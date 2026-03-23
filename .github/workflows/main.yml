@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     permissions:
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@v4
