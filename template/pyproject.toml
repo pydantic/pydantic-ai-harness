@@ -1,0 +1,47 @@
+[project]
+name = "pydantic-ai-my-capability"
+version = "0.1.0"
+description = "A Pydantic AI capability that does X"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "pydantic-ai-slim>=1.76.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "anyio[trio]>=4",
+    "pytest-anyio>=0.0.1",
+    "coverage>=7",
+]
+lint = [
+    "ruff>=0.14",
+    "pyright>=1.1.408",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+pythonVersion = "3.10"
+typeCheckingMode = "strict"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["my_capability"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
