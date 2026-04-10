@@ -7,4 +7,10 @@ Usage:
 # Each capability module is imported and re-exported here.
 # Capabilities are listed alphabetically.
 
-__all__: list[str] = []
+from pydantic_harness.tool_error_recovery import ToolErrorRecovery, fallback, retry
+
+__all__: list[str] = [
+    'ToolErrorRecovery',
+    'fallback',
+    'retry',
+]
