@@ -100,7 +100,7 @@ Want something that's not on the list? [Open a capability request](https://githu
 
 ## Build your own
 
-[Capabilities](https://ai.pydantic.dev/capabilities/#building-custom-capabilities) are the primary extension point for Pydantic AI. The [`template/`](template/) directory contains a complete starter package, and any of the existing capabilities in this repo can serve as a reference.
+[Capabilities](https://ai.pydantic.dev/capabilities/#building-custom-capabilities) are the primary extension point for Pydantic AI. Any of the existing capabilities in this repo can serve as a reference for building your own.
 
 **Publishing as a standalone package?** Use the `pydantic-ai-<name>` naming convention. See [Publishing capability packages](https://ai.pydantic.dev/extensibility/#publishing-capability-packages).
 

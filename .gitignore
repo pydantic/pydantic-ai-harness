@@ -24,3 +24,4 @@ wheels/
 
 # Hypothesis
 .hypothesis/
+.vscode/
