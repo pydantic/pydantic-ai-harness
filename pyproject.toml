@@ -86,6 +86,7 @@ executionEnvironments = [
 ]
 
 [tool.pytest.ini_options]
+testpaths = ['tests']
 xfail_strict = true
 filterwarnings = ['error']
 anyio_mode = 'auto'
