@@ -24,7 +24,7 @@ classifiers = [
     'Topic :: Software Development :: Libraries',
     'Typing :: Typed',
 ]
-dependencies = ['pydantic-ai-slim>=1.76.0']
+dependencies = ['pydantic-ai-slim>=1.76.0', 'tzdata>=2024.1; python_version >= "3.9"']
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-harness'

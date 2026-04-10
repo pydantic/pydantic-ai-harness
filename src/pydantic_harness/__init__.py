@@ -7,4 +7,8 @@ Usage:
 # Each capability module is imported and re-exported here.
 # Capabilities are listed alphabetically.
 
-__all__: list[str] = []
+from pydantic_harness.knows_current_time import KnowsCurrentTime
+
+__all__: list[str] = [
+    'KnowsCurrentTime',
+]
