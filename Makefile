@@ -1,3 +1,5 @@
+.DEFAULT_GOAL := all
+
 .PHONY: .uv .prek install format lint typecheck test testcov all
 
 .uv:
@@ -7,12 +9,12 @@
 	@prek --version || echo 'Please install prek: https://github.com/j178/pre-commit-rs'
 
 install: .uv .prek
-	uv sync --frozen --all-groups
+	uv sync --frozen --all-extras --group lint
 	prek install --install-hooks
 
 format:
 	uv run ruff format
-	uv run ruff check --fix
+	uv run ruff check --fix --fix-only
 
 lint:
 	uv run ruff format --check

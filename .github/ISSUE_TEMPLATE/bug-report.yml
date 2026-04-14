@@ -1,0 +1,41 @@
+name: Bug Report
+description: Report a bug in an existing capability
+labels: ['bug', 'needs:triage']
+body:
+  - type: input
+    id: capability
+    attributes:
+      label: Capability
+      description: Which capability is affected?
+      placeholder: e.g., Guardrails, Memory
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: What happened? What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal Reproduction
+      description: Code that reproduces the issue
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: pydantic-ai-harness version
+      placeholder: e.g., 0.1.0
+    validations:
+      required: true
+  - type: input
+    id: pydantic-ai-version
+    attributes:
+      label: pydantic-ai version
+      placeholder: e.g., 1.76.0
+    validations:
+      required: false

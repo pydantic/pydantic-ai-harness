@@ -1,0 +1,45 @@
+name: Capability Request
+description: Propose a new capability for pydantic-ai-harness
+labels: ['capability', 'needs:triage']
+body:
+  - type: input
+    id: name
+    attributes:
+      label: Capability Name
+      description: A short, descriptive name (e.g., "SlidingWindow", "ToolErrorRecovery")
+      placeholder: MyCapability
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What does this capability do? What problem does it solve?
+      placeholder: This capability allows agents to...
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case
+      description: Describe a concrete scenario where this capability is useful
+      placeholder: When building an agent that needs to...
+    validations:
+      required: true
+  - type: textarea
+    id: hooks
+    attributes:
+      label: Hooks / Integration Points
+      description: Which capability hooks would this use? (e.g., before_model_request, wrap_run, prepare_tools). See [hooks docs](https://ai.pydantic.dev/hooks/)
+      placeholder: |
+        - before_model_request: to inject context
+        - after_run: to persist state
+    validations:
+      required: false
+  - type: textarea
+    id: prior-art
+    attributes:
+      label: Prior Art / References
+      description: Links to similar implementations, papers, or discussions
+    validations:
+      required: false

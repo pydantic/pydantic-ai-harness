@@ -10,8 +10,8 @@ import pytest
 from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.toolsets.function import FunctionToolset
 
-from pydantic_harness.skills import Skill, Skills, load_skills_from_directory
-from pydantic_harness.skills._toolset import _parse_skill_markdown
+from pydantic_ai_harness.skills import Skill, Skills, load_skills_from_directory
+from pydantic_ai_harness.skills._toolset import _parse_skill_markdown
 
 # ---------------------------------------------------------------------------
 # Skill dataclass
