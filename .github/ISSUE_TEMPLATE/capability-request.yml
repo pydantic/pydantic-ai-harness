@@ -1,5 +1,5 @@
 name: Capability Request
-description: Propose a new capability for pydantic-harness
+description: Propose a new capability for pydantic-ai-harness
 labels: ['capability', 'needs:triage']
 body:
   - type: input

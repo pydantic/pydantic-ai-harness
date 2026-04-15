@@ -864,6 +864,61 @@ wheels = [
 ]
 
 [[package]]
+name = "pydantic-ai-harness"
+source = { editable = "." }
+dependencies = [
+    { name = "pydantic-ai-slim" },
+]
+
+[package.optional-dependencies]
+code-mode = [
+    { name = "pydantic-monty" },
+]
+dbos = [
+    { name = "pydantic-ai-slim", extra = ["dbos"] },
+]
+temporal = [
+    { name = "pydantic-ai-slim", extra = ["temporal"] },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "anyio", extra = ["trio"] },
+    { name = "coverage" },
+    { name = "logfire", extra = ["httpx"] },
+    { name = "pydantic-ai-harness", extra = ["code-mode"] },
+    { name = "pytest" },
+    { name = "pytest-anyio" },
+]
+lint = [
+    { name = "pyright" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
+    { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
+    { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
+    { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.10" },
+]
+provides-extras = ["code-mode", "dbos", "temporal"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "anyio", extras = ["trio"] },
+    { name = "coverage" },
+    { name = "logfire", extras = ["httpx"], specifier = ">=4.31.0" },
+    { name = "pydantic-ai-harness", extras = ["code-mode"] },
+    { name = "pytest" },
+    { name = "pytest-anyio" },
+]
+lint = [
+    { name = "pyright", specifier = ">=1.1.408" },
+    { name = "ruff", specifier = ">=0.14" },
+]
+
+[[package]]
 name = "pydantic-ai-slim"
 version = "1.80.0"
 source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main#4dcfb01e74867485fdb41f8eb3dc535e6e057a90" }
@@ -1013,61 +1068,6 @@ dependencies = [
     { name = "logfire-api" },
     { name = "pydantic" },
     { name = "typing-inspection" },
-]
-
-[[package]]
-name = "pydantic-harness"
-source = { editable = "." }
-dependencies = [
-    { name = "pydantic-ai-slim" },
-]
-
-[package.optional-dependencies]
-code-mode = [
-    { name = "pydantic-monty" },
-]
-dbos = [
-    { name = "pydantic-ai-slim", extra = ["dbos"] },
-]
-temporal = [
-    { name = "pydantic-ai-slim", extra = ["temporal"] },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "anyio", extra = ["trio"] },
-    { name = "coverage" },
-    { name = "logfire", extra = ["httpx"] },
-    { name = "pydantic-harness", extra = ["code-mode"] },
-    { name = "pytest" },
-    { name = "pytest-anyio" },
-]
-lint = [
-    { name = "pyright" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.10" },
-]
-provides-extras = ["code-mode", "dbos", "temporal"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "anyio", extras = ["trio"] },
-    { name = "coverage" },
-    { name = "logfire", extras = ["httpx"], specifier = ">=4.31.0" },
-    { name = "pydantic-harness", extras = ["code-mode"] },
-    { name = "pytest" },
-    { name = "pytest-anyio" },
-]
-lint = [
-    { name = "pyright", specifier = ">=1.1.408" },
-    { name = "ruff", specifier = ">=0.14" },
 ]
 
 [[package]]

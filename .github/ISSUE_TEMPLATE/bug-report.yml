@@ -28,7 +28,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: pydantic-harness version
+      label: pydantic-ai-harness version
       placeholder: e.g., 0.1.0
     validations:
       required: true

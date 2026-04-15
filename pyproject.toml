@@ -3,7 +3,7 @@ requires = ['hatchling', 'uv-dynamic-versioning>=0.7.0']
 build-backend = 'hatchling.build'
 
 [project]
-name = 'pydantic-harness'
+name = 'pydantic-ai-harness'
 dynamic = ['version']
 description = 'The batteries for your Pydantic AI agent'
 readme = 'README.md'
@@ -23,6 +23,7 @@ classifiers = [
     'Programming Language :: Python :: 3.11',
     'Programming Language :: Python :: 3.12',
     'Programming Language :: Python :: 3.13',
+    'Programming Language :: Python :: 3.14',
     'Topic :: Software Development :: Libraries',
     'Typing :: Typed',
 ]
@@ -42,13 +43,13 @@ dbos = [
 ]
 
 [project.urls]
-Homepage = 'https://github.com/pydantic/pydantic-harness'
-Source = 'https://github.com/pydantic/pydantic-harness'
-Issues = 'https://github.com/pydantic/pydantic-harness/issues'
+Homepage = 'https://github.com/pydantic/pydantic-ai-harness'
+Source = 'https://github.com/pydantic/pydantic-ai-harness'
+Issues = 'https://github.com/pydantic/pydantic-ai-harness/issues'
 
 [dependency-groups]
 dev = [
-    'pydantic-harness[code-mode]',
+    'pydantic-ai-harness[code-mode]',
     'pytest',
     'anyio[trio]',
     'pytest-anyio',
@@ -73,12 +74,12 @@ bump = true
 
 
 [tool.hatch.build.targets.wheel]
-packages = ['pydantic_harness']
+packages = ['pydantic_ai_harness']
 
 [tool.ruff]
 line-length = 120
 target-version = 'py310'
-exclude = ['template']
+exclude = ['template', 'legacy']
 
 [tool.ruff.lint]
 extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251']
@@ -101,7 +102,7 @@ quote-style = 'single'
 [tool.pyright]
 pythonVersion = '3.10'
 typeCheckingMode = 'strict'
-exclude = ['template', '.venv']
+exclude = ['template', '.venv', 'legacy']
 executionEnvironments = [
     { root = 'tests', reportPrivateUsage = false },
 ]
@@ -118,10 +119,10 @@ anyio_mode = 'auto'
 
 [tool.coverage.run]
 branch = true
-source = ['pydantic_harness', 'tests']
+source = ['pydantic_ai_harness', 'tests']
 
 [tool.coverage.paths]
-source = ['.', '/home/runner/work/pydantic-harness/pydantic-harness']
+source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']
 
 [tool.coverage.report]
 fail_under = 100
