@@ -278,7 +278,7 @@ class TestCodeMode:
         assert result.return_value == {'output': 'Result is, 5!\n'}
 
     async def test_run_code_parallel_tool_calls_via_gather(self) -> None:
-        """Concurrent tool calls via asyncio.gather work and record all nested metadata."""
+        """Concurrent tool calls via asyncio.gather work and exercise Monty's deferred future path."""
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
@@ -1306,7 +1306,7 @@ class TestCodeMode:
 
     async def test_sequential_tool_rendered_as_sync_and_resolved_inline(self) -> None:
         """A tool with `sequential=True` is rendered as `def` (sync) and
-        resolved inline at FunctionSnapshot via `resume(return_value=...)`."""
+        resolved inline at FunctionSnapshot via `resume({'return_value': ...})`."""
         from dataclasses import replace as dc_replace
 
         class _SeqToolset(AbstractToolset[None]):
