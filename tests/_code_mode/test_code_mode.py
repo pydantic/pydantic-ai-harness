@@ -278,7 +278,7 @@ class TestCodeMode:
         assert result.return_value == {'output': 'Result is, 5!\n'}
 
     async def test_run_code_parallel_tool_calls_via_gather(self) -> None:
-        """Concurrent tool calls via asyncio.gather work and exercise Monty's deferred future path."""
+        """Concurrent tool calls via asyncio.gather work and record all nested metadata."""
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
