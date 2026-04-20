@@ -900,7 +900,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
     { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
     { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&branch=main" },
-    { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.14" },
+    { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.16" },
 ]
 provides-extras = ["code-mode", "dbos", "temporal"]
 
