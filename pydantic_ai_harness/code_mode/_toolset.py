@@ -585,15 +585,15 @@ async def _execution_loop(
 
     Tool calls are handled based on their execution mode:
 
-    - **Parallel tools** (``async def``): deferred via ``resume({'future': ...})``
-      and eagerly scheduled as ``asyncio.Task``s for concurrent execution.
-      Resolved at ``FutureSnapshot`` via ``asyncio.gather``.
-    - **Sequential tools** (``def``): resolved inline at ``FunctionSnapshot``
-      via ``resume({'return_value': ...})`` or ``resume({'exception': ...})``. Before
+    - **Parallel tools** (`async def`): deferred via `resume({'future': ...})`
+      and eagerly scheduled as `asyncio.Task`s for concurrent execution.
+      Resolved at `FutureSnapshot` via `asyncio.gather`.
+    - **Sequential tools** (`def`): resolved inline at `FunctionSnapshot`
+      via `resume({'return_value': ...})` or `resume({'exception': ...})`. Before
       dispatching, any pending parallel tasks are awaited to maintain ordering.
     - **Global sequential mode** (DBOS/Temporal): all tools are deferred via
-      ``resume({'future': ...})`` but stored as bare coroutines and awaited
-      one-at-a-time at ``FutureSnapshot`` to prevent interleaving.
+      `resume({'future': ...})` but stored as bare coroutines and awaited
+      one-at-a-time at `FutureSnapshot` to prevent interleaving.
     """
     pending: dict[int, asyncio.Task[Any] | Coroutine[Any, Any, Any]] = {}
     # Results from parallel tasks that were awaited early (at a sequential-tool
