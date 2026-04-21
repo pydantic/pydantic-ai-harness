@@ -198,15 +198,13 @@ class HomeAssistantBackend(HomeBackend):
         if latest_state is not None:
             return latest_state
 
-        raise RuntimeError(
-            f'Service {domain}.{service_name} executed but state for {entity_id!r} could not be verified.'
-        )
+        return None
 
     async def _get_state_for_verification(self, entity_id: str) -> EntityState | None:
         """Best-effort state fetch used to verify a service call outcome."""
         try:
             return await self.get_state(entity_id)
-        except ValueError:
+        except (ValueError, httpx.HTTPError):
             return None
 
     @staticmethod

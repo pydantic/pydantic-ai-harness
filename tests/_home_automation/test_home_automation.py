@@ -550,6 +550,22 @@ class TestHomeAssistantCallService:
         assert result.verified_state.state == 'on'
         assert state_requests == 3
 
+    async def test_call_service_ignores_verification_http_errors(self) -> None:
+        server = MockHomeAssistant()
+        server.json('GET', '/api/services', _services_payload())
+        server.json('POST', '/api/services/light/turn_off', [])
+        server.json('GET', '/api/states/light.bedroom_light', {'message': 'server error'}, status_code=500)
+
+        result = await server.backend(verification_poll_attempts=1).call_service(
+            domain='light',
+            entity_id='light.bedroom_light',
+            service_name='turn_off',
+        )
+
+        assert result.changed_states == []
+        assert result.service_response is None
+        assert result.verified_state is None
+
     async def test_call_service_raises_for_unknown_service(self) -> None:
         server = MockHomeAssistant()
         server.json('GET', '/api/services', _services_payload())
@@ -598,17 +614,18 @@ class TestHomeAssistantCallService:
 
         assert verified_state == previous_state
 
-    async def test_get_verified_state_raises_when_state_cannot_be_verified(self) -> None:
+    async def test_get_verified_state_returns_none_when_state_cannot_be_verified(self) -> None:
         server = MockHomeAssistant()
         server.json('GET', '/api/states/light.missing', {}, status_code=404)
 
-        with pytest.raises(RuntimeError, match='could not be verified'):
-            await server.backend(verification_poll_attempts=1)._get_verified_state(
-                entity_id='light.missing',
-                domain='light',
-                service_name='turn_on',
-                result=ServiceCallResult(),
-            )
+        verified_state = await server.backend(verification_poll_attempts=1)._get_verified_state(
+            entity_id='light.missing',
+            domain='light',
+            service_name='turn_on',
+            result=ServiceCallResult(),
+        )
+
+        assert verified_state is None
 
     async def test_get_verified_state_returns_none_when_polling_is_disabled(self) -> None:
         server = MockHomeAssistant()
