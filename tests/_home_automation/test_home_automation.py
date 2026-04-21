@@ -610,17 +610,18 @@ class TestHomeAssistantCallService:
                 result=ServiceCallResult(),
             )
 
-    async def test_get_verified_state_raises_cleanly_when_polling_is_disabled(self) -> None:
+    async def test_get_verified_state_returns_none_when_polling_is_disabled(self) -> None:
         server = MockHomeAssistant()
         server.json('GET', '/api/states/light.bedroom_light', _states_payload()[0])
 
-        with pytest.raises(RuntimeError, match='could not be verified'):
-            await server.backend(verification_poll_attempts=0)._get_verified_state(
-                entity_id='light.bedroom_light',
-                domain='light',
-                service_name='turn_on',
-                result=ServiceCallResult(),
-            )
+        verified_state = await server.backend(verification_poll_attempts=0)._get_verified_state(
+            entity_id='light.bedroom_light',
+            domain='light',
+            service_name='turn_on',
+            result=ServiceCallResult(),
+        )
+
+        assert verified_state is None
 
     def test_state_changed_returns_true_without_previous_state(self) -> None:
         assert HomeAssistantBackend._state_changed(
@@ -665,6 +666,27 @@ class TestHomeAssistantModels:
         field = ServiceFieldDescription.model_validate({'selector': {'select': {'options': ['on', 'off']}}})
 
         assert field.to_service_argument('mode').enum == ('on', 'off')
+
+    def test_service_field_description_defaults_select_options_to_empty(self) -> None:
+        field = ServiceFieldDescription.model_validate({'selector': {'select': {}}})
+
+        assert field.to_service_argument('mode').enum == ()
+
+    def test_service_field_description_extracts_dict_select_option_values(self) -> None:
+        field = ServiceFieldDescription.model_validate(
+            {
+                'selector': {
+                    'select': {
+                        'options': [
+                            {'value': 'heat', 'label': 'Heat'},
+                            {'value': 'cool', 'label': 'Cool'},
+                        ]
+                    }
+                }
+            }
+        )
+
+        assert field.to_service_argument('hvac_mode').enum == ('heat', 'cool')
 
     def test_service_field_description_preserves_color_temp_range(self) -> None:
         field = ServiceFieldDescription.model_validate({'selector': {'color_temp': {'min': 2000, 'max': 6500}}})

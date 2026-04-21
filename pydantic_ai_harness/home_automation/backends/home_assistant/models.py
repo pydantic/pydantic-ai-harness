@@ -41,10 +41,23 @@ class NumberSelectorConfig(BaseModel):
     model_config = ConfigDict(extra='allow')
 
 
+class SelectSelectorOption(BaseModel):
+    """Dict-style option for select inputs."""
+
+    value: str | int | float | bool
+    label: str | None = None
+
+    model_config = ConfigDict(extra='allow')
+
+
+def _empty_select_options() -> list[str | int | float | bool | SelectSelectorOption]:
+    return []
+
+
 class SelectSelectorConfig(BaseModel):
     """Selector config for select inputs."""
 
-    options: list[Any] = Field(default_factory=list)
+    options: list[str | int | float | bool | SelectSelectorOption] = Field(default_factory=_empty_select_options)
     multiple: bool | None = None
     translation_key: str | None = None
 
@@ -142,7 +155,7 @@ class ServiceFieldDescription(BaseModel):
                 value_type='string',
                 required=bool(self.required),
                 description=self.description,
-                enum=tuple(str(option) for option in selector.select.options),
+                enum=tuple(_select_option_value(option) for option in selector.select.options),
             )
 
         if selector is not None and selector.color_temp is not None:
@@ -290,6 +303,12 @@ class DomainServices(BaseModel):
 ServiceFieldDescription.model_rebuild()
 ServiceCatalog = list[DomainServices]
 SERVICE_CATALOG_ADAPTER = TypeAdapter(ServiceCatalog)
+
+
+def _select_option_value(option: str | int | float | bool | SelectSelectorOption) -> str:
+    if isinstance(option, SelectSelectorOption):
+        return str(option.value)
+    return str(option)
 
 
 class HAEntityAttributes(BaseModel):

@@ -86,7 +86,7 @@ class HomeAssistantBackend(HomeBackend):
         """Call one Home Assistant service and normalize the response.
 
         If Home Assistant returns no changed states or response data, this may perform
-        follow-up state reads to populate ``verified_state``.
+        follow-up state reads to populate `verified_state`.
         """
         service_description = await self._get_service_description(domain, service_name)
         if service_description is None:
@@ -182,6 +182,9 @@ class HomeAssistantBackend(HomeBackend):
                 return changed_state
 
         if result.changed_states or result.service_response is not None:
+            return None
+
+        if self._verification_poll_attempts == 0:
             return None
 
         latest_state: EntityState | None = None
