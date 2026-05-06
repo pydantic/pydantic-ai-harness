@@ -98,7 +98,7 @@ CodeMode(
 ```
 
 Use `max_retries` when sandbox execution errors are expected to be recoverable.
-If the generated code fails during sandbox execution, the error message is sent back to the LLM, and the model is asked to redraft the code in light of that failure. This process is repeated up to `max_retries` times, or until the code executes
+If the generated code fails during sandbox execution, the error message is sent back to the LLM, and the model is asked to redraft the code in light of that failure. This process is repeated up to `max_retries` times, or until the code executes successfully.
 
 ## REPL State
 
