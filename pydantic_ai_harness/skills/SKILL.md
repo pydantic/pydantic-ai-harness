@@ -4,7 +4,7 @@ description: >
   Extend Pydantic AI agents with additional capabilities. The supported capability is `Code Mode` which provides
   sandboxed python tool orchestration. Use when the user mentions executing agent written code, tool sandboxing, pydantic-ai-harness, CodeMode, Monty, or when a pydantic-ai agent would benefit from collapsing many tool calls into one sandboxed Python execution.
 license: MIT
-compatibility: Requires Python 3.10+ and pydantic-ai-slim>=1.80.0
+compatibility: Requires Python 3.10+ and pydantic-ai-slim>=1.89.1
 metadata:
   version: "0.1.0"
   author: pydantic
@@ -26,7 +26,7 @@ Pydantic AI Harness is a capability library for Pydantic AI agents. While core c
 uv add pydantic-ai-harness
 ```
 
-Requires Python 3.10+ and `pydantic-ai-slim>=1.80.0`.
+Requires Python 3.10+ and `pydantic-ai-slim>=1.89.1`.
 
 ## Extending pydantic-ai with pydantic-ai-harness Capabilities
 
