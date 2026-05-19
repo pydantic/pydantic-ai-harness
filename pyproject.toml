@@ -28,7 +28,7 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = [
-    'pydantic-ai-slim>=1.89.1',
+    'pydantic-ai-slim>=1.95.1',
 ]
 
 [project.optional-dependencies]
@@ -63,6 +63,8 @@ dev = [
     'pytest-anyio',
     'coverage>=7.10.7',
     'logfire[httpx]>=4.31.0',
+    "dirty-equals>=0.9.0",
+    "inline-snapshot>=0.32.5",
 ]
 lint = [
     'ruff>=0.14',
@@ -84,7 +86,7 @@ packages = ['pydantic_ai_harness']
 [tool.ruff]
 line-length = 120
 target-version = 'py310'
-exclude = ['template', 'legacy']
+exclude = ['template']
 
 [tool.ruff.lint]
 extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251']
@@ -107,7 +109,7 @@ quote-style = 'single'
 [tool.pyright]
 pythonVersion = '3.10'
 typeCheckingMode = 'strict'
-exclude = ['template', '.venv', 'legacy']
+exclude = ['template', '.venv']
 executionEnvironments = [
     { root = 'tests', reportPrivateUsage = false },
 ]

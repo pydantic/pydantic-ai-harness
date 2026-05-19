@@ -76,6 +76,7 @@ The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No classes**: class definitions are not supported
 - **No third-party libraries**: only the standard library modules listed below can be used
 - **Importable standard library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`. These must be imported at the top of your snippet before use, just like in regular Python. For example: `import asyncio` then `results = await asyncio.gather(tool_one(...), tool_two(...))`.
+- **No wall-clock or timing primitives**: `asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, and the `time` module are unavailable.
 - **No `import *`**: wildcard imports are not supported
 
 State is preserved between calls (REPL-style). Set `restart: true` to reset state.
@@ -167,8 +168,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     callable from the sandbox at runtime. Non-selected tools remain visible
     to the model as normal tool calls.
 
-    Tools that require deferred execution (kind `external`/`unapproved`) cannot
-    be called from inside the sandbox and are dropped with a one-time `UserWarning`.
+    Tools with `defer_loading=True` (Tool Search) are never sandboxed: they stay
+    native pass-through so the deferred-loading contract is honored, and only get
+    folded into `run_code` once they've been discovered (`defer_loading=False`).
+    Tools annotated with `unless_native` likewise stay native so
+    `Model.prepare_request` can drop them when the provider supports the native tool.
+    To keep a Tool Search corpus native even after discovery (e.g. for prompt-cache
+    stability), pass a `tool_selector` that excludes tools with `with_native` set.
     """
 
     tool_selector: ToolSelector[AgentDepsT] = 'all'
@@ -212,6 +218,16 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         native_tools: dict[str, ToolsetTool[AgentDepsT]] = {}
         for name, tool in wrapped_tools.items():
             if name == _SEARCH_TOOLS_NAME:
+                native_tools[name] = tool
+            elif tool.tool_def.defer_loading:
+                # Tool Search keeps these out of the model's initial context until discovered.
+                # Stay native pass-through so `ToolSearchToolset`'s `defer_loading` /
+                # `with_native` flags reach `Model.prepare_request` unaltered; once a tool is
+                # discovered it comes back with `defer_loading=False` and is sandboxed from then on.
+                native_tools[name] = tool
+            elif tool.tool_def.unless_native:
+                # Defer to `Model.prepare_request`'s `unless_native` filtering: keep the local
+                # fallback native so it can be dropped when the provider supports the native tool.
                 native_tools[name] = tool
             elif await matches_tool_selector(self.tool_selector, ctx, tool.tool_def):
                 sandboxed_tools[name] = tool

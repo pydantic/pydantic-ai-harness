@@ -51,6 +51,14 @@ tokyo_c = await convert_temp(fahrenheit=tokyo['temp_f'])
 {'paris': paris_c, 'tokyo': tokyo_c}
 ```
 
+## In practice
+
+The [harness Quick start](../../README.md#quick-start) wires `CodeMode` up against an MCP server and a web search and asks it to find the most-discussed Hacker News story across three feeds, pull the comment thread and the submitter's profile, and search the web for follow-up coverage. CodeMode collapses that into two `run_code` calls: the first fetches all three feeds in parallel via `asyncio.gather`, dedupes by id, filters by score, and ranks by comment count -- in plain Python; the second batches the three follow-up calls (`hn_get_thread`, `hn_get_user`, `duckduckgo_search`) together.
+
+[![CodeMode's first run_code: parallel asyncio.gather over three HN feeds, then a dedupe and a score filter](../../docs/images/code-mode-trace.png)](https://logfire-us.pydantic.dev/public-trace/84bcf123-2106-49da-9f6f-5c26395339bb?spanId=7650806a0785b946)
+
+**[See the full Logfire trace →](https://logfire-us.pydantic.dev/public-trace/84bcf123-2106-49da-9f6f-5c26395339bb?spanId=7650806a0785b946)** Each `run_code` span fans out into the tool calls the model issued from inside the sandbox -- the easiest way to understand what code mode actually did. See the [Pydantic AI Logfire docs](https://ai.pydantic.dev/logfire/) for setup details.
+
 ## Installation
 
 Code mode requires the Monty sandbox:
@@ -77,6 +85,18 @@ CodeMode(tools={'code_mode': True})
 ```
 
 Tools that match the selector are wrapped inside `run_code`. Non-matching tools remain available as regular tool calls.
+
+### Tool Search
+
+When you mark tools or whole toolsets `defer_loading=True` ([Tool Search](https://ai.pydantic.dev/tools-advanced/#tool-search)), `CodeMode` keeps them out of `run_code` while they're undiscovered — they pass straight through, so Tool Search drives them as usual (sent on the wire with `defer_loading` on providers with native tool search; otherwise dropped until discovered, with a `search_tools` tool alongside `run_code`). Once the model discovers a tool it comes back with `defer_loading=False`, and from then on `CodeMode` folds it into `run_code` like any other tool, so it's callable from generated code.
+
+That fold-in grows `run_code`'s description, which invalidates the prompt-cache prefix once at the moment of discovery (turns with no discovery stay cache-warm). To instead keep a Tool Search corpus fully native — never folded into `run_code`, fully cache-stable, but not callable from inside it — exclude it with a `tools` selector; corpus members carry `with_native` set to the managing native tool:
+
+```python
+CodeMode(tools=lambda ctx, td: td.with_native is None)
+```
+
+A future Pydantic AI change will let `run_code`'s description stay static — newly discovered tools announced separately — so the fold-in costs nothing; until then, the selector above is the escape hatch.
 
 ### Metadata-based selection
 
@@ -126,6 +146,7 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 
 - No class definitions
 - No third-party imports (allowed stdlib: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`)
+- No wall-clock or timing primitives: `asyncio.sleep`, `datetime.datetime.now()`/`datetime.date.today()`, and the `time` module are unavailable
 - No `import *`
 - Tools requiring approval or with deferred execution are excluded from the sandbox
 
