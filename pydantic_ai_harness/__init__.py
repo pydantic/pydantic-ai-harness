@@ -4,8 +4,9 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .code_mode import CodeMode
+    from .home_automation import HomeAutomation
 
-__all__ = ['CodeMode']
+__all__ = ['CodeMode', 'HomeAutomation']
 
 
 def __getattr__(name: str) -> object:
@@ -13,4 +14,8 @@ def __getattr__(name: str) -> object:
         from .code_mode import CodeMode
 
         return CodeMode
+    if name == 'HomeAutomation':
+        from .home_automation import HomeAutomation
+
+        return HomeAutomation
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
