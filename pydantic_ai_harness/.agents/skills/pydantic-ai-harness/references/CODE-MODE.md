@@ -16,8 +16,9 @@ uv add "pydantic-ai-harness[codemode]"   # `code-mode` is also accepted as an al
 
 ## Basic Pattern
 
-```python
+```python {test="skip"}
 from pydantic_ai import Agent
+
 from pydantic_ai_harness import CodeMode
 
 agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[CodeMode()])
@@ -35,7 +36,7 @@ def convert_temp(fahrenheit: float) -> float:
 
 The model could generate code like:
 
-```python
+```python {test="skip" lint="skip"}
 paris, tokyo = await asyncio.gather(
     get_weather(city='Paris'),
     get_weather(city='Tokyo'),
@@ -62,7 +63,7 @@ CodeMode(tools={'code_mode': True})
 
 Metadata-based selection is useful when the project already groups tools into toolsets:
 
-```python
+```python {test="skip" lint="skip"}
 from pydantic_ai import Agent
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness import CodeMode
@@ -93,6 +94,8 @@ If the user expects a raw dict or list back, avoid unnecessary `print()` stateme
 ## Retries
 
 ```python
+from pydantic_ai_harness import CodeMode
+
 CodeMode(
     tools='all',
     max_retries=3,
@@ -125,7 +128,7 @@ When a generated example keeps failing, check these restrictions before changing
 
 ## API
 
-```python
+```python {test="skip" lint="skip"}
 CodeMode(
     tools: ToolSelector = 'all',   # 'all', list[str], callable, or dict
     max_retries: int = 3,          # retries on sandbox execution errors
@@ -142,8 +145,9 @@ capabilities:
   - CodeMode: {}
 ```
 
-```python
+```python {test="skip"}
 from pydantic_ai import Agent
+
 from pydantic_ai_harness import CodeMode
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[CodeMode])
@@ -163,7 +167,7 @@ capabilities:
 With Logfire or another OpenTelemetry backend, nested tool calls inside `run_code` produce child spans.
 That makes CodeMode much easier to debug than a plain blob of generated code.
 
-```python
+```python {test="skip" lint="skip"}
 for msg in result.all_messages():
     for part in msg.parts:
         if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code':

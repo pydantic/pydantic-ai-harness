@@ -60,9 +60,10 @@ Requires Python 3.10+ and `pydantic-ai-slim>=1.95.1`.
 A harness capability is added to the agent like any other. Here `CodeMode` wraps an MCP server's tools into
 a single `run_code` tool that the model drives with Python.
 
-```python
+```python {test="skip"}
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import MCP  # MCP ships in core pydantic-ai
+
 from pydantic_ai_harness import CodeMode
 
 agent = Agent(
