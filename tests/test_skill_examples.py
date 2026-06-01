@@ -42,21 +42,33 @@ def test_skill_examples(example: CodeExample, eval_example: EvalExample):
     # constructor/decorator signatures at runtime. Snippets that need a model, network, or
     # file (or are illustrative fragments) opt out with `test="skip"` / `lint="skip"`
     # fence directives; model-backed flows are covered by `test_readme_quick_start.py`.
+    # Run with `--update-examples` to reformat snippets and regenerate their printed output.
     prefix = example.prefix_settings()
+
+    # Snippets default to black's 88-column width (matching pydantic-ai's docs examples);
+    # a snippet can widen this with a `line_length="..."` fence directive.
+    line_length = int(prefix.get('line_length', '88'))
 
     eval_example.config = ExamplesConfig(
         ruff_ignore=['D', 'Q001'],
         target_version='py310',
-        line_length=120,
+        line_length=line_length,
         isort=True,
         upgrade=True,
         quotes='single',
         known_first_party=['pydantic_ai_harness'],
     )
+
     if not prefix.get('lint', '').startswith('skip'):
-        eval_example.lint_ruff(example)
+        if eval_example.update_examples:  # pragma: lax no cover
+            eval_example.format_ruff(example)
+        else:
+            eval_example.lint_ruff(example)
 
     if prefix.get('test', '').startswith('skip'):
         pytest.skip('running skipped for this example')
 
-    eval_example.run_print_check(example)
+    if eval_example.update_examples:  # pragma: lax no cover
+        eval_example.run_print_update(example)
+    else:
+        eval_example.run_print_check(example)

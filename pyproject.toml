@@ -105,6 +105,8 @@ max-complexity = 15
 convention = 'google'
 
 [tool.ruff.format]
+# don't format python in docstrings, pytest-examples takes care of it
+docstring-code-format = false
 quote-style = 'single'
 
 [tool.pyright]
