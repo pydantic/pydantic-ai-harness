@@ -1,15 +1,17 @@
 # Code Mode
 
 Standard tool calling takes one model round-trip per tool call. `CodeMode` wraps eligible tools into a
-single `run_code` tool so the LLM can write Python that loops, branches, aggregates, and parallelizes tool work inside a sandbox.
+single `run_code` tool so the model can write Python that loops, branches, aggregates, and parallelizes tool work inside a sandbox.
 
 Use it when the agent needs to call several tools, transform intermediate results, run concurrent
-tool work with `asyncio.gather`, or anywhere that a simple Python script is more reliable than an LLM, such as in mathematics.
+tool work with `asyncio.gather`, or anywhere a simple Python script is more reliable than the model alone, such as for mathematics.
 
 ## Install
 
+Code Mode needs the Monty sandbox, pulled in by the `codemode` extra:
+
 ```bash
-uv add "pydantic-ai-harness[codemode]"
+uv add "pydantic-ai-harness[codemode]"   # `code-mode` is also accepted as an alias
 ```
 
 ## Basic Pattern
@@ -31,7 +33,7 @@ def convert_temp(fahrenheit: float) -> float:
     return round((fahrenheit - 32) * 5 / 9, 1)
 ```
 
-The LLM could be prompted to generate code like:
+The model could generate code like:
 
 ```python
 paris, tokyo = await asyncio.gather(
@@ -43,7 +45,7 @@ tokyo_c = await convert_temp(fahrenheit=tokyo['temp_f'])
 {'paris': paris_c, 'tokyo': tokyo_c}
 ```
 
-This reduces four LLM calls to one.
+This reduces four model round-trips to one.
 
 ## Choose Which Tools Are Sandboxed
 
@@ -98,7 +100,7 @@ CodeMode(
 ```
 
 Use `max_retries` when sandbox execution errors are expected to be recoverable.
-If the generated code fails during sandbox execution, the error message is sent back to the LLM, and the model is asked to redraft the code in light of that failure. This process is repeated up to `max_retries` times, or until the code executes successfully.
+If the generated code fails during sandbox execution, the error message is sent back to the model, and it is asked to redraft the code in light of that failure. This process is repeated up to `max_retries` times, or until the code executes successfully.
 
 ## REPL State
 
@@ -116,9 +118,19 @@ Key restrictions:
 - No third-party imports
 - No `import *`
 - Only a small stdlib subset is allowed: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `datetime`, `os`, `pathlib`
+- No wall-clock or timing primitives: `asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, and the `time` module are unavailable
 - Tools that need approval or deferred execution are excluded from the sandbox
 
 When a generated example keeps failing, check these restrictions before changing the rest of the agent.
+
+## API
+
+```python
+CodeMode(
+    tools: ToolSelector = 'all',   # 'all', list[str], callable, or dict
+    max_retries: int = 3,          # retries on sandbox execution errors
+)
+```
 
 ## Agent Specs
 
