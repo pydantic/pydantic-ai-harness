@@ -8,8 +8,14 @@ on:
       - 'v*'
   pull_request: {}
 
+# UV_LOCKED (not UV_FROZEN): both keep uv from rewriting the lockfile, but
+# frozen installs the lock blindly while locked validates it against
+# pyproject.toml first and fails the job on drift. Frozen also turns
+# resolution flags into silent no-ops, which left the lowest-versions job
+# testing the locked (latest) versions for months. Jobs that intentionally
+# deviate from the lock opt out per step with `UV_LOCKED: '0'` or `env -u`.
 env:
-  UV_FROZEN: '1'
+  UV_LOCKED: '1'
 
 permissions:
   contents: read
@@ -28,7 +34,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: lint
 
-      - run: uv sync --frozen --all-groups --all-extras
+      - run: uv sync --locked --all-groups --all-extras
 
       - uses: pre-commit/action@646c83fcd040023954eafda54b4db0192ce70507 # v3.0.0
         with:
@@ -63,7 +69,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
-      - run: uv sync --frozen --group dev ${{ matrix.install.extras }}
+      - run: uv sync --locked --group dev ${{ matrix.install.extras }}
       - run: mkdir -p coverage-data
       - run: uv run coverage run -m pytest
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -100,12 +106,12 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: floor
 
-      # UV_FROZEN must be off here: under the workflow-level UV_FROZEN=1, uv
-      # ignores `--resolution lowest-direct` and installs the locked (latest)
-      # versions, leaving this job green without testing the floor at all.
+      # The lock validation must be off here: this job deviates from the lock
+      # on purpose, and under UV_LOCKED=1 the lowest-direct resolution fails
+      # because uv refuses to write the lowest-resolved lockfile it produces.
       - run: uv sync --resolution lowest-direct --group dev --all-extras
         env:
-          UV_FROZEN: '0'
+          UV_LOCKED: '0'
       - run: uv run --no-sync pytest
 
   # Verify the harness works against the latest published pydantic-ai packages,
@@ -132,14 +138,14 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: latest
 
-      # `env -u`: under the workflow-level `UV_FROZEN=1`, `uv lock` only checks
-      # lockfile validity and skips the upgrade, leaving this job vacuously
-      # green against the locked versions.
+      # `env -u`: under the workflow-level `UV_LOCKED=1`, `uv lock` asserts the
+      # lockfile is up to date instead of applying the upgrade, so the moment a
+      # newer pydantic-ai exists this step would fail rather than test it.
       - run: |
-          env -u UV_FROZEN uv lock \
+          env -u UV_LOCKED uv lock \
             --upgrade-package pydantic-ai-slim \
             --upgrade-package pydantic-graph
-      - run: uv sync --frozen --group dev --all-extras
+      - run: uv sync --locked --group dev --all-extras
       - run: uv run --no-sync pytest
 
   coverage:
@@ -161,7 +167,7 @@ jobs:
           path: coverage-data
           merge-multiple: true
 
-      - run: uv sync --frozen --group dev --all-extras
+      - run: uv sync --locked --group dev --all-extras
       - run: uv run coverage combine coverage-data
       - run: uv run coverage report
 
