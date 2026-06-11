@@ -1059,9 +1059,9 @@ lint = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
-    { name = "pydantic-ai-slim", specifier = ">=1.107.0" },
+    { name = "pydantic-ai-slim", specifier = ">=1.105.0" },
     { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
-    { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", specifier = ">=1.95.1" },
+    { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", specifier = ">=1.105.0" },
     { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'" },
     { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.16" },
     { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.16" },

@@ -97,6 +97,39 @@ jobs:
       - run: uv sync --resolution lowest-direct --group dev --all-extras
       - run: uv run --no-sync pytest
 
+  # Verify the harness works against the latest published pydantic-ai packages,
+  # not just the lock. The `test` matrix resolves against the lock, so harness
+  # code merged after the last lock refresh is never exercised against newer
+  # pydantic-ai releases until someone bumps. pydantic-ai's `harness compat`
+  # job doesn't cover that window either: it tests harness main as it exists
+  # when a pydantic-ai PR merges, not harness code added afterwards. With this
+  # job, the pydantic-ai-slim `>=` floor in pyproject.toml can stay an honest,
+  # test-verified floor (exercised by `test-floor`) instead of chasing the
+  # latest release.
+  test-latest:
+    runs-on: ubuntu-latest
+    name: test on latest pydantic-ai
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-suffix: latest
+
+      # `env -u`: under the workflow-level `UV_FROZEN=1`, `uv lock` only checks
+      # lockfile validity and skips the upgrade, leaving this job vacuously
+      # green against the locked versions.
+      - run: |
+          env -u UV_FROZEN uv lock \
+            --upgrade-package pydantic-ai-slim \
+            --upgrade-package pydantic-graph
+      - run: uv sync --frozen --group dev --all-extras
+      - run: uv run --no-sync pytest
+
   coverage:
     needs: [test]
     runs-on: ubuntu-latest
@@ -122,7 +155,7 @@ jobs:
 
   check:
     if: always()
-    needs: [lint, test, test-floor, coverage]
+    needs: [lint, test, test-floor, test-latest, coverage]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
