@@ -11,6 +11,23 @@ from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
+# Private import: pydantic-ai has no public way to tell capability-contributed
+# toolsets apart from the agent's own in `agent.toolsets`.
+from pydantic_ai.toolsets._capability_owned import CapabilityOwnedToolset
+
+
+def _is_capability_contributed(toolset: AbstractToolset[AgentDepsT]) -> bool:
+    """Whether `toolset`'s tree contains a `CapabilityOwnedToolset`."""
+    found = False
+
+    def visit(node: AbstractToolset[AgentDepsT]) -> None:
+        nonlocal found
+        if isinstance(node, CapabilityOwnedToolset):
+            found = True
+
+    toolset.apply(visit)
+    return found
+
 
 class SubAgentToolset(FunctionToolset[AgentDepsT]):
     """Exposes one delegate tool that dispatches a task to a named sub-agent.
@@ -43,11 +60,24 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         self.add_function(self.delegate_task, name=tool_name)
 
     def _inherited_toolsets(self, ctx: RunContext[AgentDepsT]) -> list[AbstractToolset[AgentDepsT]] | None:
-        """The parent's toolsets, with the delegate tool filtered out (no recursion)."""
+        """The parent agent's own toolsets, excluding capability-contributed ones.
+
+        Capability toolsets are bound to capability instances registered in the
+        parent run; carrying them into the sub-agent's run (where their owner is
+        not registered) fails `CapabilityOwnedToolset`'s ownership resolution, and
+        the tools would arrive without the hooks and instructions that make them
+        work. Use `shared_capabilities` to share a capability with sub-agents.
+        Excluding capability toolsets also drops this delegate tool itself, so
+        delegation cannot recurse.
+        """
         agent = ctx.agent
         if agent is None:  # pragma: no cover - the running agent is always set during a run
             return None
-        return [toolset.filtered(lambda _ctx, tool_def: tool_def.name != self._tool_name) for toolset in agent.toolsets]
+        # Capability toolsets surface as `CombinedToolset(CapabilityOwnedToolset(...))`
+        # entries, so ownership is detected by walking each tree. Only core's capability
+        # assembly constructs `CapabilityOwnedToolset`, so a tree containing one is
+        # capability-contributed in its entirety.
+        return [toolset for toolset in agent.toolsets if not _is_capability_contributed(toolset)]
 
     async def delegate_task(self, ctx: RunContext[AgentDepsT], agent_name: str, task: str) -> str:
         """Delegate a self-contained task to a named sub-agent and return its result.

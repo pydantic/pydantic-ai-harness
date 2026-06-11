@@ -222,6 +222,43 @@ class TestDelegation:
         assert 'parent_tool' in offered  # the parent's tool is inherited by the sub-agent
         assert 'delegate_task' not in offered  # the delegate tool is filtered out, so no recursion
 
+    async def test_inherit_tools_excludes_capability_contributed_tools(self) -> None:
+        """Tools contributed by the parent's capabilities stay out of sub-agent runs.
+
+        They are bound to capability instances registered in the parent run; sharing
+        them is `shared_capabilities`' job (see the `_inherited_toolsets` docstring).
+        """
+        from pydantic_ai.toolsets import FunctionToolset
+
+        @dataclass
+        class _ToolCapability(AbstractCapability[None]):
+            def get_toolset(self) -> Any:
+                def cap_tool() -> str:
+                    return 'CT'  # pragma: no cover - never offered to the sub-agent
+
+                return FunctionToolset[None](tools=[cap_tool])
+
+        offered: list[str] = []
+
+        def worker_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            offered.extend(tool.name for tool in info.function_tools)
+            return ModelResponse(parts=[TextPart('sub done')])
+
+        worker = Agent(FunctionModel(worker_fn), name='worker')
+        parent: Agent[None, str] = Agent(
+            _delegate_then_finish('worker'),
+            capabilities=[SubAgents(agents={'worker': worker}, inherit_tools=True), _ToolCapability()],
+        )
+
+        @parent.tool_plain
+        def parent_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'PT'  # pragma: no cover - listed but not called in this test
+
+        result = await parent.run('go')
+        assert result.output == 'all done'
+        assert 'parent_tool' in offered
+        assert 'cap_tool' not in offered
+
     async def test_shared_capabilities_applied_to_subagent(self) -> None:
         cap: _RecordingCapability[None] = _RecordingCapability()
         worker = Agent(TestModel(custom_output_text='W'), name='worker')
