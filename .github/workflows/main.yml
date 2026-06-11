@@ -40,6 +40,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -82,7 +83,12 @@ jobs:
   # `harness compat` job (see https://github.com/pydantic/pydantic-ai/blob/main/.github/workflows/harness-compat.yml).
   test-floor:
     runs-on: ubuntu-latest
-    name: test on lowest direct-dep versions
+    name: test on ${{ matrix.python-version }} (lowest-versions)
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -90,11 +96,16 @@ jobs:
 
       - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
         with:
-          python-version: '3.14'
+          python-version: ${{ matrix.python-version }}
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: floor
 
+      # UV_FROZEN must be off here: under the workflow-level UV_FROZEN=1, uv
+      # ignores `--resolution lowest-direct` and installs the locked (latest)
+      # versions, leaving this job green without testing the floor at all.
       - run: uv sync --resolution lowest-direct --group dev --all-extras
+        env:
+          UV_FROZEN: '0'
       - run: uv run --no-sync pytest
 
   # Verify the harness works against the latest published pydantic-ai packages,
@@ -109,6 +120,7 @@ jobs:
   test-latest:
     runs-on: ubuntu-latest
     name: test on latest pydantic-ai
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:

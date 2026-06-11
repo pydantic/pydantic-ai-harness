@@ -62,11 +62,14 @@ def instructions_seen(result_messages: list[ModelMessage]) -> list[str]:
 # make snapshots non-deterministic. `attributes` here is the literal key Logfire emits
 # on the resolve span containing the serialized targeting attributes -- it shadows the
 # enclosing span attributes dict by name, so the pop targets the inner one.
+# `logfire.metrics` only appears on logfire versions newer than the extra's floor,
+# so keeping it would make the snapshots depend on the resolved logfire version.
 _VOLATILE_SPAN_ATTRIBUTES = (
     'attributes',
     'code.lineno',
     'gen_ai.conversation.id',
     'gen_ai.agent.call.id',
+    'logfire.metrics',
 )
 
 
@@ -314,7 +317,6 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
                     'pydantic_ai.all_messages': '[{"role":"user","parts":[{"type":"text","content":"hello"}]},{"role":"assistant","parts":[{"type":"tool_call","id":"pyd_ai_tool_call_id__noop","name":"noop","arguments":{}}]},{"role":"user","parts":[{"type":"tool_call_response","id":"pyd_ai_tool_call_id__noop","name":"noop","result":"ok"}]},{"role":"assistant","parts":[{"type":"text","content":"{\\"noop\\":\\"ok\\"}"}]}]',
                     'gen_ai.system_instructions': '[{"type": "text", "content": "You are a helpful assistant."}]',
                     'logfire.json_schema': '{"type":"object","properties":{"pydantic_ai.all_messages":{"type":"array"},"gen_ai.system_instructions":{"type":"array"},"final_result":{"type":"object"}}}',
-                    'logfire.metrics': '{"gen_ai.client.token.usage": {"details": [{"attributes": {"gen_ai.operation.name": "chat", "gen_ai.provider.name": "test", "gen_ai.request.model": "test", "gen_ai.response.model": "test", "gen_ai.system": "test", "gen_ai.token.type": "input"}, "total": 103}, {"attributes": {"gen_ai.operation.name": "chat", "gen_ai.provider.name": "test", "gen_ai.request.model": "test", "gen_ai.response.model": "test", "gen_ai.system": "test", "gen_ai.token.type": "output"}, "total": 8}], "total": 111}}',
                 },
             },
         ]
