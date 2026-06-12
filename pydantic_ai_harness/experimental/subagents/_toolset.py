@@ -67,8 +67,11 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         not registered) fails `CapabilityOwnedToolset`'s ownership resolution, and
         the tools would arrive without the hooks and instructions that make them
         work. Use `shared_capabilities` to share a capability with sub-agents.
-        Excluding capability toolsets also drops this delegate tool itself, so
-        delegation cannot recurse.
+        The delegate tool itself is also filtered out by name, so delegation
+        cannot recurse. When this toolset was registered via the `SubAgents`
+        capability the capability filter already drops it; the name filter covers
+        direct registration in `Agent(toolsets=[...])`, where nothing wraps it in
+        `CapabilityOwnedToolset`.
         """
         agent = ctx.agent
         if agent is None:  # pragma: no cover - the running agent is always set during a run
@@ -77,7 +80,11 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         # entries, so ownership is detected by walking each tree. Only core's capability
         # assembly constructs `CapabilityOwnedToolset`, so a tree containing one is
         # capability-contributed in its entirety.
-        return [toolset for toolset in agent.toolsets if not _is_capability_contributed(toolset)]
+        return [
+            toolset.filtered(lambda _ctx, tool_def: tool_def.name != self._tool_name)
+            for toolset in agent.toolsets
+            if not _is_capability_contributed(toolset)
+        ]
 
     async def delegate_task(self, ctx: RunContext[AgentDepsT], agent_name: str, task: str) -> str:
         """Delegate a self-contained task to a named sub-agent and return its result.

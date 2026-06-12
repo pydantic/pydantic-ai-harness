@@ -222,6 +222,39 @@ class TestDelegation:
         assert 'parent_tool' in offered  # the parent's tool is inherited by the sub-agent
         assert 'delegate_task' not in offered  # the delegate tool is filtered out, so no recursion
 
+    async def test_directly_registered_toolset_still_filters_delegate_tool(self) -> None:
+        """`SubAgentToolset` used without the `SubAgents` capability must not recurse.
+
+        Registered directly in `Agent(toolsets=[...])` it is not wrapped in
+        `CapabilityOwnedToolset`, so only the name filter keeps `delegate_task`
+        out of inherited toolsets.
+        """
+        offered: list[str] = []
+
+        def worker_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            offered.extend(tool.name for tool in info.function_tools)
+            return ModelResponse(parts=[TextPart('sub done')])
+
+        worker = Agent(FunctionModel(worker_fn), name='worker')
+        toolset: SubAgentToolset[None] = SubAgentToolset(
+            agents={'worker': worker},
+            forward_usage=True,
+            inherit_tools=True,
+            shared_capabilities=[],
+            event_stream_handler=None,
+            tool_name='delegate_task',
+        )
+        parent: Agent[None, str] = Agent(_delegate_then_finish('worker'), toolsets=[toolset])
+
+        @parent.tool_plain
+        def parent_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'PT'  # pragma: no cover - listed but not called in this test
+
+        result = await parent.run('go')
+        assert result.output == 'all done'
+        assert 'parent_tool' in offered  # the parent's own tool is still inherited
+        assert 'delegate_task' not in offered  # the delegate tool is filtered by name
+
     async def test_inherit_tools_excludes_capability_contributed_tools(self) -> None:
         """Tools contributed by the parent's capabilities stay out of sub-agent runs.
 
