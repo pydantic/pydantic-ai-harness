@@ -274,6 +274,8 @@ class TestDelegation:
             shared_capabilities=[],
             event_stream_handler=None,
             tool_name='delegate_task',
+            limits={},
+            call_counts={},
         )
         parent: Agent[None, str] = Agent(_delegate_then_finish('worker'), toolsets=[toolset])
 

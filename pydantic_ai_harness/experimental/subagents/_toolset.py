@@ -12,6 +12,10 @@ from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
+
+# Private import: pydantic-ai has no public way to tell capability-contributed
+# toolsets apart from the agent's own in `agent.toolsets`.
+from pydantic_ai.toolsets._capability_owned import CapabilityOwnedToolset
 from pydantic_ai.usage import UsageLimits
 
 
@@ -48,10 +52,6 @@ class SubAgentLimits:
     exhausted), in place of the built-in default. Setting it also makes child
     failures soft: a child error returns this message as a normal tool result
     instead of raising a parent `ModelRetry`."""
-
-# Private import: pydantic-ai has no public way to tell capability-contributed
-# toolsets apart from the agent's own in `agent.toolsets`.
-from pydantic_ai.toolsets._capability_owned import CapabilityOwnedToolset
 
 
 def _is_capability_contributed(toolset: AbstractToolset[AgentDepsT]) -> bool:
