@@ -4,10 +4,7 @@ Use this before opening a PR or reviewing a capability change.
 
 ## Product Fit
 
-- The capability has a clear user or dogfooding need. pydanty, our background CLI
-  coding agent, is a reference consumer: for capabilities a long-running
-  background coder uses, weigh prompt-cache stability, token cost, and
-  reliability, not just feature correctness.
+- The capability has a clear user or dogfooding need.
 - The behavior belongs in harness, not Pydantic AI core.
 - The public API is small and named around user concepts.
 - The capability composes with relevant existing capabilities.
