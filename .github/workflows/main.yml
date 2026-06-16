@@ -188,7 +188,16 @@ jobs:
             --upgrade-package pydantic-ai-slim \
             --upgrade-package pydantic-graph
       - run: uv sync --locked --group dev --all-extras
-      - run: uv run --no-sync pytest
+      # A v2 break can hang instead of failing cleanly: e.g. an unhandled
+      # exception raised inside a DBOS workflow leaves DBOS's background
+      # (non-daemon) recovery thread alive, so the Python process never exits
+      # and the step would otherwise ride to the 20-minute job timeout. The
+      # `timeout` wrapper caps the step so any such hang fails fast (exit 124)
+      # rather than burning a full runner slot. `-k 30` escalates to SIGKILL if
+      # pytest ignores the initial SIGTERM. A per-test plugin (pytest-timeout)
+      # would not catch this -- the hang happens after the test body finishes,
+      # during interpreter shutdown -- so the cap has to be on the process.
+      - run: timeout -k 30 300 uv run --no-sync pytest
 
   coverage:
     needs: [test]
