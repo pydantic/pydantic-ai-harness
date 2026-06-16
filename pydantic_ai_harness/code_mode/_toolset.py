@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import keyword
 import re
 import warnings
@@ -22,7 +23,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     is_multi_modal_content,
 )
-from pydantic_ai.tool_manager import ToolManager
+from pydantic_ai.tool_manager import ParallelExecutionMode, ToolManager
 from pydantic_ai.tools import AgentDepsT, ToolDenied, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 
@@ -428,7 +429,20 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         #   to isolate the context var from per-tool flags.
         # - sequential_tools: per-tool `sequential` flags on ToolDefinition.
         #   These tools are rendered as `def` (sync) and resolved inline.
-        global_sequential = tool_manager.get_parallel_execution_mode([]) != 'parallel'
+        # pydantic-ai v1's `get_parallel_execution_mode` took the pending calls
+        # list; v2 dropped it and reads the run-scoped mode from a context var.
+        # Passing `[]` in v1 isolated that context var from per-tool sequential
+        # flags, which is exactly what the no-arg v2 call returns, so the two
+        # are equivalent. Inspect arity rather than catch TypeError so a genuine
+        # TypeError inside the method is not swallowed.
+        # The `Callable[...]` annotation erases the bound signature so both call
+        # shapes typecheck regardless of which pydantic-ai major's stubs pyright
+        # resolves (v1 requires `calls`, v2 takes none).
+        _get_mode: Callable[..., ParallelExecutionMode] = tool_manager.get_parallel_execution_mode
+        if inspect.signature(_get_mode).parameters:
+            global_sequential = _get_mode([]) != 'parallel'
+        else:
+            global_sequential = _get_mode() != 'parallel'
         sequential_tools = {name for name, td in callable_defs.items() if td.sequential}
 
         # Collect nested tool calls and returns keyed by tool_call_id so they
