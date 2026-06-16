@@ -198,8 +198,8 @@ jobs:
       # would not catch this -- the hang happens after the test body finishes,
       # during interpreter shutdown -- so the cap has to be on the process.
       #
-      # Two instrumentation tests assert pydantic-ai v1's OpenTelemetry attribute
-      # and span names (`gen_ai.usage.*`, span `agent run`). v2 deliberately
+      # Two instrumentation assertions depend on pydantic-ai v1's OpenTelemetry
+      # attribute and span names (`gen_ai.usage.*`, span `agent run`). v2 deliberately
       # renamed these (aggregated-usage attributes, and GenAI-semconv span names
       # such as `invoke_agent {name}`), so they are expected-red on v2 and carry
       # no signal here. Deselect them so this job stays a meaningful early-warning
@@ -209,7 +209,7 @@ jobs:
       - run: |
           timeout -k 30 300 uv run --no-sync pytest \
             --deselect "tests/logfire_variables/test_managed_prompt.py::test_baggage_propagates_to_run_and_child_spans" \
-            --deselect "tests/logfire_variables/test_managed_prompt.py::test_provider_backed_resolution_uses_remote_value_and_label"
+            --deselect "tests/logfire_variables/test_managed_prompt.py::test_provider_backed_resolution_tags_v1_instrumentation_spans"
 
   coverage:
     needs: [test]
