@@ -197,6 +197,25 @@ def _sanitize_tool_name(name: str) -> str:
     return sanitized or '_'
 
 
+def _global_mode_is_sequential(get_mode: Callable[..., ParallelExecutionMode]) -> bool:
+    """Whether the run-scoped execution mode forces sandbox tool calls to run sequentially.
+
+    pydantic-ai v1's `get_parallel_execution_mode` took the pending calls list
+    and folded per-tool `sequential` flags into the result; v2 dropped the
+    argument and returns only the run-scoped context-var mode. Passing `[]` in
+    v1 isolated that context var from per-tool flags, which is exactly what the
+    no-arg v2 call returns, so the two are equivalent.
+
+    Inspect the arity rather than catch `TypeError` so a genuine `TypeError`
+    raised inside the method is not swallowed. The `Callable[...]` parameter
+    type erases the bound signature so both call shapes typecheck whichever
+    major's stubs pyright resolves.
+    """
+    if inspect.signature(get_mode).parameters:
+        return get_mode([]) != 'parallel'
+    return get_mode() != 'parallel'
+
+
 @dataclass(kw_only=True)
 class _RunCodeTool(ToolsetTool[AgentDepsT]):
     """ToolsetTool subclass that caches data computed during `get_tools`.
@@ -429,20 +448,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         #   to isolate the context var from per-tool flags.
         # - sequential_tools: per-tool `sequential` flags on ToolDefinition.
         #   These tools are rendered as `def` (sync) and resolved inline.
-        # pydantic-ai v1's `get_parallel_execution_mode` took the pending calls
-        # list; v2 dropped it and reads the run-scoped mode from a context var.
-        # Passing `[]` in v1 isolated that context var from per-tool sequential
-        # flags, which is exactly what the no-arg v2 call returns, so the two
-        # are equivalent. Inspect arity rather than catch TypeError so a genuine
-        # TypeError inside the method is not swallowed.
-        # The `Callable[...]` annotation erases the bound signature so both call
-        # shapes typecheck regardless of which pydantic-ai major's stubs pyright
-        # resolves (v1 requires `calls`, v2 takes none).
-        _get_mode: Callable[..., ParallelExecutionMode] = tool_manager.get_parallel_execution_mode
-        if inspect.signature(_get_mode).parameters:
-            global_sequential = _get_mode([]) != 'parallel'
-        else:
-            global_sequential = _get_mode() != 'parallel'
+        global_sequential = _global_mode_is_sequential(tool_manager.get_parallel_execution_mode)
         sequential_tools = {name for name, td in callable_defs.items() if td.sequential}
 
         # Collect nested tool calls and returns keyed by tool_call_id so they
