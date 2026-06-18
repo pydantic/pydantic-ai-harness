@@ -530,7 +530,14 @@ async def _read_slice(
     try:
         data = await store.read(handle)
     except OSError as exc:
-        raise ModelRetry(f'No stored tool result for handle {handle!r}: {exc}.') from exc
+        # Return, not raise: a wrong handle (e.g. the model passing a tool-call id) or a
+        # result that is no longer stored must not consume a tool retry and escalate to a
+        # fatal `UnexpectedModelBehavior`. Guide the model to a valid handle instead.
+        return (
+            f'[No stored tool result for handle {handle!r}: {exc}. Use the exact handle string from a '
+            '"[Tool output too large ... stored to handle ...]" marker; if the result is no longer '
+            'available, re-run the original tool.]'
+        )
 
     lines = data.decode('utf-8', errors='replace').splitlines()
     if pattern is not None:
