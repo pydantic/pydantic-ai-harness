@@ -703,6 +703,8 @@ class TestReadBack:
         out = await _read_slice(store, 'missing/1.0', offset=0, limit=10, from_end=False, pattern=None)
         assert 'No stored tool result' in out
         assert 're-run the original tool' in out
+        # The store's error (which can carry the resolved filesystem path) is not leaked.
+        assert str(tmp_path) not in out
 
     async def test_get_toolset_registers_read_tool(self, tmp_path: Path):
         store = LocalFileStore(base_dir=tmp_path)
