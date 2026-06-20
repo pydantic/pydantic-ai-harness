@@ -261,9 +261,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     callable from the sandbox at runtime. Non-selected tools remain visible
     to the model as normal tool calls.
 
-    Tools with `defer_loading=True` (Tool Search) are never sandboxed: they stay
-    native pass-through so the deferred-loading contract is honored, and only get
-    folded into `run_code` once they've been discovered (`defer_loading=False`).
+    Framework control tools with a non-null `tool_kind` stay native, including
+    Tool Search's `search_tools` and capability-loading tools. Legacy
+    `search_tools` definitions without `tool_kind` are also kept native for
+    compatibility. Tools with `defer_loading=True` (Tool Search) are likewise
+    never sandboxed: they stay native pass-through so the deferred-loading
+    contract is honored, and only get folded into `run_code` once they've been
+    discovered (`defer_loading=False`).
     Tools annotated with `unless_native` likewise stay native so
     `Model.prepare_request` can drop them when the provider supports the native tool.
     To keep a Tool Search corpus native even after discovery (e.g. for prompt-cache
@@ -357,12 +361,14 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         wrapped_tools = await self.wrapped.get_tools(ctx)
 
         # Split tools into sandboxed vs native based on the selector.
-        # The search_tools tool (from ToolSearchToolset) is always kept native
-        # so the model can discover deferred tools alongside run_code.
+        # Framework control/discovery tools are kept native so they can manage
+        # capability loading, tool search, and related protocol-level flows.
+        # Keep a name fallback for older/local `search_tools` definitions that
+        # predate `tool_kind`.
         sandboxed_tools: dict[str, ToolsetTool[AgentDepsT]] = {}
         native_tools: dict[str, ToolsetTool[AgentDepsT]] = {}
         for name, tool in wrapped_tools.items():
-            if name == _SEARCH_TOOLS_NAME:
+            if tool.tool_def.tool_kind is not None or name == _SEARCH_TOOLS_NAME:
                 native_tools[name] = tool
             elif tool.tool_def.defer_loading:
                 # Tool Search keeps these out of the model's initial context until discovered.

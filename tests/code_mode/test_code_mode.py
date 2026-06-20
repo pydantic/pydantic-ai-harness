@@ -760,6 +760,32 @@ class TestCodeMode:
         assert 'async def later' in description
         assert 'later' not in tools
 
+    async def test_framework_tool_kind_tool_not_sandboxed(self) -> None:
+        """Framework control tools with `tool_kind` stay native even when CodeMode wraps all user tools."""
+        td_loader = ToolDefinition(
+            name='load_capability',
+            description='Load a deferred capability.',
+            parameters_json_schema={
+                'type': 'object',
+                'properties': {'capability_id': {'type': 'string'}},
+                'required': ['capability_id'],
+            },
+            return_schema={'type': 'string'},
+            tool_kind='capability-load',
+        )
+        static = _StaticToolset([_make_address_tool_def('get_user', 'Get a user.', 'street'), td_loader])
+        wrapper = CodeMode[None]().get_wrapper_toolset(static)
+        assert isinstance(wrapper, CodeModeToolset)
+
+        tools = await wrapper.get_tools(build_run_context(None))
+
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert 'async def get_user' in description
+        assert 'load_capability' not in description
+        assert 'load_capability' in tools
+        assert tools['load_capability'].tool_def.tool_kind == 'capability-load'
+
     async def test_unless_native_tool_not_sandboxed(self) -> None:
         """Tools annotated with `unless_native` stay native so `Model.prepare_request` can filter them."""
         td_fallback = ToolDefinition(
