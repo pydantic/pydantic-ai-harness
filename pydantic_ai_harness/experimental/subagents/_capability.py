@@ -132,7 +132,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
         if not self._by_name:
             return None
         return SubAgentToolset(
-            sub_agents=self._by_name,
+            agents=self._by_name,
             forward_usage=self.forward_usage,
             inherit_tools=self.inherit_tools,
             shared_capabilities=self.shared_capabilities,

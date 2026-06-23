@@ -101,7 +101,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
-        sub_agents: Mapping[str, SubAgent[AgentDepsT]],
+        agents: Mapping[str, SubAgent[AgentDepsT]],
         forward_usage: bool,
         inherit_tools: bool,
         shared_capabilities: Sequence[AgentCapability[AgentDepsT]],
@@ -110,7 +110,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         call_counts: dict[str, dict[str, int]],
     ) -> None:
         super().__init__()
-        self._sub_agents: dict[str, SubAgent[AgentDepsT]] = dict(sub_agents)
+        self._agents: dict[str, SubAgent[AgentDepsT]] = dict(agents)
         self._forward_usage = forward_usage
         self._inherit_tools = inherit_tools
         self._shared_capabilities = list(shared_capabilities)
@@ -170,9 +170,9 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
                 listed in the instructions.
             task: The complete, self-contained instruction for the sub-agent.
         """
-        sub_agent = self._sub_agents.get(agent_name)
+        sub_agent = self._agents.get(agent_name)
         if sub_agent is None:
-            available = ', '.join(sorted(self._sub_agents))
+            available = ', '.join(sorted(self._agents))
             raise ModelRetry(f'Unknown sub-agent {agent_name!r}. Available sub-agents: {available}.')
 
         if sub_agent.max_calls is not None and self._budget_exhausted(ctx, agent_name, sub_agent.max_calls):

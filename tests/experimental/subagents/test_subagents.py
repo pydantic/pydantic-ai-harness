@@ -283,7 +283,7 @@ class TestDelegation:
 
         worker = Agent(FunctionModel(worker_fn), name='worker')
         toolset: SubAgentToolset[None] = SubAgentToolset(
-            sub_agents={'worker': SubAgent(worker)},
+            agents={'worker': SubAgent(worker)},
             forward_usage=True,
             inherit_tools=True,
             shared_capabilities=[],
