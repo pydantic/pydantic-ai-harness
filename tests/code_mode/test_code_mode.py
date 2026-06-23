@@ -1012,7 +1012,7 @@ class TestCodeMode:
 
         @capability.tool_plain
         def demo_tool() -> str:  # pyright: ignore[reportUnusedFunction]
-            return 'ok'
+            return 'ok'  # pragma: no cover - deferred tool stays hidden, body is not invoked
 
         model = TestModel(call_tools=[])
         agent: Agent[None, str] = Agent(
