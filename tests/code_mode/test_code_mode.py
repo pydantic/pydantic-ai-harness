@@ -987,6 +987,56 @@ class TestCodeMode:
         # The agent's final output reflects the value flowing through the sandbox.
         assert result.output == 'sum is 10'
 
+    async def test_deferred_capability_loader_stays_native_with_tools_all(self) -> None:
+        """Regression for the deferred-capability bootstrap (issue #276).
+
+        With `CodeMode(tools='all')` and a deferred capability configured, the
+        framework-managed `load_capability` tool must stay a native call so the model
+        can reveal the capability. Its member tools keep `defer_loading=True`, so they
+        stay hidden until loaded rather than getting folded into `run_code`.
+        """
+        from pydantic_ai.capabilities import Capability
+        from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        capability = Capability[None](
+            id='demo',
+            description='Demo deferred capability.',
+            instructions='Use demo_tool.',
+            defer_loading=True,
+        )
+
+        @capability.tool_plain
+        def demo_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'ok'
+
+        seen: dict[str, list[AgentInfo]] = {'infos': []}
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen['infos'].append(info)
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent: Agent[None, str] = Agent(
+            FunctionModel(model_fn),
+            capabilities=[capability, CodeMode[None](tools='all')],
+        )
+        await agent.run('inspect tools')
+
+        info = seen['infos'][0]
+        by_name = {td.name: td for td in info.function_tools}
+
+        # The bootstrap tool is a native call alongside `run_code`, not buried in the sandbox.
+        assert 'load_capability' in by_name
+        assert 'run_code' in by_name
+
+        # The deferred member tool stays native pass-through with its `defer_loading`
+        # flag intact, so `Model.prepare_request` keeps it hidden until it's loaded --
+        # it is not folded into the `run_code` catalog.
+        assert by_name['demo_tool'].defer_loading is True
+        run_code_desc = by_name['run_code'].description or ''
+        assert 'demo_tool' not in run_code_desc
+        assert 'load_capability' not in run_code_desc
+
     # ---------------------------------------------------------------------------
     # Capability registration
     # ---------------------------------------------------------------------------
