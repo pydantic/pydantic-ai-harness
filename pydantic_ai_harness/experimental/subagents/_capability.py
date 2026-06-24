@@ -49,8 +49,10 @@ class SubAgents(AbstractCapability[AgentDepsT]):
 
     Sub-agents are also loaded from disk by default: each markdown agent definition
     under `./.agents/agents/` and `~/.agents/agents/` (or the `.claude/` equivalent)
-    becomes a delegate, built with the parent's model and (by default) tools. Disk
-    delegates coexist with explicitly-passed ones; explicitly-passed agents take
+    becomes a delegate, built with the parent's model. Disk delegates get no tools
+    by default (`inherit_tools` is `False`); set `inherit_tools=True` to expose the
+    parent's tools, or pass a `tool_resolver` to map their frontmatter tool names.
+    Disk delegates coexist with explicitly-passed ones; explicitly-passed agents take
     precedence, then the project folder, then the home folder. A disk delegate whose
     name is already taken is skipped with a warning. Configure or disable this with
     `agent_folders`; see also `agent_overrides` and `tool_resolver`.
@@ -182,7 +184,12 @@ class SubAgents(AbstractCapability[AgentDepsT]):
             if not folder.is_dir():
                 continue
             for path in sorted(folder.glob('*.md')):
-                parsed = parse_agent_markdown(path.read_text(encoding='utf-8'))
+                try:
+                    text = path.read_text(encoding='utf-8')
+                except (OSError, UnicodeDecodeError) as exc:
+                    warnings.warn(f'Skipping unreadable disk sub-agent file {str(path)!r}: {exc}', stacklevel=2)
+                    continue
+                parsed = parse_agent_markdown(text)
                 result.append(self._build_disk_agent(parsed.name or path.stem, parsed))
         return result
 

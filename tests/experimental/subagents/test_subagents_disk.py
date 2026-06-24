@@ -216,6 +216,17 @@ class TestDiskLoading:
         cap: SubAgents[None] = SubAgents(agent_folders=[tmp_path / 'does-not-exist'])
         assert cap._by_name == {}
 
+    def test_undecodable_file_is_skipped_with_warning(self, tmp_path: Path) -> None:
+        # A non-UTF-8 `.md` file must not abort loading: it is skipped with a warning
+        # and every valid definition in the same folder still loads.
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / 'broken.md').write_bytes(b'---\nname: broken\n---\n\xff\xfe not utf-8')
+        _write_agent(tmp_path, 'valid.md', '---\nname: valid\n---\nWork.')
+        with pytest.warns(UserWarning, match='Skipping unreadable disk sub-agent file'):
+            cap: SubAgents[None] = SubAgents(agent_folders=[tmp_path])
+        assert 'valid' in cap._by_name
+        assert 'broken' not in cap._by_name
+
     def test_listing_uses_description(self, tmp_path: Path) -> None:
         _write_agent(tmp_path, 'r.md', '---\nname: r\ndescription: Researches\n---\nB')
         cap: SubAgents[None] = SubAgents(agent_folders=[tmp_path])

@@ -9,7 +9,9 @@ skips corrupt entries rather than raising.
 
 from __future__ import annotations
 
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -61,7 +63,17 @@ class CapabilityStore:
 
     def _save_manifest(self, manifest: _Manifest) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
-        self._manifest_path.write_text(manifest.model_dump_json(indent=2), encoding='utf-8')
+        # Write to a temp file in the same directory, then atomically replace the
+        # manifest, so a crash mid-write never leaves a partial/corrupt file that
+        # `_load_manifest` would read as "no capabilities".
+        fd, tmp_name = tempfile.mkstemp(dir=self.directory, prefix='manifest.', suffix='.json.tmp')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as tmp:
+                tmp.write(manifest.model_dump_json(indent=2))
+            os.replace(tmp_name, self._manifest_path)
+        except BaseException:
+            os.unlink(tmp_name)
+            raise
 
     def _upsert(self, record: AuthoredCapability) -> None:
         manifest = self._load_manifest()
@@ -117,14 +129,27 @@ class CapabilityStore:
 
         Re-imports and re-constructs each active entry. Entries that fail to load
         (corrupt source, construction error) are skipped, not raised, so one bad
-        capability never blocks the rest.
+        capability never blocks the rest. A load outcome that disagrees with the
+        record's `last_error` is persisted back to the manifest: a newly broken
+        entry records its error, a re-fixed entry clears it, so the manifest stays
+        truthful about which capabilities are actually active.
         """
+        manifest = self._load_manifest()
         instances: list[AbstractCapability[object]] = []
-        for record in self._load_manifest().capabilities:
+        changed = False
+        for record in manifest.capabilities:
             if record.status != 'active':
                 continue
             try:
                 instances.append(load_capability_instance(self.directory / record.module_file))
-            except CapabilityValidationError:
+            except CapabilityValidationError as exc:
+                if record.last_error != str(exc):
+                    record.last_error = str(exc)
+                    changed = True
                 continue
+            if record.last_error is not None:
+                record.last_error = None
+                changed = True
+        if changed:
+            self._save_manifest(manifest)
         return instances

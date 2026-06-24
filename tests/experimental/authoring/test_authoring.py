@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -303,6 +304,83 @@ class TestCapabilityStore:
         # The manifest entry stays active, but the source on disk goes bad.
         (tmp_path / 'marker.py').write_text(NO_SUBCLASS_CODE, encoding='utf-8')
         assert store.load_active() == []
+
+    def test_save_manifest_atomic_over_partial_prior_file(self, tmp_path: Path) -> None:
+        # A prior interrupted save left a partial/corrupt manifest; the next save
+        # must replace it atomically, leaving a valid manifest and no temp files.
+        (tmp_path / 'manifest.json').write_text('{"capabilities": [', encoding='utf-8')
+        store = CapabilityStore(tmp_path)
+        store.write('marker', VALID_CODE)
+        assert [r.name for r in store.list_all()] == ['marker']
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith('manifest.') and p.name.endswith('.tmp')]
+        assert leftovers == []
+
+    def test_save_manifest_cleans_temp_on_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # If the atomic replace fails, the temp file must not be left behind.
+        store = CapabilityStore(tmp_path)
+        store.write('marker', VALID_CODE)
+
+        def _boom(*args: object, **kwargs: object) -> None:
+            raise OSError('replace failed')
+
+        monkeypatch.setattr(os, 'replace', _boom)
+        with pytest.raises(OSError, match='replace failed'):
+            store.write('second', VALID_CODE)
+        leftovers = [p.name for p in tmp_path.iterdir() if p.name.startswith('manifest.') and p.name.endswith('.tmp')]
+        assert leftovers == []
+
+    def test_load_active_persists_new_error(self, tmp_path: Path) -> None:
+        # A capability that validated once but later fails to load gets its error
+        # persisted to the manifest, so list_all reflects the real state.
+        store = CapabilityStore(tmp_path)
+        store.write('marker', VALID_CODE)
+        assert store.list_all()[0].last_error is None
+        (tmp_path / 'marker.py').write_text(NO_SUBCLASS_CODE, encoding='utf-8')
+        assert store.load_active() == []
+        record = store.list_all()[0]
+        assert record.last_error is not None
+        assert 'no `AbstractCapability` subclass' in record.last_error
+
+    def test_load_active_broken_twice_does_not_rewrite(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A still-broken capability whose error is already persisted must not
+        # trigger another manifest write on the next reload.
+        store = CapabilityStore(tmp_path)
+        store.write('marker', VALID_CODE)
+        (tmp_path / 'marker.py').write_text(NO_SUBCLASS_CODE, encoding='utf-8')
+        store.load_active()
+        assert store.list_all()[0].last_error is not None
+
+        def _fail_save(*args: object, **kwargs: object) -> None:
+            raise AssertionError('manifest should not be rewritten when the error is unchanged')
+
+        monkeypatch.setattr(CapabilityStore, '_save_manifest', _fail_save)
+        assert store.load_active() == []
+
+    def test_load_active_clears_error_on_refix(self, tmp_path: Path) -> None:
+        # Re-fixing a broken capability clears its persisted last_error on reload.
+        store = CapabilityStore(tmp_path)
+        store.write('marker', VALID_CODE)
+        (tmp_path / 'marker.py').write_text(NO_SUBCLASS_CODE, encoding='utf-8')
+        store.load_active()
+        assert store.list_all()[0].last_error is not None
+        (tmp_path / 'marker.py').write_text(VALID_CODE, encoding='utf-8')
+        active = store.load_active()
+        assert len(active) == 1
+        assert store.list_all()[0].last_error is None
+
+    def test_load_active_healthy_does_not_rewrite_manifest(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A reload with no error transitions must not touch the manifest on disk.
+        store = CapabilityStore(tmp_path)
+        store.write('marker', VALID_CODE)
+
+        def _fail_save(*args: object, **kwargs: object) -> None:
+            raise AssertionError('manifest should not be rewritten when nothing changed')
+
+        monkeypatch.setattr(CapabilityStore, '_save_manifest', _fail_save)
+        active = store.load_active()
+        assert len(active) == 1
 
     def test_disable_found(self, tmp_path: Path) -> None:
         store = CapabilityStore(tmp_path)

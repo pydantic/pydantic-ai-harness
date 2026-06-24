@@ -163,9 +163,11 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         key = str(directory.resolve())
         if key in self._seen_dirs:
             return result
+        if not isinstance(result, str):
+            return result
         self._seen_dirs.add(key)
         note = self._render_note(context_file)
-        return f'{result}\n\n{note}' if isinstance(result, str) else note
+        return f'{result}\n\n{note}'
 
     def _resolve_directory(self, raw_path: str) -> Path:
         candidate = Path(raw_path)

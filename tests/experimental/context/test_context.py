@@ -300,14 +300,23 @@ class TestNestedTraversal:
         out = await cap.after_tool_execute(_run_context(), call=call, tool_def=tool_def, args=args, result='r')
         assert outside.resolve().as_posix() in out
 
-    async def test_non_str_result_returns_note_only(self, tmp_path: Path) -> None:
+    async def test_non_str_result_returned_unchanged(self, tmp_path: Path) -> None:
+        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
+        cap = RepoContext[None](
+            workspace_dir=tmp_path, nested_traversal=True, traversal_tool_names=frozenset({'list_dir', 'read_file'})
+        )
+        call, tool_def, args = _call('list_dir', path='sub')
+        listing = [{'name': 'CLAUDE.md'}, {'name': 'code.py'}]
+        out = await cap.after_tool_execute(_run_context(), call=call, tool_def=tool_def, args=args, result=listing)
+        assert out is listing
+
+    async def test_string_result_still_gets_note(self, tmp_path: Path) -> None:
         _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
         cap = RepoContext[None](workspace_dir=tmp_path, nested_traversal=True)
         call, tool_def, args = _call('list_directory', path='sub')
-        out = await cap.after_tool_execute(_run_context(), call=call, tool_def=tool_def, args=args, result={'k': 'v'})
-        assert isinstance(out, str)
+        out = await cap.after_tool_execute(_run_context(), call=call, tool_def=tool_def, args=args, result='listing')
+        assert out.startswith('listing')
         assert 'CLAUDE.md' in out
-        assert "{'k': 'v'}" not in out
 
 
 class TestForRunAndMisc:
