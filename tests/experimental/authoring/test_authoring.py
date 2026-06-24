@@ -6,6 +6,7 @@ import importlib.util
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from pydantic_ai import Agent
@@ -350,11 +351,10 @@ class TestCapabilityStore:
         store.load_active()
         assert store.list_all()[0].last_error is not None
 
-        def _fail_save(*args: object, **kwargs: object) -> None:
-            raise AssertionError('manifest should not be rewritten when the error is unchanged')
-
-        monkeypatch.setattr(CapabilityStore, '_save_manifest', _fail_save)
+        save_spy = Mock()
+        monkeypatch.setattr(CapabilityStore, '_save_manifest', save_spy)
         assert store.load_active() == []
+        save_spy.assert_not_called()
 
     def test_load_active_clears_error_on_refix(self, tmp_path: Path) -> None:
         # Re-fixing a broken capability clears its persisted last_error on reload.
@@ -375,12 +375,11 @@ class TestCapabilityStore:
         store = CapabilityStore(tmp_path)
         store.write('marker', VALID_CODE)
 
-        def _fail_save(*args: object, **kwargs: object) -> None:
-            raise AssertionError('manifest should not be rewritten when nothing changed')
-
-        monkeypatch.setattr(CapabilityStore, '_save_manifest', _fail_save)
+        save_spy = Mock()
+        monkeypatch.setattr(CapabilityStore, '_save_manifest', save_spy)
         active = store.load_active()
         assert len(active) == 1
+        save_spy.assert_not_called()
 
     def test_disable_found(self, tmp_path: Path) -> None:
         store = CapabilityStore(tmp_path)
