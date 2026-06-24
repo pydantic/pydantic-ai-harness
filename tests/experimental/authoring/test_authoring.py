@@ -102,6 +102,46 @@ class BadGetter(AbstractCapability):
 SYNTAX_ERROR_CODE = 'def (:\n'
 
 
+def _marker_code(class_name: str, instruction: str) -> str:
+    """A valid capability whose class name and static instructions are controllable."""
+    return f"""
+from dataclasses import dataclass
+
+from pydantic_ai.capabilities import AbstractCapability
+
+
+@dataclass
+class {class_name}(AbstractCapability):
+    def get_instructions(self):
+        return {instruction!r}
+"""
+
+
+BAD_INSTRUCTIONS_RETURN_CODE = """
+from dataclasses import dataclass
+
+from pydantic_ai.capabilities import AbstractCapability
+
+
+@dataclass
+class BadInstructions(AbstractCapability):
+    def get_instructions(self):
+        return 12345
+"""
+
+BAD_MODEL_SETTINGS_RETURN_CODE = """
+from dataclasses import dataclass
+
+from pydantic_ai.capabilities import AbstractCapability
+
+
+@dataclass
+class BadModelSettings(AbstractCapability):
+    def get_model_settings(self):
+        return 'not-a-mapping'
+"""
+
+
 def _write(directory: Path, name: str, code: str) -> Path:
     path = directory / f'{name}.py'
     path.write_text(code, encoding='utf-8')
@@ -135,6 +175,15 @@ class TestValidate:
     def test_getter_failure_wrapped(self, tmp_path: Path) -> None:
         with pytest.raises(CapabilityValidationError, match='ValueError: boom'):
             validate_capability_file(_write(tmp_path, 'm', GETTER_FAILS_CODE))
+
+    def test_bad_instructions_return_rejected(self, tmp_path: Path) -> None:
+        # A non-instructions return is caught at author time, not at the next agent.run.
+        with pytest.raises(CapabilityValidationError):
+            validate_capability_file(_write(tmp_path, 'm', BAD_INSTRUCTIONS_RETURN_CODE))
+
+    def test_bad_model_settings_return_rejected(self, tmp_path: Path) -> None:
+        with pytest.raises(CapabilityValidationError, match='ModelSettings mapping'):
+            validate_capability_file(_write(tmp_path, 'm', BAD_MODEL_SETTINGS_RETURN_CODE))
 
     def test_syntax_error_wrapped(self, tmp_path: Path) -> None:
         with pytest.raises(CapabilityValidationError):
@@ -194,6 +243,23 @@ class TestCapabilityStore:
         records = store.list_all()
         assert len(records) == 1
         assert records[0].last_error is not None
+
+    def test_reauthor_replaces_stale_source(self, tmp_path: Path) -> None:
+        # Re-authoring the same name must serve the new source, not cached bytecode.
+        store = CapabilityStore(tmp_path)
+        store.write('marker', _marker_code('Foo', 'V1'))
+        record = store.write('marker', _marker_code('Bar', 'V2'))
+        assert record.class_name == 'Bar'
+        active = store.load_active()
+        assert len(active) == 1
+        assert active[0].get_instructions() == 'V2'
+
+    def test_write_bad_getter_return_records_error(self, tmp_path: Path) -> None:
+        # A wrong getter return type is rejected at author time, with last_error set.
+        store = CapabilityStore(tmp_path)
+        record = store.write('bad', BAD_INSTRUCTIONS_RETURN_CODE)
+        assert record.last_error is not None
+        assert record.class_name == ''
 
     def test_write_append_distinct(self, tmp_path: Path) -> None:
         store = CapabilityStore(tmp_path)

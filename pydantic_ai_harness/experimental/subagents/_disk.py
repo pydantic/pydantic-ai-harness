@@ -145,7 +145,16 @@ def resolve_folders(agent_folders: str | Sequence[Path], cwd: Path, home: Path) 
     - a `str`: the convention `<root>/.agents/<str>/` (or `.claude/<str>/`) for the
       project root (`cwd`) then the home root, project first.
     - a sequence of paths: those folders verbatim, in order.
+
+    Folders resolving to the same absolute path are deduped (keeping the first), so
+    a project root equal to the home root does not scan and warn about every agent
+    twice.
     """
     if isinstance(agent_folders, str):
-        return [_convention_folder(cwd, agent_folders), _convention_folder(home, agent_folders)]
-    return list(agent_folders)
+        folders = [_convention_folder(cwd, agent_folders), _convention_folder(home, agent_folders)]
+    else:
+        folders = list(agent_folders)
+    seen: dict[Path, Path] = {}
+    for folder in folders:
+        seen.setdefault(folder.resolve(), folder)
+    return list(seen.values())

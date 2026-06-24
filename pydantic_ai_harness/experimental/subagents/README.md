@@ -142,7 +142,7 @@ You research topics. Report your findings, each with a source.
 - `name` is the delegate name (how the parent refers to it and how it is listed). It falls back to the filename stem when absent.
 - `description` drives the prompt listing.
 - The markdown body becomes the agent's instructions.
-- `tools` (or `allowed-tools`) is a comma-separated string or a YAML block list. See "Models and tools" below.
+- `tools` (or `allowed-tools`) is a comma-separated string or a YAML block list. See "Tools" below.
 - `model` and `color` are ignored: the model is inherited from the parent (see below), and `color` has no pyai equivalent.
 
 Frontmatter is read by a small, dependency-free parser limited to those keys (`pyyaml` is not a harness dependency). Full YAML frontmatter is not supported.

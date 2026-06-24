@@ -70,7 +70,7 @@ def discover_instruction_files(
             real = candidate.resolve()
             if real in seen_paths:
                 continue
-            content = candidate.read_text(encoding='utf-8')
+            content = candidate.read_text(encoding='utf-8', errors='replace')
             digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
             if digest in seen_hashes:
                 continue
@@ -88,7 +88,7 @@ def find_dir_context_file(directory: Path, filenames: Sequence[str]) -> ContextF
             return ContextFile(
                 directory=directory,
                 path=candidate,
-                content=candidate.read_text(encoding='utf-8'),
+                content=candidate.read_text(encoding='utf-8', errors='replace'),
             )
     return None
 

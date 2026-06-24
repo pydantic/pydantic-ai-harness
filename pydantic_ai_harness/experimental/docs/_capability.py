@@ -70,11 +70,15 @@ class PyaiDocs(AbstractCapability[AgentDepsT]):
     single `get_toolset` call."""
 
     def _resolved_local_path(self) -> Path | None:
-        """The local checkout path: `local_docs_path`, else the env var, else `None`."""
+        """The local checkout path: `local_docs_path`, else the env var, else `None`.
+
+        `~` is expanded so a raw `~/...` path resolves to the local checkout
+        instead of silently falling through to the remote source.
+        """
         if self.local_docs_path is not None:
-            return self.local_docs_path
+            return self.local_docs_path.expanduser()
         env_path = os.environ.get(_DOCS_PATH_ENV)
-        return Path(env_path) if env_path else None
+        return Path(env_path).expanduser() if env_path else None
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
         """Static, cache-stable guidance on using the docs tool."""

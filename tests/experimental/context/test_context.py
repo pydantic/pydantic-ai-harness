@@ -106,6 +106,12 @@ class TestDiscoverInstructionFiles:
         files = discover_instruction_files(tmp_path, None, ('CLAUDE.md',))
         assert files == []
 
+    def test_non_utf8_file_does_not_crash(self, tmp_path: Path) -> None:
+        (tmp_path / 'CLAUDE.md').write_bytes(b'caf\xe9 instructions')
+        files = discover_instruction_files(tmp_path, None, ('CLAUDE.md',))
+        assert len(files) == 1
+        assert 'instructions' in files[0].content
+
 
 class TestFindDirContextFile:
     def test_first_existing_wins(self, tmp_path: Path) -> None:
@@ -116,6 +122,12 @@ class TestFindDirContextFile:
 
     def test_none_when_absent(self, tmp_path: Path) -> None:
         assert find_dir_context_file(tmp_path, ('CLAUDE.md',)) is None
+
+    def test_non_utf8_file_does_not_crash(self, tmp_path: Path) -> None:
+        (tmp_path / 'CLAUDE.md').write_bytes(b'caf\xe9 instructions')
+        found = find_dir_context_file(tmp_path, ('CLAUDE.md',))
+        assert found is not None
+        assert 'instructions' in found.content
 
 
 class TestRender:
@@ -200,6 +212,19 @@ class TestScanAssets:
 
     def test_returns_model(self, tmp_path: Path) -> None:
         assert isinstance(scan_assets(tmp_path, ()), AgentContextInventory)
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason='symlinks need privileges on Windows')
+    def test_symlinked_asset_escaping_workspace(self, tmp_path: Path) -> None:
+        workspace = tmp_path / 'ws'
+        outside = _write(tmp_path / 'outside' / 'foo' / 'SKILL.md', 's')
+        link = workspace / '.claude' / 'skills' / 'foo' / 'SKILL.md'
+        link.parent.mkdir(parents=True)
+        link.symlink_to(outside)
+        inv = scan_assets(workspace, ('.claude',))
+        claude = inv.roots[0]
+        assert claude.exists
+        assert len(claude.skills) == 1
+        assert claude.skills[0].endswith('.claude/skills/foo/SKILL.md')
 
 
 class TestNestedTraversal:

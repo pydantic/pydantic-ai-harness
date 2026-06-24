@@ -31,7 +31,10 @@ class AgentContextInventory(BaseModel):
 
 
 def _relposix(path: Path, workspace: Path) -> str:
-    return path.resolve().relative_to(workspace).as_posix()
+    try:
+        return path.resolve().relative_to(workspace).as_posix()
+    except ValueError:
+        return path.as_posix()
 
 
 def scan_assets(workspace_dir: Path, asset_roots: Sequence[str]) -> AgentContextInventory:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -153,11 +154,20 @@ class TestResolveFolders:
     def test_str_overrides_leaf_name(self, tmp_path: Path) -> None:
         (tmp_path / '.agents').mkdir()
         folders = resolve_folders('reviewers', tmp_path, tmp_path)
-        assert folders == [tmp_path / '.agents' / 'reviewers', tmp_path / '.agents' / 'reviewers']
+        assert folders == [tmp_path / '.agents' / 'reviewers']
 
     def test_sequence_used_verbatim(self, tmp_path: Path) -> None:
         paths = [tmp_path / 'a', tmp_path / 'b']
         assert resolve_folders(paths, tmp_path, tmp_path) == paths
+
+    def test_cwd_equal_home_dedupes_folder(self, tmp_path: Path) -> None:
+        # When the project root equals the home root, the project and home convention
+        # folders resolve to the same directory and are deduped to a single entry.
+        (tmp_path / '.agents').mkdir()
+        assert resolve_folders('agents', tmp_path, tmp_path) == [tmp_path / '.agents' / 'agents']
+
+    def test_duplicate_paths_in_sequence_deduped(self, tmp_path: Path) -> None:
+        assert resolve_folders([tmp_path / 'a', tmp_path / 'a'], tmp_path, tmp_path) == [tmp_path / 'a']
 
 
 class TestDiskLoading:
@@ -166,6 +176,22 @@ class TestDiskLoading:
         # conventional folder and the default `SubAgents()` picks it up with no config.
         _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
         cap: SubAgents[None] = SubAgents()
+        assert 'planner' in cap._by_name
+
+    def test_cwd_equal_home_loads_once_without_shadow_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # When the project root equals the home root, the project and home convention
+        # folders point at the same dir; deduping them avoids loading each agent twice
+        # and emitting a spurious "shadowed" warning.
+        root = Path.cwd()
+
+        def fake_home(cls: type[Path]) -> Path:
+            return root
+
+        monkeypatch.setattr(Path, 'home', classmethod(fake_home))
+        _write_agent(root / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            cap: SubAgents[None] = SubAgents()
         assert 'planner' in cap._by_name
 
     def test_none_disables_loading(self) -> None:

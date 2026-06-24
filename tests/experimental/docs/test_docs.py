@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from pydantic import TypeAdapter
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -100,6 +101,25 @@ class TestPyaiDocsToolset:
 
         with pytest.raises(RuntimeError, match=str(tmp_path)):
             await toolset.read_pyai_docs(PyaiDocsTopic.toolsets)
+
+    def test_tools_advanced_value_coerces_to_member(self) -> None:
+        # The LLM passes the enum VALUE; pydantic coerces it back to the member.
+        # `tools_advanced` is the one topic whose name != value, so lock the mapping.
+        assert PyaiDocsTopic.tools_advanced.value == 'tools-advanced'
+        assert TypeAdapter(PyaiDocsTopic).validate_python('tools-advanced') is PyaiDocsTopic.tools_advanced
+
+    async def test_tools_advanced_reads_hyphenated_file(self, tmp_path: Path) -> None:
+        (tmp_path / 'tools-advanced.md').write_text('# Tools advanced local', encoding='utf-8')
+        toolset = PyaiDocsToolset[None](local_docs_path=tmp_path, cache=None)
+
+        assert await toolset.read_pyai_docs(PyaiDocsTopic.tools_advanced) == '# Tools advanced local'
+
+    async def test_local_path_expands_user(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv('HOME', str(tmp_path))
+        (tmp_path / 'hooks.md').write_text('# Hooks home', encoding='utf-8')
+        toolset = PyaiDocsToolset[None](local_docs_path=Path('~'), cache=None)
+
+        assert await toolset.read_pyai_docs(PyaiDocsTopic.hooks) == '# Hooks home'
 
 
 class TestPyaiDocsCapability:

@@ -80,7 +80,7 @@ class PyaiDocsToolset(FunctionToolset[AgentDepsT]):
         """Return the local checkout's markdown for `topic`, or `None` to fall back to remote."""
         if self._local_docs_path is None:
             return None
-        path = self._local_docs_path / f'{topic.value}.md'
+        path = self._local_docs_path.expanduser() / f'{topic.value}.md'
         if not path.is_file():
             return None
         return path.read_text(encoding='utf-8')
