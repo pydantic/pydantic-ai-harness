@@ -265,18 +265,18 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
                 },
             },
             {
-                'name': 'running tool',
+                'name': 'execute_tool noop',
                 'attributes': {
                     'gen_ai.operation.name': 'execute_tool',
                     'gen_ai.tool.name': 'noop',
                     'gen_ai.tool.call.id': 'pyd_ai_tool_call_id__noop',
-                    'tool_arguments': '{}',
+                    'gen_ai.tool.call.arguments': '{}',
                     'gen_ai.agent.name': 'agent',
                     'logfire.msg': 'running tool: noop',
-                    'logfire.json_schema': '{"type":"object","properties":{"tool_arguments":{"type":"object"},"tool_response":{"type":"object"},"gen_ai.tool.name":{},"gen_ai.tool.call.id":{}}}',
+                    'logfire.json_schema': '{"type":"object","properties":{"gen_ai.tool.call.arguments":{"type":"object"},"gen_ai.tool.call.result":{"type":"object"},"gen_ai.tool.name":{},"gen_ai.tool.call.id":{}}}',
                     'logfire.span_type': 'span',
                     'logfire.variables.prompt__baggage_slug': '<code_default>',
-                    'tool_response': 'ok',
+                    'gen_ai.tool.call.result': 'ok',
                 },
             },
             {
@@ -302,7 +302,7 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
                 },
             },
             {
-                'name': 'agent run',
+                'name': 'invoke_agent agent',
                 'attributes': {
                     'model_name': 'test',
                     'agent_name': 'agent',
@@ -312,8 +312,8 @@ async def test_baggage_propagates_to_run_and_child_spans(capfire: CaptureLogfire
                     'logfire.span_type': 'span',
                     'logfire.variables.prompt__baggage_slug': '<code_default>',
                     'final_result': '{"noop":"ok"}',
-                    'gen_ai.usage.input_tokens': 103,
-                    'gen_ai.usage.output_tokens': 8,
+                    'gen_ai.aggregated_usage.input_tokens': 103,
+                    'gen_ai.aggregated_usage.output_tokens': 8,
                     'pydantic_ai.all_messages': '[{"role":"user","parts":[{"type":"text","content":"hello"}]},{"role":"assistant","parts":[{"type":"tool_call","id":"pyd_ai_tool_call_id__noop","name":"noop","arguments":{}}]},{"role":"user","parts":[{"type":"tool_call_response","id":"pyd_ai_tool_call_id__noop","name":"noop","result":"ok"}]},{"role":"assistant","parts":[{"type":"text","content":"{\\"noop\\":\\"ok\\"}"}]}]',
                     'gen_ai.system_instructions': '[{"type": "text", "content": "You are a helpful assistant."}]',
                     'logfire.json_schema': '{"type":"object","properties":{"pydantic_ai.all_messages":{"type":"array"},"gen_ai.system_instructions":{"type":"array"},"final_result":{"type":"object"}}}',
@@ -469,7 +469,7 @@ async def test_provider_backed_resolution_tags_v1_instrumentation_spans(capfire:
     spans = capfire.exporter.exported_spans_as_dict()
     # Child spans are tagged with the resolved label via baggage.
     tagged = {s['name'] for s in spans if s['attributes'].get('logfire.variables.prompt__remote_slug') == 'production'}
-    assert {'agent run', 'chat test'} <= tagged
+    assert {'invoke_agent agent', 'chat test'} <= tagged
 
 
 def test_logfire_instance_with_prebuilt_variable_warns() -> None:
