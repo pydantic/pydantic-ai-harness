@@ -17,7 +17,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.experimental.compaction._shared import estimate_text_tokens
+from pydantic_ai_harness.experimental.compaction._shared import compact_with_span, estimate_text_tokens
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext
@@ -121,6 +121,20 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
             return True
         return False
 
+    def _would_clamp(self, messages: list[ModelMessage]) -> bool:
+        """Return True if at least one part would be clamped, so a span is only emitted then."""
+        for msg in messages:
+            if not isinstance(msg, ModelResponse):
+                continue
+            for part in msg.parts:
+                if isinstance(part, TextPart):
+                    if self._clamp(part.content) is not None:
+                        return True
+                elif isinstance(part, ToolCallPart) and self.clamp_tool_call_args:
+                    if self._clamp(part.args_as_json_str()) is not None:
+                        return True
+        return False
+
     def _clamp(self, text: str) -> str | None:
         """Return the head/tail-clamped form of *text*, or ``None`` if it would not shrink."""
         if not self._is_oversized(text):
@@ -170,5 +184,14 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Clamp any oversized response part before the request is sent."""
-        request_context.messages = await self.compact(list(request_context.messages), ctx)
+        messages: list[ModelMessage] = list(request_context.messages)
+        if not self._would_clamp(messages):
+            return request_context
+        request_context.messages = await compact_with_span(
+            ctx,
+            'ClampOversizedMessages',
+            messages,
+            lambda: self.compact(messages, ctx),
+            self.tokenizer,
+        )
         return request_context

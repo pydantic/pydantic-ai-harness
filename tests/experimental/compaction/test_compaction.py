@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from opentelemetry.trace import NoOpTracer
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -49,6 +50,13 @@ from pydantic_ai_harness.experimental.compaction._summarizing_compaction import 
     _format_messages,
 )
 
+try:
+    from logfire.testing import CaptureLogfire
+
+    logfire_installed = True
+except ImportError:  # pragma: no cover
+    logfire_installed = False
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -73,6 +81,7 @@ def _make_ctx(
         usage: RunUsage
         model: Any = dataclasses.field(default_factory=_FakeModel)
         deps: None = None
+        tracer: Any = dataclasses.field(default_factory=NoOpTracer)
 
     return _FakeCtx(usage=usage)
 
@@ -2075,3 +2084,162 @@ class TestSummarizingCompactionPreserveBranches:
             1 for m in result.messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, UserPromptPart)
         )
         assert user_count == 1
+
+
+# ---------------------------------------------------------------------------
+# OTel / Logfire instrumentation: the `compact_messages` span
+# ---------------------------------------------------------------------------
+
+
+def _compact_spans(capfire: CaptureLogfire) -> list[dict[str, Any]]:
+    """Return only the `compact_messages` spans, which this package controls.
+
+    Core's own instrumentation span and attribute names have changed across pydantic-ai
+    versions, so the assertions here stay on the spans and attributes this package emits.
+    """
+    return [s for s in capfire.exporter.exported_spans_as_dict() if s['name'] == 'compact_messages']
+
+
+def _make_ctx_with_tracer() -> Any:
+    """A fake RunContext whose `tracer` exports to the active `CaptureLogfire` provider.
+
+    The `capfire` fixture configures the global OTel provider, so a tracer fetched from it
+    captures the `compact_messages` span without needing a full instrumented `Agent` run.
+    """
+    from opentelemetry.trace import get_tracer
+
+    ctx = _make_ctx()
+    ctx.tracer = get_tracer('test')
+    return ctx
+
+
+@pytest.mark.skipif(not logfire_installed, reason='logfire not installed')
+class TestCompactionSpan:
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        # A full agent.run only needs the asyncio backend; trio hits a TestModel
+        # event-loop quirk in core unrelated to compaction.
+        return 'asyncio'
+
+    @pytest.mark.anyio
+    async def test_span_emitted_when_threshold_exceeded(self, capfire: CaptureLogfire) -> None:
+        from pydantic_ai import Agent
+        from pydantic_ai.models.instrumented import InstrumentationSettings
+        from pydantic_ai.models.test import TestModel
+
+        agent: Agent[None, str] = Agent(
+            TestModel(),
+            capabilities=[SlidingWindow(max_tokens=1, keep_messages=1)],
+        )
+        agent.instrument = InstrumentationSettings()
+        await agent.run('a reasonably long prompt that exceeds one token')
+
+        spans = _compact_spans(capfire)
+        assert len(spans) >= 1
+        attrs = spans[0]['attributes']
+        assert attrs['compaction.strategy'] == 'SlidingWindow'
+        assert isinstance(attrs['compaction.messages_before'], int)
+        assert isinstance(attrs['compaction.messages_after'], int)
+        assert isinstance(attrs['compaction.tokens_before'], int)
+        assert isinstance(attrs['compaction.tokens_after'], int)
+
+    @pytest.mark.anyio
+    async def test_no_span_when_threshold_not_exceeded(self, capfire: CaptureLogfire) -> None:
+        from pydantic_ai import Agent
+        from pydantic_ai.models.instrumented import InstrumentationSettings
+        from pydantic_ai.models.test import TestModel
+
+        agent: Agent[None, str] = Agent(
+            TestModel(),
+            capabilities=[SlidingWindow(max_tokens=1_000_000, keep_messages=1)],
+        )
+        agent.instrument = InstrumentationSettings()
+        await agent.run('short prompt')
+
+        assert _compact_spans(capfire) == []
+
+    @pytest.mark.anyio
+    async def test_summarizing_compaction_emits_span(self, capfire: CaptureLogfire) -> None:
+        comp = SummarizingCompaction(model='test:m', max_messages=2, keep_messages=1, incremental=False)
+        messages: list[ModelMessage] = [_user('first'), _assistant('a'), _user('b'), _assistant('c')]
+        rc = _make_request_context(messages)
+        ctx = _make_ctx_with_tracer()
+
+        mock_result = AsyncMock()
+        mock_result.output = 'Summary.'
+        with patch('pydantic_ai.Agent') as MockAgent:
+            mock_agent_instance = AsyncMock()
+            mock_agent_instance.run.return_value = mock_result
+            MockAgent.return_value = mock_agent_instance
+            await comp.before_model_request(ctx, rc)
+
+        spans = _compact_spans(capfire)
+        assert len(spans) == 1
+        assert spans[0]['attributes']['compaction.strategy'] == 'SummarizingCompaction'
+
+    @pytest.mark.anyio
+    async def test_clamp_emits_span_only_when_a_part_is_clamped(self, capfire: CaptureLogfire) -> None:
+        comp = ClampOversizedMessages(max_part_chars=4, keep_head_chars=1, keep_tail_chars=1)
+
+        not_oversized: list[ModelMessage] = [_assistant('ab')]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(not_oversized))
+        assert _compact_spans(capfire) == []
+
+        oversized: list[ModelMessage] = [_assistant('a' * 50)]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(oversized))
+        spans = _compact_spans(capfire)
+        assert len(spans) == 1
+        assert spans[0]['attributes']['compaction.strategy'] == 'ClampOversizedMessages'
+
+    @pytest.mark.anyio
+    async def test_clamp_emits_span_for_oversized_tool_call_args(self, capfire: CaptureLogfire) -> None:
+        comp = ClampOversizedMessages(max_part_chars=4, keep_head_chars=1, keep_tail_chars=1, clamp_tool_call_args=True)
+        messages: list[ModelMessage] = [
+            ModelResponse(parts=[ToolCallPart(tool_name='fn', args={'q': 'x' * 50}, tool_call_id='tc1')])
+        ]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(messages))
+
+        spans = _compact_spans(capfire)
+        assert len(spans) == 1
+        assert spans[0]['attributes']['compaction.strategy'] == 'ClampOversizedMessages'
+
+    @pytest.mark.anyio
+    async def test_clamp_no_span_for_non_oversized_or_skipped_parts(self, capfire: CaptureLogfire) -> None:
+        from pydantic_ai.messages import ThinkingPart
+
+        comp = ClampOversizedMessages(max_part_chars=1_000, clamp_tool_call_args=True)
+        # A small tool call (not oversized) and a thinking part (not a clamp target) both
+        # leave `_would_clamp` falling through without emitting a span.
+        messages: list[ModelMessage] = [
+            ModelResponse(
+                parts=[
+                    ToolCallPart(tool_name='fn', args={'q': 'x'}, tool_call_id='tc1'),
+                    ThinkingPart(content='thinking'),
+                ]
+            )
+        ]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(messages))
+
+        assert _compact_spans(capfire) == []
+
+    @pytest.mark.anyio
+    async def test_tiered_emits_single_span_not_one_per_tier(self, capfire: CaptureLogfire) -> None:
+        comp: TieredCompaction[None] = TieredCompaction(
+            tiers=[
+                ClearToolResults(max_tokens=1, keep_pairs=0),
+                SlidingWindow(max_tokens=1, keep_messages=1),
+            ],
+            target_tokens=1,
+        )
+        messages: list[ModelMessage] = [
+            _user('first'),
+            _tool_call('fn', 'tc1'),
+            _tool_return('fn', 'tc1', 'a long tool result that takes up space'),
+            _assistant('done'),
+        ]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(messages))
+
+        spans = _compact_spans(capfire)
+        # The orchestrator drives each tier's `compact` directly, so only one span is emitted.
+        assert len(spans) == 1
+        assert spans[0]['attributes']['compaction.strategy'] == 'TieredCompaction'

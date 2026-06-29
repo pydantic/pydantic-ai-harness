@@ -6,7 +6,7 @@ preservation, and in-place tool-result clearing -- anything used by more than on
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Protocol
 
@@ -108,6 +108,49 @@ def exceeds(
     if max_tokens is not None and estimate_token_count(messages, tokenizer) > max_tokens:
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Tracing
+# ---------------------------------------------------------------------------
+
+_SPAN_NAME = 'compact_messages'
+"""Static, low-cardinality span name emitted whenever a strategy compacts. The strategy name
+goes in the `compaction.strategy` attribute rather than the span name to keep cardinality low."""
+
+
+async def compact_with_span(
+    ctx: RunContext[AgentDepsT],
+    strategy: str,
+    messages: list[ModelMessage],
+    compact: Callable[[], Awaitable[list[ModelMessage]]],
+    tokenizer: Callable[[str], int] | None = None,
+) -> list[ModelMessage]:
+    """Run *compact* inside a `compact_messages` span recording before/after metrics.
+
+    The span is emitted on `ctx.tracer`, which is a no-op tracer unless core's instrumentation
+    is active, so this adds no overhead to a non-instrumented run.
+
+    Args:
+        ctx: Run context whose `tracer` the span is started on.
+        strategy: Strategy name recorded in the `compaction.strategy` attribute.
+        messages: The pre-compaction messages, measured for the `*_before` attributes.
+        compact: Zero-argument async callable returning the compacted message list.
+        tokenizer: Optional tokenizer for the `compaction.tokens_*` estimates. When `None`,
+            uses the same ~4 characters-per-token heuristic as `estimate_token_count`.
+    """
+    with ctx.tracer.start_as_current_span(_SPAN_NAME) as span:
+        compacted = await compact()
+        span.set_attributes(
+            {
+                'compaction.strategy': strategy,
+                'compaction.messages_before': len(messages),
+                'compaction.messages_after': len(compacted),
+                'compaction.tokens_before': estimate_token_count(messages, tokenizer),
+                'compaction.tokens_after': estimate_token_count(compacted, tokenizer),
+            }
+        )
+        return compacted
 
 
 # ---------------------------------------------------------------------------
