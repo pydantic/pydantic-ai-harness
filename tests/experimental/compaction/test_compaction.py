@@ -36,7 +36,9 @@ from pydantic_ai_harness.experimental.compaction._clamp_oversized_messages impor
     _CLAMP_MARKER,
 )
 from pydantic_ai_harness.experimental.compaction._shared import (
+    _history_changed,
     _is_safe_cutoff,
+    compact_with_span,
     find_first_user_message,
     find_safe_cutoff,
     find_token_cutoff,
@@ -2132,7 +2134,8 @@ class TestCompactionSpan:
             capabilities=[SlidingWindow(max_tokens=1, keep_messages=1)],
         )
         agent.instrument = InstrumentationSettings()
-        await agent.run('a reasonably long prompt that exceeds one token')
+        history: list[ModelMessage] = [_user('first'), _assistant('a'), _user('second'), _assistant('b')]
+        await agent.run('a reasonably long prompt that exceeds one token', message_history=history)
 
         spans = _compact_spans(capfire)
         assert len(spans) >= 1
@@ -2243,3 +2246,115 @@ class TestCompactionSpan:
         # The orchestrator drives each tier's `compact` directly, so only one span is emitted.
         assert len(spans) == 1
         assert spans[0]['attributes']['compaction.strategy'] == 'TieredCompaction'
+
+    @pytest.mark.anyio
+    async def test_no_span_when_compaction_is_noop(self, capfire: CaptureLogfire) -> None:
+        # DeduplicateFileReads has no threshold, so its trigger always fires, but with no
+        # superseded reads `compact` returns the history unchanged and no span should be emitted.
+        comp = DeduplicateFileReads(file_key=_file_key)
+        messages: list[ModelMessage] = [
+            _read_call('tc1', 'a.py'),
+            _read_return('tc1', 'a body'),
+            _read_call('tc2', 'b.py'),
+            _read_return('tc2', 'b body'),
+        ]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(messages))
+
+        assert _compact_spans(capfire) == []
+
+    @pytest.mark.anyio
+    async def test_span_emitted_when_dedup_changes_history(self, capfire: CaptureLogfire) -> None:
+        comp = DeduplicateFileReads(file_key=_file_key)
+        messages: list[ModelMessage] = [
+            _read_call('tc1', 'a.py'),
+            _read_return('tc1', 'first'),
+            _read_call('tc2', 'a.py'),
+            _read_return('tc2', 'second'),
+        ]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(messages))
+
+        spans = _compact_spans(capfire)
+        assert len(spans) == 1
+        assert spans[0]['attributes']['compaction.strategy'] == 'DeduplicateFileReads'
+
+
+# ---------------------------------------------------------------------------
+# compact_with_span helper internals
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryChanged:
+    def test_same_object_is_unchanged(self):
+        msgs: list[ModelMessage] = [_user('a')]
+        assert _history_changed(msgs, msgs) is False
+
+    def test_different_length_is_changed(self):
+        before: list[ModelMessage] = [_user('a')]
+        after: list[ModelMessage] = [_user('a'), _user('b')]
+        assert _history_changed(before, after) is True
+
+    def test_same_length_equal_is_unchanged(self):
+        # Distinct list objects holding equal elements compares unchanged. A shared message
+        # object avoids the per-message timestamp that would otherwise break equality.
+        shared = _user('a')
+        before: list[ModelMessage] = [shared]
+        after: list[ModelMessage] = [shared]
+        assert before is not after
+        assert _history_changed(before, after) is False
+
+    def test_same_length_unequal_is_changed(self):
+        before: list[ModelMessage] = [_user('a')]
+        after: list[ModelMessage] = [_user('b')]
+        assert _history_changed(before, after) is True
+
+
+class TestCompactWithSpan:
+    @pytest.mark.anyio
+    async def test_no_op_returns_without_starting_span(self):
+        # A NoOpTracer would never record anyway; this guards that `compact` runs and the
+        # unchanged result is returned without attempting to start a span.
+        messages: list[ModelMessage] = [_user('a')]
+
+        async def _compact() -> list[ModelMessage]:
+            return messages
+
+        result = await compact_with_span(_make_ctx(), 'Strat', messages, _compact)
+        assert result is messages
+
+    @pytest.mark.anyio
+    @pytest.mark.skipif(not logfire_installed, reason='logfire not installed')
+    async def test_recording_span_sets_attributes(self, capfire: CaptureLogfire) -> None:
+        before: list[ModelMessage] = [_user('a'), _user('b')]
+        after: list[ModelMessage] = [_user('a')]
+
+        async def _compact() -> list[ModelMessage]:
+            return after
+
+        result = await compact_with_span(_make_ctx_with_tracer(), 'Strat', before, _compact)
+        assert result is after
+
+        spans = _compact_spans(capfire)
+        assert len(spans) == 1
+        attrs = spans[0]['attributes']
+        assert attrs['compaction.strategy'] == 'Strat'
+        assert attrs['compaction.messages_before'] == 2
+        assert attrs['compaction.messages_after'] == 1
+
+    @pytest.mark.anyio
+    async def test_non_recording_tracer_skips_attributes(self):
+        # A no-op tracer returns a non-recording span, so attribute computation is skipped.
+        before: list[ModelMessage] = [_user('a'), _user('b')]
+        after: list[ModelMessage] = [_user('a')]
+        called = False
+
+        def _tokenizer(_text: str) -> int:  # pragma: no cover - asserted never called
+            nonlocal called
+            called = True
+            return 1
+
+        async def _compact() -> list[ModelMessage]:
+            return after
+
+        result = await compact_with_span(_make_ctx(), 'Strat', before, _compact, _tokenizer)
+        assert result is after
+        assert called is False
