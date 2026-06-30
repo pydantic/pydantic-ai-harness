@@ -2138,13 +2138,14 @@ class TestCompactionSpan:
         await agent.run('a reasonably long prompt that exceeds one token', message_history=history)
 
         spans = _compact_spans(capfire)
-        assert len(spans) >= 1
+        # Exactly one compaction runs (TestModel makes a single request); `== 1` also guards against
+        # double-emission, and the `>` checks assert the window actually shrank rather than just
+        # reporting integers.
+        assert len(spans) == 1
         attrs = spans[0]['attributes']
         assert attrs['compaction.strategy'] == 'SlidingWindow'
-        assert isinstance(attrs['compaction.messages_before'], int)
-        assert isinstance(attrs['compaction.messages_after'], int)
-        assert isinstance(attrs['compaction.tokens_before'], int)
-        assert isinstance(attrs['compaction.tokens_after'], int)
+        assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
+        assert attrs['compaction.tokens_before'] > attrs['compaction.tokens_after']
 
     @pytest.mark.anyio
     async def test_no_span_when_threshold_not_exceeded(self, capfire: CaptureLogfire) -> None:
@@ -2211,8 +2212,6 @@ class TestCompactionSpan:
         from pydantic_ai.messages import ThinkingPart
 
         comp = ClampOversizedMessages(max_part_chars=1_000, clamp_tool_call_args=True)
-        # A small tool call (not oversized) and a thinking part (not a clamp target) both
-        # leave `_would_clamp` falling through without emitting a span.
         messages: list[ModelMessage] = [
             ModelResponse(
                 parts=[
@@ -2277,6 +2276,23 @@ class TestCompactionSpan:
         assert len(spans) == 1
         assert spans[0]['attributes']['compaction.strategy'] == 'DeduplicateFileReads'
 
+    @pytest.mark.anyio
+    async def test_clear_tool_results_emits_span(self, capfire: CaptureLogfire) -> None:
+        # ClearToolResults is otherwise only exercised inside TieredCompaction, which reports the
+        # orchestrator's name -- so this is the only check on its own `strategy` literal.
+        comp = ClearToolResults(max_tokens=1, keep_pairs=0)
+        messages: list[ModelMessage] = [
+            _user('first'),
+            _tool_call('fn', 'tc1'),
+            _tool_return('fn', 'tc1', 'a long tool result that takes up space'),
+            _assistant('done'),
+        ]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(messages))
+
+        spans = _compact_spans(capfire)
+        assert len(spans) == 1
+        assert spans[0]['attributes']['compaction.strategy'] == 'ClearToolResults'
+
 
 # ---------------------------------------------------------------------------
 # compact_with_span helper internals
@@ -2324,13 +2340,23 @@ class TestCompactWithSpan:
     @pytest.mark.anyio
     @pytest.mark.skipif(not logfire_installed, reason='logfire not installed')
     async def test_recording_span_sets_attributes(self, capfire: CaptureLogfire) -> None:
-        before: list[ModelMessage] = [_user('a'), _user('b')]
-        after: list[ModelMessage] = [_user('a')]
+        # Distinct text lengths plus a character-counting tokenizer pin the exact attribute values.
+        # A before/after swap, computing both token counts from one list, or ignoring the strategy
+        # tokenizer would each change a number this test checks.
+        before: list[ModelMessage] = [_user('aaaa'), _user('bb')]
+        after: list[ModelMessage] = [_user('aaaa')]
+        seen: list[str] = []
+
+        def _tokenizer(text: str) -> int:
+            seen.append(text)
+            return len(text)
 
         async def _compact() -> list[ModelMessage]:
             return after
 
-        result = await compact_with_span(_make_ctx_with_tracer(), strategy='Strat', messages=before, compact=_compact)
+        result = await compact_with_span(
+            _make_ctx_with_tracer(), strategy='Strat', messages=before, compact=_compact, tokenizer=_tokenizer
+        )
         assert result is after
 
         spans = _compact_spans(capfire)
@@ -2339,6 +2365,11 @@ class TestCompactWithSpan:
         assert attrs['compaction.strategy'] == 'Strat'
         assert attrs['compaction.messages_before'] == 2
         assert attrs['compaction.messages_after'] == 1
+        # tokenizer counts characters: before = len('aaaa') + len('bb') = 6, after = len('aaaa') = 4.
+        assert attrs['compaction.tokens_before'] == 6
+        assert attrs['compaction.tokens_after'] == 4
+        assert attrs['compaction.tokens_before'] > attrs['compaction.tokens_after']
+        assert seen  # the strategy tokenizer reached the span attributes, not the default heuristic
 
     @pytest.mark.anyio
     async def test_non_recording_tracer_skips_attributes(self):
