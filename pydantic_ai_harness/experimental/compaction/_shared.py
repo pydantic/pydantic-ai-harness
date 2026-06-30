@@ -130,6 +130,7 @@ def _history_changed(before: list[ModelMessage], after: list[ModelMessage]) -> b
 
 async def compact_with_span(
     ctx: RunContext[AgentDepsT],
+    *,
     strategy: str,
     messages: list[ModelMessage],
     compact: Callable[[], Awaitable[list[ModelMessage]]],

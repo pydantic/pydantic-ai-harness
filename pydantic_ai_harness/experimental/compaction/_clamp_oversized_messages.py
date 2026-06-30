@@ -189,9 +189,9 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
             return request_context
         request_context.messages = await compact_with_span(
             ctx,
-            'ClampOversizedMessages',
-            messages,
-            lambda: self.compact(messages, ctx),
-            self.tokenizer,
+            strategy='ClampOversizedMessages',
+            messages=messages,
+            compact=lambda: self.compact(messages, ctx),
+            tokenizer=self.tokenizer,
         )
         return request_context

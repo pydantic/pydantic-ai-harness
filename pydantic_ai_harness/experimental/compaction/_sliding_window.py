@@ -115,9 +115,9 @@ class SlidingWindow(AbstractCapability[AgentDepsT]):
             return request_context
         request_context.messages = await compact_with_span(
             ctx,
-            'SlidingWindow',
-            messages,
-            lambda: self.compact(messages, ctx),
-            self.tokenizer,
+            strategy='SlidingWindow',
+            messages=messages,
+            compact=lambda: self.compact(messages, ctx),
+            tokenizer=self.tokenizer,
         )
         return request_context
