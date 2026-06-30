@@ -160,6 +160,8 @@ async def compact_with_span(
         if span.is_recording():
             span.set_attributes(
                 {
+                    # GenAI semconv flag; the convention says set `true` only, never `false`.
+                    'gen_ai.conversation.compacted': True,
                     'compaction.strategy': strategy,
                     'compaction.messages_before': len(messages),
                     'compaction.messages_after': len(compacted),

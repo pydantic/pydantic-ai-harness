@@ -2140,6 +2140,7 @@ class TestCompactionSpan:
         # reporting integers.
         assert len(spans) == 1
         attrs = spans[0]['attributes']
+        assert attrs['gen_ai.conversation.compacted'] is True
         assert attrs['compaction.strategy'] == 'SlidingWindow'
         assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
         assert attrs['compaction.tokens_before'] > attrs['compaction.tokens_after']
@@ -2359,6 +2360,7 @@ class TestCompactWithSpan:
         spans = _compact_spans(capfire)
         assert len(spans) == 1
         attrs = spans[0]['attributes']
+        assert attrs['gen_ai.conversation.compacted'] is True
         assert attrs['compaction.strategy'] == 'Strat'
         assert attrs['compaction.messages_before'] == 2
         assert attrs['compaction.messages_after'] == 1
