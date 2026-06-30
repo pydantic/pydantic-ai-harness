@@ -134,9 +134,9 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
             return request_context
         request_context.messages = await compact_with_span(
             ctx,
-            'ClearToolResults',
-            messages,
-            lambda: self.compact(messages, ctx),
-            self.tokenizer,
+            strategy='ClearToolResults',
+            messages=messages,
+            compact=lambda: self.compact(messages, ctx),
+            tokenizer=self.tokenizer,
         )
         return request_context

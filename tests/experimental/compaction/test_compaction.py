@@ -2318,7 +2318,7 @@ class TestCompactWithSpan:
         async def _compact() -> list[ModelMessage]:
             return messages
 
-        result = await compact_with_span(_make_ctx(), 'Strat', messages, _compact)
+        result = await compact_with_span(_make_ctx(), strategy='Strat', messages=messages, compact=_compact)
         assert result is messages
 
     @pytest.mark.anyio
@@ -2330,7 +2330,7 @@ class TestCompactWithSpan:
         async def _compact() -> list[ModelMessage]:
             return after
 
-        result = await compact_with_span(_make_ctx_with_tracer(), 'Strat', before, _compact)
+        result = await compact_with_span(_make_ctx_with_tracer(), strategy='Strat', messages=before, compact=_compact)
         assert result is after
 
         spans = _compact_spans(capfire)
@@ -2355,6 +2355,8 @@ class TestCompactWithSpan:
         async def _compact() -> list[ModelMessage]:
             return after
 
-        result = await compact_with_span(_make_ctx(), 'Strat', before, _compact, _tokenizer)
+        result = await compact_with_span(
+            _make_ctx(), strategy='Strat', messages=before, compact=_compact, tokenizer=_tokenizer
+        )
         assert result is after
         assert called is False
