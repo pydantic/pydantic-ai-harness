@@ -153,7 +153,7 @@ async def compact_with_span(
     """
     compacted = await compact()
     if not _history_changed(messages, compacted):
-        return compacted
+        return messages
     with ctx.tracer.start_as_current_span(_SPAN_NAME) as span:
         if span.is_recording():
             span.set_attributes(
