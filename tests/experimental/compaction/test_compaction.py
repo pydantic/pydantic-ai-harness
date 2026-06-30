@@ -18,7 +18,8 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
-from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
+from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
+from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.experimental.compaction import (
@@ -72,16 +73,12 @@ def _make_ctx(
 ) -> Any:
     """Build a minimal RunContext-like object for testing hooks."""
 
-    @dataclasses.dataclass
-    class _FakeModel:
-        model_id: str = 'test-model'
-
     usage = RunUsage(requests=requests, input_tokens=input_tokens, output_tokens=output_tokens)
 
     @dataclasses.dataclass
     class _FakeCtx:
         usage: RunUsage
-        model: Any = dataclasses.field(default_factory=_FakeModel)
+        model: Model = dataclasses.field(default_factory=TestModel)
         deps: None = None
         tracer: Tracer = dataclasses.field(default_factory=NoOpTracer)
 
