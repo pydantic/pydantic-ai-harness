@@ -125,7 +125,7 @@ def _history_changed(before: list[ModelMessage], after: list[ModelMessage]) -> b
     The same list object, or an equal-length list that compares equal element-wise, counts as
     unchanged; anything else is a change.
     """
-    return before is not after and (len(before) != len(after) or before != after)
+    return before is not after or before != after
 
 
 async def compact_with_span(
