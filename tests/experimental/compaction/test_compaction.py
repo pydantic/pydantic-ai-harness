@@ -7,7 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from opentelemetry.trace import NoOpTracer
+from opentelemetry.trace import NoOpTracer, Tracer
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -83,7 +83,7 @@ def _make_ctx(
         usage: RunUsage
         model: Any = dataclasses.field(default_factory=_FakeModel)
         deps: None = None
-        tracer: Any = dataclasses.field(default_factory=NoOpTracer)
+        tracer: Tracer = dataclasses.field(default_factory=NoOpTracer)
 
     return _FakeCtx(usage=usage)
 
