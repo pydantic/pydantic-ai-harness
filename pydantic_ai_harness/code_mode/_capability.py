@@ -28,6 +28,7 @@ _DISCOVERY_ANNOUNCEMENT_PREFIX = (
     'added to the available-functions catalog in the system prompt'
 )
 _RUN_CODE_TOOL_NAME = 'run_code'
+_FINAL_OUTPUT_KEY = 'final_output'
 _NO_FINAL_OUTPUT_CANDIDATE = object()
 
 
@@ -252,7 +253,7 @@ def _extract_discovered_names(content: object) -> list[str]:
 
 
 def _code_mode_result_candidate(result: object) -> object:
-    """Extract the user-script result from a `run_code` tool result."""
+    """Extract an explicit final-output candidate from a `run_code` tool result."""
     candidate: object
     if isinstance(result, ToolReturn):
         candidate = cast(object, result.return_value)
@@ -262,5 +263,11 @@ def _code_mode_result_candidate(result: object) -> object:
     if isinstance(candidate, dict):
         candidate_dict = cast(dict[object, object], candidate)
         if len(candidate_dict) == 2 and 'output' in candidate_dict and 'result' in candidate_dict:
-            return _RUN_CODE_RESULT_ADAPTER.validate_python(candidate_dict)['result']
-    return cast(object, candidate)
+            candidate = _RUN_CODE_RESULT_ADAPTER.validate_python(candidate_dict)['result']
+
+    if isinstance(candidate, dict):
+        candidate_dict = cast(dict[object, object], candidate)
+        if len(candidate_dict) == 1 and _FINAL_OUTPUT_KEY in candidate_dict:
+            return candidate_dict[_FINAL_OUTPUT_KEY]
+
+    return _NO_FINAL_OUTPUT_CANDIDATE

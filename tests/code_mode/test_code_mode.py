@@ -947,8 +947,67 @@ class TestCodeMode:
         # The agent's final output reflects the value flowing through the sandbox.
         assert result.output == 'sum is 10'
 
-    async def test_run_code_result_can_be_committed_as_final_output(self) -> None:
-        """Regression for pydantic/pydantic-ai#6243: commit a valid `run_code` result."""
+    async def test_run_code_plain_result_matching_output_schema_waits_for_model_final_output(self) -> None:
+        """A regular `run_code` return is context for the model, not an implicit final output."""
+        from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        class SumOutput(BaseModel):
+            value: int
+
+        model_call_count = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal model_call_count
+            model_call_count += 1
+            if model_call_count == 1:
+                code = 'result = await add(a=4, b=6)\n{"value": result}'
+                return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code})])
+
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            run_code_return = next(
+                p for p in last_request.parts if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
+            )
+            assert run_code_return.content == {'value': 10}
+            assert info.output_tools is not None
+            return ModelResponse(
+                parts=[ToolCallPart(tool_name=info.output_tools[0].name, args={'value': 11})],
+            )
+
+        agent: Agent[object, SumOutput] = Agent(
+            FunctionModel(model_fn),
+            output_type=SumOutput,
+            capabilities=[CodeMode[object]()],
+        )
+
+        @agent.tool_plain
+        def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
+            """Add two numbers."""
+            return a + b
+
+        result = await agent.run('please add 4 and 6')
+
+        assert model_call_count == 2
+        assert result.output == SumOutput(value=11)
+
+    async def test_run_code_hook_accepts_raw_result_for_final_output_detection(self) -> None:
+        """`CodeMode` accepts raw hook results even though its own toolset returns `ToolReturn`."""
+        cap = CodeMode[object]()
+        raw_result = {'final_output': {'value': 10}}
+
+        result = await cap.after_tool_execute(
+            build_run_context(None),
+            call=ToolCallPart(tool_name='run_code', args={'code': '{}'}),
+            tool_def=ToolDefinition(name='run_code'),
+            args={'code': '{}'},
+            result=raw_result,
+        )
+
+        assert result is raw_result
+
+    async def test_run_code_final_output_wrapper_commits_without_extra_model_turn(self) -> None:
+        """The reserved `final_output` wrapper commits a valid `run_code` result."""
         from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
         from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -960,7 +1019,7 @@ class TestCodeMode:
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             nonlocal model_call_count
             model_call_count += 1
-            code = 'result = await add(a=4, b=6)\nprint(f"add returned {result}")\n{"value": result}'
+            code = 'result = await add(a=4, b=6)\n{"final_output": {"value": result}}'
             return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code})])
 
         agent: Agent[object, SumOutput] = Agent(
@@ -986,7 +1045,51 @@ class TestCodeMode:
             if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code'
         ]
         assert len(run_code_returns) == 1
-        assert run_code_returns[0].content == {'output': 'add returned 10\n', 'result': {'value': 10}}
+        assert run_code_returns[0].content == {'final_output': {'value': 10}}
+
+    async def test_run_code_final_output_wrapper_with_print_commits_result(self) -> None:
+        """The reserved `final_output` wrapper is honored inside the printed-output `result` value."""
+        from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        class SumOutput(BaseModel):
+            value: int
+
+        model_call_count = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal model_call_count
+            model_call_count += 1
+            code = 'result = await add(a=4, b=6)\nprint(f"add returned {result}")\n{"final_output": {"value": result}}'
+            return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code})])
+
+        agent: Agent[object, SumOutput] = Agent(
+            FunctionModel(model_fn),
+            output_type=SumOutput,
+            capabilities=[CodeMode[object]()],
+        )
+
+        @agent.tool_plain
+        def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
+            """Add two numbers."""
+            return a + b
+
+        result = await agent.run('please add 4 and 6')
+
+        assert model_call_count == 1
+        assert result.output == SumOutput(value=10)
+
+        run_code_returns = [
+            part
+            for message in result.all_messages()
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code'
+        ]
+        assert len(run_code_returns) == 1
+        assert run_code_returns[0].content == {
+            'output': 'add returned 10\n',
+            'result': {'final_output': {'value': 10}},
+        }
 
     async def test_deferred_capability_loader_stays_native_with_tools_all(self) -> None:
         """Regression for the deferred-capability bootstrap (issue #276).

@@ -150,11 +150,14 @@ The last expression in the code snippet is automatically captured as the return 
 | With print output | `{"output": "<printed text>", "result": <last expression>}` |
 | Multimodal content (e.g. images) | Returned natively for model processing |
 
-If the captured value is valid for the agent's output schema, `CodeMode` commits it as the final
-output immediately. The `run_code` tool return still appears in message history, but there is no
-extra model turn whose only job is to restate the same value. When printed output is present,
-`CodeMode` validates the `result` value from the `{"output": ..., "result": ...}` wrapper.
-Invalid or intermediate values continue through the normal next-model-turn flow.
+To commit a value as the agent's final output immediately, make the last expression exactly
+`{"final_output": <value>}`. The `run_code` tool return still appears in message history, but
+there is no extra model turn whose only job is to restate the same value. When printed output is
+present, `CodeMode` looks for that exact wrapper in the `result` value from
+`{"output": ..., "result": ...}`.
+
+Ordinary return values, even when they happen to match the agent's output schema, continue through
+the normal next-model-turn flow so the model can inspect them before deciding whether to finish.
 
 ## REPL state
 

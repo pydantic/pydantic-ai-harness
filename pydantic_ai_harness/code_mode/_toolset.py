@@ -129,7 +129,11 @@ The last expression's value is automatically captured as the return value -- you
 structured data. Use `print()` only for supplementary logging or debug output.
 
 Returns the last expression's value directly. If `print()` was also called, returns \
-`{"output": "<printed text>", "result": <last expression>}`.\
+`{"output": "<printed text>", "result": <last expression>}`.
+
+To finish the agent run immediately, make the last expression exactly \
+`{"final_output": <value>}`. CodeMode treats only that exact wrapper as a final output \
+candidate; ordinary return values stay regular `run_code` results for the model to inspect.\
 """
 
 
