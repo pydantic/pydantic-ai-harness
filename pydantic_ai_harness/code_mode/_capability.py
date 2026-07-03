@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
-from pydantic_ai.messages import ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
+from pydantic_ai.messages import ModelResponse, NativeToolSearchReturnPart, SystemPromptPart, ToolReturn
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
+from pydantic_graph import End
 from typing_extensions import TypedDict
 
 from pydantic_ai_harness.code_mode._toolset import CodeModeMount, CodeModeOS, CodeModeToolset
@@ -26,6 +27,8 @@ _DISCOVERY_ANNOUNCEMENT_PREFIX = (
     'New functions are now available inside `run_code`. Their signatures have been '
     'added to the available-functions catalog in the system prompt'
 )
+_RUN_CODE_TOOL_NAME = 'run_code'
+_NO_FINAL_OUTPUT_CANDIDATE = object()
 
 
 @dataclass
@@ -120,15 +123,14 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     """
 
     _announced_tools: set[str] = field(default_factory=set[str], init=False, repr=False)
+    _final_output_candidate: object = field(default=_NO_FINAL_OUTPUT_CANDIDATE, init=False, repr=False)
 
     def get_ordering(self) -> CapabilityOrdering:
         """CodeMode wraps around ToolSearch so that search_tools stays native."""
         return CapabilityOrdering(position='outermost', wraps=[_ToolSearch])
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> CodeMode[AgentDepsT]:
-        """Return a fresh instance so concurrent runs don't share `_announced_tools`."""
-        if not self.dynamic_catalog:
-            return self
+        """Return a fresh instance so concurrent runs don't share hook state."""
         return replace(self)
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
@@ -158,9 +160,21 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         (server-side search emits a `NativeToolSearchReturnPart` rather than a regular tool
         execute result).
         """
-        if self.dynamic_catalog and tool_def.tool_kind == 'tool-search':
+        if call.tool_name == _RUN_CODE_TOOL_NAME:
+            self._final_output_candidate = _code_mode_result_candidate(result)
+        elif self.dynamic_catalog and tool_def.tool_kind == 'tool-search':
             self._announce_newly_discovered(ctx, _extract_discovered_names(result))
         return result
+
+    async def after_node_run(self, ctx: RunContext[AgentDepsT], *, node: Any, result: Any) -> Any:
+        """Commit a valid `run_code` result as final output without another model turn."""
+        if self._final_output_candidate is _NO_FINAL_OUTPUT_CANDIDATE or isinstance(result, End):
+            return cast(object, result)
+
+        candidate = self._final_output_candidate
+        self._final_output_candidate = _NO_FINAL_OUTPUT_CANDIDATE
+        committed: object | None = await ctx.output.try_commit_candidate(candidate, result=result)
+        return committed if committed is not None else result
 
     async def after_model_request(
         self,
@@ -204,8 +218,16 @@ class _DiscoveredEntry(TypedDict):
     name: str
 
 
+class _RunCodeResultWrapper(TypedDict):
+    """Structured `run_code` return when stdout is also present."""
+
+    output: object
+    result: object
+
+
 _CATALOG_ADAPTER = TypeAdapter(_DiscoveredCatalog)
 _ENTRY_ADAPTER = TypeAdapter(_DiscoveredEntry)
+_RUN_CODE_RESULT_ADAPTER = TypeAdapter(_RunCodeResultWrapper)
 
 
 def _extract_discovered_names(content: object) -> list[str]:
@@ -227,3 +249,18 @@ def _extract_discovered_names(content: object) -> list[str]:
         except ValidationError:
             continue
     return names
+
+
+def _code_mode_result_candidate(result: object) -> object:
+    """Extract the user-script result from a `run_code` tool result."""
+    candidate: object
+    if isinstance(result, ToolReturn):
+        candidate = cast(object, result.return_value)
+    else:
+        candidate = result
+
+    if isinstance(candidate, dict):
+        candidate_dict = cast(dict[object, object], candidate)
+        if len(candidate_dict) == 2 and 'output' in candidate_dict and 'result' in candidate_dict:
+            return _RUN_CODE_RESULT_ADAPTER.validate_python(candidate_dict)['result']
+    return cast(object, candidate)

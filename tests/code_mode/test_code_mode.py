@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 import pytest
+from pydantic import BaseModel
 from pydantic_ai import (
     AbstractToolset,
     Agent,
@@ -945,6 +946,47 @@ class TestCodeMode:
 
         # The agent's final output reflects the value flowing through the sandbox.
         assert result.output == 'sum is 10'
+
+    async def test_run_code_result_can_be_committed_as_final_output(self) -> None:
+        """Regression for pydantic/pydantic-ai#6243: commit a valid `run_code` result."""
+        from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart, ToolReturnPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        class SumOutput(BaseModel):
+            value: int
+
+        model_call_count = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal model_call_count
+            model_call_count += 1
+            code = 'result = await add(a=4, b=6)\nprint(f"add returned {result}")\n{"value": result}'
+            return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code})])
+
+        agent: Agent[object, SumOutput] = Agent(
+            FunctionModel(model_fn),
+            output_type=SumOutput,
+            capabilities=[CodeMode[object]()],
+        )
+
+        @agent.tool_plain
+        def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
+            """Add two numbers."""
+            return a + b
+
+        result = await agent.run('please add 4 and 6')
+
+        assert model_call_count == 1
+        assert result.output == SumOutput(value=10)
+
+        run_code_returns = [
+            part
+            for message in result.all_messages()
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code'
+        ]
+        assert len(run_code_returns) == 1
+        assert run_code_returns[0].content == {'output': 'add returned 10\n', 'result': {'value': 10}}
 
     async def test_deferred_capability_loader_stays_native_with_tools_all(self) -> None:
         """Regression for the deferred-capability bootstrap (issue #276).
@@ -1900,7 +1942,7 @@ class TestToolSearchIntegration:
             ModelRequest(
                 parts=[
                     ToolSearchReturnPart(
-                        content={'discovered_tools': [{'name': 'later', 'description': 'A deferred-loading tool.'}]},
+                        content={'discovered_tools': [{'name': 'later'}]},
                         tool_call_id='search-1',
                     )
                 ]
@@ -2083,9 +2125,9 @@ class TestDynamicCatalog:
         assert fresh is not cap
         assert fresh._announced_tools == set()  # pyright: ignore[reportPrivateUsage]
 
-    async def test_for_run_returns_self_when_disabled(self) -> None:
+    async def test_for_run_returns_fresh_state_when_dynamic_catalog_disabled(self) -> None:
         cap = CodeMode[object]()
-        assert await cap.for_run(build_run_context(None)) is cap
+        assert await cap.for_run(build_run_context(None)) is not cap
 
     # -- discovery announcement: local search path ------------------------
 
@@ -2186,7 +2228,7 @@ class TestDynamicCatalog:
             parts=[
                 NativeToolSearchReturnPart(
                     tool_name='tool_search',
-                    content={'discovered_tools': [{'name': 'weather', 'description': 'Get the weather.'}]},
+                    content={'discovered_tools': [{'name': 'weather'}]},
                     tool_call_id='c1',
                 )
             ],
