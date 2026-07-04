@@ -130,6 +130,13 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     tool_name: str = 'delegate_task'
     """Name of the delegate tool exposed to the model."""
 
+    tool_retries: int | None = None
+    """How many times the model may retry the delegate tool after a sub-agent
+    run errors (e.g. the sub-agent exhausts its own output retries). `None` (the
+    default) inherits the parent agent's default tool retries. Set it (e.g. 2-3)
+    so a flaky sub-agent failure lets the parent re-delegate with a corrected
+    task instead of crashing the parent run on the first sub-agent error."""
+
     _by_name: dict[str, SubAgent[AgentDepsT]] = field(
         default_factory=dict[str, 'SubAgent[AgentDepsT]'], init=False, repr=False, compare=False
     )
@@ -262,6 +269,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
             shared_capabilities=self.shared_capabilities,
             event_stream_handler=self.event_stream_handler,
             tool_name=self.tool_name,
+            tool_retries=self.tool_retries,
             call_counts=self._call_counts,
         )
 
