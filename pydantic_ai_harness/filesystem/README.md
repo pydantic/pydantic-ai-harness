@@ -77,11 +77,12 @@ The three rules apply at two different granularities:
   `create_directory`) gates the operation's target path. You must name a path
   that the patterns permit.
 - **Walkers** (`list_directory`, `search_files`, `find_files`) gate their root
-  by deny/protected patterns, but **not** by `allowed_patterns` -- a directory
-  root like `.` never matches a file pattern such as `src/*.py`, so requiring
-  it to would make every listing fail. Instead, the root is always walked and
-  each **entry** is filtered against all three lists. A directory listing can
-  never surface a path the agent couldn't otherwise read or write.
+  by deny patterns, but **not** by `allowed_patterns` -- a directory root like
+  `.` never matches a file pattern such as `src/*.py`, so requiring it to would
+  make every listing fail. Instead, the root is always walked and each **entry**
+  is filtered against readable access: `allowed_patterns` and `denied_patterns`
+  still apply, while `protected_patterns` remain visible because they only
+  reject writes.
 
 So with `allowed_patterns=['*.py']`, `list_directory('.')` succeeds and shows
 only the `.py` entries; `read_file('notes.md')` is rejected.

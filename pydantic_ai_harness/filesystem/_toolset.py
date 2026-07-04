@@ -151,8 +151,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         directory isn't required to match `allowed_patterns` itself -- `.` or
         `src` would never match a file pattern like `src/*.py`. The walk's
         entries are still filtered against `allowed_patterns` per-entry via
-        `_is_accessible`. Denied and protected patterns continue to gate the
-        root.
+        `_is_accessible`. Denied patterns continue to gate the root. Protected
+        patterns only block writes, so read-only walkers can still inspect
+        protected paths.
         """
         if write and self._protected_patterns:
             matched = self._first_matching_pattern(path, self._protected_patterns)
@@ -320,7 +321,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             A newline-separated listing with type indicators and sizes.
         """
-        # The listing root is gated by denied/protected patterns but not by
+        # The listing root is gated by denied patterns but not by
         # allowed_patterns: a directory like '.' never matches a file pattern.
         # Entries are filtered per-entry against allowed_patterns below.
         resolved = self._safe_resolve(path, check_allowed=False)
@@ -338,10 +339,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if any(part.startswith('.') for part in rel_path.parts):
                 continue
             rel = str(rel_path)
-            # Apply the same allow/deny/protected filtering used for direct
-            # access so a directory listing can't leak patterns the agent
-            # couldn't otherwise read or write.
-            if not self._is_accessible(rel, write=True):
+            # Apply the readable access filter. Protected paths remain visible
+            # because protected patterns only make them read-only.
+            if not self._is_accessible(rel):
                 continue
             if entry.is_dir():
                 entries.append(f'{rel}/')
@@ -391,10 +391,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if any(part.startswith('.') for part in rel_parts):
                 continue
             rel_str = str(file_path.relative_to(real_root))
-            # Apply the same allow/deny/protected filtering used for direct
-            # access so a recursive search can't read patterns the agent
-            # couldn't otherwise read.
-            if not self._is_accessible(rel_str, write=True):
+            # Apply the readable access filter. Protected paths remain
+            # searchable because protected patterns only make them read-only.
+            if not self._is_accessible(rel_str):
                 continue
             if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
                 continue
@@ -441,10 +440,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if any(part.startswith('.') for part in rel_parts):
                 continue
             rel = str(match.relative_to(real_root))
-            # Apply the same allow/deny/protected filtering used for direct
-            # access so a glob find can't surface patterns the agent
-            # couldn't otherwise see.
-            if not self._is_accessible(rel, write=True):
+            # Apply the readable access filter. Protected paths remain
+            # discoverable because protected patterns only make them read-only.
+            if not self._is_accessible(rel):
                 continue
             suffix = '/' if match.is_dir() else ''
             matches.append(f'{rel}{suffix}')
