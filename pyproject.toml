@@ -40,6 +40,30 @@ code-mode = [
 codemode = [
     'pydantic-monty>=0.0.16',
 ]
+sql-mode = [
+    # 1.2.0 is the first release where registering a UDF that collides with a
+    # built-in raises; 1.3.0 stops the UDF path leaking an unraisable exception
+    # on 3.13; 3.14 wheels first ship in 1.4.2.
+    'duckdb>=1.2.0; python_version < "3.13"',
+    'duckdb>=1.3.0; python_version == "3.13"',
+    'duckdb>=1.4.2; python_version >= "3.14"',
+    # DuckDB requires numpy to register Python user-defined functions. Floors
+    # track the first numpy release with a wheel for each Python.
+    'numpy>=1.26; python_version < "3.13"',
+    'numpy>=2.1.0; python_version == "3.13"',
+    'numpy>=2.3.2; python_version >= "3.14"',
+    'anyio>=4.0.0',
+]
+# Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
+sqlmode = [
+    'duckdb>=1.2.0; python_version < "3.13"',
+    'duckdb>=1.3.0; python_version == "3.13"',
+    'duckdb>=1.4.2; python_version >= "3.14"',
+    'numpy>=1.26; python_version < "3.13"',
+    'numpy>=2.1.0; python_version == "3.13"',
+    'numpy>=2.3.2; python_version >= "3.14"',
+    'anyio>=4.0.0',
+]
 temporal = [
     'pydantic-ai-slim[temporal]',
 ]
@@ -59,6 +83,7 @@ Issues = 'https://github.com/pydantic/pydantic-ai-harness/issues'
 [dependency-groups]
 dev = [
     'pydantic-ai-harness[code-mode]',
+    'pydantic-ai-harness[sql-mode]',
     # Floors selected to keep the `test-floor` job (using `--resolution lowest-direct`)
     # working: `anyio>=4.11.0` is when the pytest plugin started registering the
     # `anyio_mode` ini option. `pytest-anyio` has only version 0.0.0 on PyPI, so no
