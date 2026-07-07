@@ -10,14 +10,23 @@ from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.capabilities._tool_search import ToolSearch as _ToolSearch
+from pydantic_ai.exceptions import StopRun
 from pydantic_ai.messages import ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
+from pydantic_graph import End
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.code_mode._toolset import CodeModeMount, CodeModeOS, CodeModeToolset
+from pydantic_ai_harness.code_mode._toolset import (
+    _FINAL_OUTPUT_METADATA_KEY,  # pyright: ignore[reportPrivateUsage]
+    _RUN_CODE_TOOL_NAME,  # pyright: ignore[reportPrivateUsage]
+    CodeModeMount,
+    CodeModeOS,
+    CodeModeToolset,
+    _FinalOutput,  # pyright: ignore[reportPrivateUsage]  -- shared within the code_mode package
+)
 
 if TYPE_CHECKING:
-    from pydantic_ai.capabilities.abstract import ValidatedToolArgs
+    from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, ValidatedToolArgs
     from pydantic_ai.messages import ToolCallPart
     from pydantic_ai.models import ModelRequestContext
 
@@ -119,15 +128,38 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     keeps the system prompt shorter and is the better choice.
     """
 
+    allow_final_output: bool = False
+    """Let sandboxed `run_code` scripts commit the agent's final output directly.
+
+    When `True`, a `final_output(value)` function is exposed inside the sandbox. Calling it
+    records `value` and, once the `run_code` call returns, `CodeMode` ends the run with that
+    value as the output -- no extra model turn -- while the `run_code` tool return stays in
+    message history. The value is passed through the agent's output validators but is **not**
+    coerced to the declared output type, so it must already match it.
+
+    Off by default: most code-mode agents should not be able to finish the run from a script.
+    A schema-matching `run_code` return is never committed implicitly; committing is always an
+    explicit `final_output(...)` call.
+    """
+
     _announced_tools: set[str] = field(default_factory=set[str], init=False, repr=False)
+
+    # The value a `run_code` script committed via `final_output()` this run, or None. Recorded in
+    # `after_tool_execute` and consumed in `after_node_run` to end the run. A fresh instance per
+    # run (see `for_run`) keeps concurrent runs from sharing it.
+    _final_output_candidate: _FinalOutput | None = field(default=None, init=False, repr=False)
 
     def get_ordering(self) -> CapabilityOrdering:
         """CodeMode wraps around ToolSearch so that search_tools stays native."""
         return CapabilityOrdering(position='outermost', wraps=[_ToolSearch])
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> CodeMode[AgentDepsT]:
-        """Return a fresh instance so concurrent runs don't share `_announced_tools`."""
-        if not self.dynamic_catalog:
+        """Return a fresh instance so concurrent runs don't share per-run state.
+
+        Needed when `dynamic_catalog` tracks `_announced_tools` or `allow_final_output` tracks
+        `_final_output_candidate`; otherwise the shared instance is safe to reuse.
+        """
+        if not (self.dynamic_catalog or self.allow_final_output):
             return self
         return replace(self)
 
@@ -138,6 +170,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             tool_selector=self.tools,
             max_retries=self.max_retries,
             dynamic_catalog=self.dynamic_catalog,
+            allow_final_output=self.allow_final_output,
             os_access=self.os_access,
             mount=self.mount,
         )
@@ -151,15 +184,48 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         args: ValidatedToolArgs,
         result: Any,
     ) -> Any:
-        """Announce newly-discovered tools from a local `search_tools` return.
+        """Announce discovered tools and record a `run_code` final-output commit.
 
-        Only active with `dynamic_catalog=True`. The native-search path is handled by
-        [`after_model_request`][pydantic_ai_harness.CodeMode.after_model_request] instead
-        (server-side search emits a `NativeToolSearchReturnPart` rather than a regular tool
-        execute result).
+        Two concerns share this hook:
+
+        - With `dynamic_catalog=True`, announce newly-discovered tools from a local
+          `search_tools` return. The native-search path is handled by
+          [`after_model_request`][pydantic_ai_harness.CodeMode.after_model_request] instead
+          (server-side search emits a `NativeToolSearchReturnPart` rather than a regular tool
+          execute result).
+        - With `allow_final_output=True`, read back a value the `run_code` script committed via
+          `final_output()`. The value rides on the `ToolReturn` metadata; recording it here lets
+          [`after_node_run`][pydantic_ai_harness.CodeMode.after_node_run] end the run once the
+          `run_code` return is in message history. The result is returned unchanged.
         """
         if self.dynamic_catalog and tool_def.tool_kind == 'tool-search':
             self._announce_newly_discovered(ctx, _extract_discovered_names(result))
+        if self.allow_final_output and call.tool_name == _RUN_CODE_TOOL_NAME:
+            # `run_code` always returns a `ToolReturn`; the committed value (if any) rides on its
+            # metadata as a `_FinalOutput`. Reading `.metadata` off `result` (typed `Any`) avoids
+            # narrowing `result` itself, keeping the pass-through `return result` fully typed.
+            marker: object = result.metadata.get(_FINAL_OUTPUT_METADATA_KEY)
+            if isinstance(marker, _FinalOutput):
+                self._final_output_candidate = marker
+        return result
+
+    async def after_node_run(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        node: AgentNode[AgentDepsT],
+        result: NodeResult[AgentDepsT],
+    ) -> NodeResult[AgentDepsT]:
+        """End the run with a value committed via `final_output()`, once tool returns are recorded.
+
+        Only active with `allow_final_output=True`. When a `run_code` script committed a value
+        this run and the node didn't already end the run, raise
+        [`StopRun`][pydantic_ai.exceptions.StopRun]: Pydantic AI runs the value through the
+        agent's output validators, preserves the pending `run_code` tool return in message
+        history, and finishes without another model request. Otherwise the result is unchanged.
+        """
+        if self._final_output_candidate is not None and not isinstance(result, End):
+            raise StopRun(self._final_output_candidate.value)
         return result
 
     async def after_model_request(

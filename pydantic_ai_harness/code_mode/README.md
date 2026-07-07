@@ -150,6 +150,38 @@ The last expression in the code snippet is automatically captured as the return 
 | With print output | `{"output": "<printed text>", "result": <last expression>}` |
 | Multimodal content (e.g. images) | Returned natively for model processing |
 
+## Committing the final output
+
+By default a `run_code` return flows back to the model, which decides what to do next -- a
+schema-matching return is never committed as the agent's output on its own. Set
+`allow_final_output=True` to let a script end the run itself:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import CodeMode
+
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[CodeMode(allow_final_output=True)])
+```
+
+This exposes a `final_output(value)` function inside the sandbox. Calling it commits `value` as
+the agent's final output and ends the run with no further model turn. The `run_code` call still
+returns normally and stays in message history, and code after `final_output(...)` keeps running:
+
+```python
+report = build_report(await gather_data())
+final_output(report)
+```
+
+`value` must already match the agent's output type. It is passed through the agent's
+[output validators](https://ai.pydantic.dev/output/#output-validator-functions) (the same ones a
+model-produced output runs through), but it is **not** coerced to the declared type, so committing
+a value of the wrong shape is your responsibility. Coerce it in code (or in an output validator)
+before committing.
+
+The function is opt-in per capability: with the default `allow_final_output=False` it is absent
+from the sandbox, and a script that calls `final_output` fails as an undefined function. Most
+code-mode agents should leave it off so a script cannot finish the run.
+
 ## REPL state
 
 State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state.
@@ -250,6 +282,7 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 CodeMode(
     tools: ToolSelector = 'all',        # 'all', list[str], callable, or dict
     max_retries: int = 3,               # retries on sandbox execution errors
+    allow_final_output: bool = False,   # expose final_output(value) to end the run from a script
     os_access: CodeModeOS | None = None,   # host handler for env vars, clock, and file I/O
     mount: CodeModeMount | None = None,    # host directories to share with the sandbox
 )

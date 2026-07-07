@@ -2600,3 +2600,191 @@ class TestGlobalModeIsSequential:
 
         assert _global_mode_is_sequential(parallel) is False
         assert _global_mode_is_sequential(sequential) is True
+
+
+class TestFinalOutput:
+    """`CodeMode(allow_final_output=True)` lets a `run_code` script commit the final output.
+
+    These use a hand-driven `FunctionModel` rather than a recorded provider call because the
+    behavior under test is control-flow and message-history shaped: how many model turns run,
+    which value ends the run, and that the `run_code` tool return stays in history. A VCR
+    cassette pins request/response bytes, not those invariants.
+    """
+
+    async def test_final_output_commits_value_in_single_turn(self) -> None:
+        """A positional `final_output(value)` ends the run in one model turn, keeping the return.
+
+        FunctionModel/non-VCR: asserts the model is called exactly once (no second turn) and the
+        `run_code` `ToolReturnPart` survives in history -- neither is visible in recorded bytes.
+        """
+        from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        turns = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal turns
+            turns += 1
+            if turns == 1:
+                code = "greeting = await greet(name='Ada')\nfinal_output(greeting)"
+                return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code})])
+            return ModelResponse(parts=[TextPart('second turn should not run')])  # pragma: no cover
+
+        agent: Agent[object, str] = Agent(
+            FunctionModel(model_fn), capabilities=[CodeMode[object](allow_final_output=True)]
+        )
+
+        @agent.tool_plain
+        def greet(name: str) -> str:  # pyright: ignore[reportUnusedFunction]
+            """Greet someone."""
+            return f'Hello, {name}!'
+
+        result = await agent.run('greet Ada')
+
+        assert turns == 1
+        assert result.output == 'Hello, Ada!'
+
+        run_code_returns = [
+            part
+            for message in result.all_messages()
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code'
+        ]
+        assert len(run_code_returns) == 1
+
+    async def test_final_output_commits_structured_output_through_validators(self) -> None:
+        """A keyword `final_output(value=...)` commits a structured value, run through validators.
+
+        FunctionModel/non-VCR: pins that the `@agent.output_validator` runs on the committed
+        value (which `StopRun` validates but does not coerce) in a single turn.
+        """
+        from pydantic import BaseModel
+        from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        class Weather(BaseModel):
+            city: str
+            temp_c: int
+
+        turns = 0
+        validated: list[object] = []
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal turns
+            turns += 1
+            if turns == 1:
+                code = "final_output(value={'city': 'Paris', 'temp_c': 20})"
+                return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code})])
+            return ModelResponse(parts=[TextPart('second turn should not run')])  # pragma: no cover
+
+        agent: Agent[object, Weather] = Agent(
+            FunctionModel(model_fn),
+            output_type=Weather,
+            capabilities=[CodeMode[object](allow_final_output=True)],
+        )
+
+        @agent.output_validator
+        def finalize(data: Weather) -> Weather:  # pyright: ignore[reportUnusedFunction]
+            validated.append(data)
+            # `StopRun` does not coerce, so `data` is the raw dict the sandbox committed; the app
+            # coerces it here to demonstrate validators run and can shape the final output.
+            return Weather.model_validate(data)
+
+        result = await agent.run('weather in Paris')
+
+        assert turns == 1
+        assert validated == [{'city': 'Paris', 'temp_c': 20}]
+        assert result.output == Weather(city='Paris', temp_c=20)
+
+    async def test_enabled_but_no_commit_flows_to_second_turn(self) -> None:
+        """With the feature on, a `run_code` return that never calls `final_output` does not commit.
+
+        FunctionModel/non-VCR: asserts the model is called twice -- proving a schema-shaped return
+        is never auto-committed; committing is only ever an explicit `final_output(...)` call.
+        """
+        from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        turns = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal turns
+            turns += 1
+            if turns == 1:
+                return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': 'await add(a=1, b=2)'})])
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent: Agent[object, str] = Agent(
+            FunctionModel(model_fn), capabilities=[CodeMode[object](allow_final_output=True)]
+        )
+
+        @agent.tool_plain
+        def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
+            """Add two numbers."""
+            return a + b
+
+        result = await agent.run('add 1 and 2')
+
+        assert turns == 2
+        assert result.output == 'done'
+
+    async def test_disabled_plain_return_flows_to_second_turn(self) -> None:
+        """By default (`allow_final_output=False`) `run_code` never ends the run.
+
+        FunctionModel/non-VCR: asserts the model is called twice, matching pre-feature behavior.
+        """
+        from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        turns = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal turns
+            turns += 1
+            if turns == 1:
+                return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': 'await add(a=1, b=2)'})])
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent: Agent[object, str] = Agent(FunctionModel(model_fn), capabilities=[CodeMode[object]()])
+
+        @agent.tool_plain
+        def add(a: int, b: int) -> int:  # pyright: ignore[reportUnusedFunction]
+            """Add two numbers."""
+            return a + b
+
+        result = await agent.run('add 1 and 2')
+
+        assert turns == 2
+        assert result.output == 'done'
+
+    async def test_final_output_in_catalog_only_when_enabled(self) -> None:
+        """`final_output` shows up in the `run_code` description only when the feature is on."""
+        toolset = _build_function_toolset(add)
+
+        enabled = CodeMode[object](allow_final_output=True).get_wrapper_toolset(toolset)
+        disabled = CodeMode[object]().get_wrapper_toolset(toolset)
+        assert isinstance(enabled, CodeModeToolset)
+        assert isinstance(disabled, CodeModeToolset)
+
+        enabled_desc = (await enabled.get_tools(build_run_context(None)))['run_code'].tool_def.description
+        disabled_desc = (await disabled.get_tools(build_run_context(None)))['run_code'].tool_def.description
+        assert enabled_desc is not None and disabled_desc is not None
+
+        assert 'def final_output(value: Any) -> Any' in enabled_desc
+        assert 'final output' in enabled_desc
+        assert 'final_output' not in disabled_desc
+
+    async def test_final_output_call_errors_when_disabled(self) -> None:
+        """Calling `final_output` with the feature off fails: it is not defined in the sandbox."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        with pytest.raises(ModelRetry) as exc_info:
+            await wrapper.call_tool('run_code', {'code': 'final_output(1)'}, ctx, tools['run_code'])
+        assert 'final_output' in str(exc_info.value)

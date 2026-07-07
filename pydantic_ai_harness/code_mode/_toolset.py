@@ -68,6 +68,20 @@ CodeModeOS = AbstractOS | CodeModeOSCallback
 CodeModeMount = MountDir | list[MountDir]
 
 
+@dataclass(frozen=True)
+class _FinalOutput:
+    """Wraps a value committed via `final_output()` inside the sandbox.
+
+    The wrapper keeps a committed `None` distinguishable from "nothing committed":
+    a bare `None` sentinel means no `final_output()` call happened, while
+    `_FinalOutput(None)` means the script committed `None` as the run's output.
+    It travels on the `run_code` `ToolReturn` metadata to the `CodeMode` capability,
+    which reads it back to end the run via `StopRun`.
+    """
+
+    value: Any
+
+
 class _RunCodeArguments(TypedDict):
     code: Annotated[str, Field(description='The Python code to execute in the sandbox.')]
     restart: NotRequired[
@@ -180,6 +194,31 @@ _TOOL_SEARCH_ADDENDUM = (
     f' that will become callable in subsequent `run_code` invocations.'
 )
 
+# Synthetic function injected into the sandbox when `CodeMode(allow_final_output=True)`.
+# Exposed across three surfaces the toolset derives from `callable_defs`: the rendered
+# catalog, the type-check stubs, and the runtime dispatch.
+_FINAL_OUTPUT_NAME = 'final_output'
+# Key under which the committed `_FinalOutput` is carried on the `run_code` `ToolReturn`
+# metadata, from which `CodeMode.after_tool_execute` reads it back.
+_FINAL_OUTPUT_METADATA_KEY = 'final_output'
+_FINAL_OUTPUT_DESCRIPTION = (
+    "Commit `value` as the agent's final output and end the run without another model turn. "
+    'The value must already match the agent output type: it is checked by the output validators '
+    'but not coerced, so pass a value of the correct type. The `run_code` call still returns '
+    'normally and stays in message history, and code after this call keeps running. '
+    'Returns `value` unchanged.'
+)
+
+
+def _final_output_block(body: str) -> str:
+    """Render the synthetic `final_output` definition shared by the catalog and type-check stubs.
+
+    `body` is the placeholder statement (`...` for the model-facing catalog,
+    `raise NotImplementedError()` for the type-check stub).
+    """
+    return f'def {_FINAL_OUTPUT_NAME}(value: Any) -> Any:\n    """{_FINAL_OUTPUT_DESCRIPTION}"""\n    {body}'
+
+
 _INVALID_IDENT_CHARS = re.compile(r'[^a-zA-Z0-9_]')
 
 
@@ -281,9 +320,22 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     so Tool Search discoveries don't bust the tool-definitions cache prefix.
     """
 
+    allow_final_output: bool = False
+    """Expose a synthetic `final_output(value)` function inside the sandbox.
+
+    When `True`, sandboxed scripts can commit `value` as the agent's final output; the
+    committed value rides back on the `run_code` `ToolReturn` metadata for `CodeMode` to
+    end the run. When `False` (default), the function is absent from every surface.
+    """
+
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
     # giving each agent run isolated REPL state. Lazy-initialized on first call_tool.
     _repl: MontyRepl | None = field(default=None, init=False, repr=False)
+
+    # The value committed by a `final_output()` call during the current `call_tool`, or None
+    # if the script didn't call it. Reset at the start of every `call_tool`; safe as per-call
+    # instance state because `run_code` is `sequential=True` (no concurrent calls share it).
+    _pending_final_output: _FinalOutput | None = field(default=None, init=False, repr=False)
 
     # Catalog string stashed during `get_tools` (when `dynamic_catalog`) and read back by
     # `get_instructions` in the same step. Empty when there's nothing to surface.
@@ -368,9 +420,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         has_mount = self.mount is not None
         if self.dynamic_catalog:
             description = _base_description(has_os=has_os, has_mount=has_mount)
-            self._last_catalog = self._render_catalog(callable_defs)
+            self._last_catalog = self._render_catalog(callable_defs, include_final_output=self.allow_final_output)
         else:
-            description = self._build_description(callable_defs, has_os=has_os, has_mount=has_mount)
+            description = self._build_description(
+                callable_defs, has_os=has_os, has_mount=has_mount, include_final_output=self.allow_final_output
+            )
             self._last_catalog = ''
 
         if _RUN_CODE_TOOL_NAME in native_tools:
@@ -420,6 +474,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         code = tool_args['code']
         restart = tool_args.get('restart', False)
+
+        # Reset the per-call final-output sentinel. Safe as instance state: `run_code` is
+        # `sequential=True`, so no other `call_tool` runs concurrently against this instance.
+        self._pending_final_output = None
 
         # Clear the REPL on restart so that if type checking fails, the
         # next retry still gets fresh_repl=True and is type-checked again.
@@ -518,13 +576,25 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # Serialize to JSON-compatible form so Monty receives only plain data.
             return _TOOL_RETURN_CONTENT_TA.dump_python(result)
 
+        # Record a `final_output(value)` call, if enabled. `run_code` is sequential, so
+        # writing to instance state here is safe. The callback is `None` when the feature
+        # is off, which leaves `final_output` undefined in the sandbox (calling it errors
+        # as an unknown function).
+        on_final_output: Callable[[Any], None] | None = None
+        if self.allow_final_output:
+
+            def record_final_output(value: Any) -> None:
+                self._pending_final_output = _FinalOutput(value)
+
+            on_final_output = record_final_output
+
         # Static type checking on fresh REPL sessions (first call or after
         # restart). Skipped on subsequent calls because accumulated REPL state
         # (variables from prior snippets) is invisible to the stateless checker.
         # Runs before REPL creation so that if this raises ModelRetry, the REPL
         # stays None and the next retry still gets type-checked.
         if fresh_repl and callable_defs:
-            self._type_check(code, callable_defs=callable_defs)
+            self._type_check(code, callable_defs=callable_defs, include_final_output=self.allow_final_output)
 
         # Create the REPL after type checking passes.
         if fresh_repl:
@@ -544,6 +614,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 global_sequential=global_sequential,
                 os_access=self.os_access,
                 mount=self.mount,
+                on_final_output=on_final_output,
             )
         except MontySyntaxError as e:
             raise ModelRetry(f'Syntax error in code:\n{_prepend_prints(e.display(), capture)}') from e
@@ -584,10 +655,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         else:
             return_value = {'output': printed, 'result': result}
 
-        return ToolReturn(
-            return_value=return_value,
-            metadata={'code_mode': True, 'tool_calls': nested_calls, 'tool_returns': nested_returns},
-        )
+        metadata: dict[str, Any] = {'code_mode': True, 'tool_calls': nested_calls, 'tool_returns': nested_returns}
+        # Surface a committed final output for `CodeMode.after_tool_execute` to read back.
+        # The `_FinalOutput` wrapper keeps a committed `None` distinct from "nothing committed".
+        if self._pending_final_output is not None:
+            metadata[_FINAL_OUTPUT_METADATA_KEY] = self._pending_final_output
+
+        return ToolReturn(return_value=return_value, metadata=metadata)
 
     def _partition_callable_tools(
         self, wrapped_tools: dict[str, ToolsetTool[AgentDepsT]]
@@ -641,24 +715,29 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         return callable_defs, sanitized_to_original
 
     @staticmethod
-    def _build_description(callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool) -> str:
+    def _build_description(
+        callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool, include_final_output: bool = False
+    ) -> str:
         """Render the `run_code` description: base prose + TypedDicts + function signatures."""
         base = _base_description(has_os=has_os, has_mount=has_mount)
-        catalog = CodeModeToolset._render_catalog(callable_defs)
+        catalog = CodeModeToolset._render_catalog(callable_defs, include_final_output=include_final_output)
         if not catalog:
             return base
         return base + '\n\n' + catalog
 
     @staticmethod
-    def _render_catalog(callable_defs: dict[str, ToolDefinition]) -> str:
-        """Render the functions-header + TypedDict + function-signature blocks, or `''` if no defs.
+    def _render_catalog(callable_defs: dict[str, ToolDefinition], *, include_final_output: bool = False) -> str:
+        """Render the functions-header + TypedDict + function-signature blocks, or `''` if empty.
 
         Excludes the `run_code` base prose; the catalog is the discovery-driven portion that's
         cache-hostile when carried in `run_code.description`. Used by `_build_description`
         (default static-description path) and by `get_instructions` (the `dynamic_catalog`
         path, which moves it into instructions instead).
+
+        When `include_final_output` is set, the synthetic `final_output(value)` function is
+        appended so the model sees it alongside the sandboxed tools.
         """
-        if not callable_defs:
+        if not callable_defs and not include_final_output:
             return ''
 
         sigs, conflicting = _get_sigs_and_conflicting(callable_defs)
@@ -667,8 +746,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             td.render_signature('...', is_async=not td.sequential, conflicting_type_names=conflicting)
             for td in callable_defs.values()
         ]
+        if include_final_output:
+            function_blocks.append(_final_output_block('...'))
 
-        has_sync = any(td.sequential for td in callable_defs.values())
+        # `final_output` is synchronous (called without `await`), so it counts toward `has_sync`.
+        has_sync = any(td.sequential for td in callable_defs.values()) or include_final_output
         has_async = any(not td.sequential for td in callable_defs.values())
         sections = [_functions_header(has_sync=has_sync, has_async=has_async)]
         if type_blocks:
@@ -677,7 +759,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         return '\n\n'.join(sections)
 
     @staticmethod
-    def _build_type_check_stubs(callable_defs: dict[str, ToolDefinition]) -> str:
+    def _build_type_check_stubs(callable_defs: dict[str, ToolDefinition], *, include_final_output: bool = False) -> str:
         """Build Python stubs for Monty's static type checker."""
         sigs, conflicting = _get_sigs_and_conflicting(callable_defs)
         parts = ['import asyncio\nfrom typing import Any, TypedDict, NotRequired, Literal']
@@ -689,10 +771,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             )
             for td in callable_defs.values()
         )
+        if include_final_output:
+            parts.append(_final_output_block('raise NotImplementedError()'))
         return '\n\n'.join(parts)
 
     @staticmethod
-    def _type_check(code: str, *, callable_defs: dict[str, ToolDefinition]) -> None:
+    def _type_check(code: str, *, callable_defs: dict[str, ToolDefinition], include_final_output: bool = False) -> None:
         """Type-check a code snippet against tool signatures before execution.
 
         Uses Monty's stateless type checker with function stubs. Only sound
@@ -701,7 +785,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         Raises:
             ModelRetry: If the code has type errors or syntax errors.
         """
-        stubs = CodeModeToolset._build_type_check_stubs(callable_defs)
+        stubs = CodeModeToolset._build_type_check_stubs(callable_defs, include_final_output=include_final_output)
         try:
             Monty(code, type_check=True, type_check_stubs=stubs)
         except MontyTypingError as e:
@@ -731,6 +815,7 @@ async def _execution_loop(
     global_sequential: bool,
     os_access: CodeModeOS | None,
     mount: CodeModeMount | None,
+    on_final_output: Callable[[Any], None] | None = None,
 ) -> MontyComplete:
     """Drive the Monty REPL via the synchronous snapshot API until completion.
 
@@ -773,6 +858,7 @@ async def _execution_loop(
                     pre_resolved=pre_resolved,
                     os_access=os_access,
                     mount=mount,
+                    on_final_output=on_final_output,
                 )
             else:
                 monty_state = await _resolve_future_snapshot(
@@ -805,9 +891,17 @@ async def _handle_function_snapshot(
     pre_resolved: dict[int, ExternalResult],
     os_access: CodeModeOS | None,
     mount: CodeModeMount | None,
+    on_final_output: Callable[[Any], None] | None = None,
 ) -> FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete:
     """Handle a single FunctionSnapshot from the Monty execution loop."""
     fn_name = snapshot.function_name
+
+    if on_final_output is not None and fn_name == _FINAL_OUTPUT_NAME:
+        # Synthetic `final_output(value)`: capture the value and hand it straight back so the
+        # script continues. The commit itself happens after `run_code` returns, in `CodeMode`.
+        value = snapshot.args[0] if snapshot.args else snapshot.kwargs['value']
+        on_final_output(value)
+        return snapshot.resume({'return_value': value}, os=os_access, mount=mount)
 
     if fn_name not in callable_defs:
         return snapshot.resume({'exception': NameError(f'Unknown function: {fn_name}')}, os=os_access, mount=mount)
