@@ -134,8 +134,9 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     When `True`, a `final_output(value)` function is exposed inside the sandbox. Calling it
     records `value` and, once the `run_code` call returns, `CodeMode` ends the run with that
     value as the output -- no extra model turn -- while the `run_code` tool return stays in
-    message history. The value is passed through the agent's output validators but is **not**
-    coerced to the declared output type, so it must already match it.
+    message history. Pydantic AI treats the value as the semantic final-output value, validates
+    and coerces it against the agent's declared output type, then runs output hooks, output
+    functions, and output validators.
 
     Off by default: most code-mode agents should not be able to finish the run from a script.
     A schema-matching `run_code` return is never committed implicitly; committing is always an
@@ -221,7 +222,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         Only active with `allow_final_output=True`. When a `run_code` script committed a value
         this run and the node didn't already end the run, raise
         [`StopRun`][pydantic_ai.exceptions.StopRun]: Pydantic AI runs the value through the
-        agent's output validators, preserves the pending `run_code` tool return in message
+        normal final-output pipeline, preserves the pending `run_code` tool return in message
         history, and finishes without another model request. Otherwise the result is unchanged.
         """
         if self._final_output_candidate is not None and not isinstance(result, End):

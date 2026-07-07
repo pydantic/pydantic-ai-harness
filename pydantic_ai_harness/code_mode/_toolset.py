@@ -203,18 +203,60 @@ _FINAL_OUTPUT_NAME = 'final_output'
 _FINAL_OUTPUT_METADATA_KEY = 'final_output'
 _FINAL_OUTPUT_DESCRIPTION = (
     "Commit `value` as the agent's final output and end the run without another model turn. "
-    'The value must already match the agent output type: it is checked by the output validators '
-    'but not coerced, so pass a value of the correct type. The `run_code` call still returns '
-    'normally and stays in message history, and code after this call keeps running. '
+    'Pydantic AI validates and coerces the value against the agent output type, then runs output '
+    'hooks, output functions, and output validators. The `run_code` call still returns normally '
+    'and stays in message history, and code after this call keeps running. '
     'Returns `value` unchanged.'
 )
 
 
-def _final_output_block(body: str) -> str:
-    """Render the synthetic `final_output` definition shared by the catalog and type-check stubs.
+def _final_output_tool_def(ctx: RunContext[AgentDepsT]) -> ToolDefinition:
+    """Build the synthetic `final_output(value)` definition advertised inside the sandbox.
 
-    `body` is the placeholder statement (`...` for the model-facing catalog,
-    `raise NotImplementedError()` for the type-check stub).
+    `RunContext` exposes `ctx.agent.output_json_schema()`, but not the current run's resolved
+    output schema. That means this reflects the agent's configured output type and can fall back
+    to `Any` for contexts without an agent; it will not see per-call `agent.run(..., output_type=...)`
+    overrides until core exposes that schema on the public run context.
+    """
+    output_schema: dict[str, Any] = {}
+    if ctx.agent is not None:
+        output_schema = ctx.agent.output_json_schema()
+
+    value_schema = dict(output_schema)
+    defs = value_schema.pop('$defs', None)
+    parameters_json_schema: dict[str, Any] = {
+        'type': 'object',
+        'properties': {'value': value_schema},
+        'required': ['value'],
+        'additionalProperties': False,
+    }
+    if defs is not None:
+        parameters_json_schema['$defs'] = defs
+
+    return ToolDefinition(
+        name=_FINAL_OUTPUT_NAME,
+        description=_FINAL_OUTPUT_DESCRIPTION,
+        parameters_json_schema=parameters_json_schema,
+        return_schema=output_schema,
+        sequential=True,
+    )
+
+
+def _render_final_output_signature(
+    final_output_tool_def: ToolDefinition, body: str, *, conflicting_type_names: frozenset[str] = frozenset()
+) -> str:
+    """Render `final_output(value)` with the agent output type and positional-call shape."""
+    rendered = final_output_tool_def.render_signature(
+        body, is_async=False, conflicting_type_names=conflicting_type_names
+    )
+    return rendered.replace(f'def {_FINAL_OUTPUT_NAME}(*, value:', f'def {_FINAL_OUTPUT_NAME}(value:', 1)
+
+
+def _final_output_type_check_stub(body: str) -> str:
+    """Render the permissive type-check stub for `final_output(value)`.
+
+    The model-facing catalog advertises the agent output type, but the static checker
+    stays permissive so Pydantic AI remains the validation and coercion boundary.
     """
     return f'def {_FINAL_OUTPUT_NAME}(value: Any) -> Any:\n    """{_FINAL_OUTPUT_DESCRIPTION}"""\n    {body}'
 
@@ -410,6 +452,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 native_tools[name] = tool
 
         callable_defs, sanitized_to_original = self._partition_callable_tools(sandboxed_tools)
+        final_output_tool_def = _final_output_tool_def(ctx) if self.allow_final_output else None
 
         # `dynamic_catalog` keeps the catalog out of `run_code.description` (cache-stable
         # tool-defs block) and surfaces it via `get_instructions` instead. Stash it for the
@@ -420,10 +463,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         has_mount = self.mount is not None
         if self.dynamic_catalog:
             description = _base_description(has_os=has_os, has_mount=has_mount)
-            self._last_catalog = self._render_catalog(callable_defs, include_final_output=self.allow_final_output)
+            self._last_catalog = self._render_catalog(callable_defs, final_output_tool_def=final_output_tool_def)
         else:
             description = self._build_description(
-                callable_defs, has_os=has_os, has_mount=has_mount, include_final_output=self.allow_final_output
+                callable_defs, has_os=has_os, has_mount=has_mount, final_output_tool_def=final_output_tool_def
             )
             self._last_catalog = ''
 
@@ -593,8 +636,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # (variables from prior snippets) is invisible to the stateless checker.
         # Runs before REPL creation so that if this raises ModelRetry, the REPL
         # stays None and the next retry still gets type-checked.
-        if fresh_repl and callable_defs:
-            self._type_check(code, callable_defs=callable_defs, include_final_output=self.allow_final_output)
+        final_output_tool_def = _final_output_tool_def(ctx) if self.allow_final_output else None
+        if fresh_repl and (callable_defs or final_output_tool_def is not None):
+            self._type_check(code, callable_defs=callable_defs, final_output_tool_def=final_output_tool_def)
 
         # Create the REPL after type checking passes.
         if fresh_repl:
@@ -716,17 +760,23 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
     @staticmethod
     def _build_description(
-        callable_defs: dict[str, ToolDefinition], *, has_os: bool, has_mount: bool, include_final_output: bool = False
+        callable_defs: dict[str, ToolDefinition],
+        *,
+        has_os: bool,
+        has_mount: bool,
+        final_output_tool_def: ToolDefinition | None = None,
     ) -> str:
         """Render the `run_code` description: base prose + TypedDicts + function signatures."""
         base = _base_description(has_os=has_os, has_mount=has_mount)
-        catalog = CodeModeToolset._render_catalog(callable_defs, include_final_output=include_final_output)
+        catalog = CodeModeToolset._render_catalog(callable_defs, final_output_tool_def=final_output_tool_def)
         if not catalog:
             return base
         return base + '\n\n' + catalog
 
     @staticmethod
-    def _render_catalog(callable_defs: dict[str, ToolDefinition], *, include_final_output: bool = False) -> str:
+    def _render_catalog(
+        callable_defs: dict[str, ToolDefinition], *, final_output_tool_def: ToolDefinition | None = None
+    ) -> str:
         """Render the functions-header + TypedDict + function-signature blocks, or `''` if empty.
 
         Excludes the `run_code` base prose; the catalog is the discovery-driven portion that's
@@ -734,23 +784,30 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         (default static-description path) and by `get_instructions` (the `dynamic_catalog`
         path, which moves it into instructions instead).
 
-        When `include_final_output` is set, the synthetic `final_output(value)` function is
-        appended so the model sees it alongside the sandboxed tools.
+        When `final_output_tool_def` is set, the synthetic `final_output(value)` function is
+        appended so the model sees it alongside the sandboxed tools, typed from the agent output
+        schema when the current run context exposes one.
         """
-        if not callable_defs and not include_final_output:
+        if not callable_defs and final_output_tool_def is None:
             return ''
 
-        sigs, conflicting = _get_sigs_and_conflicting(callable_defs)
+        type_defs = callable_defs
+        if final_output_tool_def is not None:
+            type_defs = {**callable_defs, _FINAL_OUTPUT_NAME: final_output_tool_def}
+
+        sigs, conflicting = _get_sigs_and_conflicting(type_defs)
         type_blocks = FunctionSignature.render_type_definitions(sigs, conflicting)
         function_blocks = [
             td.render_signature('...', is_async=not td.sequential, conflicting_type_names=conflicting)
             for td in callable_defs.values()
         ]
-        if include_final_output:
-            function_blocks.append(_final_output_block('...'))
+        if final_output_tool_def is not None:
+            function_blocks.append(
+                _render_final_output_signature(final_output_tool_def, '...', conflicting_type_names=conflicting)
+            )
 
         # `final_output` is synchronous (called without `await`), so it counts toward `has_sync`.
-        has_sync = any(td.sequential for td in callable_defs.values()) or include_final_output
+        has_sync = any(td.sequential for td in callable_defs.values()) or final_output_tool_def is not None
         has_async = any(not td.sequential for td in callable_defs.values())
         sections = [_functions_header(has_sync=has_sync, has_async=has_async)]
         if type_blocks:
@@ -759,7 +816,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         return '\n\n'.join(sections)
 
     @staticmethod
-    def _build_type_check_stubs(callable_defs: dict[str, ToolDefinition], *, include_final_output: bool = False) -> str:
+    def _build_type_check_stubs(
+        callable_defs: dict[str, ToolDefinition], *, final_output_tool_def: ToolDefinition | None = None
+    ) -> str:
         """Build Python stubs for Monty's static type checker."""
         sigs, conflicting = _get_sigs_and_conflicting(callable_defs)
         parts = ['import asyncio\nfrom typing import Any, TypedDict, NotRequired, Literal']
@@ -771,12 +830,17 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             )
             for td in callable_defs.values()
         )
-        if include_final_output:
-            parts.append(_final_output_block('raise NotImplementedError()'))
+        if final_output_tool_def is not None:
+            parts.append(_final_output_type_check_stub('raise NotImplementedError()'))
         return '\n\n'.join(parts)
 
     @staticmethod
-    def _type_check(code: str, *, callable_defs: dict[str, ToolDefinition], include_final_output: bool = False) -> None:
+    def _type_check(
+        code: str,
+        *,
+        callable_defs: dict[str, ToolDefinition],
+        final_output_tool_def: ToolDefinition | None = None,
+    ) -> None:
         """Type-check a code snippet against tool signatures before execution.
 
         Uses Monty's stateless type checker with function stubs. Only sound
@@ -785,7 +849,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         Raises:
             ModelRetry: If the code has type errors or syntax errors.
         """
-        stubs = CodeModeToolset._build_type_check_stubs(callable_defs, include_final_output=include_final_output)
+        stubs = CodeModeToolset._build_type_check_stubs(callable_defs, final_output_tool_def=final_output_tool_def)
         try:
             Monty(code, type_check=True, type_check_stubs=stubs)
         except MontyTypingError as e:
@@ -899,7 +963,34 @@ async def _handle_function_snapshot(
     if on_final_output is not None and fn_name == _FINAL_OUTPUT_NAME:
         # Synthetic `final_output(value)`: capture the value and hand it straight back so the
         # script continues. The commit itself happens after `run_code` returns, in `CodeMode`.
-        value = snapshot.args[0] if snapshot.args else snapshot.kwargs['value']
+        if len(snapshot.args) > 1:
+            return snapshot.resume(
+                {'exception': TypeError('final_output() takes exactly one argument')}, os=os_access, mount=mount
+            )
+        if snapshot.args and snapshot.kwargs:
+            return snapshot.resume(
+                {'exception': TypeError("final_output() got multiple values for argument 'value'")},
+                os=os_access,
+                mount=mount,
+            )
+        if snapshot.args:
+            value = snapshot.args[0]
+        elif 'value' in snapshot.kwargs:
+            unexpected = set(snapshot.kwargs) - {'value'}
+            if unexpected:
+                keyword = next(iter(unexpected))
+                return snapshot.resume(
+                    {'exception': TypeError(f'final_output() got an unexpected keyword argument {keyword!r}')},
+                    os=os_access,
+                    mount=mount,
+                )
+            value = snapshot.kwargs['value']
+        else:
+            return snapshot.resume(
+                {'exception': TypeError("final_output() missing required argument 'value'")},
+                os=os_access,
+                mount=mount,
+            )
         on_final_output(value)
         return snapshot.resume({'return_value': value}, os=os_access, mount=mount)
 

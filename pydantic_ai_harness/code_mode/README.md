@@ -172,11 +172,12 @@ report = build_report(await gather_data())
 final_output(report)
 ```
 
-`value` must already match the agent's output type. It is passed through the agent's
-[output validators](https://ai.pydantic.dev/output/#output-validator-functions) (the same ones a
-model-produced output runs through), but it is **not** coerced to the declared type, so committing
-a value of the wrong shape is your responsibility. Coerce it in code (or in an output validator)
-before committing.
+`value` is treated as the semantic final-output value: Pydantic AI validates and coerces it against
+the agent's declared output type, then runs output hooks, output functions, and
+[output validators](https://ai.pydantic.dev/output/#output-validator-functions). For example,
+`final_output({"answer": "42"})` can produce a `BaseModel` output with `answer: int`. If validation
+or a hook rejects the value, the run raises that error because there is no further model turn to
+retry against.
 
 The function is opt-in per capability: with the default `allow_final_output=False` it is absent
 from the sandbox, and a script that calls `final_output` fails as an undefined function. Most
