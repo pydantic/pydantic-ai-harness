@@ -2807,6 +2807,26 @@ class TestFinalOutput:
         assert 'final output' in enabled_desc
         assert 'final_output' not in disabled_desc
 
+    async def test_final_output_catalog_uses_agent_output_type(self) -> None:
+        """`final_output` advertises the agent output type when a run context provides one."""
+        from pydantic import BaseModel
+
+        class Weather(BaseModel):
+            city: str
+            temp_c: int
+
+        wrapper = CodeMode[object](allow_final_output=True).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = build_run_context(None)
+        ctx.agent = Agent(TestModel(), output_type=Weather)
+
+        description = (await wrapper.get_tools(ctx))['run_code'].tool_def.description
+
+        assert description is not None
+        assert 'class Weather(TypedDict):' in description
+        assert 'temp_c: int' in description
+        assert 'def final_output(value: Weather) -> Weather' in description
+
     async def test_final_output_call_errors_when_disabled(self) -> None:
         """Calling `final_output` with the feature off fails: it is not defined in the sandbox."""
         wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
