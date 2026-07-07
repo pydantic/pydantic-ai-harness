@@ -1900,7 +1900,7 @@ class TestToolSearchIntegration:
             ModelRequest(
                 parts=[
                     ToolSearchReturnPart(
-                        content={'discovered_tools': [{'name': 'later', 'description': 'A deferred-loading tool.'}]},
+                        content={'discovered_tools': [{'name': 'later'}]},
                         tool_call_id='search-1',
                     )
                 ]
@@ -2186,7 +2186,7 @@ class TestDynamicCatalog:
             parts=[
                 NativeToolSearchReturnPart(
                     tool_name='tool_search',
-                    content={'discovered_tools': [{'name': 'weather', 'description': 'Get the weather.'}]},
+                    content={'discovered_tools': [{'name': 'weather'}]},
                     tool_call_id='c1',
                 )
             ],
@@ -2653,10 +2653,10 @@ class TestFinalOutput:
         assert len(run_code_returns) == 1
 
     async def test_final_output_commits_structured_output_through_validators(self) -> None:
-        """A keyword `final_output(value=...)` commits a structured value, run through validators.
+        """A keyword `final_output(value=...)` commits a structured value through core output handling.
 
-        FunctionModel/non-VCR: pins that the `@agent.output_validator` runs on the committed
-        value (which `StopRun` validates but does not coerce) in a single turn.
+        FunctionModel/non-VCR: pins that `StopRun` coerces the committed value against the
+        declared output type before `@agent.output_validator` runs, all in a single turn.
         """
         from pydantic import BaseModel
         from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
@@ -2673,7 +2673,7 @@ class TestFinalOutput:
             nonlocal turns
             turns += 1
             if turns == 1:
-                code = "final_output(value={'city': 'Paris', 'temp_c': 20})"
+                code = "final_output(value={'city': 'Paris', 'temp_c': '20'})"
                 return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code})])
             return ModelResponse(parts=[TextPart('second turn should not run')])  # pragma: no cover
 
@@ -2686,15 +2686,44 @@ class TestFinalOutput:
         @agent.output_validator
         def finalize(data: Weather) -> Weather:  # pyright: ignore[reportUnusedFunction]
             validated.append(data)
-            # `StopRun` does not coerce, so `data` is the raw dict the sandbox committed; the app
-            # coerces it here to demonstrate validators run and can shape the final output.
-            return Weather.model_validate(data)
+            return Weather(city=data.city, temp_c=data.temp_c + 1)
 
         result = await agent.run('weather in Paris')
 
         assert turns == 1
-        assert validated == [{'city': 'Paris', 'temp_c': 20}]
-        assert result.output == Weather(city='Paris', temp_c=20)
+        assert validated == [Weather(city='Paris', temp_c=20)]
+        assert result.output == Weather(city='Paris', temp_c=21)
+
+    async def test_final_output_validation_error_propagates(self) -> None:
+        """Invalid committed output raises validation errors instead of retrying the model."""
+        from pydantic import BaseModel, ValidationError
+        from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        class Weather(BaseModel):
+            city: str
+            temp_c: int
+
+        turns = 0
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal turns
+            turns += 1
+            if turns == 1:
+                code = "final_output(value={'city': 'Paris', 'temp_c': 'warm'})"
+                return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code})])
+            return ModelResponse(parts=[TextPart('second turn should not run')])  # pragma: no cover
+
+        agent: Agent[object, Weather] = Agent(
+            FunctionModel(model_fn),
+            output_type=Weather,
+            capabilities=[CodeMode[object](allow_final_output=True)],
+        )
+
+        with pytest.raises(ValidationError):
+            await agent.run('weather in Paris')
+
+        assert turns == 1
 
     async def test_enabled_but_no_commit_flows_to_second_turn(self) -> None:
         """With the feature on, a `run_code` return that never calls `final_output` does not commit.
@@ -2788,3 +2817,16 @@ class TestFinalOutput:
         with pytest.raises(ModelRetry) as exc_info:
             await wrapper.call_tool('run_code', {'code': 'final_output(1)'}, ctx, tools['run_code'])
         assert 'final_output' in str(exc_info.value)
+
+    async def test_final_output_call_without_value_errors_on_persistent_repl(self) -> None:
+        """A malformed `final_output()` call becomes a retryable code error after type checking is skipped."""
+        wrapper = CodeMode[object](allow_final_output=True).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, tools['run_code'])
+
+        with pytest.raises(ModelRetry) as exc_info:
+            await wrapper.call_tool('run_code', {'code': 'final_output()'}, ctx, tools['run_code'])
+        assert "missing required argument 'value'" in str(exc_info.value)

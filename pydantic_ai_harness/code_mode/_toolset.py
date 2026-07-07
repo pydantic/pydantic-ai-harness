@@ -899,7 +899,34 @@ async def _handle_function_snapshot(
     if on_final_output is not None and fn_name == _FINAL_OUTPUT_NAME:
         # Synthetic `final_output(value)`: capture the value and hand it straight back so the
         # script continues. The commit itself happens after `run_code` returns, in `CodeMode`.
-        value = snapshot.args[0] if snapshot.args else snapshot.kwargs['value']
+        if len(snapshot.args) > 1:
+            return snapshot.resume(
+                {'exception': TypeError('final_output() takes exactly one argument')}, os=os_access, mount=mount
+            )
+        if snapshot.args and snapshot.kwargs:
+            return snapshot.resume(
+                {'exception': TypeError("final_output() got multiple values for argument 'value'")},
+                os=os_access,
+                mount=mount,
+            )
+        if snapshot.args:
+            value = snapshot.args[0]
+        elif 'value' in snapshot.kwargs:
+            unexpected = set(snapshot.kwargs) - {'value'}
+            if unexpected:
+                keyword = next(iter(unexpected))
+                return snapshot.resume(
+                    {'exception': TypeError(f'final_output() got an unexpected keyword argument {keyword!r}')},
+                    os=os_access,
+                    mount=mount,
+                )
+            value = snapshot.kwargs['value']
+        else:
+            return snapshot.resume(
+                {'exception': TypeError("final_output() missing required argument 'value'")},
+                os=os_access,
+                mount=mount,
+            )
         on_final_output(value)
         return snapshot.resume({'return_value': value}, os=os_access, mount=mount)
 
