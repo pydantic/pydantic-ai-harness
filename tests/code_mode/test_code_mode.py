@@ -9,7 +9,7 @@ loaded by the project (no extra dev dependency needed).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import pytest
 from pydantic_ai import (
@@ -19,7 +19,7 @@ from pydantic_ai import (
     Tool,
     ToolDefinition,
 )
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tool_manager import ParallelExecutionMode
@@ -32,7 +32,7 @@ from typing_extensions import TypedDict
 
 from pydantic_ai_harness import CodeMode
 from pydantic_ai_harness._monty_exec import PrintCapture
-from pydantic_ai_harness.code_mode import CodeModeToolset
+from pydantic_ai_harness.code_mode import CodeModeResourceLimits, CodeModeToolset
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
@@ -2656,3 +2656,86 @@ class TestGlobalModeIsSequential:
 
         assert _global_mode_is_sequential(parallel) is False
         assert _global_mode_is_sequential(sequential) is True
+
+
+class TestResourceLimits:
+    """Sandbox resource limits on `run_code` executions."""
+
+    async def _run_code(self, code: str, limits: CodeModeResourceLimits | Literal['unlimited'] | None) -> Any:
+        toolset = _build_function_toolset(add)
+        wrapper = CodeMode[object](resource_limits=limits).get_wrapper_toolset(toolset)
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        return await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
+    async def test_runaway_loop_stopped_by_duration_cap(self) -> None:
+        with pytest.raises(ModelRetry, match='Runtime error'):
+            await self._run_code('while True:\n    x = 1', {'max_duration_secs': 0.2})
+
+    async def test_partial_mapping_is_applied_in_the_sandbox(self) -> None:
+        # Code comfortably under the default backstop trips a small explicit `max_memory`,
+        # proving a partial dict reaches the sandbox (merged, not dropped).
+        with pytest.raises(ModelRetry, match='Runtime error'):
+            await self._run_code("x = ['data'] * 100000\nlen(x)", {'max_memory': 4096})
+
+    async def test_recursion_depth_cap(self) -> None:
+        code = 'def f(n: int) -> int:\n    return f(n + 1)\nf(0)'
+        with pytest.raises(ModelRetry, match='Runtime error'):
+            await self._run_code(code, {'max_recursion_depth': 4})
+
+    async def test_default_backstop_allows_normal_code(self) -> None:
+        result = await self._run_code('print(await add(a=2, b=3))', None)
+        assert result.return_value == {'output': '5\n'}
+
+    async def test_unlimited_removes_limits(self) -> None:
+        # The same allocation that trips a small explicit cap runs to completion.
+        result = await self._run_code("x = ['data'] * 100000\nprint(len(x))", 'unlimited')
+        assert result.return_value == {'output': '100000\n'}
+
+    def test_unknown_key_raises_at_construction(self) -> None:
+        # A typo'd key (e.g. plural `max_durations_secs`) must not be silently dropped -- that
+        # would disable the cap it was meant to set. Validated eagerly, not at the first call.
+        toolset = _build_function_toolset(add)
+        with pytest.raises(UserError, match='Unknown `resource_limits` key'):
+            CodeMode[object](
+                resource_limits={'max_durations_secs': 5},  # pyright: ignore[reportArgumentType]
+            ).get_wrapper_toolset(toolset)
+
+    def test_capability_field_reaches_toolset(self) -> None:
+        toolset = _build_function_toolset(add)
+        wrapper = CodeMode[object](resource_limits='unlimited').get_wrapper_toolset(toolset)
+        assert isinstance(wrapper, CodeModeToolset)
+        assert wrapper.resource_limits == 'unlimited'
+
+    def test_invalid_limit_values_raise_at_construction(self) -> None:
+        # TypedDict annotations are advisory: a config-driven caller (agent-spec YAML, json.loads)
+        # can pass values the annotations forbid. `None` would overwrite the backstop in the merge
+        # and disable the guard the caller thought was in place; bool subclasses int.
+        toolset = _build_function_toolset(add)
+        bad_values: list[Any] = [
+            {'max_memory': None},
+            {'max_memory': True},
+            {'max_memory': 0},
+            {'max_memory': -1},
+            {'max_memory': '256'},
+            {'max_memory': 1.5},
+            {'max_duration_secs': None},
+            {'max_duration_secs': False},
+            {'max_duration_secs': 0},
+            {'max_duration_secs': 'fast'},
+        ]
+        for bad in bad_values:
+            with pytest.raises(UserError, match='must be a positive'):
+                CodeMode[object](resource_limits=bad).get_wrapper_toolset(toolset)
+
+    async def test_agent_run_with_resource_limits_configured(self) -> None:
+        # Public-surface check: an Agent constructed with limits set runs cleanly end to end.
+        model = TestModel(call_tools=[])
+        agent: Agent[object, str] = Agent(
+            model,
+            tools=[Tool(add)],
+            capabilities=[CodeMode[object](resource_limits={'max_memory': 64 * 1024 * 1024})],
+        )
+        result = await agent.run('hello')
+        assert result.output

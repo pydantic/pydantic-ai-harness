@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import AbstractToolset
@@ -14,7 +14,12 @@ from pydantic_ai.messages import ModelResponse, NativeToolSearchReturnPart, Syst
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.code_mode._toolset import CodeModeMount, CodeModeOS, CodeModeToolset
+from pydantic_ai_harness.code_mode._toolset import (
+    CodeModeMount,
+    CodeModeOS,
+    CodeModeResourceLimits,
+    CodeModeToolset,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai.capabilities.abstract import ValidatedToolArgs
@@ -89,6 +94,22 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     mount: CodeModeMount | None = None
     """Host directories to expose to sandboxed `pathlib` code; each mount's `mode` controls whether writes reach the host."""
 
+    resource_limits: CodeModeResourceLimits | Literal['unlimited'] | None = None
+    """Sandbox limits on `run_code` executions: memory, allocations, recursion depth, and CPU time.
+
+    Model-generated code is not always well behaved -- an accidental `while True`, unbounded
+    recursion, or a huge allocation can block the event loop or exhaust memory. The sandbox
+    enforces these caps per execution.
+
+    - `None` (default): backstop limits apply (256 MiB memory, 50M allocations, no duration cap).
+    - A `CodeModeResourceLimits` mapping: merged onto the backstop, so setting one key does not
+      drop the others. Unknown keys raise at construction.
+    - `'unlimited'`: removes all limits, restoring the previous unguarded behavior.
+
+    `max_duration_secs` counts only sandbox bytecode execution; time spent awaiting dispatched
+    tool calls does not count against it.
+    """
+
     dynamic_catalog: bool = False
     """Keep the `run_code` tool definition cache-stable as the sandboxed toolset grows.
 
@@ -140,6 +161,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             dynamic_catalog=self.dynamic_catalog,
             os_access=self.os_access,
             mount=self.mount,
+            resource_limits=self.resource_limits,
         )
 
     async def after_tool_execute(
