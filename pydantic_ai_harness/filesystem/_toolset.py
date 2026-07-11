@@ -11,11 +11,21 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Concatenate, ParamSpec
 
+from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
 _P = ParamSpec('_P')
+
+
+class EditOp(BaseModel):
+    """One replacement in a `multi_edit` batch."""
+
+    old_string: str = Field(description='Exact text to find. Must be non-empty.')
+    new_string: str = Field(description='Replacement text.')
+    replace_all: bool = Field(default=False, description='Replace every occurrence instead of only the first.')
+
 
 # Errors that mean "the model asked for something the tool couldn't do" -- a
 # missing file, a denied path, a stale edit. pyai only feeds `ModelRetry` back
@@ -108,6 +118,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self.add_function(self.read_file, name='read_file')
         self.add_function(self.write_file, name='write_file')
         self.add_function(self.edit_file, name='edit_file')
+        self.add_function(self.multi_edit, name='multi_edit')
         self.add_function(self.list_directory, name='list_directory')
         self.add_function(self.search_files, name='search_files')
         self.add_function(self.find_files, name='find_files')
@@ -309,6 +320,60 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         resolved.write_text(new_content, encoding='utf-8')
         new_hash = _content_hash(new_content)
         return f'Edited {path}. [hash:{new_hash}]'
+
+    @_recoverable
+    async def multi_edit(self, path: str, edits: list[EditOp], *, expected_hash: str | None = None) -> str:
+        """Apply an ordered list of exact-string edits to one file atomically.
+
+        Each edit operates on the result of the previous one and replaces the
+        first occurrence of its `old_string`, or every occurrence when
+        `replace_all` is set. All-or-nothing: if any `old_string` is not
+        found, the file is left untouched. Unlike `edit_file`, a match does
+        not have to be unique.
+
+        Args:
+            path: File path relative to the root directory.
+            edits: Replacements to apply in order.
+            expected_hash: If provided, rejects the batch when the file's
+                current hash doesn't match (optimistic concurrency).
+
+        Returns:
+            Summary with new hash for subsequent operations.
+        """
+        resolved = self._safe_resolve(path, write=True)
+        if not resolved.is_file():
+            raise FileNotFoundError(f'File not found: {path}')
+        if not edits:
+            raise ValueError('edits is empty; provide at least one edit.')
+
+        text = resolved.read_text(encoding='utf-8')
+        current_hash = _content_hash(text)
+
+        # Optimistic concurrency check
+        if expected_hash is not None and current_hash != expected_hash:
+            raise ValueError(
+                f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
+                f'got hash:{current_hash}). Re-read the file and retry.'
+            )
+
+        new_content = text
+        replacements = 0
+        for i, edit in enumerate(edits):
+            if not edit.old_string:
+                raise ValueError(f'edits[{i}]: old_string is empty. No edits were applied.')
+            count = new_content.count(edit.old_string)
+            if count == 0:
+                raise ValueError(f'edits[{i}]: old_string not found in {path}. No edits were applied.')
+            if edit.replace_all:
+                new_content = new_content.replace(edit.old_string, edit.new_string)
+                replacements += count
+            else:
+                new_content = new_content.replace(edit.old_string, edit.new_string, 1)
+                replacements += 1
+
+        resolved.write_text(new_content, encoding='utf-8')
+        new_hash = _content_hash(new_content)
+        return f'Applied {len(edits)} edits ({replacements} replacements) to {path}. [hash:{new_hash}]'
 
     @_recoverable
     async def list_directory(self, path: str = '.') -> str:

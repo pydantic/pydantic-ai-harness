@@ -9,7 +9,7 @@ from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.filesystem import FileSystem
+from pydantic_ai_harness.filesystem import EditOp, FileSystem
 from pydantic_ai_harness.filesystem._toolset import FileSystemToolset, _content_hash, _format_lines, _is_binary
 
 
@@ -398,6 +398,89 @@ class TestEditFile:
     async def test_edit_returns_new_hash(self, toolset: FileSystemToolset[None]) -> None:
         result = await toolset.edit_file('hello.txt', 'Hello, world!', 'Goodbye!')
         assert 'hash:' in result
+
+
+class TestMultiEdit:
+    async def test_edits_applied_in_order(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        """Each edit sees the result of the previous one."""
+        result = await toolset.multi_edit(
+            'hello.txt',
+            [
+                EditOp(old_string='world', new_string='universe'),
+                EditOp(old_string='Hello, universe', new_string='Bye, universe'),
+            ],
+        )
+        assert 'Applied 2 edits (2 replacements)' in result
+        assert (fs_root / 'hello.txt').read_text() == 'Bye, universe!\n'
+
+    async def test_first_occurrence_not_unique(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        """A repeated match replaces the first occurrence instead of erroring like edit_file."""
+        (fs_root / 'repeat.txt').write_text('foo bar foo\n')
+        await toolset.multi_edit('repeat.txt', [EditOp(old_string='foo', new_string='baz')])
+        assert (fs_root / 'repeat.txt').read_text() == 'baz bar foo\n'
+
+    async def test_replace_all(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        (fs_root / 'repeat.txt').write_text('foo bar foo\n')
+        result = await toolset.multi_edit('repeat.txt', [EditOp(old_string='foo', new_string='x', replace_all=True)])
+        assert 'Applied 1 edits (2 replacements)' in result
+        assert (fs_root / 'repeat.txt').read_text() == 'x bar x\n'
+
+    async def test_missing_old_string_leaves_file_untouched(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        """All-or-nothing: a failing edit rolls back the ones before it."""
+        original = (fs_root / 'hello.txt').read_text()
+        with pytest.raises(ModelRetry, match=r'edits\[1\]: old_string not found'):
+            await toolset.multi_edit(
+                'hello.txt',
+                [
+                    EditOp(old_string='world', new_string='universe'),
+                    EditOp(old_string='NONEXISTENT', new_string='x'),
+                ],
+            )
+        assert (fs_root / 'hello.txt').read_text() == original
+
+    async def test_empty_edits_rejected(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match='edits is empty'):
+            await toolset.multi_edit('hello.txt', [])
+
+    async def test_empty_old_string_rejected(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        original = (fs_root / 'hello.txt').read_text()
+        with pytest.raises(ModelRetry, match=r'edits\[0\]: old_string is empty'):
+            await toolset.multi_edit('hello.txt', [EditOp(old_string='', new_string='x')])
+        assert (fs_root / 'hello.txt').read_text() == original
+
+    async def test_missing_file(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match='File not found'):
+            await toolset.multi_edit('ghost.txt', [EditOp(old_string='x', new_string='y')])
+
+    async def test_conflict_rejection(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        original = (fs_root / 'hello.txt').read_text()
+        with pytest.raises(ModelRetry, match='Conflict'):
+            await toolset.multi_edit(
+                'hello.txt',
+                [EditOp(old_string='Hello', new_string='Hi')],
+                expected_hash='stale_hash_',
+            )
+        assert (fs_root / 'hello.txt').read_text() == original
+
+    async def test_conflict_detection_passes(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        current_hash = _content_hash((fs_root / 'hello.txt').read_text())
+        result = await toolset.multi_edit(
+            'hello.txt',
+            [EditOp(old_string='Hello', new_string='Hi')],
+            expected_hash=current_hash,
+        )
+        assert 'hash:' in result
+
+    async def test_protected_blocked(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match='protected'):
+            await toolset.multi_edit('.env', [EditOp(old_string='SECRET', new_string='HACKED')])
+
+    async def test_returned_hash_matches_content(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        result = await toolset.multi_edit('hello.txt', [EditOp(old_string='world', new_string='universe')])
+        new_hash = _content_hash((fs_root / 'hello.txt').read_text())
+        assert f'hash:{new_hash}' in result
 
 
 class TestListDirectory:

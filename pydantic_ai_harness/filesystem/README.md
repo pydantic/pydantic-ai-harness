@@ -36,6 +36,7 @@ print(result.output)
 | `read_file` | Read a text file with line numbers and a content hash. Binary files are detected and not dumped. |
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement; `old_text` must match exactly once. Optional `expected_hash`. |
+| `multi_edit` | Ordered exact-string replacements applied to one file all-or-nothing: if any `old_string` is missing, nothing is written. Per-edit matching is first-occurrence (or every occurrence with `replace_all`). Optional `expected_hash`. |
 | `list_directory` | List a directory's entries with type indicators and sizes. |
 | `search_files` | Regex search over file contents, optionally narrowed by an `include_glob`. |
 | `find_files` | Glob search over file names (e.g. `*.py`, `**/*.json`). |
@@ -50,7 +51,7 @@ print(result.output)
   the TOCTTOU window.
 - **Binary detection.** `read_file` returns a placeholder instead of dumping
   binary bytes into the model context.
-- **Optimistic concurrency.** `write_file`/`edit_file` accept an
+- **Optimistic concurrency.** `write_file`/`edit_file`/`multi_edit` accept an
   `expected_hash` so an agent operating on a stale read is told to re-read
   rather than silently overwriting newer content.
 
@@ -73,9 +74,9 @@ and `**/secrets*`. Pass an empty list to disable protection.
 
 The three rules apply at two different granularities:
 
-- **Direct access** (`read_file`, `write_file`, `edit_file`, `file_info`,
-  `create_directory`) gates the operation's target path. You must name a path
-  that the patterns permit.
+- **Direct access** (`read_file`, `write_file`, `edit_file`, `multi_edit`,
+  `file_info`, `create_directory`) gates the operation's target path. You must
+  name a path that the patterns permit.
 - **Walkers** (`list_directory`, `search_files`, `find_files`) gate their root
   by deny/protected patterns, but **not** by `allowed_patterns` -- a directory
   root like `.` never matches a file pattern such as `src/*.py`, so requiring
