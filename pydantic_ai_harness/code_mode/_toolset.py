@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
+import json
 import keyword
 import re
 import warnings
@@ -200,13 +202,35 @@ def _sanitize_tool_name(name: str) -> str:
     return sanitized or '_'
 
 
-def _infer_return_schema(value: Any) -> dict[str, Any]:
+# Caps on inferred-schema size. Tool results are untrusted input rendered into
+# the model-facing catalog, so a pathological response must not be able to
+# balloon the prompt with a huge or deeply nested inferred type.
+_INFER_MAX_DEPTH = 5
+_INFER_MAX_PROPERTIES = 50
+_INFER_MAX_KEY_LENGTH = 64
+
+
+def _is_safe_schema_key(key: str) -> bool:
+    """Whether an object key from a tool result may appear in an inferred schema.
+
+    Inferred keys become TypedDict field names rendered into the model-facing
+    catalog. Requiring a plain identifier both matches what the renderer can
+    express and keeps a result key from carrying arbitrary prose (prompt
+    injection) or oversized identifiers into the prompt.
+    """
+    return key.isidentifier() and not keyword.iskeyword(key) and len(key) <= _INFER_MAX_KEY_LENGTH
+
+
+def _infer_return_schema(value: Any, *, _depth: int = 0) -> dict[str, Any]:
     """Best-effort JSON schema for a single sample tool result.
 
     Object properties carry no `required` list and arrays only get an `items`
     schema when every element infers identically: one sample can show a shape
     but cannot prove which parts of it are stable. Values that don't map to a
-    JSON type produce `{}` (unconstrained), which renders as `Any`.
+    JSON type produce `{}` (unconstrained), which renders as `Any`. Object keys
+    that fail `_is_safe_schema_key` are dropped; an object whose keys all drop
+    infers as `{}` so the capture site skips caching it. Nesting past
+    `_INFER_MAX_DEPTH` collapses to an untyped object/array.
     """
     if value is None:
         return {'type': 'null'}
@@ -219,14 +243,40 @@ def _infer_return_schema(value: Any) -> dict[str, Any]:
     if isinstance(value, str):
         return {'type': 'string'}
     if isinstance(value, dict):
-        properties = {str(k): _infer_return_schema(v) for k, v in value.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        if _depth >= _INFER_MAX_DEPTH:
+            return {'type': 'object'}
+        properties: dict[str, Any] = {}
+        for k, v in value.items():  # pyright: ignore[reportUnknownVariableType]
+            key = str(k)  # pyright: ignore[reportUnknownArgumentType]
+            if not _is_safe_schema_key(key):
+                continue
+            if len(properties) == _INFER_MAX_PROPERTIES:
+                break
+            properties[key] = _infer_return_schema(v, _depth=_depth + 1)
+        if value and not properties:
+            return {}
         return {'type': 'object', 'properties': properties}
     if isinstance(value, list):
-        item_schemas = [_infer_return_schema(item) for item in value]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        if _depth >= _INFER_MAX_DEPTH:
+            return {'type': 'array'}
+        item_schemas = [_infer_return_schema(item, _depth=_depth + 1) for item in value]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
         if item_schemas and all(s == item_schemas[0] for s in item_schemas[1:]):
             return {'type': 'array', 'items': item_schemas[0]}
         return {'type': 'array'}
     return {}
+
+
+def _tool_identity_key(td: ToolDefinition) -> str:
+    """Cache key for an inferred return schema: tool name plus a parameter-schema digest.
+
+    Keying by bare name would let a later run that exposes a *different* tool
+    under the same name inherit a shape learned from the earlier tool's output
+    (the cache dict outlives runs by design). The parameter schema is the stable
+    part of a tool's identity, so a redefined tool starts fresh instead.
+    """
+    canonical = json.dumps(td.parameters_json_schema, sort_keys=True, separators=(',', ':'), default=str)
+    digest = hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:12]
+    return f'{td.name}:{digest}'
 
 
 def _global_mode_is_sequential(get_mode: Callable[..., ParallelExecutionMode]) -> bool:
@@ -314,12 +364,14 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     """
 
     inferred_return_schemas: dict[str, Any] | None = None
-    """Return schemas inferred from first tool results, keyed by original tool name.
+    """Return schemas inferred from first tool results, keyed by tool identity.
 
     `None` (default) disables inference. The `CodeMode` capability passes its own dict
     here (see `CodeMode.infer_return_schemas`) so learned shapes survive the fresh
     instances `for_run` creates and carry over to later runs. Pass an empty dict to
-    enable inference on a standalone toolset.
+    enable inference on a standalone toolset. Keys are internal: the tool name plus a
+    digest of its parameter schema, so a later tool that merely reuses a name does not
+    inherit a shape learned from a different tool's output.
     """
 
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
@@ -563,12 +615,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
             # Serialize to JSON-compatible form so Monty receives only plain data.
             serialized = _TOOL_RETURN_CONTENT_TA.dump_python(result)
-            if self.inferred_return_schemas is not None and original_name not in self.inferred_return_schemas:
-                declared = tool.wrapped_tools[original_name].tool_def.return_schema
-                if declared is None:
+            if self.inferred_return_schemas is not None:
+                called_def = tool.wrapped_tools[original_name].tool_def
+                cache_key = _tool_identity_key(called_def)
+                if called_def.return_schema is None and cache_key not in self.inferred_return_schemas:
                     schema = _infer_return_schema(serialized)
                     if schema:
-                        self.inferred_return_schemas[original_name] = schema
+                        self.inferred_return_schemas[cache_key] = schema
             return serialized
 
         # Static type checking on fresh REPL sessions (first call or after
@@ -691,7 +744,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # from the tool's first successful result (and skip the warning: the
             # signature corrects itself after that first call).
             if td.return_schema is None:
-                inferred = None if self.inferred_return_schemas is None else self.inferred_return_schemas.get(name)
+                inferred = (
+                    None
+                    if self.inferred_return_schemas is None
+                    else self.inferred_return_schemas.get(_tool_identity_key(td))
+                )
                 if inferred is not None:
                     td = replace(td, return_schema=inferred)
                 elif self.inferred_return_schemas is None and name not in self._warned_deferred:
