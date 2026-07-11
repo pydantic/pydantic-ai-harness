@@ -244,6 +244,29 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 - Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv`/`os.environ` need an `os_access` handler
 - Tools requiring approval or with deferred execution are excluded from the sandbox
 
+## Resource limits
+
+Model-generated code is not always well behaved: an accidental `while True`, unbounded recursion,
+or a huge allocation can block the event loop or exhaust memory. `resource_limits` caps what a
+`run_code` execution may consume. The default backstop is 256 MiB of sandbox memory and 50 million
+allocations, with no time limit.
+
+```python
+CodeMode(resource_limits={'max_duration_secs': 30})
+```
+
+A partial mapping merges onto the backstop, so setting one key keeps the others. Pass
+`'unlimited'` to remove all limits. Unknown keys raise at construction. Available keys:
+`max_duration_secs`, `max_memory`, `max_allocations`, `max_recursion_depth`.
+
+There is no default duration cap because Monty checks the limit once per bytecode step: it
+measures time spent running sandbox code, not wall-clock time. While the code awaits a dispatched
+tool call it is suspended on the host, so slow tools do not count against the cap. A cap is worth
+setting when you want to bound pure-CPU loops, which the tool-call path never sees.
+
+When a limit trips, the sandbox raises and `run_code` surfaces the error to the model as a retry,
+the same path as any other runtime error in generated code.
+
 ## API
 
 ```python
@@ -252,6 +275,7 @@ CodeMode(
     max_retries: int = 3,               # retries on sandbox execution errors
     os_access: CodeModeOS | None = None,   # host handler for env vars, clock, and file I/O
     mount: CodeModeMount | None = None,    # host directories to share with the sandbox
+    resource_limits=None,               # sandbox caps; None = backstop, 'unlimited' = none
 )
 ```
 

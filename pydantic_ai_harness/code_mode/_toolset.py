@@ -8,7 +8,7 @@ import re
 import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition, WrapperToolset
@@ -41,6 +41,7 @@ try:
         MontyTypingError,
         MountDir,
         OsFunction,
+        ResourceLimits,
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -57,6 +58,63 @@ CodeModeOSCallback = Callable[[OsFunction, tuple[object, ...], dict[str, object]
 CodeModeOS = AbstractOS | CodeModeOSCallback
 # Accepted by `CodeMode.mount`: one or more host-directory mounts.
 CodeModeMount = MountDir | list[MountDir]
+
+
+class CodeModeResourceLimits(TypedDict, total=False):
+    """Caps on the sandbox resources available to `run_code` executions.
+
+    A harness-owned view of the sandbox limits the capability supports, so the public API does
+    not depend on the underlying sandbox's own types. Every field is optional; an omitted field
+    keeps its backstop value.
+    """
+
+    max_duration_secs: float
+    """Ceiling on the time the code spends executing sandbox bytecode. Monty checks it per
+    bytecode step, so time spent awaiting dispatched tool calls does not count against it --
+    during that wait the code is suspended on the host, not running sandbox code. There is no
+    default cap. Set one to bound a pure-CPU `while True` loop, which would otherwise burn a
+    core and block the event loop."""
+
+    max_memory: int
+    """Maximum sandbox memory, in bytes."""
+
+    max_allocations: int
+    """Maximum number of sandbox allocations."""
+
+    max_recursion_depth: int
+    """Maximum sandbox call-stack depth, bounding runaway recursion."""
+
+
+def _default_resource_limits() -> ResourceLimits:
+    """Backstop sandbox limits; no duration cap -- see `CodeModeResourceLimits.max_duration_secs`."""
+    return {
+        'max_memory': 256 * 1024 * 1024,
+        'max_allocations': 50_000_000,
+    }
+
+
+# The keys `CodeModeResourceLimits` accepts. A `total=False` TypedDict does not validate keys at
+# runtime, so a typo (e.g. `max_durations_secs`) would otherwise merge through and be silently
+# dropped, disabling the limit the caller thought they set. We reject unknowns.
+_RESOURCE_LIMIT_KEYS = frozenset(CodeModeResourceLimits.__annotations__)
+
+
+def _resolve_resource_limits(limits: CodeModeResourceLimits | Literal['unlimited'] | None) -> ResourceLimits:
+    """Resolve the public `resource_limits` value to the limits handed to the sandbox.
+
+    A partial mapping merges *onto* the backstop rather than replacing it, so `{'max_memory': ...}`
+    never drops the allocations backstop. Full semantics: `CodeMode.resource_limits`.
+    """
+    if limits is None:
+        return _default_resource_limits()
+    if limits == 'unlimited':
+        return {}
+    unknown = set(limits) - _RESOURCE_LIMIT_KEYS
+    if unknown:
+        raise UserError(
+            f'Unknown `resource_limits` key(s): {sorted(unknown)}. Valid keys are {sorted(_RESOURCE_LIMIT_KEYS)}.'
+        )
+    return {**_default_resource_limits(), **limits}
 
 
 class _RunCodeArguments(TypedDict):
@@ -284,6 +342,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     so Tool Search discoveries don't bust the tool-definitions cache prefix.
     """
 
+    resource_limits: CodeModeResourceLimits | Literal['unlimited'] | None = None
+    """Sandbox limits guarding `run_code` executions. `None` applies the backstop defaults,
+    `'unlimited'` removes all limits; a `CodeModeResourceLimits` mapping is merged onto the
+    backstop. Full semantics: `CodeMode.resource_limits`."""
+
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
     # giving each agent run isolated REPL state. Lazy-initialized on first call_tool.
     _repl: MontyRepl | None = field(default=None, init=False, repr=False)
@@ -295,6 +358,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     # Tracks deferred-tool names we've already warned about so we don't spam the
     # logs every step. Reset on `for_run` because each run gets a fresh instance.
     _warned_deferred: set[str] = field(default_factory=set[str], init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        _resolve_resource_limits(self.resource_limits)  # validate keys now, not at the first tool call
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
         """Return a fresh toolset instance with isolated REPL state for this agent run."""
@@ -536,7 +602,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         # Create the REPL after type checking passes.
         if fresh_repl:
-            self._repl = MontyRepl()
+            self._repl = MontyRepl(limits=_resolve_resource_limits(self.resource_limits))
         assert self._repl is not None
 
         capture = PrintCapture()
