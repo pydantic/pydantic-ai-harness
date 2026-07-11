@@ -1271,6 +1271,87 @@ class TestKillProcessGroupEdgeCases:
         assert call_count == 2
 
 
+class TestKillProcessGroupWindows:
+    """The Windows kill path (`os.killpg`/`os.getpgid`/`signal.SIGKILL` do not exist there)."""
+
+    def _toolset(self, tmp_path: Path) -> ShellToolset:
+        return ShellToolset(
+            cwd=tmp_path,
+            allowed_commands=[],
+            denied_commands=[],
+            denied_operators=[],
+            default_timeout=5.0,
+            max_output_chars=50_000,
+            persist_cwd=False,
+            allow_interactive=False,
+        )
+
+    async def test_graceful_exit_skips_kill(self, tmp_path: Path) -> None:
+        """When the process exits within the grace period, kill() is not called."""
+        ts = self._toolset(tmp_path)
+        proc = MagicMock()
+
+        async def exit_immediately() -> None:
+            return
+
+        proc.wait = exit_immediately
+
+        with patch('sys.platform', 'win32'):
+            await ts._kill_process_group(proc)
+
+        proc.terminate.assert_called_once_with()
+        proc.kill.assert_not_called()
+
+    async def test_terminate_raises_os_error(self, tmp_path: Path) -> None:
+        """When terminate() raises OSError (process already gone), method returns early."""
+        ts = self._toolset(tmp_path)
+        proc = MagicMock()
+        proc.terminate.side_effect = OSError
+
+        with patch('sys.platform', 'win32'):
+            await ts._kill_process_group(proc)
+
+        proc.kill.assert_not_called()
+
+    async def test_kill_escalation(self, tmp_path: Path) -> None:
+        """When the process outlives the grace period, kill() is called."""
+        ts = self._toolset(tmp_path)
+        proc = MagicMock()
+
+        async def never_return() -> None:
+            await anyio.sleep(999)
+
+        proc.wait = never_return
+
+        with (
+            patch('sys.platform', 'win32'),
+            patch('pydantic_ai_harness.shell._toolset._KILL_GRACE_PERIOD', 0.01),
+        ):
+            await ts._kill_process_group(proc)
+
+        proc.terminate.assert_called_once_with()
+        proc.kill.assert_called_once_with()
+
+    async def test_kill_raises_os_error(self, tmp_path: Path) -> None:
+        """When kill() raises OSError (process exited between terminate and kill)."""
+        ts = self._toolset(tmp_path)
+        proc = MagicMock()
+        proc.kill.side_effect = OSError
+
+        async def never_return() -> None:
+            await anyio.sleep(999)
+
+        proc.wait = never_return
+
+        with (
+            patch('sys.platform', 'win32'),
+            patch('pydantic_ai_harness.shell._toolset._KILL_GRACE_PERIOD', 0.01),
+        ):
+            await ts._kill_process_group(proc)
+
+        proc.kill.assert_called_once_with()
+
+
 class TestDrainWithTimeoutEdgeCases:
     async def test_stdout_closed_resource_error(self, tmp_path: Path) -> None:
         """ClosedResourceError on stdout is caught silently after yielding data."""

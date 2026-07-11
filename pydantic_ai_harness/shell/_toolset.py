@@ -9,6 +9,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -257,7 +258,33 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             self._cwd = candidate
 
     async def _kill_process_group(self, proc: anyio.abc.Process) -> None:
-        """SIGTERM the process group, escalating to SIGKILL after the grace period."""
+        """Terminate the spawned command, escalating to a hard kill after the grace period.
+
+        On POSIX the whole process group is signalled (SIGTERM, then SIGKILL):
+        the process is launched with `start_new_session=True`, so grandchildren
+        that would otherwise survive and keep the output pipes open die with it.
+        On Windows `os.killpg`, `os.getpgid` and `signal.SIGKILL` do not exist
+        (the lookup raises `AttributeError`) and `start_new_session` is ignored,
+        so fall back to `Process.terminate()`/`Process.kill()`, which map to
+        `TerminateProcess` and only affect the direct child.
+        """
+        if sys.platform == 'win32':
+            try:
+                proc.terminate()
+            except OSError:
+                return
+
+            with anyio.move_on_after(_KILL_GRACE_PERIOD):
+                await proc.wait()
+                return
+
+            # Still alive after grace period -- hard kill
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            return
+
         pid = proc.pid
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)

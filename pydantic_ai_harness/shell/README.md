@@ -116,9 +116,12 @@ explicitly when you replace the environment.
 
 `start_command` writes stdout/stderr to temp files and returns a short ID. Use
 `check_command(id)` to poll and `stop_command(id)` to terminate and collect
-final output. Processes are launched in their own session (`start_new_session`)
-so the whole process group can be signalled -- `SIGTERM`, escalating to
-`SIGKILL` after a grace period.
+final output. On POSIX, processes are launched in their own session
+(`start_new_session`) so the whole process group can be signalled -- `SIGTERM`,
+escalating to `SIGKILL` after a grace period. On Windows, where process groups
+and these signals don't exist, the direct child is terminated via
+`TerminateProcess` with the same grace-period escalation; grandchildren it
+spawned are not reaped.
 
 On run end, the toolset's `__aexit__` terminates every still-running background
 process and deletes its temp files. The agent runtime enters toolsets via an
