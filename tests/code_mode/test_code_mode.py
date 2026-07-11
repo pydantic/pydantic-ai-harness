@@ -2707,3 +2707,35 @@ class TestResourceLimits:
         wrapper = CodeMode[object](resource_limits='unlimited').get_wrapper_toolset(toolset)
         assert isinstance(wrapper, CodeModeToolset)
         assert wrapper.resource_limits == 'unlimited'
+
+    def test_invalid_limit_values_raise_at_construction(self) -> None:
+        # TypedDict annotations are advisory: a config-driven caller (agent-spec YAML, json.loads)
+        # can pass values the annotations forbid. `None` would overwrite the backstop in the merge
+        # and disable the guard the caller thought was in place; bool subclasses int.
+        toolset = _build_function_toolset(add)
+        bad_values: list[Any] = [
+            {'max_memory': None},
+            {'max_memory': True},
+            {'max_memory': 0},
+            {'max_memory': -1},
+            {'max_memory': '256'},
+            {'max_memory': 1.5},
+            {'max_duration_secs': None},
+            {'max_duration_secs': False},
+            {'max_duration_secs': 0},
+            {'max_duration_secs': 'fast'},
+        ]
+        for bad in bad_values:
+            with pytest.raises(UserError, match='must be a positive'):
+                CodeMode[object](resource_limits=bad).get_wrapper_toolset(toolset)
+
+    async def test_agent_run_with_resource_limits_configured(self) -> None:
+        # Public-surface check: an Agent constructed with limits set runs cleanly end to end.
+        model = TestModel(call_tools=[])
+        agent: Agent[object, str] = Agent(
+            model,
+            tools=[Tool(add)],
+            capabilities=[CodeMode[object](resource_limits={'max_memory': 64 * 1024 * 1024})],
+        )
+        result = await agent.run('hello')
+        assert result.output

@@ -114,6 +114,18 @@ def _resolve_resource_limits(limits: CodeModeResourceLimits | Literal['unlimited
         raise UserError(
             f'Unknown `resource_limits` key(s): {sorted(unknown)}. Valid keys are {sorted(_RESOURCE_LIMIT_KEYS)}.'
         )
+    # TypedDict annotations are advisory, not enforced: a config-driven caller can pass `None`
+    # (which would overwrite the backstop in the merge below, disabling that guard) or a bool
+    # (an `int` subclass). Validate values before merging.
+    for key, value in limits.items():
+        if key == 'max_duration_secs':
+            valid = isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+            expected = 'a positive number'
+        else:
+            valid = isinstance(value, int) and not isinstance(value, bool) and value > 0
+            expected = 'a positive integer'
+        if not valid:
+            raise UserError(f'`resource_limits` key {key!r} must be {expected}, got {value!r}')
     return {**_default_resource_limits(), **limits}
 
 
