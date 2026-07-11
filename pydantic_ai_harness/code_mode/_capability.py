@@ -119,7 +119,32 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     keeps the system prompt shorter and is the better choice.
     """
 
+    infer_return_schemas: bool = False
+    """Infer a return schema for sandboxed tools that don't declare one.
+
+    Many MCP tools ship no `outputSchema`, so their sandbox signature renders as
+    `-> Any` and the model has to guess response shapes, which costs retries and
+    tokens. With this flag on, the shape of each such tool's first successful
+    result is captured and substituted into later renders of the signature (and
+    into the sandbox type-check stubs) in place of `Any`. Learned shapes persist
+    across runs of the same capability instance.
+
+    Off by default because an updated signature changes `run_code`'s description,
+    which lives in the prompt-cache-keyed tool-definitions block, so the cache
+    prefix is busted once per learned tool. With `dynamic_catalog=True` the
+    catalog lives in dynamic instructions instead, where an update is cache-cheap.
+
+    Inferred schemas are best-effort: they come from a single sample, so variants
+    that sample didn't show (optional fields, error shapes, mixed-type arrays)
+    are not captured.
+    """
+
     _announced_tools: set[str] = field(default_factory=set[str], init=False, repr=False)
+
+    # Shared across `for_run` copies and passed by reference into every
+    # `CodeModeToolset` this capability builds, so shapes learned in one run
+    # improve signatures in later runs.
+    _inferred_return_schemas: dict[str, Any] = field(default_factory=dict[str, Any], init=False, repr=False)
 
     def get_ordering(self) -> CapabilityOrdering:
         """CodeMode wraps around ToolSearch so that search_tools stays native."""
@@ -129,7 +154,9 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         """Return a fresh instance so concurrent runs don't share `_announced_tools`."""
         if not self.dynamic_catalog:
             return self
-        return replace(self)
+        new_self = replace(self)
+        new_self._inferred_return_schemas = self._inferred_return_schemas
+        return new_self
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         """Wrap the agent's assembled toolset, splitting it into native + sandboxed subsets if needed."""
@@ -140,6 +167,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             dynamic_catalog=self.dynamic_catalog,
             os_access=self.os_access,
             mount=self.mount,
+            inferred_return_schemas=self._inferred_return_schemas if self.infer_return_schemas else None,
         )
 
     async def after_tool_execute(

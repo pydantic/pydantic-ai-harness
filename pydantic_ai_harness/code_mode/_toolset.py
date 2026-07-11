@@ -200,6 +200,35 @@ def _sanitize_tool_name(name: str) -> str:
     return sanitized or '_'
 
 
+def _infer_return_schema(value: Any) -> dict[str, Any]:
+    """Best-effort JSON schema for a single sample tool result.
+
+    Object properties carry no `required` list and arrays only get an `items`
+    schema when every element infers identically: one sample can show a shape
+    but cannot prove which parts of it are stable. Values that don't map to a
+    JSON type produce `{}` (unconstrained), which renders as `Any`.
+    """
+    if value is None:
+        return {'type': 'null'}
+    if isinstance(value, bool):  # before int: bool is an int subclass
+        return {'type': 'boolean'}
+    if isinstance(value, int):
+        return {'type': 'integer'}
+    if isinstance(value, float):
+        return {'type': 'number'}
+    if isinstance(value, str):
+        return {'type': 'string'}
+    if isinstance(value, dict):
+        properties = {str(k): _infer_return_schema(v) for k, v in value.items()}  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        return {'type': 'object', 'properties': properties}
+    if isinstance(value, list):
+        item_schemas = [_infer_return_schema(item) for item in value]  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
+        if item_schemas and all(s == item_schemas[0] for s in item_schemas[1:]):
+            return {'type': 'array', 'items': item_schemas[0]}
+        return {'type': 'array'}
+    return {}
+
+
 def _global_mode_is_sequential(get_mode: Callable[..., ParallelExecutionMode]) -> bool:
     """Whether the run-scoped execution mode forces sandbox tool calls to run sequentially.
 
@@ -282,6 +311,15 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     surfaced as a dynamic [`InstructionPart`][pydantic_ai.messages.InstructionPart] via
     [`get_instructions`][pydantic_ai_harness.code_mode.CodeModeToolset.get_instructions],
     so Tool Search discoveries don't bust the tool-definitions cache prefix.
+    """
+
+    inferred_return_schemas: dict[str, Any] | None = None
+    """Return schemas inferred from first tool results, keyed by original tool name.
+
+    `None` (default) disables inference. The `CodeMode` capability passes its own dict
+    here (see `CodeMode.infer_return_schemas`) so learned shapes survive the fresh
+    instances `for_run` creates and carry over to later runs. Pass an empty dict to
+    enable inference on a standalone toolset.
     """
 
     # init=False so `replace()` in `for_run` produces a fresh instance with _repl=None,
@@ -524,7 +562,14 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             )
 
             # Serialize to JSON-compatible form so Monty receives only plain data.
-            return _TOOL_RETURN_CONTENT_TA.dump_python(result)
+            serialized = _TOOL_RETURN_CONTENT_TA.dump_python(result)
+            if self.inferred_return_schemas is not None and original_name not in self.inferred_return_schemas:
+                declared = tool.wrapped_tools[original_name].tool_def.return_schema
+                if declared is None:
+                    schema = _infer_return_schema(serialized)
+                    if schema:
+                        self.inferred_return_schemas[original_name] = schema
+            return serialized
 
         # Static type checking on fresh REPL sessions (first call or after
         # restart). Skipped on subsequent calls because accumulated REPL state
@@ -640,17 +685,23 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     stacklevel=2,
                 )
                 continue
-            # Warn when a sandboxed tool has no return schema -- the generated
-            # signature will show `-> Any`, giving the model no type information
-            # about the return shape, which limits code mode effectiveness.
-            if td.return_schema is None and name not in self._warned_deferred:
-                self._warned_deferred.add(name)
-                warnings.warn(
-                    f'CodeMode: tool {name!r} has no return schema; '
-                    f'its signature will show `-> Any`, which may reduce code mode effectiveness.',
-                    UserWarning,
-                    stacklevel=2,
-                )
+            # A tool with no return schema renders as `-> Any`, giving the model no
+            # type information about the return shape, which limits code mode
+            # effectiveness. With inference enabled, substitute the shape captured
+            # from the tool's first successful result (and skip the warning: the
+            # signature corrects itself after that first call).
+            if td.return_schema is None:
+                inferred = None if self.inferred_return_schemas is None else self.inferred_return_schemas.get(name)
+                if inferred is not None:
+                    td = replace(td, return_schema=inferred)
+                elif self.inferred_return_schemas is None and name not in self._warned_deferred:
+                    self._warned_deferred.add(name)
+                    warnings.warn(
+                        f'CodeMode: tool {name!r} has no return schema; '
+                        f'its signature will show `-> Any`, which may reduce code mode effectiveness.',
+                        UserWarning,
+                        stacklevel=2,
+                    )
 
             if safe_name != name:
                 sanitized_to_original[safe_name] = name

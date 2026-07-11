@@ -150,6 +150,16 @@ The last expression in the code snippet is automatically captured as the return 
 | With print output | `{"output": "<printed text>", "result": <last expression>}` |
 | Multimodal content (e.g. images) | Returned natively for model processing |
 
+## Inferred return schemas
+
+Tools that declare no return schema (common for MCP servers without `outputSchema`) render as `-> Any` in the sandbox catalog, so the model has to guess response shapes. Pass `infer_return_schemas=True` to capture the shape of each such tool's first successful result and substitute it into later renders of the signature and into the sandbox type-check stubs:
+
+```python
+agent = Agent('openai:gpt-5', capabilities=[CodeMode(infer_return_schemas=True)])
+```
+
+Learned shapes persist across runs of the same capability instance. Off by default because an upgraded signature changes `run_code`'s description and busts the prompt-cache prefix once per learned tool; with `dynamic_catalog=True` the catalog lives in dynamic instructions where the update is cache-cheap, so the two flags pair well. Inferred schemas are best-effort: one sample cannot show optional fields, error variants, or mixed-type arrays, and a wrong guess can make the sandbox type checker reject code that would have run. Tools that declare a return schema are never touched.
+
 ## REPL state
 
 State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state.

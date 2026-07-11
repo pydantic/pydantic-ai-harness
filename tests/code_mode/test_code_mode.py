@@ -1993,6 +1993,183 @@ class TestToolSearchIntegration:
         assert ToolSearch in ordering.wraps
 
 
+def _schema_less_tool_def(name: str = 'search') -> ToolDefinition:
+    """A tool with no `return_schema`, like an MCP tool without `outputSchema`."""
+    return ToolDefinition(
+        name=name,
+        description='Search for things.',
+        parameters_json_schema={'type': 'object', 'properties': {'q': {'type': 'string'}}, 'required': ['q']},
+    )
+
+
+class TestInferReturnSchemas:
+    """Return-schema inference from first tool results (`CodeMode.infer_return_schemas`)."""
+
+    async def test_signature_upgrades_after_first_call(self) -> None:
+        """`-> Any` before the first call; the inferred shape afterwards. No warning while enabled."""
+        import warnings as _warnings
+
+        static = _StaticToolset([_schema_less_tool_def()], results={'search': {'total': 2, 'ok': True}})
+        cache: dict[str, Any] = {}
+        toolset = CodeModeToolset(wrapped=static, tool_selector='all', inferred_return_schemas=cache)
+        ctx = await build_ctx(None, toolset)
+
+        with _warnings.catch_warnings():
+            _warnings.simplefilter('error')
+            tools = await toolset.get_tools(ctx)
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert '-> Any' in description
+
+        await toolset.call_tool('run_code', {'code': 'r = await search(q="x")\nr'}, ctx, tools['run_code'])
+        assert cache == {
+            'search': {
+                'type': 'object',
+                'properties': {'total': {'type': 'integer'}, 'ok': {'type': 'boolean'}},
+            }
+        }
+
+        tools = await toolset.get_tools(ctx)
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert '-> Any' not in description
+        assert 'async def search(*, q: str) -> SearchReturn:' in description
+
+        # A second call must not re-infer (the cached entry wins).
+        await toolset.call_tool(
+            'run_code', {'code': 'r2 = await search(q="y")\nr2', 'restart': True}, ctx, tools['run_code']
+        )
+        assert list(cache) == ['search']
+
+    async def test_flag_off_keeps_any_after_call(self) -> None:
+        static = _StaticToolset([_schema_less_tool_def()], results={'search': {'total': 2}})
+        toolset = CodeModeToolset(wrapped=static, tool_selector='all')
+
+        # `build_ctx` prepares a ToolManager, which triggers the first `get_tools` and its warning.
+        with pytest.warns(UserWarning, match=r"tool 'search' has no return schema"):
+            ctx = await build_ctx(None, toolset)
+            tools = await toolset.get_tools(ctx)
+        await toolset.call_tool('run_code', {'code': 'r = await search(q="x")\nr'}, ctx, tools['run_code'])
+
+        tools = await toolset.get_tools(ctx)
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert '-> Any' in description
+
+    async def test_declared_schema_is_never_replaced(self) -> None:
+        td = ToolDefinition(
+            name='get_user',
+            description='Get a user.',
+            parameters_json_schema={'type': 'object', 'properties': {'id': {'type': 'integer'}}, 'required': ['id']},
+            return_schema={'type': 'string'},
+        )
+        static = _StaticToolset([td], results={'get_user': 'alice'})
+        cache: dict[str, Any] = {}
+        toolset = CodeModeToolset(wrapped=static, tool_selector='all', inferred_return_schemas=cache)
+        ctx = await build_ctx(None, toolset)
+
+        tools = await toolset.get_tools(ctx)
+        await toolset.call_tool('run_code', {'code': 'r = await get_user(id=1)\nr'}, ctx, tools['run_code'])
+        assert cache == {}
+
+    async def test_non_json_result_is_not_cached(self) -> None:
+        """A result that doesn't map to a JSON type infers `{}` and is skipped."""
+        import datetime
+
+        static = _StaticToolset([_schema_less_tool_def()], results={'search': datetime.datetime(2026, 1, 1)})
+        cache: dict[str, Any] = {}
+        toolset = CodeModeToolset(wrapped=static, tool_selector='all', inferred_return_schemas=cache)
+        ctx = await build_ctx(None, toolset)
+
+        tools = await toolset.get_tools(ctx)
+        await toolset.call_tool('run_code', {'code': 'r = await search(q="x")\nr'}, ctx, tools['run_code'])
+        assert cache == {}
+
+    async def test_inferred_shapes_across_result_types(self) -> None:
+        """Each JSON shape infers the schema the sandbox signature is rebuilt from."""
+        defs = [_schema_less_tool_def(n) for n in ('t_none', 't_num', 't_text', 't_list', 't_mixed', 't_nested')]
+        results: dict[str, Any] = {
+            't_none': None,
+            't_num': 2.5,
+            't_text': 'hi',
+            't_list': [{'id': 1}, {'id': 2}],
+            't_mixed': ['a', 1],
+            't_nested': {'user': {'name': 'x'}, 'tags': []},
+        }
+        static = _StaticToolset(defs, results=results)
+        cache: dict[str, Any] = {}
+        toolset = CodeModeToolset(wrapped=static, tool_selector='all', inferred_return_schemas=cache)
+        ctx = await build_ctx(None, toolset)
+
+        tools = await toolset.get_tools(ctx)
+        code = '\n'.join(f'r_{n} = await {n}(q="x")' for n in results) + '\n1'
+        await toolset.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
+        assert cache == {
+            't_none': {'type': 'null'},
+            't_num': {'type': 'number'},
+            't_text': {'type': 'string'},
+            't_list': {
+                'type': 'array',
+                'items': {'type': 'object', 'properties': {'id': {'type': 'integer'}}},
+            },
+            't_mixed': {'type': 'array'},
+            't_nested': {
+                'type': 'object',
+                'properties': {
+                    'user': {'type': 'object', 'properties': {'name': {'type': 'string'}}},
+                    'tags': {'type': 'array'},
+                },
+            },
+        }
+
+    async def test_shapes_survive_across_runs_of_one_capability(self) -> None:
+        """A shape learned through one wrapper toolset shows up in the next run's first render."""
+        static = _StaticToolset([_schema_less_tool_def()], results={'search': {'total': 1}})
+        cap = CodeMode[object](infer_return_schemas=True)
+
+        first = cap.get_wrapper_toolset(static)
+        assert isinstance(first, CodeModeToolset)
+        ctx = await build_ctx(None, first)
+        tools = await first.get_tools(ctx)
+        await first.call_tool('run_code', {'code': 'r = await search(q="x")\nr'}, ctx, tools['run_code'])
+
+        second = cap.get_wrapper_toolset(static)
+        assert isinstance(second, CodeModeToolset)
+        tools = await second.get_tools(await build_ctx(None, second))
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert 'async def search(*, q: str) -> SearchReturn:' in description
+
+    async def test_capability_passes_cache_only_when_enabled(self) -> None:
+        static = _StaticToolset([_schema_less_tool_def()])
+        enabled = CodeMode[object](infer_return_schemas=True).get_wrapper_toolset(static)
+        disabled = CodeMode[object]().get_wrapper_toolset(static)
+        assert isinstance(enabled, CodeModeToolset) and isinstance(disabled, CodeModeToolset)
+        assert enabled.inferred_return_schemas == {}
+        assert disabled.inferred_return_schemas is None
+
+    async def test_inferred_shape_reaches_dynamic_catalog(self) -> None:
+        """With `dynamic_catalog=True` the upgraded signature lands in instructions, not the description."""
+        from pydantic_ai.messages import InstructionPart
+
+        static = _StaticToolset([_schema_less_tool_def()], results={'search': {'total': 1}})
+        cache: dict[str, Any] = {}
+        toolset = CodeModeToolset(
+            wrapped=static, tool_selector='all', dynamic_catalog=True, inferred_return_schemas=cache
+        )
+        ctx = await build_ctx(None, toolset)
+
+        tools = await toolset.get_tools(ctx)
+        await toolset.call_tool('run_code', {'code': 'r = await search(q="x")\nr'}, ctx, tools['run_code'])
+
+        await toolset.get_tools(ctx)
+        instructions = await toolset.get_instructions(ctx)
+        assert isinstance(instructions, InstructionPart)
+        assert 'async def search(*, q: str) -> SearchReturn:' in instructions.content
+        assert '-> Any' not in instructions.content
+
+
 class TestDynamicCatalog:
     """`CodeMode(dynamic_catalog=True)`: move the catalog to instructions + announce discoveries.
 
