@@ -208,6 +208,7 @@ def _sanitize_tool_name(name: str) -> str:
 _INFER_MAX_DEPTH = 5
 _INFER_MAX_PROPERTIES = 50
 _INFER_MAX_KEY_LENGTH = 64
+_INFER_MAP_LIKE_MIN_KEYS = 10
 
 
 def _is_safe_schema_key(key: str) -> bool:
@@ -221,6 +222,32 @@ def _is_safe_schema_key(key: str) -> bool:
     return key.isidentifier() and not keyword.iskeyword(key) and len(key) <= _INFER_MAX_KEY_LENGTH
 
 
+def _infer_object_schema(value: dict[Any, Any], depth: int) -> dict[str, Any]:
+    """The dict branch of `_infer_return_schema`: a record infers properties, a lookup map does not.
+
+    A map's keys are data (usernames, tenant ids) and must not leak into the
+    model-facing schema, while a record's keys are field names worth surfacing.
+    A record with `_INFER_MAP_LIKE_MIN_KEYS`+ identically-shaped fields is rare;
+    a map with them is the common case, so that combination stays an untyped
+    object.
+    """
+    properties: dict[str, Any] = {}
+    for k, v in value.items():
+        key = str(k)
+        if not _is_safe_schema_key(key):
+            continue
+        if len(properties) == _INFER_MAX_PROPERTIES:
+            break
+        properties[key] = _infer_return_schema(v, _depth=depth + 1)
+    if value and not properties:
+        return {}
+    if len(properties) >= _INFER_MAP_LIKE_MIN_KEYS:
+        child_schemas = list(properties.values())
+        if all(s == child_schemas[0] for s in child_schemas[1:]):
+            return {'type': 'object'}
+    return {'type': 'object', 'properties': properties}
+
+
 def _infer_return_schema(value: Any, *, _depth: int = 0) -> dict[str, Any]:
     """Best-effort JSON schema for a single sample tool result.
 
@@ -230,7 +257,10 @@ def _infer_return_schema(value: Any, *, _depth: int = 0) -> dict[str, Any]:
     JSON type produce `{}` (unconstrained), which renders as `Any`. Object keys
     that fail `_is_safe_schema_key` are dropped; an object whose keys all drop
     infers as `{}` so the capture site skips caching it. Nesting past
-    `_INFER_MAX_DEPTH` collapses to an untyped object/array.
+    `_INFER_MAX_DEPTH` collapses to an untyped object/array, and a dict that
+    looks like a lookup map rather than a record (`_INFER_MAP_LIKE_MIN_KEYS`+
+    keys, all with the same shape) infers as an untyped object so data-bearing
+    keys stay out of the schema.
     """
     if value is None:
         return {'type': 'null'}
@@ -245,17 +275,7 @@ def _infer_return_schema(value: Any, *, _depth: int = 0) -> dict[str, Any]:
     if isinstance(value, dict):
         if _depth >= _INFER_MAX_DEPTH:
             return {'type': 'object'}
-        properties: dict[str, Any] = {}
-        for k, v in value.items():  # pyright: ignore[reportUnknownVariableType]
-            key = str(k)  # pyright: ignore[reportUnknownArgumentType]
-            if not _is_safe_schema_key(key):
-                continue
-            if len(properties) == _INFER_MAX_PROPERTIES:
-                break
-            properties[key] = _infer_return_schema(v, _depth=_depth + 1)
-        if value and not properties:
-            return {}
-        return {'type': 'object', 'properties': properties}
+        return _infer_object_schema(value, _depth)  # pyright: ignore[reportUnknownArgumentType]
     if isinstance(value, list):
         if _depth >= _INFER_MAX_DEPTH:
             return {'type': 'array'}

@@ -2240,7 +2240,9 @@ class TestInferReturnSchemas:
         assert list_schema == {'type': 'array'}
 
     async def test_object_property_count_is_capped(self) -> None:
-        big = {f'k{i:02d}': i for i in range(60)}
+        # Mixed value shapes so the map-like heuristic doesn't genericize the
+        # object before the property cap can apply.
+        big = {f'k{i:02d}': (i if i % 2 else f'v{i}') for i in range(60)}
         static = _StaticToolset([_schema_less_tool_def()], results={'search': big})
         cache: dict[str, Any] = {}
         toolset = CodeModeToolset(wrapped=static, tool_selector='all', inferred_return_schemas=cache)
@@ -2251,6 +2253,51 @@ class TestInferReturnSchemas:
 
         schema = next(iter(cache.values()))
         assert len(schema['properties']) == 50
+
+    async def test_map_like_dict_is_genericized(self) -> None:
+        """Ten or more identically-shaped keys read as a lookup map; its data-bearing keys must not leak."""
+        by_user = {f'user_{i:02d}': {'active': True} for i in range(10)}
+        static = _StaticToolset([_schema_less_tool_def()], results={'search': by_user})
+        cache: dict[str, Any] = {}
+        toolset = CodeModeToolset(wrapped=static, tool_selector='all', inferred_return_schemas=cache)
+        ctx = await build_ctx(None, toolset)
+
+        tools = await toolset.get_tools(ctx)
+        await toolset.call_tool('run_code', {'code': 'r = await search(q="x")\nr'}, ctx, tools['run_code'])
+        assert next(iter(cache.values())) == {'type': 'object'}
+
+        tools = await toolset.get_tools(ctx)
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+        assert 'user_0' not in description
+
+    async def test_record_below_map_threshold_keeps_properties(self) -> None:
+        record = {f'field_{i}': i for i in range(9)}
+        static = _StaticToolset([_schema_less_tool_def()], results={'search': record})
+        cache: dict[str, Any] = {}
+        toolset = CodeModeToolset(wrapped=static, tool_selector='all', inferred_return_schemas=cache)
+        ctx = await build_ctx(None, toolset)
+
+        tools = await toolset.get_tools(ctx)
+        await toolset.call_tool('run_code', {'code': 'r = await search(q="x")\nr'}, ctx, tools['run_code'])
+
+        schema = next(iter(cache.values()))
+        assert len(schema['properties']) == 9
+        assert schema['properties']['field_0'] == {'type': 'integer'}
+
+    async def test_many_keys_with_mixed_shapes_stay_a_record(self) -> None:
+        """The map heuristic needs both conditions: many keys AND one value shape."""
+        mixed = {f'field_{i}': (i if i % 2 else f'v{i}') for i in range(12)}
+        static = _StaticToolset([_schema_less_tool_def()], results={'search': mixed})
+        cache: dict[str, Any] = {}
+        toolset = CodeModeToolset(wrapped=static, tool_selector='all', inferred_return_schemas=cache)
+        ctx = await build_ctx(None, toolset)
+
+        tools = await toolset.get_tools(ctx)
+        await toolset.call_tool('run_code', {'code': 'r = await search(q="x")\nr'}, ctx, tools['run_code'])
+
+        schema = next(iter(cache.values()))
+        assert len(schema['properties']) == 12
 
     async def test_same_name_different_tool_does_not_share_shape(self) -> None:
         """A redefined tool under a reused name starts fresh instead of inheriting the old shape."""
