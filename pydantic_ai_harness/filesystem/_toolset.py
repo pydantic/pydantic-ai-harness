@@ -7,6 +7,7 @@ import functools
 import hashlib
 import os
 import re
+import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Concatenate, ParamSpec
@@ -371,7 +372,17 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 new_content = new_content.replace(edit.old_string, edit.new_string, 1)
                 replacements += 1
 
-        resolved.write_text(new_content, encoding='utf-8')
+        # Write to a same-directory temp file and rename over the target, so a
+        # failed write can't leave a truncated file and the rename replaces a
+        # symlink swapped in after resolution instead of writing through it.
+        fd, tmp_name = tempfile.mkstemp(dir=resolved.parent, prefix=f'.{resolved.name}.')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as tmp_file:
+                tmp_file.write(new_content)
+            os.replace(tmp_name, resolved)
+        except OSError:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
         new_hash = _content_hash(new_content)
         return f'Applied {len(edits)} edits ({replacements} replacements) to {path}. [hash:{new_hash}]'
 

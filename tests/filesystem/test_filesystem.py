@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -481,6 +482,21 @@ class TestMultiEdit:
         result = await toolset.multi_edit('hello.txt', [EditOp(old_string='world', new_string='universe')])
         new_hash = _content_hash((fs_root / 'hello.txt').read_text())
         assert f'hash:{new_hash}' in result
+
+    async def test_failed_write_leaves_file_untouched(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A write failure mid-batch leaves the original content and no temp file behind."""
+        original = (fs_root / 'hello.txt').read_text()
+
+        def failing_replace(src: str | os.PathLike[str], dst: str | os.PathLike[str]) -> None:
+            raise OSError('disk full')
+
+        monkeypatch.setattr(os, 'replace', failing_replace)
+        with pytest.raises(OSError, match='disk full'):
+            await toolset.multi_edit('hello.txt', [EditOp(old_string='world', new_string='universe')])
+        assert (fs_root / 'hello.txt').read_text() == original
+        assert [p.name for p in fs_root.iterdir() if p.name.startswith('.hello.txt.')] == []
 
 
 class TestListDirectory:
