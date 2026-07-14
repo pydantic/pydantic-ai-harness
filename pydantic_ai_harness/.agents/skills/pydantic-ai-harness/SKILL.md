@@ -110,8 +110,8 @@ print(result.output)
 #> Paris is 20.0 C and Tokyo is 25.0 C.
 ```
 
-Instead of one model round-trip per tool call, the model writes a single Python script that fetches both
-temperatures with `asyncio.gather` and converts them -- collapsing four calls into one `run_code`.
+The model writes a single Python script that fetches both temperatures with `asyncio.gather` and then
+converts them -- performing four tool calls across two dependent stages in one `run_code` invocation.
 
 ## Key Practices
 
@@ -121,6 +121,6 @@ temperatures with `asyncio.gather` and converts them -- collapsing four calls in
 
 ## Common Gotchas
 
-- **`native=True` tools bypass `CodeMode`.** Provider-native MCP servers and web search execute server-side, so `run_code` never sees them. Construct them with `native=False` to keep them local and wrappable.
+- **`native=True` tools bypass `CodeMode`.** Provider-native MCP servers and web search execute server-side, so `run_code` never sees them. Use `native=False` for client-side dispatch that `CodeMode` can wrap, but do not treat a remote server as trusted or sandboxed; see the [Code Mode trust boundary](./references/CODE-MODE.md#sandbox-restrictions).
 - **The Monty sandbox is a Python subset.** No class definitions, no third-party imports, and only a small stdlib allowlist -- read [Code Mode](./references/CODE-MODE.md#sandbox-restrictions) before debugging generated code that fails to run.
 - **`CodeMode` needs its extra.** Install `pydantic-ai-harness[codemode]`, not the bare package.
