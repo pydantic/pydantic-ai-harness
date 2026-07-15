@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from pydantic_ai import CallToolsNode
+from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
 from pydantic_ai.messages import ModelResponse, ToolCallPart
@@ -411,6 +411,8 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         """
         if isinstance(node, CallToolsNode):
             messages = list(ctx.messages)
+            if isinstance(result, ModelRequestNode):
+                messages.append(result.request)
             if is_provider_valid(messages):
                 await self.store.save_snapshot(
                     ContinuableSnapshot(

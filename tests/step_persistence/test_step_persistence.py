@@ -8,12 +8,14 @@ agent run (e.g. the path-traversal guard on `FileStepStore`).
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic_ai import Agent, RunContext
 from pydantic_ai._agent_graph import GraphAgentState  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -83,6 +85,26 @@ def make_simple_agent(capabilities: list[Any]) -> Agent[object, str]:
         return a + b
 
     return agent
+
+
+class WorkerInterruptedError(RuntimeError):
+    """Simulate a worker stopping before its second model request."""
+
+
+@dataclass
+class InterruptBeforeSecondModelRequest(AbstractCapability[object]):
+    requests: int = 0
+
+    async def before_model_request(
+        self,
+        ctx: RunContext[object],
+        request_context: ModelRequestContext,
+    ) -> ModelRequestContext:
+        del ctx
+        self.requests += 1
+        if self.requests == 2:
+            raise WorkerInterruptedError('worker stopped after the completed tool call')
+        return request_context
 
 
 async def first_run_id(store: StepStore) -> str:
@@ -658,6 +680,35 @@ class TestFileStepStore:
 
 
 class TestStepPersistenceCapability:
+    async def test_interrupted_run_resumes_from_completed_tool_boundary(self) -> None:
+        store = InMemoryStepStore()
+        interrupt = InterruptBeforeSecondModelRequest()
+        agent = make_simple_agent(
+            [
+                StepPersistence(store=store, run_id='interrupted-read'),
+                interrupt,
+            ]
+        )
+
+        with pytest.raises(WorkerInterruptedError, match='completed tool call'):
+            await agent.run('add 1 and 2')
+
+        history = await continue_run(store, run_id='interrupted-read')
+        effect = await store.get_tool_effect(
+            run_id='interrupted-read',
+            tool_call_id='pyd_ai_tool_call_id__add',
+        )
+
+        assert is_provider_valid(history) is True
+        assert any(
+            isinstance(part, ToolReturnPart)
+            for message in history
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+        assert effect is not None
+        assert effect.status == 'completed'
+
     async def test_basic_run_records_lifecycle_and_snapshot(self) -> None:
         store = InMemoryStepStore()
         agent = make_simple_agent([StepPersistence(store=store, agent_name='librarian')])
