@@ -406,6 +406,8 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
 
         At that boundary every tool call from the preceding `ModelRequestNode`
         has a matching tool return, so the history is provider-valid.
+        The returned `ModelRequestNode` holds the tool returns but is not yet in
+        `ctx.messages`, so its request must be included before validation.
         Snapshots are filtered through `is_provider_valid` defensively in case
         a custom node reshapes history.
         """
