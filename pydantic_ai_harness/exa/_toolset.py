@@ -5,11 +5,12 @@ from __future__ import annotations
 import functools
 import json
 import re
-from collections.abc import Awaitable, Callable, Sequence
-from typing import Concatenate, Literal, ParamSpec, Protocol
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from typing import Concatenate, Literal, ParamSpec, Protocol, TypedDict, TypeVar
 
 import httpx
 from pydantic_ai.exceptions import ModelRetry, UserError
+from pydantic_ai.messages import ToolReturn
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -18,6 +19,8 @@ try:
     from exa_py.api import (
         ContentsOptions,
         DeepOutputSchema,
+        DeepSearchOutput,
+        DeepTextOutputSchema,
         Result,
         SearchResponse,
         SearchType,
@@ -35,6 +38,21 @@ EXA_MAX_PAGE_TEXT_CHARS = 10_000
 """Largest per-page text budget the Exa contents API accepts."""
 
 _P = ParamSpec('_P')
+_R = TypeVar('_R')
+_SelfT = TypeVar('_SelfT')
+
+
+class ExaSource(TypedDict):
+    """One source behind a tool result, carried in `ToolReturn.metadata['sources']`."""
+
+    url: str
+    title: str | None
+
+
+def _source_list(sources: Mapping[str, str | None]) -> list[ExaSource]:
+    """Convert a `url -> title` mapping into the metadata `sources` list."""
+    return [{'url': url, 'title': title} for url, title in sources.items()]
+
 
 # exa-py raises a bare ValueError for any non-2xx response, embedding the HTTP
 # status in the message. 401/403 mean a bad or missing API key -- configuration
@@ -85,8 +103,8 @@ def _default_client() -> ExaClient:
 
 
 def _recoverable(
-    fn: Callable[Concatenate[ExaSearchToolset, _P], Awaitable[str]],
-) -> Callable[Concatenate[ExaSearchToolset, _P], Awaitable[str]]:
+    fn: Callable[Concatenate[_SelfT, _P], Awaitable[_R]],
+) -> Callable[Concatenate[_SelfT, _P], Awaitable[_R]]:
     """Convert transient Exa API failures into `ModelRetry`.
 
     pyai only feeds `ModelRetry` back to the model as a retry prompt; any other
@@ -99,7 +117,7 @@ def _recoverable(
     """
 
     @functools.wraps(fn)
-    async def wrapper(self: ExaSearchToolset, *args: _P.args, **kwargs: _P.kwargs) -> str:
+    async def wrapper(self: _SelfT, *args: _P.args, **kwargs: _P.kwargs) -> _R:
         try:
             return await fn(self, *args, **kwargs)
         except httpx.HTTPError as error:
@@ -120,6 +138,11 @@ class ExaSearchToolset(FunctionToolset[AgentDepsT]):
     `include_deep_search=True`, `deep_search` runs Exa's multi-step deep search
     and returns a synthesized, cited answer in one call.
 
+    Each tool returns a `ToolReturn` whose `return_value` is the text the
+    model sees and whose `metadata['sources']` lists the result URLs and
+    titles (`ExaSource` dicts), so applications can render citations from
+    `ToolReturnPart.metadata` without parsing the text.
+
     `get_page` text is capped at `max_text_chars` characters; one character of
     headroom above the cap is requested from Exa so local truncation can detect
     a longer page and append a marker (at the API ceiling of
@@ -138,6 +161,7 @@ class ExaSearchToolset(FunctionToolset[AgentDepsT]):
         include_deep_search: bool,
         include_domains: Sequence[str] = (),
         exclude_domains: Sequence[str] = (),
+        text_summary: bool | str = False,
     ) -> None:
         super().__init__()
         self._client = client if client is not None else _default_client()
@@ -145,13 +169,14 @@ class ExaSearchToolset(FunctionToolset[AgentDepsT]):
         self._max_text_chars = max_text_chars
         self._include_domains = list(include_domains) if include_domains else None
         self._exclude_domains = list(exclude_domains) if exclude_domains else None
+        self._text_summary = text_summary
         self.add_function(self.web_search, name='web_search')
         self.add_function(self.get_page, name='get_page')
         if include_deep_search:
             self.add_function(self.deep_search, name='deep_search')
 
     @_recoverable
-    async def web_search(self, query: str) -> str:
+    async def web_search(self, query: str) -> ToolReturn[str]:
         """Search the web and return matching pages, each with its most relevant excerpts.
 
         Args:
@@ -165,19 +190,33 @@ class ExaSearchToolset(FunctionToolset[AgentDepsT]):
             query,
             contents={'highlights': True},
             num_results=self._num_results,
+            output_schema=self._summary_schema(),
             include_domains=self._include_domains,
             exclude_domains=self._exclude_domains,
         )
         if not response.results:
-            return f'No results found for {query!r}.'
+            return ToolReturn(f'No results found for {query!r}.', metadata={'sources': []})
         results = response.results[: self._num_results]
+        sources = _source_list({result.url: result.title for result in results})
         sections = [_format_result(result, _highlights_body(result)) for result in results]
         plural = 's' if len(sections) != 1 else ''
         joined = '\n\n---\n\n'.join(sections)
-        return f'Found {len(sections)} result{plural} for {query!r}:\n\n{joined}'
+        found = f'Found {len(sections)} result{plural} for {query!r}:\n\n{joined}'
+        summary = response.output.content if response.output is not None else None
+        if not isinstance(summary, str) or not summary:
+            return ToolReturn(found, metadata={'sources': sources})
+        return ToolReturn(f'Summary: {summary}\n\n{found}', metadata={'sources': sources})
+
+    def _summary_schema(self) -> DeepTextOutputSchema | None:
+        """The text output schema `web_search` requests when `text_summary` is on, else `None`."""
+        if self._text_summary is False:
+            return None
+        if isinstance(self._text_summary, str):
+            return {'type': 'text', 'description': self._text_summary}
+        return {'type': 'text'}
 
     @_recoverable
-    async def get_page(self, url: str) -> str:
+    async def get_page(self, url: str) -> ToolReturn[str]:
         """Retrieve the full text of a specific URL.
 
         Use it to read a promising URL from `web_search` results in full, or a
@@ -194,10 +233,13 @@ class ExaSearchToolset(FunctionToolset[AgentDepsT]):
         first = response.results[0] if response.results else None
         if first is None or not first.text:
             raise ModelRetry(f'No content could be retrieved for {url!r}. Check the URL or try another page.')
-        return _format_result(first, _truncate(first.text, self._max_text_chars))
+        return ToolReturn(
+            _format_result(first, _truncate(first.text, self._max_text_chars)),
+            metadata={'sources': _source_list({first.url: first.title})},
+        )
 
     @_recoverable
-    async def deep_search(self, question: str) -> str:
+    async def deep_search(self, question: str) -> ToolReturn[str]:
         """Run Exa's multi-step deep search and return a synthesized answer with its sources.
 
         A full research pass in a single call; suited to questions that need
@@ -224,14 +266,10 @@ class ExaSearchToolset(FunctionToolset[AgentDepsT]):
             )
         content = output.content
         answer = content if isinstance(content, str) else json.dumps(content)
-        sources = {citation.url: citation.title for row in output.grounding for citation in row.citations}
+        sources = _grounding_sources(output)
         if not sources:
             sources = {result.url: result.title or '' for result in response.results}
-        lines = [answer]
-        if sources:
-            lines.extend(['', 'Sources:'])
-            lines.extend(f'- {title or "(untitled)"}: {url}' for url, title in sources.items())
-        return '\n'.join(lines)
+        return ToolReturn(_with_sources(answer, sources), metadata={'sources': _source_list(sources)})
 
 
 def _format_result(result: Result, body: str | None) -> str:
@@ -243,6 +281,20 @@ def _format_result(result: Result, body: str | None) -> str:
         lines.append(f'Author: {result.author}')
     if body:
         lines.extend(['', body])
+    return '\n'.join(lines)
+
+
+def _grounding_sources(output: DeepSearchOutput) -> dict[str, str | None]:
+    """Deduplicated `url -> title` sources from a synthesized output's grounding."""
+    return {citation.url: citation.title for row in output.grounding for citation in row.citations}
+
+
+def _with_sources(body: str, sources: Mapping[str, str | None]) -> str:
+    """Append a `Sources:` block to `body`, or return `body` unchanged when there are none."""
+    if not sources:
+        return body
+    lines = [body, '', 'Sources:']
+    lines.extend(f'- {title or "(untitled)"}: {url}' for url, title in sources.items())
     return '\n'.join(lines)
 
 

@@ -24,7 +24,7 @@ from exa_py.api import (
 from pydantic_ai import Agent
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import ModelRetry, UserError
-from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturn, ToolReturnPart
 from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.exa import ExaSearch, ExaSearchToolset
@@ -34,6 +34,13 @@ from pydantic_ai_harness.exa import ExaSearch, ExaSearchToolset
 def anyio_backend() -> str:
     """Run async tests on the asyncio backend (matching upstream pydantic-ai)."""
     return 'asyncio'
+
+
+def _text(output: ToolReturn[str]) -> str:
+    """The model-facing text of a tool result."""
+    body = output.return_value
+    assert isinstance(body, str)
+    return body
 
 
 def _result(
@@ -139,6 +146,7 @@ def _toolset(
     *,
     num_results: int = 5,
     max_text_chars: int = 10_000,
+    text_summary: bool | str = False,
     include_deep_search: bool = False,
     include_domains: Sequence[str] = (),
     exclude_domains: Sequence[str] = (),
@@ -146,6 +154,7 @@ def _toolset(
     return ExaSearch[None](
         num_results=num_results,
         max_text_chars=max_text_chars,
+        text_summary=text_summary,
         include_deep_search=include_deep_search,
         include_domains=include_domains,
         exclude_domains=exclude_domains,
@@ -168,7 +177,7 @@ class TestWebSearch:
             )
         )
         output = await _toolset(client).web_search('rust web frameworks')
-        assert output == (
+        assert _text(output) == (
             "Found 2 results for 'rust web frameworks':\n\n"
             'Title: A\n'
             'URL: https://a.dev\n'
@@ -181,6 +190,9 @@ class TestWebSearch:
             'Title: (untitled)\n'
             'URL: https://b.dev'
         )
+        assert output.metadata == {
+            'sources': [{'url': 'https://a.dev', 'title': 'A'}, {'url': 'https://b.dev', 'title': None}]
+        }
 
     async def test_requests_highlights_num_results_and_domains(self) -> None:
         client = _FakeExaClient(search_response=_response(_result()))
@@ -207,7 +219,8 @@ class TestWebSearch:
     async def test_no_results(self) -> None:
         client = _FakeExaClient()
         output = await _toolset(client).web_search('nothing to see')
-        assert output == "No results found for 'nothing to see'."
+        assert _text(output) == "No results found for 'nothing to see'."
+        assert output.metadata == {'sources': []}
 
     async def test_num_results_enforced_on_oversized_response(self) -> None:
         client = _FakeExaClient(
@@ -218,9 +231,12 @@ class TestWebSearch:
             )
         )
         output = await _toolset(client, num_results=2).web_search('q')
-        assert output == (
+        assert _text(output) == (
             "Found 2 results for 'q':\n\nTitle: A\nURL: https://a.dev\n\n---\n\nTitle: B\nURL: https://b.dev"
         )
+        assert output.metadata == {
+            'sources': [{'url': 'https://a.dev', 'title': 'A'}, {'url': 'https://b.dev', 'title': 'B'}]
+        }
 
 
 class TestGetPage:
@@ -228,7 +244,8 @@ class TestGetPage:
         client = _FakeExaClient(contents_response=_response(_result('https://a.dev', title='A', text='alpha text')))
         output = await _toolset(client, max_text_chars=100).get_page('https://a.dev')
         assert client.get_contents_calls == [('https://a.dev', {'max_characters': 101})]
-        assert output == 'Title: A\nURL: https://a.dev\n\nalpha text'
+        assert _text(output) == 'Title: A\nURL: https://a.dev\n\nalpha text'
+        assert output.metadata == {'sources': [{'url': 'https://a.dev', 'title': 'A'}]}
 
     async def test_headroom_request_stops_at_api_ceiling(self) -> None:
         client = _FakeExaClient(contents_response=_response(_result(text='alpha')))
@@ -238,12 +255,12 @@ class TestGetPage:
     async def test_text_at_cap_is_not_truncated(self) -> None:
         client = _FakeExaClient(contents_response=_response(_result(title='T', text='x' * 10)))
         output = await _toolset(client, max_text_chars=10).get_page('https://example.dev/page')
-        assert output == f'Title: T\nURL: https://example.dev/page\n\n{"x" * 10}'
+        assert _text(output) == f'Title: T\nURL: https://example.dev/page\n\n{"x" * 10}'
 
     async def test_text_over_cap_is_truncated_keeping_the_head(self) -> None:
         client = _FakeExaClient(contents_response=_response(_result(title='T', text='x' * 10 + 'T')))
         output = await _toolset(client, max_text_chars=10).get_page('https://example.dev/page')
-        assert output == (
+        assert _text(output) == (
             f'Title: T\nURL: https://example.dev/page\n\n{"x" * 10}\n[... page text truncated at 10 characters]'
         )
 
@@ -295,7 +312,10 @@ class TestDeepSearch:
                 'exclude_domains': None,
             }
         ]
-        assert output == 'Deep answer.\n\nSources:\n- A: https://a.dev\n- (untitled): https://b.dev'
+        assert _text(output) == 'Deep answer.\n\nSources:\n- A: https://a.dev\n- (untitled): https://b.dev'
+        assert output.metadata == {
+            'sources': [{'url': 'https://a.dev', 'title': 'A'}, {'url': 'https://b.dev', 'title': ''}]
+        }
 
     async def test_domains_plumbed(self) -> None:
         client = _FakeExaClient(deep_response=_deep_response('Answer.'))
@@ -306,23 +326,25 @@ class TestDeepSearch:
     async def test_structured_content_is_rendered_as_json(self) -> None:
         client = _FakeExaClient(deep_response=_deep_response({'finding': 'x'}, citations=[('https://a.dev', 'A')]))
         output = await _toolset(client, include_deep_search=True).deep_search('q')
-        assert output == '{"finding": "x"}\n\nSources:\n- A: https://a.dev'
+        assert _text(output) == '{"finding": "x"}\n\nSources:\n- A: https://a.dev'
 
     async def test_without_grounding_falls_back_to_result_sources(self) -> None:
         client = _FakeExaClient(deep_response=_deep_response('Answer.', results=[_result('https://a.dev', title='A')]))
         output = await _toolset(client, include_deep_search=True).deep_search('q')
-        assert output == 'Answer.\n\nSources:\n- A: https://a.dev'
+        assert _text(output) == 'Answer.\n\nSources:\n- A: https://a.dev'
+        assert output.metadata == {'sources': [{'url': 'https://a.dev', 'title': 'A'}]}
 
     async def test_without_any_sources_returns_answer_only(self) -> None:
         client = _FakeExaClient(deep_response=_deep_response('Answer.'))
         output = await _toolset(client, include_deep_search=True).deep_search('q')
-        assert output == 'Answer.'
+        assert _text(output) == 'Answer.'
+        assert output.metadata == {'sources': []}
 
     async def test_answer_is_not_capped_by_max_text_chars(self) -> None:
         long_answer = 'a' * 50
         client = _FakeExaClient(deep_response=_deep_response(long_answer))
         output = await _toolset(client, include_deep_search=True, max_text_chars=10).deep_search('q')
-        assert output == long_answer
+        assert _text(output) == long_answer
 
     async def test_missing_output_raises_model_retry(self) -> None:
         client = _FakeExaClient(deep_response=_response())
@@ -338,6 +360,46 @@ class TestDeepSearch:
         client = _FakeExaClient()
         assert list(_toolset(client).tools) == ['web_search', 'get_page']
         assert list(_toolset(client, include_deep_search=True).tools) == ['web_search', 'get_page', 'deep_search']
+
+
+class TestTextSummary:
+    async def test_summary_prepended_to_results(self) -> None:
+        client = _FakeExaClient(
+            search_response=_deep_response('Rust is fast.', results=[_result('https://a.dev', title='A')])
+        )
+        output = await _toolset(client, text_summary=True).web_search('is rust fast?')
+        assert client.search_calls[0]['output_schema'] == {'type': 'text'}
+        assert _text(output) == (
+            "Summary: Rust is fast.\n\nFound 1 result for 'is rust fast?':\n\nTitle: A\nURL: https://a.dev"
+        )
+
+    async def test_summary_format_hint_sent_as_description(self) -> None:
+        client = _FakeExaClient(search_response=_response(_result()))
+        await _toolset(client, text_summary='One sentence with the year.').web_search('q')
+        assert client.search_calls[0]['output_schema'] == {
+            'type': 'text',
+            'description': 'One sentence with the year.',
+        }
+
+    async def test_off_by_default(self) -> None:
+        client = _FakeExaClient(search_response=_response(_result()))
+        await _toolset(client).web_search('q')
+        assert client.search_calls[0]['output_schema'] is None
+
+    async def test_missing_output_returns_results_only(self) -> None:
+        client = _FakeExaClient(search_response=_response(_result('https://a.dev', title='A')))
+        output = await _toolset(client, text_summary=True).web_search('q')
+        assert _text(output) == "Found 1 result for 'q':\n\nTitle: A\nURL: https://a.dev"
+
+    async def test_non_text_output_returns_results_only(self) -> None:
+        client = _FakeExaClient(search_response=_deep_response({'not': 'text'}, results=[_result(title='A')]))
+        output = await _toolset(client, text_summary=True).web_search('q')
+        assert _text(output).startswith("Found 1 result for 'q':")
+
+    async def test_no_results_short_circuits_before_summary(self) -> None:
+        client = _FakeExaClient(search_response=_deep_response('Summary without results.'))
+        output = await _toolset(client, text_summary=True).web_search('q')
+        assert _text(output) == "No results found for 'q'."
 
 
 class TestExaSearch:
@@ -418,11 +480,21 @@ class TestExaSearch:
             for part in message.parts
             if isinstance(part, ToolReturnPart)
         }
+        metadata = {
+            part.tool_name: part.metadata
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        }
         assert set(returns) == {'web_search', 'get_page', 'deep_search'}
         query = calls['web_search']['query']
         assert returns['web_search'] == f'Found 1 result for {query!r}:\n\nTitle: A\nURL: https://a.dev\n\n- alpha'
         assert returns['get_page'] == 'Title: B\nURL: https://b.dev\n\nbeta'
         assert returns['deep_search'] == 'Deep answer.\n\nSources:\n- C: https://c.dev'
+        assert metadata['web_search'] == {'sources': [{'url': 'https://a.dev', 'title': 'A'}]}
+        assert metadata['get_page'] == {'sources': [{'url': 'https://b.dev', 'title': 'B'}]}
+        assert metadata['deep_search'] == {'sources': [{'url': 'https://c.dev', 'title': 'C'}]}
 
 
 class TestAgentSpec:
@@ -431,8 +503,14 @@ class TestAgentSpec:
         assert 'ExaSearch' in json.dumps(schema)
 
     def test_from_spec_builds_capability(self) -> None:
-        capability = ExaSearch[None].from_spec(num_results=3, include_deep_search=True, include_domains=['a.dev'])
+        capability = ExaSearch[None].from_spec(
+            num_results=3,
+            text_summary=True,
+            include_deep_search=True,
+            include_domains=['a.dev'],
+        )
         assert capability.num_results == 3
+        assert capability.text_summary is True
         assert capability.include_deep_search is True
         assert capability.include_domains == ['a.dev']
         assert capability.client is None

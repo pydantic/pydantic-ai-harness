@@ -1,9 +1,11 @@
 # Exa Search
 
 Give an agent web research tools backed by the [Exa](https://exa.ai) search
-API: search that returns the most relevant excerpts from each hit, full-page
-retrieval for digging into a specific URL, and opt-in deep search that
-synthesizes a cited answer in one call.
+API: search that returns the most relevant excerpts from each hit (with an
+optional synthesized text summary), full-page retrieval for digging into a specific
+URL, opt-in deep search that synthesizes a cited answer in one call, and a
+separate `ExaAgent` capability that delegates long-running research to the
+Exa Agent API as deferred tool calls.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/exa/)
 
@@ -49,6 +51,7 @@ print(result.output)
 | `web_search` | Search the web and return the top `num_results` pages, each with title, URL, and its most relevant excerpts. |
 | `get_page` | Retrieve the full text of one specific URL -- a promising `web_search` hit, or a URL the user provided. |
 | `deep_search` | Run Exa's multi-step deep search and return a synthesized, cited answer. Opt-in via `include_deep_search=True`. |
+| `exa_agent` | Delegate a research task to an asynchronous Exa agent run. Provided by the separate `ExaAgent` capability. |
 
 `web_search` returns short excerpts (Exa highlights) rather than full page
 text, following [Exa's own guidance for agents](https://exa.ai/docs/reference/search-api-guide-for-coding-agents),
@@ -88,6 +91,49 @@ escalation from `web_search`, not a replacement. The synthesized answer is
 returned in full (it is Exa-generated and inherently bounded); `max_text_chars`
 only applies to `get_page`.
 
+## Text summary
+
+Set `text_summary` to have every `web_search` call also request Exa's
+plain-text output schema, so the response carries a short summary synthesized
+from the results for question-style queries. Pass `True` for an unconstrained
+summary, or a string describing the desired format (sent as the schema's
+`description`):
+
+```python
+from pydantic_ai_harness.exa import ExaSearch
+
+ExaSearch(text_summary='One concise sentence with the requested facts.')
+```
+
+The tool's return shape is unchanged and backward compatible: the result list
+is returned as before, and when Exa returns a summary it is prepended as a
+`Summary:` line.
+
+## Structured citations
+
+Every tool returns a
+[`ToolReturn`](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#advanced-tool-returns):
+`return_value` carries the readable text the model sees (unchanged from
+previous releases, including the `Sources:` blocks), and `metadata` carries
+the sources as structured `ExaSource` records (`{'url': ..., 'title': ...}`)
+under the `'sources'` key. Metadata is never sent to the model; the
+application reads it from the `ToolReturnPart` in the message history, so
+rendering citations needs no text parsing:
+
+```python
+from pydantic_ai.messages import ModelRequest, ToolReturnPart
+
+for message in result.all_messages():
+    if isinstance(message, ModelRequest):
+        for part in message.parts:
+            if isinstance(part, ToolReturnPart) and part.metadata is not None:
+                for source in part.metadata.get('sources', []):
+                    print(source['url'], source['title'])
+```
+
+`exa_agent` results additionally carry the Exa run ID in metadata under
+`RUN_ID_METADATA_KEY`.
+
 ## Instructions
 
 `ExaSearch` contributes short research guidance to the system prompt: search
@@ -107,6 +153,7 @@ from pydantic_ai_harness.exa import ExaSearch
 ExaSearch(
     num_results=5,              # results per web_search call (1 to 100)
     max_text_chars=10_000,      # get_page text cap, in characters (1 to 10,000)
+    text_summary=False,         # web_search also returns a synthesized text summary
     include_deep_search=False,  # also expose the deep_search tool
     include_domains=[],         # only search these domains (allowlist)
     exclude_domains=[],         # never search these domains (denylist)
@@ -117,7 +164,131 @@ ExaSearch(
 
 `include_domains` and `exclude_domains` apply to `web_search` and
 `deep_search`, and are mutually exclusive -- set one, not both. Out-of-range
-limits and setting both domain lists raise a `ValueError` at construction.
+limits and setting both domain lists raise at construction.
+
+## Exa agent runs
+
+The Exa [Agent API](https://docs.exa.ai) runs open-ended research tasks
+asynchronously: a run is created, moves through `queued -> running`, and
+reaches a terminal status (`completed`, `failed`, or `cancelled`) after up to
+an hour. The separate `ExaAgent` capability maps that lifecycle onto Pydantic
+AI's [deferred tool calls](https://ai.pydantic.dev/deferred-tools/): its
+`exa_agent` tool creates the run and defers, carrying the Exa run ID in the
+deferred call's metadata.
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.exa import ExaAgent
+
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[ExaAgent()])
+```
+
+By default (`execution='inline'`) the capability resolves its own deferred
+calls within the agent run by polling the Exa run to completion, so the tool
+behaves like a regular (if slow) tool. With `execution='external'` the calls
+bubble up as `DeferredToolRequests` output for the host application to resolve
+out of band -- including from a different process, since the Exa run ID
+survives in the request metadata under `RUN_ID_METADATA_KEY`. The agent's
+`output_type` must include `DeferredToolRequests`, otherwise the run raises
+instead of returning the deferred requests:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.tools import DeferredToolRequests
+
+from pydantic_ai_harness.exa import ExaAgent
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    output_type=[str, DeferredToolRequests],
+    capabilities=[ExaAgent(execution='external')],
+)
+```
+
+Render a finished run with the `agent_run_result` helper, passing the same
+`output_schema` the capability was constructed with so external resolution
+applies the same validation and produces the same tool result shape as inline
+execution, then feed the results and the original message history back into
+the agent to resume the deferred run:
+
+```python
+from pydantic_ai.tools import DeferredToolResults
+
+from pydantic_ai_harness.exa import RUN_ID_METADATA_KEY, agent_run_result
+
+
+async def resolve(requests, runs, output_schema=None):  # e.g. in a worker process
+    results = DeferredToolResults()
+    for call in requests.calls:
+        run_id = requests.metadata[call.tool_call_id][RUN_ID_METADATA_KEY]
+        run = await runs.poll_until_finished(run_id)
+        results.calls[call.tool_call_id] = agent_run_result(run, output_schema=output_schema)
+    return results
+
+
+async def resume(agent, messages, results):
+    return await agent.run(message_history=messages, deferred_tool_results=results)
+```
+
+Every field of `ExaAgent` with its default:
+
+```python
+from pydantic_ai_harness.exa import ExaAgent
+
+ExaAgent(
+    effort=None,            # 'low' | 'medium' | 'high' | 'xhigh' | 'auto' -- None = API default
+    execution='inline',     # 'inline' polls to completion; 'external' bubbles DeferredToolRequests
+    output_schema=None,     # BaseModel class or dict schema for structured output
+    system_prompt=None,     # forwarded to the Exa agent run
+    poll_interval=1000,     # ms between polls when resolving inline
+    timeout_ms=3_600_000,   # ms to wait for a run when resolving inline
+    guidance=None,          # None = default instructions, '' = none, str = custom
+    runs=None,              # ExaAgentRuns -- None builds AsyncExa().agent.runs from EXA_API_KEY
+)
+```
+
+An `output_schema` model class is validated against
+the completed run's structured output (mismatches surface as `ModelRetry`),
+while a dict schema is forwarded without client-side validation and is the
+agent-spec form. Terminal failures (`failed`, `cancelled`) are returned to the
+model as a structured message rather than raised, so the agent can decide how
+to proceed. Each result includes the run ID, which the model can pass back as
+`previous_run_id` to ask follow-up questions in the context of a previous run.
+
+## Multiple instances
+
+Two instances of the same capability register the same tool names, which is an
+error. To run several differently configured instances in one agent (for
+example one open-web `ExaSearch` and one pinned to specific domains), wrap the
+extra instances in core's `PrefixTools` capability, which prefixes their tool
+names:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import PrefixTools
+
+from pydantic_ai_harness.exa import ExaSearch
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[
+        ExaSearch(),  # web_search, get_page
+        PrefixTools(
+            wrapped=ExaSearch(include_domains=['crunchbase.com'], guidance=''),
+            prefix='cb',
+        ),  # cb_web_search, cb_get_page
+    ],
+)
+```
+
+Set `guidance=''` on the wrapped instance (or replace it with text that tells
+the model when to use the prefixed tools), since each instance otherwise
+contributes the same default research guidance.
+
+This also works for `ExaAgent`: it identifies its deferred calls by metadata
+it wrote when deferring, not by tool name, so a prefixed `exa_agent` still
+resolves inline, and multiple `ExaAgent` instances never claim each other's
+calls.
 
 ## Custom client
 
@@ -194,18 +365,22 @@ capabilities:
   - ExaSearch:
       num_results: 3
       include_deep_search: true
+  - ExaAgent:
+      effort: low
 ```
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.exa import ExaSearch
+from pydantic_ai_harness.exa import ExaAgent, ExaSearch
 
-agent = Agent.from_file('agent.yaml', custom_capability_types=[ExaSearch])
+agent = Agent.from_file('agent.yaml', custom_capability_types=[ExaSearch, ExaAgent])
 ```
 
-Pass `custom_capability_types` so the spec loader knows how to instantiate
-`ExaSearch`. The `client` field is not spec-serializable; spec-loaded instances
-always build the default client from `EXA_API_KEY`.
+Pass `custom_capability_types` so the spec loader knows how to instantiate the
+capabilities. The `client` and `runs` fields are not spec-serializable;
+spec-loaded instances always build the default client from `EXA_API_KEY`. In
+specs, `output_schema` takes the JSON-schema dict form; Pydantic model
+classes are only available when constructing the capability in Python.
 
 ## Further reading
 

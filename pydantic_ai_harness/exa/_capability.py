@@ -26,7 +26,7 @@ _INSTRUCTIONS = (
     'the pages you relied on in your answer.'
 )
 
-_DEEP_INSTRUCTIONS = _INSTRUCTIONS + (
+_DEEP_INSTRUCTIONS_SUFFIX = (
     ' For questions that need synthesis across many sources, escalate to `deep_search`: it runs '
     'a full research pass in a single call, so save it for the questions that deserve that depth.'
 )
@@ -38,9 +38,10 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
 
     Adds two tools: `web_search`, which returns search results with their most
     relevant excerpts, and `get_page`, which retrieves the full text of a
-    specific URL. Set `include_deep_search=True` to also expose `deep_search`,
-    which runs Exa's multi-step deep search and returns a synthesized, cited
-    answer in one tool call.
+    specific URL. Set `text_summary` to have `web_search` also return a
+    synthesized text summary with the results. Set `include_deep_search=True`
+    to also expose `deep_search`, which runs Exa's multi-step deep search and
+    returns a synthesized, cited answer in one tool call.
 
     ```python
     from pydantic_ai import Agent
@@ -62,6 +63,17 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
     One character of headroom above the cap is requested from Exa so local
     truncation can detect a longer page and append a truncation marker. At the
     API ceiling of 10,000 no headroom exists, so the marker cannot fire there.
+    """
+
+    text_summary: bool | str = False
+    """Have `web_search` also return a synthesized text summary above the results. Off by default.
+
+    When enabled, each `web_search` call requests Exa's plain-text output
+    schema, so the response carries a short summary synthesized from the
+    results in addition to the result list. Pass a string to describe the
+    desired summary format (it is sent as the schema's `description`), or
+    `True` for an unconstrained summary. The tool's return shape is unchanged:
+    the summary is prepended as a `Summary:` line when Exa returns one.
     """
 
     include_deep_search: bool = False
@@ -122,10 +134,13 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
         """
         if self.guidance is not None:
             return self.guidance or None
-        return _DEEP_INSTRUCTIONS if self.include_deep_search else _INSTRUCTIONS
+        instructions = _INSTRUCTIONS
+        if self.include_deep_search:
+            instructions += _DEEP_INSTRUCTIONS_SUFFIX
+        return instructions
 
     def get_toolset(self) -> ExaSearchToolset[AgentDepsT]:
-        """Build the toolset providing the `web_search`, `get_page`, and optional `deep_search` tools."""
+        """Build the toolset providing `web_search`, `get_page`, and the optional `deep_search` tool."""
         return ExaSearchToolset[AgentDepsT](
             client=self.client,
             num_results=self.num_results,
@@ -133,6 +148,7 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
             include_deep_search=self.include_deep_search,
             include_domains=self.include_domains,
             exclude_domains=self.exclude_domains,
+            text_summary=self.text_summary,
         )
 
     @classmethod
@@ -141,6 +157,7 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
         *,
         num_results: int = 5,
         max_text_chars: int = 10_000,
+        text_summary: bool | str = False,
         include_deep_search: bool = False,
         include_domains: Sequence[str] = (),
         exclude_domains: Sequence[str] = (),
@@ -154,6 +171,7 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
         return cls(
             num_results=num_results,
             max_text_chars=max_text_chars,
+            text_summary=text_summary,
             include_deep_search=include_deep_search,
             include_domains=list(include_domains),
             exclude_domains=list(exclude_domains),
