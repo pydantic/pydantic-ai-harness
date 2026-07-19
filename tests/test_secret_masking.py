@@ -206,6 +206,16 @@ class TestMaskDictValues:
         result = _mask_dict_values(d, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
         assert result['outer']['inner_key'] == '[REDACTED]'
 
+    def test_mask_list_values(self):
+        d = {
+            'headers': ['Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.test', 'safe-header'],
+            'configs': [{'token': 'sk-abc123def456ghi789jkl012mno'}],
+        }
+        result = _mask_dict_values(d, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
+        assert 'eyJ' not in result['headers'][0]
+        assert result['headers'][1] == 'safe-header'
+        assert result['configs'][0]['token'] == '[REDACTED]'
+
     def test_non_string_values_unchanged(self):
         d: dict[str, Any] = {'count': 42, 'flag': True, 'items': [1, 2]}
         result = _mask_dict_values(d, _ALL_BUILTIN_PATTERNS, '[REDACTED]')

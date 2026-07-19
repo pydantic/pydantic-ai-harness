@@ -98,8 +98,45 @@ def _mask_dict_values(
             result[key] = _mask_dict_values(
                 cast(dict[str, Any], value), patterns, replacement, partial=partial, visible_chars=visible_chars
             )
+        elif isinstance(value, list):
+            result[key] = _mask_list_values(
+                cast('list[Any]', value), patterns, replacement, partial=partial, visible_chars=visible_chars
+            )
         else:
             result[key] = value
+    return result
+
+
+def _mask_list_values(
+    items: list[Any],
+    patterns: dict[str, re.Pattern[str]],
+    replacement: str,
+    *,
+    partial: bool = False,
+    visible_chars: int = 4,
+) -> list[Any]:
+    """Recursively scrub secret patterns from string items in a list."""
+    result: list[Any] = []
+    for item in items:
+        if isinstance(item, str):
+            if partial:
+                result.append(_partial_mask_text(item, patterns, visible_chars))
+            else:
+                result.append(_mask_text(item, patterns, replacement))
+        elif isinstance(item, dict):
+            result.append(
+                _mask_dict_values(
+                    cast(dict[str, Any], item), patterns, replacement, partial=partial, visible_chars=visible_chars
+                )
+            )
+        elif isinstance(item, list):
+            result.append(
+                _mask_list_values(
+                    cast('list[Any]', item), patterns, replacement, partial=partial, visible_chars=visible_chars
+                )
+            )
+        else:
+            result.append(item)
     return result
 
 
