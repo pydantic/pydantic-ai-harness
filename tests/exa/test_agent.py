@@ -216,7 +216,7 @@ class TestAgentRunResult:
 
     def test_completed_without_output(self) -> None:
         result = agent_run_result(_run())
-        assert _text(result) == '\n\nRun ID: run_1 (pass as previous_run_id for follow-ups)'
+        assert _text(result) == '(no text output)\n\nRun ID: run_1 (pass as previous_run_id for follow-ups)'
         assert result.metadata == {RUN_ID_METADATA_KEY: 'run_1', 'sources': []}
 
     def test_structured_output_validated_against_model(self) -> None:

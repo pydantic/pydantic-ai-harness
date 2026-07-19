@@ -129,6 +129,8 @@ def agent_run_result(
                 ) from error
         else:
             body = json.dumps(structured)
+    if not body:
+        body = '(no text output)'
     sources: dict[str, str | None] = {}
     if output is not None and output.grounding:
         sources = {citation.url: citation.title for entry in output.grounding for citation in entry.citations}
