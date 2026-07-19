@@ -149,9 +149,12 @@ class TestMaskText:
     # --- .env content detection ---
 
     def test_env_key_value_single_line(self):
+        """DATABASE_URL isn't a sensitive *name*, but the credentials in its value still get
+        caught by the connection_strings category, so the variable name can stay visible."""
         text = 'DATABASE_URL=postgres://user:pass@localhost/db'
         result = _mask_text(text, _ALL_BUILTIN_PATTERNS, '[REDACTED]')
-        assert 'DATABASE_URL=' not in result
+        assert 'user:pass' not in result
+        assert 'DATABASE_URL=' in result
 
     def test_env_key_value_multiline(self):
         text = 'API_KEY=some_secret_value\nDB_PASSWORD=hunter2\nDEBUG=true'
@@ -163,6 +166,13 @@ class TestMaskText:
         """Lowercase variable names are not typical .env format and should not match."""
         patterns = _BUILTIN_CATEGORIES['env_file']
         text = 'lowercase_var=value'
+        result = _mask_text(text, patterns, '[REDACTED]')
+        assert result == text
+
+    def test_env_key_value_ignores_non_sensitive_names(self):
+        """Ordinary system env vars with no security-relevant name should survive untouched."""
+        patterns = _BUILTIN_CATEGORIES['env_file']
+        text = 'PATH=/usr/local/bin:/usr/bin\nHOME=/root\nDEBUG=true\nNODE_ENV=production'
         result = _mask_text(text, patterns, '[REDACTED]')
         assert result == text
 

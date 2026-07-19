@@ -46,7 +46,9 @@ _PRIVATE_KEY_PATTERNS: dict[str, re.Pattern[str]] = {
 }
 
 _ENV_FILE_PATTERNS: dict[str, re.Pattern[str]] = {
-    'env_key_value': re.compile(r'(?m)^[A-Z][A-Z0-9_]+=.+$'),
+    'env_key_value': re.compile(
+        r'(?m)^[A-Z][A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH|CERT|CREDENTIAL)[A-Z0-9_]*=.+$'
+    ),
 }
 
 _BUILTIN_CATEGORIES: dict[str, dict[str, re.Pattern[str]]] = {
