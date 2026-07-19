@@ -170,13 +170,13 @@ ExaSearch(
 )
 ```
 
-`include_domains` and `exclude_domains` apply to `web_search`, `deep_search`,
+`include_domains` and `exclude_domains` apply to `web_search` and `deep_search`,
 and are mutually exclusive -- set one, not both. Out-of-range limits and
 setting both domain lists raise at construction.
 
 ## Exa agent runs
 
-The Exa [Agent API](https://docs.exa.ai) runs open-ended research tasks
+The Exa [Agent API](https://exa.ai/docs/reference/agent-api-guide) runs open-ended research tasks
 asynchronously: a run is created, moves through `queued -> running`, and
 reaches a terminal status (`completed`, `failed`, or `cancelled`) after up to
 an hour. The separate `ExaAgent` capability maps that lifecycle onto Pydantic
