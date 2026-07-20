@@ -10,6 +10,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Annotated, Any
 
+import anyio
 from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition, WrapperToolset
 from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ModelRetry, UserError
@@ -541,16 +542,29 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         capture = PrintCapture()
 
+        tool_timeout = ctx.agent._tool_timeout if ctx.agent is not None else None  # pyright: ignore[reportPrivateUsage]
+
         try:
             monty_state = self._repl.feed_start(code, print_callback=capture, os=self.os_access, mount=self.mount)
-            completed = await MontyExecutor(
+            executor = MontyExecutor(
                 dispatch=dispatch_tool_call,
                 valid_names=callable_defs,
                 sequential_names=sequential_tools,
                 global_sequential=global_sequential,
                 os_access=self.os_access,
                 mount=self.mount,
-            ).run(monty_state)
+            )
+            if tool_timeout is not None:
+                with anyio.move_on_after(tool_timeout) as cancel_scope:
+                    completed = await executor.run(monty_state)
+                if cancel_scope.cancelled_caught:
+                    self._repl = None
+                    raise ModelRetry(
+                        f'run_code exceeded the cumulative tool timeout of {tool_timeout}s. '
+                        'The session was reset. Simplify the code or reduce the number of tool calls.'
+                    )
+            else:
+                completed = await executor.run(monty_state)
         except MontySyntaxError as e:
             raise ModelRetry(f'Syntax error in code:\n{capture.prepend_to(e.display())}') from e
         except MontyTypingError as e:  # pragma: no cover -- MontyRepl.feed_start doesn't raise this
@@ -580,7 +594,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 'each gathered call its own invocation. Revise the code and try again.'
             ) from e
 
-        result = completed.output
+        result = completed.output  # pyright: ignore[reportPossiblyUnboundVariable]
         printed = capture.joined
 
         # Validate result to reconstruct multimodal types (e.g. BinaryContent from

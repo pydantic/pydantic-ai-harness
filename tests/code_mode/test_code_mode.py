@@ -321,6 +321,31 @@ class TestCodeMode:
         with pytest.raises(ModelRetry, match='not allowed'):
             await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
 
+    async def test_run_code_cumulative_tool_timeout(self) -> None:
+        """tool_timeout applies to the total run_code execution, not per individual tool call."""
+        import asyncio
+
+        async def slow_tool(x: int) -> int:
+            """A tool that sleeps briefly before returning."""
+            await asyncio.sleep(0.2)
+            return x
+
+        agent = Agent(TestModel(), tool_timeout=0.3)  
+        toolset = _build_function_toolset(slow_tool)
+        wrapper = CodeMode[object]().get_wrapper_toolset(toolset)
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        ctx.agent = agent
+        tools = await wrapper.get_tools(ctx)
+
+        code = (
+            'import asyncio\n'
+            'await slow_tool(x=1)\n'
+            'await slow_tool(x=2)\n'
+        )
+        with pytest.raises(ModelRetry, match='cumulative tool timeout'):
+            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
     async def test_run_code_renders_no_arg_tool_signature(self) -> None:
         """A no-argument tool renders as `async def name() -> ...` (without `(*, ...)`).
 
