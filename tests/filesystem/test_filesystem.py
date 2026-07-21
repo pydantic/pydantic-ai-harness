@@ -16,17 +16,18 @@ from pydantic_ai_harness.filesystem._toolset import FileSystemToolset, _content_
 class TestFormatLines:
     def test_basic_formatting(self) -> None:
         text = 'line1\nline2\nline3\n'
-        result = _format_lines(text.splitlines(keepends=True), 0, 10)
+        result = _format_lines(text.splitlines(keepends=True), 1, 10)
         assert '     1\tline1\n' in result
         assert '     2\tline2\n' in result
         assert '     3\tline3\n' in result
 
     def test_offset(self) -> None:
+        """offset is 1-indexed: offset=2 starts at the second line ('b')."""
         text = 'a\nb\nc\nd\ne\n'
         result = _format_lines(text.splitlines(keepends=True), 2, 2)
+        assert '     2\tb\n' in result
         assert '     3\tc\n' in result
-        assert '     4\td\n' in result
-        assert '... (1 more lines. Use offset=4 to continue reading.)' in result
+        assert '... (2 more lines. Use offset=4 to continue reading.)' in result
 
     def test_offset_exceeds_length(self) -> None:
         text = 'a\nb\n'
@@ -39,13 +40,13 @@ class TestFormatLines:
 
     def test_no_trailing_newline(self) -> None:
         text = 'no newline'
-        result = _format_lines(text.splitlines(keepends=True), 0, 10)
+        result = _format_lines(text.splitlines(keepends=True), 1, 10)
         assert result.endswith('\n')
 
     def test_continuation_hint(self) -> None:
         text = '\n'.join(f'line{i}' for i in range(10))
-        result = _format_lines(text.splitlines(keepends=True), 0, 3)
-        assert '... (7 more lines. Use offset=3 to continue reading.)' in result
+        result = _format_lines(text.splitlines(keepends=True), 1, 3)
+        assert '... (7 more lines. Use offset=4 to continue reading.)' in result
 
 
 class TestIsBinary:
@@ -298,7 +299,9 @@ class TestReadFile:
         assert '1 lines' in result
 
     async def test_read_with_offset(self, toolset: FileSystemToolset[None]) -> None:
+        """offset is 1-indexed: offset=2 starts at the second line, not the third."""
         result = await toolset.read_file('multi.txt', offset=2)
+        assert 'line2' in result
         assert 'line3' in result
         assert 'line1' not in result
 
@@ -307,6 +310,17 @@ class TestReadFile:
         assert 'line1' in result
         assert 'line2' in result
         assert '... (3 more lines' in result
+
+    async def test_read_offset_zero_rejected(self, toolset: FileSystemToolset[None]) -> None:
+        """offset=0 was the old zero-based default; it must fail loudly, not silently shift."""
+        with pytest.raises(ModelRetry, match='1-indexed'):
+            await toolset.read_file('multi.txt', offset=0)
+
+    async def test_read_offset_one_matches_default(self, toolset: FileSystemToolset[None]) -> None:
+        """offset=1 (first line, explicit) is the same window as the default (None)."""
+        explicit = await toolset.read_file('multi.txt', offset=1)
+        default = await toolset.read_file('multi.txt')
+        assert explicit == default
 
     async def test_read_directory_raises(self, toolset: FileSystemToolset[None]) -> None:
         with pytest.raises(ModelRetry, match='is a directory'):
@@ -742,35 +756,35 @@ class TestFileInfo:
 class TestMutationKillers:
     async def test_format_lines_offset_equals_total(self) -> None:
         text = 'a\nb\n'  # 2 lines
-        with pytest.raises(ValueError, match='Offset 2 exceeds file length'):
-            _format_lines(text.splitlines(keepends=True), 2, 10)
+        with pytest.raises(ValueError, match='Offset 3 exceeds file length'):
+            _format_lines(text.splitlines(keepends=True), 3, 10)
 
     async def test_format_lines_exact_fit_no_continuation(self) -> None:
         text = 'a\nb\nc\n'  # 3 lines
-        result = _format_lines(text.splitlines(keepends=True), 0, 3)
+        result = _format_lines(text.splitlines(keepends=True), 1, 3)
         assert '... (' not in result
         assert 'more lines' not in result
 
     async def test_format_lines_exact_fit_from_offset(self) -> None:
         text = 'a\nb\nc\n'  # 3 lines
-        result = _format_lines(text.splitlines(keepends=True), 1, 2)  # lines 2-3, 0 remaining
+        result = _format_lines(text.splitlines(keepends=True), 2, 2)  # lines 2-3, 0 remaining
         assert '... (' not in result
         assert 'more lines' not in result
 
     async def test_format_lines_one_line_remaining(self) -> None:
         text = 'a\nb\nc\n'  # 3 lines
-        result = _format_lines(text.splitlines(keepends=True), 0, 2)
-        assert '... (1 more lines. Use offset=2 to continue reading.)' in result
+        result = _format_lines(text.splitlines(keepends=True), 1, 2)
+        assert '... (1 more lines. Use offset=3 to continue reading.)' in result
 
     async def test_format_lines_line_number_starts_at_one(self) -> None:
         text = 'first\nsecond\n'
-        result = _format_lines(text.splitlines(keepends=True), 0, 10)
+        result = _format_lines(text.splitlines(keepends=True), 1, 10)
         assert '     1\tfirst\n' in result
         assert '     0\t' not in result
 
     async def test_format_lines_offset_line_numbering(self) -> None:
         text = 'a\nb\nc\n'
-        result = _format_lines(text.splitlines(keepends=True), 1, 2)
+        result = _format_lines(text.splitlines(keepends=True), 2, 2)
         assert '     2\tb\n' in result
         assert '     3\tc\n' in result
 
@@ -887,13 +901,13 @@ class TestMutationKillers:
     async def test_format_lines_join_separator(self) -> None:
         """Verify the result doesn't contain garbage between lines."""
         text = 'a\nb\nc\n'
-        result = _format_lines(text.splitlines(keepends=True), 0, 3)
+        result = _format_lines(text.splitlines(keepends=True), 1, 3)
         # Lines should be directly adjacent (no separator between them)
         assert '     1\ta\n     2\tb\n     3\tc\n' in result
 
     async def test_format_lines_no_trailing_newline_preserves_content(self) -> None:
         text = 'no newline'
-        result = _format_lines(text.splitlines(keepends=True), 0, 10)
+        result = _format_lines(text.splitlines(keepends=True), 1, 10)
         # The content must still be present
         assert 'no newline' in result
         assert result.endswith('\n')
@@ -952,7 +966,7 @@ class TestMutationKillers:
     def test_format_lines_no_double_trailing_newline(self) -> None:
         """Text that already ends with newline must NOT get a second one appended."""
         text = 'hello\n'
-        result = _format_lines(text.splitlines(keepends=True), 0, 10)
+        result = _format_lines(text.splitlines(keepends=True), 1, 10)
         # Exact match: no trailing double newline
         assert result == '     1\thello\n'
 
