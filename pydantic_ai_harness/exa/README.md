@@ -66,10 +66,13 @@ is requested from Exa, so when a page exceeds the cap the output ends with a
 result count is bounded the same way: `num_results` is requested from Exa and
 re-applied to the response.
 
-A URL or question that returns no content, a rate limit, or a transient API or
-network failure surfaces to the model as a `ModelRetry` (the model can correct
-the URL, rephrase, or try again) rather than aborting the run. Authentication
-failures (401/403) are configuration errors and propagate.
+A `web_search` query with no matches is a valid answer, not an error: the tool
+returns `No results found for {query!r}.` and the model can relay that to the
+user. For `get_page` and `deep_search`, a URL or question that returns no
+content, a rate limit, or a transient API or network failure surfaces to the
+model as a `ModelRetry` (the model can correct the URL, rephrase, or try again)
+rather than aborting the run. Authentication failures (401/403) are
+configuration errors and propagate.
 
 ## Deep search
 
