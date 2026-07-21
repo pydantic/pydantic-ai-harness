@@ -11,6 +11,7 @@
       { "label": "Exa Search", "slug": "exa-search" },
       { "label": "Compaction", "slug": "compaction" },
       { "label": "Overflowing Tool Output", "slug": "overflowing-tool-output" },
+      { "label": "Cross-Model Label", "slug": "cross-model-label" },
       { "label": "Step Persistence", "slug": "step-persistence" },
       { "label": "Media", "slug": "media" },
       { "label": "Subagents", "slug": "subagents" },
