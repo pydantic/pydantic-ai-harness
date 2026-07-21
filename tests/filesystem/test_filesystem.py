@@ -35,8 +35,13 @@ class TestFormatLines:
             _format_lines(text.splitlines(keepends=True), 5, 10)
 
     def test_empty_file(self) -> None:
-        result = _format_lines([], 0, 10)
+        result = _format_lines([], 1, 10)
         assert result == '(empty file)\n'
+
+    def test_empty_file_offset_zero_still_rejected(self) -> None:
+        """offset validation must not depend on the file being empty."""
+        with pytest.raises(ValueError, match='1-indexed'):
+            _format_lines([], 0, 10)
 
     def test_no_trailing_newline(self) -> None:
         text = 'no newline'

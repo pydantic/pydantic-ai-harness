@@ -47,9 +47,6 @@ def _format_lines(lines: Sequence[str], offset: int | None, limit: int) -> str:
     """
     total = len(lines)
 
-    if total == 0:
-        return '(empty file)\n'
-
     if offset is not None and offset < 1:
         raise ValueError(
             f'offset must be >= 1: line numbers are 1-indexed (previously 0-indexed), matching '
@@ -59,6 +56,8 @@ def _format_lines(lines: Sequence[str], offset: int | None, limit: int) -> str:
 
     start = offset - 1 if offset is not None else 0
     if start >= total:
+        if total == 0:
+            return '(empty file)\n'
         raise ValueError(f'Offset {offset} exceeds file length ({total} lines).')
 
     selected = lines[start : start + limit]
