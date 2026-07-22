@@ -241,8 +241,14 @@ class Memory(AbstractCapability[AgentDepsT]):
                 if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
                     parts.append(part)
                     continue
+                # The bare `_MEMORY_PART_METADATA` match is a compatibility strip for
+                # histories persisted before markers were scope-qualified; without it a
+                # resumed pre-upgrade conversation keeps one stale block permanently.
+                # Removable once pre-upgrade histories are no longer a concern.
                 content = [
-                    item for item in part.content if not (isinstance(item, TextContent) and item.metadata == marker)
+                    item
+                    for item in part.content
+                    if not (isinstance(item, TextContent) and item.metadata in (marker, _MEMORY_PART_METADATA))
                 ]
                 if len(content) == len(part.content):
                     parts.append(part)
