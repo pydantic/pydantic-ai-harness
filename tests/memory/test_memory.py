@@ -26,7 +26,6 @@ from pydantic_ai.messages import (
     UserContent,
     UserPromptPart,
 )
-from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.test import TestModel
@@ -1045,29 +1044,62 @@ class TestInjection:
                 capabilities=[Memory(store=OutOfScopeListingStore(), injection_errors='raise')],
             ).run('go')
 
-    async def test_multiple_scopes_do_not_clobber_each_others_injection(self) -> None:
+    async def test_multiple_memories_compose_on_one_agent_without_clobbering(self) -> None:
         store = InMemoryStore()
         await _seed(store, 'main/MEMORY.md', '- personal fact')
         await _seed(store, 'org/MEMORY.md', '- org fact')
-        personal = await Memory[None](store=store, agent_name='main').for_run(_ctx())
-        org = await Memory[None](store=store, agent_name='org').for_run(_ctx())
+        captured: list[list[str]] = []
 
-        def fresh_context() -> ModelRequestContext:
-            return ModelRequestContext(
-                model=TestModel(),
-                messages=[ModelRequest(parts=[UserPromptPart('go')])],
-                model_settings=None,
-                model_request_parameters=ModelRequestParameters(),
-            )
+        def capture(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            captured.append(_memory_contexts(messages))
+            return ModelResponse(parts=[TextPart('done')])
 
-        rc = fresh_context()
-        for turn in range(2):
-            rc = await personal.before_model_request(_ctx(), rc)
-            rc = await org.before_model_request(_ctx(), rc)
-            contexts = _memory_contexts(rc.messages)
-            assert len(contexts) == 2, turn
-            assert any('personal fact' in c for c in contexts)
-            assert any('org fact' in c for c in contexts)
+        agent = Agent(
+            FunctionModel(capture),
+            capabilities=[
+                Memory(store=store),
+                Memory(store=store, agent_name='org').prefix_tools('org'),
+            ],
+        )
+        first = await agent.run('first')
+        second = await agent.run('second', message_history=first.all_messages())
+
+        assert len(captured) == 2
+        for contexts in captured:
+            assert len(contexts) == 2
+            assert any('personal fact' in context for context in contexts)
+            assert any('org fact' in context for context in contexts)
+        assert len(_memory_contexts(second.all_messages())) == 2
+
+    async def test_legacy_unqualified_marker_is_stripped_from_continued_history(self) -> None:
+        store = InMemoryStore()
+        await _seed(store, 'main/MEMORY.md', '- durable fact')
+        history: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    UserPromptPart('earlier'),
+                    UserPromptPart(
+                        [TextContent('<memory>\n- stale fact\n</memory>', metadata='pydantic-ai-harness.memory.v1')]
+                    ),
+                ]
+            ),
+            ModelResponse(parts=[TextPart('ok')]),
+        ]
+        captured: list[list[str]] = []
+
+        def capture(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            captured.append(_memory_contexts(messages))
+            return ModelResponse(parts=[TextPart('done')])
+
+        result = await Agent(FunctionModel(capture), capabilities=[Memory(store=store)]).run(
+            'continue', message_history=history
+        )
+
+        assert len(captured) == 1
+        assert len(captured[0]) == 1
+        assert 'durable fact' in captured[0][0]
+        assert 'stale fact' not in captured[0][0]
+        assert len(_memory_contexts(result.all_messages())) == 1
 
 
 class TestConfigurationAndSpecs:
