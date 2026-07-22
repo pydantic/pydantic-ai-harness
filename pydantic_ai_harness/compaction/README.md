@@ -23,7 +23,7 @@ provider rejects an orphaned pair. The zero-LLM strategies never call a model.
 
 | Capability | Cost | What it does | Reach for it when |
 |---|---|---|---|
-| `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
+| `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, plain tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
 | `SlidingWindow` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
 | `ClearToolResults` | zero-LLM | Blanks the content of old tool *results* in place, keeping the last `keep_pairs` | Tool outputs dominate context and can be re-fetched on demand (the cheap first tier) |
 | `DeduplicateFileReads` | zero-LLM | Blanks every file read superseded by a newer read of the same file | The agent re-reads files and only the latest version matters |
@@ -68,11 +68,14 @@ A part is clamped only when it is oversized *and* the clamp actually shrinks it,
 It clamps two kinds of part inside each `ModelResponse`:
 
 - **Response text** (`TextPart`) -- the critical case, a runaway model-response text part.
-- **Tool-call args** (`ToolCallPart`), when `clamp_tool_call_args=True` (default) -- the same failure
-  shape for a giant payload (e.g. a runaway `write_plan`). The args are replaced with a small JSON
-  object `{"_clamped": "<head>...<tail>"}` so they stay valid function arguments; the original call
-  already executed, so this only shrinks the history copy. Set `clamp_tool_call_args=False` to clamp
-  response text only.
+- **Plain tool-call args** (`ToolCallPart`), when `clamp_tool_call_args=True` (default) -- the same
+  failure shape for a giant payload (e.g. a runaway `write_plan`). The args are replaced with a small
+  JSON object `{"_clamped": "<head>...<tail>"}` so they stay valid function arguments; the original
+  call already executed, so this only shrinks the history copy. Framework-typed calls such as core's
+  `search_tools` and `load_capability` are left intact because their args use narrower structured
+  schemas. Replacing them with the generic `_clamped` object would preserve the subclass while
+  corrupting message-history serialization and restore. Typed calls therefore remain in the context
+  even when oversized. Set `clamp_tool_call_args=False` to clamp response text only.
 
 Request-side parts (user prompts, tool *returns*, system prompts) are deliberately out of scope:
 user input should not be silently rewritten, and oversized tool returns are the job of
