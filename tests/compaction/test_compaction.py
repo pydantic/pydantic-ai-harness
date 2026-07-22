@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer
 from pydantic_ai.messages import (
+    LoadCapabilityCallPart,
     ModelMessage,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
+    ToolSearchCallPart,
     ToolSearchReturnContent,
     ToolSearchReturnPart,
     UserPromptPart,
@@ -1957,6 +1961,49 @@ class TestClampOversizedMessages:
         assert _CLAMP_ARGS_KEY in part.args
         assert '[clamped: removed' in part.args[_CLAMP_ARGS_KEY]
         assert part.tool_call_id == 'c1'
+
+    @pytest.mark.anyio
+    async def test_preserves_typed_tool_call_args_and_round_trips(self):
+        query = 'q' * 5_000
+        capability_id = 'c' * 5_000
+        search_call = ToolSearchCallPart(args={'queries': [query]}, tool_call_id='ts1')
+        load_call = LoadCapabilityCallPart(args={'id': capability_id}, tool_call_id='lc1')
+        plain_call = ToolCallPart(tool_name='write_plan', args='p' * 5_000, tool_call_id='p1')
+        response = ModelResponse(parts=[search_call, load_call, plain_call])
+        cap = ClampOversizedMessages(max_part_chars=1_000, keep_head_chars=50, keep_tail_chars=50)
+
+        result = await cap.compact([response], _make_ctx())
+
+        out_search, out_load, out_plain = result[0].parts
+        assert out_search is search_call
+        assert isinstance(out_search, ToolSearchCallPart)
+        assert out_search.queries == [query]
+        assert out_load is load_call
+        assert isinstance(out_load, LoadCapabilityCallPart)
+        assert out_load.capability_id == capability_id
+        assert type(out_plain) is ToolCallPart
+        assert isinstance(out_plain.args, dict)
+        assert _CLAMP_ARGS_KEY in out_plain.args
+
+        dumped_python = ModelMessagesTypeAdapter.dump_python(result, mode='json')
+        dumped_json = ModelMessagesTypeAdapter.dump_json(result)
+        restored_variants = (
+            ModelMessagesTypeAdapter.validate_python(result),
+            ModelMessagesTypeAdapter.validate_python(dumped_python),
+            ModelMessagesTypeAdapter.validate_json(dumped_json),
+            ModelMessagesTypeAdapter.validate_python(json.loads(dumped_json.decode('utf-8'))),
+        )
+        for restored in restored_variants:
+            restored_response = restored[0]
+            assert isinstance(restored_response, ModelResponse)
+            restored_search, restored_load, restored_plain = restored_response.parts
+            assert type(restored_search) is ToolSearchCallPart
+            assert restored_search.queries == [query]
+            assert type(restored_load) is LoadCapabilityCallPart
+            assert restored_load.capability_id == capability_id
+            assert type(restored_plain) is ToolCallPart
+            assert isinstance(restored_plain.args, dict)
+            assert _CLAMP_ARGS_KEY in restored_plain.args
 
     @pytest.mark.anyio
     async def test_small_tool_call_args_untouched(self):

@@ -27,7 +27,7 @@ _CLAMP_MARKER = '\n[clamped: removed {removed} of {original} characters]\n'
 are filled with character counts."""
 
 _CLAMP_ARGS_KEY = '_clamped'
-"""Key of the single-entry object a clamped `ToolCallPart`'s args are replaced with.
+"""Key of the single-entry object a clamped plain `ToolCallPart`'s args are replaced with.
 
 Args stay a JSON object (not a bare marker string) so `args_as_json_str()` emits valid function
 arguments for the provider."""
@@ -35,7 +35,7 @@ arguments for the provider."""
 
 @dataclass
 class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
-    """Zero-cost head/tail truncation of any single oversized message part.
+    """Zero-cost head/tail truncation of oversized response text and plain tool-call args.
 
     A runaway generation -- a model response of repeated whitespace, a giant tool-call
     payload -- can produce one part so large the next request exceeds the provider's context
@@ -49,10 +49,12 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
     What it clamps, in each `ModelResponse`:
 
     - `TextPart` content (the critical case -- a runaway model-response text part).
-    - `ToolCallPart` args, when `clamp_tool_call_args` is set (the same failure shape for a
-      giant tool-call payload). The args are replaced with a small JSON object so they stay
+    - Plain `ToolCallPart` args, when `clamp_tool_call_args` is set (the same failure shape for
+      a giant tool-call payload). The args are replaced with a small JSON object so they stay
       valid function arguments; the original call already executed, so this only shrinks the
-      history copy.
+      history copy. Framework-typed subclasses are left intact because replacing their
+      structured args with the generic marker would violate their schemas and break
+      message-history persistence and restore.
 
     Request-side parts (user prompts, tool returns, system prompts) are out of scope: user
     input should not be silently rewritten, and oversized tool *returns* are the job of
@@ -64,8 +66,8 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
     A part is clamped only when it is oversized *and* the clamp actually shrinks it, so set
     `keep_head_chars` + `keep_tail_chars` well below your per-part threshold.
 
-    Composes as the first tier of a `TieredCompaction` (run it before `ClearToolResults`):
-    it is the only zero-LLM way to keep a run alive after a runaway generation.
+    Compose it as the first tier of a `TieredCompaction` (run it before `ClearToolResults`)
+    to handle supported runaway response parts without an LLM call.
 
     Example:
         ```python
@@ -92,7 +94,7 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
     """Characters of the part's tail to retain."""
 
     clamp_tool_call_args: bool = True
-    """When ``True``, also clamp oversized `ToolCallPart` args, not just response text."""
+    """When `True`, also clamp oversized plain `ToolCallPart` args, not just response text."""
 
     tokenizer: Callable[[str], int] | None = None
     """Optional tokenizer for accurate token counting.
@@ -137,7 +139,7 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
         messages: list[ModelMessage],
         ctx: RunContext[AgentDepsT],
     ) -> list[ModelMessage]:
-        """Clamp every oversized response text part (and tool-call args, if enabled)."""
+        """Clamp every oversized response text part (and plain tool-call args, if enabled)."""
         out: list[ModelMessage] = []
         for msg in messages:
             if not isinstance(msg, ModelResponse):
@@ -153,7 +155,9 @@ class ClampOversizedMessages(AbstractCapability[AgentDepsT]):
                         new_parts.append(replace(part, content=clamped))
                         changed = True
                         continue
-                elif isinstance(part, ToolCallPart) and self.clamp_tool_call_args:
+                # Exact type: framework-typed subclasses narrow `args` to structured schemas.
+                # `replace` would preserve the subclass while bypassing validation and corrupting history round-trips.
+                elif type(part) is ToolCallPart and self.clamp_tool_call_args:
                     clamped = self._clamp(part.args_as_json_str())
                     if clamped is not None:
                         new_parts.append(replace(part, args={_CLAMP_ARGS_KEY: clamped}))
