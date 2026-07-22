@@ -26,6 +26,7 @@ from pydantic_ai.messages import (
     UserContent,
     UserPromptPart,
 )
+from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.test import TestModel
@@ -1043,6 +1044,30 @@ class TestInjection:
                 TestModel(),
                 capabilities=[Memory(store=OutOfScopeListingStore(), injection_errors='raise')],
             ).run('go')
+
+    async def test_multiple_scopes_do_not_clobber_each_others_injection(self) -> None:
+        store = InMemoryStore()
+        await _seed(store, 'main/MEMORY.md', '- personal fact')
+        await _seed(store, 'org/MEMORY.md', '- org fact')
+        personal = await Memory[None](store=store, agent_name='main').for_run(_ctx())
+        org = await Memory[None](store=store, agent_name='org').for_run(_ctx())
+
+        def fresh_context() -> ModelRequestContext:
+            return ModelRequestContext(
+                model=TestModel(),
+                messages=[ModelRequest(parts=[UserPromptPart('go')])],
+                model_settings=None,
+                model_request_parameters=ModelRequestParameters(),
+            )
+
+        rc = fresh_context()
+        for turn in range(2):
+            rc = await personal.before_model_request(_ctx(), rc)
+            rc = await org.before_model_request(_ctx(), rc)
+            contexts = _memory_contexts(rc.messages)
+            assert len(contexts) == 2, turn
+            assert any('personal fact' in c for c in contexts)
+            assert any('org fact' in c for c in contexts)
 
 
 class TestConfigurationAndSpecs:
