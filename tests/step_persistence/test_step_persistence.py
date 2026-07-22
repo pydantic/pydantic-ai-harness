@@ -711,6 +711,26 @@ class TestStepPersistenceCapability:
         assert effect is not None
         assert effect.status == 'completed'
 
+    async def test_run_stream_snapshot_keeps_the_final_response(self) -> None:
+        """A completed `run_stream` resumes from its final assistant turn, not the tool boundary.
+
+        `run_stream` ends through `SetFinalResult`, not a terminal
+        `CallToolsNode`, and its final response reaches the history only after
+        that boundary -- so no `after_node_run` save can carry it and the
+        `after_run` fallback is the only writer that sees the whole run.
+        """
+        store = InMemoryStepStore()
+        agent = make_simple_agent([StepPersistence(store=store, run_id='streamed')])
+
+        async with agent.run_stream('add 1 and 2') as result:
+            await result.get_output()
+
+        snapshot = await store.latest_snapshot(run_id='streamed')
+        assert snapshot is not None
+        assert is_provider_valid(snapshot.messages) is True
+        assert isinstance(snapshot.messages[-1], ModelResponse)
+        assert snapshot.messages == result.all_messages()
+
     async def test_basic_run_records_lifecycle_and_snapshot(self) -> None:
         store = InMemoryStepStore()
         agent = make_simple_agent([StepPersistence(store=store, agent_name='librarian')])
