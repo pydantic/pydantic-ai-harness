@@ -210,7 +210,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     ) -> AgentRunResult[Any]:
         """Push this run's id onto the contextvar so nested delegates can read it."""
         token = current_run_id.set(self._effective_run_id(ctx))
-        saved_token = snapshot_saved.set(False)
+        saved_token = snapshot_saved.set(0)
         history_token = latest_node_history.set(None)
         try:
             return await handler()
@@ -255,15 +255,19 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     ) -> AgentRunResult[Any]:
         """Emit `run_completed`, saving a final snapshot only as a fallback.
 
-        The terminal `CallToolsNode` already saved the final provider-valid
-        snapshot via `after_node_run`, carrying the correct `step_index`. By
-        `after_run`, `ctx.run_step` is reset to 0, so re-saving here would both
-        duplicate the tail and stamp a misleading `step_index`. We only save
-        when the run produced no snapshot at all (no provider-valid node
-        boundary was reached), as a last-resort capture of the final state.
+        When a terminal `CallToolsNode` already saved the final history via
+        `after_node_run` it carries the correct `step_index`, whereas by
+        `after_run` `ctx.run_step` is reset to 0 -- so re-saving would both
+        duplicate the tail and stamp a misleading `step_index`. We save only
+        when the run ended past the newest boundary snapshot.
+
+        That covers a run which reached no provider-valid boundary at all, and
+        `Agent.run_stream`, which ends through `SetFinalResult` rather than a
+        terminal `CallToolsNode` and appends its closing response after the last
+        boundary -- leaving `after_run` the only hook that sees the full run.
         """
-        if not snapshot_saved.get():
-            messages = result.all_messages()
+        messages = result.all_messages()
+        if len(messages) > snapshot_saved.get():
             if is_provider_valid(messages):
                 await self.store.save_snapshot(
                     ContinuableSnapshot(
@@ -525,5 +529,5 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
                         agent_name=self.agent_name,
                     )
                 )
-                snapshot_saved.set(True)
+                snapshot_saved.set(len(messages))
         return result
