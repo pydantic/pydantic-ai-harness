@@ -375,12 +375,16 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     ) -> ModelResponse:
         """Rescue the request payload as a resume point when a model request fails.
 
-        The payload is the provider-valid history the run was about to send --
-        e.g. a resolved tool cycle after a clean `CallToolsNode`, which is
-        never a completed-node boundary (the tool return only enters the
-        history as this request is built). It is saved here, directly to the
-        store, because the contextvar path used by `on_run_error` cannot carry
-        a value out of a model request that raises.
+        The payload is the provider-valid history the run was about to send,
+        which can be further along than any completed node boundary -- a
+        request built from processors or an injected history has no boundary
+        behind it. It is saved here, directly to the store, because the
+        contextvar path used by `on_run_error` cannot carry a value out of a
+        model request that raises.
+
+        For a plain resolved tool cycle this repeats what `after_node_run`
+        already saved at the `CallToolsNode` boundary, which folds the pending
+        request in.
         """
         messages = list(request_context.messages)
         if _is_resumable_history(messages):

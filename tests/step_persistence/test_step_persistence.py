@@ -1071,22 +1071,28 @@ class TestCrashMidToolCallContract:
 class TestOnRunErrorSnapshot:
     """`on_run_error` rescues a provider-valid resume point no snapshot captured (#253).
 
-    A provider-valid history can exist at a boundary that no snapshot records:
-    the model request after a clean tool cycle (the resolved tool return only
-    enters the history as that request is built) or the `CallToolsNode` after a
-    text response (output validation raising there skips its `after_node_run`).
-    `on_run_error` persists the last such history, and skips when the crash left
-    a dangling tool call -- so `latest_snapshot` never regresses to an
-    unsendable point.
+    A provider-valid history can exist at a boundary that no snapshot records --
+    for instance the `CallToolsNode` after a text response, where output
+    validation raising skips its own `after_node_run`. `on_run_error` persists
+    the last such history, and skips when the crash left a dangling tool call --
+    so `latest_snapshot` never regresses to an unsendable point.
+
+    These run-level tests assert the resume point a failed run ends up with.
+    Since `after_node_run` folds the pending request into its `CallToolsNode`
+    snapshot (#373), the error paths are no longer the only writer of these
+    histories; `TestCapabilityHookBranches` pins each error hook's own save
+    directly.
     """
 
     async def test_rescues_provider_valid_history_when_next_model_request_raises(self) -> None:
         """Issue #253 acceptance test: request 1 tool call, request 2 raises.
 
-        The resolved tool cycle `[prompt, response, tool-return]` is
-        provider-valid with no open tool calls, but it is never a completed
-        node boundary, so without this behavior the run leaves no snapshot.
-        `on_run_error` rescues it from the `before_model_request` boundary.
+        The run must end with the resolved tool cycle
+        `[prompt, response, tool-return]` as its resume point -- provider-valid,
+        no open tool calls. Since #373 the `CallToolsNode` boundary also saves
+        that history, so this asserts the outcome rather than which hook wrote
+        it; `test_on_model_request_error_saves_resumable_payload` pins the
+        error-path save on its own.
         """
         store = InMemoryStepStore()
 
@@ -1382,6 +1388,38 @@ class TestCapabilityHookBranches:
         events = await store.list_events(run_id='r1')
         assert [e.kind for e in events] == ['model_request_failed']
         assert events[0].error is not None and 'nope' in events[0].error
+        assert await store.latest_snapshot(run_id='r1') is None
+
+    async def test_on_model_request_error_saves_resumable_payload(self) -> None:
+        """The failing request's payload is itself persisted as a resume point.
+
+        Pinned directly because the run-level `TestOnRunErrorSnapshot` cases no
+        longer isolate this hook: since #373 the `CallToolsNode` boundary saves
+        the same resolved-cycle history, so those assertions hold even with this
+        save removed.
+        """
+        store = InMemoryStepStore()
+        cap: StepPersistence[object] = StepPersistence(store=store)
+        ctx = build_run_context(deps=None, run_id='r1', run_step=4)
+        resumable: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='hi')]),
+            ModelResponse(parts=[ToolCallPart(tool_name='add', args={}, tool_call_id='add-1')]),
+            ModelRequest(parts=[ToolReturnPart(tool_name='add', content=3, tool_call_id='add-1')]),
+        ]
+        request_context = ModelRequestContext(
+            model=ctx.model,
+            messages=resumable,
+            model_settings=None,
+            model_request_parameters=ModelRequestParameters(),
+        )
+
+        with pytest.raises(RuntimeError, match='nope'):
+            await cap.on_model_request_error(ctx, request_context=request_context, error=RuntimeError('nope'))
+
+        snap = await store.latest_snapshot(run_id='r1')
+        assert snap is not None
+        assert snap.step_index == 4
+        assert snap.messages == resumable
 
     async def test_for_run_returns_self_when_resolution_is_no_op(self) -> None:
         """When `run_id` is explicit and no contextvar is set, `for_run` returns `self`."""
