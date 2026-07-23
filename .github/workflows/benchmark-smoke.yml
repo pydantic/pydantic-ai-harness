@@ -1,0 +1,98 @@
+name: Benchmark smoke
+
+# Validates the Terminal-Bench reference agent (benchmarks/terminal_bench). This
+# is a standalone project with heavy deps (Harbor), so it runs in its own
+# workflow, off the main `check` gate, and only when the benchmark changes.
+on:
+  pull_request:
+    paths:
+      - benchmarks/terminal_bench/**
+      - .github/workflows/benchmark-smoke.yml
+  # For manual re-runs once this workflow exists on the default branch.
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: benchmarks/terminal_bench
+
+jobs:
+  # Lint, typecheck, and the no-Docker unit tests: they prove the adapter/agent
+  # seam with a fake environment and a scripted model, no API keys.
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.12'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- no release artifacts, no sensitive permissions
+          cache-suffix: benchmark-smoke
+
+      - name: Install the harness (local), the benchmark, and Harbor
+        run: |
+          uv venv
+          uv pip install -e ../.. -e '.[dev]' 'harbor==0.18.0'
+
+      - run: uv run --no-sync ruff check src tests
+      - run: uv run --no-sync ruff format --check src tests
+      - run: uv run --no-sync pyright
+      - run: uv run --no-sync pytest -q
+
+  # The Docker seam: run one local task container with the scripted, keyless
+  # agent. Proves Harbor + Docker + adapter + environment.exec + agent end to
+  # end. GitHub-hosted ubuntu runners ship Docker preinstalled.
+  docker-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.12'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- no release artifacts, no sensitive permissions
+          cache-suffix: benchmark-docker
+
+      - name: Confirm Docker is available
+        run: docker info
+
+      - name: Install the harness (local), the benchmark, and Harbor
+        run: |
+          uv venv
+          uv pip install -e ../.. -e '.[dev]' 'harbor==0.18.0'
+
+      - name: Run the smoke task with the scripted keyless agent
+        run: |
+          uv run --no-sync harbor run \
+            -p tasks/smoke-hello \
+            -a pydantic_ai_harness_terminal_bench.smoke:ScriptedSmokeAgent \
+            -o jobs_smoke \
+            -n 1 -k 1 -y
+
+      - name: Assert the trial completed and the write landed in the container
+        run: |
+          echo "Reward files found:"
+          find jobs_smoke -name 'reward.txt' -print -exec cat {} \;
+          if grep -rq '1.0' jobs_smoke --include='reward.txt'; then
+            echo "Smoke passed: environment.exec round-tripped and the write persisted."
+          else
+            echo "Smoke failed: no reward=1.0. The seam did not complete as expected." >&2
+            exit 1
+          fi
+
+      - name: Upload job artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-smoke-jobs
+          path: benchmarks/terminal_bench/jobs_smoke
+          include-hidden-files: true

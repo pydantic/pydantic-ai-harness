@@ -1,0 +1,157 @@
+name: Benchmark live
+
+# Runs the Terminal-Bench reference agent against a small slice of REAL tasks
+# with a REAL model, in Docker on a GitHub-hosted runner. Real API spend, so it
+# is opt-in per PR (the `bench-live` label) and off the required check set. The
+# keyless plumbing is covered by `benchmark-smoke.yml`; this proves the same
+# seam end to end with a live model.
+on:
+  pull_request:
+    types: [labeled, synchronize, opened]
+    paths:
+      - benchmarks/terminal_bench/**
+      - .github/workflows/benchmark-live.yml
+  # Post-merge manual runs: pick the task slice at dispatch time.
+  workflow_dispatch:
+    inputs:
+      tasks:
+        description: Space-separated Terminal-Bench task names (globs) to run.
+        required: false
+        default: fix-git openssl-selfsigned-cert regex-log
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: benchmarks/terminal_bench
+
+jobs:
+  # Gated twice: the label gates the job (an `if:` cannot read secrets), and the
+  # first step inside fails fast if no usable credential is actually present.
+  live:
+    # Only on an explicit dispatch, or when the PR carries the `bench-live` label.
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.pull_request.labels.*.name, 'bench-live')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.12'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- no release artifacts, no sensitive permissions
+          cache-suffix: benchmark-live
+
+      - name: Confirm Docker is available
+        run: docker info
+
+      # Decide model routing and fail fast with a clear message if no credential
+      # is usable. Reads presence only -- never echoes a secret value.
+      - name: Check credentials and pick model routing
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} # zizmor: ignore[secrets-outside-env] -- label-gated job, no GitHub Environments configured; secrets are needed as process env for the model/gateway/logfire clients
+          PYDANTIC_AI_GATEWAY_API_KEY: ${{ secrets.PYDANTIC_AI_GATEWAY_API_KEY }} # zizmor: ignore[secrets-outside-env] -- see above
+          LOGFIRE_TOKEN: ${{ secrets.LOGFIRE_TOKEN }} # zizmor: ignore[secrets-outside-env] -- see above
+        run: |
+          have() { [ -n "$1" ] && echo present || echo missing; }
+          echo "ANTHROPIC_API_KEY:            $(have "$ANTHROPIC_API_KEY")"
+          echo "PYDANTIC_AI_GATEWAY_API_KEY:  $(have "$PYDANTIC_AI_GATEWAY_API_KEY")"
+          echo "LOGFIRE_TOKEN:                $(have "$LOGFIRE_TOKEN")"
+          if [ -n "$PYDANTIC_AI_GATEWAY_API_KEY" ]; then
+            echo "Routing model through the Pydantic AI Gateway."
+          elif [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "Routing model directly via ANTHROPIC_API_KEY."
+          else
+            echo "::error::No usable model credential. Set the PYDANTIC_AI_GATEWAY_API_KEY (preferred) or ANTHROPIC_API_KEY repo secret." >&2
+            exit 1
+          fi
+          if [ -z "$LOGFIRE_TOKEN" ]; then
+            echo "LOGFIRE_TOKEN not set -- running without Logfire tracing."
+          fi
+
+      - name: Install the harness (local), the benchmark, Harbor, and the live extras
+        # `anthropic` backs both the direct and gateway Anthropic paths; `logfire`
+        # is only used when LOGFIRE_TOKEN is set but is cheap to always install.
+        run: |
+          uv venv
+          uv pip install -e ../.. -e '.[dev]' 'harbor==0.18.0' anthropic logfire
+
+      - name: Run the live slice against real Terminal-Bench tasks
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} # zizmor: ignore[secrets-outside-env] -- label-gated job, no GitHub Environments configured; secrets are needed as process env for the model/gateway/logfire clients
+          PYDANTIC_AI_GATEWAY_API_KEY: ${{ secrets.PYDANTIC_AI_GATEWAY_API_KEY }} # zizmor: ignore[secrets-outside-env] -- see above
+          LOGFIRE_TOKEN: ${{ secrets.LOGFIRE_TOKEN }} # zizmor: ignore[secrets-outside-env] -- see above
+          TASKS: ${{ github.event.inputs.tasks || 'fix-git openssl-selfsigned-cert regex-log' }}
+        run: |
+          include_args=()
+          for task in $TASKS; do
+            include_args+=(-i "$task")
+          done
+          # One attempt per task (-k 1), one at a time (-n 1), timeouts as shipped.
+          # Conservative per-task UsageLimits via the agent's --ak kwargs cap spend.
+          uv run --no-sync harbor run \
+            -d terminal-bench/terminal-bench-2 \
+            -a pydantic_ai_harness_terminal_bench.live:LiveBenchAgent \
+            -m anthropic/claude-sonnet-4-6 \
+            "${include_args[@]}" \
+            -o jobs_live \
+            -n 1 -k 1 \
+            --timeout-multiplier 1.0 \
+            --ak request_limit=50 \
+            --ak tool_calls_limit=60 \
+            --ak total_tokens_limit=800000 \
+            -y
+
+      - name: Summarize rewards and assert the run produced results
+        if: always()
+        run: |
+          uv run --no-sync python - <<'PY'
+          import json, os, pathlib, statistics, sys
+
+          jobs = pathlib.Path('jobs_live')
+          results = sorted(jobs.rglob('results.json'))
+          rows, rewards = [], []
+          for path in results:
+              try:
+                  data = json.loads(path.read_text())
+              except (OSError, json.JSONDecodeError):
+                  continue
+              task = data.get('task_name', path.parent.name)
+              verifier = data.get('verifier_result') or {}
+              reward_map = verifier.get('rewards') or {}
+              reward = reward_map.get('reward')
+              exc = data.get('exception_info') or {}
+              note = exc.get('exception_type', '') if exc else ''
+              rows.append((task, reward, note))
+              if isinstance(reward, (int, float)):
+                  rewards.append(float(reward))
+
+          summary = os.environ.get('GITHUB_STEP_SUMMARY')
+          lines = ['## Terminal-Bench live slice', '', '| task | reward | note |', '| --- | --- | --- |']
+          for task, reward, note in rows:
+              shown = f'{reward:g}' if isinstance(reward, (int, float)) else 'n/a'
+              lines.append(f'| {task} | {shown} | {note} |')
+          if rewards:
+              lines += ['', f'**Mean reward:** {statistics.mean(rewards):.3f} over {len(rewards)} verified task(s).']
+          text = '\n'.join(lines) + '\n'
+          print(text)
+          if summary:
+              pathlib.Path(summary).write_text(text)
+
+          # Data, not failure: a task scoring 0 is a real result. Fail only when
+          # the run produced nothing verifiable -- an infrastructure/harness error.
+          if not rewards:
+              print('::error::No verified task results were produced -- treating as an infrastructure failure.', file=sys.stderr)
+              sys.exit(1)
+          PY
+
+      - name: Upload the harbor output and trajectories
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: benchmark-live-jobs
+          path: benchmarks/terminal_bench/jobs_live
+          include-hidden-files: true

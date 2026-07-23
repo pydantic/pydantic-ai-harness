@@ -1,0 +1,15 @@
+version = "1.0"
+
+[metadata]
+# A minimal local task whose only purpose is to prove the Harbor + Docker +
+# adapter + agent seam in CI, with no API keys. The scripted smoke agent writes
+# /app/smoke_done.txt; the verifier below checks it.
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+build_timeout_sec = 300.0

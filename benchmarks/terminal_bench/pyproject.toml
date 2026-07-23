@@ -1,0 +1,59 @@
+[build-system]
+requires = ['hatchling']
+build-backend = 'hatchling.build'
+
+[project]
+name = 'pydantic-ai-harness-terminal-bench'
+version = '0.0.1'
+description = 'Terminal-Bench reference agent for Pydantic AI on Harbor'
+readme = 'README.md'
+requires-python = '>=3.11'
+license = 'MIT'
+authors = [{ name = 'Pydantic', email = 'engineering@pydantic.dev' }]
+dependencies = [
+    # The agent and its capabilities. Unpinned: the monorepo installs the local
+    # checkout editable (a pre-release dev version), and the harness is pre-1.0.
+    'pydantic-ai-harness',
+    'pydantic-ai-slim>=2.1.0',
+    # Harbor: the Terminal-Bench harness. Heavy (it pulls a web/DB stack), which
+    # is exactly why this project is kept out of the root package's install.
+    'harbor>=0.18.0',
+]
+
+[project.optional-dependencies]
+dev = [
+    'pytest>=8.0.0',
+    'pytest-anyio',
+    'anyio>=4.0.0',
+    'pyright>=1.1.408',
+    'ruff>=0.14',
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ['src/pydantic_ai_harness_terminal_bench']
+
+[tool.ruff]
+line-length = 120
+target-version = 'py311'
+
+[tool.ruff.lint]
+extend-select = ['Q', 'I', 'UP']
+
+[tool.ruff.lint.flake8-quotes]
+inline-quotes = 'single'
+
+[tool.ruff.format]
+quote-style = 'single'
+
+[tool.pyright]
+pythonVersion = '3.11'
+typeCheckingMode = 'standard'
+# Typecheck the shipped package only. Tests use duck-typed fakes for Harbor's
+# abstract environment, which standard mode would reject. Harbor is not shipped
+# with strict type stubs; standard mode keeps the adapter checkable without
+# fighting third-party annotations.
+include = ['src']
+
+[tool.pytest.ini_options]
+testpaths = ['tests']
+anyio_mode = 'auto'
