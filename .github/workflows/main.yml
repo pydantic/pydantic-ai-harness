@@ -258,10 +258,13 @@ jobs:
 
   release:
     needs: [check]
-    # `changes` is skipped on tag pushes, and a skipped ancestor makes bare
-    # `success()` false even though `check` itself passed -- which silently
-    # skipped the publish for v0.10.0. Gate on `check`'s own result instead.
-    if: needs.check.result == 'success' && startsWith(github.ref, 'refs/tags/')
+    # `changes` is skipped on tag pushes, and GitHub skips every downstream job
+    # of a skipped ancestor unless the condition opts out via `always()` /
+    # `!cancelled()` -- which silently skipped the publish for v0.10.0 even
+    # though `check` itself passed. `!cancelled()` restores evaluation without
+    # publishing from a cancelled run (same opt-out `localstack-integration`
+    # needs, one job up).
+    if: ${{ !cancelled() && needs.check.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -283,7 +286,8 @@ jobs:
   send-tweet:
     name: Send tweet
     needs: [release]
-    if: needs.release.result == 'success'
+    # Same skipped-ancestor opt-out as `release` above.
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     environment: release
 
