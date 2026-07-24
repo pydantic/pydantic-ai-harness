@@ -143,6 +143,7 @@ An agent can carry several `Memory` capabilities at once, for example a personal
 
 - Give each instance a distinct `agent_name` or `namespace`. Injected blocks are tracked by their resolved scope, so instances that differ only in their store resolve the same scope and replace each other's injection.
 - All instances define the same tool names, so wrap every instance but one in `prefix_tools` to keep the tool schemas distinct.
+- Set a distinct `heading` on each instance so the model sees the blocks as separate sections. `agent_name` is a storage key and never appears in the prompt, so it can't label them.
 
 ```python
 from pydantic_ai import Agent
@@ -151,8 +152,8 @@ from pydantic_ai_harness.memory import FileStore, Memory
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
     capabilities=[
-        Memory(FileStore('/var/lib/myapp/memory')),
-        Memory(FileStore('/var/lib/myapp/memory'), agent_name='org').prefix_tools('org'),
+        Memory(FileStore('/var/lib/myapp/memory'), heading='Your notes'),
+        Memory(FileStore('/var/lib/myapp/memory'), agent_name='org', heading='Org notes').prefix_tools('org'),
     ],
     defer_model_check=True,
 )
@@ -178,7 +179,8 @@ from pydantic_ai_harness.memory import FileStore, Memory
 Memory(
     FileStore('.agent-memory'),
     store_resolver=None,               # optional per-run store resolver
-    agent_name='main',                 # agent segment inside the namespace
+    agent_name='main',                 # storage segment inside the namespace; never shown to the model
+    heading='',                        # optional `## {heading}` on the injected block; set to distinguish blocks
     namespace='',                      # string or per-run resolver
     inject_memory=True,                # False keeps prompts cache-stable
     max_tokens=2_000,                  # finite approximate total injection budget

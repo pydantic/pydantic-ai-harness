@@ -665,6 +665,72 @@ class TestSearchMemory:
 
 
 class TestInjection:
+    async def test_heading_is_omitted_by_default(self) -> None:
+        store = InMemoryStore()
+        await _seed(store, 'main/MEMORY.md', '- a durable fact')
+        captured: list[str] = []
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            captured.append(_latest_memory_context(messages))
+            return ModelResponse(parts=[TextPart('done')])
+
+        await Agent(FunctionModel(model), capabilities=[Memory(store=store, guidance='')]).run('go')
+        assert captured[0].startswith('<memory>\n')
+        assert not any(line.startswith('## ') for line in captured[0].splitlines())
+        assert 'main' not in captured[0]
+
+    async def test_heading_is_rendered_when_set(self) -> None:
+        store = InMemoryStore()
+        await _seed(store, 'main/MEMORY.md', '- a durable fact')
+        captured: list[str] = []
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            captured.append(_latest_memory_context(messages))
+            return ModelResponse(parts=[TextPart('done')])
+
+        await Agent(
+            FunctionModel(model),
+            capabilities=[Memory(store=store, guidance='', heading='Shared team notes')],
+        ).run('go')
+        assert '## Shared team notes' in captured[0]
+
+    async def test_oversized_heading_is_truncated_to_budget(self) -> None:
+        store = InMemoryStore()
+        await _seed(store, 'main/MEMORY.md', 'a durable fact')
+        captured: list[str] = []
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            captured.append(_latest_memory_context(messages))
+            return ModelResponse(parts=[TextPart('done')])
+
+        await Agent(
+            FunctionModel(model),
+            capabilities=[Memory(store=store, guidance='', heading='H' * 50, max_tokens=5)],
+        ).run('go')
+        assert captured[0].startswith('<memory>\n')
+        assert 'H' * 50 not in captured[0]
+
+    async def test_composed_instances_render_distinct_headings(self) -> None:
+        store = InMemoryStore()
+        await _seed(store, 'you/MEMORY.md', '- your fact')
+        await _seed(store, 'team/MEMORY.md', '- team fact')
+        captured: list[list[str]] = []
+
+        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            captured.append(_memory_contexts(messages))
+            return ModelResponse(parts=[TextPart('done')])
+
+        await Agent(
+            FunctionModel(model),
+            capabilities=[
+                Memory(store=store, agent_name='you', guidance='', heading='Your notes'),
+                Memory(store=store, agent_name='team', guidance='', heading='Team notes').prefix_tools('team'),
+            ],
+        ).run('go')
+        blocks = '\n'.join(captured[0])
+        assert '## Your notes' in blocks
+        assert '## Team notes' in blocks
+
     async def test_external_oversized_main_and_file_listing_are_backend_bounded(self) -> None:
         store = UnboundedListingStore()
         await store.inner.write('main/MEMORY.md', 'x' * 1_000, expected_version=None)
@@ -1153,6 +1219,7 @@ class TestConfigurationAndSpecs:
             'database',
             'directory',
             'guidance',
+            'heading',
             'inject_memory',
             'injection_errors',
             'max_lines',
