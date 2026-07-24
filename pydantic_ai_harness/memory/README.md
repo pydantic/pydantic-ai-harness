@@ -139,7 +139,7 @@ Namespace isolation controls which records the capability addresses. It is not a
 
 ## Multiple memories on one agent
 
-An agent can carry several `Memory` capabilities at once, for example a personal notebook plus a shared org notebook. Two constraints apply:
+An agent can carry several `Memory` capabilities at once, for example a personal notebook plus a shared org notebook. Three constraints apply:
 
 - Give each instance a distinct `agent_name` or `namespace`. Injected blocks are tracked by their resolved scope, so instances that differ only in their store resolve the same scope and replace each other's injection.
 - All instances define the same tool names, so wrap every instance but one in `prefix_tools` to keep the tool schemas distinct.
