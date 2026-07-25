@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.messages import (
@@ -226,6 +226,21 @@ async def compact_with_span(
 # ---------------------------------------------------------------------------
 # Compaction strategy protocol
 # ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class SupportsFocus(Protocol):
+    """A strategy whose output can be steered toward a topic.
+
+    Only a strategy that *writes* something -- a summary -- can be focused. One that drops or
+    blanks content by rule has nothing to steer, so `compact_now` passes a focus it cannot
+    honour over rather than rejecting it. A composing strategy is focusable when any strategy
+    it wraps is, so the hint reaches the tier that writes the prose.
+    """
+
+    def with_focus(self, focus: str) -> Any:
+        """Return a copy of this strategy that prioritizes `focus`."""
+        ...  # pragma: no cover
 
 
 class CompactionStrategy(Protocol[AgentDepsT]):

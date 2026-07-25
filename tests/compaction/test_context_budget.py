@@ -20,6 +20,7 @@ from pydantic_ai_harness.compaction import (
     LimitWarner,
     SlidingWindow,
     SummarizingCompaction,
+    SupportsFocus,
     TieredCompaction,
     compact_now,
     resolve_context_window,
@@ -528,3 +529,58 @@ class TestPositionalCompatibility:
         for cls, name in cases:
             field = next(f for f in dataclasses.fields(cls) if f.name == name)
             assert field.kw_only, f'{cls.__name__}.{name} must stay keyword-only'
+
+
+class TestFocusPropagation:
+    """A composing strategy has to pass the focus down to the tier that writes the summary."""
+
+    def _tiered(self) -> TieredCompaction[None]:
+        return TieredCompaction(
+            tiers=[SlidingWindow(max_tokens=1, keep_messages=2), SummarizingCompaction(max_messages=1)],
+            target_tokens=100,
+        )
+
+    def test_tiered_is_focusable(self):
+        assert isinstance(self._tiered(), SupportsFocus)
+
+    def test_focus_reaches_the_summarizing_tier(self):
+        focused = self._tiered().with_focus('the auth flow')
+        summarizer = focused.tiers[1]
+        assert isinstance(summarizer, SummarizingCompaction)
+        assert 'the auth flow' in summarizer.summary_prompt
+
+    def test_tiers_that_cannot_be_focused_pass_through(self):
+        tiered = self._tiered()
+        assert tiered.with_focus('anything').tiers[0] is tiered.tiers[0]
+
+    def test_the_original_is_left_alone(self):
+        tiered = self._tiered()
+        tiered.with_focus('the auth flow')
+        summarizer = tiered.tiers[1]
+        assert isinstance(summarizer, SummarizingCompaction)
+        assert 'the auth flow' not in summarizer.summary_prompt
+
+    def test_nesting_propagates_all_the_way_down(self):
+        outer = TieredCompaction(tiers=[self._tiered()], target_tokens=100)
+        focused = outer.with_focus('nested topic')
+        inner = focused.tiers[0]
+        assert isinstance(inner, TieredCompaction)
+        summarizer = inner.tiers[1]
+        assert isinstance(summarizer, SummarizingCompaction)
+        assert 'nested topic' in summarizer.summary_prompt
+
+    async def test_compact_now_focuses_through_a_tiered_strategy(self):
+        seen: list[str] = []
+
+        class _Tier:
+            def with_focus(self, focus: str) -> _Tier:
+                seen.append(focus)
+                return self
+
+            async def compact(self, messages: list[ModelMessage], ctx: Any) -> list[ModelMessage]:
+                return messages[:1]
+
+        tiered = TieredCompaction(tiers=[_Tier()], target_tokens=1)
+        await compact_now(tiered, _history(4), model=TestModel(), focus='the auth flow')
+
+        assert seen == ['the auth flow']

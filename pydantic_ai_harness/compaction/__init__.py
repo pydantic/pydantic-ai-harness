@@ -13,8 +13,8 @@ from pydantic_ai_harness.compaction._context_window import (
 )
 from pydantic_ai_harness.compaction._deduplicate_file_reads import DeduplicateFileReads
 from pydantic_ai_harness.compaction._limit_warner import LimitWarner, WarningKind
-from pydantic_ai_harness.compaction._manual import SupportsFocus, compact_now
-from pydantic_ai_harness.compaction._shared import CompactionStrategy, estimate_token_count
+from pydantic_ai_harness.compaction._manual import compact_now
+from pydantic_ai_harness.compaction._shared import CompactionStrategy, SupportsFocus, estimate_token_count
 from pydantic_ai_harness.compaction._sliding_window import SlidingWindow
 from pydantic_ai_harness.compaction._summarizing_compaction import SummarizingCompaction
 from pydantic_ai_harness.compaction._tiered_compaction import TieredCompaction

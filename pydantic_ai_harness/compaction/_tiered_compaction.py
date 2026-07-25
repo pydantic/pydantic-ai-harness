@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from pydantic_ai._run_context import AgentDepsT
@@ -13,6 +13,7 @@ from pydantic_ai.tools import RunContext
 
 from pydantic_ai_harness.compaction._shared import (
     CompactionStrategy,
+    SupportsFocus,
     compact_with_span,
     estimate_token_count,
     resolve_token_trigger,
@@ -90,6 +91,18 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             self.target_fraction,
             tokens_name='target_tokens',
             fraction_name='target_fraction',
+        )
+
+    def with_focus(self, focus: str) -> TieredCompaction[AgentDepsT]:
+        """Return a copy whose focus-capable tiers prioritize `focus`.
+
+        A tiered strategy is focusable when any of its tiers is: the summarizing tier writes
+        the prose, so the hint has to reach it rather than stopping at this wrapper. Tiers that
+        cannot honour a focus are passed through unchanged.
+        """
+        return replace(
+            self,
+            tiers=[tier.with_focus(focus) if isinstance(tier, SupportsFocus) else tier for tier in self.tiers],
         )
 
     def _target(self, ctx: RunContext[AgentDepsT]) -> int:

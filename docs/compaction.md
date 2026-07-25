@@ -89,7 +89,7 @@ history = await compact_now(
 )
 ```
 
-Unlike the automatic path it always runs the strategy: an explicit request should not be subject to the threshold check. `focus` steers strategies that write prose -- `SummarizingCompaction`, via `with_focus` -- and is ignored by the ones that drop or blank content by rule, since they have nothing to steer.
+Unlike the automatic path it always runs the strategy: an explicit request should not be subject to the threshold check. `focus` steers strategies that write prose -- `SummarizingCompaction`, via `with_focus` -- and is passed over by the ones that drop or blank content by rule, since they have nothing to steer. `TieredCompaction` is focusable when any of its tiers is, so a focus reaches the summarizing tier rather than stopping at the wrapper.
 
 ## The recommended default: `TieredCompaction`
 

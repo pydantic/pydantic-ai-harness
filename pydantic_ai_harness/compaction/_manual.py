@@ -2,31 +2,19 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
+
+from pydantic_ai_harness.compaction._shared import SupportsFocus
 
 if TYPE_CHECKING:
     from pydantic_ai._run_context import AgentDepsT
     from pydantic_ai.models import Model
 
     from pydantic_ai_harness.compaction._shared import CompactionStrategy
-
-
-@runtime_checkable
-class SupportsFocus(Protocol):
-    """A strategy whose output can be steered toward a topic.
-
-    Only strategies that *write* something -- a summary -- can be focused; the ones that drop
-    or blank content by rule have nothing to steer, so `compact_now` ignores a focus they
-    cannot honour rather than rejecting it.
-    """
-
-    def with_focus(self, focus: str) -> Any:
-        """Return a copy of this strategy that prioritizes `focus`."""
-        ...  # pragma: no cover
 
 
 async def compact_now(
@@ -53,7 +41,8 @@ async def compact_now(
         strategy: The strategy to run. Any `CompactionStrategy` works.
         messages: History to compact. Not mutated; the compacted list is returned.
         model: Model the strategy should use, needed by summarizing strategies that call one.
-        focus: What the summary should prioritize. Ignored by strategies that cannot honour it.
+        focus: What the summary should prioritize. Passed over by strategies that cannot honour
+            it; a composing strategy forwards it to the tiers that can.
         deps: Dependencies to expose on the throwaway context, for a strategy that reads them.
         usage: Usage to accumulate into, so a summarization call can be billed to your own
             counter. A fresh `RunUsage` is used when omitted.
