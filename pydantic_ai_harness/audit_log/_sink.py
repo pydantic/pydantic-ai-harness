@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import anyio.to_thread
-from pydantic import TypeAdapter
+from pydantic import TypeAdapter, ValidationError
 
 from pydantic_ai_harness.audit_log._types import RunAuditRecord, ToolCallRecord
 
@@ -82,9 +82,11 @@ class JsonlAuditSink:
     Each line is `{"kind": "tool_call"|"run", "record": {...}}`. Writes append,
     so a run recorded more than once keeps every line and `get_run` returns the
     last. File I/O runs on a worker thread so the event loop is not blocked. A
-    line that fails to decode as UTF-8 or parse as JSON (e.g. a partial append
-    torn mid-write by a crash) is skipped and logged rather than raised, so one
-    bad line does not hide every valid record recorded before it.
+    line that fails to decode as UTF-8, fails to parse as JSON (e.g. a partial
+    append torn mid-write by a crash), or parses but is not a well-formed
+    envelope for a known record kind (a foreign JSON value, a `record` missing
+    the fields its kind requires) is skipped and logged rather than raised, so
+    one bad line does not hide every valid record recorded before it.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -115,31 +117,51 @@ class JsonlAuditSink:
                     handle.write(b'\n')
             handle.write(line + b'\n')
 
-    def _read(self) -> list[dict[str, object]]:
-        """Read every envelope in the file, skipping a line that fails to decode or parse.
+    def _read(self) -> tuple[list[ToolCallRecord], list[RunAuditRecord]]:
+        """Read every well-formed record in the file, skipping any line that fails to decode, parse, or validate.
 
-        A torn trailing record -- a partial append cut short by a crash, or any
-        other single malformed line -- must not make every read raise and hide
-        every prior valid record; the unparseable line is logged and skipped.
+        A torn trailing record -- a partial append cut short by a crash -- or
+        any other single malformed line must not make the whole read raise
+        and hide every prior valid record; each bad line is logged and
+        skipped instead. "Malformed" is broader than a decode or parse
+        failure: a line can decode as UTF-8 and parse as valid JSON and still
+        not be a well-formed envelope -- `null`, `{}`, a JSON array or
+        number, a `record` missing the fields its `kind` requires, or a
+        `kind` this sink does not recognize. Validating the envelope shape
+        and the record here, rather than in `list_tool_calls`/`get_run`,
+        means every record those methods see is already a real
+        `ToolCallRecord` or `RunAuditRecord`; they never need to guard
+        against a foreign or damaged envelope raising `KeyError`, `TypeError`,
+        or a pydantic `ValidationError` out of what should be a pure filter.
+
         This reads the file as bytes and decodes each line individually,
-        inside the same try/except that parses its JSON, rather than decoding
-        the whole file as UTF-8 upfront: a crash can tear an append in the
-        middle of a multi-byte UTF-8 character, and decoding the whole file in
-        one call would raise `UnicodeDecodeError` for the entire read, hiding
-        every valid record recorded before the torn one instead of just
-        skipping it.
+        inside the same try/except that parses and validates it, rather than
+        decoding the whole file as UTF-8 upfront: a crash can tear an append
+        in the middle of a multi-byte UTF-8 character, and decoding the whole
+        file in one call would raise `UnicodeDecodeError` for the entire
+        read, hiding every valid record recorded before the torn one instead
+        of just skipping it.
         """
         if not self._path.exists():
-            return []
-        envelopes: list[dict[str, object]] = []
+            return [], []
+        tool_calls: list[ToolCallRecord] = []
+        runs: list[RunAuditRecord] = []
         for raw in self._path.read_bytes().split(b'\n'):
             if not raw.strip():
                 continue
             try:
-                envelopes.append(json.loads(raw.decode('utf-8')))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+                envelope = json.loads(raw.decode('utf-8'))
+                kind = envelope['kind']
+                payload = envelope['record']
+                if kind == _KIND_TOOL:
+                    tool_calls.append(_TOOL_ADAPTER.validate_python(payload))
+                elif kind == _KIND_RUN:
+                    runs.append(_RUN_ADAPTER.validate_python(payload))
+                else:
+                    raise ValueError(f'unrecognized audit record kind {kind!r}')
+            except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, KeyError, TypeError, ValueError):
                 logger.warning('Skipping unparseable line in audit sink %s.', self._path)
-        return envelopes
+        return tool_calls, runs
 
     async def record_tool_call(self, record: ToolCallRecord) -> None:
         await anyio.to_thread.run_sync(self._append, _KIND_TOOL, _TOOL_ADAPTER.dump_json(record))
@@ -151,22 +173,16 @@ class JsonlAuditSink:
         return await anyio.to_thread.run_sync(self._sync_list_tool_calls, run_id)
 
     def _sync_list_tool_calls(self, run_id: str) -> list[ToolCallRecord]:
-        records: list[ToolCallRecord] = []
-        for envelope in self._read():
-            if envelope['kind'] == _KIND_TOOL:
-                record = _TOOL_ADAPTER.validate_python(envelope['record'])
-                if record.run_id == run_id:
-                    records.append(record)
-        return records
+        tool_calls, _runs = self._read()
+        return [record for record in tool_calls if record.run_id == run_id]
 
     async def get_run(self, *, run_id: str) -> RunAuditRecord | None:
         return await anyio.to_thread.run_sync(self._sync_get_run, run_id)
 
     def _sync_get_run(self, run_id: str) -> RunAuditRecord | None:
+        _tool_calls, runs = self._read()
         latest: RunAuditRecord | None = None
-        for envelope in self._read():
-            if envelope['kind'] == _KIND_RUN:
-                record = _RUN_ADAPTER.validate_python(envelope['record'])
-                if record.run_id == run_id:
-                    latest = record
+        for record in runs:
+            if record.run_id == run_id:
+                latest = record
         return latest

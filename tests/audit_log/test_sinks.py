@@ -201,3 +201,91 @@ class TestJsonlAuditSink:
         assert [c.tool_call_id for c in calls] == ['c1']  # records before the torn line are still readable
         assert run is not None and run.outcome == 'completed'
         assert 'unparseable' in caplog.text.lower()  # the torn line is skipped, not fatal to the whole read
+
+    @pytest.mark.parametrize(
+        'malformed_line',
+        [
+            pytest.param('null', id='json-null'),
+            pytest.param('{}', id='empty-object'),
+            pytest.param('[]', id='json-array'),
+            pytest.param('42', id='bare-number'),
+            pytest.param('{"kind": "tool_call", "record": {}}', id='tool-call-missing-required-fields'),
+            pytest.param('{"kind": "run", "record": {}}', id='run-missing-required-fields'),
+            pytest.param('{"kind": "mystery", "record": {"foo": "bar"}}', id='unrecognized-kind'),
+            pytest.param('{"kind": "tool_call", "record": {"run_id": "r1"', id='unterminated-json'),
+        ],
+    )
+    async def test_read_skips_any_malformed_or_foreign_line(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture, malformed_line: str
+    ):
+        # Each of these decodes as UTF-8 and, except for the unterminated-json
+        # case, parses as valid JSON -- but none is a well-formed `tool_call`
+        # or `run` envelope. Before the fix, `_read` caught only
+        # `UnicodeDecodeError`/`json.JSONDecodeError`, so a line like this
+        # propagated a `TypeError` (not subscriptable), `KeyError` (missing
+        # `kind`/`record`), or pydantic `ValidationError` (a `record` missing
+        # its required fields) straight out of `list_tool_calls`/`get_run`,
+        # crashing the read and hiding every valid record around it. Placing
+        # the malformed line between two valid tool-call records proves it is
+        # skipped in place, not just tolerated at the end of the file.
+        path = tmp_path / 'audit.jsonl'
+        sink = JsonlAuditSink(path)
+        await sink.record_tool_call(_tool('r1', 'before'))
+        await sink.record_run(_run('r1'))
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write(malformed_line + '\n')
+        await sink.record_tool_call(_tool('r1', 'after'))
+
+        with caplog.at_level(logging.WARNING):
+            calls = await sink.list_tool_calls(run_id='r1')
+            run = await sink.get_run(run_id='r1')
+
+        assert [c.tool_call_id for c in calls] == ['before', 'after']
+        assert run is not None and run.outcome == 'completed'
+        assert 'unparseable' in caplog.text.lower()  # the skip is logged, not silent
+
+    async def test_read_skips_every_malformed_variant_coexisting_in_one_file(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        # The variants from test_read_skips_any_malformed_or_foreign_line, all
+        # interleaved with valid records in one file, plus a genuinely torn
+        # (no trailing newline) fragment at the end -- the crash-mid-write
+        # shape the older torn-line tests cover. Different failure modes
+        # coexisting in one read must not interact: every bad line is
+        # independently skipped and logged, and every valid record survives.
+        path = tmp_path / 'audit.jsonl'
+        sink = JsonlAuditSink(path)
+        malformed_lines = [
+            'null',
+            '{}',
+            '[]',
+            '42',
+            '{"kind": "tool_call", "record": {}}',
+            '{"kind": "run", "record": {}}',
+            '{"kind": "mystery", "record": {"foo": "bar"}}',
+        ]
+        await sink.record_tool_call(_tool('r1', 'c0'))
+        await sink.record_run(_run('r1'))
+        for index, line in enumerate(malformed_lines):
+            with path.open('a', encoding='utf-8') as handle:
+                handle.write(line + '\n')
+            await sink.record_tool_call(_tool('r1', f'c{index + 1}'))
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write('{"kind": "tool_call", "record": {"run_id": "r1", "tool_call_id": "torn"')  # no \n
+
+        bad_line_count = len(malformed_lines) + 1  # + the trailing torn fragment
+
+        # Each accessor does its own full-file read, so count the warnings from
+        # one read at a time rather than across both -- that call-count is an
+        # unrelated implementation detail, not what this test is about.
+        with caplog.at_level(logging.WARNING):
+            calls = await sink.list_tool_calls(run_id='r1')
+        assert caplog.text.lower().count('unparseable') == bad_line_count  # every bad line logged once, none silent
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            run = await sink.get_run(run_id='r1')
+        assert caplog.text.lower().count('unparseable') == bad_line_count  # the second read skips them all too
+
+        assert [c.tool_call_id for c in calls] == [f'c{i}' for i in range(len(malformed_lines) + 1)]
+        assert run is not None and run.outcome == 'completed'
