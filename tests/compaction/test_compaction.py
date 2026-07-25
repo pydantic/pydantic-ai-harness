@@ -1824,7 +1824,7 @@ class TestTieredCompaction:
 
 class TestSummarizingCompactionModel:
     @pytest.mark.anyio
-    async def test_model_inherits_from_ctx_when_none(self):
+    async def test_model_inherits_from_the_request_when_none(self):
         comp = SummarizingCompaction(
             max_messages=3, keep_messages=1, preserve_first_user_message=False, incremental=False
         )
@@ -1840,9 +1840,11 @@ class TestSummarizingCompactionModel:
             MockAgent.return_value = mock_agent_instance
             await comp.before_model_request(ctx, rc)
 
-        # The summarizer agent was constructed with the running agent's model.
-        assert MockAgent.call_args.args[0] is ctx.model
-        # And its usage is threaded into the parent run for honest accounting.
+        # The summarizer agent was constructed with the model the request is going to. Core
+        # starts that as the run's model, so the two differ only where a capability replaced
+        # it -- and then the request's is the one the compaction is being done for.
+        assert MockAgent.call_args.args[0] is rc.model
+        # Its usage is threaded into the parent run for honest accounting.
         assert mock_agent_instance.run.call_args.kwargs['usage'] is ctx.usage
 
     def test_default_prompt_has_structured_sections(self):

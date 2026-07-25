@@ -16,6 +16,7 @@ from pydantic_ai_harness.compaction._shared import (
     CompactionStrategy,
     SupportsFocus,
     compact_with_span,
+    context_for_request,
     estimate_token_count,
     resolve_token_trigger,
     validate_token_trigger,
@@ -148,16 +149,19 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Escalate through the tiers when the conversation exceeds the target."""
         messages: list[ModelMessage] = list(request_context.messages)
-        # Resolved once from the model the request will be sent to, so the gate and the
-        # escalation loop cannot disagree about the target.
-        target = self._target(request_context.model)
+        # The tiers get the request's context, not the run's: a tier that resolves a model --
+        # a summarizing one, or a `TieredCompaction` nested inside this one -- has to reach the
+        # same conclusion this gate did.
+        request_ctx = context_for_request(ctx, request_context)
+        # Resolved once, so the gate and the escalation loop cannot disagree about the target.
+        target = self._target(request_ctx.model)
         if estimate_token_count(messages, self.tokenizer) <= target:
             return request_context
         request_context.messages = await compact_with_span(
-            ctx,
+            request_ctx,
             strategy='TieredCompaction',
             messages=messages,
-            compact=lambda: self._escalate(messages, ctx, target),
+            compact=lambda: self._escalate(messages, request_ctx, target),
             tokenizer=self.tokenizer,
         )
         return request_context

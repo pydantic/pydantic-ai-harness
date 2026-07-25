@@ -23,6 +23,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW
 from pydantic_ai_harness.compaction._shared import (
     compact_with_span,
+    context_for_request,
     exceeds,
     find_first_user_message,
     find_safe_cutoff,
@@ -168,7 +169,12 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """
 
     model: str | Model | None = None
-    """Model used to generate summaries.  When ``None``, inherits the running agent's model."""
+    """Model used to generate summaries.
+
+    When `None`, inherits the model the request being compacted is going to. Core starts
+    that as the run's model, so the two differ only where a capability replaced
+    `ModelRequestContext.model`; set this explicitly to pin the summarizer regardless.
+    """
 
     max_messages: int | None = None
     """Trigger compaction when message count exceeds this value."""
@@ -282,16 +288,17 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Summarize older messages when the threshold is exceeded."""
         messages: list[ModelMessage] = list(request_context.messages)
+        request_ctx = context_for_request(ctx, request_context)
         token_trigger = resolve_token_trigger(
-            self.max_tokens, self.max_fraction, request_context.model, self.fallback_context_window
+            self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window
         )
         if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
             return request_context
         request_context.messages = await compact_with_span(
-            ctx,
+            request_ctx,
             strategy='SummarizingCompaction',
             messages=messages,
-            compact=lambda: self.compact(messages, ctx),
+            compact=lambda: self.compact(messages, request_ctx),
             tokenizer=self.tokenizer,
         )
         return request_context

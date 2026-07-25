@@ -14,6 +14,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW
 from pydantic_ai_harness.compaction._shared import (
     compact_with_span,
+    context_for_request,
     exceeds,
     iter_tool_pairs,
     rebuild_with_cleared,
@@ -121,17 +122,18 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Deduplicate file reads, optionally gated on a size threshold."""
         messages: list[ModelMessage] = list(request_context.messages)
+        request_ctx = context_for_request(ctx, request_context)
         if self.max_messages is not None or self.max_tokens is not None or self.max_fraction is not None:
             token_trigger = resolve_token_trigger(
-                self.max_tokens, self.max_fraction, request_context.model, self.fallback_context_window
+                self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window
             )
             if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
                 return request_context
         request_context.messages = await compact_with_span(
-            ctx,
+            request_ctx,
             strategy='DeduplicateFileReads',
             messages=messages,
-            compact=lambda: self.compact(messages, ctx),
+            compact=lambda: self.compact(messages, request_ctx),
             tokenizer=self.tokenizer,
         )
         return request_context

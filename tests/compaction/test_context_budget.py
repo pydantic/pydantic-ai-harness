@@ -346,6 +346,45 @@ class TestRequestModelIsTheOneResolved:
 
         assert len(request_context.messages) < 12
 
+    async def test_a_nested_tiered_strategy_resolves_the_same_model(self, monkeypatch: pytest.MonkeyPatch):
+        """A tier reached through `compact` gets the request's context, not the run's.
+
+        The outer target is absolute, so only the nested strategy's `target_fraction` decides
+        whether the inner tier runs. Resolving it against the run's model leaves the history
+        alone.
+        """
+        self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
+        capability: TieredCompaction[None] = TieredCompaction(
+            tiers=[
+                TieredCompaction(
+                    tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+                    target_fraction=0.1,
+                )
+            ],
+            target_tokens=1,
+        )
+        request_context = _request_context(_history(6), self.REQUEST)
+
+        await capability.before_model_request(_ctx(self.RUN), request_context)
+
+        assert len(request_context.messages) < 12
+
+    async def test_a_summarizing_tier_calls_the_request_model(self, monkeypatch: pytest.MonkeyPatch):
+        """The same rule for the model a summarizing tier inherits when it has none of its own."""
+        self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
+        seen: list[Any] = []
+
+        class _Recording:
+            async def compact(self, messages: list[ModelMessage], ctx: Any) -> list[ModelMessage]:
+                seen.append(ctx.model)
+                return messages[:1]
+
+        capability: TieredCompaction[None] = TieredCompaction(tiers=[_Recording()], target_fraction=0.1)
+
+        await capability.before_model_request(_ctx(self.RUN), _request_context(_history(6), self.REQUEST))
+
+        assert seen == [self.REQUEST]
+
     async def test_limit_warner(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
         capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.1, warning_threshold=0.5)

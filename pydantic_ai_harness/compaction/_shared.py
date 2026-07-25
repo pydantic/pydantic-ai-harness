@@ -30,7 +30,7 @@ from typing_extensions import Self
 from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW, resolve_context_window
 
 if TYPE_CHECKING:
-    from pydantic_ai.models import Model
+    from pydantic_ai.models import Model, ModelRequestContext
 
 # ---------------------------------------------------------------------------
 # Token estimation
@@ -145,6 +145,25 @@ def validate_token_trigger(
         raise ValueError('fallback_context_window must be positive.')
 
 
+def context_for_request(
+    ctx: RunContext[AgentDepsT],
+    request_context: ModelRequestContext,
+) -> RunContext[AgentDepsT]:
+    """The run context as it applies to *this* request.
+
+    A capability may replace `ModelRequestContext.model` before the request leaves, so a
+    strategy driven from `before_model_request` has to see the model the request is going to
+    rather than the one the run started with. Everything a strategy reads off the context
+    follows: the window a fraction resolves against, the model a summarizing tier calls, and
+    the same for a `TieredCompaction` nested inside another one.
+
+    Returns `ctx` itself when no capability replaced the model, which is the common case.
+    """
+    if request_context.model is ctx.model:
+        return ctx
+    return replace(ctx, model=request_context.model)
+
+
 def resolve_token_trigger(
     max_tokens: int | None,
     max_fraction: float | None,
@@ -256,8 +275,8 @@ class SupportsFocus(Protocol):
 class CompactionStrategy(Protocol[AgentDepsT]):
     """A history transform that can be used standalone or as a `TieredCompaction` tier.
 
-    ``compact`` applies the transform *unconditionally* (the trigger check lives in the
-    capability's ``before_model_request``).  A strategy that composes others may define its own
+    `compact` applies the transform *unconditionally* (the trigger check lives in the
+    capability's `before_model_request`).  A strategy that composes others may define its own
     stop condition instead -- `TieredCompaction` escalates only until the history fits its
     target.  Implementations must preserve tool-call / tool-return pairing.
     """
