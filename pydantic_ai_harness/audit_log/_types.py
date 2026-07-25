@@ -24,10 +24,11 @@ def _utcnow() -> datetime:
 class ToolCallRecord:
     """The audit record for one tool call.
 
-    `arguments` is the redacted, size-bounded JSON of the validated call
-    arguments -- content a trace span emits ephemerally and `step_persistence`
-    omits by design. Exactly one of `result` (success) or `error` (the tool
-    raised) is set; both are size-bounded to `max_value_chars`.
+    `arguments` is the size-bounded JSON of the validated call arguments,
+    passed through the capability's `redactor` first -- content a trace span
+    emits ephemerally and `step_persistence` omits by design. Exactly one of
+    `result` (success) or `error` (the tool raised) is set; both are
+    size-bounded to `max_value_chars`.
 
     `conversation_id`, `parent_run_id`, and `agent_name` mirror pydantic-ai's
     identity stack so audit records join against runs and against

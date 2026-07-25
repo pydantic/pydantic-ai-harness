@@ -1,25 +1,26 @@
 """Storage backends for audit records.
 
-`AuditSink` is the pluggable interface; a backend adapter (a warehouse, an
-object store, a knowledge graph) implements it. Three stdlib reference sinks
-ship here: `InMemoryAuditSink`, `JsonlAuditSink`, and `SqliteAuditSink`.
+`AuditSink` is the pluggable interface, and it is the extension point of this
+capability: this module ships no persistent or production backend, by
+design. Implement the four methods against SQLite, Postgres, Mongo, a
+warehouse, an object store, or a knowledge graph, and pass the instance as
+`sink=`; that choice, and its transaction, durability, and concurrency
+semantics, belongs to the consumer. Two trivial, dependency-free reference
+sinks ship here for tests and simple single-process use: `InMemoryAuditSink`
+and `JsonlAuditSink`.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from collections import defaultdict
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import anyio.to_thread
 from pydantic import TypeAdapter
-from typing_extensions import TypeVar
 
 from pydantic_ai_harness.audit_log._types import RunAuditRecord, ToolCallRecord
-
-_RecordT = TypeVar('_RecordT')
 
 _TOOL_ADAPTER: TypeAdapter[ToolCallRecord] = TypeAdapter(ToolCallRecord)
 _RUN_ADAPTER: TypeAdapter[RunAuditRecord] = TypeAdapter(RunAuditRecord)
@@ -27,13 +28,15 @@ _RUN_ADAPTER: TypeAdapter[RunAuditRecord] = TypeAdapter(RunAuditRecord)
 
 @runtime_checkable
 class AuditSink(Protocol):
-    """Async protocol for audit-record backends.
+    """Async protocol for audit-record backends -- implement this for your own backend.
 
     Every method is async so one protocol covers in-memory sinks and
     file/database sinks that would otherwise block the event loop.
     `record_tool_call` and `record_run` are append/write; `list_tool_calls`
     returns a run's tool calls in the order they were recorded, and `get_run`
-    returns the run's latest record, or `None` when the run is absent.
+    returns the run's latest record, or `None` when the run is absent. This
+    library takes no position on which backend a real deployment should use;
+    it defines the shape and ships trivial references, not a recommendation.
     """
 
     async def record_tool_call(self, record: ToolCallRecord) -> None: ...  # pragma: no cover
@@ -124,212 +127,3 @@ class JsonlAuditSink:
                 if record.run_id == run_id:
                     latest = record
         return latest
-
-
-_SQLITE_SCHEMA = """
-CREATE TABLE IF NOT EXISTS tool_calls (
-    seq INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id TEXT NOT NULL,
-    tool_call_id TEXT NOT NULL,
-    tool_name TEXT NOT NULL,
-    arguments TEXT NOT NULL,
-    result TEXT,
-    error TEXT,
-    started_at TEXT NOT NULL,
-    ended_at TEXT,
-    conversation_id TEXT,
-    parent_run_id TEXT,
-    agent_name TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_tool_calls_run ON tool_calls(run_id, seq);
-
-CREATE TABLE IF NOT EXISTS runs (
-    run_id TEXT PRIMARY KEY,
-    outcome TEXT NOT NULL,
-    input_tokens INTEGER,
-    output_tokens INTEGER,
-    total_tokens INTEGER,
-    error TEXT,
-    conversation_id TEXT,
-    parent_run_id TEXT,
-    agent_name TEXT,
-    started_at TEXT NOT NULL,
-    ended_at TEXT NOT NULL
-);
-"""
-
-_TOOL_COLUMNS = (
-    'run_id',
-    'tool_call_id',
-    'tool_name',
-    'arguments',
-    'result',
-    'error',
-    'started_at',
-    'ended_at',
-    'conversation_id',
-    'parent_run_id',
-    'agent_name',
-)
-_RUN_COLUMNS = (
-    'run_id',
-    'outcome',
-    'input_tokens',
-    'output_tokens',
-    'total_tokens',
-    'error',
-    'conversation_id',
-    'parent_run_id',
-    'agent_name',
-    'started_at',
-    'ended_at',
-)
-
-
-def _to_json_row(record: _RecordT, adapter: TypeAdapter[_RecordT], columns: tuple[str, ...]) -> tuple[object, ...]:
-    data = adapter.dump_python(record, mode='json')
-    return tuple(data[column] for column in columns)
-
-
-_MEMORY_DATABASE = ':memory:'
-
-
-class SqliteAuditSink:
-    """SQLite-backed sink. One file holds the `tool_calls` and `runs` tables.
-
-    Pass either `database=` (a path; short-lived connections opened per call
-    with WAL enabled) or `connection=` (a caller-owned `sqlite3.Connection`).
-    A caller-owned connection must be created with `check_same_thread=False`,
-    since methods dispatch SQL onto worker threads via `anyio.to_thread`. Runs
-    upsert on their `run_id`; tool calls append.
-
-    `database=':memory:'` is a special case: SQLite hands out a distinct,
-    empty database to every `connect()` call for that name, so the sink keeps
-    one connection open for its own lifetime instead of the normal
-    open-per-call cycle used for file-backed databases.
-    """
-
-    def __init__(
-        self,
-        *,
-        database: str | Path | None = None,
-        connection: sqlite3.Connection | None = None,
-    ) -> None:
-        if (database is None) == (connection is None):
-            raise ValueError('provide exactly one of `database=` or `connection=`')
-        self._database = Path(database) if database is not None else None
-        self._connection = connection
-        self._schema_ready = False
-        self._is_memory = self._database is not None and str(self._database) == _MEMORY_DATABASE
-        self._memory_connection: sqlite3.Connection | None = None
-
-    def _open(self) -> sqlite3.Connection:
-        if self._connection is not None:
-            return self._connection
-        if self._is_memory:
-            if self._memory_connection is None:
-                self._memory_connection = sqlite3.connect(
-                    _MEMORY_DATABASE, isolation_level=None, check_same_thread=False
-                )
-            return self._memory_connection
-        assert self._database is not None
-        self._database.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self._database, isolation_level=None, check_same_thread=False)
-        conn.execute('PRAGMA journal_mode=WAL')
-        return conn
-
-    def _maybe_close(self, conn: sqlite3.Connection) -> None:
-        if self._connection is None and not self._is_memory:
-            conn.close()
-
-    def __del__(self) -> None:
-        """Close the internally-opened `:memory:` connection so it isn't leaked.
-
-        Only relevant to the `database=':memory:'` path: a caller-owned
-        `connection=` is the caller's to close, and the file-backed
-        `database=` path already closes its connection after every call.
-        `__init__` can raise before `_memory_connection` is set (the
-        exactly-one-of check), so guard against that partially-constructed case.
-        """
-        connection = getattr(self, '_memory_connection', None)
-        if connection is not None:
-            connection.close()
-
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
-        if self._schema_ready:
-            return
-        conn.executescript(_SQLITE_SCHEMA)
-        conn.commit()
-        self._schema_ready = True
-
-    async def record_tool_call(self, record: ToolCallRecord) -> None:
-        await anyio.to_thread.run_sync(self._sync_record_tool_call, record)
-
-    def _sync_record_tool_call(self, record: ToolCallRecord) -> None:
-        conn = self._open()
-        try:
-            self._ensure_schema(conn)
-            placeholders = ', '.join('?' * len(_TOOL_COLUMNS))
-            conn.execute(
-                f'INSERT INTO tool_calls ({", ".join(_TOOL_COLUMNS)}) VALUES ({placeholders})',
-                _to_json_row(record, _TOOL_ADAPTER, _TOOL_COLUMNS),
-            )
-            # A caller-owned connection may be in sqlite3's default deferred
-            # isolation mode, where writes stay in an open transaction until
-            # committed. Commit unconditionally so a write is durable even if
-            # the caller closes their connection (which rolls back an open
-            # transaction) without committing first.
-            conn.commit()
-        finally:
-            self._maybe_close(conn)
-
-    async def record_run(self, record: RunAuditRecord) -> None:
-        await anyio.to_thread.run_sync(self._sync_record_run, record)
-
-    def _sync_record_run(self, record: RunAuditRecord) -> None:
-        conn = self._open()
-        try:
-            self._ensure_schema(conn)
-            placeholders = ', '.join('?' * len(_RUN_COLUMNS))
-            conn.execute(
-                f'INSERT OR REPLACE INTO runs ({", ".join(_RUN_COLUMNS)}) VALUES ({placeholders})',
-                _to_json_row(record, _RUN_ADAPTER, _RUN_COLUMNS),
-            )
-            # See the matching comment in `_sync_record_tool_call`: commit
-            # unconditionally so a caller-owned connection in deferred mode
-            # doesn't lose the write on close.
-            conn.commit()
-        finally:
-            self._maybe_close(conn)
-
-    async def list_tool_calls(self, *, run_id: str) -> list[ToolCallRecord]:
-        return await anyio.to_thread.run_sync(self._sync_list_tool_calls, run_id)
-
-    def _sync_list_tool_calls(self, run_id: str) -> list[ToolCallRecord]:
-        conn = self._open()
-        try:
-            self._ensure_schema(conn)
-            rows = conn.execute(
-                f'SELECT {", ".join(_TOOL_COLUMNS)} FROM tool_calls WHERE run_id = ? ORDER BY seq',
-                (run_id,),
-            ).fetchall()
-        finally:
-            self._maybe_close(conn)
-        return [_TOOL_ADAPTER.validate_python(dict(zip(_TOOL_COLUMNS, row))) for row in rows]
-
-    async def get_run(self, *, run_id: str) -> RunAuditRecord | None:
-        return await anyio.to_thread.run_sync(self._sync_get_run, run_id)
-
-    def _sync_get_run(self, run_id: str) -> RunAuditRecord | None:
-        conn = self._open()
-        try:
-            self._ensure_schema(conn)
-            row = conn.execute(
-                f'SELECT {", ".join(_RUN_COLUMNS)} FROM runs WHERE run_id = ?',
-                (run_id,),
-            ).fetchone()
-        finally:
-            self._maybe_close(conn)
-        if row is None:
-            return None
-        return _RUN_ADAPTER.validate_python(dict(zip(_RUN_COLUMNS, row)))

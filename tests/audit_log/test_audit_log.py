@@ -77,7 +77,11 @@ class TestAuditLogThroughAgent:
         assert run.total_tokens == run.input_tokens + run.output_tokens  # type: ignore[operator]
         assert run.total_tokens and run.total_tokens > 0
 
-    async def test_redacts_secret_arguments(self):
+    async def test_no_redaction_by_default(self):
+        # `AuditLog` ships no default secret-detection policy: with no
+        # `redactor` configured, every argument value -- including one named
+        # `api_key` -- is recorded as given. Redaction policy is the
+        # consumer's; see `test_custom_redactor` for how to opt in.
         sink = InMemoryAuditSink()
         agent = Agent(TestModel(), capabilities=[AuditLog(sink=sink)])
 
@@ -87,9 +91,11 @@ class TestAuditLogThroughAgent:
 
         result = await agent.run('go')
         (call,) = await sink.list_tool_calls(run_id=result.run_id)
-        assert json.loads(call.arguments) == {'host': 'a', 'api_key': '***'}
+        assert json.loads(call.arguments) == {'host': 'a', 'api_key': 'a'}
 
     async def test_custom_redactor(self):
+        # A consumer opts into a redaction policy by passing their own
+        # `redactor` -- there is nothing to override, since there is no default.
         sink = InMemoryAuditSink()
         agent = Agent(
             TestModel(), capabilities=[AuditLog(sink=sink, redactor=lambda k, v: 'HIDDEN' if k == 'host' else v)]
@@ -260,3 +266,64 @@ class TestDirectHookEdges:
 
         run_ids = {c.run_id for c in sink.tool_calls} | {r.run_id for r in sink.runs}
         assert len(run_ids) == 1
+
+
+class _UnstringifiableResult:
+    """A tool result whose `__str__` raises -- audit-record construction must not propagate that."""
+
+    def __str__(self) -> str:
+        raise RuntimeError('__str__ is broken')
+
+
+class _UnreprableError(Exception):
+    """An exception whose `__repr__` raises -- audit-record construction must not replace it."""
+
+    def __repr__(self) -> str:
+        raise RuntimeError('__repr__ is broken')
+
+
+class TestDefensiveRecordConstruction:
+    """A broken `__str__`/`__repr__` on a tool result or error must not change the run outcome.
+
+    `str(result)` and `repr(error)` happen while building the audit record,
+    after the tool has already succeeded or failed. A conversion that itself
+    raises must not turn a successful call into a failure, or replace the
+    tool's real exception with one raised while merely describing it.
+    """
+
+    async def test_result_with_broken_str_leaves_the_returned_result_unchanged(self):
+        sink = RecordingSink()
+        cap = AuditLog(sink=sink)
+        outcome = _UnstringifiableResult()
+
+        returned = await cap.after_tool_execute(
+            _ctx(run_id='r1'),
+            call=ToolCallPart(tool_name='lookup', args={}, tool_call_id='c1'),
+            tool_def=ToolDefinition(name='lookup'),
+            args={},
+            result=outcome,
+        )
+
+        assert returned is outcome  # the successful call still returns its actual result, unaltered
+        (call,) = sink.tool_calls
+        assert call.result == '<unrepresentable>'
+        assert call.error is None
+
+    async def test_error_with_broken_repr_still_reraises_the_original_error(self):
+        sink = RecordingSink()
+        cap = AuditLog(sink=sink)
+        original = _UnreprableError('original tool failure')
+
+        with pytest.raises(_UnreprableError) as exc_info:
+            await cap.on_tool_execute_error(
+                _ctx(run_id='r1'),
+                call=ToolCallPart(tool_name='boom', args={}, tool_call_id='c1'),
+                tool_def=ToolDefinition(name='boom'),
+                args={},
+                error=original,
+            )
+
+        assert exc_info.value is original  # the original exception, not one raised while describing it
+        (call,) = sink.tool_calls
+        assert call.result is None
+        assert call.error == '<unrepresentable>'

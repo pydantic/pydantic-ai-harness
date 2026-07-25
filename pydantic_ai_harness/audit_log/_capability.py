@@ -1,4 +1,4 @@
-"""The `AuditLog` capability: durable, redacted audit records to a pluggable sink."""
+"""The `AuditLog` capability: durable audit records of tool calls and runs to a pluggable sink."""
 
 from __future__ import annotations
 
@@ -15,22 +15,40 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 
 from pydantic_ai_harness.audit_log._context import current_run_id
-from pydantic_ai_harness.audit_log._redact import Redactor, bound_text, default_secret_redactor, redact_arguments
+from pydantic_ai_harness.audit_log._redact import Redactor, bound_text, identity_redactor, redact_arguments
 from pydantic_ai_harness.audit_log._sink import AuditSink, InMemoryAuditSink
 from pydantic_ai_harness.audit_log._types import RunAuditRecord, RunOutcome, ToolCallRecord
+
+_UNREPRESENTABLE = '<unrepresentable>'
 
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _safe_convert(convert: Callable[[], str]) -> str:
+    """Run a `str()`/`repr()` conversion, substituting a placeholder if it raises.
+
+    A tool's result or an exception can have a `__str__`/`__repr__` that
+    itself raises. `after_tool_execute`, `on_tool_execute_error`, and
+    `on_run_error` all promise to return or re-raise the underlying value
+    unchanged, so a broken conversion must not propagate from audit-record
+    construction and turn a successful call into a failure, or replace the
+    original error with a different one raised while merely describing it.
+    """
+    try:
+        return convert()
+    except Exception:
+        return _UNREPRESENTABLE
+
+
 @dataclass
 class AuditLog(AbstractCapability[AgentDepsT]):
-    """Record a structured, redacted audit trail of tool calls and run outcomes.
+    """Record a structured audit trail of tool calls and run outcomes.
 
-    Writes a `ToolCallRecord` per tool call (redacted arguments, result or
-    error, timing, and lineage) and a `RunAuditRecord` per run (outcome plus
-    token usage) to a pluggable `AuditSink`. Where OpenTelemetry emits spans for
+    Writes a `ToolCallRecord` per tool call (arguments, result or error,
+    timing, and lineage) and a `RunAuditRecord` per run (outcome plus token
+    usage) to a pluggable `AuditSink`. Where OpenTelemetry emits spans for
     observability and `step_persistence` records boundary events for resume,
     this captures the *content* of each call as a durable record to query for
     audit and compliance, attribute cost against, or mine into eval datasets.
@@ -46,8 +64,12 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     calls = await sink.list_tool_calls(run_id=result.run_id)
     ```
 
-    Redaction is a pluggable `redactor` over each argument, defaulting to
-    stripping secret-named keys. Values are bounded to `max_value_chars`. Pass a
+    `sink` is the extension point: `InMemoryAuditSink` and `JsonlAuditSink` are
+    trivial, dependency-free references, not a persistent backend. Implement
+    `AuditSink` against SQLite, Postgres, Mongo, or a warehouse for your own
+    deployment. Redaction is a pluggable `redactor` over each argument,
+    defaulting to no redaction -- pass your own `Redactor` for your
+    secret-handling policy. Values are bounded to `max_value_chars`. Pass a
     `sink_resolver` for a per-run backend keyed on `RunContext` (tenant/scope),
     mirroring `Memory.store_resolver`.
     """
@@ -58,8 +80,8 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     sink_resolver: Callable[[RunContext[AgentDepsT]], AuditSink] | None = None
     """Optional per-run sink resolver, keyed on the run context. Resolver failures propagate."""
 
-    redactor: Redactor = default_secret_redactor
-    """Per-argument redaction policy `(arg_name, value) -> value`. Defaults to secret-key stripping."""
+    redactor: Redactor = identity_redactor
+    """Per-argument redaction policy `(arg_name, value) -> value`. Defaults to no redaction."""
 
     max_value_chars: int = 2000
     """Character bound applied to each argument value, and to the full result/error text."""
@@ -152,8 +174,8 @@ class AuditLog(AbstractCapability[AgentDepsT]):
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
             arguments=redact_arguments(args, redactor=self.redactor, max_chars=self.max_value_chars),
-            result=None if error is not None else bound_text(str(result), self.max_value_chars),
-            error=None if error is None else bound_text(repr(error), self.max_value_chars),
+            result=None if error is not None else bound_text(_safe_convert(lambda: str(result)), self.max_value_chars),
+            error=None if error is None else bound_text(_safe_convert(lambda: repr(error)), self.max_value_chars),
             started_at=self._pending.pop(call.tool_call_id, _utcnow()),
             ended_at=_utcnow(),
             conversation_id=ctx.conversation_id,
@@ -186,7 +208,7 @@ class AuditLog(AbstractCapability[AgentDepsT]):
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
-            error=None if error is None else bound_text(repr(error), self.max_value_chars),
+            error=None if error is None else bound_text(_safe_convert(lambda: repr(error)), self.max_value_chars),
             conversation_id=ctx.conversation_id,
             parent_run_id=self._parent_run_id,
             agent_name=self.agent_name,

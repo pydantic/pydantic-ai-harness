@@ -1,9 +1,11 @@
 """Argument redaction and size bounding for audit records.
 
-The default redactor strips values whose key names a secret (token, password,
-api key, ...). Redaction is keyed on the argument name, so a custom `Redactor`
-can implement any policy over `(key, value)` -- value-shape detection, an
-allowlist, or a no-op that keeps everything.
+Redaction policy belongs to the consumer, not this library: the default
+`redactor` is a no-op that keeps every value unchanged. Pass your own
+`Redactor` -- `(key, value) -> value` -- to strip whatever your deployment
+considers a secret. A hint-list matcher, value-shape detection, and an
+allowlist are all just a function of that shape; this module ships none of
+them as a default.
 """
 
 from __future__ import annotations
@@ -19,40 +21,13 @@ redact it. Called once per top-level argument before the arguments are
 serialized to JSON.
 """
 
-_REDACTED = '***'
 
-_SECRET_HINTS = frozenset(
-    {
-        'password',
-        'passwd',
-        'secret',
-        'token',
-        'api_key',
-        'apikey',
-        'access_key',
-        'secret_key',
-        'private_key',
-        'client_secret',
-        'authorization',
-        'credential',
-        'session',
-        'cookie',
-    }
-)
+def identity_redactor(_key: str, value: object) -> object:
+    """`AuditLog`'s default `Redactor`: every value passes through unchanged.
 
-
-def default_secret_redactor(key: str, value: object) -> object:
-    """Redact values whose key names a secret; pass everything else through.
-
-    Matches case-insensitively on a substring of the argument name, with `-`
-    and `.` separators normalized to `_` before matching, so `API_KEY`,
-    `x-api-key`, and `client_secret` are all caught. Replace this with a
-    stricter or looser `Redactor` on the capability when the default set does
-    not fit.
+    The library takes no position on what counts as a secret. Pass your own
+    `redactor` on `AuditLog` for a policy that fits your deployment.
     """
-    normalized = key.lower().replace('-', '_').replace('.', '_')
-    if any(hint in normalized for hint in _SECRET_HINTS):
-        return _REDACTED
     return value
 
 
@@ -86,18 +61,23 @@ def redact_arguments(arguments: dict[str, object], *, redactor: Redactor, max_ch
 def _bound_value(value: object, max_chars: int) -> object:
     """Bound one redacted argument value to `max_chars`.
 
-    Strings are truncated directly. `None` and numeric/boolean scalars pass
-    through unbounded since serializing them can't balloon a record. Anything
-    else (a nested dict/list, or an object that needs `default=str`) is
-    measured by its own serialization and, only if that exceeds the bound,
-    replaced by its truncated string form. Either way the value handed back
-    is safe for the caller to serialize again: the original JSON-native value,
-    or a plain string.
+    Strings are truncated directly. `None` and `bool` pass through unbounded;
+    neither can grow large enough to balloon a record. Any other `int` or
+    `float` -- notably an arbitrary-precision integer like `10**3000` -- has
+    no such ceiling, so it is bounded by its own decimal text the same way a
+    string is. Anything else (a nested dict/list, or an object that needs
+    `default=str`) is measured by its own serialization and, only if that
+    exceeds the bound, replaced by its truncated string form. Either way the
+    value handed back is safe for the caller to serialize again: the original
+    JSON-native value, or a plain string.
     """
     if isinstance(value, str):
         return bound_text(value, max_chars)
-    if value is None or isinstance(value, (int, float)):
+    if value is None or isinstance(value, bool):
         return value
+    if isinstance(value, (int, float)):
+        text = str(value)
+        return value if len(text) <= max_chars else bound_text(text, max_chars)
     serialized = json.dumps(value, default=str, ensure_ascii=False)
     if len(serialized) <= max_chars:
         return value

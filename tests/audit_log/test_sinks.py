@@ -1,8 +1,13 @@
-"""Conformance and backend-specific tests for the audit sinks."""
+"""Conformance and backend-specific tests for the audit sinks.
+
+Only the two dependency-free reference sinks (`InMemoryAuditSink`,
+`JsonlAuditSink`) are covered here. A persistent backend (SQLite, Postgres,
+Mongo, a warehouse) is the consumer's own `AuditSink` implementation and is
+not this library's concern -- see `docs/audit-log.md` "Sinks".
+"""
 
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -14,7 +19,6 @@ from pydantic_ai_harness.audit_log import (
     JsonlAuditSink,
     RunAuditRecord,
     RunOutcome,
-    SqliteAuditSink,
     ToolCallRecord,
 )
 
@@ -34,21 +38,10 @@ def _run(run_id: str, *, outcome: RunOutcome = 'completed') -> RunAuditRecord:
     return RunAuditRecord(run_id=run_id, outcome=outcome, input_tokens=3, output_tokens=4, total_tokens=7)
 
 
-@pytest.fixture(params=['memory', 'jsonl', 'sqlite-db', 'sqlite-conn'])
+@pytest.fixture(params=['memory', 'jsonl'])
 def sink(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[AuditSink]:
-    connection: sqlite3.Connection | None = None
-    if request.param == 'sqlite-conn':
-        connection = sqlite3.connect(':memory:', check_same_thread=False)
-        made: AuditSink = SqliteAuditSink(connection=connection)
-    elif request.param == 'sqlite-db':
-        made = SqliteAuditSink(database=tmp_path / 'audit.db')
-    elif request.param == 'jsonl':
-        made = JsonlAuditSink(tmp_path / 'audit.jsonl')
-    else:
-        made = InMemoryAuditSink()
+    made: AuditSink = JsonlAuditSink(tmp_path / 'audit.jsonl') if request.param == 'jsonl' else InMemoryAuditSink()
     yield made
-    if connection is not None:
-        connection.close()
 
 
 class TestSinkConformance:
@@ -133,82 +126,3 @@ class TestJsonlAuditSink:
         await sink.record_run(_run('r1'))
         assert [c.tool_call_id for c in await sink.list_tool_calls(run_id='r1')] == ['c1']
         assert await sink.get_run(run_id='r2') is None
-
-
-class TestSqliteAuditSink:
-    def test_requires_exactly_one_of_database_or_connection(self):
-        with pytest.raises(ValueError, match='exactly one'):
-            SqliteAuditSink()
-        connection = sqlite3.connect(':memory:', check_same_thread=False)
-        try:
-            with pytest.raises(ValueError, match='exactly one'):
-                SqliteAuditSink(database='x.db', connection=connection)
-        finally:
-            connection.close()
-
-    async def test_schema_is_created_once_and_reused(self, tmp_path: Path):
-        sink = SqliteAuditSink(database=tmp_path / 'audit.db')
-        # The first write creates the schema; the second reuses it (idempotent).
-        await sink.record_tool_call(_tool('r1', 'c1'))
-        await sink.record_run(_run('r1'))
-        assert len(await sink.list_tool_calls(run_id='r1')) == 1
-        assert (await sink.get_run(run_id='r1')) is not None
-
-    async def test_run_upserts_on_run_id(self, tmp_path: Path):
-        sink = SqliteAuditSink(database=tmp_path / 'audit.db')
-        await sink.record_run(_run('r1', outcome='completed'))
-        await sink.record_run(_run('r1', outcome='failed'))
-        run = await sink.get_run(run_id='r1')
-        assert run is not None and run.outcome == 'failed'
-
-    async def test_get_run_on_fresh_db_creates_schema(self, tmp_path: Path):
-        # `get_run` as the very first operation must create the schema, not fail on a missing table.
-        sink = SqliteAuditSink(database=tmp_path / 'fresh.db')
-        assert await sink.get_run(run_id='absent') is None
-
-    async def test_list_on_fresh_db_creates_schema(self, tmp_path: Path):
-        sink = SqliteAuditSink(database=tmp_path / 'fresh.db')
-        assert await sink.list_tool_calls(run_id='absent') == []
-
-    async def test_creates_nested_parent_dirs(self, tmp_path: Path):
-        sink = SqliteAuditSink(database=tmp_path / 'nested' / 'deep' / 'audit.db')
-        await sink.record_run(_run('r1'))
-        assert (await sink.get_run(run_id='r1')) is not None
-
-    async def test_caller_owned_deferred_connection_writes_survive_close(self, tmp_path: Path):
-        # A caller-owned connection defaults to sqlite3's deferred isolation
-        # mode (unlike the internally-managed `database=` path, which forces
-        # autocommit). Writes must be committed regardless, or closing the
-        # caller's connection rolls them back and a fresh connection to the
-        # same file finds nothing.
-        db_path = tmp_path / 'caller-owned.db'
-        owned = sqlite3.connect(db_path, check_same_thread=False)
-        assert owned.isolation_level is not None  # deferred mode, not autocommit
-        try:
-            sink = SqliteAuditSink(connection=owned)
-            await sink.record_tool_call(_tool('r1', 'c1'))
-            await sink.record_run(_run('r1'))
-        finally:
-            owned.close()  # a commit-less close on a deferred connection rolls back
-
-        reader = sqlite3.connect(db_path, check_same_thread=False)
-        try:
-            read_sink = SqliteAuditSink(connection=reader)
-            assert len(await read_sink.list_tool_calls(run_id='r1')) == 1
-            run = await read_sink.get_run(run_id='r1')
-            assert run is not None and run.outcome == 'completed'
-        finally:
-            reader.close()
-
-    async def test_memory_database_persists_across_calls(self):
-        # `database=':memory:'` must behave like a working sink across
-        # multiple calls, not silently discard everything after the first
-        # write (SQLite hands out a brand-new, empty `:memory:` database to
-        # every `connect()` call, so opening and closing a connection per
-        # operation -- the normal `database=` lifecycle -- destroys the data).
-        sink = SqliteAuditSink(database=':memory:')
-        await sink.record_tool_call(_tool('r1', 'c1'))
-        await sink.record_run(_run('r1'))
-        assert len(await sink.list_tool_calls(run_id='r1')) == 1
-        run = await sink.get_run(run_id='r1')
-        assert run is not None and run.outcome == 'completed'
