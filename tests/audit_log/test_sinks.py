@@ -174,3 +174,30 @@ class TestJsonlAuditSink:
         assert run is not None and run.outcome == 'completed'
         assert await sink.list_tool_calls(run_id='torn') == []  # the torn fragment never merges into a real record
         assert 'unparseable' in caplog.text.lower()  # the torn fragment is skipped, not silently merged
+
+    async def test_trailing_line_torn_mid_multibyte_utf8_char_does_not_fail_the_whole_read(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        # A crash can tear an append in the middle of a multi-byte UTF-8
+        # character, not just mid-JSON-structure. Decoding the whole file as
+        # UTF-8 in one call would raise `UnicodeDecodeError` for the entire
+        # read and hide every valid record recorded before the torn one --
+        # this one bad line must be skipped, exactly like a torn JSON line.
+        path = tmp_path / 'audit.jsonl'
+        sink = JsonlAuditSink(path)
+        await sink.record_tool_call(_tool('r1', 'c1'))
+        await sink.record_run(_run('r1'))
+        # A line ending in a multi-byte UTF-8 character ('世', 3 bytes: \xe4\xb8\x96),
+        # truncated by one byte so the file ends mid-character, with no
+        # terminating newline -- what a write cut short by a crash leaves behind.
+        torn = '{"kind": "tool_call", "record": {"run_id": "r1", "tool_name": "世'.encode()[:-1]
+        with path.open('ab') as handle:
+            handle.write(torn)
+
+        with caplog.at_level(logging.WARNING):
+            calls = await sink.list_tool_calls(run_id='r1')
+            run = await sink.get_run(run_id='r1')
+
+        assert [c.tool_call_id for c in calls] == ['c1']  # records before the torn line are still readable
+        assert run is not None and run.outcome == 'completed'
+        assert 'unparseable' in caplog.text.lower()  # the torn line is skipped, not fatal to the whole read

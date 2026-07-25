@@ -308,6 +308,17 @@ class _UnreprableError(Exception):
         raise RuntimeError('__repr__ is broken')
 
 
+class _UnreprableViaBaseException(Exception):
+    """An exception whose `__repr__` raises `KeyboardInterrupt` -- a `BaseException` that is not
+    an `Exception`. `on_run_error`/`on_tool_execute_error` accept any `BaseException`, so the
+    conversion guard must catch more than just `Exception` or this escapes and replaces the run's
+    real failure with an unrelated `KeyboardInterrupt`.
+    """
+
+    def __repr__(self) -> str:
+        raise KeyboardInterrupt
+
+
 class TestDefensiveRecordConstruction:
     """A broken `__str__`/`__repr__` on a tool result or error must not change the run outcome.
 
@@ -353,6 +364,29 @@ class TestDefensiveRecordConstruction:
         (call,) = sink.tool_calls
         assert call.result is None
         assert call.error == '<unrepresentable>'
+
+    async def test_run_error_whose_repr_raises_a_non_exception_base_exception_still_reraises_the_original(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        # `on_run_error` accepts any `BaseException`. Here the run's own error
+        # is an ordinary `Exception` subclass, but its `__repr__` -- invoked
+        # only while building the audit record -- raises `KeyboardInterrupt`,
+        # which is *not* an `Exception`. That must not escape the conversion
+        # guard and replace the run's real failure with an unrelated
+        # `KeyboardInterrupt`.
+        sink = RecordingSink()
+        cap = AuditLog(sink=sink)
+        original = _UnreprableViaBaseException('the run actually failed this way')
+
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(_UnreprableViaBaseException) as exc_info:
+                await cap.on_run_error(_ctx(run_id='r1'), error=original)
+
+        assert exc_info.value is original  # the original error, not the KeyboardInterrupt raised while describing it
+        (run,) = sink.runs
+        assert run.outcome == 'failed'
+        assert run.error == '<unrepresentable>'
+        assert 'failed to convert' in caplog.text  # the conversion failure is logged, not just swallowed
 
 
 class TestSinkFailureIsolation:

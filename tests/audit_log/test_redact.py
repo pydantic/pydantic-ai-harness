@@ -12,6 +12,15 @@ class _Stringifies:
         return 'STR_FORM'
 
 
+class _RaisesTypeErrorOnStr:
+    """A value whose `__str__` raises `TypeError` -- invoked through `default=str` for a value
+    `json.dumps` cannot encode natively, so the `TypeError` surfaces from `json.dumps` itself.
+    """
+
+    def __str__(self) -> str:
+        raise TypeError('__str__ is broken')
+
+
 class TestIdentityRedactor:
     def test_keeps_every_value_unchanged(self):
         # This is `AuditLog`'s default `redactor`: the library ships no
@@ -96,6 +105,28 @@ class TestRedactArguments:
         parsed = json.loads(out)  # must not raise json.JSONDecodeError
         assert isinstance(parsed['payload'], str)
         assert 'exceeds' in parsed['payload']
+
+    def test_dict_with_a_tuple_key_is_isolated_to_a_placeholder_not_a_hook_failure(self):
+        # `default=str` rescues values `json.dumps` cannot encode, but never
+        # dict keys: a `dict` argument with a non-string key (e.g. a tuple)
+        # raises `TypeError`, not `ValueError`. A valid Python tool argument
+        # must not turn a successful tool call into a hook failure -- the
+        # offending argument is isolated to a placeholder, the same as an
+        # oversized int, while the sibling argument still records faithfully.
+        out = redact_arguments({'bad': {('t',): 1}, 'good': 'kept'}, redactor=identity_redactor)
+        parsed = json.loads(out)  # must not raise -- and construction must not raise TypeError either
+        assert parsed['good'] == 'kept'
+        assert isinstance(parsed['bad'], str)
+
+    def test_str_raising_type_error_is_isolated_to_a_placeholder_not_a_hook_failure(self):
+        # `default=str` calls `str(obj)` for a value `json.dumps` cannot
+        # encode natively. If that `__str__` itself raises `TypeError`, the
+        # failure must be isolated to the one offending argument, not escape
+        # and turn a successful tool call into a hook failure.
+        out = redact_arguments({'bad': _RaisesTypeErrorOnStr(), 'good': 'kept'}, redactor=identity_redactor)
+        parsed = json.loads(out)
+        assert parsed['good'] == 'kept'
+        assert isinstance(parsed['bad'], str)
 
     def test_numeric_values_are_kept_native(self):
         # An ordinary int/float keeps its native JSON numeric type instead of

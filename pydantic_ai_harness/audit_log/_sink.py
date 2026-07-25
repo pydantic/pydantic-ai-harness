@@ -82,9 +82,9 @@ class JsonlAuditSink:
     Each line is `{"kind": "tool_call"|"run", "record": {...}}`. Writes append,
     so a run recorded more than once keeps every line and `get_run` returns the
     last. File I/O runs on a worker thread so the event loop is not blocked. A
-    line that fails to parse as JSON (e.g. a partial append torn by a crash) is
-    skipped and logged rather than raised, so one bad line does not hide every
-    valid record recorded before it.
+    line that fails to decode as UTF-8 or parse as JSON (e.g. a partial append
+    torn mid-write by a crash) is skipped and logged rather than raised, so one
+    bad line does not hide every valid record recorded before it.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -116,21 +116,28 @@ class JsonlAuditSink:
             handle.write(line + b'\n')
 
     def _read(self) -> list[dict[str, object]]:
-        """Read every envelope in the file, skipping a line that fails to parse as JSON.
+        """Read every envelope in the file, skipping a line that fails to decode or parse.
 
         A torn trailing record -- a partial append cut short by a crash, or any
         other single malformed line -- must not make every read raise and hide
         every prior valid record; the unparseable line is logged and skipped.
+        This reads the file as bytes and decodes each line individually,
+        inside the same try/except that parses its JSON, rather than decoding
+        the whole file as UTF-8 upfront: a crash can tear an append in the
+        middle of a multi-byte UTF-8 character, and decoding the whole file in
+        one call would raise `UnicodeDecodeError` for the entire read, hiding
+        every valid record recorded before the torn one instead of just
+        skipping it.
         """
         if not self._path.exists():
             return []
         envelopes: list[dict[str, object]] = []
-        for raw in self._path.read_text(encoding='utf-8').splitlines():
+        for raw in self._path.read_bytes().split(b'\n'):
             if not raw.strip():
                 continue
             try:
-                envelopes.append(json.loads(raw))
-            except json.JSONDecodeError:
+                envelopes.append(json.loads(raw.decode('utf-8')))
+            except (UnicodeDecodeError, json.JSONDecodeError):
                 logger.warning('Skipping unparseable line in audit sink %s.', self._path)
         return envelopes
 

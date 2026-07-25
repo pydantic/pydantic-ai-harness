@@ -45,19 +45,30 @@ def redact_arguments(arguments: dict[str, object], *, redactor: Redactor) -> str
     consumer who wants to cap value size does so in their own `redactor`
     (e.g. truncate a string before returning it).
 
-    The one value `default=str` cannot rescue is an integer beyond Python's
-    int-to-str conversion digit limit (`sys.get_int_max_str_digits`, 4300 by
-    default) anywhere in the argument tree: encoding a JSON number means
-    converting the int to decimal text, which raises `ValueError` past that
-    limit instead of returning text, and `default` is never consulted for a
-    type `json.dumps` already knows how to encode. On that failure, each
-    argument is re-serialized individually so the fault is isolated to the
-    one unencodable value instead of losing every sibling argument.
+    Two failure modes `default=str` cannot rescue, both isolated to a
+    placeholder on the one offending argument instead of losing every
+    sibling argument:
+
+    - `ValueError`: an integer beyond Python's int-to-str conversion digit
+      limit (`sys.get_int_max_str_digits`, 4300 by default) anywhere in the
+      argument tree. Encoding a JSON number means converting the int to
+      decimal text, which raises instead of returning text, and `default` is
+      never consulted for a type `json.dumps` already knows how to encode.
+    - `TypeError`: a `dict` argument with a key that is not
+      `str`/`int`/`float`/`bool`/`None` (e.g. a `tuple`) -- `default` rescues
+      values, never keys -- or a `__str__`/`__repr__` invoked through the
+      `default=str` fallback that itself raises `TypeError`. Either way, a
+      valid Python tool argument must not turn a successful call into a hook
+      failure.
+
+    On either failure, each argument is re-serialized individually so the
+    fault is isolated to the one unencodable value instead of losing every
+    sibling argument.
     """
     redacted = {key: redactor(key, value) for key, value in arguments.items()}
     try:
         return json.dumps(redacted, default=str, ensure_ascii=False)
-    except ValueError:
+    except (ValueError, TypeError):
         return json.dumps({key: _json_safe(value) for key, value in redacted.items()}, default=str, ensure_ascii=False)
 
 
@@ -65,11 +76,14 @@ def _json_safe(value: object) -> object:
     """Return `value` unchanged, or a placeholder if `json.dumps` cannot encode it at all.
 
     This is a serialization guard, not a size policy: it only replaces a
-    value `json.dumps` cannot represent by any means (see `redact_arguments`),
-    never one it can represent, no matter how large.
+    value `json.dumps` cannot represent by any means (see `redact_arguments`
+    for the two failure modes this guards), never one it can represent, no
+    matter how large.
     """
     try:
         json.dumps(value, default=str)
     except ValueError:
         return '<value exceeds JSON int-to-str conversion limit>'
+    except TypeError:
+        return '<value is not JSON-serializable>'
     return value

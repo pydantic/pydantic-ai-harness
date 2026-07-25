@@ -33,15 +33,22 @@ def _safe_convert(convert: Callable[[], str]) -> str:
     """Run a `str()`/`repr()` conversion, substituting a placeholder if it raises.
 
     A tool's result or an exception can have a `__str__`/`__repr__` that
-    itself raises. `after_tool_execute`, `on_tool_execute_error`, and
-    `on_run_error` all promise to return or re-raise the underlying value
-    unchanged, so a broken conversion must not propagate from audit-record
-    construction and turn a successful call into a failure, or replace the
-    original error with a different one raised while merely describing it.
+    itself raises -- any `BaseException`, not just `Exception`. `on_run_error`
+    and `on_tool_execute_error` both accept a bare `BaseException` (a
+    `KeyboardInterrupt` raised from a broken `__repr__` is not an `Exception`
+    and is exactly as able to reach here), and `after_tool_execute`,
+    `on_tool_execute_error`, and `on_run_error` all promise to return or
+    re-raise the underlying value unchanged. A broken conversion must
+    therefore never propagate from audit-record construction and turn a
+    successful call into a failure, or replace the original error with a
+    different one raised while merely describing it -- the same
+    swallow-to-placeholder rationale as the sink-failure isolation in
+    `_record_tool_call`/`_record_run`, so the failure is logged the same way.
     """
     try:
         return convert()
-    except Exception:
+    except BaseException as exc:
+        logger.warning('AuditLog failed to convert a value for the audit record; using a placeholder.', exc_info=exc)
         return _UNREPRESENTABLE
 
 
