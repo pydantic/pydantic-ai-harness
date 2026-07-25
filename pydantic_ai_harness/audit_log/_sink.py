@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections import defaultdict
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -90,9 +91,28 @@ class JsonlAuditSink:
         self._path = Path(path)
 
     def _append(self, kind: str, payload: bytes) -> None:
+        """Append one record as its own line, first isolating any torn trailing line.
+
+        If a prior crash left the file's last byte not a newline (a write cut
+        short mid-record), naively appending this record plus a terminating
+        newline would concatenate it onto that fragment, producing one
+        combined line that `_read` cannot parse -- hiding the new record
+        along with the torn one, not just the torn one. Opened `a+b` (append
+        *and* read) rather than `ab` so the trailing byte can be inspected:
+        when the file is non-empty and does not already end in a newline, a
+        separating newline is written first, leaving the torn fragment as its
+        own (skippable) line and this record starting cleanly on the next.
+        Reading the trailing byte does not race the append: `a+b` writes
+        always land at end-of-file regardless of the read seek, the same
+        O_APPEND guarantee `ab` relies on.
+        """
         self._path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps({'kind': kind, 'record': json.loads(payload)}).encode('utf-8')
-        with self._path.open('ab') as handle:
+        with self._path.open('a+b') as handle:
+            if handle.tell() > 0:
+                handle.seek(-1, os.SEEK_END)
+                if handle.read(1) != b'\n':
+                    handle.write(b'\n')
             handle.write(line + b'\n')
 
     def _read(self) -> list[dict[str, object]]:

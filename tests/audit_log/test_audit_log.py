@@ -153,17 +153,20 @@ class TestAuditLogThroughAgent:
         assert await sink.get_run(run_id=sink.runs[0].run_id) is not None
         assert len(await sink.list_tool_calls(run_id=sink.tool_calls[0].run_id)) == 1
 
-    async def test_value_bounds_apply(self):
+    async def test_result_is_recorded_faithfully_without_a_size_cap(self):
+        # `AuditLog` has no size cap of its own: a large result is recorded
+        # in full. A consumer who wants one bounds it before returning it
+        # from the tool.
         sink = InMemoryAuditSink()
-        agent = Agent(TestModel(), capabilities=[AuditLog(sink=sink, max_value_chars=20)])
+        agent = Agent(TestModel(), capabilities=[AuditLog(sink=sink)])
 
         @agent.tool_plain
         def big() -> str:
-            return 'z' * 500
+            return 'z' * 5000
 
         result = await agent.run('go')
         (call,) = await sink.list_tool_calls(run_id=result.run_id)
-        assert call.result is not None and len(call.result) == 20
+        assert call.result == 'z' * 5000
 
     async def test_conversation_id_is_recorded(self):
         sink = InMemoryAuditSink()
@@ -429,18 +432,3 @@ class TestSinkFailureIsolation:
         assert result.output  # the run completed normally end to end; a broken sink never surfaces
         assert 'failed to record tool call' in caplog.text
         assert 'failed to record run' in caplog.text
-
-
-class TestMaxValueCharsValidation:
-    """`max_value_chars` bounds every recorded value; a non-positive bound must not be allowed to
-    silently defeat that bound (e.g. `bound_text`'s `text[:-1]` for `max_chars=-1`, which drops
-    only the text's last character instead of capping its size).
-    """
-
-    def test_negative_max_value_chars_is_rejected(self):
-        with pytest.raises(ValueError, match='max_value_chars'):
-            AuditLog(max_value_chars=-1)
-
-    def test_zero_max_value_chars_is_rejected(self):
-        with pytest.raises(ValueError, match='max_value_chars'):
-            AuditLog(max_value_chars=0)

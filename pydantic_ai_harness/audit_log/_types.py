@@ -24,11 +24,13 @@ def _utcnow() -> datetime:
 class ToolCallRecord:
     """The audit record for one tool call.
 
-    `arguments` is the size-bounded JSON of the validated call arguments,
-    passed through the capability's `redactor` first -- content a trace span
-    emits ephemerally and `step_persistence` omits by design. Exactly one of
-    `result` (success) or `error` (the tool raised) is set; both are
-    size-bounded to `max_value_chars`.
+    `arguments` is the JSON of the validated call arguments, passed through
+    the capability's `redactor` first -- content a trace span emits
+    ephemerally and `step_persistence` omits by design. Exactly one of
+    `result` (success) or `error` (the tool raised) is set. `arguments`,
+    `result`, and `error` are all recorded faithfully, with no size cap; for
+    `arguments`, a `redactor` that also shortens a value is how a consumer
+    limits size.
 
     `conversation_id`, `parent_run_id`, and `agent_name` mirror pydantic-ai's
     identity stack so audit records join against runs and against
@@ -53,8 +55,8 @@ class RunAuditRecord:
     """The audit record for one agent run.
 
     `outcome` is `completed` on success and `failed` when the run raised, with
-    `error` carrying the size-bounded exception text in the failure case. Token
-    counts are read from `RunContext.usage`; `total_tokens` is its
+    `error` carrying the exception text, recorded faithfully, in the failure
+    case. Token counts are read from `RunContext.usage`; `total_tokens` is its
     `input_tokens + output_tokens` sum.
     """
 

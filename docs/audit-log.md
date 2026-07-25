@@ -39,7 +39,7 @@ asyncio.run(main())
 
 ## What it records
 
-- A `ToolCallRecord` per tool call: `tool_name`, `arguments` (optionally redacted, size-bounded JSON), `result` or `error`, `started_at` / `ended_at`, and the `conversation_id` / `parent_run_id` / `agent_name` identity stack.
+- A `ToolCallRecord` per tool call: `tool_name`, `arguments` (optionally redacted JSON, recorded faithfully), `result` or `error`, `started_at` / `ended_at`, and the `conversation_id` / `parent_run_id` / `agent_name` identity stack.
 - A `RunAuditRecord` per run: `outcome` (`completed` / `failed`), `error` on failure, and `input_tokens` / `output_tokens` / `total_tokens` read from `RunContext.usage`.
 
 Both records carry the same `run_id` / `conversation_id` / `parent_run_id` identity as [step persistence](step-persistence.md), so audit records join against runs and step events.
@@ -55,14 +55,14 @@ Neither is a persistent production backend. `AuditLog` ships no opinion on which
 
 ## Redaction
 
-Each argument passes through a `redactor` -- `(arg_name, value) -> value` -- before it is serialized. `AuditLog` ships no default secret-detection policy: unless you configure one, every argument value is recorded as given. Supply your own `redactor` for your secret-handling policy, and set `max_value_chars` to bound each argument value, and the result and error text, independent of whether you redact.
+Each argument passes through a `redactor` -- `(arg_name, value) -> value` -- before it is serialized. `AuditLog` ships no default secret-detection policy: unless you configure one, every argument value is recorded as given. Supply your own `redactor` for your secret-handling policy. It is also the extension point for limiting an argument's size -- truncate or drop an oversized value there -- since this capability records values faithfully and has no size cap of its own.
 
 ```python
 def keep_only_ids(key: str, value: object) -> object:
     return value if key.endswith('_id') else '***'
 
 
-AuditLog(sink=sink, redactor=keep_only_ids, max_value_chars=500)
+AuditLog(sink=sink, redactor=keep_only_ids)
 ```
 
 ## Lineage across delegation
@@ -79,7 +79,8 @@ When an orchestrator's tool calls a delegate's `Agent.run(...)`, the delegate's 
 - It does not resume runs. Use [step persistence](step-persistence.md) for continuable snapshots.
 - It does not ship a persistent backend. `InMemoryAuditSink` and `JsonlAuditSink` are trivial references for tests and simple single-process use; implement `AuditSink` for SQLite, Postgres, Mongo, or a warehouse. That choice, and its durability, retention, and concurrency semantics, is the consumer's.
 - It does not clean up old records. Retention is the caller's responsibility.
-- It ships no default redaction policy, and redacts arguments by key only -- results and error text carry no keys, so the `redactor` does not see them. Both are size-bounded by `max_value_chars` regardless of redaction; keep secrets out of return values, or wrap the sink to scrub them.
+- It ships no default redaction policy, and redacts arguments by key only -- results and error text carry no keys, so the `redactor` does not see them. Keep secrets out of return values, or wrap the sink to scrub them.
+- It does not bound value size, for arguments or for results and error text. A `redactor` that also truncates an oversized argument is the extension point there; keep a result or error already bounded before returning or raising it, or wrap the sink to scrub or trim it.
 
 ## Related
 

@@ -1,4 +1,4 @@
-"""Argument redaction and size bounding for audit records.
+"""Argument redaction for audit records.
 
 Redaction policy belongs to the consumer, not this library: the default
 `redactor` is a no-op that keeps every value unchanged. Pass your own
@@ -6,6 +6,10 @@ Redaction policy belongs to the consumer, not this library: the default
 considers a secret. A hint-list matcher, value-shape detection, and an
 allowlist are all just a function of that shape; this module ships none of
 them as a default.
+
+Values are recorded faithfully: this module has no size cap of its own. A
+`redactor` that also shortens or drops an oversized value is how a consumer
+limits size, the same extension point used for secret-handling.
 """
 
 from __future__ import annotations
@@ -31,62 +35,41 @@ def identity_redactor(_key: str, value: object) -> object:
     return value
 
 
-def bound_text(text: str, max_chars: int) -> str:
-    """Truncate `text` to at most `max_chars` characters.
+def redact_arguments(arguments: dict[str, object], *, redactor: Redactor) -> str:
+    """Apply `redactor` to each argument and serialize the result to JSON.
 
-    The bound keeps a single oversized argument or result from ballooning a
-    record; the trailing marker signals the value was cut.
-    """
-    if len(text) <= max_chars:
-        return text
-    marker = '...[truncated]'
-    if max_chars <= len(marker):
-        return text[:max_chars]
-    return text[: max_chars - len(marker)] + marker
-
-
-def redact_arguments(arguments: dict[str, object], *, redactor: Redactor, max_chars: int) -> str:
-    """Apply `redactor` to each argument, bound each value, and serialize to JSON.
-
-    Each value is bounded to `max_chars` before the arguments dict is
-    serialized, not the serialized document as a whole, so a truncated value
-    can never land inside a JSON token -- the result is always valid JSON.
+    Values are recorded faithfully -- an audit trail that quietly truncated
+    what a tool was called with would be less correct, not more useful.
     Non-JSON-serializable values fall back to their string form (`default=str`),
-    so an arbitrary tool argument never makes the record unserializable.
+    so an arbitrary tool argument never makes the record unserializable. A
+    consumer who wants to cap value size does so in their own `redactor`
+    (e.g. truncate a string before returning it).
+
+    The one value `default=str` cannot rescue is an integer beyond Python's
+    int-to-str conversion digit limit (`sys.get_int_max_str_digits`, 4300 by
+    default) anywhere in the argument tree: encoding a JSON number means
+    converting the int to decimal text, which raises `ValueError` past that
+    limit instead of returning text, and `default` is never consulted for a
+    type `json.dumps` already knows how to encode. On that failure, each
+    argument is re-serialized individually so the fault is isolated to the
+    one unencodable value instead of losing every sibling argument.
     """
-    redacted = {key: _bound_value(redactor(key, value), max_chars) for key, value in arguments.items()}
-    return json.dumps(redacted, default=str, ensure_ascii=False)
+    redacted = {key: redactor(key, value) for key, value in arguments.items()}
+    try:
+        return json.dumps(redacted, default=str, ensure_ascii=False)
+    except ValueError:
+        return json.dumps({key: _json_safe(value) for key, value in redacted.items()}, default=str, ensure_ascii=False)
 
 
-def _bound_value(value: object, max_chars: int) -> object:
-    """Bound one redacted argument value to `max_chars`.
+def _json_safe(value: object) -> object:
+    """Return `value` unchanged, or a placeholder if `json.dumps` cannot encode it at all.
 
-    Strings are truncated directly. `None` and `bool` pass through unbounded;
-    neither can grow large enough to balloon a record. Any other `int` or
-    `float` -- notably an arbitrary-precision integer like `10**3000` -- has
-    no such ceiling, so it is bounded by its own decimal text the same way a
-    string is. Python 3.11+ caps int-to-str conversion at a digit-count limit
-    (`sys.get_int_max_str_digits`, 4300 by default): beyond it, `str()` --
-    and `repr()`, which hits the same limit -- raise `ValueError` instead of
-    returning text, so a value that large falls back to a fixed placeholder
-    instead of attempting another decimal conversion. Anything else (a nested
-    dict/list, or an object that needs `default=str`) is measured by its own
-    serialization and, only if that exceeds the bound, replaced by its
-    truncated string form. Either way the value handed back is safe for the
-    caller to serialize again: the original JSON-native value, or a plain
-    string.
+    This is a serialization guard, not a size policy: it only replaces a
+    value `json.dumps` cannot represent by any means (see `redact_arguments`),
+    never one it can represent, no matter how large.
     """
-    if isinstance(value, str):
-        return bound_text(value, max_chars)
-    if value is None or isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        try:
-            text = str(value)
-        except ValueError:
-            return bound_text(f'<{type(value).__name__} exceeds string-conversion limit>', max_chars)
-        return value if len(text) <= max_chars else bound_text(text, max_chars)
-    serialized = json.dumps(value, default=str, ensure_ascii=False)
-    if len(serialized) <= max_chars:
-        return value
-    return bound_text(serialized, max_chars)
+    try:
+        json.dumps(value, default=str)
+    except ValueError:
+        return '<value exceeds JSON int-to-str conversion limit>'
+    return value

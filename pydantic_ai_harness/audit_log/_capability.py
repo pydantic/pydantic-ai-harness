@@ -16,7 +16,7 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 
 from pydantic_ai_harness.audit_log._context import current_run_id
-from pydantic_ai_harness.audit_log._redact import Redactor, bound_text, identity_redactor, redact_arguments
+from pydantic_ai_harness.audit_log._redact import Redactor, identity_redactor, redact_arguments
 from pydantic_ai_harness.audit_log._sink import AuditSink, InMemoryAuditSink
 from pydantic_ai_harness.audit_log._types import RunAuditRecord, RunOutcome, ToolCallRecord
 
@@ -79,9 +79,13 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     `AuditSink` against SQLite, Postgres, Mongo, or a warehouse for your own
     deployment. Redaction is a pluggable `redactor` over each argument,
     defaulting to no redaction -- pass your own `Redactor` for your
-    secret-handling policy. Values are bounded to `max_value_chars`. Pass a
-    `sink_resolver` for a per-run backend keyed on `RunContext` (tenant/scope),
-    mirroring `Memory.store_resolver`.
+    secret-handling policy. Arguments, results, and error text are all
+    recorded faithfully, with no size cap of any kind: for an argument, a
+    `redactor` that also truncates or drops an oversized value is the
+    extension point; a result or error is already under the tool's own
+    control to return or raise already bounded. Pass a `sink_resolver` for a
+    per-run backend keyed on `RunContext` (tenant/scope), mirroring
+    `Memory.store_resolver`.
     """
 
     sink: AuditSink = field(default_factory=InMemoryAuditSink)
@@ -96,12 +100,11 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     """Optional per-run sink resolver, keyed on the run context. Resolver failures propagate."""
 
     redactor: Redactor = identity_redactor
-    """Per-argument redaction policy `(arg_name, value) -> value`. Defaults to no redaction."""
+    """Per-argument redaction policy `(arg_name, value) -> value`. Defaults to no redaction.
 
-    max_value_chars: int = 2000
-    """Character bound applied to each argument value, and to the full result/error text.
-
-    Must be `>= 1`; a non-positive bound raises `ValueError` at construction.
+    Also the extension point for limiting a value's size -- e.g. truncate a
+    string before returning it -- since this capability records values
+    faithfully and ships no size cap of its own.
     """
 
     agent_name: str | None = None
@@ -111,17 +114,6 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     _started_at: datetime = field(default_factory=_utcnow, init=False, repr=False, compare=False)
     _pending: dict[str, datetime] = field(default_factory=dict[str, datetime], init=False, repr=False, compare=False)
     _run_id_fallback: str | None = field(default=None, init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        """Reject a non-positive `max_value_chars` instead of silently failing to bound.
-
-        `bound_text` truncates with `text[:max_chars]`; a negative bound (e.g.
-        `-1`) turns that into `text[:-1]`, which drops only the last character
-        instead of capping the size, defeating the bound for any input no
-        matter how large.
-        """
-        if self.max_value_chars < 1:
-            raise ValueError(f'max_value_chars must be >= 1, got {self.max_value_chars}.')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AuditLog[AgentDepsT]:
         """Clone with per-run state: the resolved sink, the parent-run link, and a fresh start time.
@@ -210,9 +202,9 @@ class AuditLog(AbstractCapability[AgentDepsT]):
             run_id=self._run_id(ctx),
             tool_call_id=call.tool_call_id,
             tool_name=tool_def.name,
-            arguments=redact_arguments(args, redactor=self.redactor, max_chars=self.max_value_chars),
-            result=None if error is not None else bound_text(_safe_convert(lambda: str(result)), self.max_value_chars),
-            error=None if error is None else bound_text(_safe_convert(lambda: repr(error)), self.max_value_chars),
+            arguments=redact_arguments(args, redactor=self.redactor),
+            result=None if error is not None else _safe_convert(lambda: str(result)),
+            error=None if error is None else _safe_convert(lambda: repr(error)),
             started_at=self._pending.pop(call.tool_call_id, _utcnow()),
             ended_at=_utcnow(),
             conversation_id=ctx.conversation_id,
@@ -259,7 +251,7 @@ class AuditLog(AbstractCapability[AgentDepsT]):
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             total_tokens=usage.total_tokens,
-            error=None if error is None else bound_text(_safe_convert(lambda: repr(error)), self.max_value_chars),
+            error=None if error is None else _safe_convert(lambda: repr(error)),
             conversation_id=ctx.conversation_id,
             parent_run_id=self._parent_run_id,
             agent_name=self.agent_name,

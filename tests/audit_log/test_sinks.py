@@ -147,3 +147,30 @@ class TestJsonlAuditSink:
         assert [c.tool_call_id for c in calls] == ['c1']
         assert run is not None and run.outcome == 'completed'
         assert 'unparseable' in caplog.text.lower()  # the skip is logged, not silently dropped
+
+    async def test_append_after_a_pre_existing_torn_line_does_not_lose_the_new_record(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ):
+        # A prior crash can leave the file's last line torn -- no terminating
+        # newline -- *before* the process restarts and appends again. Naively
+        # opening `ab` and writing `line + b"\n"` would concatenate the new
+        # record onto that fragment into one combined, unparseable line, so
+        # `_read`'s skip-on-malformed-line behavior would drop the newly
+        # written record too, not just the torn one. `_append` must insert a
+        # separating newline first so the torn fragment stays its own
+        # (skipped) line and the newly appended record is readable on its own.
+        path = tmp_path / 'audit.jsonl'
+        path.write_bytes(b'{"kind": "tool_call", "record": {"run_id": "torn", "tool_call_id": "lost"')  # no \n
+        sink = JsonlAuditSink(path)
+
+        await sink.record_tool_call(_tool('r1', 'c1'))
+        await sink.record_run(_run('r1'))
+
+        with caplog.at_level(logging.WARNING):
+            calls = await sink.list_tool_calls(run_id='r1')
+            run = await sink.get_run(run_id='r1')
+
+        assert [c.tool_call_id for c in calls] == ['c1']  # the new record is readable, not swallowed
+        assert run is not None and run.outcome == 'completed'
+        assert await sink.list_tool_calls(run_id='torn') == []  # the torn fragment never merges into a real record
+        assert 'unparseable' in caplog.text.lower()  # the torn fragment is skipped, not silently merged
