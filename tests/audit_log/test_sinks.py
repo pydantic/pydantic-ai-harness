@@ -213,21 +213,32 @@ class TestJsonlAuditSink:
             pytest.param('{"kind": "run", "record": {}}', id='run-missing-required-fields'),
             pytest.param('{"kind": "mystery", "record": {"foo": "bar"}}', id='unrecognized-kind'),
             pytest.param('{"kind": "tool_call", "record": {"run_id": "r1"', id='unterminated-json'),
+            pytest.param(
+                ('[' * 200_000) + '1' + (']' * 200_000),
+                id='recursion-error-deeply-nested-json',
+            ),
         ],
     )
     async def test_read_skips_any_malformed_or_foreign_line(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture, malformed_line: str
     ):
         # Each of these decodes as UTF-8 and, except for the unterminated-json
-        # case, parses as valid JSON -- but none is a well-formed `tool_call`
-        # or `run` envelope. Before the fix, `_read` caught only
-        # `UnicodeDecodeError`/`json.JSONDecodeError`, so a line like this
-        # propagated a `TypeError` (not subscriptable), `KeyError` (missing
-        # `kind`/`record`), or pydantic `ValidationError` (a `record` missing
-        # its required fields) straight out of `list_tool_calls`/`get_run`,
-        # crashing the read and hiding every valid record around it. Placing
-        # the malformed line between two valid tool-call records proves it is
-        # skipped in place, not just tolerated at the end of the file.
+        # and deeply-nested-json cases, parses as valid JSON -- but none is a
+        # well-formed `tool_call` or `run` envelope. Before the fix, `_read`
+        # caught only `UnicodeDecodeError`/`json.JSONDecodeError`, so a line
+        # like this propagated a `TypeError` (not subscriptable), `KeyError`
+        # (missing `kind`/`record`), or pydantic `ValidationError` (a `record`
+        # missing its required fields) straight out of `list_tool_calls`/
+        # `get_run`, crashing the read and hiding every valid record around
+        # it. The deeply-nested-json case is different again: nesting an
+        # array past the interpreter's recursion limit makes `json.loads`
+        # itself raise `RecursionError`, not a shape or validation failure at
+        # all -- which is why `_read` now catches `Exception` rather than an
+        # enumerated list of the specific types the other cases raise; the
+        # next pathological line would only need a different exception type
+        # to escape again. Placing the malformed line between two valid
+        # tool-call records proves it is skipped in place, not just
+        # tolerated at the end of the file.
         path = tmp_path / 'audit.jsonl'
         sink = JsonlAuditSink(path)
         await sink.record_tool_call(_tool('r1', 'before'))

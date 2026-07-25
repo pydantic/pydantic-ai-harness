@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 import anyio.to_thread
-from pydantic import TypeAdapter, ValidationError
+from pydantic import TypeAdapter
 
 from pydantic_ai_harness.audit_log._types import RunAuditRecord, ToolCallRecord
 
@@ -83,10 +83,13 @@ class JsonlAuditSink:
     so a run recorded more than once keeps every line and `get_run` returns the
     last. File I/O runs on a worker thread so the event loop is not blocked. A
     line that fails to decode as UTF-8, fails to parse as JSON (e.g. a partial
-    append torn mid-write by a crash), or parses but is not a well-formed
-    envelope for a known record kind (a foreign JSON value, a `record` missing
-    the fields its kind requires) is skipped and logged rather than raised, so
-    one bad line does not hide every valid record recorded before it.
+    append torn mid-write by a crash), parses but is not a well-formed envelope
+    for a known record kind (a foreign JSON value, a `record` missing the
+    fields its kind requires), or raises any other `Exception` while being read
+    (e.g. a pathologically deep-nested JSON structure raising `RecursionError`
+    out of the decoder) is skipped and logged rather than raised, so one bad
+    line -- whatever kind of bad -- does not hide every valid record recorded
+    before it.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -127,12 +130,23 @@ class JsonlAuditSink:
         failure: a line can decode as UTF-8 and parse as valid JSON and still
         not be a well-formed envelope -- `null`, `{}`, a JSON array or
         number, a `record` missing the fields its `kind` requires, or a
-        `kind` this sink does not recognize. Validating the envelope shape
-        and the record here, rather than in `list_tool_calls`/`get_run`,
-        means every record those methods see is already a real
-        `ToolCallRecord` or `RunAuditRecord`; they never need to guard
-        against a foreign or damaged envelope raising `KeyError`, `TypeError`,
-        or a pydantic `ValidationError` out of what should be a pure filter.
+        `kind` this sink does not recognize. The per-line handler catches
+        `Exception` rather than an enumerated list of the specific types
+        those failures raise (`KeyError`, `TypeError`, a pydantic
+        `ValidationError`), because the set of ways a line can be malformed
+        is not closed: a pathologically deep-nested JSON structure exhausts
+        the decoder and raises `RecursionError`, which is neither a decode
+        nor a shape failure, and some other foreign or pathological line
+        could just as well raise a different type again. Catching `Exception`
+        isolates all of them the same way, once, instead of chasing each new
+        type as it turns up; `BaseException` subclasses that are not
+        `Exception` -- `KeyboardInterrupt`, `SystemExit`, `GeneratorExit` --
+        still propagate, since those must never be swallowed by an isolation
+        boundary. Validating the envelope shape and the record here, rather
+        than in `list_tool_calls`/`get_run`, means every record those methods
+        see is already a real `ToolCallRecord` or `RunAuditRecord`; they
+        never need to guard against a foreign or damaged envelope raising out
+        of what should be a pure filter.
 
         This reads the file as bytes and decodes each line individually,
         inside the same try/except that parses and validates it, rather than
@@ -146,7 +160,7 @@ class JsonlAuditSink:
             return [], []
         tool_calls: list[ToolCallRecord] = []
         runs: list[RunAuditRecord] = []
-        for raw in self._path.read_bytes().split(b'\n'):
+        for line_number, raw in enumerate(self._path.read_bytes().split(b'\n'), start=1):
             if not raw.strip():
                 continue
             try:
@@ -159,8 +173,8 @@ class JsonlAuditSink:
                     runs.append(_RUN_ADAPTER.validate_python(payload))
                 else:
                     raise ValueError(f'unrecognized audit record kind {kind!r}')
-            except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, KeyError, TypeError, ValueError):
-                logger.warning('Skipping unparseable line in audit sink %s.', self._path)
+            except Exception as exc:
+                logger.warning('Skipping unparseable line %d in audit sink %s.', line_number, self._path, exc_info=exc)
         return tool_calls, runs
 
     async def record_tool_call(self, record: ToolCallRecord) -> None:
