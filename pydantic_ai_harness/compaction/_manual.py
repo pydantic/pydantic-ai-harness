@@ -34,8 +34,11 @@ async def compact_now(
     strategy the agent uses can be driven from a command handler, and the compacted history
     handed back to the next `agent.run(message_history=...)`.
 
-    Unlike the automatic path this always runs the strategy: an explicit request should not be
-    subject to the threshold check.
+    `compact_now` applies no trigger of its own, so a strategy whose `compact` is unconditional
+    runs whatever the history size. A strategy that defines its own stop condition still honours
+    it: `TieredCompaction` escalates only until the history fits its target, so a history already
+    under target comes back unchanged -- by that strategy's own definition there is nothing left
+    to reclaim. Pass the tier directly if you need it to run regardless.
 
     Args:
         strategy: The strategy to run. Any `CompactionStrategy` works.

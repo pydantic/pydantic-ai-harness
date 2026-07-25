@@ -118,8 +118,12 @@ history = await compact_now(
 )
 ```
 
-Unlike the automatic path it always runs the strategy: an explicit request is not subject to the
-threshold check. `focus` steers strategies that write prose -- `SummarizingCompaction`,
+`compact_now` applies no trigger of its own, so a strategy whose `compact` is unconditional runs
+whatever the history size. A strategy that defines its own stop condition still honours it:
+`TieredCompaction` escalates only until the history fits its target, so a history already under
+target comes back unchanged. Pass the tier directly if you need it to run regardless.
+
+`focus` steers strategies that write prose -- `SummarizingCompaction`,
 via `with_focus` -- and is passed over by the ones that drop or blank content by rule, since they have
 nothing to steer. `TieredCompaction` is focusable when any of its tiers is, so a focus reaches the
 summarizing tier rather than stopping at the wrapper.

@@ -584,3 +584,40 @@ class TestFocusPropagation:
         await compact_now(tiered, _history(4), model=TestModel(), focus='the auth flow')
 
         assert seen == ['the auth flow']
+
+
+class TestManualCompactionSemantics:
+    """`compact_now` adds no trigger; a strategy's own stop condition still applies."""
+
+    def _short_history(self) -> list[ModelMessage]:
+        return _history(3, filler='x' * 40)
+
+    async def test_an_unconditional_strategy_runs_whatever_the_size(self):
+        history = self._short_history()
+        strategy: SlidingWindow[None] = SlidingWindow(max_tokens=1_000_000, keep_messages=2)
+
+        result = await compact_now(strategy, history, model=TestModel())
+
+        assert len(result) < len(history), 'no trigger of its own means it runs regardless'
+
+    async def test_a_tiered_strategy_honours_its_own_target(self):
+        """Already under target is not a missed compaction: there is nothing left to reclaim."""
+        history = self._short_history()
+        tiered: TieredCompaction[None] = TieredCompaction(
+            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            target_tokens=1_000_000,
+        )
+
+        result = await compact_now(tiered, history, model=TestModel())
+
+        assert result == history
+
+    async def test_a_tiered_strategy_over_target_still_escalates(self):
+        tiered: TieredCompaction[None] = TieredCompaction(
+            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            target_tokens=1,
+        )
+
+        result = await compact_now(tiered, _history(6), model=TestModel())
+
+        assert len(result) < 12

@@ -247,8 +247,9 @@ class CompactionStrategy(Protocol[AgentDepsT]):
     """A history transform that can be used standalone or as a `TieredCompaction` tier.
 
     ``compact`` applies the transform *unconditionally* (the trigger check lives in the
-    capability's ``before_model_request``).  Implementations must preserve tool-call /
-    tool-return pairing.
+    capability's ``before_model_request``).  A strategy that composes others may define its own
+    stop condition instead -- `TieredCompaction` escalates only until the history fits its
+    target.  Implementations must preserve tool-call / tool-return pairing.
     """
 
     async def compact(
