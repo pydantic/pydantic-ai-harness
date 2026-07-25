@@ -62,7 +62,7 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     """Per-argument redaction policy `(arg_name, value) -> value`. Defaults to secret-key stripping."""
 
     max_value_chars: int = 2000
-    """Character bound applied to serialized arguments, results, and error text."""
+    """Character bound applied to each argument value, and to the full result/error text."""
 
     agent_name: str | None = None
     """Logical agent name stamped on every record for cross-run attribution."""
@@ -70,21 +70,26 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     _parent_run_id: str | None = field(default=None, init=False, repr=False, compare=False)
     _started_at: datetime = field(default_factory=_utcnow, init=False, repr=False, compare=False)
     _pending: dict[str, datetime] = field(default_factory=dict[str, datetime], init=False, repr=False, compare=False)
+    _run_id_fallback: str | None = field(default=None, init=False, repr=False, compare=False)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AuditLog[AgentDepsT]:
         """Clone with per-run state: the resolved sink, the parent-run link, and a fresh start time.
 
         Reads the parent id from the contextvar set by any enclosing
         `AuditLog.wrap_run` before this run overwrites it, so a delegate's
-        records point at the run that spawned them.
+        records point at the run that spawned them. Also materializes the
+        `run_id` fallback once for the run, so every record from a `ctx`
+        without a `run_id` still joins on the same generated id instead of
+        each hook call minting its own.
         """
         sink = self.sink_resolver(ctx) if self.sink_resolver is not None else self.sink
         clone = replace(self, sink=sink)
         clone._parent_run_id = current_run_id.get()
+        clone._run_id_fallback = ctx.run_id or uuid4().hex
         return clone
 
     def _run_id(self, ctx: RunContext[AgentDepsT]) -> str:
-        return ctx.run_id or uuid4().hex
+        return ctx.run_id or self._run_id_fallback or uuid4().hex
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
         """Publish this run's id on the contextvar so nested delegates can record it as their parent."""

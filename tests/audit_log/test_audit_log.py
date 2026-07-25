@@ -8,6 +8,7 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 
@@ -233,3 +234,29 @@ class TestDirectHookEdges:
         assert len(call.run_id) == 32
         # No `before_tool_execute` ran, so `started_at` fell back to record time.
         assert call.started_at <= call.ended_at  # type: ignore[operator]
+
+    async def test_run_id_fallback_is_shared_across_records_in_one_run(self):
+        # `for_run` resolves the per-run clone once, the same way `Agent.run`
+        # does; every hook call against that clone must join on the same
+        # fallback run_id instead of minting a fresh one each time.
+        sink = RecordingSink()
+        run_cap = await AuditLog(sink=sink).for_run(_ctx(run_id=None))
+
+        await run_cap.after_tool_execute(
+            _ctx(run_id=None),
+            call=ToolCallPart(tool_name='lookup', args={'q': 1}, tool_call_id='c1'),
+            tool_def=ToolDefinition(name='lookup'),
+            args={'q': 1},
+            result='ok',
+        )
+        await run_cap.after_tool_execute(
+            _ctx(run_id=None),
+            call=ToolCallPart(tool_name='lookup', args={'q': 2}, tool_call_id='c2'),
+            tool_def=ToolDefinition(name='lookup'),
+            args={'q': 2},
+            result='ok',
+        )
+        await run_cap.after_run(_ctx(run_id=None), result=AgentRunResult(output='ok'))
+
+        run_ids = {c.run_id for c in sink.tool_calls} | {r.run_id for r in sink.runs}
+        assert len(run_ids) == 1

@@ -191,6 +191,9 @@ def _to_json_row(record: _RecordT, adapter: TypeAdapter[_RecordT], columns: tupl
     return tuple(data[column] for column in columns)
 
 
+_MEMORY_DATABASE = ':memory:'
+
+
 class SqliteAuditSink:
     """SQLite-backed sink. One file holds the `tool_calls` and `runs` tables.
 
@@ -199,6 +202,11 @@ class SqliteAuditSink:
     A caller-owned connection must be created with `check_same_thread=False`,
     since methods dispatch SQL onto worker threads via `anyio.to_thread`. Runs
     upsert on their `run_id`; tool calls append.
+
+    `database=':memory:'` is a special case: SQLite hands out a distinct,
+    empty database to every `connect()` call for that name, so the sink keeps
+    one connection open for its own lifetime instead of the normal
+    open-per-call cycle used for file-backed databases.
     """
 
     def __init__(
@@ -212,10 +220,18 @@ class SqliteAuditSink:
         self._database = Path(database) if database is not None else None
         self._connection = connection
         self._schema_ready = False
+        self._is_memory = self._database is not None and str(self._database) == _MEMORY_DATABASE
+        self._memory_connection: sqlite3.Connection | None = None
 
     def _open(self) -> sqlite3.Connection:
         if self._connection is not None:
             return self._connection
+        if self._is_memory:
+            if self._memory_connection is None:
+                self._memory_connection = sqlite3.connect(
+                    _MEMORY_DATABASE, isolation_level=None, check_same_thread=False
+                )
+            return self._memory_connection
         assert self._database is not None
         self._database.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self._database, isolation_level=None, check_same_thread=False)
@@ -223,8 +239,21 @@ class SqliteAuditSink:
         return conn
 
     def _maybe_close(self, conn: sqlite3.Connection) -> None:
-        if self._connection is None:
+        if self._connection is None and not self._is_memory:
             conn.close()
+
+    def __del__(self) -> None:
+        """Close the internally-opened `:memory:` connection so it isn't leaked.
+
+        Only relevant to the `database=':memory:'` path: a caller-owned
+        `connection=` is the caller's to close, and the file-backed
+        `database=` path already closes its connection after every call.
+        `__init__` can raise before `_memory_connection` is set (the
+        exactly-one-of check), so guard against that partially-constructed case.
+        """
+        connection = getattr(self, '_memory_connection', None)
+        if connection is not None:
+            connection.close()
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         if self._schema_ready:
@@ -245,6 +274,12 @@ class SqliteAuditSink:
                 f'INSERT INTO tool_calls ({", ".join(_TOOL_COLUMNS)}) VALUES ({placeholders})',
                 _to_json_row(record, _TOOL_ADAPTER, _TOOL_COLUMNS),
             )
+            # A caller-owned connection may be in sqlite3's default deferred
+            # isolation mode, where writes stay in an open transaction until
+            # committed. Commit unconditionally so a write is durable even if
+            # the caller closes their connection (which rolls back an open
+            # transaction) without committing first.
+            conn.commit()
         finally:
             self._maybe_close(conn)
 
@@ -260,6 +295,10 @@ class SqliteAuditSink:
                 f'INSERT OR REPLACE INTO runs ({", ".join(_RUN_COLUMNS)}) VALUES ({placeholders})',
                 _to_json_row(record, _RUN_ADAPTER, _RUN_COLUMNS),
             )
+            # See the matching comment in `_sync_record_tool_call`: commit
+            # unconditionally so a caller-owned connection in deferred mode
+            # doesn't lose the write on close.
+            conn.commit()
         finally:
             self._maybe_close(conn)
 

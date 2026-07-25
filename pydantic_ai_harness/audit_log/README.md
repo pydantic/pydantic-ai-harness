@@ -75,8 +75,8 @@ Each argument passes through a `redactor` -- `(arg_name, value) -> value` --
 before it is serialized. The default, `default_secret_redactor`, replaces
 values whose key names a secret (`api_key`, `token`, `password`,
 `authorization`, ...) with `***`. Supply your own `redactor` for a different
-policy, and set `max_value_chars` to bound the serialized size of arguments,
-results, and error text.
+policy, and set `max_value_chars` to bound each argument value, and the
+result and error text.
 
 ```python
 def keep_only_ids(key: str, value: object) -> object:

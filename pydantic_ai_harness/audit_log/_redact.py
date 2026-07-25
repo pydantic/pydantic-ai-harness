@@ -44,13 +44,14 @@ _SECRET_HINTS = frozenset(
 def default_secret_redactor(key: str, value: object) -> object:
     """Redact values whose key names a secret; pass everything else through.
 
-    Matches case-insensitively on a substring of the argument name, so
-    `API_KEY`, `x-api-key`, and `client_secret` are all caught. Replace this
-    with a stricter or looser `Redactor` on the capability when the default set
-    does not fit.
+    Matches case-insensitively on a substring of the argument name, with `-`
+    and `.` separators normalized to `_` before matching, so `API_KEY`,
+    `x-api-key`, and `client_secret` are all caught. Replace this with a
+    stricter or looser `Redactor` on the capability when the default set does
+    not fit.
     """
-    lowered = key.lower()
-    if any(hint in lowered for hint in _SECRET_HINTS):
+    normalized = key.lower().replace('-', '_').replace('.', '_')
+    if any(hint in normalized for hint in _SECRET_HINTS):
         return _REDACTED
     return value
 
@@ -70,11 +71,34 @@ def bound_text(text: str, max_chars: int) -> str:
 
 
 def redact_arguments(arguments: dict[str, object], *, redactor: Redactor, max_chars: int) -> str:
-    """Apply `redactor` to each argument, serialize to JSON, and bound the length.
+    """Apply `redactor` to each argument, bound each value, and serialize to JSON.
 
+    Each value is bounded to `max_chars` before the arguments dict is
+    serialized, not the serialized document as a whole, so a truncated value
+    can never land inside a JSON token -- the result is always valid JSON.
     Non-JSON-serializable values fall back to their string form (`default=str`),
     so an arbitrary tool argument never makes the record unserializable.
     """
-    redacted = {key: redactor(key, value) for key, value in arguments.items()}
-    serialized = json.dumps(redacted, default=str, ensure_ascii=False)
+    redacted = {key: _bound_value(redactor(key, value), max_chars) for key, value in arguments.items()}
+    return json.dumps(redacted, default=str, ensure_ascii=False)
+
+
+def _bound_value(value: object, max_chars: int) -> object:
+    """Bound one redacted argument value to `max_chars`.
+
+    Strings are truncated directly. `None` and numeric/boolean scalars pass
+    through unbounded since serializing them can't balloon a record. Anything
+    else (a nested dict/list, or an object that needs `default=str`) is
+    measured by its own serialization and, only if that exceeds the bound,
+    replaced by its truncated string form. Either way the value handed back
+    is safe for the caller to serialize again: the original JSON-native value,
+    or a plain string.
+    """
+    if isinstance(value, str):
+        return bound_text(value, max_chars)
+    if value is None or isinstance(value, (int, float)):
+        return value
+    serialized = json.dumps(value, default=str, ensure_ascii=False)
+    if len(serialized) <= max_chars:
+        return value
     return bound_text(serialized, max_chars)

@@ -174,3 +174,41 @@ class TestSqliteAuditSink:
         sink = SqliteAuditSink(database=tmp_path / 'nested' / 'deep' / 'audit.db')
         await sink.record_run(_run('r1'))
         assert (await sink.get_run(run_id='r1')) is not None
+
+    async def test_caller_owned_deferred_connection_writes_survive_close(self, tmp_path: Path):
+        # A caller-owned connection defaults to sqlite3's deferred isolation
+        # mode (unlike the internally-managed `database=` path, which forces
+        # autocommit). Writes must be committed regardless, or closing the
+        # caller's connection rolls them back and a fresh connection to the
+        # same file finds nothing.
+        db_path = tmp_path / 'caller-owned.db'
+        owned = sqlite3.connect(db_path, check_same_thread=False)
+        assert owned.isolation_level is not None  # deferred mode, not autocommit
+        try:
+            sink = SqliteAuditSink(connection=owned)
+            await sink.record_tool_call(_tool('r1', 'c1'))
+            await sink.record_run(_run('r1'))
+        finally:
+            owned.close()  # a commit-less close on a deferred connection rolls back
+
+        reader = sqlite3.connect(db_path, check_same_thread=False)
+        try:
+            read_sink = SqliteAuditSink(connection=reader)
+            assert len(await read_sink.list_tool_calls(run_id='r1')) == 1
+            run = await read_sink.get_run(run_id='r1')
+            assert run is not None and run.outcome == 'completed'
+        finally:
+            reader.close()
+
+    async def test_memory_database_persists_across_calls(self):
+        # `database=':memory:'` must behave like a working sink across
+        # multiple calls, not silently discard everything after the first
+        # write (SQLite hands out a brand-new, empty `:memory:` database to
+        # every `connect()` call, so opening and closing a connection per
+        # operation -- the normal `database=` lifecycle -- destroys the data).
+        sink = SqliteAuditSink(database=':memory:')
+        await sink.record_tool_call(_tool('r1', 'c1'))
+        await sink.record_run(_run('r1'))
+        assert len(await sink.list_tool_calls(run_id='r1')) == 1
+        run = await sink.get_run(run_id='r1')
+        assert run is not None and run.outcome == 'completed'
