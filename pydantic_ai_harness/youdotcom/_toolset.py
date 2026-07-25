@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Literal, TypeVar
 
 import anyio
 import httpx
@@ -188,12 +188,18 @@ CrawlTimeoutSeconds = Annotated[int, Field(ge=1, le=60)]
 """Per-URL crawl timeout in seconds (1-60)."""
 
 _AnyUrlAdapter: TypeAdapter[AnyUrl] = TypeAdapter(AnyUrl)
+_ValueT = TypeVar('_ValueT')
 
 
 def _validate_uri(value: str) -> str:
     """Validate a URI while preserving the string value sent to You.com."""
     _AnyUrlAdapter.validate_python(value)
     return value
+
+
+def _prefer_configured(configured: _ValueT | None, supplied: _ValueT | None) -> _ValueT | None:
+    """Use construction-time configuration when present."""
+    return configured if configured is not None else supplied
 
 
 ContentsUrl = Annotated[
@@ -532,16 +538,16 @@ class _RawFinanceResearchResponse(BaseModel):
     output: _RawTextResearchOutput
 
 
-class _ConfigValidator(BaseModel):
-    """Validates configured (construction-time) values against You.com's documented limits.
+class _Config(BaseModel):
+    """Validated construction-time configuration.
 
     Tool-argument aliases only constrain values the LLM supplies; constructor
     values are validated here so out-of-range configuration fails at build time.
     """
 
-    model_config = ConfigDict(strict=True)
+    model_config = ConfigDict(strict=True, frozen=True)
 
-    api_key: str
+    api_key: str = Field(repr=False)
     timeout: Annotated[float, Field(gt=0)] | None = None
     count: SearchCount | None = None
     offset: SearchOffset | None = None
@@ -625,7 +631,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         super().__init__()
         # Validate configured values against You.com's documented limits. Tool-argument
         # aliases only constrain LLM-supplied values, so constructor values are checked here.
-        _ConfigValidator(
+        self._config = _Config(
             api_key=api_key,
             timeout=timeout,
             count=count,
@@ -653,41 +659,18 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             finance_research_effort=finance_research_effort,
         )
 
-        self._api_key = api_key
         self._http_client = http_client
-        self._timeout = timeout
-        # Search
-        self._count = count
-        self._offset = offset
-        self._freshness = freshness
-        self._country = country
-        self._language = language
-        self._safesearch = safesearch
-        self._livecrawl = livecrawl
-        self._livecrawl_formats = livecrawl_formats
-        self._include_domains = include_domains
-        self._exclude_domains = exclude_domains
-        self._boost_domains = boost_domains
-        self._search_crawl_timeout = search_crawl_timeout
-        # Contents
-        self._contents_formats = contents_formats
-        self._crawl_timeout = crawl_timeout
-        self._max_age = max_age
-        # Research
-        self._research_effort = research_effort
-        self._research_include_domains = research_include_domains
-        self._research_exclude_domains = research_exclude_domains
-        self._research_boost_domains = research_boost_domains
-        self._research_freshness = research_freshness
-        self._research_country = research_country
-        self._output_schema = output_schema
-        # Finance research
-        self._finance_research_effort = finance_research_effort
 
         # Fail fast on locked-value combinations the API rejects with 422.
-        self._check_domain_combo(include_domains, exclude_domains, boost_domains, ValueError)
-        self._check_domain_combo(research_include_domains, research_exclude_domains, research_boost_domains, ValueError)
-        if output_schema is not None and research_effort == 'lite':
+        config = self._config
+        self._check_domain_combo(config.include_domains, config.exclude_domains, config.boost_domains, ValueError)
+        self._check_domain_combo(
+            config.research_include_domains,
+            config.research_exclude_domains,
+            config.research_boost_domains,
+            ValueError,
+        )
+        if config.output_schema is not None and config.research_effort == 'lite':
             raise ValueError("output_schema is not supported with research_effort='lite'.")
 
         # Configured parameters are locked and removed from each tool's schema so the
@@ -709,56 +692,54 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     def _locked_search_params(self) -> frozenset[str]:
         """Tool-argument names of `you_search` that are locked by configuration."""
-        configured: dict[str, object | None] = {
-            'count': self._count,
-            'freshness': self._freshness,
-            'country': self._country,
-            'language': self._language,
-            'safesearch': self._safesearch,
-            'livecrawl': self._livecrawl,
-            'livecrawl_formats': self._livecrawl_formats,
-            'include_domains': self._include_domains,
-            'exclude_domains': self._exclude_domains,
-            'boost_domains': self._boost_domains,
-            'crawl_timeout': self._search_crawl_timeout,
-        }
-        locked = {name for name, value in configured.items() if value is not None}
-        if self._include_domains is not None:
-            locked.update(('exclude_domains', 'boost_domains'))
-        elif self._exclude_domains is not None or self._boost_domains is not None:
-            locked.add('include_domains')
-        return frozenset(locked)
+        return self._locked_params(
+            {
+                'count': self._config.count,
+                'freshness': self._config.freshness,
+                'country': self._config.country,
+                'language': self._config.language,
+                'safesearch': self._config.safesearch,
+                'livecrawl': self._config.livecrawl,
+                'livecrawl_formats': self._config.livecrawl_formats,
+                'include_domains': self._config.include_domains,
+                'exclude_domains': self._config.exclude_domains,
+                'boost_domains': self._config.boost_domains,
+                'crawl_timeout': self._config.search_crawl_timeout,
+            }
+        )
 
     def _locked_contents_params(self) -> frozenset[str]:
         """Tool-argument names of `you_contents` that are locked by configuration."""
-        configured: dict[str, object | None] = {
-            'formats': self._contents_formats,
-            'crawl_timeout': self._crawl_timeout,
-        }
-        return frozenset(name for name, value in configured.items() if value is not None)
+        return self._locked_params(
+            {'formats': self._config.contents_formats, 'crawl_timeout': self._config.crawl_timeout}
+        )
 
     def _locked_research_params(self) -> frozenset[str]:
         """Tool-argument names of `you_research` that are locked by configuration."""
-        configured: dict[str, object | None] = {
-            'research_effort': self._research_effort,
-            'include_domains': self._research_include_domains,
-            'exclude_domains': self._research_exclude_domains,
-            'boost_domains': self._research_boost_domains,
-            'freshness': self._research_freshness,
-            'country': self._research_country,
-        }
+        return self._locked_params(
+            {
+                'research_effort': self._config.research_effort,
+                'include_domains': self._config.research_include_domains,
+                'exclude_domains': self._config.research_exclude_domains,
+                'boost_domains': self._config.research_boost_domains,
+                'freshness': self._config.research_freshness,
+                'country': self._config.research_country,
+            }
+        )
+
+    @staticmethod
+    def _locked_params(configured: dict[str, object | None]) -> frozenset[str]:
+        """Lock configured values and domain parameters incompatible with them."""
         locked = {name for name, value in configured.items() if value is not None}
-        if self._research_include_domains is not None:
+        if configured.get('include_domains') is not None:
             locked.update(('exclude_domains', 'boost_domains'))
-        elif self._research_exclude_domains is not None or self._research_boost_domains is not None:
+        elif configured.get('exclude_domains') is not None or configured.get('boost_domains') is not None:
             locked.add('include_domains')
         return frozenset(locked)
 
     def _locked_finance_params(self) -> frozenset[str]:
         """Tool-argument names of `you_finance_research` that are locked by configuration."""
-        if self._finance_research_effort is not None:
-            return frozenset({'research_effort'})
-        return frozenset()
+        return self._locked_params({'research_effort': self._config.finance_research_effort})
 
     def _strip_locked_params(self, ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> ToolDefinition:
         """`prepare` hook that removes construction-locked parameters from a tool's schema."""
@@ -839,9 +820,9 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         # Domain filters must be sent as JSON arrays via POST; the GET endpoint has no
         # unambiguous encoding for them.
         if domains:
-            response = await self._post(_YOU_SEARCH_URL, {**params, **domains}, timeout=timeout)
+            response = await self._request('POST', _YOU_SEARCH_URL, timeout=timeout, json_body={**params, **domains})
         else:
-            response = await self._get(_YOU_SEARCH_URL, params, timeout=timeout)
+            response = await self._request('GET', _YOU_SEARCH_URL, timeout=timeout, params=params)
         return self._parse_search_results(_RawSearchResponse.model_validate(response.json()))
 
     async def extract_contents(
@@ -864,7 +845,9 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
                 configured at tool creation.
         """
         body = self._build_contents_body(urls=urls, formats=formats, crawl_timeout=crawl_timeout)
-        response = await self._post(_YOU_CONTENTS_URL, body, timeout=self._timeout_for(_DEFAULT_TIMEOUT))
+        response = await self._request(
+            'POST', _YOU_CONTENTS_URL, timeout=self._timeout_for(_DEFAULT_TIMEOUT), json_body=body
+        )
         items = _ContentsResponseAdapter.validate_python(response.json())
         return [item.to_result() for item in items]
 
@@ -910,7 +893,9 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             freshness=freshness,
             country=country,
         )
-        response = await self._post(_YOU_RESEARCH_URL, body, timeout=self._timeout_for(_RESEARCH_TIMEOUT))
+        response = await self._request(
+            'POST', _YOU_RESEARCH_URL, timeout=self._timeout_for(_RESEARCH_TIMEOUT), json_body=body
+        )
         return self._parse_research_result(_RawResearchResponse.model_validate(response.json()))
 
     async def finance_research(
@@ -931,7 +916,9 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
                 if not configured at tool creation.
         """
         body = self._build_finance_research_body(input=input, research_effort=research_effort)
-        response = await self._post(_YOU_FINANCE_RESEARCH_URL, body, timeout=self._timeout_for(_RESEARCH_TIMEOUT))
+        response = await self._request(
+            'POST', _YOU_FINANCE_RESEARCH_URL, timeout=self._timeout_for(_RESEARCH_TIMEOUT), json_body=body
+        )
         output = _RawFinanceResearchResponse.model_validate(response.json()).output
         return {
             'content': output.content,
@@ -966,30 +953,29 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         """
         params: dict[str, str | int | Sequence[str]] = {'query': query}
 
-        effective_count = self._count if self._count is not None else count
+        effective_count = _prefer_configured(self._config.count, count)
         if effective_count is not None:
             params['count'] = effective_count
-        if self._offset is not None:
-            params['offset'] = self._offset
+        if self._config.offset is not None:
+            params['offset'] = self._config.offset
 
-        effective_values: tuple[tuple[str, object | None], ...] = (
-            ('freshness', self._freshness if self._freshness is not None else freshness),
-            ('country', self._country if self._country is not None else country),
-            ('language', self._language if self._language is not None else language),
-            ('safesearch', self._safesearch if self._safesearch is not None else safesearch),
-            ('livecrawl', self._livecrawl if self._livecrawl is not None else livecrawl),
+        effective_values: tuple[tuple[str, str | None], ...] = (
+            ('freshness', _prefer_configured(self._config.freshness, freshness)),
+            ('country', _prefer_configured(self._config.country, country)),
+            ('language', _prefer_configured(self._config.language, language)),
+            ('safesearch', _prefer_configured(self._config.safesearch, safesearch)),
+            ('livecrawl', _prefer_configured(self._config.livecrawl, livecrawl)),
         )
         for key, value in effective_values:
-            normalized = self._normalize_param(value)
-            if normalized is not None:
-                params[key] = normalized
+            if value is not None:
+                params[key] = value
 
         # livecrawl_formats is a list -- pass directly so httpx repeats the param.
-        effective_formats = self._livecrawl_formats if self._livecrawl_formats is not None else livecrawl_formats
+        effective_formats = _prefer_configured(self._config.livecrawl_formats, livecrawl_formats)
         if effective_formats is not None:
             params['livecrawl_formats'] = effective_formats
 
-        effective_timeout = self._search_crawl_timeout if self._search_crawl_timeout is not None else crawl_timeout
+        effective_timeout = _prefer_configured(self._config.search_crawl_timeout, crawl_timeout)
         if effective_timeout is not None:
             params['crawl_timeout'] = effective_timeout
 
@@ -1003,9 +989,9 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         boost_domains: Domains | None,
     ) -> dict[str, Sequence[str]]:
         """Resolve effective search domain filters, rejecting combinations the API 422s on."""
-        effective_include = self._include_domains if self._include_domains is not None else include_domains
-        effective_exclude = self._exclude_domains if self._exclude_domains is not None else exclude_domains
-        effective_boost = self._boost_domains if self._boost_domains is not None else boost_domains
+        effective_include = _prefer_configured(self._config.include_domains, include_domains)
+        effective_exclude = _prefer_configured(self._config.exclude_domains, exclude_domains)
+        effective_boost = _prefer_configured(self._config.boost_domains, boost_domains)
         self._check_domain_combo(effective_include, effective_exclude, effective_boost, ModelRetry)
 
         domains: dict[str, Sequence[str]] = {}
@@ -1031,16 +1017,16 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         """
         body: dict[str, object] = {'urls': urls}
 
-        effective_formats = self._contents_formats if self._contents_formats is not None else formats
+        effective_formats = _prefer_configured(self._config.contents_formats, formats)
         if effective_formats is not None:
             body['formats'] = effective_formats
 
-        effective_timeout = self._crawl_timeout if self._crawl_timeout is not None else crawl_timeout
+        effective_timeout = _prefer_configured(self._config.crawl_timeout, crawl_timeout)
         if effective_timeout is not None:
             body['crawl_timeout'] = effective_timeout
 
-        if self._max_age is not None:
-            body['max_age'] = self._max_age
+        if self._config.max_age is not None:
+            body['max_age'] = self._config.max_age
 
         return body
 
@@ -1063,22 +1049,18 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         from the LLM.
         """
         body: dict[str, object] = {'input': input}
-        effective_effort = self._research_effort if self._research_effort is not None else research_effort
+        effective_effort = _prefer_configured(self._config.research_effort, research_effort)
         if effective_effort is not None:
             body['research_effort'] = effective_effort
 
-        if self._output_schema is not None and effective_effort == 'lite':
+        if self._config.output_schema is not None and effective_effort == 'lite':
             raise ModelRetry(
                 "output_schema is not supported with research_effort='lite'; use 'standard', 'deep', or 'exhaustive'."
             )
 
-        effective_include = (
-            self._research_include_domains if self._research_include_domains is not None else include_domains
-        )
-        effective_exclude = (
-            self._research_exclude_domains if self._research_exclude_domains is not None else exclude_domains
-        )
-        effective_boost = self._research_boost_domains if self._research_boost_domains is not None else boost_domains
+        effective_include = _prefer_configured(self._config.research_include_domains, include_domains)
+        effective_exclude = _prefer_configured(self._config.research_exclude_domains, exclude_domains)
+        effective_boost = _prefer_configured(self._config.research_boost_domains, boost_domains)
         self._check_domain_combo(effective_include, effective_exclude, effective_boost, ModelRetry)
 
         source_control: _ResearchSourceControl = {}
@@ -1088,17 +1070,17 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             source_control['exclude_domains'] = effective_exclude
         if effective_boost is not None:
             source_control['boost_domains'] = effective_boost
-        effective_freshness = self._research_freshness if self._research_freshness is not None else freshness
+        effective_freshness = _prefer_configured(self._config.research_freshness, freshness)
         if effective_freshness is not None:
             source_control['freshness'] = effective_freshness
-        effective_country = self._research_country if self._research_country is not None else country
+        effective_country = _prefer_configured(self._config.research_country, country)
         if effective_country is not None:
             source_control['country'] = effective_country
         if source_control:
             body['source_control'] = source_control
 
-        if self._output_schema is not None:
-            body['output_schema'] = self._output_schema
+        if self._config.output_schema is not None:
+            body['output_schema'] = self._config.output_schema
 
         return body
 
@@ -1110,9 +1092,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
     ) -> dict[str, object]:
         """Build the JSON body for a Finance Research API request."""
         body: dict[str, object] = {'input': input}
-        effective_effort = (
-            self._finance_research_effort if self._finance_research_effort is not None else research_effort
-        )
+        effective_effort = _prefer_configured(self._config.finance_research_effort, research_effort)
         if effective_effort is not None:
             body['research_effort'] = effective_effort
         return body
@@ -1123,7 +1103,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     def _timeout_for(self, default: float) -> float:
         """Return the configured timeout override, or *default* when unset."""
-        return self._timeout if self._timeout is not None else default
+        return self._config.timeout if self._config.timeout is not None else default
 
     @staticmethod
     def _check_domain_combo(
@@ -1143,22 +1123,14 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
                 'use include_domains alone, or combine exclude_domains and boost_domains.'
             )
 
-    async def _get(self, url: str, params: dict[str, str | int | Sequence[str]], *, timeout: float) -> httpx.Response:
-        """Execute a GET request with the API key header."""
-        return await self._request('GET', url, params=params, json_body=None, timeout=timeout)
-
-    async def _post(self, url: str, json_body: dict[str, object], *, timeout: float) -> httpx.Response:
-        """Execute a POST request with the API key header."""
-        return await self._request('POST', url, params=None, json_body=json_body, timeout=timeout)
-
     async def _request(
         self,
         method: Literal['GET', 'POST'],
         url: str,
         *,
-        params: dict[str, str | int | Sequence[str]] | None,
-        json_body: dict[str, object] | None,
         timeout: float,
+        params: dict[str, str | int | Sequence[str]] | None = None,
+        json_body: dict[str, object] | None = None,
     ) -> httpx.Response:
         """Execute a request, retrying one rate-limited response with provider guidance."""
         if self._http_client is not None:
@@ -1190,7 +1162,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         json_body: dict[str, object] | None,
         timeout: float,
     ) -> httpx.Response:
-        headers = {'X-API-Key': self._api_key}
+        headers = {'X-API-Key': self._config.api_key}
         for attempt in range(2):
             try:
                 response = await client.request(
@@ -1245,14 +1217,10 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     def _parse_search_results(self, response: _RawSearchResponse) -> list[YouSearchResult]:
         """Convert the parsed search response into a flat list of search results."""
-        results: list[YouSearchResult] = []
         if response.results is None:
-            return results
-        for item in response.results.web or []:
-            results.append(item.to_result())
-        for item in response.results.news or []:
-            results.append(item.to_result())
-        return results
+            return []
+        items = [*(response.results.web or []), *(response.results.news or [])]
+        return [item.to_result() for item in items]
 
     def _parse_research_result(self, response: _RawResearchResponse) -> YouResearchResult:
         """Convert the parsed research response into a public `YouResearchResult`."""
@@ -1261,12 +1229,3 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         if isinstance(output, _RawObjectResearchOutput):
             return {'content': output.content, 'content_type': 'object', 'sources': sources}
         return {'content': output.content, 'content_type': 'text', 'sources': sources}
-
-    @staticmethod
-    def _normalize_param(value: object | None) -> str | None:
-        """Convert a parameter value to its string form for the API query string."""
-        if value is None:
-            return None
-        if isinstance(value, str):
-            return value
-        return str(value)
