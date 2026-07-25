@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Annotated, Final, Literal
 
 import httpx
-from pydantic import BaseModel, Field, StringConstraints, TypeAdapter
+from pydantic import AfterValidator, AnyUrl, BaseModel, Field, StringConstraints, TypeAdapter, WithJsonSchema
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
@@ -162,7 +162,7 @@ ContentsFormat = Literal['html', 'markdown', 'metadata']
 """Format for content extraction via the Contents API."""
 
 ResearchEffort = Literal['lite', 'standard', 'deep', 'exhaustive']
-"""Research depth level for the Research API."""
+"""Synchronous research depth level. The asynchronous `frontier` mode is not exposed."""
 
 FinanceResearchEffort = Literal['deep', 'exhaustive']
 """Research depth level for the Finance Research API."""
@@ -176,8 +176,22 @@ SearchOffset = Annotated[int, Field(ge=0, le=9)]
 CrawlTimeoutSeconds = Annotated[int, Field(ge=1, le=60)]
 """Per-URL crawl timeout in seconds (1-60)."""
 
-ContentsUrls = Annotated[list[str], Field(max_length=10)]
-"""URLs to fetch content from (maximum 10 per request)."""
+_AnyUrlAdapter: TypeAdapter[AnyUrl] = TypeAdapter(AnyUrl)
+
+
+def _validate_uri(value: str) -> str:
+    """Validate a URI while preserving the string value sent to You.com."""
+    _AnyUrlAdapter.validate_python(value)
+    return value
+
+
+ContentsUrl = Annotated[
+    str,
+    AfterValidator(_validate_uri),
+    WithJsonSchema({'type': 'string', 'format': 'uri', 'minLength': 1}),
+]
+ContentsUrls = list[ContentsUrl]
+"""URIs to fetch content from."""
 
 ResearchInput = Annotated[str, Field(max_length=40000)]
 """The research question (maximum 40,000 characters)."""
@@ -196,11 +210,10 @@ class YouLivecrawlContents(TypedDict, total=False):
     """The Markdown content of the page."""
 
 
-class YouSearchResult(TypedDict):
+class YouSearchResult(TypedDict, total=False):
     """A single You.com search result.
 
-    `title` and `url` are always present. All other fields are optional and
-    depend on the API response and livecrawl settings.
+    Fields depend on the API response and livecrawl settings.
     """
 
     title: str
@@ -241,11 +254,10 @@ class YouContentsMetadata(TypedDict, total=False):
     """The URL of the favicon of the web page's domain."""
 
 
-class YouContentsResult(TypedDict):
+class YouContentsResult(TypedDict, total=False):
     """A single result from the Contents API.
 
-    `url` and `title` are always present. Other fields depend on the requested
-    formats and what the API could extract.
+    Fields depend on the requested formats and what the API could extract.
     """
 
     url: str
@@ -347,8 +359,8 @@ class _RawLivecrawlContents(BaseModel):
 class _RawSearchResult(BaseModel):
     """Shared fields present in both web and news search results."""
 
-    title: str
-    url: str
+    title: str | None = None
+    url: str | None = None
     description: str | None = None
     thumbnail_url: str | None = None
     page_age: datetime | None = None
@@ -356,7 +368,11 @@ class _RawSearchResult(BaseModel):
 
     def to_result(self) -> YouSearchResult:
         """Convert to a public `YouSearchResult` TypedDict."""
-        result: YouSearchResult = {'title': self.title, 'url': self.url}
+        result: YouSearchResult = {}
+        if self.title is not None:
+            result['title'] = self.title
+        if self.url is not None:
+            result['url'] = self.url
         if self.description:
             result['description'] = self.description
         if self.thumbnail_url:
@@ -428,15 +444,19 @@ class _RawContentsMetadata(BaseModel):
 class _RawContentsItem(BaseModel):
     """A single item from the Contents API response array."""
 
-    url: str
-    title: str
+    url: str | None = None
+    title: str | None = None
     html: str | None = None
     markdown: str | None = None
     metadata: _RawContentsMetadata | None = None
 
     def to_result(self) -> YouContentsResult:
         """Convert to a public `YouContentsResult` TypedDict."""
-        result: YouContentsResult = {'url': self.url, 'title': self.title}
+        result: YouContentsResult = {}
+        if self.url is not None:
+            result['url'] = self.url
+        if self.title is not None:
+            result['title'] = self.title
         if self.html:
             result['html'] = self.html
         if self.markdown:
@@ -502,6 +522,7 @@ class _ConfigValidator(BaseModel):
     values are validated here so out-of-range configuration fails at build time.
     """
 
+    timeout: Annotated[float, Field(gt=0)] | None = None
     count: SearchCount | None = None
     offset: SearchOffset | None = None
     freshness: Freshness | None = None
@@ -584,6 +605,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         # Validate configured values against You.com's documented limits. Tool-argument
         # aliases only constrain LLM-supplied values, so constructor values are checked here.
         _ConfigValidator(
+            timeout=timeout,
             count=count,
             offset=offset,
             freshness=freshness,
@@ -677,7 +699,12 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             'boost_domains': self._boost_domains,
             'crawl_timeout': self._search_crawl_timeout,
         }
-        return frozenset(name for name, value in configured.items() if value is not None)
+        locked = {name for name, value in configured.items() if value is not None}
+        if self._include_domains is not None:
+            locked.update(('exclude_domains', 'boost_domains'))
+        elif self._exclude_domains is not None or self._boost_domains is not None:
+            locked.add('include_domains')
+        return frozenset(locked)
 
     def _locked_contents_params(self) -> frozenset[str]:
         """Tool-argument names of `you_contents` that are locked by configuration."""
@@ -697,7 +724,12 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             'freshness': self._research_freshness,
             'country': self._research_country,
         }
-        return frozenset(name for name, value in configured.items() if value is not None)
+        locked = {name for name, value in configured.items() if value is not None}
+        if self._research_include_domains is not None:
+            locked.update(('exclude_domains', 'boost_domains'))
+        elif self._research_exclude_domains is not None or self._research_boost_domains is not None:
+            locked.add('include_domains')
+        return frozenset(locked)
 
     def _locked_finance_params(self) -> frozenset[str]:
         """Tool-argument names of `you_finance_research` that are locked by configuration."""
@@ -714,9 +746,6 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         properties: dict[str, object] = original.get('properties', {})
         schema: dict[str, object] = dict(original)
         schema['properties'] = {key: value for key, value in properties.items() if key not in locked}
-        if 'required' in original:  # pragma: no branch -- every tool schema has a required argument
-            required: list[object] = original.get('required', [])
-            schema['required'] = [name for name in required if name not in locked]
         return replace(tool_def, parameters_json_schema=schema)
 
     # ------------------------------------------------------------------
@@ -805,10 +834,9 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         them in parallel and returns clean, LLM-ready content.
 
         Args:
-            urls: The URLs to fetch content from (max 10 per request).
+            urls: The URIs to fetch content from.
             formats: Content formats to return: 'markdown', 'html', 'metadata'.
-                Defaults to 'markdown' if not configured. Only used if not
-                configured at tool creation.
+                Only used if not configured at tool creation.
             crawl_timeout: Per-URL timeout in seconds (1-60). Only used if not
                 configured at tool creation.
         """
@@ -1090,24 +1118,38 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
     async def _get(self, url: str, params: dict[str, str | int | Sequence[str]], *, timeout: float) -> httpx.Response:
         """Execute a GET request with the API key header."""
         headers = {'X-API-Key': self._api_key}
-        if self._http_client is not None:
-            response = await self._http_client.get(url, params=params, headers=headers, timeout=timeout)
-        else:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, params=params, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        return response
+        try:
+            if self._http_client is not None:
+                response = await self._http_client.get(url, params=params, headers=headers, timeout=timeout)
+            else:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(url, params=params, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in (401, 403):
+                raise
+            raise ModelRetry(f'You.com request failed: {error}') from error
+        except httpx.RequestError as error:
+            raise ModelRetry(f'You.com request failed: {error}') from error
 
     async def _post(self, url: str, json_body: dict[str, object], *, timeout: float) -> httpx.Response:
         """Execute a POST request with the API key header."""
         headers = {'X-API-Key': self._api_key}
-        if self._http_client is not None:
-            response = await self._http_client.post(url, json=json_body, headers=headers, timeout=timeout)
-        else:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=json_body, headers=headers, timeout=timeout)
-        response.raise_for_status()
-        return response
+        try:
+            if self._http_client is not None:
+                response = await self._http_client.post(url, json=json_body, headers=headers, timeout=timeout)
+            else:
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(url, json=json_body, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code in (401, 403):
+                raise
+            raise ModelRetry(f'You.com request failed: {error}') from error
+        except httpx.RequestError as error:
+            raise ModelRetry(f'You.com request failed: {error}') from error
 
     # ------------------------------------------------------------------
     # Response parsing

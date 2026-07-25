@@ -118,6 +118,7 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 | [Context](context.md) | Auto-loads repo context -- `CLAUDE.md`/`AGENTS.md` and repository structure -- so the agent starts a run already oriented in the project. | -- |
 | [Pydantic AI Docs](pydantic-ai-docs.md) | An on-demand `read_pyai_docs` tool that pulls Pydantic AI documentation into the run when the agent needs it, instead of preloading it. | -- |
 | [Exa Search](exa-search.md) | Web research backed by the [Exa](https://exa.ai) search API: `web_search` returns results with their most relevant excerpts, `get_page` reads a specific URL in full, and opt-in `deep_search` synthesizes a cited answer in one call. Output is budgeted per tool. | `exa` |
+| [You.com](youdotcom.md) | Web search, content extraction, and synchronous research backed by the You.com API. | -- |
 | [Compaction](compaction.md) | Keeps a run within token limits: sliding-window trimming, LLM-powered summarization of older messages, and warnings before the context or iteration ceiling is hit. | -- |
 | [Overflowing Tool Output](overflowing-tool-output.md) | Reduces an oversized tool return when it is produced -- truncate, spill to a queryable file, or summarize -- so a large payload does not persist in history and get re-sent every request. | -- |
 | [Cache Stability Monitor](cache-stability.md) | Warns when a run's prompt-cache hit collapses between model requests -- a moved cacheable prefix or an expired provider cache -- reading the provider's own `cache_read_tokens` verdict. | -- |

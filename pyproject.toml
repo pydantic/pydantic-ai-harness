@@ -34,11 +34,11 @@ dependencies = [
 
 [project.optional-dependencies]
 code-mode = [
-    'pydantic-monty>=0.0.16',
+    "pydantic-monty>=0.0.19",
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 codemode = [
-    'pydantic-monty>=0.0.16',
+    "pydantic-monty>=0.0.19",
 ]
 temporal = [
     'pydantic-ai-slim[temporal]',
@@ -50,8 +50,11 @@ logfire = [
     'logfire>=4.31.0',
     "pydantic-ai-slim[spec]>=2.14.1",
 ]
+modal = [
+    "modal>=1.5.0",
+]
 dynamic-workflow = [
-    "pydantic-monty>=0.0.16",
+    "pydantic-monty>=0.0.19",
 ]
 acp = [
     # The SDK breaks across minors, so cap per minor.
@@ -129,7 +132,7 @@ quote-style = 'single'
 [tool.pyright]
 pythonVersion = '3.10'
 typeCheckingMode = 'strict'
-exclude = ['template', '.venv', 'mutants']
+exclude = ['template', '.venv', 'mutants', '.agents', '.claude']
 # `reportUnusedFunction` is disabled for tests because fixtures and `@agent.tool_plain`
 # helpers are registered via decorators and never referenced by name (matches pydantic-ai).
 executionEnvironments = [
@@ -139,6 +142,7 @@ executionEnvironments = [
 [tool.pytest.ini_options]
 testpaths = ['tests']
 xfail_strict = true
+markers = ['modal_live: runs against a real Modal control plane; needs credentials']
 filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
@@ -151,6 +155,7 @@ anyio_mode = 'auto'
 [tool.coverage.run]
 branch = true
 source = ['pydantic_ai_harness', 'tests']
+omit = ['tests/**/test_modal_live.py']
 
 [tool.coverage.paths]
 source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']

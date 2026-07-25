@@ -59,8 +59,7 @@ Returns unified results from web and news sources.
 
 Extract clean HTML or Markdown from known URLs via the
 [Contents API](https://docs.you.com/api-reference/contents). Pass a list of URLs
-and get back full page content, ready for LLM consumption. Up to 10 URLs per
-request.
+and get back full page content, ready for LLM consumption.
 
 ### `you_research`
 
@@ -68,6 +67,10 @@ Deep research via the [Research API](https://docs.you.com/api-reference/research
 Runs multiple searches, reads through sources, and synthesizes a thorough,
 well-cited answer with inline citations. Use it when a question is too complex
 for a simple lookup.
+
+This capability uses the synchronous Research API. It supports `lite`,
+`standard`, `deep`, and `exhaustive`; the asynchronous `frontier` mode is not
+exposed.
 
 ### `you_finance_research`
 
@@ -100,7 +103,7 @@ analysis, or earnings summaries.
 
 | Parameter | Description | LLM Control |
 |---|---|---|
-| `contents_formats` | Formats to return: `'html'`, `'markdown'`, `'metadata'`. Default: `'markdown'`. | Only if not configured |
+| `contents_formats` | Formats to return: `'html'`, `'markdown'`, `'metadata'`. | Only if not configured |
 | `crawl_timeout` | Per-URL timeout in seconds (1-60). Default: 10. | Only if not configured |
 | `max_age` | Max age of cached content in seconds. | Never (human-only) |
 

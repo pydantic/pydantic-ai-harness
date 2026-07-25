@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TypeVar
 
 import httpx
 import pytest
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
@@ -250,8 +251,8 @@ class TestSearchResultFields:
             results = await toolset.search('q')
             assert len(results) == 1
             r = results[0]
-            assert r['title'] == 'Example Page'
-            assert r['url'] == 'https://example.com'
+            assert r.get('title') == 'Example Page'
+            assert r.get('url') == 'https://example.com'
             assert r.get('description') == 'An example page.'
             assert r.get('snippets') == ['snippet one', 'snippet two']
             assert r.get('thumbnail_url') == 'https://example.com/thumb.png'
@@ -267,8 +268,8 @@ class TestSearchResultFields:
         try:
             results = await toolset.search('q')
             assert len(results) == 1
-            assert results[0]['title'] == 'T'
-            assert results[0]['url'] == 'https://x.com'
+            assert results[0].get('title') == 'T'
+            assert results[0].get('url') == 'https://x.com'
             assert 'description' not in results[0]
             assert 'snippets' not in results[0]
             assert 'thumbnail_url' not in results[0]
@@ -306,7 +307,7 @@ class TestSearchResultFields:
         try:
             results = await toolset.search('q')
             assert len(results) == 1
-            assert results[0]['title'] == 'Breaking News'
+            assert results[0].get('title') == 'Breaking News'
             assert 'snippets' not in results[0]
             assert 'favicon_url' not in results[0]
             assert 'authors' not in results[0]
@@ -377,8 +378,8 @@ class TestSearchResultFields:
         try:
             results = await toolset.search('q')
             assert len(results) == 2
-            assert results[0]['title'] == 'W'
-            assert results[1]['title'] == 'N'
+            assert results[0].get('title') == 'W'
+            assert results[1].get('title') == 'N'
         finally:
             await client.aclose()
 
@@ -396,6 +397,14 @@ class TestSearchResultFields:
         try:
             with pytest.raises(ValidationError):
                 await toolset.search('q')
+        finally:
+            await client.aclose()
+
+    async def test_partial_item_is_preserved(self) -> None:
+        """Provider-valid search items may omit every optional field."""
+        toolset, client = self._toolset_with_payload({'results': {'web': [{}]}})
+        try:
+            assert await toolset.search('q') == [{}]
         finally:
             await client.aclose()
 
@@ -421,8 +430,8 @@ class TestContentsResultFields:
             results = await toolset.extract_contents(['https://example.com/page'])
             assert len(results) == 1
             r = results[0]
-            assert r['url'] == 'https://example.com/page'
-            assert r['title'] == 'Example Page'
+            assert r.get('url') == 'https://example.com/page'
+            assert r.get('title') == 'Example Page'
             assert r.get('html') == '<h1>Example</h1><p>Hello world.</p>'
             assert r.get('markdown') == '# Example\n\nHello world.'
             assert r.get('metadata') == {
@@ -437,11 +446,19 @@ class TestContentsResultFields:
         try:
             results = await toolset.extract_contents(['https://example.com'])
             assert len(results) == 1
-            assert results[0]['url'] == 'https://example.com'
-            assert results[0]['title'] == 'Minimal'
+            assert results[0].get('url') == 'https://example.com'
+            assert results[0].get('title') == 'Minimal'
             assert 'html' not in results[0]
             assert 'markdown' not in results[0]
             assert 'metadata' not in results[0]
+        finally:
+            await client.aclose()
+
+    async def test_partial_item_is_preserved(self) -> None:
+        """Provider-valid contents items may omit every optional field."""
+        toolset, client = self._toolset_with_payload([{}])
+        try:
+            assert await toolset.extract_contents(['https://example.com']) == [{}]
         finally:
             await client.aclose()
 
@@ -906,8 +923,8 @@ class TestContentsIntegration:
         try:
             results = await toolset.extract_contents(['https://example.com/page'])
             assert len(results) == 1
-            assert results[0]['url'] == 'https://example.com/page'
-            assert results[0]['title'] == 'Example Page'
+            assert results[0].get('url') == 'https://example.com/page'
+            assert results[0].get('title') == 'Example Page'
             assert results[0].get('markdown') == '# Example\n\nHello world.'
         finally:
             await client.aclose()
@@ -1428,6 +1445,28 @@ class TestHttpGet:
         finally:
             await client.aclose()
 
+    async def test_recoverable_http_error_becomes_model_retry(self) -> None:
+        transport = httpx.MockTransport(lambda req: httpx.Response(500, json={'error': 'server'}))
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(ModelRetry, match='You.com request failed'):
+                await toolset._get('https://api.you.com/v1/search', {'query': 'test'}, timeout=60.0)
+        finally:
+            await client.aclose()
+
+    async def test_network_error_becomes_model_retry(self) -> None:
+        def fail(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError('offline', request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(fail))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(ModelRetry, match='You.com request failed'):
+                await toolset._get('https://api.you.com/v1/search', {'query': 'test'}, timeout=60.0)
+        finally:
+            await client.aclose()
+
     async def test_without_custom_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """_get creates a new httpx.AsyncClient when no http_client is provided."""
         transport = httpx.MockTransport(lambda req: httpx.Response(200, json=_make_web_payload()))
@@ -1455,13 +1494,34 @@ class TestHttpPost:
         finally:
             await client.aclose()
 
-    async def test_raises_on_http_error(self) -> None:
-        """_post raises for non-2xx responses."""
+    async def test_recoverable_http_error_becomes_model_retry(self) -> None:
         transport = httpx.MockTransport(lambda req: httpx.Response(422, json={'error': 'invalid'}))
         client = httpx.AsyncClient(transport=transport)
         toolset = YoudotcomToolset(api_key='bad-key', http_client=client)
         try:
+            with pytest.raises(ModelRetry, match='You.com request failed'):
+                await toolset._post('https://api.you.com/v1/research', {'input': 'test'}, timeout=60.0)
+        finally:
+            await client.aclose()
+
+    async def test_auth_error_propagates(self) -> None:
+        transport = httpx.MockTransport(lambda req: httpx.Response(401, json={'error': 'unauthorized'}))
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='bad-key', http_client=client)
+        try:
             with pytest.raises(httpx.HTTPStatusError):
+                await toolset._post('https://api.you.com/v1/research', {'input': 'test'}, timeout=60.0)
+        finally:
+            await client.aclose()
+
+    async def test_network_error_becomes_model_retry(self) -> None:
+        def fail(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError('offline', request=request)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(fail))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(ModelRetry, match='You.com request failed'):
                 await toolset._post('https://api.you.com/v1/research', {'input': 'test'}, timeout=60.0)
         finally:
             await client.aclose()
@@ -1500,7 +1560,7 @@ class TestSearchIntegration:
         try:
             results = await toolset.search('example query')
             assert len(results) == 1
-            assert results[0]['title'] == 'Example Page'
+            assert results[0].get('title') == 'Example Page'
         finally:
             await client.aclose()
 
@@ -1686,6 +1746,16 @@ class TestCapability:
         result = agent.run_sync('Search for test')
         assert result.output == 'done'
 
+    def test_capability_loads_from_agent_file(self, tmp_path: Path) -> None:
+        spec_path = tmp_path / 'agent.yaml'
+        spec_path.write_text('capabilities:\n  - Youdotcom:\n      api_key: test\n')
+        agent = Agent.from_file(
+            spec_path,
+            custom_capability_types=[Youdotcom],
+            model=TestModel(custom_output_text='done', call_tools=[]),
+        )
+        assert agent.run_sync('test').output == 'done'
+
 
 # ---------------------------------------------------------------------------
 # Locked-parameter schema stripping
@@ -1701,6 +1771,8 @@ class TestLockedSchema:
         props: dict[str, object] = tools['you_search'].tool_def.parameters_json_schema.get('properties', {})
         assert 'count' not in props
         assert 'include_domains' not in props
+        assert 'exclude_domains' not in props
+        assert 'boost_domains' not in props
         assert 'query' in props
 
     async def test_unlocked_search_params_present_in_schema(self) -> None:
@@ -1709,6 +1781,31 @@ class TestLockedSchema:
         props: dict[str, object] = tools['you_search'].tool_def.parameters_json_schema.get('properties', {})
         assert 'count' in props
         assert 'include_domains' in props
+
+    async def test_configured_research_exclude_hides_incompatible_include(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', research_exclude_domains=['a.com'])
+        tools = await toolset.get_tools(build_run_context(None))
+        props: dict[str, object] = tools['you_research'].tool_def.parameters_json_schema.get('properties', {})
+        assert 'include_domains' not in props
+        assert 'exclude_domains' not in props
+        assert 'boost_domains' in props
+
+    async def test_configured_contents_formats_are_removed(self) -> None:
+        toolset = YoudotcomToolset(api_key='test', contents_formats=['markdown'])
+        tools = await toolset.get_tools(build_run_context(None))
+        props: dict[str, object] = tools['you_contents'].tool_def.parameters_json_schema.get('properties', {})
+        assert 'formats' not in props
+
+    async def test_contents_urls_have_uri_schema(self) -> None:
+        toolset = YoudotcomToolset(api_key='test')
+        tools = await toolset.get_tools(build_run_context(None))
+        tool = tools['you_contents']
+        props: dict[str, object] = tool.tool_def.parameters_json_schema.get('properties', {})
+        urls_schema = TypeAdapter(dict[str, object]).validate_python(props['urls'])
+        assert urls_schema['items'] == {'type': 'string', 'format': 'uri', 'minLength': 1}
+        tool.args_validator.validate_python({'urls': ['https://example.com']})
+        with pytest.raises(ValidationError):
+            tool.args_validator.validate_python({'urls': ['not-a-url']})
 
     async def test_locked_field_removed_from_required(self) -> None:
         toolset = YoudotcomToolset(api_key='test', finance_research_effort='deep')
@@ -1732,6 +1829,10 @@ class TestConstructorValidation:
         with pytest.raises(ValidationError):
             YoudotcomToolset(api_key='test', count=0)
 
+    def test_capability_validates_immediately(self) -> None:
+        with pytest.raises(ValidationError):
+            Youdotcom(api_key='test', count=0)
+
     def test_offset_out_of_range_rejected(self) -> None:
         with pytest.raises(ValidationError):
             YoudotcomToolset(api_key='test', offset=10)
@@ -1739,6 +1840,10 @@ class TestConstructorValidation:
     def test_crawl_timeout_out_of_range_rejected(self) -> None:
         with pytest.raises(ValidationError):
             YoudotcomToolset(api_key='test', search_crawl_timeout=61)
+
+    def test_non_positive_request_timeout_rejected(self) -> None:
+        with pytest.raises(ValidationError):
+            YoudotcomToolset(api_key='test', timeout=0)
 
     def test_freshness_bad_date_range_rejected(self) -> None:
         with pytest.raises(ValidationError):

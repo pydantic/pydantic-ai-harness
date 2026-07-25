@@ -114,7 +114,7 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
 
     # Contents
     contents_formats: list[ContentsFormat] | None = None
-    """Formats for `you_contents`: 'html', 'markdown', 'metadata'. API default is 'markdown'."""
+    """Formats for `you_contents`: 'html', 'markdown', and/or 'metadata'."""
 
     crawl_timeout: CrawlTimeoutSeconds | None = None
     """Per-URL timeout for `you_contents` in seconds (1-60). API default is 10."""
@@ -124,7 +124,7 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
 
     # Research
     research_effort: ResearchEffort | None = None
-    """Depth for `you_research`: 'lite', 'standard', 'deep', or 'exhaustive'. API default is 'standard'."""
+    """Synchronous depth for `you_research`: 'lite', 'standard', 'deep', or 'exhaustive'. API default is 'standard'."""
 
     research_include_domains: Domains | None = None
     """Domain allowlist for research sources (max 500 domains)."""
@@ -147,6 +147,10 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
     # Finance research
     finance_research_effort: FinanceResearchEffort | None = None
     """Depth for `you_finance_research`: 'deep' or 'exhaustive'. API default is 'deep'."""
+
+    def __post_init__(self) -> None:
+        """Validate configuration when the public capability is constructed."""
+        self.get_toolset()
 
     def get_toolset(self) -> YoudotcomToolset[AgentDepsT]:
         """Build and return the You.com toolset."""
