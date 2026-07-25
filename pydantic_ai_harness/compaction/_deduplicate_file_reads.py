@@ -11,6 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ToolCallPart
 from pydantic_ai.tools import RunContext
 
+from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW
 from pydantic_ai_harness.compaction._shared import (
     compact_with_span,
     exceeds,
@@ -68,8 +69,14 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     max_fraction: float | None = field(default=None, kw_only=True)
     """Trigger when estimated tokens reach this fraction of the model's context window.
 
-    Resolved per run from the run's model, so one setting behaves correctly on any model.
-    Mutually exclusive with `max_tokens`."""
+    Resolved per request from the request's model, so one setting behaves correctly on any
+    model. Mutually exclusive with `max_tokens`."""
+
+    fallback_context_window: int = field(default=DEFAULT_CONTEXT_WINDOW, kw_only=True)
+    """Window assumed when the request's model is not in the pricing registry.
+
+    Only consulted alongside `max_fraction`. Supply the real number for a deployment the
+    registry cannot resolve."""
 
     tokenizer: Callable[[str], int] | None = None
     """Optional tokenizer for accurate token counting.
@@ -81,7 +88,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError('max_messages must be positive.')
-        validate_token_trigger(self.max_tokens, self.max_fraction)
+        validate_token_trigger(self.max_tokens, self.max_fraction, self.fallback_context_window)
 
     async def compact(
         self,
@@ -115,7 +122,9 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
         """Deduplicate file reads, optionally gated on a size threshold."""
         messages: list[ModelMessage] = list(request_context.messages)
         if self.max_messages is not None or self.max_tokens is not None or self.max_fraction is not None:
-            token_trigger = resolve_token_trigger(self.max_tokens, self.max_fraction, ctx.model)
+            token_trigger = resolve_token_trigger(
+                self.max_tokens, self.max_fraction, request_context.model, self.fallback_context_window
+            )
             if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
                 return request_context
         request_context.messages = await compact_with_span(

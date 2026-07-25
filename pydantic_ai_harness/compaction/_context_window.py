@@ -23,6 +23,10 @@ DEFAULT_CONTEXT_WINDOW = 200_000
 
 Deliberately conservative.  Compacting earlier than necessary costs one summary;
 overestimating the window costs the whole request.
+
+Every capability that resolves a fraction takes a `fallback_context_window` defaulting to
+this, so a deployment the registry cannot resolve -- a local endpoint, a Bedrock-prefixed
+reference, a `FallbackModel` -- can supply the number it knows instead.
 """
 
 
@@ -44,14 +48,14 @@ def resolve_context_window(model: Model | str) -> int | None:
     `None` is returned both for models `genai-prices` has no entry for and for models
     it knows without a recorded window, so callers cannot mistake "unknown" for a
     number.  Pair it with `DEFAULT_CONTEXT_WINDOW` to get a usable budget.
+
+    A wrapping model resolves to whatever `model_id` it reports: `WrapperModel` (and so
+    `InstrumentedModel`) forwards the wrapped model's, while `FallbackModel` reports a
+    composite `fallback:...` id that no registry entry matches, so it resolves to `None`.
     """
     from genai_prices.data_snapshot import get_snapshot
 
-    model_id = model if isinstance(model, str) else getattr(model, 'model_id', None)
-    if not model_id:
-        return None
-
-    provider_id, model_ref = split_model_id(model_id)
+    provider_id, model_ref = split_model_id(model if isinstance(model, str) else model.model_id)
     try:
         _, model_info = get_snapshot().find_provider_model(
             model_ref=model_ref,

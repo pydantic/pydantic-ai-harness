@@ -11,6 +11,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext
 
+from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW
 from pydantic_ai_harness.compaction._shared import (
     CompactionStrategy,
     SupportsFocus,
@@ -21,7 +22,7 @@ from pydantic_ai_harness.compaction._shared import (
 )
 
 if TYPE_CHECKING:
-    from pydantic_ai.models import ModelRequestContext
+    from pydantic_ai.models import Model, ModelRequestContext
 
 
 @dataclass
@@ -68,11 +69,17 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     """
 
     target_fraction: float | None = field(default=None, kw_only=True)
-    """Target expressed as a fraction of the model's context window, resolved per run.
+    """Target expressed as a fraction of the model's context window, resolved per request.
 
     Use this instead of `target_tokens` when the same agent runs on models with
     different windows. Mutually exclusive with `target_tokens`.
     """
+
+    fallback_context_window: int = field(default=DEFAULT_CONTEXT_WINDOW, kw_only=True)
+    """Window assumed when the model is not in the pricing registry.
+
+    Only consulted alongside `target_fraction`. Supply the real number for a deployment the
+    registry cannot resolve."""
 
     tokenizer: Callable[[str], int] | None = None
     """Optional tokenizer for accurate token counting.
@@ -89,6 +96,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         validate_token_trigger(
             self.target_tokens,
             self.target_fraction,
+            self.fallback_context_window,
             tokens_name='target_tokens',
             fraction_name='target_fraction',
         )
@@ -105,12 +113,25 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             tiers=[tier.with_focus(focus) if isinstance(tier, SupportsFocus) else tier for tier in self.tiers],
         )
 
-    def _target(self, ctx: RunContext[AgentDepsT]) -> int:
-        """Absolute token target for this run, resolved from the model when relative."""
-        target = resolve_token_trigger(self.target_tokens, self.target_fraction, ctx.model)
+    def _target(self, model: Model | str | None) -> int:
+        """Absolute token target, resolved against *model* when expressed as a fraction."""
+        target = resolve_token_trigger(self.target_tokens, self.target_fraction, model, self.fallback_context_window)
         if target is None:  # pragma: no cover -- __post_init__ rejects both being unset
             raise ValueError('One of target_tokens or target_fraction must be set.')
         return target
+
+    async def _escalate(
+        self,
+        messages: list[ModelMessage],
+        ctx: RunContext[AgentDepsT],
+        target: int,
+    ) -> list[ModelMessage]:
+        """Apply tiers in order until the history fits *target* or tiers run out."""
+        for tier in self.tiers:
+            if estimate_token_count(messages, self.tokenizer) <= target:
+                break
+            messages = await tier.compact(messages, ctx)
+        return messages
 
     async def compact(
         self,
@@ -118,12 +139,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
     ) -> list[ModelMessage]:
         """Apply tiers in order until the history fits the target or tiers run out."""
-        target = self._target(ctx)
-        for tier in self.tiers:
-            if estimate_token_count(messages, self.tokenizer) <= target:
-                break
-            messages = await tier.compact(messages, ctx)
-        return messages
+        return await self._escalate(messages, ctx, self._target(ctx.model))
 
     async def before_model_request(
         self,
@@ -132,13 +148,16 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Escalate through the tiers when the conversation exceeds the target."""
         messages: list[ModelMessage] = list(request_context.messages)
-        if estimate_token_count(messages, self.tokenizer) <= self._target(ctx):
+        # Resolved once from the model the request will be sent to, so the gate and the
+        # escalation loop cannot disagree about the target.
+        target = self._target(request_context.model)
+        if estimate_token_count(messages, self.tokenizer) <= target:
             return request_context
         request_context.messages = await compact_with_span(
             ctx,
             strategy='TieredCompaction',
             messages=messages,
-            compact=lambda: self.compact(messages, ctx),
+            compact=lambda: self._escalate(messages, ctx, target),
             tokenizer=self.tokenizer,
         )
         return request_context

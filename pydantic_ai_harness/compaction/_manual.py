@@ -4,13 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from opentelemetry.trace import NoOpTracer
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.compaction._shared import SupportsFocus
+from pydantic_ai_harness.compaction._shared import SupportsFocus, compact_with_span
 
 if TYPE_CHECKING:
+    from opentelemetry.trace import Tracer
     from pydantic_ai._run_context import AgentDepsT
     from pydantic_ai.models import Model
 
@@ -25,6 +27,7 @@ async def compact_now(
     focus: str | None = None,
     deps: AgentDepsT | None = None,
     usage: RunUsage | None = None,
+    tracer: Tracer | None = None,
 ) -> list[ModelMessage]:
     """Compact `messages` with `strategy`, without an agent run in progress.
 
@@ -40,6 +43,10 @@ async def compact_now(
     under target comes back unchanged -- by that strategy's own definition there is nothing left
     to reclaim. Pass the tier directly if you need it to run regardless.
 
+    A compaction that changes the history emits the same `compact_messages` span the in-run
+    path emits, so an instrumented application sees one shape however compaction was
+    triggered. Pass `tracer` to record it; without one the span goes to a no-op tracer.
+
     Args:
         strategy: The strategy to run. Any `CompactionStrategy` works.
         messages: History to compact. Not mutated; the compacted list is returned.
@@ -49,6 +56,8 @@ async def compact_now(
         deps: Dependencies to expose on the throwaway context, for a strategy that reads them.
         usage: Usage to accumulate into, so a summarization call can be billed to your own
             counter. A fresh `RunUsage` is used when omitted.
+        tracer: Tracer the `compact_messages` span is started on. Defaults to a no-op tracer,
+            which records nothing.
 
     Example:
         ```python {test="skip"}
@@ -65,12 +74,17 @@ async def compact_now(
     """
     from pydantic_ai.models import infer_model
 
-    if focus is not None and isinstance(strategy, SupportsFocus):
-        strategy = strategy.with_focus(focus)
+    focused = strategy.with_focus(focus) if focus is not None and isinstance(strategy, SupportsFocus) else strategy
 
     ctx: RunContext[Any] = RunContext(
         deps=deps,
         model=infer_model(model) if isinstance(model, str) else model,
         usage=usage if usage is not None else RunUsage(),
+        tracer=tracer if tracer is not None else NoOpTracer(),
     )
-    return await strategy.compact(messages, ctx)
+    return await compact_with_span(
+        ctx,
+        strategy=type(focused).__name__,
+        messages=messages,
+        compact=lambda: focused.compact(messages, ctx),
+    )

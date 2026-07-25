@@ -10,6 +10,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart, UserPromptPart
 from pydantic_ai.tools import RunContext
 
+from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW
 from pydantic_ai_harness.compaction._shared import (
     estimate_token_count,
     resolve_token_trigger,
@@ -66,11 +67,17 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
     """Maximum context-window size to warn against."""
 
     max_context_fraction: float | None = field(default=None, kw_only=True)
-    """Context limit as a fraction of the model's real context window, resolved per run.
+    """Context limit as a fraction of the model's real context window, resolved per request.
 
     Use this instead of `max_context_tokens` when the same agent runs on models with
     different windows. Mutually exclusive with `max_context_tokens`.
     """
+
+    fallback_context_window: int = field(default=DEFAULT_CONTEXT_WINDOW, kw_only=True)
+    """Window assumed when the request's model is not in the pricing registry.
+
+    Only consulted alongside `max_context_fraction`. Supply the real number for a deployment
+    the registry cannot resolve."""
 
     max_total_tokens: int | None = None
     """Maximum cumulative run token budget to warn against."""
@@ -92,6 +99,7 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
         validate_token_trigger(
             self.max_context_tokens,
             self.max_context_fraction,
+            self.fallback_context_window,
             tokens_name='max_context_tokens',
             fraction_name='max_context_fraction',
         )
@@ -102,26 +110,26 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
         if self.critical_remaining_iterations < 0:
             raise ValueError('critical_remaining_iterations must be non-negative.')
 
-        # The two context limits are mutually exclusive (checked above), so whichever is set
-        # marks the kind as configured.
-        configured: dict[WarningKind, float | None] = {
-            'iterations': self.max_iterations,
-            'context_window': self.max_context_tokens or self.max_context_fraction,
-            'total_tokens': self.max_total_tokens,
+        # The two context limits are mutually exclusive (checked above), so either one marks
+        # the kind as configured.
+        configured: dict[WarningKind, bool] = {
+            'iterations': self.max_iterations is not None,
+            'context_window': self.max_context_tokens is not None or self.max_context_fraction is not None,
+            'total_tokens': self.max_total_tokens is not None,
         }
-        if all(v is None for v in configured.values()):
+        if not any(configured.values()):
             raise ValueError(
                 'At least one of max_iterations, max_context_tokens, max_context_fraction, '
                 'or max_total_tokens must be set.'
             )
 
         if self.warn_on is None:
-            self._active_kinds = tuple(k for k in _WARNING_ORDER if configured[k] is not None)
+            self._active_kinds = tuple(k for k in _WARNING_ORDER if configured[k])
         else:
             if not self.warn_on:
                 raise ValueError('warn_on must not be empty.')
             for kind in self.warn_on:
-                if configured[kind] is None:
+                if not configured[kind]:
                     raise ValueError(f'{kind!r} requires its corresponding max_* limit to be configured.')
             self._active_kinds = tuple(dict.fromkeys(self.warn_on))
 
@@ -221,7 +229,12 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
             active.append(w)
 
         if 'context_window' in self._active_kinds:
-            context_limit = resolve_token_trigger(self.max_context_tokens, self.max_context_fraction, ctx.model)
+            context_limit = resolve_token_trigger(
+                self.max_context_tokens,
+                self.max_context_fraction,
+                request_context.model,
+                self.fallback_context_window,
+            )
             if context_limit is not None:  # pragma: no branch -- the kind is only active when one is set
                 w = self._build_context_warning(estimate_token_count(messages), context_limit)
                 if w is not None:

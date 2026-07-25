@@ -20,6 +20,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.tools import RunContext
 
+from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW
 from pydantic_ai_harness.compaction._shared import (
     compact_with_span,
     exceeds,
@@ -178,8 +179,14 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     max_fraction: float | None = field(default=None, kw_only=True)
     """Trigger when estimated tokens reach this fraction of the model's context window.
 
-    Resolved per run from the run's model, so one setting behaves correctly on any model.
-    Mutually exclusive with `max_tokens`."""
+    Resolved per request from the request's model, so one setting behaves correctly on any
+    model. Mutually exclusive with `max_tokens`."""
+
+    fallback_context_window: int = field(default=DEFAULT_CONTEXT_WINDOW, kw_only=True)
+    """Window assumed when the request's model is not in the pricing registry.
+
+    Only consulted alongside `max_fraction`. Supply the real number for a deployment the
+    registry cannot resolve."""
 
     keep_messages: int = 20
     """Number of tail messages to preserve after compaction (message-count trigger)."""
@@ -218,7 +225,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             raise ValueError('At least one of max_messages, max_tokens, or max_fraction must be set.')
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError('max_messages must be positive.')
-        validate_token_trigger(self.max_tokens, self.max_fraction)
+        validate_token_trigger(self.max_tokens, self.max_fraction, self.fallback_context_window)
         if self.keep_messages < 0:
             raise ValueError('keep_messages must be non-negative.')
         if self.keep_tokens is not None and self.keep_tokens < 0:
@@ -275,7 +282,9 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Summarize older messages when the threshold is exceeded."""
         messages: list[ModelMessage] = list(request_context.messages)
-        token_trigger = resolve_token_trigger(self.max_tokens, self.max_fraction, ctx.model)
+        token_trigger = resolve_token_trigger(
+            self.max_tokens, self.max_fraction, request_context.model, self.fallback_context_window
+        )
         if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
             return request_context
         request_context.messages = await compact_with_span(

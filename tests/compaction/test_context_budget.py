@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -27,6 +28,13 @@ from pydantic_ai_harness.compaction import (
 )
 from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW, split_model_id
 from pydantic_ai_harness.compaction._shared import resolve_token_trigger, validate_token_trigger
+
+try:
+    from logfire.testing import CaptureLogfire
+
+    logfire_installed = True
+except ImportError:  # pragma: no cover
+    logfire_installed = False
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -53,9 +61,9 @@ def _ctx(model: Any = None) -> Any:
     return _FakeCtx(model=model) if model is not None else _FakeCtx()
 
 
-def _request_context(messages: list[ModelMessage]) -> ModelRequestContext:
+def _request_context(messages: list[ModelMessage], model: _FakeModel | None = None) -> ModelRequestContext:
     return ModelRequestContext(
-        model=_FakeModel(),  # type: ignore[arg-type]
+        model=model if model is not None else _FakeModel(),  # type: ignore[arg-type]
         messages=messages,
         model_settings=None,
         model_request_parameters=ModelRequestParameters(),
@@ -75,6 +83,15 @@ def _fixed_window(monkeypatch: pytest.MonkeyPatch, module: str, window: int | No
 
     def _resolve(_model: Any) -> int | None:
         return window
+
+    monkeypatch.setattr(f'pydantic_ai_harness.compaction.{module}.resolve_context_window', _resolve)
+
+
+def _window_per_model(monkeypatch: pytest.MonkeyPatch, module: str, windows: dict[str, int | None]) -> None:
+    """Give each model id its own window, so a test can tell which model was consulted."""
+
+    def _resolve(model: Any) -> int | None:
+        return windows[model.model_id]
 
     monkeypatch.setattr(f'pydantic_ai_harness.compaction.{module}.resolve_context_window', _resolve)
 
@@ -106,6 +123,11 @@ class TestResolveContextWindow:
 
     def test_model_without_an_id(self):
         assert resolve_context_window(_FakeModel(model_id='')) is None  # type: ignore[arg-type]
+
+    def test_a_fallback_model_does_not_resolve(self):
+        """`FallbackModel.model_id` is a composite no registry entry matches."""
+        composite = _FakeModel(model_id='fallback:openai,anthropic:fallback:gpt-4o,claude-sonnet-4-6')
+        assert resolve_context_window(composite) is None  # type: ignore[arg-type]
 
     def test_known_model_without_a_recorded_window(self, monkeypatch: pytest.MonkeyPatch):
         _patch_snapshot(monkeypatch, context_window=None)
@@ -159,6 +181,10 @@ class TestValidateTokenTrigger:
         with pytest.raises(ValueError, match='Set at most one of target_tokens or target_fraction'):
             validate_token_trigger(1, 0.5, tokens_name='target_tokens', fraction_name='target_fraction')
 
+    def test_rejects_a_non_positive_fallback(self):
+        with pytest.raises(ValueError, match='fallback_context_window must be positive'):
+            validate_token_trigger(None, 0.5, 0)
+
 
 class TestResolveTokenTrigger:
     def test_absolute_wins(self):
@@ -181,6 +207,14 @@ class TestResolveTokenTrigger:
     def test_never_resolves_below_one(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1)
         assert resolve_token_trigger(None, 0.001, _FakeModel()) == 1  # type: ignore[arg-type]
+
+    def test_a_custom_fallback_replaces_the_default(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', None)
+        assert resolve_token_trigger(None, 0.5, _FakeModel(), 1_000_000) == 500_000  # type: ignore[arg-type]
+
+    def test_a_custom_fallback_is_ignored_once_the_window_resolves(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', 2_000)
+        assert resolve_token_trigger(None, 0.5, _FakeModel(), 1_000_000) == 1_000  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +280,149 @@ class TestFractionTriggers:
     def test_rejects_both_triggers(self):
         with pytest.raises(ValueError, match='Set at most one of max_tokens or max_fraction'):
             SlidingWindow(max_tokens=1_000, max_fraction=0.9)
+
+
+class TestRequestModelIsTheOneResolved:
+    """A capability may replace `ModelRequestContext.model`, and that is where the request goes.
+
+    Each test gives the run's model and the request's model different windows, so a strategy
+    that consults the run's model reaches the opposite conclusion from the correct one.
+    """
+
+    RUN = _FakeModel('run-model')
+    REQUEST = _FakeModel('request-model')
+
+    def _windows(self, monkeypatch: pytest.MonkeyPatch, module: str, *, run: int, request: int) -> None:
+        _window_per_model(monkeypatch, module, {'run-model': run, 'request-model': request})
+
+    async def test_sliding_window_trims_on_the_request_model(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
+        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.1, keep_messages=2)
+        request_context = _request_context(_history(6), self.REQUEST)
+
+        await capability.before_model_request(_ctx(self.RUN), request_context)
+
+        assert len(request_context.messages) < 12, "the run model's window would not have triggered"
+
+    async def test_sliding_window_stays_quiet_on_the_request_model(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_shared', run=1_000, request=10_000_000)
+        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.1, keep_messages=2)
+        request_context = _request_context(_history(6), self.REQUEST)
+
+        await capability.before_model_request(_ctx(self.RUN), request_context)
+
+        assert len(request_context.messages) == 12, "the run model's window would have triggered"
+
+    async def test_summarizing_compaction(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_shared', run=1_000, request=10_000_000)
+        capability: SummarizingCompaction[None] = SummarizingCompaction(max_fraction=0.1)
+        request_context = _request_context(_history(6), self.REQUEST)
+
+        assert await capability.before_model_request(_ctx(self.RUN), request_context) is request_context
+
+    async def test_clear_tool_results(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_shared', run=1_000, request=10_000_000)
+        capability: ClearToolResults[None] = ClearToolResults(max_fraction=0.1)
+        request_context = _request_context(_history(6), self.REQUEST)
+
+        assert await capability.before_model_request(_ctx(self.RUN), request_context) is request_context
+
+    async def test_deduplicate_file_reads(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_shared', run=1_000, request=10_000_000)
+        capability: DeduplicateFileReads[None] = DeduplicateFileReads(file_key=lambda call: None, max_fraction=0.1)
+        request_context = _request_context(_history(6), self.REQUEST)
+
+        assert await capability.before_model_request(_ctx(self.RUN), request_context) is request_context
+
+    async def test_tiered_compaction(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
+        capability: TieredCompaction[None] = TieredCompaction(
+            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            target_fraction=0.1,
+        )
+        request_context = _request_context(_history(6), self.REQUEST)
+
+        await capability.before_model_request(_ctx(self.RUN), request_context)
+
+        assert len(request_context.messages) < 12
+
+    async def test_limit_warner(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
+        capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.1, warning_threshold=0.5)
+        request_context = _request_context(_history(6), self.REQUEST)
+
+        await capability.before_model_request(_ctx(self.RUN), request_context)
+
+        assert '[LimitWarner]' in str(request_context.messages[-1])
+
+    async def test_context_usage_monitor(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_context_usage', run=10_000_000, request=1_000)
+        seen: list[ContextUsage] = []
+        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append)
+
+        await monitor.before_model_request(_ctx(self.RUN), _request_context(_history(2), self.REQUEST))
+
+        assert seen[0].window_tokens == 1_000
+
+
+_FallbackFactory = Callable[[int], object]
+
+_FALLBACK_FACTORIES: list[tuple[str, _FallbackFactory]] = [
+    ('SlidingWindow', lambda w: SlidingWindow(max_fraction=0.9, fallback_context_window=w)),
+    ('SummarizingCompaction', lambda w: SummarizingCompaction(max_fraction=0.9, fallback_context_window=w)),
+    ('ClearToolResults', lambda w: ClearToolResults(max_fraction=0.9, fallback_context_window=w)),
+    (
+        'DeduplicateFileReads',
+        lambda w: DeduplicateFileReads(file_key=lambda call: None, max_fraction=0.9, fallback_context_window=w),
+    ),
+    (
+        'TieredCompaction',
+        lambda w: TieredCompaction(tiers=[SlidingWindow(max_tokens=1)], target_fraction=0.9, fallback_context_window=w),
+    ),
+    ('LimitWarner', lambda w: LimitWarner(max_context_fraction=0.9, fallback_context_window=w)),
+]
+"""Every capability that resolves a fraction, so the guard below cannot miss a new one."""
+
+
+class TestStrategyFallbackWindow:
+    """A window the registry cannot resolve is the caller's to supply, not just the monitor's."""
+
+    async def test_sliding_window_uses_the_configured_fallback(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', None)
+        capability: SlidingWindow[None] = SlidingWindow(
+            max_fraction=0.9, keep_messages=2, fallback_context_window=10_000_000
+        )
+        request_context = _request_context(_history(6))
+
+        await capability.before_model_request(_ctx(), request_context)
+
+        assert len(request_context.messages) == 12, 'the 200K default would have triggered'
+
+    async def test_tiered_compaction_uses_the_configured_fallback(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', None)
+        capability: TieredCompaction[None] = TieredCompaction(
+            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            target_fraction=0.9,
+            fallback_context_window=10_000_000,
+        )
+        request_context = _request_context(_history(6))
+
+        assert await capability.before_model_request(_ctx(), request_context) is request_context
+
+    async def test_limit_warner_uses_the_configured_fallback(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', None)
+        capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.9, fallback_context_window=10_000_000)
+        request_context = _request_context(_history(6))
+
+        await capability.before_model_request(_ctx(), request_context)
+
+        assert len(request_context.messages) == 12, 'the 200K default would have warned'
+
+    @pytest.mark.parametrize(('name', 'factory'), _FALLBACK_FACTORIES, ids=[n for n, _ in _FALLBACK_FACTORIES])
+    def test_every_strategy_rejects_a_non_positive_fallback(self, name: str, factory: _FallbackFactory):
+        factory(1)
+        with pytest.raises(ValueError, match='fallback_context_window must be positive'):
+            factory(0)
 
 
 class TestTieredTargetFraction:
@@ -333,10 +510,9 @@ class TestContextUsageMonitor:
         _fixed_window(monkeypatch, '_context_usage', 1_000)
         seen: list[ContextUsage] = []
         monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append)
-        run = await monitor.for_run(_ctx())
 
         request_context = _request_context(_history(2))
-        assert await run.before_model_request(_ctx(), request_context) is request_context
+        assert await monitor.before_model_request(_ctx(), request_context) is request_context
 
         assert len(seen) == 1
         assert seen[0].window_tokens == 1_000
@@ -346,44 +522,66 @@ class TestContextUsageMonitor:
     async def test_never_edits_the_history(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_context_usage', 1_000)
         monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=lambda _: None)
-        run = await monitor.for_run(_ctx())
         messages = _history(3)
         request_context = _request_context(messages)
 
-        await run.before_model_request(_ctx(), request_context)
+        await monitor.before_model_request(_ctx(), request_context)
 
         assert request_context.messages == messages
 
-    async def test_override_skips_resolution(self):
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=lambda _: None, context_window=4_242)
-        run = await monitor.for_run(_ctx())
-        assert run._window == 4_242
-        assert run._resolved is True
+    async def test_an_async_callback_is_awaited(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_context_usage', 1_000)
+        seen: list[ContextUsage] = []
+
+        async def record(usage: ContextUsage) -> None:
+            seen.append(usage)
+
+        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=record)
+
+        await monitor.before_model_request(_ctx(), _request_context(_history(2)))
+
+        assert len(seen) == 1
+
+    async def test_override_skips_resolution(self, monkeypatch: pytest.MonkeyPatch):
+        def _explode(_model: Any) -> int | None:  # pragma: no cover -- must not be called
+            raise AssertionError('an explicit window must not consult the registry')
+
+        monkeypatch.setattr('pydantic_ai_harness.compaction._context_usage.resolve_context_window', _explode)
+        seen: list[ContextUsage] = []
+        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append, context_window=4_242)
+
+        await monitor.before_model_request(_ctx(), _request_context(_history(2)))
+
+        assert (seen[0].window_tokens, seen[0].resolved) == (4_242, True)
 
     async def test_falls_back_for_an_unknown_model(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_context_usage', None)
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=lambda _: None)
-        run = await monitor.for_run(_ctx())
-        assert run._window == DEFAULT_CONTEXT_WINDOW
-        assert run._resolved is False
+        seen: list[ContextUsage] = []
+        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append)
+
+        await monitor.before_model_request(_ctx(), _request_context(_history(2)))
+
+        assert (seen[0].window_tokens, seen[0].resolved) == (DEFAULT_CONTEXT_WINDOW, False)
 
     async def test_custom_fallback(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_context_usage', None)
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(
-            on_usage=lambda _: None, fallback_context_window=32_000
-        )
-        run = await monitor.for_run(_ctx())
-        assert run._window == 32_000
+        seen: list[ContextUsage] = []
+        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append, fallback_context_window=32_000)
 
-    async def test_each_run_resolves_independently(self, monkeypatch: pytest.MonkeyPatch):
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=lambda _: None)
+        await monitor.before_model_request(_ctx(), _request_context(_history(2)))
+
+        assert seen[0].window_tokens == 32_000
+
+    async def test_each_request_resolves_independently(self, monkeypatch: pytest.MonkeyPatch):
+        seen: list[ContextUsage] = []
+        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append)
 
         _fixed_window(monkeypatch, '_context_usage', 1_000)
-        first = await monitor.for_run(_ctx())
+        await monitor.before_model_request(_ctx(), _request_context(_history(2)))
         _fixed_window(monkeypatch, '_context_usage', 2_000)
-        second = await monitor.for_run(_ctx())
+        await monitor.before_model_request(_ctx(), _request_context(_history(2)))
 
-        assert (first._window, second._window) == (1_000, 2_000)
+        assert [reading.window_tokens for reading in seen] == [1_000, 2_000]
 
     def test_rejects_a_non_positive_window(self):
         with pytest.raises(ValueError, match='context_window must be positive'):
@@ -460,6 +658,90 @@ class TestCompactNow:
         assert seen == ['the auth refactor']
 
 
+class TestCompactNowSummarizes:
+    """`compact_now` driving a strategy that really calls a model."""
+
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        # These run a real `agent.run`; trio hits a TestModel event-loop quirk in core
+        # unrelated to compaction.
+        return 'asyncio'
+
+    async def test_a_summary_call_lands_on_the_supplied_usage(self):
+        """The documented reason `usage` exists: an out-of-run summary stays on someone's counter."""
+        usage = RunUsage()
+        strategy: SummarizingCompaction[None] = SummarizingCompaction(max_messages=1, keep_messages=2)
+
+        await compact_now(strategy, _history(4), model=TestModel(), usage=usage)
+
+        assert usage.requests == 1
+        assert usage.total_tokens > 0
+
+    async def test_the_history_is_replaced_by_a_summary(self):
+        strategy: SummarizingCompaction[None] = SummarizingCompaction(max_messages=1, keep_messages=2)
+
+        result = await compact_now(strategy, _history(4), model=TestModel())
+
+        assert len(result) < 8
+
+
+@pytest.mark.skipif(not logfire_installed, reason='logfire not installed')
+class TestCompactNowSpan:
+    """An out-of-run compaction emits the same span the in-run path does."""
+
+    @pytest.fixture
+    def anyio_backend(self) -> str:
+        return 'asyncio'
+
+    def _spans(self, capfire: CaptureLogfire) -> list[dict[str, Any]]:
+        return [s for s in capfire.exporter.exported_spans_as_dict() if s['name'] == 'compact_messages']
+
+    async def test_emits_the_compaction_span(self, capfire: CaptureLogfire):
+        from opentelemetry.trace import get_tracer
+
+        strategy: SlidingWindow[None] = SlidingWindow(max_tokens=1, keep_messages=2)
+
+        await compact_now(strategy, _history(4), model=TestModel(), tracer=get_tracer('test'))
+
+        spans = self._spans(capfire)
+        assert len(spans) == 1
+        attrs = spans[0]['attributes']
+        assert attrs['gen_ai.conversation.compacted'] is True
+        assert attrs['compaction.strategy'] == 'SlidingWindow'
+        assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
+
+    async def test_no_span_when_the_history_is_unchanged(self, capfire: CaptureLogfire):
+        from opentelemetry.trace import get_tracer
+
+        tiered: TieredCompaction[None] = TieredCompaction(
+            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            target_tokens=1_000_000,
+        )
+
+        await compact_now(tiered, _history(3, filler='x' * 40), model=TestModel(), tracer=get_tracer('test'))
+
+        assert self._spans(capfire) == []
+
+    async def test_the_span_names_the_focused_strategy(self, capfire: CaptureLogfire):
+        from opentelemetry.trace import get_tracer
+
+        tiered: TieredCompaction[None] = TieredCompaction(
+            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            target_tokens=1,
+        )
+
+        await compact_now(tiered, _history(6), model=TestModel(), focus='auth', tracer=get_tracer('test'))
+
+        assert self._spans(capfire)[0]['attributes']['compaction.strategy'] == 'TieredCompaction'
+
+    async def test_a_default_tracer_records_nothing(self, capfire: CaptureLogfire):
+        strategy: SlidingWindow[None] = SlidingWindow(max_tokens=1, keep_messages=2)
+
+        await compact_now(strategy, _history(4), model=TestModel())
+
+        assert self._spans(capfire) == []
+
+
 class TestWithFocus:
     def test_appends_the_focus_to_the_prompt(self):
         capability: SummarizingCompaction[None] = SummarizingCompaction(max_fraction=0.9)
@@ -525,6 +807,12 @@ class TestPositionalCompatibility:
             (DeduplicateFileReads, 'max_fraction'),
             (TieredCompaction, 'target_fraction'),
             (LimitWarner, 'max_context_fraction'),
+            (SlidingWindow, 'fallback_context_window'),
+            (SummarizingCompaction, 'fallback_context_window'),
+            (ClearToolResults, 'fallback_context_window'),
+            (DeduplicateFileReads, 'fallback_context_window'),
+            (TieredCompaction, 'fallback_context_window'),
+            (LimitWarner, 'fallback_context_window'),
         ]
         for cls, name in cases:
             field = next(f for f in dataclasses.fields(cls) if f.name == name)

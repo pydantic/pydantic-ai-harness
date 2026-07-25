@@ -48,8 +48,8 @@ An absolute `max_tokens` is only correct for the model it was measured against. 
 and a 1M-context model compacts at a fifth of its capacity, paying for summaries it did not need; a
 128K model configured for `1_000_000` never compacts before the provider rejects the request.
 
-`max_fraction` is resolved per run against the model's real context window, so one configuration is
-correct everywhere:
+`max_fraction` is resolved per request against the model's real context window, so one configuration
+is correct everywhere:
 
 ```python
 from pydantic_ai import Agent
@@ -70,9 +70,35 @@ pick one and discard the other, leaving the caller unable to tell which budget w
 The window comes from [`genai-prices`](https://github.com/pydantic/genai-prices), already a
 dependency of `pydantic-ai-slim`; `resolve_context_window` is exported if you want the number
 yourself. Pydantic AI does not expose it yet (`ModelProfile` has no `context_window` field), so when
-it does, that one function switches over. A model the pricing registry does not know -- a local
-endpoint, a bespoke deployment -- falls back to a conservative 200K (`DEFAULT_CONTEXT_WINDOW`).
-Nothing is cached: only a registry-confirmed number is ever treated as the real window.
+it does, that one function switches over. Nothing is cached: only a registry-confirmed number is
+ever treated as the real window.
+
+The model consulted is `ModelRequestContext.model`, the one the request will be sent to, not the one
+the run started with. A capability ordered earlier may replace it, and the budget follows.
+
+### When the window does not resolve
+
+Not every model is in the registry. A local endpoint, a bespoke deployment, a Bedrock-prefixed
+reference such as `bedrock:us.anthropic.claude-sonnet-4-5`, a model the registry knows without a
+recorded window (`google-gla:gemini-2.5-pro` today), and any `FallbackModel` (its `model_id` is a
+composite `fallback:...`) all resolve to nothing. The fraction is then taken of
+`fallback_context_window`, which defaults to a conservative 200K (`DEFAULT_CONTEXT_WINDOW`):
+compacting earlier than necessary costs one summary, overestimating costs the whole request.
+
+Every capability that takes a fraction takes the fallback too, so you are not stuck with 200K on a
+model you know the size of:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction
+
+agent = Agent(
+    'google-gla:gemini-2.5-pro',
+    capabilities=[SummarizingCompaction(max_fraction=0.9, fallback_context_window=1_000_000)],
+)
+```
+
+It is only consulted when resolution fails, so it costs nothing on a model the registry does know.
 
 ## Reporting usage: `ContextUsageMonitor`
 
@@ -96,9 +122,16 @@ agent = Agent(
 
 Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the
 fallback rather than the model's real one, so a gauge can show that the percentage is a guess.
+`on_usage` may be a coroutine function, so a gauge that pushes over a socket does not need a sync
+bridge.
 
 Order matters: register the monitor *after* a compaction capability to observe the compacted history,
 or before it to see what triggered the compaction.
+
+`used_tokens` counts message parts, the same way the triggers do. Instructions
+(`ModelRequest.instructions`) and tool schemas are outside that count, so the reading is lower than
+what the provider bills; tool-schema accounting is tracked in
+[#100](https://github.com/pydantic/pydantic-ai-harness/issues/100).
 
 ## Compacting outside a run: `compact_now`
 
@@ -127,6 +160,10 @@ target comes back unchanged. Pass the tier directly if you need it to run regard
 via `with_focus` -- and is passed over by the ones that drop or blank content by rule, since they have
 nothing to steer. `TieredCompaction` is focusable when any of its tiers is, so a focus reaches the
 summarizing tier rather than stopping at the wrapper.
+
+A compaction that changes the history emits the same `compact_messages` span the in-run path emits,
+so an instrumented application sees one shape however compaction was triggered. Pass `tracer=` to
+record it; without one the span goes to a no-op tracer.
 
 ## `ClampOversizedMessages`: surviving a runaway generation
 
