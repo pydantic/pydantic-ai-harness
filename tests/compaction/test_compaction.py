@@ -271,7 +271,7 @@ class TestFindTokenCutoff:
 
 class TestSlidingWindow:
     def test_validation_no_trigger(self):
-        with pytest.raises(ValueError, match='At least one of max_messages or max_tokens must be set'):
+        with pytest.raises(ValueError, match='At least one of max_messages, max_tokens, or max_fraction must be set'):
             SlidingWindow()
 
     def test_validation_negative_max_messages(self):
@@ -477,7 +477,7 @@ class TestLimitWarner:
 
 class TestCompaction:
     def test_validation_no_trigger(self):
-        with pytest.raises(ValueError, match='At least one of max_messages or max_tokens must be set'):
+        with pytest.raises(ValueError, match='At least one of max_messages, max_tokens, or max_fraction must be set'):
             SummarizingCompaction(model='test', max_messages=None, max_tokens=None)
 
     def test_validation_negative_max_messages(self):
@@ -1485,7 +1485,7 @@ class TestIterToolPairs:
 
 class TestClearToolResults:
     def test_validation_no_trigger(self):
-        with pytest.raises(ValueError, match='At least one of max_messages or max_tokens must be set'):
+        with pytest.raises(ValueError, match='At least one of max_messages, max_tokens, or max_fraction must be set'):
             ClearToolResults()
 
     def test_validation_negative_max_messages(self):

@@ -15,6 +15,8 @@ from pydantic_ai_harness.compaction._shared import (
     CompactionStrategy,
     compact_with_span,
     estimate_token_count,
+    resolve_token_trigger,
+    validate_token_trigger,
 )
 
 if TYPE_CHECKING:
@@ -58,8 +60,18 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     tiers: Sequence[CompactionStrategy[AgentDepsT]]
     """Strategies to apply in order, cheap-to-expensive.  The last is typically a summarizer."""
 
-    target_tokens: int
-    """Stop escalating once the estimated token count is at or below this value."""
+    target_tokens: int | None = None
+    """Stop escalating once the estimated token count is at or below this value.
+
+    Mutually exclusive with `target_fraction`; exactly one of the two must be set.
+    """
+
+    target_fraction: float | None = None
+    """Target expressed as a fraction of the model's context window, resolved per run.
+
+    Use this instead of `target_tokens` when the same agent runs on models with
+    different windows. Mutually exclusive with `target_tokens`.
+    """
 
     tokenizer: Callable[[str], int] | None = None
     """Optional tokenizer for accurate token counting.
@@ -71,17 +83,31 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         if not self.tiers:
             raise ValueError('tiers must not be empty.')
-        if self.target_tokens < 1:
-            raise ValueError('target_tokens must be positive.')
+        if self.target_tokens is None and self.target_fraction is None:
+            raise ValueError('One of target_tokens or target_fraction must be set.')
+        validate_token_trigger(
+            self.target_tokens,
+            self.target_fraction,
+            tokens_name='target_tokens',
+            fraction_name='target_fraction',
+        )
+
+    def _target(self, ctx: RunContext[AgentDepsT]) -> int:
+        """Absolute token target for this run, resolved from the model when relative."""
+        target = resolve_token_trigger(self.target_tokens, self.target_fraction, ctx.model)
+        if target is None:  # pragma: no cover -- __post_init__ rejects both being unset
+            raise ValueError('One of target_tokens or target_fraction must be set.')
+        return target
 
     async def compact(
         self,
         messages: list[ModelMessage],
         ctx: RunContext[AgentDepsT],
     ) -> list[ModelMessage]:
-        """Apply tiers in order until the history fits ``target_tokens`` or tiers run out."""
+        """Apply tiers in order until the history fits the target or tiers run out."""
+        target = self._target(ctx)
         for tier in self.tiers:
-            if estimate_token_count(messages, self.tokenizer) <= self.target_tokens:
+            if estimate_token_count(messages, self.tokenizer) <= target:
                 break
             messages = await tier.compact(messages, ctx)
         return messages
@@ -91,9 +117,9 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        """Escalate through the tiers when the conversation exceeds ``target_tokens``."""
+        """Escalate through the tiers when the conversation exceeds the target."""
         messages: list[ModelMessage] = list(request_context.messages)
-        if estimate_token_count(messages, self.tokenizer) <= self.target_tokens:
+        if estimate_token_count(messages, self.tokenizer) <= self._target(ctx):
             return request_context
         request_context.messages = await compact_with_span(
             ctx,

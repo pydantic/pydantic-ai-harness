@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from pydantic_ai._run_context import AgentDepsT
@@ -26,6 +26,8 @@ from pydantic_ai_harness.compaction._shared import (
     find_first_user_message,
     find_safe_cutoff,
     find_token_cutoff,
+    resolve_token_trigger,
+    validate_token_trigger,
 )
 
 if TYPE_CHECKING:
@@ -173,6 +175,12 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     max_tokens: int | None = None
     """Trigger compaction when estimated token count exceeds this value."""
 
+    max_fraction: float | None = None
+    """Trigger when estimated tokens reach this fraction of the model's context window.
+
+    Resolved per run from the run's model, so one setting behaves correctly on any model.
+    Mutually exclusive with `max_tokens`."""
+
     keep_messages: int = 20
     """Number of tail messages to preserve after compaction (message-count trigger)."""
 
@@ -206,16 +214,25 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """
 
     def __post_init__(self) -> None:
-        if self.max_messages is None and self.max_tokens is None:
-            raise ValueError('At least one of max_messages or max_tokens must be set.')
+        if self.max_messages is None and self.max_tokens is None and self.max_fraction is None:
+            raise ValueError('At least one of max_messages, max_tokens, or max_fraction must be set.')
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError('max_messages must be positive.')
-        if self.max_tokens is not None and self.max_tokens < 1:
-            raise ValueError('max_tokens must be positive.')
+        validate_token_trigger(self.max_tokens, self.max_fraction)
         if self.keep_messages < 0:
             raise ValueError('keep_messages must be non-negative.')
         if self.keep_tokens is not None and self.keep_tokens < 0:
             raise ValueError('keep_tokens must be non-negative.')
+
+    def with_focus(self, focus: str) -> SummarizingCompaction[AgentDepsT]:
+        """Return a copy whose summary prompt prioritizes `focus`.
+
+        Used by `compact_now` so a user-invoked compaction can say what the summary must not
+        lose. The prompt is later run through `str.format`, so braces in a user- or
+        model-supplied focus are escaped to survive it.
+        """
+        escaped = focus.replace('{', '{{').replace('}', '}}')
+        return replace(self, summary_prompt=f'{self.summary_prompt}\n\nGive particular weight to: {escaped}')
 
     async def compact(
         self,
@@ -258,7 +275,8 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Summarize older messages when the threshold is exceeded."""
         messages: list[ModelMessage] = list(request_context.messages)
-        if not exceeds(messages, self.max_messages, self.max_tokens, self.tokenizer):
+        token_trigger = resolve_token_trigger(self.max_tokens, self.max_fraction, ctx.model)
+        if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
             return request_context
         request_context.messages = await compact_with_span(
             ctx,

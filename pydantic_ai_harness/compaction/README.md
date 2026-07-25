@@ -30,15 +30,98 @@ provider rejects an orphaned pair. The zero-LLM strategies never call a model.
 | `SummarizingCompaction` | one LLM call | Summarizes older messages into a structured summary, keeping the recent tail | Old context still matters but must be compressed; use behind the cheap tiers |
 | `TieredCompaction` | escalates | Runs cheap passes first, summarizes only if still over `target_tokens` | You want a sensible default: spend the expensive summary only when needed |
 | `LimitWarner` | zero-LLM | Injects an URGENT/CRITICAL warning as limits approach | You want the agent to wrap up rather than have its history rewritten |
+| `ContextUsageMonitor` | zero-LLM | Reports context usage to your application; never edits history | You want a live context gauge in a UI |
 
 ## Triggers
 
-Every size-based strategy triggers on `max_messages` and/or `max_tokens` (estimated). Token counts
-use a ~4-chars-per-token heuristic by default; pass a `tokenizer` callable (e.g. `tiktoken`) for
-accuracy. `DeduplicateFileReads` runs on every request when no trigger is set (it is cheap and
-near-lossless). `TieredCompaction` triggers and stops on a single `target_tokens` budget.
-`ClampOversizedMessages` triggers per *part* (`max_part_tokens` / `max_part_chars`), not on the
-whole history -- the failure it targets is one oversized part, not a large total.
+Every size-based strategy triggers on `max_messages`, `max_tokens` (estimated), or `max_fraction`.
+Token counts use a ~4-chars-per-token heuristic by default; pass a `tokenizer` callable (e.g.
+`tiktoken`) for accuracy. `DeduplicateFileReads` runs on every request when no trigger is set (it is
+cheap and near-lossless). `TieredCompaction` triggers and stops on a single `target_tokens` /
+`target_fraction` budget. `ClampOversizedMessages` triggers per *part* (`max_part_tokens` /
+`max_part_chars`), not on the whole history -- the failure it targets is one oversized part, not a
+large total.
+
+### `max_fraction`: one setting for every model
+
+An absolute `max_tokens` is only correct for the model it was measured against. Configure `180_000`
+and a 1M-context model compacts at a fifth of its capacity, paying for summaries it did not need; a
+128K model configured for `1_000_000` never compacts before the provider rejects the request.
+
+`max_fraction` is resolved per run against the model's real context window, so one configuration is
+correct everywhere:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[SummarizingCompaction(max_fraction=0.9, keep_messages=20)],
+)
+```
+
+That compacts at 900K on a 1M model and at 115K on a 128K one. `LimitWarner` takes the same shape as
+`max_context_fraction`, and `TieredCompaction` as `target_fraction`.
+
+`max_tokens` and `max_fraction` are mutually exclusive -- a strategy taking both would have to
+pick one and discard the other, leaving the caller unable to tell which budget was in force.
+
+The window comes from [`genai-prices`](https://github.com/pydantic/genai-prices), already a
+dependency of `pydantic-ai-slim`; `resolve_context_window` is exported if you want the number
+yourself. Pydantic AI does not expose it yet (`ModelProfile` has no `context_window` field), so when
+it does, that one function switches over. A model the pricing registry does not know -- a local
+endpoint, a bespoke deployment -- falls back to a conservative 200K (`DEFAULT_CONTEXT_WINDOW`).
+Nothing is cached: only a registry-confirmed number is ever treated as the real window.
+
+## Reporting usage: `ContextUsageMonitor`
+
+A strategy knows when to act but says nothing about how close the run is to the limit, so an
+application that wants to show `context: 73%` ends up re-counting the history and guessing the
+denominator. `ContextUsageMonitor` does neither -- it reuses the same estimator and the same resolved
+window, and only observes:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import ContextUsageMonitor, SummarizingCompaction
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[
+        SummarizingCompaction(max_fraction=0.9, keep_messages=20),
+        ContextUsageMonitor(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
+    ],
+)
+```
+
+Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the
+fallback rather than the model's real one, so a gauge can show that the percentage is a guess.
+
+Order matters: register the monitor *after* a compaction capability to observe the compacted history,
+or before it to see what triggered the compaction.
+
+## Compacting outside a run: `compact_now`
+
+A strategy's `compact` takes a `RunContext`, which an application holding a conversation *between*
+runs does not have -- and that is exactly when a user types `/compact`. `compact_now` builds a
+throwaway context so the same strategy the agent uses can be driven from a command handler:
+
+```python {test="skip"}
+from pydantic_ai_harness.compaction import SummarizingCompaction, compact_now
+
+strategy = SummarizingCompaction(max_fraction=0.9, keep_messages=20)
+history = await compact_now(
+    strategy,
+    history,
+    model='anthropic:claude-sonnet-4-6',
+    focus='the auth refactor, not the earlier CSS work',
+)
+```
+
+Unlike the automatic path it always runs the strategy: an explicit request is not subject to the
+threshold check. `focus` steers strategies that write prose -- `SummarizingCompaction`,
+via `with_focus` -- and is ignored by the ones that drop or blank content by rule, since they have
+nothing to steer.
 
 ## `ClampOversizedMessages`: surviving a runaway generation
 
@@ -115,8 +198,8 @@ rewriting it via `dataclasses.replace` would bypass validation and corrupt the p
 
 Warnings begin at `warning_threshold` (default `0.7`, a fraction of the limit) and escalate to CRITICAL
 for iterations once the remaining request count drops to `critical_remaining_iterations` (default `3`).
-It watches `max_iterations`, `max_context_tokens`, and `max_total_tokens`, warning on whichever are
-configured; narrow that with `warn_on`.
+It watches `max_iterations`, `max_context_tokens` (or `max_context_fraction`), and `max_total_tokens`,
+warning on whichever are configured; narrow that with `warn_on`.
 
 ## Cost: why summarization is the last resort
 

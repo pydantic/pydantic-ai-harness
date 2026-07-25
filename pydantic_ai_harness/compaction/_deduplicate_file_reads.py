@@ -16,6 +16,8 @@ from pydantic_ai_harness.compaction._shared import (
     exceeds,
     iter_tool_pairs,
     rebuild_with_cleared,
+    resolve_token_trigger,
+    validate_token_trigger,
 )
 
 if TYPE_CHECKING:
@@ -63,6 +65,12 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     max_tokens: int | None = None
     """Optional token-count trigger. When both triggers are ``None``, runs whenever invoked."""
 
+    max_fraction: float | None = None
+    """Trigger when estimated tokens reach this fraction of the model's context window.
+
+    Resolved per run from the run's model, so one setting behaves correctly on any model.
+    Mutually exclusive with `max_tokens`."""
+
     tokenizer: Callable[[str], int] | None = None
     """Optional tokenizer for accurate token counting.
 
@@ -73,8 +81,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError('max_messages must be positive.')
-        if self.max_tokens is not None and self.max_tokens < 1:
-            raise ValueError('max_tokens must be positive.')
+        validate_token_trigger(self.max_tokens, self.max_fraction)
 
     async def compact(
         self,
@@ -107,8 +114,9 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Deduplicate file reads, optionally gated on a size threshold."""
         messages: list[ModelMessage] = list(request_context.messages)
-        if self.max_messages is not None or self.max_tokens is not None:
-            if not exceeds(messages, self.max_messages, self.max_tokens, self.tokenizer):
+        if self.max_messages is not None or self.max_tokens is not None or self.max_fraction is not None:
+            token_trigger = resolve_token_trigger(self.max_tokens, self.max_fraction, ctx.model)
+            if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
                 return request_context
         request_context.messages = await compact_with_span(
             ctx,

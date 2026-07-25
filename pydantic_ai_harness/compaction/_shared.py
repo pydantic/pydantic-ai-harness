@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.messages import (
@@ -25,6 +25,11 @@ from pydantic_ai.messages import (
     UserPromptPart,
 )
 from pydantic_ai.tools import RunContext
+
+from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW, resolve_context_window
+
+if TYPE_CHECKING:
+    from pydantic_ai.models import Model
 
 # ---------------------------------------------------------------------------
 # Token estimation
@@ -108,6 +113,52 @@ def exceeds(
     if max_tokens is not None and estimate_token_count(messages, tokenizer) > max_tokens:
         return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# Token triggers
+# ---------------------------------------------------------------------------
+
+
+def validate_token_trigger(
+    max_tokens: int | None,
+    max_fraction: float | None,
+    *,
+    tokens_name: str = 'max_tokens',
+    fraction_name: str = 'max_fraction',
+) -> None:
+    """Validate the absolute/relative token trigger pair a strategy was configured with.
+
+    The two are mutually exclusive: a strategy that took both would have to pick one and discard
+    the other, and the caller could not tell which budget was in force. The names are parameterized
+    so `TieredCompaction`'s `target_*` pair reports its own field names.
+    """
+    if max_tokens is not None and max_fraction is not None:
+        raise ValueError(f'Set at most one of {tokens_name} or {fraction_name}.')
+    if max_tokens is not None and max_tokens < 1:
+        raise ValueError(f'{tokens_name} must be positive.')
+    if max_fraction is not None and not 0 < max_fraction <= 1:
+        raise ValueError(f'{fraction_name} must be greater than 0 and at most 1.')
+
+
+def resolve_token_trigger(
+    max_tokens: int | None,
+    max_fraction: float | None,
+    model: Model | str | None,
+) -> int | None:
+    """Absolute token trigger for this request, or `None` when no token trigger is configured.
+
+    `max_fraction` is resolved against the model's real context window, so one configuration
+    behaves correctly on a 128K model and on a 1M one. When the window cannot be resolved
+    the conservative `DEFAULT_CONTEXT_WINDOW` stands in: compacting earlier than necessary
+    costs a summary, while overestimating costs the whole request.
+    """
+    if max_tokens is not None:
+        return max_tokens
+    if max_fraction is None:
+        return None
+    window = resolve_context_window(model) if model is not None else None
+    return max(1, int((window if window is not None else DEFAULT_CONTEXT_WINDOW) * max_fraction))
 
 
 # ---------------------------------------------------------------------------

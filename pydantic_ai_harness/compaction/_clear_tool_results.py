@@ -17,6 +17,8 @@ from pydantic_ai_harness.compaction._shared import (
     exceeds,
     iter_tool_pairs,
     rebuild_with_cleared,
+    resolve_token_trigger,
+    validate_token_trigger,
 )
 
 if TYPE_CHECKING:
@@ -58,6 +60,12 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
     max_tokens: int | None = None
     """Trigger clearing when estimated token count reaches this value. ``None`` disables."""
 
+    max_fraction: float | None = None
+    """Trigger when estimated tokens reach this fraction of the model's context window.
+
+    Resolved per run from the run's model, so one setting behaves correctly on any model.
+    Mutually exclusive with `max_tokens`."""
+
     keep_pairs: int = 3
     """Number of most-recent tool-call / tool-return pairs left untouched."""
 
@@ -84,12 +92,11 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
     """
 
     def __post_init__(self) -> None:
-        if self.max_messages is None and self.max_tokens is None:
-            raise ValueError('At least one of max_messages or max_tokens must be set.')
+        if self.max_messages is None and self.max_tokens is None and self.max_fraction is None:
+            raise ValueError('At least one of max_messages, max_tokens, or max_fraction must be set.')
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError('max_messages must be positive.')
-        if self.max_tokens is not None and self.max_tokens < 1:
-            raise ValueError('max_tokens must be positive.')
+        validate_token_trigger(self.max_tokens, self.max_fraction)
         if self.keep_pairs < 0:
             raise ValueError('keep_pairs must be non-negative.')
         if self.min_clear_tokens is not None and self.min_clear_tokens < 0:
@@ -130,7 +137,8 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Clear old tool results if the conversation exceeds the configured threshold."""
         messages: list[ModelMessage] = list(request_context.messages)
-        if not exceeds(messages, self.max_messages, self.max_tokens, self.tokenizer):
+        token_trigger = resolve_token_trigger(self.max_tokens, self.max_fraction, ctx.model)
+        if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
             return request_context
         request_context.messages = await compact_with_span(
             ctx,
