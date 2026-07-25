@@ -125,6 +125,7 @@ _CAPABILITY_PAGE_META = {
     'overflowing-tool-output.md': ('overflowing_tool_output', 'Overflowing Tool Output'),
     'cache-stability.md': ('cache_stability', 'Cache Stability Monitor'),
     'step-persistence.md': ('step_persistence', 'Step Persistence'),
+    'audit-log.md': ('audit_log', 'Audit Log'),
     'media.md': ('media', 'Media Externalization'),
     'subagents.md': ('subagents', 'Subagents'),
     'dynamic-workflow.md': ('dynamic_workflow', 'Dynamic Workflow'),
