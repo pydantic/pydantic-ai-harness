@@ -62,7 +62,8 @@ You.com is a paid service with free credits to explore. Create an account at
 
 Web and news search via the
 [Search API](https://docs.you.com/api-reference/search/v1-search). Returns
-unified results from web and news sources.
+unified results from web and news sources. A response without a `results` object
+returns an empty list.
 
 ### `you_contents`
 
@@ -91,7 +92,8 @@ Finance-focused research via the
 [Finance Research API](https://docs.you.com/api-reference/finance-research/v1-finance_research).
 Uses a finance-optimized index to research earnings, filings, market data, and
 financial news. Use it for company fundamentals, market trends, competitive
-analysis, or earnings summaries.
+analysis, or earnings summaries. It returns a `YouTextResearchResult`;
+structured output is available only from `you_research`.
 
 ## Parameters
 
@@ -231,6 +233,14 @@ from pydantic_ai_harness.youdotcom import Youdotcom
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[Youdotcom])
 ```
+
+## Error handling
+
+The toolset retries one `429 Too Many Requests` response when You.com's
+`Retry-After` delay is at most 60 seconds. Longer or repeated rate limits, and
+configuration errors (`401`, `402`, `403`, or `404`), propagate as
+`httpx.HTTPStatusError`. Other HTTP and transport errors become `ModelRetry` so
+the agent can recover.
 
 ## Further reading
 

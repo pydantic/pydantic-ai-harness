@@ -126,7 +126,7 @@ def _make_empty_search_payload() -> dict[str, object]:
     return {'results': {'web': [], 'news': []}}
 
 
-def _make_malformed_search_payload() -> dict[str, object]:
+def _make_missing_results_payload() -> dict[str, object]:
     """Build a search payload missing the results key entirely."""
     return {'unrelated': 'data'}
 
@@ -391,12 +391,11 @@ class TestSearchResultFields:
         finally:
             await client.aclose()
 
-    async def test_malformed_payload_raises(self) -> None:
-        """Missing results key raises ValidationError instead of returning empty list."""
-        toolset, client = self._toolset_with_payload(_make_malformed_search_payload())
+    async def test_missing_results_returns_empty(self) -> None:
+        """The provider may omit the optional results object."""
+        toolset, client = self._toolset_with_payload(_make_missing_results_payload())
         try:
-            with pytest.raises(ValidationError):
-                await toolset.search('q')
+            assert await toolset.search('q') == []
         finally:
             await client.aclose()
 
@@ -1403,6 +1402,17 @@ class TestFinanceResearchIntegration:
         finally:
             await client.aclose()
 
+    async def test_finance_research_rejects_structured_output(self) -> None:
+        """Finance research only documents text output."""
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, json=_make_research_structured_payload()))
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(ValidationError):
+                await toolset.finance_research('q')
+        finally:
+            await client.aclose()
+
 
 # ---------------------------------------------------------------------------
 # HTTP helper tests
@@ -1466,6 +1476,63 @@ class TestHttpGet:
                 await toolset._get('https://api.you.com/v1/search', {'query': 'test'}, timeout=60.0)
         finally:
             await client.aclose()
+
+    @pytest.mark.parametrize('status_code', [402, 404])
+    async def test_configuration_errors_propagate(self, status_code: int) -> None:
+        transport = httpx.MockTransport(lambda req: httpx.Response(status_code, json={'error': 'configuration'}))
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(httpx.HTTPStatusError):
+                await toolset._get('https://api.you.com/v1/search', {'query': 'test'}, timeout=60.0)
+        finally:
+            await client.aclose()
+
+    async def test_rate_limit_retries_with_retry_after(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(429, headers={'Retry-After': '0'})
+            return httpx.Response(200, json=_make_empty_search_payload())
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            assert await toolset.search('test') == []
+            assert attempts == 2
+        finally:
+            await client.aclose()
+
+    async def test_long_rate_limit_delay_propagates(self) -> None:
+        transport = httpx.MockTransport(lambda req: httpx.Response(429, headers={'Retry-After': '100'}))
+        client = httpx.AsyncClient(transport=transport)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
+        try:
+            with pytest.raises(httpx.HTTPStatusError):
+                await toolset.search('test')
+        finally:
+            await client.aclose()
+
+    def test_retry_delay_uses_bounded_header_or_backoff(self) -> None:
+        request = httpx.Request('GET', 'https://api.you.com/v1/search')
+        assert (
+            YoudotcomToolset._retry_delay(httpx.Response(429, headers={'Retry-After': '100'}, request=request), 0)
+            is None
+        )
+        assert (
+            YoudotcomToolset._retry_delay(
+                httpx.Response(429, headers={'Retry-After': 'Wed, 25 Jul 2099 12:00:00 GMT'}, request=request), 0
+            )
+            is None
+        )
+        assert (
+            YoudotcomToolset._retry_delay(httpx.Response(429, headers={'Retry-After': 'invalid'}, request=request), 0)
+            is None
+        )
+        assert YoudotcomToolset._retry_delay(httpx.Response(429, request=request), 1) == 2
 
     async def test_without_custom_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """_get creates a new httpx.AsyncClient when no http_client is provided."""
@@ -1755,6 +1822,24 @@ class TestCapability:
             model=TestModel(custom_output_text='done', call_tools=[]),
         )
         assert agent.run_sync('test').output == 'done'
+
+    @pytest.mark.parametrize(
+        'config',
+        [
+            "api_key: test\n      timeout: '5'",
+            'api_key: 123',
+            'api_key: test\n      output_schema: []',
+        ],
+    )
+    def test_capability_file_rejects_coerced_config(self, tmp_path: Path, config: str) -> None:
+        spec_path = tmp_path / 'agent.yaml'
+        spec_path.write_text(f'capabilities:\n  - Youdotcom:\n      {config}\n')
+        with pytest.raises(ValueError, match="Failed to instantiate capability 'Youdotcom'"):
+            Agent.from_file(
+                spec_path,
+                custom_capability_types=[Youdotcom],
+                model=TestModel(custom_output_text='done', call_tools=[]),
+            )
 
 
 # ---------------------------------------------------------------------------

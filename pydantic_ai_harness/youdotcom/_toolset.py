@@ -5,10 +5,21 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Annotated, Final, Literal
 
+import anyio
 import httpx
-from pydantic import AfterValidator, AnyUrl, BaseModel, Field, StringConstraints, TypeAdapter, WithJsonSchema
+from pydantic import (
+    AfterValidator,
+    AnyUrl,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    TypeAdapter,
+    WithJsonSchema,
+)
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
@@ -330,7 +341,7 @@ class YouObjectResearchResult(TypedDict):
 
 
 YouResearchResult = YouTextResearchResult | YouObjectResearchResult
-"""A result from the Research or Finance Research API, discriminated on `content_type`."""
+"""A result from the Research API, discriminated on `content_type`."""
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +426,7 @@ class _RawSearchResults(BaseModel):
 class _RawSearchResponse(BaseModel):
     """Top-level You.com search API response."""
 
-    results: _RawSearchResults
+    results: _RawSearchResults | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +526,12 @@ class _RawResearchResponse(BaseModel):
     output: _RawTextResearchOutput | _RawObjectResearchOutput = Field(discriminator='content_type')
 
 
+class _RawFinanceResearchResponse(BaseModel):
+    """Top-level finance research API response."""
+
+    output: _RawTextResearchOutput
+
+
 class _ConfigValidator(BaseModel):
     """Validates configured (construction-time) values against You.com's documented limits.
 
@@ -522,6 +539,9 @@ class _ConfigValidator(BaseModel):
     values are validated here so out-of-range configuration fails at build time.
     """
 
+    model_config = ConfigDict(strict=True)
+
+    api_key: str
     timeout: Annotated[float, Field(gt=0)] | None = None
     count: SearchCount | None = None
     offset: SearchOffset | None = None
@@ -544,6 +564,7 @@ class _ConfigValidator(BaseModel):
     research_boost_domains: Domains | None = None
     research_freshness: Freshness | None = None
     research_country: Country | None = None
+    output_schema: dict[str, object] | None = None
     finance_research_effort: FinanceResearchEffort | None = None
 
 
@@ -605,6 +626,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         # Validate configured values against You.com's documented limits. Tool-argument
         # aliases only constrain LLM-supplied values, so constructor values are checked here.
         _ConfigValidator(
+            api_key=api_key,
             timeout=timeout,
             count=count,
             offset=offset,
@@ -627,6 +649,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             research_boost_domains=research_boost_domains,
             research_freshness=research_freshness,
             research_country=research_country,
+            output_schema=output_schema,
             finance_research_effort=finance_research_effort,
         )
 
@@ -895,7 +918,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         input: ResearchInput,
         *,
         research_effort: FinanceResearchEffort | None = None,
-    ) -> YouResearchResult:
+    ) -> YouTextResearchResult:
         """Research a financial question and return a cited, synthesized answer.
 
         The Finance Research API uses a finance-optimized index to research
@@ -909,7 +932,12 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         """
         body = self._build_finance_research_body(input=input, research_effort=research_effort)
         response = await self._post(_YOU_FINANCE_RESEARCH_URL, body, timeout=self._timeout_for(_RESEARCH_TIMEOUT))
-        return self._parse_research_result(_RawResearchResponse.model_validate(response.json()))
+        output = _RawFinanceResearchResponse.model_validate(response.json()).output
+        return {
+            'content': output.content,
+            'content_type': 'text',
+            'sources': [source.to_source() for source in output.sources],
+        }
 
     # ------------------------------------------------------------------
     # Parameter building
@@ -1117,39 +1145,99 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     async def _get(self, url: str, params: dict[str, str | int | Sequence[str]], *, timeout: float) -> httpx.Response:
         """Execute a GET request with the API key header."""
-        headers = {'X-API-Key': self._api_key}
-        try:
-            if self._http_client is not None:
-                response = await self._http_client.get(url, params=params, headers=headers, timeout=timeout)
-            else:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(url, params=params, headers=headers, timeout=timeout)
-            response.raise_for_status()
-            return response
-        except httpx.HTTPStatusError as error:
-            if error.response.status_code in (401, 403):
-                raise
-            raise ModelRetry(f'You.com request failed: {error}') from error
-        except httpx.RequestError as error:
-            raise ModelRetry(f'You.com request failed: {error}') from error
+        return await self._request('GET', url, params=params, json_body=None, timeout=timeout)
 
     async def _post(self, url: str, json_body: dict[str, object], *, timeout: float) -> httpx.Response:
         """Execute a POST request with the API key header."""
+        return await self._request('POST', url, params=None, json_body=json_body, timeout=timeout)
+
+    async def _request(
+        self,
+        method: Literal['GET', 'POST'],
+        url: str,
+        *,
+        params: dict[str, str | int | Sequence[str]] | None,
+        json_body: dict[str, object] | None,
+        timeout: float,
+    ) -> httpx.Response:
+        """Execute a request, retrying one rate-limited response with provider guidance."""
+        if self._http_client is not None:
+            return await self._request_with_client(
+                self._http_client,
+                method,
+                url,
+                params=params,
+                json_body=json_body,
+                timeout=timeout,
+            )
+        async with httpx.AsyncClient() as client:
+            return await self._request_with_client(
+                client,
+                method,
+                url,
+                params=params,
+                json_body=json_body,
+                timeout=timeout,
+            )
+
+    async def _request_with_client(
+        self,
+        client: httpx.AsyncClient,
+        method: Literal['GET', 'POST'],
+        url: str,
+        *,
+        params: dict[str, str | int | Sequence[str]] | None,
+        json_body: dict[str, object] | None,
+        timeout: float,
+    ) -> httpx.Response:
         headers = {'X-API-Key': self._api_key}
-        try:
-            if self._http_client is not None:
-                response = await self._http_client.post(url, json=json_body, headers=headers, timeout=timeout)
-            else:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(url, json=json_body, headers=headers, timeout=timeout)
-            response.raise_for_status()
+        for attempt in range(2):
+            try:
+                response = await client.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers=headers,
+                    timeout=timeout,
+                )
+            except httpx.RequestError as error:
+                raise ModelRetry(f'You.com request failed: {error}') from error
+
+            if response.status_code == 429 and attempt == 0:
+                delay = self._retry_delay(response, attempt)
+                if delay is not None:
+                    await anyio.sleep(delay)
+                    continue
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                if error.response.status_code in (401, 402, 403, 404, 429):
+                    raise
+                raise ModelRetry(f'You.com request failed: {error}') from error
             return response
-        except httpx.HTTPStatusError as error:
-            if error.response.status_code in (401, 403):
-                raise
-            raise ModelRetry(f'You.com request failed: {error}') from error
-        except httpx.RequestError as error:
-            raise ModelRetry(f'You.com request failed: {error}') from error
+        raise AssertionError('rate-limit retry loop exhausted')  # pragma: no cover
+
+    @staticmethod
+    def _retry_delay(response: httpx.Response, attempt: int) -> float | None:
+        """Return a short `Retry-After` delay or fallback backoff.
+
+        A long provider delay returns `None`, leaving the 429 to propagate instead
+        of contacting the provider before that delay expires.
+        """
+        retry_after = response.headers.get('Retry-After')
+        if retry_after is not None:
+            try:
+                delay = max(float(retry_after), 0.0)
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                except (TypeError, ValueError):
+                    return None
+                delay = max((retry_at - datetime.now(retry_at.tzinfo)).total_seconds(), 0.0)
+            return delay if delay <= 60.0 else None
+        return min(float(2**attempt), 60.0)
 
     # ------------------------------------------------------------------
     # Response parsing
@@ -1158,6 +1246,8 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
     def _parse_search_results(self, response: _RawSearchResponse) -> list[YouSearchResult]:
         """Convert the parsed search response into a flat list of search results."""
         results: list[YouSearchResult] = []
+        if response.results is None:
+            return results
         for item in response.results.web or []:
             results.append(item.to_result())
         for item in response.results.news or []:
