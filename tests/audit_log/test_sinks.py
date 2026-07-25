@@ -8,6 +8,7 @@ not this library's concern -- see `docs/audit-log.md` "Sinks".
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -126,3 +127,23 @@ class TestJsonlAuditSink:
         await sink.record_run(_run('r1'))
         assert [c.tool_call_id for c in await sink.list_tool_calls(run_id='r1')] == ['c1']
         assert await sink.get_run(run_id='r2') is None
+
+    async def test_torn_trailing_line_is_skipped(self, tmp_path: Path, caplog: pytest.LogCaptureFixture):
+        # A partial append (e.g. a process crash mid-write) leaves a trailing
+        # line that is not valid JSON and has no terminating newline. That one
+        # torn record must not make every read raise and hide the valid
+        # records recorded before it.
+        path = tmp_path / 'audit.jsonl'
+        sink = JsonlAuditSink(path)
+        await sink.record_tool_call(_tool('r1', 'c1'))
+        await sink.record_run(_run('r1'))
+        with path.open('a', encoding='utf-8') as handle:
+            handle.write('{"kind": "tool_call", "record": {"run_id": "r1"')
+
+        with caplog.at_level(logging.WARNING):
+            calls = await sink.list_tool_calls(run_id='r1')
+            run = await sink.get_run(run_id='r1')
+
+        assert [c.tool_call_id for c in calls] == ['c1']
+        assert run is not None and run.outcome == 'completed'
+        assert 'unparseable' in caplog.text.lower()  # the skip is logged, not silently dropped

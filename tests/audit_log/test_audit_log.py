@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 from pydantic_ai import Agent
@@ -46,6 +47,28 @@ class RecordingSink:
 
     async def get_run(self, *, run_id: str) -> RunAuditRecord | None:
         return next((r for r in self.runs if r.run_id == run_id), None)
+
+
+class _FailingSink:
+    """An `AuditSink` whose writes always raise, standing in for sink I/O failure (full disk,
+    permission loss). `list_tool_calls`/`get_run` are never exercised through this double; they
+    only exist to satisfy the `AuditSink` protocol shape.
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error if error is not None else RuntimeError('sink write failed')
+
+    async def record_tool_call(self, record: ToolCallRecord) -> None:
+        raise self.error
+
+    async def record_run(self, record: RunAuditRecord) -> None:
+        raise self.error
+
+    async def list_tool_calls(self, *, run_id: str) -> list[ToolCallRecord]:
+        return []  # pragma: no cover
+
+    async def get_run(self, *, run_id: str) -> RunAuditRecord | None:
+        return None  # pragma: no cover
 
 
 def _ctx(*, run_id: str | None, conversation_id: str | None = None) -> RunContext[None]:
@@ -327,3 +350,97 @@ class TestDefensiveRecordConstruction:
         (call,) = sink.tool_calls
         assert call.result is None
         assert call.error == '<unrepresentable>'
+
+
+class TestSinkFailureIsolation:
+    """A sink write failure (full disk, permission loss) must never alter the run outcome or
+    replace the tool's/run's own error -- see `_capability.py`'s `_record_tool_call` and
+    `_record_run`. Covers both the success path (the hook must still return/report the real
+    outcome) and the error path (the hook must still re-raise the *original* exception, not the
+    sink's) for both the tool-call record and the run record.
+    """
+
+    async def test_tool_call_sink_failure_leaves_the_returned_result_unchanged(self, caplog: pytest.LogCaptureFixture):
+        cap = AuditLog(sink=_FailingSink())
+
+        with caplog.at_level(logging.WARNING):
+            returned = await cap.after_tool_execute(
+                _ctx(run_id='r1'),
+                call=ToolCallPart(tool_name='lookup', args={}, tool_call_id='c1'),
+                tool_def=ToolDefinition(name='lookup'),
+                args={},
+                result='the real result',
+            )
+
+        assert returned == 'the real result'  # the sink's failure never touches the tool's own result
+        assert 'failed to record tool call' in caplog.text  # observable, not silently dropped
+
+    async def test_tool_call_sink_failure_on_error_path_still_reraises_the_original_error(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        cap = AuditLog(sink=_FailingSink(RuntimeError('sink write failed')))
+        original = ValueError('the tool actually failed this way')
+
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(ValueError) as exc_info:
+                await cap.on_tool_execute_error(
+                    _ctx(run_id='r1'),
+                    call=ToolCallPart(tool_name='boom', args={}, tool_call_id='c1'),
+                    tool_def=ToolDefinition(name='boom'),
+                    args={},
+                    error=original,
+                )
+
+        assert exc_info.value is original  # the tool's own exception, never replaced by the sink's
+        assert 'failed to record tool call' in caplog.text
+
+    async def test_run_sink_failure_does_not_raise_on_a_successful_run(self, caplog: pytest.LogCaptureFixture):
+        cap = AuditLog(sink=_FailingSink())
+
+        with caplog.at_level(logging.WARNING):
+            result = await cap.after_run(_ctx(run_id='r1'), result=AgentRunResult(output='ok'))
+
+        assert result.output == 'ok'  # the run still reports success despite the sink failure
+        assert 'failed to record run' in caplog.text
+
+    async def test_run_sink_failure_on_error_path_still_reraises_the_original_error(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        cap = AuditLog(sink=_FailingSink())
+        original = TypeError('the run actually failed this way')
+
+        with caplog.at_level(logging.WARNING):
+            with pytest.raises(TypeError) as exc_info:
+                await cap.on_run_error(_ctx(run_id='r1'), error=original)
+
+        assert exc_info.value is original  # the run's own exception, never replaced by the sink's
+        assert 'failed to record run' in caplog.text
+
+    async def test_full_agent_run_succeeds_despite_every_sink_write_failing(self, caplog: pytest.LogCaptureFixture):
+        agent = Agent(TestModel(), capabilities=[AuditLog(sink=_FailingSink())])
+
+        @agent.tool_plain
+        def lookup(query: str) -> str:
+            return f'found: {query}'
+
+        with caplog.at_level(logging.WARNING):
+            result = await agent.run('go')
+
+        assert result.output  # the run completed normally end to end; a broken sink never surfaces
+        assert 'failed to record tool call' in caplog.text
+        assert 'failed to record run' in caplog.text
+
+
+class TestMaxValueCharsValidation:
+    """`max_value_chars` bounds every recorded value; a non-positive bound must not be allowed to
+    silently defeat that bound (e.g. `bound_text`'s `text[:-1]` for `max_chars=-1`, which drops
+    only the text's last character instead of capping its size).
+    """
+
+    def test_negative_max_value_chars_is_rejected(self):
+        with pytest.raises(ValueError, match='max_value_chars'):
+            AuditLog(max_value_chars=-1)
+
+    def test_zero_max_value_chars_is_rejected(self):
+        with pytest.raises(ValueError, match='max_value_chars'):
+            AuditLog(max_value_chars=0)

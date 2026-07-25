@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -18,6 +19,8 @@ from pydantic_ai_harness.audit_log._context import current_run_id
 from pydantic_ai_harness.audit_log._redact import Redactor, bound_text, identity_redactor, redact_arguments
 from pydantic_ai_harness.audit_log._sink import AuditSink, InMemoryAuditSink
 from pydantic_ai_harness.audit_log._types import RunAuditRecord, RunOutcome, ToolCallRecord
+
+logger = logging.getLogger(__name__)
 
 _UNREPRESENTABLE = '<unrepresentable>'
 
@@ -55,13 +58,20 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     It composes alongside `step_persistence`: boundaries there, content here.
 
     ```python
+    import asyncio
+
     from pydantic_ai import Agent
     from pydantic_ai_harness.audit_log import AuditLog, InMemoryAuditSink
 
-    sink = InMemoryAuditSink()
-    agent = Agent('openai:gpt-5', capabilities=[AuditLog(sink=sink, agent_name='librarian')])
-    result = await agent.run('look up the release notes')
-    calls = await sink.list_tool_calls(run_id=result.run_id)
+
+    async def main() -> None:
+        sink = InMemoryAuditSink()
+        agent = Agent('openai:gpt-5', capabilities=[AuditLog(sink=sink, agent_name='librarian')])
+        result = await agent.run('look up the release notes')
+        calls = await sink.list_tool_calls(run_id=result.run_id)
+
+
+    asyncio.run(main())
     ```
 
     `sink` is the extension point: `InMemoryAuditSink` and `JsonlAuditSink` are
@@ -75,7 +85,12 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     """
 
     sink: AuditSink = field(default_factory=InMemoryAuditSink)
-    """Backend the records are written to. The default persists for the process lifetime."""
+    """Backend the records are written to. The default persists for the process lifetime.
+
+    A `record_tool_call`/`record_run` failure here (e.g. a full disk) is caught
+    and logged as a warning; it never alters the tool's result/error or the
+    run's outcome. Unlike `sink_resolver`, sink write failures do not propagate.
+    """
 
     sink_resolver: Callable[[RunContext[AgentDepsT]], AuditSink] | None = None
     """Optional per-run sink resolver, keyed on the run context. Resolver failures propagate."""
@@ -84,7 +99,10 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     """Per-argument redaction policy `(arg_name, value) -> value`. Defaults to no redaction."""
 
     max_value_chars: int = 2000
-    """Character bound applied to each argument value, and to the full result/error text."""
+    """Character bound applied to each argument value, and to the full result/error text.
+
+    Must be `>= 1`; a non-positive bound raises `ValueError` at construction.
+    """
 
     agent_name: str | None = None
     """Logical agent name stamped on every record for cross-run attribution."""
@@ -93,6 +111,17 @@ class AuditLog(AbstractCapability[AgentDepsT]):
     _started_at: datetime = field(default_factory=_utcnow, init=False, repr=False, compare=False)
     _pending: dict[str, datetime] = field(default_factory=dict[str, datetime], init=False, repr=False, compare=False)
     _run_id_fallback: str | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Reject a non-positive `max_value_chars` instead of silently failing to bound.
+
+        `bound_text` truncates with `text[:max_chars]`; a negative bound (e.g.
+        `-1`) turns that into `text[:-1]`, which drops only the last character
+        instead of capping the size, defeating the bound for any input no
+        matter how large.
+        """
+        if self.max_value_chars < 1:
+            raise ValueError(f'max_value_chars must be >= 1, got {self.max_value_chars}.')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AuditLog[AgentDepsT]:
         """Clone with per-run state: the resolved sink, the parent-run link, and a fresh start time.
@@ -169,6 +198,14 @@ class AuditLog(AbstractCapability[AgentDepsT]):
         result: Any,
         error: Exception | None,
     ) -> None:
+        """Build and write the tool-call record; a sink write failure is logged, not raised.
+
+        `after_tool_execute` and `on_tool_execute_error` both promise to
+        return/re-raise the tool's own outcome unchanged, so a
+        `sink.record_tool_call` failure (e.g. a full disk) must not escape and
+        turn a successful call into a failed run, or replace the tool's own
+        exception with the sink's.
+        """
         record = ToolCallRecord(
             run_id=self._run_id(ctx),
             tool_call_id=call.tool_call_id,
@@ -182,7 +219,15 @@ class AuditLog(AbstractCapability[AgentDepsT]):
             parent_run_id=self._parent_run_id,
             agent_name=self.agent_name,
         )
-        await self.sink.record_tool_call(record)
+        try:
+            await self.sink.record_tool_call(record)
+        except Exception as exc:
+            logger.warning(
+                'AuditLog sink failed to record tool call %r for run %r; the tool outcome is unaffected.',
+                call.tool_call_id,
+                record.run_id,
+                exc_info=exc,
+            )
 
     async def after_run(self, ctx: RunContext[AgentDepsT], *, result: AgentRunResult[Any]) -> AgentRunResult[Any]:
         """Record the run as completed with its final token usage, then return it unchanged."""
@@ -201,6 +246,12 @@ class AuditLog(AbstractCapability[AgentDepsT]):
         outcome: RunOutcome,
         error: BaseException | None,
     ) -> None:
+        """Build and write the run record; a sink write failure is logged, not raised.
+
+        Mirrors `_record_tool_call`: `after_run` and `on_run_error` must
+        return/re-raise the run's own outcome unchanged regardless of whether
+        `sink.record_run` succeeds.
+        """
         usage = ctx.usage
         record = RunAuditRecord(
             run_id=self._run_id(ctx),
@@ -215,4 +266,11 @@ class AuditLog(AbstractCapability[AgentDepsT]):
             started_at=self._started_at,
             ended_at=_utcnow(),
         )
-        await self.sink.record_run(record)
+        try:
+            await self.sink.record_run(record)
+        except Exception as exc:
+            logger.warning(
+                'AuditLog sink failed to record run %r; the run outcome is unaffected.',
+                record.run_id,
+                exc_info=exc,
+            )

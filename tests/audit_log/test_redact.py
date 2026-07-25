@@ -108,6 +108,19 @@ class TestRedactArguments:
         assert parsed['n'].endswith('...[truncated]')
         assert len(parsed['n']) == 50
 
+    def test_huge_integer_beyond_str_conversion_limit_is_bounded_instead_of_crashing(self):
+        # Python 3.11+ caps int-to-str conversion at `sys.get_int_max_str_digits()`
+        # decimal digits (4300 by default). `10**3000` above (3001 digits) stays
+        # under that limit; `10**5000` (5001 digits) exceeds it, so `str()` --
+        # and `repr()`, which hits the same conversion limit -- raise
+        # `ValueError` instead of returning text. `redact_arguments` must still
+        # produce a bounded, parseable record instead of crashing on the
+        # conversion itself.
+        out = redact_arguments({'n': 10**5000}, redactor=identity_redactor, max_chars=50)
+        parsed = json.loads(out)  # must not raise json.JSONDecodeError
+        assert isinstance(parsed['n'], str)
+        assert len(parsed['n']) <= 50
+
     def test_small_numeric_values_are_kept_native(self):
         # An ordinary int/float well within the bound keeps its JSON-native
         # numeric type instead of being stringified -- the bound only fires

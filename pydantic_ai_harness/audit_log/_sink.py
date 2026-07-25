@@ -13,6 +13,7 @@ and `JsonlAuditSink`.
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import Protocol, runtime_checkable
@@ -21,6 +22,8 @@ import anyio.to_thread
 from pydantic import TypeAdapter
 
 from pydantic_ai_harness.audit_log._types import RunAuditRecord, ToolCallRecord
+
+logger = logging.getLogger(__name__)
 
 _TOOL_ADAPTER: TypeAdapter[ToolCallRecord] = TypeAdapter(ToolCallRecord)
 _RUN_ADAPTER: TypeAdapter[RunAuditRecord] = TypeAdapter(RunAuditRecord)
@@ -77,7 +80,10 @@ class JsonlAuditSink:
 
     Each line is `{"kind": "tool_call"|"run", "record": {...}}`. Writes append,
     so a run recorded more than once keeps every line and `get_run` returns the
-    last. File I/O runs on a worker thread so the event loop is not blocked.
+    last. File I/O runs on a worker thread so the event loop is not blocked. A
+    line that fails to parse as JSON (e.g. a partial append torn by a crash) is
+    skipped and logged rather than raised, so one bad line does not hide every
+    valid record recorded before it.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -90,12 +96,22 @@ class JsonlAuditSink:
             handle.write(line + b'\n')
 
     def _read(self) -> list[dict[str, object]]:
+        """Read every envelope in the file, skipping a line that fails to parse as JSON.
+
+        A torn trailing record -- a partial append cut short by a crash, or any
+        other single malformed line -- must not make every read raise and hide
+        every prior valid record; the unparseable line is logged and skipped.
+        """
         if not self._path.exists():
             return []
         envelopes: list[dict[str, object]] = []
         for raw in self._path.read_text(encoding='utf-8').splitlines():
-            if raw.strip():
+            if not raw.strip():
+                continue
+            try:
                 envelopes.append(json.loads(raw))
+            except json.JSONDecodeError:
+                logger.warning('Skipping unparseable line in audit sink %s.', self._path)
         return envelopes
 
     async def record_tool_call(self, record: ToolCallRecord) -> None:

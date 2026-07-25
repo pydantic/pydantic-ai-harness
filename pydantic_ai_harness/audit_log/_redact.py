@@ -65,18 +65,26 @@ def _bound_value(value: object, max_chars: int) -> object:
     neither can grow large enough to balloon a record. Any other `int` or
     `float` -- notably an arbitrary-precision integer like `10**3000` -- has
     no such ceiling, so it is bounded by its own decimal text the same way a
-    string is. Anything else (a nested dict/list, or an object that needs
-    `default=str`) is measured by its own serialization and, only if that
-    exceeds the bound, replaced by its truncated string form. Either way the
-    value handed back is safe for the caller to serialize again: the original
-    JSON-native value, or a plain string.
+    string is. Python 3.11+ caps int-to-str conversion at a digit-count limit
+    (`sys.get_int_max_str_digits`, 4300 by default): beyond it, `str()` --
+    and `repr()`, which hits the same limit -- raise `ValueError` instead of
+    returning text, so a value that large falls back to a fixed placeholder
+    instead of attempting another decimal conversion. Anything else (a nested
+    dict/list, or an object that needs `default=str`) is measured by its own
+    serialization and, only if that exceeds the bound, replaced by its
+    truncated string form. Either way the value handed back is safe for the
+    caller to serialize again: the original JSON-native value, or a plain
+    string.
     """
     if isinstance(value, str):
         return bound_text(value, max_chars)
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        text = str(value)
+        try:
+            text = str(value)
+        except ValueError:
+            return bound_text(f'<{type(value).__name__} exceeds string-conversion limit>', max_chars)
         return value if len(text) <= max_chars else bound_text(text, max_chars)
     serialized = json.dumps(value, default=str, ensure_ascii=False)
     if len(serialized) <= max_chars:

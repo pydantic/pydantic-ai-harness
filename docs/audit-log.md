@@ -16,18 +16,25 @@ It is the content complement to two things Pydantic AI already gives you: OpenTe
 ## Quick start
 
 ```python
+import asyncio
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.audit_log import AuditLog, InMemoryAuditSink
 
-sink = InMemoryAuditSink()
-agent = Agent('openai:gpt-5', capabilities=[AuditLog(sink=sink, agent_name='librarian')])
 
-result = await agent.run('look up the release notes')
+async def main() -> None:
+    sink = InMemoryAuditSink()
+    agent = Agent('openai:gpt-5', capabilities=[AuditLog(sink=sink, agent_name='librarian')])
 
-for call in await sink.list_tool_calls(run_id=result.run_id):
-    print(call.tool_name, call.arguments, call.result)
-run = await sink.get_run(run_id=result.run_id)
-print(run.outcome, run.total_tokens)
+    result = await agent.run('look up the release notes')
+
+    for call in await sink.list_tool_calls(run_id=result.run_id):
+        print(call.tool_name, call.arguments, call.result)
+    run = await sink.get_run(run_id=result.run_id)
+    print(run.outcome, run.total_tokens)
+
+
+asyncio.run(main())
 ```
 
 ## What it records
