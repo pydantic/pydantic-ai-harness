@@ -485,3 +485,46 @@ class TestNewExports:
         for name in ('ContextUsage', 'ContextUsageMonitor', 'compact_now', 'resolve_context_window'):
             assert hasattr(compaction, name)
             assert not hasattr(pydantic_ai_harness, name)
+
+
+class TestPositionalCompatibility:
+    """The new fields are keyword-only, so they cannot shift an existing positional argument.
+
+    Every strategy here is a plain dataclass whose own fields are positional, so inserting a
+    field next to a related one would rebind every argument after it in existing call sites.
+    """
+
+    def test_sliding_window(self):
+        assert SlidingWindow(None, 1_000, 40).keep_messages == 40
+
+    def test_summarizing_compaction(self):
+        assert SummarizingCompaction('openai:gpt-4o', None, 1_000, 15).keep_messages == 15
+
+    def test_clear_tool_results(self):
+        assert ClearToolResults(None, 1_000, 5).keep_pairs == 5
+
+    def test_deduplicate_file_reads(self):
+        strategy = DeduplicateFileReads(lambda call: None, '[superseded]', None, 1_000)
+        assert strategy.max_tokens == 1_000
+
+    def test_tiered_compaction(self):
+        strategy = TieredCompaction([SlidingWindow(max_tokens=1)], 100, len)
+        assert strategy.tokenizer is len
+
+    def test_limit_warner(self):
+        assert LimitWarner(10, 1_000, 2_000).max_total_tokens == 2_000
+
+    def test_the_new_fields_stay_keyword_only(self):
+        import dataclasses
+
+        cases = [
+            (SlidingWindow, 'max_fraction'),
+            (SummarizingCompaction, 'max_fraction'),
+            (ClearToolResults, 'max_fraction'),
+            (DeduplicateFileReads, 'max_fraction'),
+            (TieredCompaction, 'target_fraction'),
+            (LimitWarner, 'max_context_fraction'),
+        ]
+        for cls, name in cases:
+            field = next(f for f in dataclasses.fields(cls) if f.name == name)
+            assert field.kw_only, f'{cls.__name__}.{name} must stay keyword-only'

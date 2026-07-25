@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from pydantic_ai._run_context import AgentDepsT
@@ -65,7 +65,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     max_tokens: int | None = None
     """Optional token-count trigger. When both triggers are ``None``, runs whenever invoked."""
 
-    max_fraction: float | None = None
+    max_fraction: float | None = field(default=None, kw_only=True)
     """Trigger when estimated tokens reach this fraction of the model's context window.
 
     Resolved per run from the run's model, so one setting behaves correctly on any model.

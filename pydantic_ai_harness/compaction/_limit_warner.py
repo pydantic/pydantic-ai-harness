@@ -65,7 +65,7 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
     max_context_tokens: int | None = None
     """Maximum context-window size to warn against."""
 
-    max_context_fraction: float | None = None
+    max_context_fraction: float | None = field(default=None, kw_only=True)
     """Context limit as a fraction of the model's real context window, resolved per run.
 
     Use this instead of `max_context_tokens` when the same agent runs on models with
