@@ -19,6 +19,38 @@ Use this before opening a PR or reviewing a capability change.
   runtime behavior.
 - Capability ordering is justified when present.
 - Dependency changes were made through `uv` and have a clear reason.
+- A capability that adds heavy CI machinery (a Docker image, an external service
+  with a secret, a large system binary, live network calls) scopes its expensive
+  job to its own paths and keeps the aggregate check green when that job is
+  skipped. See `capability-authoring.md` "CI And Dependency Footprint".
+
+## Executable Boundaries
+
+Apply these checks when a change invokes a command/parser, process/container,
+or network service, or changes CI:
+
+- Trace user or model input through every transformation to the downstream
+  parser. Verify guards against the syntax that parser accepts, including
+  aliases, abbreviations, normalization, separators, and repeated options.
+- Trace each created resource through readiness, use, and cleanup. Failed
+  cleanup is reported, and tracked identity remains recoverable until cleanup
+  succeeds.
+- Trace each configurable address, endpoint, path, or credential with a
+  non-default sentinel through provisioning, readiness, invocation, and
+  teardown.
+- Measure limits on the final value the caller receives, including framing,
+  truncation markers, envelopes, and metadata.
+- For each CI secret or write permission, trace event/ref -> checked-out code ->
+  credential -> executable step. PR-controlled code must not receive repository
+  or environment secrets; step-level scoping does not create that boundary.
+  Check trusted and fork PR outcomes, including the aggregate required check.
+- Starting from each conditional job's executed command, ensure its path filter
+  includes the task-runner or script entry point and every dependency,
+  configuration, image, and workflow input that can change execution.
+
+Passing coverage alone is not evidence that these contracts hold. For
+downstream-parser and external-runtime claims, run a focused reproduction and
+retain the command and result as review evidence.
 
 ## Stale Or Pre-Merge PRs
 
@@ -34,12 +66,21 @@ well before now, or that was built against unreleased Pydantic AI changes.
   time.
 - Behavior the PR worked around because a primitive was missing is reconsidered
   if that primitive now exists in core.
+- A flood of pyright or import errors right after merging main or rebasing is
+  usually uninstalled extras, not a real regression. Re-sync (`make install`, or
+  `uv sync --frozen --all-extras --group lint`) before treating the merge as
+  broken; errors that name third-party types (`modal`, `openai`, ...) as unknown
+  in files the PR did not touch are the tell.
 
 ## Tests
 
 - Tests cover the public `Agent(..., capabilities=[...])` path where possible.
 - Lower-level tests cover lifecycle, schemas, retries, and metadata when needed.
 - Error paths and important option combinations are covered.
+- For a stateful capability, or one that overrides `for_run`, require a public
+  `Agent` durability-composition test for every supported wrapper or an
+  explicit, tested incompatibility. Mocked lifecycle tests alone do not
+  establish state continuity across activity, process, or replay boundaries.
 - Relevant protocol-shaped output is snapshotted.
 - `make lint`, `make typecheck`, and `make test` pass before handoff.
 

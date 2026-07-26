@@ -21,6 +21,45 @@ permissions:
   contents: read
 
 jobs:
+  # Detect whether a pull request or branch push touches LocalStack. The live
+  # integration job installs the AWS CLI, pulls the LocalStack image, and starts
+  # a real container against an external auth token -- weight that only pays off
+  # when LocalStack code or its CI wiring changes. Tag pushes skip detection so
+  # releases always exercise the live path.
+  changes:
+    if: github.event_name == 'pull_request' || github.ref_type == 'branch'
+    runs-on: ubuntu-latest
+    outputs:
+      localstack: ${{ steps.detect.outputs.localstack }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - id: detect
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+            pydantic_ai_harness/localstack \
+            tests/localstack \
+            integration_tests/localstack \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            .github/workflows/main.yml
+          then
+            echo 'localstack=false' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+            echo 'localstack=true' >> "$GITHUB_OUTPUT"
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -148,6 +187,47 @@ jobs:
       - run: uv sync --locked --group dev --all-extras
       - run: uv run --no-sync pytest
 
+  localstack-integration:
+    needs: [changes]
+    # Skip on pull requests and branch pushes that leave LocalStack untouched;
+    # always run on tags so releases exercise the live path. `always()` lets this
+    # evaluate even though `changes` is skipped on tag events.
+    if: ${{ always() && (github.ref_type == 'tag' || needs.changes.outputs.localstack == 'true') }}
+    runs-on: ubuntu-latest
+    name: LocalStack integration tests
+    env:
+      # LOCALSTACK_REQUIRE_AUTH_TOKEN makes a missing token fail the job instead
+      # of silently skipping the container tests. The token itself is scoped to
+      # the test step below so checkout/setup steps never see the secret.
+      LOCALSTACK_REQUIRE_AUTH_TOKEN: '1'
+      LOCALSTACK_AWS_CLI: aws
+      LOCALSTACK_IMAGE: localstack/localstack
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-suffix: localstack
+
+      - run: uv sync --locked --group dev --all-extras
+
+      - uses: LocalStack/setup-localstack@7c8a0cb3405bc58be4c8f763f812aa000bc46303 # v0.3.2
+        with:
+          install-awslocal: 'true'
+          skip-startup: 'true'
+
+      - run: aws --version
+
+      - run: make integration-localstack
+        env:
+          # Since LocalStack 2026.03.0 the single image requires an auth token to start.
+          # The job executes the full PR checkout, so path detection is not a security boundary.
+          LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }} # zizmor: ignore[secrets-outside-env]
+
   coverage:
     needs: [test]
     runs-on: ubuntu-latest
@@ -173,16 +253,26 @@ jobs:
 
   check:
     if: always()
-    needs: [lint, test, test-floor, test-latest, coverage]
+    needs: [changes, lint, test, test-floor, test-latest, coverage, localstack-integration]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
         with:
+          # localstack-integration is skipped when a pull request or branch push
+          # doesn't touch LocalStack, and `changes` is skipped on tag events.
+          # Both still vote (block the merge) when they actually run and fail.
+          allowed-skips: changes, localstack-integration
           jobs: ${{ toJSON(needs) }}
 
   release:
     needs: [check]
-    if: success() && startsWith(github.ref, 'refs/tags/')
+    # `changes` is skipped on tag pushes, and GitHub skips every downstream job
+    # of a skipped ancestor unless the condition opts out via `always()` /
+    # `!cancelled()` -- which silently skipped the publish for v0.10.0 even
+    # though `check` itself passed. `!cancelled()` restores evaluation without
+    # publishing from a cancelled run (same opt-out `localstack-integration`
+    # needs, one job up).
+    if: ${{ !cancelled() && needs.check.result == 'success' && startsWith(github.ref, 'refs/tags/') }}
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -204,7 +294,8 @@ jobs:
   send-tweet:
     name: Send tweet
     needs: [release]
-    if: needs.release.result == 'success'
+    # Same skipped-ancestor opt-out as `release` above.
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
     environment: release
 

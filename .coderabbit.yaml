@@ -1,0 +1,8 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+inheritance: true
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - files: agent_docs/review-checklist.md
+        applyTo: '**/*'

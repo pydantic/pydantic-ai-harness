@@ -1,6 +1,12 @@
 ## Summary
 
 <!-- Brief description of the changes -->
+<!-- If this crosses a command/parser, process/container, network, resource-
+lifecycle, output-limit, or CI trust boundary, add "Boundary notes" covering:
+the downstream contract and focused reproduction; cleanup-failure and
+non-default-configuration evidence; final limit accounting; and, for CI, the
+event/ref -> checked-out code -> credentials -> executable steps map plus
+conditional-job path inputs. -->
 
 ## Linked Issue
 

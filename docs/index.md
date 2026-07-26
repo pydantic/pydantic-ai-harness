@@ -37,12 +37,13 @@ uv add "pydantic-ai-harness[codemode]"          # Code Mode (adds the Monty sand
 uv add "pydantic-ai-harness[dynamic-workflow]"  # Dynamic Workflow (adds the Monty sandbox)
 uv add "pydantic-ai-harness[logfire]"           # Managed Prompt (Logfire-managed prompts)
 uv add "pydantic-ai-harness[exa]"               # Exa Search (web research via the Exa API)
+uv add "pydantic-ai-harness[skills]"            # Skills (loads SKILL.md frontmatter)
 uv add "pydantic-ai-harness[acp]"               # ACP (Agent Client Protocol SDK)
 ```
 
 The `code-mode` extra is also supported as an alias for `codemode`.
 
-Requires Python 3.10+ and `pydantic-ai-slim>=2.14.1`.
+Requires Python 3.10+ and `pydantic-ai-slim>=2.18.0`.
 
 ## Quick start
 
@@ -113,6 +114,7 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 | Capability | What it does | Extra |
 |---|---|---|
 | [Code Mode](code-mode.md) | Wraps the agent's tools into a single `run_code` tool, sandboxed by [Monty](https://github.com/pydantic/monty). The model writes Python that calls the tools as functions -- with loops, conditionals, `asyncio.gather`, and local filtering -- collapsing N tool calls into one model round-trip. | `codemode` |
+| [Skills](skills.md) | Loads Agent Skill instructions only when the model needs them. | `skills` |
 | [FileSystem](filesystem.md) | Sandboxed file access scoped to a root directory: read, write, edit, search, and find files. Rejects path traversal above the root, resolves symlinks before authorizing, and keeps `.git/`, `.env`, key files, and secrets read-only by default. | -- |
 | [Shell](shell.md) | Command execution in a subprocess rooted at a working directory, gated by allowlists, denylists, timeouts, and optional environment-variable stripping (including a preset for common LLM provider credentials). | -- |
 | [Context](context.md) | Auto-loads repo context -- `CLAUDE.md`/`AGENTS.md` and repository structure -- so the agent starts a run already oriented in the project. | -- |
@@ -120,6 +122,7 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 | [Exa Search](exa-search.md) | Web research backed by the [Exa](https://exa.ai) search API: `web_search` returns results with their most relevant excerpts, `get_page` reads a specific URL in full, and opt-in `deep_search` synthesizes a cited answer in one call. Output is budgeted per tool. | `exa` |
 | [Compaction](compaction.md) | Keeps a run within token limits: sliding-window trimming, LLM-powered summarization of older messages, and warnings before the context or iteration ceiling is hit. | -- |
 | [Overflowing Tool Output](overflowing-tool-output.md) | Reduces an oversized tool return when it is produced -- truncate, spill to a queryable file, or summarize -- so a large payload does not persist in history and get re-sent every request. | -- |
+| [Cache Stability Monitor](cache-stability.md) | Warns when a run's prompt-cache hit collapses between model requests -- a moved cacheable prefix or an expired provider cache -- reading the provider's own `cache_read_tokens` verdict. | -- |
 | [Step Persistence](step-persistence.md) | Saves and restores full conversation state; snapshot, resume (`continue_run`), and fork (`fork_run`) a run. | -- |
 | [Media](media.md) | Offloads large `BinaryContent` to content-addressed stores (local or S3) so big media does not bloat message history. | -- |
 | [Subagents](subagents.md) | Delegates subtasks to specialized child agents through a delegate tool. | -- |
