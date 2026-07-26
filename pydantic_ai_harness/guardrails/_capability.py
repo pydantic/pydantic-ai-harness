@@ -31,7 +31,7 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, TypeGuard, cast
 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation, WrapModelRequestHandler
 from pydantic_ai.exceptions import ModelRetry, SkipModelRequest, UserError
@@ -120,6 +120,10 @@ GuardOutcome = bool | GuardResult
 """What a guard callable returns: a bare `bool` (`True` = allow), or a `GuardResult`."""
 
 
+GuardFuncs = Sequence[object]
+"""Marker for the sequence form of a `guard` field; the element type is per-guard."""
+
+
 InputGuardFunc = (
     Callable[[str], GuardOutcome | Awaitable[GuardOutcome]]
     | Callable[[RunContext[AgentDepsT], str], GuardOutcome | Awaitable[GuardOutcome]]
@@ -173,6 +177,75 @@ async def _evaluate(
     if isinstance(outcome, GuardResult):
         return outcome
     return GuardResult.allow() if outcome else GuardResult.block()
+
+
+_GuardCallable = Callable[..., GuardOutcome | Awaitable[GuardOutcome]]
+
+
+def _require_prompt_text(replacement: object, position: int) -> None:
+    """A prompt replacement has to be text, since it is written back into the message."""
+    if not isinstance(replacement, str):
+        raise UserError(
+            f'GuardResult.replace() for an input guard must provide replacement prompt text (str); '
+            f'guard at position {position} returned {type(replacement).__name__}.'
+        )
+
+
+def _is_guard_sequence(guard: object) -> TypeGuard[Sequence[_GuardCallable]]:
+    """Whether a `guard` field holds several guards rather than one.
+
+    A callable is not a `Sequence`, so the shape tells the two forms apart.
+    """
+    return isinstance(guard, Sequence)
+
+
+def _as_guards(guard: object, *, capability: str) -> tuple[_GuardCallable, ...]:
+    """Normalize a `guard` field to a tuple, rejecting a configuration that guards nothing.
+
+    A single callable is not a `Sequence`, so the two forms are told apart by
+    shape. An empty sequence is refused: a guardrail that inspects nothing reads
+    as configured and behaves as absent.
+    """
+    if not _is_guard_sequence(guard):
+        return (cast('_GuardCallable', guard),)
+    guards = tuple(guard)
+    if not guards:
+        raise UserError(f'{capability} was given an empty sequence of guards, so it would inspect nothing.')
+    return guards
+
+
+async def _evaluate_all(
+    guards: Sequence[_GuardCallable],
+    ctx: RunContext[AgentDepsT],
+    value: object,
+    *,
+    check_replacement: Callable[[object, int], None] | None = None,
+) -> GuardResult:
+    """Run each guard in order over the value, threading replacements through.
+
+    `allow` moves on to the next guard. `replace` substitutes the value the rest
+    of the chain inspects, so a redactor followed by a checker sees the redacted
+    text. `block` and `retry` end the chain, since neither leaves a value for a
+    later guard to judge. When every guard allowed and at least one replaced,
+    the accumulated replacement is the verdict.
+
+    `check_replacement` validates each substitution as it is made rather than
+    only at the end, so a guard returning the wrong type is named instead of
+    handing something unusable to the next one.
+    """
+    replaced = False
+    for position, guard in enumerate(guards):
+        verdict = await _evaluate(guard, ctx, value)
+        if verdict.action == 'allow':
+            continue
+        if verdict.action == 'replace':
+            if check_replacement is not None:
+                check_replacement(verdict.replacement, position)
+            value = verdict.replacement
+            replaced = True
+            continue
+        return verdict
+    return GuardResult.replace(value) if replaced else GuardResult.allow()
 
 
 def _extract_prompt(ctx: RunContext[AgentDepsT], messages: Sequence[ModelMessage]) -> str | None:
@@ -278,8 +351,13 @@ class InputGuard(AbstractCapability[AgentDepsT]):
     guard sees the final prompt that will reach the model.
     """
 
-    guard: InputGuardFunc[AgentDepsT]
-    """Callable that decides what to do with the prompt before it reaches the model."""
+    guard: InputGuardFunc[AgentDepsT] | Sequence[InputGuardFunc[AgentDepsT]]
+    """One callable, or several run in order, deciding what happens to the prompt.
+
+    In a chain the first `block` ends it, and a `replace` substitutes the text
+    the remaining guards see -- so a redactor placed first cleans the prompt the
+    ones after it inspect.
+    """
 
     parallel: bool = False
     """Run the guard concurrently with the model request and cancel the model call on failure."""
@@ -300,7 +378,12 @@ class InputGuard(AbstractCapability[AgentDepsT]):
         the prompt in `request_context`; `retry` and `replace` under
         `parallel=True` raise `UserError`.
         """
-        verdict = await _evaluate(self.guard, ctx, prompt)
+        verdict = await _evaluate_all(
+            _as_guards(self.guard, capability='InputGuard'),
+            ctx,
+            prompt,
+            check_replacement=_require_prompt_text,
+        )
         match verdict.action:
             case 'allow':
                 return
@@ -319,10 +402,7 @@ class InputGuard(AbstractCapability[AgentDepsT]):
                         'already started with the original prompt. Use sequential mode for prompt redaction.'
                     )
                 replacement = verdict.replacement
-                if not isinstance(replacement, str):
-                    raise UserError(
-                        'GuardResult.replace() for an input guard must provide replacement prompt text (str).'
-                    )
+                assert isinstance(replacement, str)  # `_require_prompt_text` ran on the way here
                 if not _replace_prompt(request_context.messages, replacement):
                     raise UserError('InputGuard could not find a user prompt to redact in the request.')
                 _trace_redaction(ctx, direction='input', original=prompt, replacement=replacement)
@@ -422,8 +502,12 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
     be screened before any of it is exposed.
     """
 
-    guard: OutputGuardFunc[AgentDepsT]
-    """Callable that decides what to do with the agent output."""
+    guard: OutputGuardFunc[AgentDepsT] | Sequence[OutputGuardFunc[AgentDepsT]]
+    """One callable, or several run in order, deciding what happens to the output.
+
+    In a chain the first `block` or `retry` ends it, and a `replace` substitutes
+    the output the remaining guards see.
+    """
 
     def get_ordering(self) -> CapabilityOrdering:
         """Sit outermost (inside `Instrumentation`) so the guard sees the final processed output."""
@@ -439,7 +523,7 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
         """Evaluate the guard against the processed output and act on its verdict."""
         if ctx.partial_output:
             return output
-        verdict = await _evaluate(self.guard, ctx, output)
+        verdict = await _evaluate_all(_as_guards(self.guard, capability='OutputGuard'), ctx, output)
         match verdict.action:
             case 'allow':
                 return output

@@ -1,5 +1,10 @@
-"""Input and output guardrails for Pydantic AI agents."""
+"""Input and output guardrails for Pydantic AI agents.
 
+Ready-made checks to plug into a guard live in
+[`detectors`][pydantic_ai_harness.guardrails.detectors].
+"""
+
+from pydantic_ai_harness.guardrails import detectors
 from pydantic_ai_harness.guardrails._capability import (
     GuardResult,
     InputGuard,
@@ -22,4 +27,5 @@ __all__ = [
     'OutputBlocked',
     'OutputGuard',
     'OutputGuardFunc',
+    'detectors',
 ]

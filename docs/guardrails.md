@@ -56,6 +56,85 @@ A guard returns a bare `bool` (`True` = allow, `False` = block) for the simple c
 
 `OutputGuard` receives the output unchanged -- no automatic stringification. For a string output the guard reads it directly; for a typed (Pydantic model) output the guard gets the model instance, so pick the serialization that fits the check (read a field, or call `output.model_dump_json()` for JSON text). This avoids the trap of `str(MyModel(...))` producing a `MyModel(field=...)` repr that hides field contents from regex-based checks.
 
+## Several guards at once
+
+A `guard` takes one callable or a sequence of them. In a chain each runs in
+order, and what happens next depends on the verdict:
+
+| Verdict | Effect on the chain |
+|---|---|
+| `allow` | move on to the next guard |
+| `replace` | the rest of the chain inspects the substituted value |
+| `block` / `retry` | the chain ends there, since neither leaves a value to judge |
+
+`replace` threading forward is what makes order meaningful: put a redactor
+first and everything after it sees the cleaned text.
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import InputGuard
+from pydantic_ai_harness.guardrails.detectors import blocked_keywords, redact_secrets
+
+agent = Agent(
+    'openai:gpt-5.4',
+    capabilities=[InputGuard(guard=[redact_secrets, blocked_keywords(['internal-only'])])],
+)
+```
+
+One `InputGuard` holding three checks is not the same as three `InputGuard`
+capabilities: the chain is one place in the capability list, one ordering
+decision, and one set of spans, and only the chain threads a redaction into the
+check that follows it.
+
+An empty sequence is refused. A guardrail that inspects nothing reads as
+configured and behaves as absent, which is worth an error rather than a quiet
+pass.
+
+## Ready-made detectors
+
+`pydantic_ai_harness.guardrails.detectors` holds checks you would otherwise
+write again: they are plain functions returning a `GuardResult`, so they drop
+into a chain beside your own.
+
+```python
+from pydantic_ai_harness.guardrails import detectors
+
+detectors.redact_secrets  # rewrites API keys, tokens, and private keys out of text
+detectors.redact_personal_data  # rewrites emails, card numbers, IBANs, US SSNs
+detectors.blocked_keywords(['internal-only'])  # refuses text containing any of them
+```
+
+The two redactors rewrite rather than refuse, which is the useful default:
+an agent that quoted a key back has still done the work, and blocking the answer
+loses it while leaving the key in the message history either way.
+
+Both are factories when you need to narrow or extend them:
+
+```python
+from pydantic_ai_harness.guardrails.detectors import secrets
+
+secrets(only=['aws_access_key', 'private_key'])
+secrets(extra={'internal_ticket': r'INT-\d{4}'})
+secrets(placeholder='***')  # the default is `[redacted:{name}]`, which says what it removed
+```
+
+Detectors read text, so they suit a prompt directly. An agent output may be a
+model instance, and substituting a scrubbed string for one would change its
+type, so `for_text` makes you say what should happen:
+
+```python
+from pydantic_ai_harness import OutputGuard
+from pydantic_ai_harness.guardrails.detectors import for_text, redact_secrets
+
+OutputGuard(guard=for_text(redact_secrets))  # raises on a non-string output
+OutputGuard(guard=for_text(redact_secrets, on_other='allow'))  # skips it deliberately
+```
+
+**What these do not do.** A regex finds a credential because credentials have a
+shape. It does not find a prompt injection, which is ordinary language, and it
+does not understand context, so a redactor will sometimes take a string that
+only looks like a key. They are one cheap layer, not the answer.
+
 ## `GuardResult`
 
 Construct a `GuardResult` with its classmethods, not the raw fields:
@@ -160,18 +239,20 @@ Any exception raised by the guard propagates as-is -- use `InputBlocked` / `Outp
 
 ## Relationship to `pydantic-ai-shields`
 
-[`pydantic-ai-shields`](https://github.com/vstorm-co/pydantic-ai-shields) provides opinionated implementations on top of these primitives (prompt-injection detectors, PII scrubbers, keyword blocklists). Use the guardrails here when you want to plug in your own validation logic; reach for shields when you need a batteries-included detector.
+`pydantic-ai-shields` ships each detector as its own capability. The equivalents here are functions instead, which is what lets several run as one chain, share a redaction, and sit beside a guard you wrote.
+
+Two things it has that this deliberately does not. Its `PromptInjection` matches phrases like "ignore previous instructions": injection is ordinary language, so a pattern list catches the examples and misses the attack while flagging a pasted log, and a check that reads as protection without being it is worse than none. Its `NoRefusals` blocks the model from declining, which is a decision about what an agent may say rather than a guardrail on data, and not one to make a default.
 
 ## API
 
 ```python
 InputGuard(
-    guard,              # Callable[..., bool | GuardResult | Awaitable[bool | GuardResult]]
+    guard,              # one guard, or a sequence run in order
     parallel=False,     # run concurrently with the model call
 )
 
 OutputGuard(
-    guard,              # Callable[..., bool | GuardResult | Awaitable[bool | GuardResult]]
+    guard,              # one guard, or a sequence run in order
 )
 ```
 
