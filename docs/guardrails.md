@@ -141,7 +141,7 @@ redact_personal_data('git clone git@github.com:pydantic/pydantic-ai.git')
 # replaces `git@github.com`, leaving a command that no longer runs
 ```
 
-An input guard rewrites the prompt in place, so the model receives the broken version. On an agent that handles code or paths, use `personal_data(only=['us_ssn', 'credit_card', 'iban'])`, or put the detector on the output rather than the prompt. `credit_card` has it less badly: every match is checked against the Luhn algorithm, which discards most runs of digits that are not card numbers. Not all of them -- roughly one run of four consecutive years in ten satisfies the checksum by chance, so a prompt listing years can still lose one.
+An input guard rewrites the prompt in place, so the model receives the broken version. On an agent that handles code or paths, use `personal_data(only=['us_ssn', 'credit_card', 'iban'])`, or put the detector on the output rather than the prompt. `credit_card` has it less badly. It covers the 13 to 19 digits ISO/IEC 7812 allows, in any grouping, and only where the leading digit is 2 to 6, which is what a payment card starts with and a millisecond timestamp does not. Every match is then checked against the Luhn algorithm, which discards most of the runs that are left. Not all of them -- roughly one run of four consecutive years in ten satisfies the checksum by chance, so a prompt listing years can still lose one.
 
 An AWS *secret* access key is deliberately absent from the defaults. It is forty characters of base64 with no distinguishing prefix, so a pattern for it would take ordinary text with it.
 

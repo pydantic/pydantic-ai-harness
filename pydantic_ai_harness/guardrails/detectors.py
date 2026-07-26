@@ -115,11 +115,16 @@ DEFAULT_PII_PATTERNS: Mapping[str, str] = {
         r'|PS|PT|QA|RO|RS|RU|SA|SC|SD|SE|SI|SK|SM|SO|ST|SV|TL|TN|TR|UA|VA|VG|XK)'
         r'\d{2}(?:[ ]?[A-Za-z0-9]){10,30}\b'
     ),
-    # 4-4-4-4 and the 4-6-5 grouping American Express uses. Every match is
+    # 13 to 19 digits, the range ISO/IEC 7812 allows, in any grouping: fixing
+    # the groups to 4-4-4-4 and Amex's 4-6-5 left a 13-digit Visa, a 14-digit
+    # Diners and a 19-digit PAN unmatched, so a real card passed through.
+    # Length alone would then take a millisecond timestamp with it, hence the
+    # leading digit: the major industry identifier of a payment card is 2 to 6,
+    # which is the same trick the IBAN country code plays above. Every match is
     # checked against the Luhn algorithm, which discards most runs of digits
     # that are not card numbers. Not all of them: roughly one in ten runs of
     # four consecutive years satisfies the checksum by chance.
-    'credit_card': r'\b(?:\d{4}[ -]?\d{6}[ -]?\d{5}|(?:\d{4}[ -]?){3}\d{4})\b',
+    'credit_card': r'\b(?=[2-6])(?:\d[ -]?){12,18}\d\b',
     'us_ssn': r'\b\d{3}[- ]\d{2}[- ]\d{4}\b',
     # The local part is bounded and preceded by a negative lookbehind: an
     # unbounded `+` lets a failed match restart at every interior offset, which

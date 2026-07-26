@@ -234,12 +234,33 @@ class TestPersonalData:
         assert personal_data(only=[name])(sample).replacement == expected
 
     @pytest.mark.parametrize(
-        'text',
-        ['revenue for 2021 2022 2023 2024 was flat', 'ports 8080 8081 8082 8083 are open'],
+        'number',
+        [
+            '4222222222222',  # 13, legacy Visa
+            '30569309025904',  # 14, Diners Club
+            '378282246310005',  # 15, American Express
+            '4111111111111111',  # 16, Visa
+            '4000000000000000006',  # 19, Visa
+            '4000 0000 0000 0000 006',
+            '4000-0000-0000-0000-006',
+        ],
     )
-    def test_luhn_discards_digit_runs_that_are_not_cards(self, text: str):
+    def test_every_pan_length_is_redacted(self, number: str):
+        """Fixed 4-4-4-4 and 4-6-5 groups let a 13, 14 or 19-digit card through untouched."""
+        assert redact_personal_data(f'card {number} on file').replacement == 'card [redacted:credit_card] on file'
+
+    def test_luhn_discards_a_digit_run_that_is_not_a_card(self):
         """It discards most of them. A run that satisfies the checksum by chance is still redacted."""
+        assert redact_personal_data('revenue for 2021 2022 2023 2024 was flat').action == 'allow'
+
+    @pytest.mark.parametrize('text', ['ports 8080 8081 8082 8083 are open', 'the job ran at 1721990400000'])
+    def test_a_digit_run_that_cannot_be_a_card_is_not_checked_at_all(self, text: str):
+        """A payment card's leading digit is 2 to 6, so a timestamp or a port list never reaches Luhn."""
         assert redact_personal_data(text).action == 'allow'
+
+    def test_a_digit_run_longer_than_a_pan_is_left_alone(self):
+        """Accepting any length would make an identifier a card whenever the checksum happened to pass."""
+        assert redact_personal_data('order 40000000000000000060 shipped').action == 'allow'
 
     @pytest.mark.parametrize('case', ['DE89 3704 0044 0532 0130 00', 'de89 3704 0044 0532 0130 00'])
     def test_an_iban_matches_in_either_case(self, case: str):
