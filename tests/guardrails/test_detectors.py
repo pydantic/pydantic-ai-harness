@@ -192,6 +192,19 @@ class TestPersonalData:
         """It discards most of them. A run that satisfies the checksum by chance is still redacted."""
         assert redact_personal_data(text).action == 'allow'
 
+    @pytest.mark.parametrize('case', ['DE89 3704 0044 0532 0130 00', 'de89 3704 0044 0532 0130 00'])
+    def test_an_iban_matches_in_either_case(self, case: str):
+        """The printed form is uppercase; the standard is not."""
+        assert redact_personal_data(f'iban {case}').replacement == 'iban [redacted:iban]'
+
+    @pytest.mark.parametrize(
+        'text',
+        ['see patent US10123456789B2 for details', 'build RC20240115T090000Z finished', 'commit ab12cdef0123456789'],
+    )
+    def test_an_identifier_is_not_an_account_number(self, text: str):
+        """The country code comes from the IBAN registry, not from any two letters."""
+        assert redact_personal_data(text).action == 'allow'
+
     def test_a_spaced_iban_keeps_its_own_label(self):
         """Declared before `credit_card`, whose digit groups would otherwise claim the middle of it."""
         assert redact_personal_data('iban DE89 3704 0044 0532 0130 00').replacement == 'iban [redacted:iban]'

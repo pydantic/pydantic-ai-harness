@@ -92,10 +92,17 @@ rather than matched by a pattern that would also take ordinary text.
 
 DEFAULT_PII_PATTERNS: Mapping[str, str] = {
     # Before `credit_card`, whose digit groups would otherwise claim the middle
-    # of a spaced IBAN and label it as a card number.
-    # Counted in characters, not groups: the last group of a printed IBAN is
-    # whatever is left over, so requiring groups of four drops it.
-    'iban': r'\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){10,30}\b',
+    # of a spaced IBAN and label it as a card number. The country code is drawn
+    # from the IBAN registry rather than any two letters: the set is closed, and
+    # anchoring on it is what keeps a build id or a patent number from reading
+    # as an account. Case-insensitive, since the printed form is uppercase but
+    # the standard is not.
+    'iban': (
+        r'\b(?i:AD|AE|AL|AT|AZ|BA|BE|BG|BH|BI|BR|BY|CH|CR|CY|CZ|DE|DJ|DK|DO|EE|EG|ES|FI|FK|FO|FR|GB|GE|GI|GL|GR'
+        r'|GT|HN|HR|HU|IE|IL|IQ|IS|IT|JO|KW|KZ|LB|LC|LI|LT|LU|LV|LY|MA|MC|MD|ME|MK|MN|MR|MT|MU|NI|NL|NO|OM|PK|PL'
+        r'|PS|PT|QA|RO|RS|RU|SA|SC|SD|SE|SI|SK|SM|SO|ST|SV|TL|TN|TR|UA|VA|VG|XK)'
+        r'\d{2}(?:[ ]?[A-Za-z0-9]){10,30}\b'
+    ),
     # 4-4-4-4 and the 4-6-5 grouping American Express uses. Every match is
     # checked against the Luhn algorithm, which discards most runs of digits
     # that are not card numbers. Not all of them: roughly one in ten runs of
