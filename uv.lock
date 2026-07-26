@@ -1880,6 +1880,9 @@ logfire = [
 modal = [
     { name = "modal" },
 ]
+skills = [
+    { name = "pyyaml" },
+]
 temporal = [
     { name = "pydantic-ai-slim", extra = ["temporal"] },
 ]
@@ -1917,8 +1920,9 @@ requires-dist = [
     { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.19" },
     { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.19" },
     { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.19" },
+    { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
 ]
-provides-extras = ["acp", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "temporal"]
+provides-extras = ["acp", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "skills", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [
