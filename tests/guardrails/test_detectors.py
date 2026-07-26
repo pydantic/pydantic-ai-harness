@@ -100,11 +100,60 @@ class TestSecretRedaction:
 
         assert result.replacement == 'key:\n[redacted:private_key_body]\nAlso deploy to prod.'
 
+    def test_an_encrypted_private_key_is_removed_whole(self):
+        """Its RFC 1421 headers carry `:` and `,`, which the base64 body class stops at."""
+        pem = (
+            '-----BEGIN RSA PRIVATE KEY-----\n'
+            'Proc-Type: 4,ENCRYPTED\n'
+            'DEK-Info: AES-256-CBC,ABCDEF0123456789\n'
+            '\n'
+            'MIIEowIBAAKCAQEAx7Vv9mKq\n'
+            'abcdEFGH1234+/==\n'
+            '-----END RSA PRIVATE KEY-----'
+        )
+        result = redact_secrets(f'here:\n{pem}\ndone')
+
+        assert result.replacement == 'here:\n[redacted:private_key]\ndone'
+
+    @pytest.mark.parametrize(
+        ('text', 'expected'),
+        [
+            (
+                'k:\r\n-----BEGIN PRIVATE KEY-----\r\nMIIEow\r\n-----END PRIVATE KEY-----\r\ndone',
+                'k:\r\n[redacted:private_key]\r\ndone',
+            ),
+            (
+                'k:\r\n-----BEGIN PRIVATE KEY-----\r\nMIIEowIBAAK\r\nabcdEFGH1234+/==\r\n\r\nAlso deploy.',
+                'k:\r\n[redacted:private_key_body]\r\nAlso deploy.',
+            ),
+        ],
+    )
+    def test_a_key_pasted_with_crlf_is_removed_whole(self, text: str, expected: str):
+        """A body line ending in CRLF ends the run at the first line, leaving the rest of the key."""
+        assert redact_secrets(text).replacement == expected
+
     def test_prose_naming_both_markers_is_not_a_key(self):
         """The newline after the header is what separates a real block from a sentence about one."""
         text = 'Paste everything between -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- in the field.'
 
         assert redact_secrets(text).action == 'allow'
+
+    @pytest.mark.parametrize(
+        'text',
+        [
+            'ship the task-management-and-deployment plan',
+            'ask the risk-management-and-compliance-team',
+            'see the disk-usage-monitoring-report-2024',
+        ],
+    )
+    def test_a_prefix_inside_a_word_is_not_a_key(self, text: str):
+        """`sk-` sits inside ordinary hyphenated English, and the class then takes the rest of the phrase."""
+        assert redact_secrets(text).action == 'allow'
+
+    @pytest.mark.parametrize('delimiter', [' ', '=', '"', ':'])
+    def test_a_key_still_matches_after_the_delimiters_keys_arrive_with(self, delimiter: str):
+        """The boundary above must not cost a real key, which arrives after a space, quote or separator."""
+        assert redact_secrets(f'key{delimiter}{_OPENAI_KEY}').replacement == f'key{delimiter}[redacted:openai_key]'
 
     def test_a_subset_leaves_the_rest_alone(self):
         detector = secrets(only=['aws_access_key'])
@@ -387,6 +436,28 @@ class TestGuardChain:
         agent = Agent(_echo_prompt(), deps_type=type(None), capabilities=[InputGuard(guard=guards)])
 
         with pytest.raises(UserError, match='empty sequence of guards'):
+            await agent.run('hi')
+
+    async def test_a_set_of_guards_is_refused(self):
+        """A set iterates in hash order, so the chain would not run in the order it was written."""
+        agent = Agent(
+            _echo_prompt(),
+            deps_type=type(None),
+            capabilities=[InputGuard(guard={redact_secrets})],  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(UserError, match='got set'):
+            await agent.run('hi')
+
+    async def test_a_one_shot_iterator_is_refused(self):
+        """The chain is rebuilt per request, so an iterator would be spent after the first run."""
+        agent = Agent(
+            _echo_prompt(),
+            deps_type=type(None),
+            capabilities=[InputGuard(guard=(guard for guard in [redact_secrets]))],  # type: ignore[arg-type]
+        )
+
+        with pytest.raises(UserError, match='got generator'):
             await agent.run('hi')
 
     async def test_a_mid_chain_replacement_must_still_be_prompt_text(self):

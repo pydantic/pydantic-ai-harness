@@ -58,36 +58,48 @@ DEFAULT_SECRET_PATTERNS: Mapping[str, str] = {
     # Vendor key bodies are base64url, whose alphabet includes `_`. A class that
     # stops at `_` redacts half a key and leaves the rest under a label saying it
     # is gone, which is worse than not matching at all.
-    'anthropic_key': r'sk-ant-[A-Za-z0-9_-]{20,}',
+    'anthropic_key': r'\bsk-ant-[A-Za-z0-9_-]{20,}',
     # Declared after the Anthropic shape it must not claim, and excluding it
     # explicitly so the label does not depend on declaration order.
-    'openai_key': r'sk-(?!ant-)[A-Za-z0-9_-]{20,}',
+    'openai_key': r'\bsk-(?!ant-)[A-Za-z0-9_-]{20,}',
     'aws_access_key': r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b',
-    'github_token': r'(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}',
-    'slack_token': r'xox[bporas]-[A-Za-z0-9-]{10,}',
-    'slack_app_token': r'xapp-\d-[A-Za-z0-9-]{10,}',
-    'stripe_key': r'(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}',
-    'stripe_webhook_secret': r'whsec_[A-Za-z0-9]{20,}',
-    'google_api_key': r'AIza[A-Za-z0-9_-]{35}',
-    'google_oauth_secret': r'GOCSPX-[A-Za-z0-9_-]{20,}',
-    'jwt': r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}',
+    'github_token': r'\b(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}',
+    'slack_token': r'\bxox[bporas]-[A-Za-z0-9-]{10,}',
+    'slack_app_token': r'\bxapp-\d-[A-Za-z0-9-]{10,}',
+    'stripe_key': r'\b(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}',
+    'stripe_webhook_secret': r'\bwhsec_[A-Za-z0-9]{20,}',
+    'google_api_key': r'\bAIza[A-Za-z0-9_-]{35}',
+    'google_oauth_secret': r'\bGOCSPX-[A-Za-z0-9_-]{20,}',
+    'jwt': r'\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}',
     # A complete PEM block. The newline after the header is required so prose
-    # naming both markers in one sentence is not swallowed as a key.
+    # naming both markers in one sentence is not swallowed as a key. The
+    # optional header lines are RFC 1421 fields (`Proc-Type`, `DEK-Info`),
+    # which an encrypted key carries and whose `:` and `,` the body class stops
+    # at, leaving the whole key to the pattern below.
     'private_key': (
         r'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----\s*\n'
+        r'(?:[A-Za-z-]+: [^\n]*\n)*'
         r'[A-Za-z0-9+/=\s]*?'
         r'-----END[^-\n]*PRIVATE KEY(?: BLOCK)?-----'
     ),
     # A block with no END marker: take the header and the base64 lines under it,
     # and stop at the first line that is not body. Running to the end of the
-    # input instead would delete whatever the user wrote after it.
-    'private_key_body': r'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----\s*\n(?:[A-Za-z0-9+/=]+\n?)+',
+    # input instead would delete whatever the user wrote after it. `\r?` because
+    # a body line ending in CRLF would otherwise stop the run at the first line.
+    'private_key_body': (
+        r'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----\s*\n'
+        r'(?:[A-Za-z-]+: [^\n]*\n)*\s*'
+        r'(?:[A-Za-z0-9+/=]+\r?\n?)+'
+    ),
 }
 """Credential shapes worth redacting, in the order they are applied.
 
-Prefix-anchored, so false positives are rare. An AWS *secret* access key has no
-distinctive shape -- it is 40 characters of base64 -- and is deliberately absent
-rather than matched by a pattern that would also take ordinary text.
+Prefixed and left-anchored on a word boundary, so false positives are rare: a
+prefix is also a substring of ordinary text, and `sk-` without the boundary
+takes the rest of `task-management-and-deployment` with it. An AWS *secret*
+access key has no distinctive shape -- it is 40 characters of base64 -- and is
+deliberately absent rather than matched by a pattern that would also take
+ordinary text.
 """
 
 DEFAULT_PII_PATTERNS: Mapping[str, str] = {

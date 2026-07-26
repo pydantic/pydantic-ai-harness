@@ -88,7 +88,9 @@ check that follows it.
 
 An empty sequence is refused. A guardrail that inspects nothing reads as
 configured and behaves as absent, which is worth an error rather than a quiet
-pass.
+pass. A set and a one-shot iterator are refused too: a set has no order for the
+chain to run in, and an iterator is spent after the first request, since the
+chain is rebuilt per request.
 
 ## Ready-made detectors
 

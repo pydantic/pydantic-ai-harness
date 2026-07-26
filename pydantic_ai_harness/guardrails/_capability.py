@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -188,18 +188,23 @@ def _require_prompt_text(replacement: object, position: int) -> None:
         )
 
 
-def _is_guard_chain(guard: object) -> TypeIs[Iterable[_GuardCallable]]:
+def _is_guard_chain(guard: object) -> TypeIs[Sequence[_GuardCallable]]:
     """Whether a `guard` field holds several guards rather than one.
 
-    Callability decides first: a guard that is itself an iterable would
+    Callability decides first: a guard that is itself a sequence would
     otherwise be taken apart and its elements invoked. `str` and `bytes` are
-    excluded because they are iterable, so a string handed over by mistake
+    excluded because they are sequences, so a string handed over by mistake
     would be split into characters and each one "called".
+
+    A `Sequence` rather than any iterable, matching the declared field type. A
+    set has no order for a chain to run in, and a one-shot iterator is spent
+    after the first run -- both are refused here by name rather than reordering
+    the chain or emptying it between runs.
 
     `TypeIs` rather than `TypeGuard` so the negative branch narrows too, which
     is what lets the single-guard path stay cast-free.
     """
-    return not callable(guard) and not isinstance(guard, (str, bytes)) and isinstance(guard, Iterable)
+    return not callable(guard) and not isinstance(guard, (str, bytes)) and isinstance(guard, Sequence)
 
 
 def _as_guards(guard: object, *, capability: str) -> tuple[_GuardCallable, ...]:
