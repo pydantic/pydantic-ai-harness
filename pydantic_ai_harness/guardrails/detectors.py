@@ -24,9 +24,21 @@ say what should happen there.
 
 What these cannot do is worth stating. A regex finds a credential because
 credentials have a shape; it does not find a prompt injection, which is
-ordinary language, and it does not understand context, so a redactor will
-sometimes take a string that only looks like a key. Treat them as one cheap
-layer, not as the answer.
+ordinary language, and it does not understand context.
+
+That last point has a concrete cost for `email`, which matches anything shaped
+like an address because that is all an address is:
+
+```python
+redact_personal_data('git clone git@github.com:pydantic/pydantic-ai.git')
+# -> replaces `git@github.com`, leaving a command that no longer runs
+```
+
+An input guard rewrites the prompt in place, so the model receives the broken
+version. On an agent that handles code or paths, reach for
+`personal_data(only=['us_ssn', 'credit_card', 'iban'])`, or apply the detector
+to the output rather than the prompt. Treat all of these as one cheap layer,
+not as the answer.
 """
 
 from __future__ import annotations
@@ -43,33 +55,78 @@ TextDetector = Callable[[str], GuardResult]
 """A check over text. Plug one into `InputGuard`, or into `OutputGuard` via `for_text`."""
 
 DEFAULT_SECRET_PATTERNS: Mapping[str, str] = {
-    # Hyphens included for project keys (`sk-proj-...`); the lookahead keeps an
-    # Anthropic key from matching here and being labelled as OpenAI's, so the
-    # label does not depend on the order these are declared in.
-    'openai_key': r'sk-(?!ant-)[A-Za-z0-9-]{20,}',
-    'anthropic_key': r'sk-ant-[A-Za-z0-9-]{20,}',
-    'aws_access_key': r'AKIA[0-9A-Z]{16}',
-    'github_token': r'(?:ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}',
+    # Vendor key bodies are base64url, whose alphabet includes `_`. A class that
+    # stops at `_` redacts half a key and leaves the rest under a label saying it
+    # is gone, which is worse than not matching at all.
+    'anthropic_key': r'sk-ant-[A-Za-z0-9_-]{20,}',
+    # Declared after the Anthropic shape it must not claim, and excluding it
+    # explicitly so the label does not depend on declaration order.
+    'openai_key': r'sk-(?!ant-)[A-Za-z0-9_-]{20,}',
+    'aws_access_key': r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b',
+    'github_token': r'(?:ghp|gho|ghu|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}',
     'slack_token': r'xox[bporas]-[A-Za-z0-9-]{10,}',
-    'stripe_key': r'sk_(?:live|test)_[A-Za-z0-9]{20,}',
+    'slack_app_token': r'xapp-\d-[A-Za-z0-9-]{10,}',
+    'stripe_key': r'(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{20,}',
+    'stripe_webhook_secret': r'whsec_[A-Za-z0-9]{20,}',
     'google_api_key': r'AIza[A-Za-z0-9_-]{35}',
+    'google_oauth_secret': r'GOCSPX-[A-Za-z0-9_-]{20,}',
     'jwt': r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}',
-    # The whole PEM block, not its header: replacing the BEGIN line alone would
-    # leave the key material sitting in the text. An unterminated block is taken
-    # to the end of the input, since a partial key is not worth keeping either.
-    'private_key': r'-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*?(?:-----END[^-]*PRIVATE KEY-----|\Z)',
+    # A complete PEM block. The newline after the header is required so prose
+    # naming both markers in one sentence is not swallowed as a key.
+    'private_key': (
+        r'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----\s*\n'
+        r'[A-Za-z0-9+/=\s]*?'
+        r'-----END[^-\n]*PRIVATE KEY(?: BLOCK)?-----'
+    ),
+    # A block with no END marker: take the header and the base64 lines under it,
+    # and stop at the first line that is not body. Running to the end of the
+    # input instead would delete whatever the user wrote after it.
+    'private_key_body': r'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----\s*\n(?:[A-Za-z0-9+/=]+\n?)+',
 }
-"""Credential shapes worth redacting. Distinctive prefixes, so false positives are rare."""
+"""Credential shapes worth redacting, in the order they are applied.
+
+Prefix-anchored, so false positives are rare. An AWS *secret* access key has no
+distinctive shape -- it is 40 characters of base64 -- and is deliberately absent
+rather than matched by a pattern that would also take ordinary text.
+"""
 
 DEFAULT_PII_PATTERNS: Mapping[str, str] = {
-    'email': r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}',
-    'us_ssn': r'\b\d{3}-\d{2}-\d{4}\b',
-    'credit_card': r'\b(?:\d{4}[ -]?){3}\d{4}\b',
-    'iban': r'\b[A-Z]{2}\d{2}[A-Z0-9]{10,30}\b',
+    # Before `credit_card`, whose digit groups would otherwise claim the middle
+    # of a spaced IBAN and label it as a card number.
+    # Counted in characters, not groups: the last group of a printed IBAN is
+    # whatever is left over, so requiring groups of four drops it.
+    'iban': r'\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){10,30}\b',
+    # 4-4-4-4 and the 4-6-5 grouping American Express uses. Every match is
+    # checked against the Luhn algorithm, which is what keeps four consecutive
+    # years or port numbers from reading as a card.
+    'credit_card': r'\b(?:\d{4}[ -]?\d{6}[ -]?\d{5}|(?:\d{4}[ -]?){3}\d{4})\b',
+    'us_ssn': r'\b\d{3}[- ]\d{2}[- ]\d{4}\b',
+    # The local part is bounded and preceded by a negative lookbehind: an
+    # unbounded `+` lets a failed match restart at every interior offset, which
+    # makes a pasted log quadratic and blocks the event loop for seconds.
+    'email': (
+        r'(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(?:\.[A-Za-z0-9-]{1,63})*\.[A-Za-z]{2,24}\b'
+    ),
 }
-"""Personal data shapes. Narrower than the secret set, because these overlap ordinary text."""
+"""Personal data shapes, in the order they are applied.
+
+Narrower than the secret set, because these overlap ordinary text. `email`
+matches anything shaped like an address, which includes `git@github.com` in a
+shell command -- see the module docstring on where that matters.
+"""
 
 _REDACTED = '[redacted:{name}]'
+
+
+def _luhn(digits: str) -> bool:
+    """Whether a run of digits satisfies the Luhn checksum every card number does."""
+    values = [int(character) for character in digits if character.isdigit()][::-1]
+    total = sum(value if index % 2 == 0 else sum(divmod(value * 2, 10)) for index, value in enumerate(values))
+    return len(values) >= 12 and total % 10 == 0
+
+
+_VALIDATORS: Mapping[str, Callable[[str], bool]] = {'credit_card': _luhn}
+"""Semantic checks that a shape alone cannot make. A name absent here is taken on its shape."""
 
 
 def _compile(
@@ -83,7 +140,15 @@ def _compile(
                 raise UserError(f'Unknown pattern {name!r}; available: {sorted(patterns)}.')
             selected[name] = patterns[name]
     if extra:
+        clashes = sorted(set(extra) & set(selected))
+        if clashes:
+            raise UserError(
+                f'`extra` would replace the built-in pattern(s) {clashes} rather than add to them. '
+                'Rename them, or pass `only` to drop the built-in first.'
+            )
         selected.update(extra)
+    if not selected:
+        raise UserError('This detector was given no patterns, so it would never match anything.')
     return tuple((name, re.compile(pattern)) for name, pattern in selected.items())
 
 
@@ -93,9 +158,16 @@ def _redactor(compiled: tuple[tuple[str, re.Pattern[str]], ...], placeholder: st
     def detect(text: str) -> GuardResult:
         cleaned = text
         for name, pattern in compiled:
-            # `replace` rather than `format`, so a placeholder containing braces
-            # for any other reason is left alone instead of raising.
-            cleaned = pattern.sub(placeholder.replace('{name}', name), cleaned)
+            valid = _VALIDATORS.get(name)
+            substitution = placeholder.replace('{name}', name)
+
+            def replace(match: re.Match[str], valid: Callable[[str], bool] | None = valid, out: str = substitution):
+                # A function rather than a template string: `re.sub` reads
+                # backreferences in a replacement, so a placeholder containing
+                # `\g<0>` would re-emit the very text being redacted.
+                return out if valid is None or valid(match.group()) else match.group()
+
+            cleaned = pattern.sub(replace, cleaned)
         return GuardResult.replace(cleaned) if cleaned != text else GuardResult.allow()
 
     return detect

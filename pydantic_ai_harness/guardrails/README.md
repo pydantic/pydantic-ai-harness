@@ -99,7 +99,7 @@ into a chain beside your own.
 ```python
 from pydantic_ai_harness.guardrails import detectors
 
-detectors.redact_secrets  # rewrites API keys, tokens, and whole private-key blocks out of text
+detectors.redact_secrets  # rewrites vendor API keys, tokens, and whole private-key blocks out of text
 detectors.redact_personal_data  # rewrites emails, card numbers, IBANs, US SSNs
 detectors.blocked_keywords(['internal-only'])  # refuses text containing any of them
 ```
@@ -129,6 +129,19 @@ from pydantic_ai_harness.guardrails.detectors import for_text, redact_secrets
 OutputGuard(guard=for_text(redact_secrets))  # raises on a non-string output
 OutputGuard(guard=for_text(redact_secrets, on_other='allow'))  # skips it deliberately
 ```
+
+**Where a shape is not enough.** `email` matches anything shaped like an address, because that is all an address is:
+
+```python
+from pydantic_ai_harness.guardrails.detectors import redact_personal_data
+
+redact_personal_data('git clone git@github.com:pydantic/pydantic-ai.git')
+# replaces `git@github.com`, leaving a command that no longer runs
+```
+
+An input guard rewrites the prompt in place, so the model receives the broken version. On an agent that handles code or paths, use `personal_data(only=['us_ssn', 'credit_card', 'iban'])`, or put the detector on the output rather than the prompt. `credit_card` does not have this problem: every match is checked against the Luhn algorithm, so four consecutive years or port numbers do not read as a card.
+
+An AWS *secret* access key is deliberately absent from the defaults. It is forty characters of base64 with no distinguishing prefix, so a pattern for it would take ordinary text with it.
 
 **What these do not do.** A regex finds a credential because credentials have a
 shape. It does not find a prompt injection, which is ordinary language, and it

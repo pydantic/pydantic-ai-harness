@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
@@ -59,6 +61,10 @@ class TestSecretRedaction:
         """A pattern that matches nothing is dead weight, and a typo in one is invisible."""
         samples = {
             'openai_key': _OPENAI_KEY,
+            'slack_app_token': 'xapp-1-A01B2C3D4E5-1234567890123-abcdef',
+            'stripe_webhook_secret': 'whsec_abcdefghijklmnopqrstuvwx',
+            'google_oauth_secret': 'GOCSPX-abcdefghijklmnopqrstuv',
+            'private_key_body': '-----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n',
             'anthropic_key': 'sk-ant-abcdefghijklmnopqrstuvwx',
             'aws_access_key': 'AKIAIOSFODNN7EXAMPLE',
             'github_token': 'ghp_abcdefghijklmnopqrstuvwxyz0123',
@@ -66,7 +72,7 @@ class TestSecretRedaction:
             'stripe_key': 'sk_live_abcdefghijklmnopqrstuvwx',
             'google_api_key': 'AIza' + 'a' * 35,
             'jwt': 'eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4',
-            'private_key': '-----BEGIN RSA PRIVATE KEY-----',
+            'private_key': '-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----',
         }
         assert secrets(only=[name])(samples[name]).action == 'replace'
 
@@ -88,11 +94,17 @@ class TestSecretRedaction:
 
         assert result.replacement == 'here:\n[redacted:private_key]\ndone'
 
-    def test_an_unterminated_private_key_is_taken_to_the_end(self):
-        """A truncated block is not worth keeping either, so the match runs to the end."""
-        result = redact_secrets('log: -----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEA')
+    def test_an_unterminated_private_key_takes_its_body_and_stops(self):
+        """Running to the end of the input instead would delete whatever the user wrote after it."""
+        result = redact_secrets('key:\n-----BEGIN PRIVATE KEY-----\nMIIEow\n\nAlso deploy to prod.')
 
-        assert result.replacement == 'log: [redacted:private_key]'
+        assert result.replacement == 'key:\n[redacted:private_key_body]\nAlso deploy to prod.'
+
+    def test_prose_naming_both_markers_is_not_a_key(self):
+        """The newline after the header is what separates a real block from a sentence about one."""
+        text = 'Paste everything between -----BEGIN PRIVATE KEY----- and -----END PRIVATE KEY----- in the field.'
+
+        assert redact_secrets(text).action == 'allow'
 
     def test_a_subset_leaves_the_rest_alone(self):
         detector = secrets(only=['aws_access_key'])
@@ -109,6 +121,39 @@ class TestSecretRedaction:
 
         assert detector('ticket INT-4321').replacement == 'ticket [redacted:internal]'
 
+    @pytest.mark.parametrize(
+        'key',
+        ['sk-ant-api03-R2xvYmFs_ZGVmaW5pdGVseVNlY3JldA-abcdEFGH', 'sk-proj-Ab3dEfGhIj_KlMnOpQrStUvWxYz0123456789'],
+    )
+    def test_a_base64url_key_is_removed_whole(self, key: str):
+        """Vendor key bodies contain `_`; a class that stops there leaves most of the key behind."""
+        replacement = str(redact_secrets(f'k={key}').replacement)
+
+        assert replacement.startswith('k=[redacted:')
+        assert replacement.endswith('_key]')
+
+    def test_scanning_a_large_paste_is_linear(self):
+        """An unbounded local part lets a failed match restart at every offset, blocking the event loop."""
+        start = time.perf_counter()
+        redact_personal_data('9' * 100_000)
+
+        assert time.perf_counter() - start < 1.0
+
+    def test_a_detector_with_no_patterns_is_refused(self):
+        """Same rule as an empty keyword list: a check that inspects nothing behaves as absent."""
+        with pytest.raises(UserError, match='no patterns'):
+            secrets(only=[])
+
+    def test_a_placeholder_cannot_re_emit_the_secret(self):
+        """`re.sub` reads backreferences in a template, so the placeholder is applied literally."""
+        result = secrets(placeholder=r'\g<0>-GONE')(f'k {_OPENAI_KEY}')
+
+        assert result.replacement == r'k \g<0>-GONE'
+
+    def test_extra_may_not_silently_replace_a_built_in(self):
+        with pytest.raises(UserError, match='would replace the built-in'):
+            secrets(extra={'openai_key': 'x'})
+
     def test_a_placeholder_without_the_name_is_used_verbatim(self):
         assert secrets(placeholder='***')(f'k {_OPENAI_KEY}').replacement == 'k ***'
 
@@ -117,17 +162,33 @@ class TestPersonalData:
     """Personal data is rewritten too, for the same reason."""
 
     @pytest.mark.parametrize(
-        ('name', 'sample'),
+        ('name', 'sample', 'expected'),
         [
-            ('email', 'write to a.b@example.com'),
-            ('us_ssn', 'ssn 123-45-6789'),
-            ('credit_card', 'card 4111 1111 1111 1111'),
-            ('iban', 'iban GB29NWBK60161331926819'),
+            ('email', 'write to a.b@example.com', 'write to [redacted:email]'),
+            ('us_ssn', 'ssn 123-45-6789', 'ssn [redacted:us_ssn]'),
+            ('us_ssn', 'ssn 123 45 6789', 'ssn [redacted:us_ssn]'),
+            ('credit_card', 'card 4111 1111 1111 1111', 'card [redacted:credit_card]'),
+            ('credit_card', 'amex 3782 822463 10005', 'amex [redacted:credit_card]'),
+            ('iban', 'iban GB29NWBK60161331926819', 'iban [redacted:iban]'),
+            ('iban', 'iban DE89 3704 0044 0532 0130 00', 'iban [redacted:iban]'),
         ],
     )
-    def test_each_default_pattern_matches(self, name: str, sample: str):
+    def test_each_default_pattern_replaces_the_whole_match(self, name: str, sample: str, expected: str):
+        """Asserting the replacement, not just the action: a partial or mislabelled redaction passes the weaker check."""
         assert name in DEFAULT_PII_PATTERNS
-        assert personal_data(only=[name])(sample).action == 'replace'
+        assert personal_data(only=[name])(sample).replacement == expected
+
+    @pytest.mark.parametrize(
+        'text',
+        ['revenue for 2021 2022 2023 2024 was flat', 'ports 8080 8081 8082 8083 are open'],
+    )
+    def test_four_digit_groups_are_not_a_card_number(self, text: str):
+        """The Luhn check is what separates a card from four consecutive years or ports."""
+        assert redact_personal_data(text).action == 'allow'
+
+    def test_a_spaced_iban_keeps_its_own_label(self):
+        """Declared before `credit_card`, whose digit groups would otherwise claim the middle of it."""
+        assert redact_personal_data('iban DE89 3704 0044 0532 0130 00').replacement == 'iban [redacted:iban]'
 
     def test_ordinary_text_survives(self):
         assert redact_personal_data('the meeting is at 3pm on the 4th').action == 'allow'
@@ -239,7 +300,9 @@ class TestGuardChain:
             capabilities=[InputGuard(guard=[redact_secrets, blocked_keywords(['nope'])])],
         )
 
-        assert await agent.run('nothing sensitive here') is not None
+        result = await agent.run('nothing sensitive here')
+
+        assert result.output == 'nothing sensitive here'
 
     async def test_an_output_chain_blocks_on_the_second_guard(self):
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -282,6 +345,22 @@ class TestGuardChain:
         result = await agent.run('hi')
 
         assert result.output == 'refused by the callable itself'
+
+    @pytest.mark.parametrize(
+        ('guard', 'match'),
+        [
+            ('not-a-guard', 'got str'),
+            (b'xy', 'got bytes'),
+            (42, 'got int'),
+            ([redact_secrets, 'nope'], 'at position 1 of its guard sequence; got str'),
+        ],
+    )
+    async def test_a_shape_that_is_not_a_guard_is_named(self, guard: object, match: str):
+        """Left alone these reach `inspect.signature` as a bare TypeError naming nothing useful."""
+        agent = Agent(_echo_prompt(), deps_type=type(None), capabilities=[InputGuard(guard=guard)])  # type: ignore[arg-type]
+
+        with pytest.raises(UserError, match=match):
+            await agent.run('hi')
 
     async def test_an_empty_chain_is_refused(self):
         """A guardrail that inspects nothing reads as configured and behaves as absent."""

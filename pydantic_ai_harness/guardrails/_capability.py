@@ -29,15 +29,15 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal, TypeGuard, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation, WrapModelRequestHandler
 from pydantic_ai.exceptions import ModelRetry, SkipModelRequest, UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext
-from typing_extensions import assert_never
+from typing_extensions import TypeIs, assert_never
 
 from pydantic_ai_harness.guardrails._exceptions import OutputBlocked
 
@@ -120,10 +120,6 @@ GuardOutcome = bool | GuardResult
 """What a guard callable returns: a bare `bool` (`True` = allow), or a `GuardResult`."""
 
 
-GuardFuncs = Sequence[object]
-"""Marker for the sequence form of a `guard` field; the element type is per-guard."""
-
-
 InputGuardFunc = (
     Callable[[str], GuardOutcome | Awaitable[GuardOutcome]]
     | Callable[[RunContext[AgentDepsT], str], GuardOutcome | Awaitable[GuardOutcome]]
@@ -166,7 +162,7 @@ def _takes_ctx(func: Callable[..., object]) -> bool:
 
 
 async def _evaluate(
-    guard: Callable[..., GuardOutcome | Awaitable[GuardOutcome]],
+    guard: Callable[..., object],
     ctx: RunContext[AgentDepsT],
     value: object,
 ) -> GuardResult:
@@ -179,7 +175,8 @@ async def _evaluate(
     return GuardResult.allow() if outcome else GuardResult.block()
 
 
-_GuardCallable = Callable[..., GuardOutcome | Awaitable[GuardOutcome]]
+_GuardCallable = Callable[..., object]
+"""A guard as the chain handles it. `_evaluate` normalizes whatever it returns."""
 
 
 def _require_prompt_text(replacement: object, position: int) -> None:
@@ -191,28 +188,40 @@ def _require_prompt_text(replacement: object, position: int) -> None:
         )
 
 
-def _is_guard_sequence(guard: object) -> TypeGuard[Sequence[_GuardCallable]]:
+def _is_guard_chain(guard: object) -> TypeIs[Iterable[_GuardCallable]]:
     """Whether a `guard` field holds several guards rather than one.
 
-    Callability decides first. Being a `Sequence` is what a chain looks like,
-    but a guard that is itself a callable sequence would otherwise be taken
-    apart and its elements invoked, so the single-callable form has to win.
+    Callability decides first: a guard that is itself an iterable would
+    otherwise be taken apart and its elements invoked. `str` and `bytes` are
+    excluded because they are iterable, so a string handed over by mistake
+    would be split into characters and each one "called".
+
+    `TypeIs` rather than `TypeGuard` so the negative branch narrows too, which
+    is what lets the single-guard path stay cast-free.
     """
-    return not callable(guard) and isinstance(guard, Sequence)
+    return not callable(guard) and not isinstance(guard, (str, bytes)) and isinstance(guard, Iterable)
 
 
 def _as_guards(guard: object, *, capability: str) -> tuple[_GuardCallable, ...]:
-    """Normalize a `guard` field to a tuple, rejecting a configuration that guards nothing.
+    """Normalize a `guard` field to a tuple, refusing shapes that would misbehave later.
 
-    A single callable is not a `Sequence`, so the two forms are told apart by
-    shape. An empty sequence is refused: a guardrail that inspects nothing reads
-    as configured and behaves as absent.
+    Everything wrong here is caught by name. Left alone, a non-callable reaches
+    `inspect.signature` and surfaces as a bare `TypeError` about an object being
+    uncallable, with nothing to say which guard or which position.
     """
-    if not _is_guard_sequence(guard):
-        return (cast('_GuardCallable', guard),)
+    if not _is_guard_chain(guard):
+        if not callable(guard):
+            raise UserError(f'{capability} needs a guard callable, or a sequence of them; got {type(guard).__name__}.')
+        return (guard,)
     guards = tuple(guard)
     if not guards:
         raise UserError(f'{capability} was given an empty sequence of guards, so it would inspect nothing.')
+    for position, entry in enumerate(guards):
+        if not callable(entry):
+            raise UserError(
+                f'{capability} needs a guard callable at position {position} of its guard sequence; '
+                f'got {type(entry).__name__}.'
+            )
     return guards
 
 
@@ -222,7 +231,7 @@ async def _evaluate_all(
     value: object,
     *,
     check_replacement: Callable[[object, int], None] | None = None,
-) -> GuardResult:
+) -> tuple[GuardResult, int]:
     """Run each guard in order over the value, threading replacements through.
 
     `allow` moves on to the next guard. `replace` substitutes the value the rest
@@ -234,6 +243,9 @@ async def _evaluate_all(
     `check_replacement` validates each substitution as it is made rather than
     only at the end, so a guard returning the wrong type is named instead of
     handing something unusable to the next one.
+
+    Returns the verdict and the position of the guard that produced it, so an
+    error about an inapplicable verdict can say which guard to go and look at.
     """
     replaced = False
     for position, guard in enumerate(guards):
@@ -246,8 +258,8 @@ async def _evaluate_all(
             value = verdict.replacement
             replaced = True
             continue
-        return verdict
-    return GuardResult.replace(value) if replaced else GuardResult.allow()
+        return verdict, position
+    return (GuardResult.replace(value) if replaced else GuardResult.allow()), len(guards) - 1
 
 
 def _extract_prompt(ctx: RunContext[AgentDepsT], messages: Sequence[ModelMessage]) -> str | None:
@@ -380,7 +392,7 @@ class InputGuard(AbstractCapability[AgentDepsT]):
         the prompt in `request_context`; `retry` and `replace` under
         `parallel=True` raise `UserError`.
         """
-        verdict = await _evaluate_all(
+        verdict, position = await _evaluate_all(
             _as_guards(self.guard, capability='InputGuard'),
             ctx,
             prompt,
@@ -391,7 +403,8 @@ class InputGuard(AbstractCapability[AgentDepsT]):
                 return
             case 'retry':
                 raise UserError(
-                    'An InputGuard guard cannot return GuardResult.retry() — retry applies to model output only.'
+                    f'An InputGuard guard cannot return GuardResult.retry(); guard at position {position} did. '
+                    'Retry applies to model output only.'
                 )
             case 'block':
                 message = verdict.message or _DEFAULT_INPUT_BLOCK_MESSAGE
@@ -404,7 +417,8 @@ class InputGuard(AbstractCapability[AgentDepsT]):
                         'already started with the original prompt. Use sequential mode for prompt redaction.'
                     )
                 replacement = verdict.replacement
-                assert isinstance(replacement, str)  # `_require_prompt_text` ran on the way here
+                if not isinstance(replacement, str):  # pragma: no cover - `_require_prompt_text` ran on the way here
+                    raise UserError('GuardResult.replace() for an input guard must provide replacement prompt text.')
                 if not _replace_prompt(request_context.messages, replacement):
                     raise UserError('InputGuard could not find a user prompt to redact in the request.')
                 _trace_redaction(ctx, direction='input', original=prompt, replacement=replacement)
@@ -525,7 +539,7 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
         """Evaluate the guard against the processed output and act on its verdict."""
         if ctx.partial_output:
             return output
-        verdict = await _evaluate_all(_as_guards(self.guard, capability='OutputGuard'), ctx, output)
+        verdict, _ = await _evaluate_all(_as_guards(self.guard, capability='OutputGuard'), ctx, output)
         match verdict.action:
             case 'allow':
                 return output
