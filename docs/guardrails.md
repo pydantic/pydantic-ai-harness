@@ -81,7 +81,7 @@ agent = Agent(
 )
 ```
 
-One `InputGuard` holding three checks is not the same as three `InputGuard`
+One `InputGuard` holding two checks is not the same as two `InputGuard`
 capabilities: the chain is one place in the capability list, one ordering
 decision, and one set of spans, and only the chain threads a redaction into the
 check that follows it.
