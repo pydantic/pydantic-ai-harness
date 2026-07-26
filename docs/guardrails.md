@@ -155,13 +155,22 @@ Any exception raised by the guard propagates as-is -- use `InputBlocked` / `Outp
 `ToolGuard` inspects both sides of a tool call: `guard` sees the validated arguments before the tool runs, `result_guard` sees what it returned before the model does.
 
 ```python
+from pathlib import Path
+
+import httpx
 from pydantic_ai import Agent
 from pydantic_ai_harness import GuardResult, ToolCallInfo, ToolGuard, ToolResultInfo
 
+WORKSPACE = Path('/workspace')
+
 
 def stay_in_the_workspace(call: ToolCallInfo) -> GuardResult:
-    if call.name == 'write_file' and not str(call.args['path']).startswith('/workspace/'):
-        return GuardResult.block(f'{call.args["path"]} is outside the workspace.')
+    if call.name == 'write_file':
+        # `resolve()` before the containment check: a prefix test on the raw
+        # string accepts `/workspace/../etc/passwd`.
+        target = Path(str(call.args['path'])).resolve()
+        if not target.is_relative_to(WORKSPACE):
+            return GuardResult.block(f'{target} is outside the workspace.')
     return GuardResult.allow()
 
 
@@ -174,6 +183,17 @@ agent = Agent(
     'openai:gpt-5.4',
     capabilities=[ToolGuard(guard=stay_in_the_workspace, result_guard=scrub_secrets)],
 )
+
+
+@agent.tool_plain
+def write_file(path: str, content: str) -> str:
+    Path(path).write_text(content)
+    return f'wrote {path}'
+
+
+@agent.tool_plain
+def fetch_page(url: str) -> str:
+    return httpx.get(url).text
 ```
 
 The outcomes map onto Pydantic AI control flow rather than a parallel mechanism:
@@ -208,6 +228,12 @@ agent = Agent(
     capabilities=[ToolGuard(guard=confirm_production)],
     output_type=[str, DeferredToolRequests],
 )
+
+
+@agent.tool_plain
+def deploy(env: str) -> str:
+    return f'deployed to {env}'
+
 
 deferred = await agent.run('deploy the new build')
 if isinstance(deferred.output, DeferredToolRequests):

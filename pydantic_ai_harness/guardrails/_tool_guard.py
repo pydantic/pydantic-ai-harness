@@ -115,14 +115,19 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
     """Validate tool arguments before execution and tool results after it.
 
     ```python
+    from pathlib import Path
+
     from pydantic_ai import Agent
     from pydantic_ai_harness import GuardResult, ToolCallInfo, ToolGuard
 
 
     def no_writes_outside_workspace(call: ToolCallInfo) -> GuardResult:
-        path = call.args.get('path', '')
-        if call.name == 'write_file' and not str(path).startswith('/workspace/'):
-            return GuardResult.block(f'{path} is outside the workspace.')
+        if call.name == 'write_file':
+            # `resolve()` before the containment check: a prefix test on the raw
+            # string accepts `/workspace/../etc/passwd`.
+            target = Path(str(call.args['path'])).resolve()
+            if not target.is_relative_to(Path('/workspace')):
+                return GuardResult.block(f'{target} is outside the workspace.')
         return GuardResult.allow()
 
 

@@ -17,6 +17,21 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from typing_extensions import assert_never
 
 
+class _Unset:
+    """Sentinel for a `replacement` that was never supplied.
+
+    `None` is a legitimate replacement: a tool may return `None`, and a result
+    guard may want to sanitize a sensitive result down to it. A `None` default
+    could not tell that apart from "this verdict carries no replacement".
+    """
+
+    def __repr__(self) -> str:
+        return '<unset>'
+
+
+_UNSET = _Unset()
+
+
 @dataclass(frozen=True, kw_only=True)
 class GuardResult:
     """The outcome a guard reports for the value it inspected.
@@ -39,20 +54,24 @@ class GuardResult:
     message: str | None = None
     """For `block`, the refusal text. For `retry`, the instruction sent back to the model."""
 
-    replacement: object | None = None
-    """For `replace`, the value substituted for the inspected one."""
+    replacement: object = _UNSET
+    """For `replace`, the value substituted for the inspected one.
+
+    Defaults to a private sentinel rather than `None`, so `replace(None)` is a
+    valid verdict.
+    """
 
     def __post_init__(self) -> None:
         """Reject field combinations the outcome contract does not allow."""
         match self.action:
             case 'allow':
-                if self.message is not None or self.replacement is not None:
+                if self.message is not None or self.replacement is not _UNSET:
                     raise UserError("GuardResult(action='allow') must not set `message` or `replacement`.")
             case 'approve':
-                if self.message is not None or self.replacement is not None:
+                if self.message is not None or self.replacement is not _UNSET:
                     raise UserError("GuardResult(action='approve') must not set `message` or `replacement`.")
             case 'replace':
-                if self.replacement is None:
+                if self.replacement is _UNSET:
                     raise UserError("GuardResult(action='replace') requires a `replacement` value.")
             case 'retry':
                 if self.message is None:
@@ -80,7 +99,8 @@ class GuardResult:
         For `InputGuard`, `value` is the replacement prompt text sent to the
         model. For `OutputGuard`, it is the agent output returned to the caller.
         For `ToolGuard`, it is the replacement tool arguments (a mapping) or the
-        replacement tool result, depending on the stage.
+        replacement tool result, depending on the stage. `None` is a valid
+        replacement.
         """
         return cls(action='replace', replacement=value)
 

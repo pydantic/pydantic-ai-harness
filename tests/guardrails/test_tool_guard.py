@@ -398,6 +398,12 @@ class TestResultGuard:
 
         assert seen == [ToolResultInfo(name='lookup', args={}, tool_call_id='call-1', result={'rows': 2})]
 
+    async def test_replace_accepts_none_as_a_sanitized_result(self):
+        """`None` is a real tool result, so it has to be a usable replacement."""
+        guard = ToolGuard[object](result_guard=lambda info: GuardResult.replace(None))
+
+        assert await _guard_result(guard, 'sensitive') is None
+
     async def test_no_result_guard_passes_the_result_through(self):
         assert await _guard_result(ToolGuard[object](), 'x') == 'x'
 
@@ -581,6 +587,17 @@ class TestOrdering:
 
 class TestSharedVerdicts:
     """`approve` joins the shared vocabulary, and the other guards reject it."""
+
+    def test_an_unsupplied_replacement_reads_as_unset(self):
+        assert 'replacement=<unset>' in repr(GuardResult.allow())
+
+    def test_replace_still_requires_a_value(self):
+        with pytest.raises(UserError, match="action='replace'"):
+            GuardResult(action='replace')
+
+    def test_allow_rejects_an_explicit_none_replacement(self):
+        with pytest.raises(UserError, match="action='allow'"):
+            GuardResult(action='allow', replacement=None)
 
     def test_approve_rejects_a_message(self):
         with pytest.raises(UserError, match="action='approve'"):
