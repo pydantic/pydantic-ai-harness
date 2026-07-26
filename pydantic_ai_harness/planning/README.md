@@ -75,6 +75,24 @@ planning = Planning(store=agent_store)
 
 Built-in stores: `InMemoryPlanStore` (default), `SqlitePlanStore` (local file, session-scoped), `PostgresPlanStore` (server database over a caller-owned asyncpg pool), and `RedisPlanStore` (over a caller-owned `redis.asyncio` client). The Postgres and Redis stores take a client you already own, so the harness carries no database driver dependency. Any object implementing the `PlanStore` protocol works. `SqlitePlanStore` requires a file-backed database; use `InMemoryPlanStore` for ephemeral plans rather than `':memory:'`.
 
+### Planning and executing in separate runs
+
+A shared store is the whole handoff mechanism between two runs. One agent writes the plan, a second one executes it, and the plan is the only state that crosses between them:
+
+```python
+store = SqlitePlanStore('plan.db', session='issue-403')
+
+planner = Agent('anthropic:claude-opus-4-7', capabilities=[Planning(store=store)])
+executor = Agent('anthropic:claude-sonnet-4-6', capabilities=[Planning(store=store)])
+
+await planner.run('Investigate the issue and write a plan. Do not implement anything.')
+await executor.run('Implement the plan.')
+```
+
+The executor starts with no `message_history`, so it never pays for the planner's investigation. Its first request carries only the new prompt plus the plan reminder, which the capability rebuilds from the store. That is why the two agents can run on different models: a large-context model can do the reading and the reasoning, and a smaller one can execute against the resulting checklist.
+
+The planner's read-only discipline is a property of how you configure that agent (which toolsets it gets, and what its instructions say), not something the capability enforces.
+
 ## Events
 
 Give a store a `PlanEventEmitter` to react to changes -- surface progress in a UI, mirror steps to a tracker, notify a channel on completion:
