@@ -438,6 +438,102 @@ class TestUpdateTaskStatus:
         # A manual block on a dependency-free step must persist, not auto-revert.
         assert (await store.get_item(item.id)).status is TaskStatus.blocked  # type: ignore[union-attr]
 
+    async def test_an_executor_without_subtasks_still_unblocks_over_a_shared_store(self) -> None:
+        """The README's handoff shares one store; the flag says which tools exist, not what the data means."""
+        store = InMemoryPlanStore()
+        planner = _toolset(subtasks=True, store=store)
+        executor = _toolset(subtasks=False, store=store)
+        dep = await store.add_item(PlanItem(content='dep'))
+        task = await store.add_item(PlanItem(content='task', depends_on=[dep.id]))
+        await planner.update_task_status(_ctx(), task.id, TaskStatus.pending)
+        assert (await store.get_item(task.id)).status is TaskStatus.blocked  # type: ignore[union-attr]
+
+        await executor.update_task_status(_ctx(), dep.id, TaskStatus.completed)
+
+        assert (await store.get_item(task.id)).status is TaskStatus.pending  # type: ignore[union-attr]
+
+    async def test_a_blocked_step_is_counted_whoever_renders_the_plan(self) -> None:
+        """Omitting it from the tally hid a step the reader had no other way to see."""
+        store = InMemoryPlanStore()
+        planner = _toolset(subtasks=True, store=store)
+        executor = _toolset(subtasks=False, store=store)
+        dep = await store.add_item(PlanItem(content='dep'))
+        task = await store.add_item(PlanItem(content='task', depends_on=[dep.id]))
+        await planner.update_task_status(_ctx(), task.id, TaskStatus.pending)
+
+        assert '1 blocked' in await executor.read_plan(_ctx())
+
+    async def test_a_plan_cannot_store_a_step_blocked_on_nothing(self) -> None:
+        """Reconciliation only touches steps with dependencies, so nothing would ever free it."""
+        ts = _toolset(subtasks=True)
+
+        result = await ts.write_plan(_ctx(), [PlanItem(id='x', content='X', status=TaskStatus.blocked)])
+
+        assert 'blocked but depends on nothing' in result
+
+    async def test_a_dependency_added_to_a_blocked_step_reconciles_it(self) -> None:
+        """The prerequisite is already terminal, so leaving it blocked strands it forever."""
+        store = InMemoryPlanStore()
+        ts = _toolset(subtasks=True, store=store)
+        dep = await store.add_item(PlanItem(content='dep', status=TaskStatus.completed))
+        task = await store.add_item(PlanItem(content='task', status=TaskStatus.blocked))
+
+        await ts.set_dependency(_ctx(), task.id, dep.id)
+
+        assert (await store.get_item(task.id)).status is TaskStatus.pending  # type: ignore[union-attr]
+
+    async def test_blocking_a_step_whose_dependencies_are_resolved_is_refused(self) -> None:
+        """Reconciliation would undo it in the same call while the reply said it worked."""
+        store = InMemoryPlanStore()
+        ts = _toolset(subtasks=True, store=store)
+        dep = await store.add_item(PlanItem(content='dep', status=TaskStatus.completed))
+        task = await store.add_item(PlanItem(content='task', depends_on=[dep.id]))
+
+        result = await ts.update_task_status(_ctx(), task.id, TaskStatus.blocked)
+
+        assert 'every step it depends on is already resolved' in result
+        assert (await store.get_item(task.id)).status is TaskStatus.pending  # type: ignore[union-attr]
+
+    async def test_the_reply_reports_the_status_the_store_holds(self) -> None:
+        """Asking for `pending` on a step with an unmet dependency stores `blocked`."""
+        store = InMemoryPlanStore()
+        ts = _toolset(subtasks=True, store=store)
+        dep = await store.add_item(PlanItem(content='dep'))
+        task = await store.add_item(PlanItem(content='task', depends_on=[dep.id]))
+
+        result = await ts.update_task_status(_ctx(), task.id, TaskStatus.pending)
+
+        assert "status to 'blocked'" in result
+        assert (await store.get_item(task.id)).status is TaskStatus.blocked  # type: ignore[union-attr]
+
+    async def test_a_batch_reports_the_statuses_the_store_holds(self) -> None:
+        store = InMemoryPlanStore()
+        ts = _toolset(subtasks=True, store=store)
+        dep = await store.add_item(PlanItem(content='dep'))
+        task = await store.add_item(PlanItem(content='task', depends_on=[dep.id]))
+
+        result = await ts.update_task_statuses(_ctx(), [PlanStatusUpdate(task_id=task.id, status=TaskStatus.pending)])
+
+        assert f'- [{task.id}] task -> blocked' in result
+
+    async def test_a_batch_refuses_an_inert_block_without_applying_anything(self) -> None:
+        store = InMemoryPlanStore()
+        ts = _toolset(subtasks=True, store=store)
+        dep = await store.add_item(PlanItem(content='dep', status=TaskStatus.completed))
+        task = await store.add_item(PlanItem(content='task', depends_on=[dep.id]))
+        other = await store.add_item(PlanItem(content='other'))
+
+        result = await ts.update_task_statuses(
+            _ctx(),
+            [
+                PlanStatusUpdate(task_id=other.id, status=TaskStatus.completed),
+                PlanStatusUpdate(task_id=task.id, status=TaskStatus.blocked),
+            ],
+        )
+
+        assert 'No changes applied' in result
+        assert (await store.get_item(other.id)).status is TaskStatus.pending  # type: ignore[union-attr]
+
     async def test_cannot_start_blocked_by_dependency(self) -> None:
         store = InMemoryPlanStore()
         ts = _toolset(subtasks=True, store=store)
@@ -658,6 +754,20 @@ class TestSubtaskTools:
 # --- Capability -------------------------------------------------------------
 
 
+class TestStoreContract:
+    """The shipped stores answer the same way, so a plan behaves the same on any backend."""
+
+    async def test_a_duplicate_id_is_refused(self) -> None:
+        """SQLite and Postgres have a primary key; the others used to accept a shadowing id."""
+        store = InMemoryPlanStore()
+        await store.add_item(PlanItem(id='a', content='A'))
+
+        with pytest.raises(ValueError, match="id 'a' is already"):
+            await store.add_item(PlanItem(id='a', content='A again'))
+
+        assert len(await store.get_items()) == 1
+
+
 class TestCapability:
     def test_serialization_name(self) -> None:
         assert Planning.get_serialization_name() == 'Planning'
@@ -721,6 +831,11 @@ class TestCapability:
         assert isinstance(sqlite_cap.store, SqlitePlanStore)
         with pytest.raises(ValueError, match='database is only valid'):
             Planning.from_spec(backend='memory', database='custom.db')
+
+    def test_from_spec_rejects_an_unknown_backend(self) -> None:
+        """`backend` is a `Literal`, but a spec is deserialized text; nothing has checked it yet."""
+        with pytest.raises(ValueError, match='Unknown planning backend'):
+            Planning.from_spec(backend='postgres')  # type: ignore[arg-type]
 
 
 class TestReminder:

@@ -246,7 +246,7 @@ def status_counts_line(items: list[PlanItem], *, subtasks: bool) -> str:
     """Render the `X completed, Y in progress, Z pending` status tally."""
     counts = _counts(items)
     parts = [f'{counts[TaskStatus.completed]} completed']
-    if subtasks and counts[TaskStatus.blocked] > 0:
+    if counts[TaskStatus.blocked] > 0:
         parts.append(f'{counts[TaskStatus.blocked]} blocked')
     parts.append(f'{counts[TaskStatus.in_progress]} in progress')
     parts.append(f'{counts[TaskStatus.pending]} pending')
@@ -348,6 +348,10 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
         for item in new_items:
             if not self._valid_status(item.status):
                 return f"Plan not updated: status '{item.status.value}' is only valid with subtasks enabled."
+            if item.status is TaskStatus.blocked and not item.depends_on:
+                # Nothing would ever free it: reconciliation only touches steps that have
+                # dependencies, and `get_available_tasks` excludes `blocked`.
+                return f"Plan not updated: step '{item.content}' is blocked but depends on nothing."
         if self._subtasks:
             error = validate_hierarchy(new_items)
             if error is not None:
@@ -404,6 +408,30 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
         for item, new_status in list(dependency_block_transitions(items)):
             await store.update_item(item.id, status=new_status)
 
+    @staticmethod
+    def _refuse_inert_block(items: list[PlanItem], item: PlanItem, status: TaskStatus) -> str | None:
+        """Refuse a `blocked` that the dependency reconciliation would undo in the same call.
+
+        A step whose prerequisites are all resolved is not blocked by anything, so
+        `dependency_block_transitions` returns it to `pending` immediately. Applying the write
+        and then silently reversing it, while the reply says it worked, is the worst of the
+        three available answers. A step with no dependencies at all is a different case and
+        stays supported: nothing reconciles it, so a manual block there persists.
+        """
+        if status is not TaskStatus.blocked or not item.depends_on or is_blocked(items, item):
+            return None
+        return f"Cannot block '{item.content}': every step it depends on is already resolved."
+
+    @staticmethod
+    async def _stored_status(store: PlanStore, task_id: str, requested: TaskStatus) -> str:
+        """The status the store now holds, which is not always the one that was asked for.
+
+        Reconciliation may have blocked the step on an unmet dependency. Reporting the request
+        instead would tell the model one thing and show it another in the next turn's plan.
+        """
+        item = await store.get_item(task_id)
+        return (requested if item is None else item.status).value
+
     async def update_task_status(self, ctx: RunContext[AgentDepsT], task_id: str, status: TaskStatus) -> str:
         """Update one step's status by id.
 
@@ -421,10 +449,11 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
             return f"Step with id '{task_id}' not found."
         if self._subtasks and status is TaskStatus.in_progress and is_blocked(items, item):
             return f"Cannot start '{item.content}': it has incomplete dependencies."
+        if refusal := self._refuse_inert_block(items, item, status):
+            return refusal
         await store.update_item(task_id, status=status)
-        if self._subtasks:
-            await self._sync_dependency_blocks(store)
-        return f"Updated step '{item.content}' status to '{status.value}'."
+        await self._sync_dependency_blocks(store)
+        return f"Updated step '{item.content}' status to '{await self._stored_status(store, task_id, status)}'."
 
     async def update_task_statuses(self, ctx: RunContext[AgentDepsT], updates: list[PlanStatusUpdate]) -> str:
         """Update several steps' statuses in one call.
@@ -456,16 +485,20 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
             if self._subtasks and update.status is TaskStatus.in_progress and is_blocked(projected, item):
                 errors.append(f"Cannot start '{item.content}': it has incomplete dependencies.")
                 continue
+            if refusal := self._refuse_inert_block(projected, item, update.status):
+                errors.append(refusal)
+                continue
             item.status = update.status
             resolved.append((item, update.status))
         if errors:
             return 'No changes applied. Errors:\n' + '\n'.join(f'- {error}' for error in errors)
-        lines: list[str] = []
         for item, status in resolved:
             await store.update_item(item.id, status=status)
-            lines.append(f'- [{item.id}] {item.content} -> {status.value}')
-        if self._subtasks:
-            await self._sync_dependency_blocks(store)
+        await self._sync_dependency_blocks(store)
+        lines = [
+            f'- [{item.id}] {item.content} -> {await self._stored_status(store, item.id, status)}'
+            for item, status in resolved
+        ]
         return f'Updated {len(resolved)} step(s):\n' + '\n'.join(lines)
 
     async def remove_task(self, ctx: RunContext[AgentDepsT], task_id: str) -> str:
@@ -568,6 +601,10 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
                 f"Added dependency: '{item.content}' now depends on '{dependency.content}'. Step automatically blocked."
             )
         await store.update_item(task_id, depends_on=new_depends_on)
+        # A step already `blocked` keeps its status above, which leaves it blocked on a
+        # prerequisite that may be terminal -- and so excluded from `get_available_tasks`
+        # with nothing left to free it. Every other write reconciles; so does this one.
+        await self._sync_dependency_blocks(store)
         return f"Added dependency: '{item.content}' now depends on '{dependency.content}'."
 
     async def get_available_tasks(self, ctx: RunContext[AgentDepsT]) -> str:

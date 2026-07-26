@@ -67,6 +67,14 @@ class TestRedisStore:
         fetched = await store.get_item(a.id)
         assert fetched is not None and fetched.depends_on == ['x']
 
+    async def test_a_duplicate_id_is_refused(self) -> None:
+        """Every backend answers the same way, so a plan behaves the same wherever it is stored."""
+        store = RedisPlanStore(FakeRedis())
+        item = await store.add_item(_item('A'))
+
+        with pytest.raises(ValueError, match='already'):
+            await store.add_item(_item('A again', id=item.id))
+
     async def test_set_replaces(self) -> None:
         store = RedisPlanStore(FakeRedis())
         await store.set_items([_item('one'), _item('two')])

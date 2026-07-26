@@ -53,7 +53,13 @@ class PlanStore(Protocol):
         ...  # pragma: no cover
 
     async def add_item(self, item: PlanItem) -> PlanItem:
-        """Append `item` and return it."""
+        """Append `item` and return it.
+
+        Ids are unique within a store. An id that is already present raises `ValueError`
+        rather than being appended: every reader here resolves an id to the first match, so a
+        duplicate would shadow the original and make updates land on one of them at random.
+        The SQL stores enforce this with a primary key; the others check.
+        """
         ...  # pragma: no cover
 
     async def update_item(
@@ -146,6 +152,8 @@ class InMemoryPlanStore:
 
     async def add_item(self, item: PlanItem) -> PlanItem:
         """Append `item` and return it."""
+        if any(existing.id == item.id for existing in self._items):
+            raise ValueError(f'A step with id {item.id!r} is already in this plan.')
         self._items.append(item)
         await emit_created(self._emitter, item)
         return item

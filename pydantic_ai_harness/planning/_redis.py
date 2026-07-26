@@ -90,6 +90,8 @@ class RedisPlanStore:
     async def add_item(self, item: PlanItem) -> PlanItem:
         """Append `item` for this session and return it."""
         items = await self._load()
+        if any(existing.id == item.id for existing in items):
+            raise ValueError(f'A step with id {item.id!r} is already in this plan.')
         items.append(item)
         await self._save(items)
         await emit_created(self._emitter, item)

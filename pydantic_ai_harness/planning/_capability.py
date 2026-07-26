@@ -158,10 +158,15 @@ class Planning(AbstractCapability[AgentDepsT]):
             raise ValueError('database is only valid with backend="sqlite"')
         if backend == 'memory':
             store: PlanStore | None = None
-        else:
+        elif backend == 'sqlite':
             from pydantic_ai_harness.planning._store import SqlitePlanStore
 
             store = SqlitePlanStore(database, session=session)
+        else:
+            # `backend` is a `Literal`, but this is the deserialization entry point: the value
+            # arrives from a YAML or JSON spec, where nothing has checked it. Falling through
+            # to SQLite would silently write `postgres` plans to `.agent-plan.db`.
+            raise ValueError(f"Unknown planning backend {backend!r}; expected 'memory' or 'sqlite'.")
         return cls(
             store=store,
             enable_subtasks=enable_subtasks,
