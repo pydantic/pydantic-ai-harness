@@ -1,0 +1,198 @@
+"""Verdict vocabulary shared by the input, output, and tool guardrails.
+
+`GuardResult` is the single result type every guard returns, so the same five
+outcomes read the same way on all three edges of a run. The helpers here
+normalize a guard's return value and record the non-`allow` outcomes as spans.
+"""
+
+from __future__ import annotations
+
+import inspect
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Literal
+
+from pydantic_ai.exceptions import UserError
+from pydantic_ai.tools import AgentDepsT, RunContext
+from typing_extensions import assert_never
+
+
+@dataclass(frozen=True, kw_only=True)
+class GuardResult:
+    """The outcome a guard reports for the value it inspected.
+
+    Construct one with the classmethods -- `GuardResult.allow()`,
+    `GuardResult.block()`, `GuardResult.replace()`, `GuardResult.retry()`,
+    `GuardResult.approve()` -- rather than the raw fields. A guard may also
+    return a bare `bool`: `True` is `allow()`, `False` is `block()`.
+
+    Not every outcome applies to every guard. `retry` and `approve` are
+    rejected by [`InputGuard`][pydantic_ai_harness.InputGuard]; `approve` is
+    rejected by [`OutputGuard`][pydantic_ai_harness.OutputGuard] and by the
+    result stage of [`ToolGuard`][pydantic_ai_harness.ToolGuard]. Each raises
+    `UserError` naming the guard and the outcome.
+    """
+
+    action: Literal['allow', 'block', 'replace', 'retry', 'approve']
+    """What the capability should do with the inspected value."""
+
+    message: str | None = None
+    """For `block`, the refusal text. For `retry`, the instruction sent back to the model."""
+
+    replacement: object | None = None
+    """For `replace`, the value substituted for the inspected one."""
+
+    def __post_init__(self) -> None:
+        """Reject field combinations the outcome contract does not allow."""
+        match self.action:
+            case 'allow':
+                if self.message is not None or self.replacement is not None:
+                    raise UserError("GuardResult(action='allow') must not set `message` or `replacement`.")
+            case 'approve':
+                if self.message is not None or self.replacement is not None:
+                    raise UserError("GuardResult(action='approve') must not set `message` or `replacement`.")
+            case 'replace':
+                if self.replacement is None:
+                    raise UserError("GuardResult(action='replace') requires a `replacement` value.")
+            case 'retry':
+                if self.message is None:
+                    raise UserError("GuardResult(action='retry') requires a `message`.")
+            case 'block':
+                # `message=None` is valid: a default is supplied at the use site.
+                pass
+            case _:  # pragma: no cover - assert_never exhaustiveness guard
+                assert_never(self.action)
+
+    @classmethod
+    def allow(cls) -> GuardResult:
+        """Let the value through unchanged."""
+        return cls(action='allow')
+
+    @classmethod
+    def block(cls, message: str | None = None) -> GuardResult:
+        """Refuse the value. `message` is the refusal text; `None` uses a default."""
+        return cls(action='block', message=message)
+
+    @classmethod
+    def replace(cls, value: object) -> GuardResult:
+        """Substitute `value` for the inspected one and continue.
+
+        For `InputGuard`, `value` is the replacement prompt text sent to the
+        model. For `OutputGuard`, it is the agent output returned to the caller.
+        For `ToolGuard`, it is the replacement tool arguments (a mapping) or the
+        replacement tool result, depending on the stage.
+        """
+        return cls(action='replace', replacement=value)
+
+    @classmethod
+    def retry(cls, message: str) -> GuardResult:
+        """Send the value back to the model to try again.
+
+        `message` is the instruction the model sees on the retry. Valid for
+        `OutputGuard` and for both stages of `ToolGuard`.
+        """
+        return cls(action='retry', message=message)
+
+    @classmethod
+    def approve(cls) -> GuardResult:
+        """Defer the tool call for human approval -- `ToolGuard` argument stage only.
+
+        Raises [`ApprovalRequired`][pydantic_ai.exceptions.ApprovalRequired], so
+        the call surfaces in
+        [`DeferredToolRequests`][pydantic_ai.DeferredToolRequests] and the
+        application decides. To attach approval metadata, raise
+        `ApprovalRequired(metadata=...)` from the guard directly.
+        """
+        return cls(action='approve')
+
+
+GuardOutcome = bool | GuardResult
+"""What a guard callable returns: a bare `bool` (`True` = allow), or a `GuardResult`."""
+
+
+def takes_ctx(func: Callable[..., object]) -> bool:
+    """Return `True` when `func` declares a leading `RunContext` parameter.
+
+    Detected by parameter count, not annotation: a guard always takes the
+    guarded value, so a second parameter means it also wants the run context.
+    This matches pydantic-ai's own optional-`ctx` convention for output
+    validators. A callable whose signature cannot be introspected is treated
+    as taking the value only.
+    """
+    try:
+        parameters = inspect.signature(func).parameters
+    except ValueError:  # pragma: no cover - callable without an introspectable signature
+        return False
+    return len(parameters) > 1
+
+
+async def evaluate(
+    guard: Callable[..., GuardOutcome | Awaitable[GuardOutcome]],
+    ctx: RunContext[AgentDepsT],
+    value: object,
+) -> GuardResult:
+    """Call `guard` (passing `ctx` when declared), await it, and normalize to `GuardResult`."""
+    outcome = guard(ctx, value) if takes_ctx(guard) else guard(value)
+    if inspect.isawaitable(outcome):
+        outcome = await outcome
+    if isinstance(outcome, GuardResult):
+        return outcome
+    return GuardResult.allow() if outcome else GuardResult.block()
+
+
+def direction_attributes(direction: str, action: str, tool_name: str | None) -> dict[str, str]:
+    """Attributes every guardrail span carries, regardless of content settings."""
+    attributes = {'guardrail.direction': direction, 'guardrail.action': action}
+    if tool_name is not None:
+        attributes['guardrail.tool'] = tool_name
+    return attributes
+
+
+def trace_block(
+    ctx: RunContext[AgentDepsT],
+    *,
+    direction: str,
+    message: str,
+    tool_name: str | None = None,
+) -> None:
+    """Record a zero-duration span marking a guardrail refusal.
+
+    The refusal message is attached only when `ctx.trace_include_content` is
+    set -- it can quote sensitive content from the guarded value, and ops
+    audiences are broader than the user who sees the refusal text.
+    """
+    attributes = direction_attributes(direction, 'block', tool_name)
+    if ctx.trace_include_content:
+        attributes['guardrail.message'] = message
+    ctx.tracer.start_span(f'guardrail blocked {direction}', attributes=attributes).end()
+
+
+def trace_redaction(
+    ctx: RunContext[AgentDepsT],
+    *,
+    direction: str,
+    original: object,
+    replacement: object,
+    tool_name: str | None = None,
+) -> None:
+    """Record a zero-duration span marking a guardrail redaction.
+
+    The original and replacement values are attached only when
+    `ctx.trace_include_content` is set, since a redacted value is often the
+    sensitive content the guard exists to keep out of traces.
+    """
+    attributes = direction_attributes(direction, 'replace', tool_name)
+    if ctx.trace_include_content:
+        attributes['guardrail.original'] = str(original)
+        attributes['guardrail.replacement'] = str(replacement)
+    ctx.tracer.start_span(f'guardrail redacted {direction}', attributes=attributes).end()
+
+
+def trace_approval(ctx: RunContext[AgentDepsT], *, direction: str, tool_name: str) -> None:
+    """Record a zero-duration span marking a tool call deferred for approval.
+
+    Carries no content attributes: the span says which tool was deferred, and
+    the arguments are already on the tool-call span.
+    """
+    attributes = direction_attributes(direction, 'approve', tool_name)
+    ctx.tracer.start_span(f'guardrail deferred {direction}', attributes=attributes).end()

@@ -1,7 +1,6 @@
-"""Input and output guardrails for Pydantic AI agents."""
+"""Input, output, and tool guardrails for Pydantic AI agents."""
 
 from pydantic_ai_harness.guardrails._capability import (
-    GuardResult,
     InputGuard,
     InputGuardFunc,
     OutputGuard,
@@ -11,6 +10,15 @@ from pydantic_ai_harness.guardrails._exceptions import (
     GuardrailError,
     InputBlocked,
     OutputBlocked,
+    ToolBlocked,
+)
+from pydantic_ai_harness.guardrails._shared import GuardResult
+from pydantic_ai_harness.guardrails._tool_guard import (
+    ToolCallInfo,
+    ToolGuard,
+    ToolGuardFunc,
+    ToolResultGuardFunc,
+    ToolResultInfo,
 )
 
 __all__ = [
@@ -22,4 +30,10 @@ __all__ = [
     'OutputBlocked',
     'OutputGuard',
     'OutputGuardFunc',
+    'ToolBlocked',
+    'ToolCallInfo',
+    'ToolGuard',
+    'ToolGuardFunc',
+    'ToolResultGuardFunc',
+    'ToolResultInfo',
 ]

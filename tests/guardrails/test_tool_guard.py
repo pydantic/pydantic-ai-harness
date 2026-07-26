@@ -1,0 +1,607 @@
+"""Tests for the `ToolGuard` capability."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+import pytest
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import NoOpTracer, Tracer
+from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
+from pydantic_ai.capabilities import CapabilityOrdering
+from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, SkipToolExecution, UserError
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+)
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext, ToolDefinition
+from pydantic_ai.usage import RunUsage
+
+from pydantic_ai_harness import (
+    GuardResult,
+    ToolBlocked,
+    ToolCallInfo,
+    ToolGuard,
+    ToolResultInfo,
+)
+from pydantic_ai_harness.guardrails import GuardrailError
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return 'asyncio'
+
+
+def _recording_tracer() -> tuple[Tracer, InMemorySpanExporter]:
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return provider.get_tracer('test'), exporter
+
+
+def _run_ctx(
+    *,
+    trace_include_content: bool = False,
+    tracer: Tracer | None = None,
+    tool_call_approved: bool = False,
+) -> RunContext[object]:
+    return RunContext(
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        trace_include_content=trace_include_content,
+        tracer=tracer if tracer is not None else NoOpTracer(),
+        tool_call_approved=tool_call_approved,
+    )
+
+
+def _only_span(exporter: InMemorySpanExporter) -> ReadableSpan:
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1, f'expected exactly one span, got {[s.name for s in spans]}'
+    return spans[0]
+
+
+def _call(tool_name: str = 'lookup', tool_call_id: str = 'call-1') -> ToolCallPart:
+    return ToolCallPart(tool_name=tool_name, args='{}', tool_call_id=tool_call_id)
+
+
+def _tool_def(name: str = 'lookup') -> ToolDefinition:
+    return ToolDefinition(name=name)
+
+
+async def _guard_args(
+    guard: ToolGuard[object],
+    args: dict[str, Any],
+    *,
+    tool_name: str = 'lookup',
+    ctx: RunContext[object] | None = None,
+) -> dict[str, Any]:
+    return await guard.before_tool_execute(
+        ctx if ctx is not None else _run_ctx(),
+        call=_call(tool_name),
+        tool_def=_tool_def(tool_name),
+        args=args,
+    )
+
+
+async def _guard_result(
+    guard: ToolGuard[object],
+    result: Any,
+    *,
+    tool_name: str = 'lookup',
+    ctx: RunContext[object] | None = None,
+) -> Any:
+    return await guard.after_tool_execute(
+        ctx if ctx is not None else _run_ctx(),
+        call=_call(tool_name),
+        tool_def=_tool_def(tool_name),
+        args={},
+        result=result,
+    )
+
+
+def _scripted(*responses: ModelResponse) -> FunctionModel:
+    """A model that replays `responses` in order, one per request."""
+    remaining = iter(responses)
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        return next(remaining)
+
+    return FunctionModel(respond)
+
+
+def _calls_lookup(**args: Any) -> ModelResponse:
+    return ModelResponse(parts=[ToolCallPart(tool_name='lookup', args=args, tool_call_id='call-1')])
+
+
+def _agent_with(guard: ToolGuard[None], *responses: ModelResponse) -> tuple[Agent[None, str], list[dict[str, Any]]]:
+    """An agent whose single `lookup` tool records the arguments it was called with."""
+    seen: list[dict[str, Any]] = []
+    # `deps_type` is explicit because Pydantic AI cannot infer it from a capability
+    # passed as an already-typed variable rather than constructed inline.
+    agent = Agent(_scripted(*responses), deps_type=type(None), capabilities=[guard])
+
+    @agent.tool_plain
+    def lookup(query: str) -> str:
+        seen.append({'query': query})
+        return f'result for {query}'
+
+    return agent, seen
+
+
+class TestArgumentGuard:
+    """The `guard` callable, evaluated before the tool runs."""
+
+    async def test_allow_runs_the_tool(self):
+        agent, seen = _agent_with(
+            ToolGuard(guard=lambda call: True),
+            _calls_lookup(query='weather'),
+            ModelResponse(parts=[TextPart(content='done')]),
+        )
+        result = await agent.run('hi')
+
+        assert result.output == 'done'
+        assert seen == [{'query': 'weather'}]
+
+    async def test_block_substitutes_a_refusal_and_skips_execution(self):
+        agent, seen = _agent_with(
+            ToolGuard(guard=lambda call: GuardResult.block('not allowed')),
+            _calls_lookup(query='secrets'),
+            ModelResponse(parts=[TextPart(content='understood')]),
+        )
+        result = await agent.run('hi')
+
+        assert seen == []
+        returns = [
+            part for message in result.all_messages() for part in message.parts if isinstance(part, ToolReturnPart)
+        ]
+        assert [part.content for part in returns] == ['not allowed']
+
+    async def test_bare_false_blocks_with_the_default_message(self):
+        with pytest.raises(SkipToolExecution) as exc_info:
+            await _guard_args(ToolGuard(guard=lambda call: False), {})
+
+        assert exc_info.value.result == 'Tool call blocked by tool guardrail.'
+
+    async def test_replace_substitutes_arguments(self):
+        def redact(call: ToolCallInfo) -> GuardResult:
+            return GuardResult.replace({**call.args, 'query': '[redacted]'})
+
+        agent, seen = _agent_with(
+            ToolGuard(guard=redact),
+            _calls_lookup(query='sk-live-000'),
+            ModelResponse(parts=[TextPart(content='done')]),
+        )
+        await agent.run('hi')
+
+        assert seen == [{'query': '[redacted]'}]
+
+    async def test_replace_with_a_non_mapping_is_a_user_error(self):
+        guard = ToolGuard[object](guard=lambda call: GuardResult.replace('not a mapping'))
+
+        with pytest.raises(UserError, match='must provide replacement arguments'):
+            await _guard_args(guard, {'query': 'x'})
+
+    async def test_retry_asks_the_model_to_redo_the_call(self):
+        guard = ToolGuard[object](guard=lambda call: GuardResult.retry('narrow the query'))
+
+        with pytest.raises(ModelRetry, match='narrow the query'):
+            await _guard_args(guard, {})
+
+    async def test_retry_without_a_message_uses_the_default(self):
+        guard = ToolGuard[object](guard=lambda call: GuardResult(action='retry', message=''))
+
+        with pytest.raises(ModelRetry, match='Tool call rejected by tool guardrail.'):
+            await _guard_args(guard, {})
+
+    async def test_approve_defers_the_call(self):
+        guard = ToolGuard[object](guard=lambda call: GuardResult.approve())
+
+        with pytest.raises(ApprovalRequired):
+            await _guard_args(guard, {})
+
+    async def test_approve_surfaces_the_call_as_a_deferred_request(self):
+        agent = Agent(
+            _scripted(_calls_lookup(query='rm -rf')),
+            capabilities=[ToolGuard(guard=lambda call: GuardResult.approve())],
+            output_type=[str, DeferredToolRequests],
+        )
+
+        @agent.tool_plain
+        def lookup(query: str) -> str:  # pragma: no cover - deferred before execution
+            return query
+
+        result = await agent.run('hi')
+
+        assert isinstance(result.output, DeferredToolRequests)
+        assert [call.tool_name for call in result.output.approvals] == ['lookup']
+
+
+class TestHumanInTheLoop:
+    """`approve` hands off to Pydantic AI's deferred-approval round trip."""
+
+    def _deferring_agent(self) -> tuple[Agent[None, str | DeferredToolRequests], list[str]]:
+        executed: list[str] = []
+        agent = Agent(
+            _scripted(_calls_lookup(query='prod'), ModelResponse(parts=[TextPart(content='done')])),
+            deps_type=type(None),
+            capabilities=[ToolGuard(guard=lambda call: GuardResult.approve())],
+            output_type=[str, DeferredToolRequests],
+        )
+
+        @agent.tool_plain
+        def lookup(query: str) -> str:
+            executed.append(query)
+            return f'result for {query}'
+
+        return agent, executed
+
+    async def test_approval_lets_the_call_through_on_resume(self):
+        agent, executed = self._deferring_agent()
+        deferred = await agent.run('hi')
+        assert isinstance(deferred.output, DeferredToolRequests)
+
+        resumed = await agent.run(
+            message_history=deferred.all_messages(),
+            deferred_tool_results=DeferredToolResults(approvals={'call-1': True}),
+        )
+
+        assert resumed.output == 'done'
+        assert executed == ['prod']
+
+    async def test_denial_reaches_the_model_without_running_the_tool(self):
+        agent, executed = self._deferring_agent()
+        deferred = await agent.run('hi')
+
+        resumed = await agent.run(
+            message_history=deferred.all_messages(),
+            deferred_tool_results=DeferredToolResults(approvals={'call-1': ToolDenied('not on a Friday')}),
+        )
+
+        assert resumed.output == 'done'
+        assert executed == []
+        returns = [
+            part for message in resumed.all_messages() for part in message.parts if isinstance(part, ToolReturnPart)
+        ]
+        assert [part.content for part in returns] == ['not on a Friday']
+
+    async def test_a_guard_may_still_block_an_approved_call(self):
+        """Approval clears `approve`, not the rest of the policy."""
+
+        def policy(call: ToolCallInfo) -> GuardResult:
+            return GuardResult.block('the window closed while you were deciding')
+
+        guard = ToolGuard[object](guard=policy)
+        ctx = _run_ctx(tool_call_approved=True)
+
+        with pytest.raises(SkipToolExecution) as exc_info:
+            await _guard_args(guard, {}, ctx=ctx)
+
+        assert exc_info.value.result == 'the window closed while you were deciding'
+
+    async def test_an_async_guard_approves_in_process_without_ending_the_run(self):
+        """The blocking-prompt shape: the guard awaits a human and the run never unwinds."""
+        asked: list[str] = []
+
+        async def ask_the_operator(call: ToolCallInfo) -> GuardResult:
+            asked.append(call.name)
+            await asyncio.sleep(0)  # stands in for a prompt, a websocket, a queue
+            return GuardResult.block('operator said no')
+
+        agent, seen = _agent_with(
+            ToolGuard(guard=ask_the_operator),
+            _calls_lookup(query='prod'),
+            ModelResponse(parts=[TextPart(content='understood')]),
+        )
+        result = await agent.run('hi')
+
+        assert result.output == 'understood'
+        assert asked == ['lookup']
+        assert seen == []
+
+    async def test_guard_receives_the_call_details(self):
+        seen: list[ToolCallInfo] = []
+
+        def record(call: ToolCallInfo) -> bool:
+            seen.append(call)
+            return True
+
+        await _guard_args(ToolGuard(guard=record), {'query': 'x'})
+
+        assert seen == [ToolCallInfo(name='lookup', args={'query': 'x'}, tool_call_id='call-1')]
+
+    async def test_guard_may_take_run_context(self):
+        async def policy(ctx: RunContext[object], call: ToolCallInfo) -> GuardResult:
+            assert ctx.deps is None
+            return GuardResult.block('denied')
+
+        with pytest.raises(SkipToolExecution):
+            await _guard_args(ToolGuard(guard=policy), {})
+
+    async def test_no_guard_passes_arguments_through(self):
+        assert await _guard_args(ToolGuard[object](), {'query': 'x'}) == {'query': 'x'}
+
+    async def test_tools_restricts_which_calls_are_guarded(self):
+        guard = ToolGuard[object](guard=lambda call: False, tools=['dangerous'])
+
+        assert await _guard_args(guard, {'query': 'x'}, tool_name='safe') == {'query': 'x'}
+        with pytest.raises(SkipToolExecution):
+            await _guard_args(guard, {}, tool_name='dangerous')
+
+
+class TestResultGuard:
+    """The `result_guard` callable, evaluated after the tool returns."""
+
+    async def test_allow_returns_the_result_unchanged(self):
+        assert await _guard_result(ToolGuard(result_guard=lambda info: True), 'clean') == 'clean'
+
+    async def test_block_replaces_the_result_with_the_refusal(self):
+        guard = ToolGuard[object](result_guard=lambda info: GuardResult.block('contained a secret'))
+
+        assert await _guard_result(guard, 'sk-live-000') == 'contained a secret'
+
+    async def test_block_without_a_message_uses_the_default(self):
+        assert await _guard_result(ToolGuard(result_guard=lambda info: False), 'x') == (
+            'Tool result blocked by tool guardrail.'
+        )
+
+    async def test_replace_substitutes_a_sanitized_result(self):
+        def scrub(info: ToolResultInfo) -> GuardResult:
+            return GuardResult.replace(str(info.result).replace('sk-live-000', '[redacted]'))
+
+        agent = Agent(
+            _scripted(_calls_lookup(query='key'), ModelResponse(parts=[TextPart(content='done')])),
+            capabilities=[ToolGuard(result_guard=scrub)],
+        )
+
+        @agent.tool_plain
+        def lookup(query: str) -> str:
+            return 'the key is sk-live-000'
+
+        result = await agent.run('hi')
+        returns = [
+            part for message in result.all_messages() for part in message.parts if isinstance(part, ToolReturnPart)
+        ]
+
+        assert [part.content for part in returns] == ['the key is [redacted]']
+
+    async def test_retry_asks_the_model_to_redo_the_call(self):
+        guard = ToolGuard[object](result_guard=lambda info: GuardResult.retry('try a narrower query'))
+
+        with pytest.raises(ModelRetry, match='try a narrower query'):
+            await _guard_result(guard, 'too much')
+
+    async def test_approve_is_rejected_after_execution(self):
+        guard = ToolGuard[object](result_guard=lambda info: GuardResult.approve())
+
+        with pytest.raises(UserError, match='the tool has already run'):
+            await _guard_result(guard, 'x')
+
+    async def test_result_guard_receives_the_call_and_the_result(self):
+        seen: list[ToolResultInfo] = []
+
+        def record(info: ToolResultInfo) -> bool:
+            seen.append(info)
+            return True
+
+        await _guard_result(ToolGuard(result_guard=record), {'rows': 2})
+
+        assert seen == [ToolResultInfo(name='lookup', args={}, tool_call_id='call-1', result={'rows': 2})]
+
+    async def test_no_result_guard_passes_the_result_through(self):
+        assert await _guard_result(ToolGuard[object](), 'x') == 'x'
+
+    async def test_tools_restricts_which_results_are_guarded(self):
+        guard = ToolGuard[object](result_guard=lambda info: False, tools=['dangerous'])
+
+        assert await _guard_result(guard, 'x', tool_name='safe') == 'x'
+        assert await _guard_result(guard, 'x', tool_name='dangerous') != 'x'
+
+
+class TestHiddenTools:
+    """`hidden` withholds tools from the model rather than refusing them."""
+
+    async def test_hidden_tools_are_not_offered_to_the_model(self):
+        offered: list[list[str]] = []
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            offered.append(sorted(tool.name for tool in info.function_tools))
+            return ModelResponse(parts=[TextPart(content='done')])
+
+        agent = Agent(FunctionModel(respond), capabilities=[ToolGuard(hidden=['danger'])])
+
+        @agent.tool_plain
+        def danger() -> str:  # pragma: no cover - hidden, so never called
+            return 'boom'
+
+        @agent.tool_plain
+        def safe() -> str:  # pragma: no cover - the model returns text instead
+            return 'ok'
+
+        await agent.run('hi')
+
+        assert offered == [['safe']]
+
+    async def test_no_hidden_tools_leaves_definitions_untouched(self):
+        tool_defs = [_tool_def('a'), _tool_def('b')]
+
+        assert await ToolGuard[object]().prepare_tools(_run_ctx(), tool_defs) == tool_defs
+
+
+class TestHardFailure:
+    """Raising from a guard propagates instead of substituting a result."""
+
+    async def test_tool_blocked_propagates(self):
+        def deny(call: ToolCallInfo) -> GuardResult:
+            raise ToolBlocked(call.name, 'policy violation')
+
+        with pytest.raises(ToolBlocked, match="Tool 'lookup' blocked: policy violation") as exc_info:
+            await _guard_args(ToolGuard(guard=deny), {})
+
+        assert exc_info.value.tool_name == 'lookup'
+        assert exc_info.value.reason == 'policy violation'
+        assert isinstance(exc_info.value, GuardrailError)
+
+    async def test_tool_blocked_without_a_reason(self):
+        error = ToolBlocked('lookup')
+
+        assert str(error) == "Tool 'lookup' blocked"
+        assert error.reason is None
+
+
+class TestTracing:
+    """Non-`allow` verdicts are recorded as spans, content only when opted in."""
+
+    async def test_block_span_carries_the_message_when_content_is_included(self):
+        tracer, exporter = _recording_tracer()
+        guard = ToolGuard[object](guard=lambda call: GuardResult.block('denied'))
+
+        with pytest.raises(SkipToolExecution):
+            await _guard_args(guard, {}, ctx=_run_ctx(trace_include_content=True, tracer=tracer))
+
+        span = _only_span(exporter)
+        assert span.name == 'guardrail blocked tool args'
+        assert dict(span.attributes or {}) == {
+            'guardrail.direction': 'tool args',
+            'guardrail.action': 'block',
+            'guardrail.tool': 'lookup',
+            'guardrail.message': 'denied',
+        }
+
+    async def test_block_span_omits_the_message_by_default(self):
+        tracer, exporter = _recording_tracer()
+        guard = ToolGuard[object](result_guard=lambda info: GuardResult.block('denied'))
+
+        await _guard_result(guard, 'x', ctx=_run_ctx(tracer=tracer))
+
+        span = _only_span(exporter)
+        assert span.name == 'guardrail blocked tool result'
+        assert dict(span.attributes or {}) == {
+            'guardrail.direction': 'tool result',
+            'guardrail.action': 'block',
+            'guardrail.tool': 'lookup',
+        }
+
+    async def test_redaction_span_carries_values_when_content_is_included(self):
+        tracer, exporter = _recording_tracer()
+        guard = ToolGuard[object](result_guard=lambda info: GuardResult.replace('clean'))
+
+        await _guard_result(guard, 'dirty', ctx=_run_ctx(trace_include_content=True, tracer=tracer))
+
+        span = _only_span(exporter)
+        assert span.name == 'guardrail redacted tool result'
+        assert dict(span.attributes or {}) == {
+            'guardrail.direction': 'tool result',
+            'guardrail.action': 'replace',
+            'guardrail.tool': 'lookup',
+            'guardrail.original': 'dirty',
+            'guardrail.replacement': 'clean',
+        }
+
+    async def test_redaction_span_omits_values_by_default(self):
+        tracer, exporter = _recording_tracer()
+        guard = ToolGuard[object](guard=lambda call: GuardResult.replace({'query': 'clean'}))
+
+        await _guard_args(guard, {'query': 'dirty'}, ctx=_run_ctx(tracer=tracer))
+
+        span = _only_span(exporter)
+        assert span.name == 'guardrail redacted tool args'
+        assert dict(span.attributes or {}) == {
+            'guardrail.direction': 'tool args',
+            'guardrail.action': 'replace',
+            'guardrail.tool': 'lookup',
+        }
+
+    async def test_approval_span_carries_no_content(self):
+        tracer, exporter = _recording_tracer()
+        guard = ToolGuard[object](guard=lambda call: GuardResult.approve())
+
+        with pytest.raises(ApprovalRequired):
+            await _guard_args(guard, {}, ctx=_run_ctx(trace_include_content=True, tracer=tracer))
+
+        span = _only_span(exporter)
+        assert span.name == 'guardrail deferred tool args'
+        assert dict(span.attributes or {}) == {
+            'guardrail.direction': 'tool args',
+            'guardrail.action': 'approve',
+            'guardrail.tool': 'lookup',
+        }
+
+
+class TestOrdering:
+    """`ToolGuard` sits innermost so it sees final arguments and raw results."""
+
+    def test_declares_innermost(self):
+        assert ToolGuard[object]().get_ordering() == CapabilityOrdering(position='innermost')
+
+    async def test_result_guard_runs_before_an_outer_capability_rewrites_the_result(self):
+        order: list[str] = []
+
+        class Truncating(ToolGuard[object]):
+            async def after_tool_execute(
+                self,
+                ctx: RunContext[object],
+                *,
+                call: ToolCallPart,
+                tool_def: ToolDefinition,
+                args: dict[str, Any],
+                result: Any,
+            ) -> Any:
+                order.append('outer')
+                return str(result)[:4]
+
+        def record(info: ToolResultInfo) -> bool:
+            order.append('guard')
+            assert info.result == 'the full untruncated result'
+            return True
+
+        agent = Agent(
+            _scripted(_calls_lookup(query='k'), ModelResponse(parts=[TextPart(content='done')])),
+            capabilities=[Truncating(), ToolGuard(result_guard=record)],
+        )
+
+        @agent.tool_plain
+        def lookup(query: str) -> str:
+            return 'the full untruncated result'
+
+        await agent.run('hi')
+
+        assert order == ['guard', 'outer']
+
+
+class TestSharedVerdicts:
+    """`approve` joins the shared vocabulary, and the other guards reject it."""
+
+    def test_approve_rejects_a_message(self):
+        with pytest.raises(UserError, match="action='approve'"):
+            GuardResult(action='approve', message='why')
+
+    def test_approve_rejects_a_replacement(self):
+        with pytest.raises(UserError, match="action='approve'"):
+            GuardResult(action='approve', replacement='x')
+
+    async def test_input_guard_rejects_approve(self):
+        from pydantic_ai_harness import InputGuard
+
+        agent = Agent(TestModel(), capabilities=[InputGuard(guard=lambda prompt: GuardResult.approve())])
+
+        with pytest.raises(UserError, match='approval applies to tool calls only'):
+            await agent.run('hi')
+
+    async def test_output_guard_rejects_approve(self):
+        from pydantic_ai_harness import OutputGuard
+
+        agent = Agent(TestModel(), capabilities=[OutputGuard(guard=lambda output: GuardResult.approve())])
+
+        with pytest.raises(UserError, match='approval applies to tool calls only'):
+            await agent.run('hi')

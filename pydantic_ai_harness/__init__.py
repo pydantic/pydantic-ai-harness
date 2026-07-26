@@ -14,6 +14,12 @@ if TYPE_CHECKING:
         OutputBlocked,
         OutputGuard,
         OutputGuardFunc,
+        ToolBlocked,
+        ToolCallInfo,
+        ToolGuard,
+        ToolGuardFunc,
+        ToolResultGuardFunc,
+        ToolResultInfo,
     )
     from .logfire import ManagedPrompt
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
@@ -32,6 +38,12 @@ __all__ = [
     'OutputGuard',
     'OutputGuardFunc',
     'Shell',
+    'ToolBlocked',
+    'ToolCallInfo',
+    'ToolGuard',
+    'ToolGuardFunc',
+    'ToolResultGuardFunc',
+    'ToolResultInfo',
 ]
 
 _GUARDRAIL_EXPORTS = {
@@ -43,6 +55,12 @@ _GUARDRAIL_EXPORTS = {
     'OutputBlocked',
     'OutputGuard',
     'OutputGuardFunc',
+    'ToolBlocked',
+    'ToolCallInfo',
+    'ToolGuard',
+    'ToolGuardFunc',
+    'ToolResultGuardFunc',
+    'ToolResultInfo',
 }
 
 
