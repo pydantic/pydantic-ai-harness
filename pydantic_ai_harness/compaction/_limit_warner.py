@@ -73,6 +73,14 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
     different windows. Mutually exclusive with `max_context_tokens`.
     """
 
+    context_window: int | None = field(default=None, kw_only=True)
+    """Window override in tokens. `None` resolves it from the request's model.
+
+    Unlike `fallback_context_window`, this applies whether or not resolution succeeds. Reach
+    for it when the registry is confidently wrong: a beta- or tier-gated window it records as
+    the maximum, or a self-hosted endpoint whose model id describes someone else's
+    deployment. Only consulted alongside `max_context_fraction`."""
+
     fallback_context_window: int = field(default=DEFAULT_CONTEXT_WINDOW, kw_only=True)
     """Window assumed when the request's model is not in the pricing registry.
 
@@ -100,6 +108,7 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
             self.max_context_tokens,
             self.max_context_fraction,
             self.fallback_context_window,
+            self.context_window,
             tokens_name='max_context_tokens',
             fraction_name='max_context_fraction',
         )
@@ -234,6 +243,7 @@ class LimitWarner(AbstractCapability[AgentDepsT]):
                 self.max_context_fraction,
                 request_context.model,
                 self.fallback_context_window,
+                self.context_window,
             )
             if context_limit is not None:  # pragma: no branch -- the kind is only active when one is set
                 w = self._build_context_warning(estimate_token_count(messages), context_limit)

@@ -12,14 +12,18 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.messages import (
+    CompactionPart,
     ModelMessage,
     ModelRequest,
     ModelRequestPart,
     ModelResponse,
     ModelResponsePart,
+    NativeToolCallPart,
+    NativeToolReturnPart,
     SystemPromptPart,
     TextContent,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
@@ -41,7 +45,18 @@ _CHARS_PER_TOKEN = 4
 
 
 def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
-    """Collect all text segments from a sequence of messages."""
+    """Collect all text segments from a sequence of messages.
+
+    Every part that carries text the provider is sent counts, including the ones a run only
+    grows under load: a retry prompt, an extended-thinking block, the result of a
+    provider-side tool. Leaving those out was tolerable while the budget was an absolute
+    `max_tokens` the caller had calibrated against this same estimator; a fraction of the
+    real window is only meaningful if the numerator measures the same request the
+    denominator describes.
+
+    `FilePart` is deliberately absent: its payload is binary, and counting its length as
+    characters would be a number with no relation to what the provider bills.
+    """
     segments: list[str] = []
     for msg in messages:
         if isinstance(msg, ModelRequest):
@@ -50,7 +65,10 @@ def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
                     segments.append(_user_prompt_text_for_counting(part))
                 elif isinstance(part, SystemPromptPart):
                     segments.append(part.content)
-                elif isinstance(part, ToolReturnPart):
+                else:
+                    # Everything else a request can carry is a retry prompt or a tool return
+                    # of some kind -- the tool-search and capability-load returns subclass
+                    # `ToolReturnPart` -- and all of them are sent.
                     segments.append(str(part.content))
         else:
             for part in msg.parts:
@@ -59,7 +77,31 @@ def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
                 elif isinstance(part, ToolCallPart):
                     segments.append(part.tool_name)
                     segments.append(str(part.args))
+                elif isinstance(part, (ThinkingPart, CompactionPart)):
+                    # A redacted thinking block carries a signature and no text.
+                    segments.append(part.content or '')
+                elif isinstance(part, NativeToolCallPart):
+                    segments.append(part.tool_name)
+                    segments.append(str(part.args))
+                elif isinstance(part, NativeToolReturnPart):
+                    segments.append(part.tool_name)
+                    segments.append(str(part.content))
+    segments.extend(_instructions_text(messages))
     return segments
+
+
+def _instructions_text(messages: Sequence[ModelMessage]) -> list[str]:
+    """The instructions this history would be sent with, counted once.
+
+    Every `ModelRequest` in a history carries the instructions in force when it was made, but
+    a request sends one set. Summing them would multiply a system prompt by the number of
+    turns, which is the opposite error from ignoring it. The most recent non-empty set is the
+    one that goes, mirroring how a model synthesizes instructions from history.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, ModelRequest) and msg.instructions:
+            return [msg.instructions]
+    return []
 
 
 def _user_prompt_text_for_counting(part: UserPromptPart) -> str:
@@ -125,6 +167,7 @@ def validate_token_trigger(
     max_tokens: int | None,
     max_fraction: float | None,
     fallback_context_window: int = DEFAULT_CONTEXT_WINDOW,
+    context_window: int | None = None,
     *,
     tokens_name: str = 'max_tokens',
     fraction_name: str = 'max_fraction',
@@ -143,6 +186,8 @@ def validate_token_trigger(
         raise ValueError(f'{fraction_name} must be greater than 0 and at most 1.')
     if fallback_context_window < 1:
         raise ValueError('fallback_context_window must be positive.')
+    if context_window is not None and context_window < 1:
+        raise ValueError('context_window must be positive.')
 
 
 def context_for_request(
@@ -169,6 +214,7 @@ def resolve_token_trigger(
     max_fraction: float | None,
     model: Model | str | None,
     fallback_context_window: int = DEFAULT_CONTEXT_WINDOW,
+    context_window: int | None = None,
 ) -> int | None:
     """Absolute token trigger for this request, or `None` when no token trigger is configured.
 
@@ -178,6 +224,12 @@ def resolve_token_trigger(
     `DEFAULT_CONTEXT_WINDOW`, because compacting earlier than necessary costs a summary while
     overestimating costs the whole request.
 
+    `context_window` overrides resolution entirely. The registry can be confidently wrong --
+    it records the maximum a model can be made to accept, which for a beta-gated or
+    tier-gated window is not what an ordinary request gets, and a self-hosted endpoint
+    reports an id whose registry entry describes someone else's deployment. `fallback_*`
+    cannot cover those: it only applies when resolution *fails*, and here it succeeds.
+
     Pass the model the request will actually be sent to. A capability may replace
     `ModelRequestContext.model` before the request leaves, so the run's model and the request's
     model are not always the same one.
@@ -186,8 +238,9 @@ def resolve_token_trigger(
         return max_tokens
     if max_fraction is None:
         return None
-    window = resolve_context_window(model) if model is not None else None
-    return max(1, int((window if window is not None else fallback_context_window) * max_fraction))
+    if context_window is None:
+        context_window = resolve_context_window(model) if model is not None else None
+    return max(1, int((context_window if context_window is not None else fallback_context_window) * max_fraction))
 
 
 # ---------------------------------------------------------------------------

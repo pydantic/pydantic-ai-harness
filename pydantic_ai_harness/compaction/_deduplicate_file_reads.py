@@ -68,10 +68,18 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     """Optional token-count trigger. When both triggers are ``None``, runs whenever invoked."""
 
     max_fraction: float | None = field(default=None, kw_only=True)
-    """Trigger when estimated tokens reach this fraction of the model's context window.
+    """Trigger when estimated tokens exceed this fraction of the model's context window.
 
     Resolved per request from the request's model, so one setting behaves correctly on any
     model. Mutually exclusive with `max_tokens`."""
+
+    context_window: int | None = field(default=None, kw_only=True)
+    """Window override in tokens. `None` resolves it from the request's model.
+
+    Unlike `fallback_context_window`, this applies whether or not resolution succeeds. Reach
+    for it when the registry is confidently wrong: a beta- or tier-gated window it records as
+    the maximum, or a self-hosted endpoint whose model id describes someone else's
+    deployment. Only consulted alongside `max_fraction`."""
 
     fallback_context_window: int = field(default=DEFAULT_CONTEXT_WINDOW, kw_only=True)
     """Window assumed when the request's model is not in the pricing registry.
@@ -89,7 +97,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError('max_messages must be positive.')
-        validate_token_trigger(self.max_tokens, self.max_fraction, self.fallback_context_window)
+        validate_token_trigger(self.max_tokens, self.max_fraction, self.fallback_context_window, self.context_window)
 
     async def compact(
         self,
@@ -125,7 +133,11 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
         request_ctx = context_for_request(ctx, request_context)
         if self.max_messages is not None or self.max_tokens is not None or self.max_fraction is not None:
             token_trigger = resolve_token_trigger(
-                self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window
+                self.max_tokens,
+                self.max_fraction,
+                request_ctx.model,
+                self.fallback_context_window,
+                self.context_window,
             )
             if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
                 return request_context

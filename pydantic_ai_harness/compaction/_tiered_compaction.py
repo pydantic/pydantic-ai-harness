@@ -76,6 +76,14 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     different windows. Mutually exclusive with `target_tokens`.
     """
 
+    context_window: int | None = field(default=None, kw_only=True)
+    """Window override in tokens. `None` resolves it from the request's model.
+
+    Unlike `fallback_context_window`, this applies whether or not resolution succeeds. Reach
+    for it when the registry is confidently wrong: a beta- or tier-gated window it records as
+    the maximum, or a self-hosted endpoint whose model id describes someone else's
+    deployment. Only consulted alongside `target_fraction`."""
+
     fallback_context_window: int = field(default=DEFAULT_CONTEXT_WINDOW, kw_only=True)
     """Window assumed when the model is not in the pricing registry.
 
@@ -98,6 +106,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             self.target_tokens,
             self.target_fraction,
             self.fallback_context_window,
+            self.context_window,
             tokens_name='target_tokens',
             fraction_name='target_fraction',
         )
@@ -116,7 +125,9 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
 
     def _target(self, model: Model | str | None) -> int:
         """Absolute token target, resolved against *model* when expressed as a fraction."""
-        target = resolve_token_trigger(self.target_tokens, self.target_fraction, model, self.fallback_context_window)
+        target = resolve_token_trigger(
+            self.target_tokens, self.target_fraction, model, self.fallback_context_window, self.context_window
+        )
         if target is None:  # pragma: no cover -- __post_init__ rejects both being unset
             raise ValueError('One of target_tokens or target_fraction must be set.')
         return target

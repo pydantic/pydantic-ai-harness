@@ -74,6 +74,37 @@ agent = Agent(
 
 It is only consulted when resolution fails, so it costs nothing on a model the registry does know.
 
+### When the window resolves to the wrong number
+
+Resolution can also succeed and be wrong, which `fallback_context_window` cannot help with -- it
+applies only when resolution fails. Two cases:
+
+- The registry records the maximum a model can be made to accept. Where that maximum is gated --
+  a beta header, a pricing tier -- an ordinary request gets less, and a fraction of the recorded
+  number never triggers before the provider rejects the request.
+- A self-hosted or proxied endpoint reports a model id whose registry entry describes someone
+  else's deployment.
+
+`context_window` overrides resolution outright, on every capability that takes a fraction:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction
+
+agent = Agent(
+    'openai:gpt-4o',  # served by a local endpoint with a smaller window than the registry records
+    capabilities=[SummarizingCompaction(max_fraction=0.9, context_window=32_000)],
+)
+```
+
+### What counts toward the fraction
+
+The estimator counts every part that is sent: prompts, system prompts, tool calls and their
+results, retry prompts, extended-thinking blocks, provider-side tool results, and the
+instructions, once. It is a ~4-characters-per-token approximation, not a tokenizer; pass
+`tokenizer=` to any strategy to measure with the real one. `FilePart` is not counted -- its
+payload is binary, and its length in characters would mean nothing.
+
 ## Reporting usage: `ContextUsageMonitor`
 
 A strategy knows when to act but says nothing about how close the run is to the limit, so an application that wants to show `context: 73%` ends up re-counting the history and guessing the denominator. `ContextUsageMonitor` does neither -- it reuses the same estimator and the same resolved window, and only observes:

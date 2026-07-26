@@ -57,16 +57,24 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
     """
 
     max_messages: int | None = None
-    """Trigger clearing when message count reaches this value. ``None`` disables."""
+    """Trigger clearing when message count exceeds this value. ``None`` disables."""
 
     max_tokens: int | None = None
-    """Trigger clearing when estimated token count reaches this value. ``None`` disables."""
+    """Trigger clearing when estimated token count exceeds this value. ``None`` disables."""
 
     max_fraction: float | None = field(default=None, kw_only=True)
-    """Trigger when estimated tokens reach this fraction of the model's context window.
+    """Trigger when estimated tokens exceed this fraction of the model's context window.
 
     Resolved per request from the request's model, so one setting behaves correctly on any
     model. Mutually exclusive with `max_tokens`."""
+
+    context_window: int | None = field(default=None, kw_only=True)
+    """Window override in tokens. `None` resolves it from the request's model.
+
+    Unlike `fallback_context_window`, this applies whether or not resolution succeeds. Reach
+    for it when the registry is confidently wrong: a beta- or tier-gated window it records as
+    the maximum, or a self-hosted endpoint whose model id describes someone else's
+    deployment. Only consulted alongside `max_fraction`."""
 
     fallback_context_window: int = field(default=DEFAULT_CONTEXT_WINDOW, kw_only=True)
     """Window assumed when the request's model is not in the pricing registry.
@@ -104,7 +112,7 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
             raise ValueError('At least one of max_messages, max_tokens, or max_fraction must be set.')
         if self.max_messages is not None and self.max_messages < 1:
             raise ValueError('max_messages must be positive.')
-        validate_token_trigger(self.max_tokens, self.max_fraction, self.fallback_context_window)
+        validate_token_trigger(self.max_tokens, self.max_fraction, self.fallback_context_window, self.context_window)
         if self.keep_pairs < 0:
             raise ValueError('keep_pairs must be non-negative.')
         if self.min_clear_tokens is not None and self.min_clear_tokens < 0:
@@ -147,7 +155,7 @@ class ClearToolResults(AbstractCapability[AgentDepsT]):
         messages: list[ModelMessage] = list(request_context.messages)
         request_ctx = context_for_request(ctx, request_context)
         token_trigger = resolve_token_trigger(
-            self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window
+            self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window, self.context_window
         )
         if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
             return request_context

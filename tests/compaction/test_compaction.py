@@ -2136,14 +2136,57 @@ class TestHelperBranchCoverage:
         ]
         assert [p.content for p in _extract_system_prompts(msgs)] == ['a', 'b']
 
-    def test_collect_and_format_skip_unknown_part_types(self):
+    def test_a_retry_and_a_thinking_block_are_counted(self):
+        """Both are sent to the provider, and a run under load is where they appear."""
         from pydantic_ai.messages import RetryPromptPart, ThinkingPart
 
         msgs: list[ModelMessage] = [
-            ModelRequest(parts=[RetryPromptPart(content='retry')]),
-            ModelResponse(parts=[ThinkingPart(content='think')]),
+            ModelRequest(parts=[RetryPromptPart(content='r' * 400)]),
+            ModelResponse(parts=[ThinkingPart(content='t' * 400)]),
         ]
-        # Unknown part types contribute no countable text but exercise the skip branches.
+        assert estimate_token_count(msgs) == 200
+        # `_format_messages` renders history for a summarizer prompt, which is a different
+        # question from what the request costs; a retry and a thinking block stay out of it.
+        assert _format_messages(msgs) == ''
+
+    def test_a_provider_side_tool_call_and_its_result_are_counted(self):
+        """A web search runs on the provider's side and its result still lands in the context."""
+        from pydantic_ai.messages import NativeToolCallPart, NativeToolReturnPart
+
+        msgs: list[ModelMessage] = [
+            ModelResponse(
+                parts=[
+                    NativeToolCallPart(tool_name='web_search', args={'q': 'x' * 200}, tool_call_id='c1'),
+                    NativeToolReturnPart(tool_name='web_search', content='r' * 200, tool_call_id='c1'),
+                ]
+            )
+        ]
+
+        assert estimate_token_count(msgs) > 100
+
+    def test_instructions_are_counted_once_however_many_turns_carry_them(self):
+        """A request sends one set; summing them would multiply a system prompt by the turn count."""
+        instructions = 'i' * 400
+        one_turn: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content='')], instructions=instructions)]
+        four_turns: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='')], instructions=instructions) for _ in range(4)
+        ]
+
+        assert estimate_token_count(one_turn) == 100
+        assert estimate_token_count(four_turns) == 100
+
+    def test_a_history_with_no_instructions_counts_none(self):
+        msgs: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content='')])]
+
+        assert estimate_token_count(msgs) == 0
+
+    def test_a_binary_part_is_not_counted_as_characters(self):
+        """`FilePart` carries bytes; its length in characters would mean nothing."""
+        from pydantic_ai.messages import BinaryContent, FilePart
+
+        msgs: list[ModelMessage] = [
+            ModelResponse(parts=[FilePart(content=BinaryContent(data=b'\x00' * 4_000, media_type='image/png'))])
+        ]
         assert estimate_token_count(msgs) == 0
         assert _format_messages(msgs) == ''
 

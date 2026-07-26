@@ -5,10 +5,19 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
@@ -27,7 +36,11 @@ from pydantic_ai_harness.compaction import (
     resolve_context_window,
 )
 from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW, split_model_id
-from pydantic_ai_harness.compaction._shared import resolve_token_trigger, validate_token_trigger
+from pydantic_ai_harness.compaction._shared import (
+    estimate_token_count,
+    resolve_token_trigger,
+    validate_token_trigger,
+)
 
 try:
     from logfire.testing import CaptureLogfire
@@ -76,6 +89,46 @@ def _history(turns: int, filler: str = 'x' * 400) -> list[ModelMessage]:
         messages.append(ModelRequest(parts=[UserPromptPart(content=f'{index} {filler}')]))
         messages.append(ModelResponse(parts=[TextPart(content=f'reply {index} {filler}')]))
     return messages
+
+
+_CLEARED = '[tool result cleared]'
+_SUPERSEDED = '[superseded file read]'
+
+
+def _tool_history(
+    calls: int, tool_name: str = 'search', path: str | None = None, filler: str = 'x' * 400
+) -> list[ModelMessage]:
+    """A history of completed tool calls, which is what the clearing strategies act on."""
+    messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content='go')])]
+    for index in range(calls):
+        args = {'path': path} if path is not None else {'q': f'{index}'}
+        messages.append(
+            ModelResponse(parts=[ToolCallPart(tool_name=tool_name, args=args, tool_call_id=f'call-{index}')])
+        )
+        messages.append(
+            ModelRequest(
+                parts=[
+                    ToolReturnPart(
+                        tool_name=tool_name, content=f'result {index} {filler}', tool_call_id=f'call-{index}'
+                    )
+                ]
+            )
+        )
+    return messages
+
+
+def _tool_return_contents(messages: list[ModelMessage]) -> list[str]:
+    return [
+        str(part.content)
+        for message in messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, ToolReturnPart)
+    ]
+
+
+def _message_text(message: ModelMessage) -> str:
+    return ' '.join(str(getattr(part, 'content', '')) for part in message.parts)
 
 
 def _fixed_window(monkeypatch: pytest.MonkeyPatch, module: str, window: int | None) -> None:
@@ -262,6 +315,16 @@ class TestFractionTriggers:
 
         assert await capability.before_model_request(_ctx(), request_context) is request_context
 
+    async def test_clear_tool_results_clears_when_over_the_fraction(self, monkeypatch: pytest.MonkeyPatch):
+        """Asserting the negative alone cannot tell a working trigger from one that never fires."""
+        _fixed_window(monkeypatch, '_shared', 1_000)
+        capability: ClearToolResults[None] = ClearToolResults(max_fraction=0.1, keep_pairs=1)
+        request_context = _request_context(_tool_history(4))
+
+        await capability.before_model_request(_ctx(), request_context)
+
+        assert _tool_return_contents(request_context.messages).count(_CLEARED) == 3
+
     async def test_deduplicate_file_reads_gates_on_a_fraction(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1_000_000)
         capability: DeduplicateFileReads[None] = DeduplicateFileReads(file_key=lambda call: None, max_fraction=0.9)
@@ -269,9 +332,42 @@ class TestFractionTriggers:
 
         assert await capability.before_model_request(_ctx(), request_context) is request_context
 
+    async def test_deduplicate_file_reads_drops_stale_reads_over_the_fraction(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _fixed_window(monkeypatch, '_shared', 1_000)
+        capability: DeduplicateFileReads[None] = DeduplicateFileReads(
+            file_key=lambda call: str(call.args.get('path')) if isinstance(call.args, dict) else None,
+            max_fraction=0.1,
+        )
+        request_context = _request_context(_tool_history(3, tool_name='read_file', path='a.py'))
+
+        await capability.before_model_request(_ctx(), request_context)
+
+        contents = _tool_return_contents(request_context.messages)
+        assert contents.count(_SUPERSEDED) == 2, 'only the newest read of a.py should survive'
+
     def test_summarizing_compaction_accepts_a_fraction_alone(self):
         capability: SummarizingCompaction[None] = SummarizingCompaction(max_fraction=0.9)
         assert capability.max_fraction == 0.9
+
+    async def test_summarizing_compaction_summarizes_when_over_the_fraction(self, monkeypatch: pytest.MonkeyPatch):
+        """The headline example of the PR, and the one whose trigger nothing exercised."""
+        _fixed_window(monkeypatch, '_shared', 1_000)
+        capability: SummarizingCompaction[None] = SummarizingCompaction(
+            model='test:m', max_fraction=0.1, keep_messages=2, incremental=False
+        )
+        request_context = _request_context(_history(6))
+
+        # Stand in for the summarizing sub-agent, as the sibling compaction tests do.
+        summary = AsyncMock()
+        summary.output = 'a summary'
+        with patch('pydantic_ai.Agent') as agent_class:
+            agent_class.return_value.run = AsyncMock(return_value=summary)
+            await capability.before_model_request(_ctx(), request_context)
+
+        assert len(request_context.messages) < 12
+        assert any('a summary' in _message_text(message) for message in request_context.messages)
 
     def test_a_fraction_alone_satisfies_the_trigger_requirement(self):
         capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.9)
@@ -422,6 +518,22 @@ _FALLBACK_FACTORIES: list[tuple[str, _FallbackFactory]] = [
 ]
 """Every capability that resolves a fraction, so the guard below cannot miss a new one."""
 
+_OVERRIDE_FACTORIES: list[tuple[str, _FallbackFactory]] = [
+    ('SlidingWindow', lambda w: SlidingWindow(max_fraction=0.9, context_window=w)),
+    ('SummarizingCompaction', lambda w: SummarizingCompaction(max_fraction=0.9, context_window=w)),
+    ('ClearToolResults', lambda w: ClearToolResults(max_fraction=0.9, context_window=w)),
+    (
+        'DeduplicateFileReads',
+        lambda w: DeduplicateFileReads(file_key=lambda call: None, max_fraction=0.9, context_window=w),
+    ),
+    (
+        'TieredCompaction',
+        lambda w: TieredCompaction(tiers=[SlidingWindow(max_tokens=1)], target_fraction=0.9, context_window=w),
+    ),
+    ('LimitWarner', lambda w: LimitWarner(max_context_fraction=0.9, context_window=w)),
+]
+"""The same registry for the override, so a capability cannot grow a fraction without one."""
+
 
 class TestStrategyFallbackWindow:
     """A window the registry cannot resolve is the caller's to supply, not just the monitor's."""
@@ -461,6 +573,72 @@ class TestStrategyFallbackWindow:
     def test_every_strategy_rejects_a_non_positive_fallback(self, name: str, factory: _FallbackFactory):
         factory(1)
         with pytest.raises(ValueError, match='fallback_context_window must be positive'):
+            factory(0)
+
+
+class TestTriggerBoundary:
+    """`exceeds` is strict, and the docstrings now say so."""
+
+    async def test_a_history_exactly_at_the_trigger_does_not_compact(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', 1_000)
+        messages = _history(3)
+        exact = estimate_token_count(messages)
+        capability: SlidingWindow[None] = SlidingWindow(max_fraction=1.0, keep_messages=2, context_window=exact)
+        request_context = _request_context(messages)
+
+        assert await capability.before_model_request(_ctx(), request_context) is request_context
+        assert len(request_context.messages) == 6
+
+    async def test_one_token_over_the_trigger_compacts(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', 1_000)
+        messages = _history(3)
+        capability: SlidingWindow[None] = SlidingWindow(
+            max_fraction=1.0, keep_messages=2, context_window=estimate_token_count(messages) - 1
+        )
+        request_context = _request_context(messages)
+
+        await capability.before_model_request(_ctx(), request_context)
+
+        assert len(request_context.messages) < 6
+
+
+class TestStrategyWindowOverride:
+    """A window the registry resolves *wrongly* is the caller's to correct.
+
+    `fallback_context_window` cannot: it is consulted only when resolution fails, and a
+    beta-gated maximum or a self-hosted endpoint resolves to a confident wrong number.
+    """
+
+    async def test_the_override_beats_a_resolved_window(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', 1_000_000)
+        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.1, keep_messages=2, context_window=1_000)
+        request_context = _request_context(_history(6))
+
+        await capability.before_model_request(_ctx(), request_context)
+
+        assert len(request_context.messages) < 12, 'the resolved 1M window would not have triggered'
+
+    async def test_the_override_beats_the_fallback_too(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', None)
+        capability: SlidingWindow[None] = SlidingWindow(
+            max_fraction=0.1, keep_messages=2, context_window=10_000_000, fallback_context_window=1_000
+        )
+        request_context = _request_context(_history(6))
+
+        await capability.before_model_request(_ctx(), request_context)
+
+        assert len(request_context.messages) == 12, 'the fallback would have triggered'
+
+    def test_the_override_is_ignored_without_a_fraction(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, '_shared', 1_000_000)
+        assert resolve_token_trigger(500, None, _FakeModel(), context_window=10) == 500  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize(('name', 'factory'), _OVERRIDE_FACTORIES, ids=[n for n, _ in _OVERRIDE_FACTORIES])
+    def test_every_strategy_takes_the_override_and_rejects_a_non_positive_one(
+        self, name: str, factory: _FallbackFactory
+    ):
+        factory(1)
+        with pytest.raises(ValueError, match='context_window must be positive'):
             factory(0)
 
 
@@ -748,6 +926,19 @@ class TestCompactNowSpan:
         assert attrs['gen_ai.conversation.compacted'] is True
         assert attrs['compaction.strategy'] == 'SlidingWindow'
         assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
+
+    async def test_the_span_is_measured_with_the_tokenizer_it_was_given(self, capfire: CaptureLogfire):
+        """Without it the manual path reports the heuristic where the in-run path reported a real count."""
+        from opentelemetry.trace import get_tracer
+
+        strategy: SlidingWindow[None] = SlidingWindow(max_tokens=1, keep_messages=2)
+        messages = _history(4)
+        characters = sum(len(_message_text(message)) for message in messages)
+
+        await compact_now(strategy, messages, model=TestModel(), tracer=get_tracer('test'), tokenizer=len)
+
+        attributes = self._spans(capfire)[0]['attributes']
+        assert attributes['compaction.tokens_before'] == characters, 'the 4-characters heuristic was used instead'
 
     async def test_no_span_when_the_history_is_unchanged(self, capfire: CaptureLogfire):
         from opentelemetry.trace import get_tracer
