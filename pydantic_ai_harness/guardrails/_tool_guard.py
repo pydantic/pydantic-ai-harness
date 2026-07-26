@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
@@ -279,14 +280,14 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
         if self.guard is None or not self._guards(call.tool_name):
             return args
 
-        # A read-only view: the dict passed here is the one the tool is about to be
-        # called with, so a guard mutating it would change the call while reporting
-        # `allow`, bypassing both the `replace` contract and its span. The view is
-        # shallow -- a nested `call.args['opts']['path'] = ...` still lands on the
-        # real object. Deep-copying every call to close that would cost more than it
-        # buys against a guard that is the caller's own code; `replace` is the
-        # supported way to change a call, and it is the one that gets a span.
-        info = ToolCallInfo(name=call.tool_name, args=MappingProxyType(args), tool_call_id=call.tool_call_id)
+        # A read-only view over a copy. The dict passed here is the one the tool is about to
+        # be called with, so a guard mutating it would change the call while reporting
+        # `allow`, bypassing both the `replace` contract and its span. The proxy alone stops
+        # that only at the top level: `call.args['opts']['path'] = ...` reaches through it to
+        # the real object. Validated arguments come from the tool's own schema, so they are
+        # small and copyable; `replace` stays the one way to change a call, and the one that
+        # gets a span.
+        info = ToolCallInfo(name=call.tool_name, args=MappingProxyType(deepcopy(args)), tool_call_id=call.tool_call_id)
         verdict = await evaluate(self.guard, ctx, info)
         match verdict.action:
             case 'allow':
@@ -378,13 +379,18 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
         """
         assert self.result_guard is not None
         info = ToolResultInfo(
-            name=call.tool_name, args=MappingProxyType(args), tool_call_id=call.tool_call_id, result=content
+            name=call.tool_name, args=MappingProxyType(deepcopy(args)), tool_call_id=call.tool_call_id, result=content
         )
         verdict = await evaluate(self.result_guard, ctx, info)
         match verdict.action:
             case 'allow':
                 return None
-            case 'block' | 'retry':
+            case 'retry':
+                # The tool already failed, but `retry` still means retry: collapsing it into a
+                # replacement message would hand the model a failed result where it was asked
+                # to redo the call, and skip the run's retry accounting with it.
+                raise ModelRetry(verdict.message or _DEFAULT_RETRY_MESSAGE)
+            case 'block':
                 message = verdict.message or _DEFAULT_RESULT_BLOCK_MESSAGE
                 trace_block(ctx, direction=_RESULT_DIRECTION, message=message, tool_name=call.tool_name)
                 return message
@@ -419,7 +425,7 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
             return result
 
         info = ToolResultInfo(
-            name=call.tool_name, args=MappingProxyType(args), tool_call_id=call.tool_call_id, result=result
+            name=call.tool_name, args=MappingProxyType(deepcopy(args)), tool_call_id=call.tool_call_id, result=result
         )
         verdict = await evaluate(self.result_guard, ctx, info)
         match verdict.action:

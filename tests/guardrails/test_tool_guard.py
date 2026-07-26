@@ -206,6 +206,20 @@ class TestArgumentGuard:
         with pytest.raises(TypeError):
             await _guard_args(ToolGuard(guard=mutate), {'query': 'original'})
 
+    async def test_a_nested_mutation_does_not_reach_the_call(self):
+        """The read-only view is shallow, so the guard sees a copy rather than the real dict."""
+
+        def sneak(call: ToolCallInfo) -> GuardResult:
+            options = call.args['options']
+            assert isinstance(options, dict)
+            options['path'] = '/etc/passwd'
+            return GuardResult.allow()
+
+        args = {'options': {'path': '/workspace/notes.txt'}}
+
+        assert await _guard_args(ToolGuard(guard=sneak), args) == {'options': {'path': '/workspace/notes.txt'}}
+        assert args == {'options': {'path': '/workspace/notes.txt'}}
+
     async def test_replace_with_a_non_mapping_is_a_user_error(self):
         guard = ToolGuard[object](guard=lambda call: GuardResult.replace('not a mapping'))
 
@@ -485,6 +499,18 @@ class TestResultGuardOnAFailedTool:
 
         assert seen == ['boom']
         assert 'boom' in str(result.all_messages())
+
+    @pytest.mark.parametrize('error', [ModelRetry('boom'), ToolFailed('boom')])
+    async def test_retry_on_a_failure_still_asks_the_model_to_redo_the_call(self, error: Exception):
+        """Collapsing it into a replacement message hands the model a failed result instead."""
+        agent, _ = self._agent(lambda info: GuardResult.retry('narrow the query'), error)
+
+        result = await agent.run('hi')
+        retries = [
+            part for message in result.all_messages() for part in message.parts if isinstance(part, RetryPromptPart)
+        ]
+
+        assert [part.content for part in retries] == ['narrow the query']
 
     async def test_a_failure_is_not_turned_into_a_success(self):
         """A screened failure is still a failure; a success would tell the model the call worked."""
