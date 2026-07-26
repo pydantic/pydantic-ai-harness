@@ -150,6 +150,12 @@ class TestSecretRedaction:
 
         assert result.replacement == r'k \g<0>-GONE'
 
+    def test_a_custom_pattern_is_not_judged_by_a_built_in_validator(self):
+        """A validator belongs to the pattern it was written for, not to its name."""
+        detector = personal_data(only=['email'], extra={'credit_card': r'CARD-\d{4}'})
+
+        assert detector('ref CARD-1234').replacement == 'ref [redacted:credit_card]'
+
     def test_extra_may_not_silently_replace_a_built_in(self):
         with pytest.raises(UserError, match='would replace the built-in'):
             secrets(extra={'openai_key': 'x'})
@@ -182,8 +188,8 @@ class TestPersonalData:
         'text',
         ['revenue for 2021 2022 2023 2024 was flat', 'ports 8080 8081 8082 8083 are open'],
     )
-    def test_four_digit_groups_are_not_a_card_number(self, text: str):
-        """The Luhn check is what separates a card from four consecutive years or ports."""
+    def test_luhn_discards_digit_runs_that_are_not_cards(self, text: str):
+        """It discards most of them. A run that satisfies the checksum by chance is still redacted."""
         assert redact_personal_data(text).action == 'allow'
 
     def test_a_spaced_iban_keeps_its_own_label(self):

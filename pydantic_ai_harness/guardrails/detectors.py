@@ -97,8 +97,9 @@ DEFAULT_PII_PATTERNS: Mapping[str, str] = {
     # whatever is left over, so requiring groups of four drops it.
     'iban': r'\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]){10,30}\b',
     # 4-4-4-4 and the 4-6-5 grouping American Express uses. Every match is
-    # checked against the Luhn algorithm, which is what keeps four consecutive
-    # years or port numbers from reading as a card.
+    # checked against the Luhn algorithm, which discards most runs of digits
+    # that are not card numbers. Not all of them: roughly one in ten runs of
+    # four consecutive years satisfies the checksum by chance.
     'credit_card': r'\b(?:\d{4}[ -]?\d{6}[ -]?\d{5}|(?:\d{4}[ -]?){3}\d{4})\b',
     'us_ssn': r'\b\d{3}[- ]\d{2}[- ]\d{4}\b',
     # The local part is bounded and preceded by a negative lookbehind: an
@@ -131,8 +132,14 @@ _VALIDATORS: Mapping[str, Callable[[str], bool]] = {'credit_card': _luhn}
 
 def _compile(
     patterns: Mapping[str, str], only: Iterable[str] | None, extra: Mapping[str, str] | None
-) -> tuple[tuple[str, re.Pattern[str]], ...]:
-    """The patterns a detector will run, as `(name, compiled)` pairs."""
+) -> tuple[tuple[str, re.Pattern[str], Callable[[str], bool] | None], ...]:
+    """The patterns a detector will run, as `(name, compiled, validator)` triples.
+
+    A validator belongs to the built-in pattern it was written for, not to its
+    name. A custom pattern supplied under a built-in name -- possible once
+    `only` has dropped that built-in -- would otherwise be judged by a check
+    written for different text and silently never match.
+    """
     selected = dict(patterns) if only is None else {}
     if only is not None:
         for name in only:
@@ -149,16 +156,21 @@ def _compile(
         selected.update(extra)
     if not selected:
         raise UserError('This detector was given no patterns, so it would never match anything.')
-    return tuple((name, re.compile(pattern)) for name, pattern in selected.items())
+    overridden = set(extra or ())
+    return tuple(
+        (name, re.compile(pattern), None if name in overridden else _VALIDATORS.get(name))
+        for name, pattern in selected.items()
+    )
 
 
-def _redactor(compiled: tuple[tuple[str, re.Pattern[str]], ...], placeholder: str) -> TextDetector:
+def _redactor(
+    compiled: tuple[tuple[str, re.Pattern[str], Callable[[str], bool] | None], ...], placeholder: str
+) -> TextDetector:
     """A detector that rewrites every match and allows text with none."""
 
     def detect(text: str) -> GuardResult:
         cleaned = text
-        for name, pattern in compiled:
-            valid = _VALIDATORS.get(name)
+        for name, pattern, valid in compiled:
             substitution = placeholder.replace('{name}', name)
 
             def replace(match: re.Match[str], valid: Callable[[str], bool] | None = valid, out: str = substitution):
