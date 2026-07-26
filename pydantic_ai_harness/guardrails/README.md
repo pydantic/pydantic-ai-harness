@@ -135,8 +135,13 @@ def stay_in_the_workspace(call: ToolCallInfo) -> GuardResult:
 
 
 def scrub_secrets(info: ToolResultInfo) -> GuardResult:
-    cleaned = SECRET_RE.sub('[redacted]', str(info.result))
-    return GuardResult.replace(cleaned) if cleaned != str(info.result) else GuardResult.allow()
+    # Text only. `str()` on a structured result or a `ToolReturn` yields a repr, and
+    # replacing it with that string would change the result's type -- but only on the
+    # calls where the pattern happened to match.
+    if not isinstance(info.result, str):
+        return GuardResult.allow()
+    cleaned = SECRET_RE.sub('[redacted]', info.result)
+    return GuardResult.replace(cleaned) if cleaned != info.result else GuardResult.allow()
 
 
 agent = Agent(
@@ -162,8 +167,8 @@ The outcomes map onto Pydantic AI control flow rather than a parallel mechanism:
 |---|---|---|
 | **allow** | run the tool | return the result unchanged |
 | **block** | skip execution; the refusal message becomes the tool result (`SkipToolExecution`) | the refusal message replaces the result |
-| **replace** | run the tool with substituted arguments (a mapping) | substitute a sanitized result |
-| **retry** | ask the model to redo the call (`ModelRetry`) | ask the model to redo the call (`ModelRetry`) |
+| **replace** | run the tool with substituted arguments (a mapping); the call recorded in the message history keeps the model's original arguments | substitute a sanitized result |
+| **retry** | ask the model to redo the call (`ModelRetry`) | ask the model to redo the call (`ModelRetry`); the tool has already run once, so its side effects have happened and the retry runs it again |
 | **approve** | defer the call for human approval (`ApprovalRequired`) | -- (the tool has already run) |
 
 `block` is graceful on both stages: the agent sees the refusal text where it expected a tool result, so it can explain the refusal or try another approach. To fail the run instead, raise `ToolBlocked` from the guard.
@@ -243,7 +248,15 @@ ToolGuard(
 
 `hidden` is not a blocklist with a nicer name. A hidden tool is dropped from the definitions sent to the model, so it costs no tokens and the model never attempts it; a blocked tool stays visible and the model learns it was refused. Hiding takes a static list of names -- for policy that depends on `deps` or on the arguments, use `guard`.
 
-Output tools do not fire tool-execution hooks in Pydantic AI, so a tool guard never sees the call that produces the agent's structured output. Screen that with `OutputGuard`.
+### What a tool guard does not see
+
+Three kinds of call never reach the execution hooks, so neither `guard` nor `result_guard` is consulted for them:
+
+- **Output tools**, which produce the agent's structured output. Screen that with `OutputGuard`.
+- **External and deferred tools**, which the run hands back to your application in `DeferredToolRequests` instead of executing. Pydantic AI rejects them before any execution hook runs, so a guard cannot vet the arguments -- your application is the thing that executes them, and the check belongs there. `hidden` *does* cover them, since it works on the tool definitions.
+- **Provider-side builtin tools** such as web search, which run inside the provider and come back as builtin call/return parts rather than tool executions.
+
+A `ToolGuard` is a control over tools this run executes. For the ones it does not, `hidden` is the lever that still applies.
 
 ## Streaming
 

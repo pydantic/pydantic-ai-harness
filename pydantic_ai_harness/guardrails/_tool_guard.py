@@ -24,13 +24,21 @@ the run's deferred approval flow.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
-from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, SkipToolExecution, UserError
+from pydantic_ai.exceptions import (
+    ApprovalRequired,
+    ModelRetry,
+    SkipToolExecution,
+    ToolFailedError,
+    ToolRetryError,
+    UserError,
+)
 from pydantic_ai.tools import AgentDepsT, RunContext
 from typing_extensions import assert_never
 
@@ -43,6 +51,7 @@ from pydantic_ai_harness.guardrails._shared import (
 )
 
 if TYPE_CHECKING:
+    from pydantic_ai.capabilities import WrapToolExecuteHandler
     from pydantic_ai.messages import ToolCallPart
     from pydantic_ai.tools import ToolDefinition
 
@@ -181,7 +190,11 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
     """Callable that decides what to do with a tool result before the model sees it."""
 
     tools: Sequence[str] | None = None
-    """Restrict both guards to these tool names. `None` guards every tool."""
+    """Restrict both guards to these tool names. `None` guards every tool.
+
+    An empty sequence guards nothing, which is the same as configuring no guard at all --
+    write `None` when you mean every tool.
+    """
 
     hidden: Sequence[str] = field(default_factory=tuple)
     """Tool names to withhold from the model entirely.
@@ -191,7 +204,18 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
     tries to call it. A blocked tool stays visible and the model learns it was
     refused. Hiding is a static name list; for policy that depends on `deps` or
     the arguments, use `guard`.
+
+    A name here that no offered tool answers to raises a `UserWarning`. Unlike a
+    misspelled `tools` entry, which only widens what is inspected, a misspelled
+    `hidden` entry leaves the tool on the wire and reads, at the call site,
+    exactly like a tool that was hidden.
     """
+
+    _seen_hidden: set[str] = field(default_factory=set[str], init=False, repr=False, compare=False)
+    """`hidden` names some offered tool has answered to, so a tool that appears late is not warned about."""
+
+    _warned_hidden: set[str] = field(default_factory=set[str], init=False, repr=False, compare=False)
+    """`hidden` names already warned about, so a per-step hook does not warn once per step."""
 
     def __post_init__(self) -> None:
         """Reject a bare string where a collection of tool names is meant.
@@ -222,10 +246,25 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         tool_defs: list[ToolDefinition],
     ) -> list[ToolDefinition]:
-        """Drop the `hidden` tools from what the model is offered."""
+        """Drop the `hidden` tools from what the model is offered.
+
+        A name that matches nothing is warned about once. `hidden` is the one setting whose
+        failure mode is silent exposure: a typo leaves the tool on the wire and reads, at the
+        call site, exactly like a tool that was hidden. The warning is per name rather than
+        per step, since a toolset may legitimately offer a tool only some of the time.
+        """
         if not self.hidden:
             return tool_defs
         hidden = set(self.hidden)
+        self._seen_hidden.update(hidden.intersection(tool_def.name for tool_def in tool_defs))
+        for name in sorted(hidden - self._seen_hidden - self._warned_hidden):
+            self._warned_hidden.add(name)
+            warnings.warn(
+                f'ToolGuard.hidden names {name!r}, which no tool offered so far is called. '
+                'A tool that is never named stays available to the model.',
+                UserWarning,
+                stacklevel=2,
+            )
         return [tool_def for tool_def in tool_defs if tool_def.name not in hidden]
 
     async def before_tool_execute(
@@ -242,7 +281,11 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
 
         # A read-only view: the dict passed here is the one the tool is about to be
         # called with, so a guard mutating it would change the call while reporting
-        # `allow`, bypassing both the `replace` contract and its span.
+        # `allow`, bypassing both the `replace` contract and its span. The view is
+        # shallow -- a nested `call.args['opts']['path'] = ...` still lands on the
+        # real object. Deep-copying every call to close that would cost more than it
+        # buys against a guard that is the caller's own code; `replace` is the
+        # supported way to change a call, and it is the one that gets a span.
         info = ToolCallInfo(name=call.tool_name, args=MappingProxyType(args), tool_call_id=call.tool_call_id)
         verdict = await evaluate(self.guard, ctx, info)
         match verdict.action:
@@ -284,6 +327,81 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
                     tool_name=call.tool_name,
                 )
                 return replacement
+            case _:  # pragma: no cover - assert_never exhaustiveness guard
+                assert_never(verdict.action)
+
+    async def wrap_tool_execute(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        handler: WrapToolExecuteHandler,
+    ) -> Any:
+        """Screen the message of a tool that failed, which reaches the model like a result.
+
+        A tool raising `ModelRetry` or `ToolFailed` never reaches `after_tool_execute`: core
+        wraps both into control-flow exceptions and re-raises them past it
+        (`tool_manager._run_execute_hooks`). Their text still lands in the conversation -- a
+        failure as an ordinary `ToolReturnPart`, a retry as a `RetryPromptPart` -- so a
+        `result_guard` that did not see them would leave the one text path it exists to
+        screen unscreened whenever a tool errored.
+        """
+        if self.result_guard is None or not self._guards(call.tool_name):
+            return await handler(args)
+        try:
+            return await handler(args)
+        except ToolRetryError as error:
+            message = await self._screen_failure(ctx, call=call, args=args, content=error.tool_retry.content)
+            if message is None:
+                raise
+            raise ToolRetryError(replace(error.tool_retry, content=message)) from error
+        except ToolFailedError as error:
+            message = await self._screen_failure(ctx, call=call, args=args, content=error.tool_failed.content)
+            if message is None:
+                raise
+            raise ToolFailedError(replace(error.tool_failed, content=message)) from error
+
+    async def _screen_failure(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        call: ToolCallPart,
+        args: dict[str, Any],
+        content: object,
+    ) -> str | None:
+        """The text a failed tool should carry instead, or `None` to leave it alone.
+
+        The failure keeps its own type either way: a failure screened into a refusal is still
+        a failure, and turning it into a success would tell the model the call worked.
+        """
+        assert self.result_guard is not None
+        info = ToolResultInfo(
+            name=call.tool_name, args=MappingProxyType(args), tool_call_id=call.tool_call_id, result=content
+        )
+        verdict = await evaluate(self.result_guard, ctx, info)
+        match verdict.action:
+            case 'allow':
+                return None
+            case 'block' | 'retry':
+                message = verdict.message or _DEFAULT_RESULT_BLOCK_MESSAGE
+                trace_block(ctx, direction=_RESULT_DIRECTION, message=message, tool_name=call.tool_name)
+                return message
+            case 'replace':
+                trace_redaction(
+                    ctx,
+                    direction=_RESULT_DIRECTION,
+                    original=content,
+                    replacement=verdict.replacement,
+                    tool_name=call.tool_name,
+                )
+                return str(verdict.replacement)
+            case 'approve':
+                raise UserError(
+                    'A tool result guard cannot return GuardResult.approve() -- the tool has already run. '
+                    'Return approve() from the argument guard instead.'
+                )
             case _:  # pragma: no cover - assert_never exhaustiveness guard
                 assert_never(verdict.action)
 

@@ -73,12 +73,19 @@ class GuardResult:
             case 'replace':
                 if self.replacement is _UNSET:
                     raise UserError("GuardResult(action='replace') requires a `replacement` value.")
+                if self.message is not None:
+                    raise UserError("GuardResult(action='replace') must not set `message`.")
             case 'retry':
                 if self.message is None:
                     raise UserError("GuardResult(action='retry') requires a `message`.")
+                if self.replacement is not _UNSET:
+                    raise UserError("GuardResult(action='retry') must not set `replacement`.")
             case 'block':
-                # `message=None` is valid: a default is supplied at the use site.
-                pass
+                # `message=None` is valid: a default is supplied at the use site. A
+                # `replacement` is not: nothing reads it here, so accepting one would
+                # silently discard a substitution the guard believed it had made.
+                if self.replacement is not _UNSET:
+                    raise UserError("GuardResult(action='block') must not set `replacement`.")
             case _:  # pragma: no cover - assert_never exhaustiveness guard
                 assert_never(self.action)
 

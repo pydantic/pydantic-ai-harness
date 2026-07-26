@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -11,8 +13,8 @@ from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NoOpTracer, Tracer
 from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
-from pydantic_ai.capabilities import CapabilityOrdering
-from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, SkipToolExecution, UserError
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
+from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, SkipToolExecution, ToolFailed, UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
@@ -432,6 +434,85 @@ class TestResultGuard:
         assert await _guard_result(guard, 'x', tool_name='dangerous') == 'Tool result blocked by tool guardrail.'
 
 
+class TestResultGuardOnAFailedTool:
+    """A tool that fails sends text to the model too, and core routes it past `after_tool_execute`."""
+
+    def _agent(
+        self,
+        verdict: Callable[[ToolResultInfo], GuardResult],
+        error: Exception,
+        *,
+        tools: list[str] | None = None,
+    ) -> tuple[Agent[None, str], list[object]]:
+        seen: list[object] = []
+
+        def result_guard(info: ToolResultInfo) -> GuardResult:
+            seen.append(info.result)
+            return verdict(info)
+
+        agent = Agent(
+            _scripted(_calls_lookup(query='key'), ModelResponse(parts=[TextPart(content='done')])),
+            deps_type=type(None),
+            capabilities=[ToolGuard[None](result_guard=result_guard, tools=tools)],
+        )
+
+        @agent.tool_plain
+        def lookup(query: str) -> str:
+            raise error
+
+        return agent, seen
+
+    @pytest.mark.parametrize('error', [ModelRetry('the key is sk-live-000'), ToolFailed('the key is sk-live-000')])
+    async def test_a_failure_message_is_screened_before_the_model_sees_it(self, error: Exception):
+        def scrub(info: ToolResultInfo) -> GuardResult:
+            cleaned = str(info.result).replace('sk-live-000', '[redacted]')
+            return GuardResult.replace(cleaned) if cleaned != str(info.result) else GuardResult.allow()
+
+        agent, seen = self._agent(scrub, error)
+
+        result = await agent.run('hi')
+
+        assert seen == ['the key is sk-live-000'], 'the guard never saw the failed tool'
+        rendered = str(result.all_messages())
+        assert 'sk-live-000' not in rendered
+        assert '[redacted]' in rendered
+
+    @pytest.mark.parametrize('error', [ModelRetry('boom'), ToolFailed('boom')])
+    async def test_a_failure_the_guard_allows_keeps_its_own_type_and_text(self, error: Exception):
+        agent, seen = self._agent(lambda info: GuardResult.allow(), error)
+
+        result = await agent.run('hi')
+
+        assert seen == ['boom']
+        assert 'boom' in str(result.all_messages())
+
+    async def test_a_failure_is_not_turned_into_a_success(self):
+        """A screened failure is still a failure; a success would tell the model the call worked."""
+        agent, _ = self._agent(lambda info: GuardResult.block('refused'), ToolFailed('the key is sk-live-000'))
+
+        result = await agent.run('hi')
+        returns = [
+            part for message in result.all_messages() for part in message.parts if isinstance(part, ToolReturnPart)
+        ]
+
+        assert [(part.content, part.outcome) for part in returns] == [('refused', 'failed')]
+
+    async def test_approve_is_rejected_on_a_failure_too(self):
+        """The tool has already run, and failed; there is nothing left to approve."""
+        agent, _ = self._agent(lambda info: GuardResult.approve(), ToolFailed('boom'))
+
+        with pytest.raises(UserError, match='the tool has already run'):
+            await agent.run('hi')
+
+    async def test_a_tool_the_guard_does_not_cover_is_left_alone(self):
+        agent, seen = self._agent(lambda info: GuardResult.block('refused'), ToolFailed('boom'), tools=['other'])
+
+        result = await agent.run('hi')
+
+        assert seen == []
+        assert 'boom' in str(result.all_messages())
+
+
 class TestConfigurationShape:
     """A bare string satisfies `Sequence[str]`, and both fields misbehave on one."""
 
@@ -498,6 +579,48 @@ class TestHiddenTools:
         tool_defs = [_tool_def('a'), _tool_def('b')]
 
         assert await ToolGuard[object]().prepare_tools(_run_ctx(), tool_defs) == tool_defs
+
+
+class TestHiddenNameWarning:
+    """`hidden` is the one setting whose typo fails open."""
+
+    async def test_a_name_no_tool_answers_to_is_warned_about(self):
+        guard = ToolGuard[object](hidden=['dangre'])
+
+        with pytest.warns(UserWarning, match="names 'dangre'"):
+            await guard.prepare_tools(_run_ctx(), [_tool_def('danger')])
+
+    async def test_the_warning_fires_once_not_once_per_step(self):
+        guard = ToolGuard[object](hidden=['dangre'])
+
+        with pytest.warns(UserWarning):
+            await guard.prepare_tools(_run_ctx(), [_tool_def('danger')])
+        with warnings.catch_warnings(record=True) as later:
+            warnings.simplefilter('always')
+            await guard.prepare_tools(_run_ctx(), [_tool_def('danger')])
+
+        assert later == []
+
+    async def test_a_name_that_matches_is_not_warned_about(self):
+        guard = ToolGuard[object](hidden=['danger'])
+
+        with warnings.catch_warnings(record=True) as raised:
+            warnings.simplefilter('always')
+            remaining = await guard.prepare_tools(_run_ctx(), [_tool_def('danger'), _tool_def('safe')])
+
+        assert raised == []
+        assert [tool_def.name for tool_def in remaining] == ['safe']
+
+    async def test_a_tool_that_only_appears_later_is_not_warned_about(self):
+        """A toolset may offer a tool on some steps and not others."""
+        guard = ToolGuard[object](hidden=['danger'])
+
+        with warnings.catch_warnings(record=True) as raised:
+            warnings.simplefilter('always')
+            await guard.prepare_tools(_run_ctx(), [_tool_def('danger')])
+            await guard.prepare_tools(_run_ctx(), [_tool_def('safe')])
+
+        assert raised == []
 
 
 class TestHardFailure:
@@ -624,9 +747,15 @@ class TestOrdering:
         assert ToolGuard[object]().get_ordering() == CapabilityOrdering(position='innermost')
 
     async def test_result_guard_runs_before_an_outer_capability_rewrites_the_result(self):
+        """The guard is listed *first*, so only `position='innermost'` can put it second.
+
+        A `ToolGuard` subclass would declare `innermost` too, leaving list order to decide and
+        the assertion true whatever `get_ordering` returned. The truncating capability here is
+        a plain one, the way `OverflowingToolOutput` is.
+        """
         order: list[str] = []
 
-        class Truncating(ToolGuard[object]):
+        class Truncating(AbstractCapability[object]):
             async def after_tool_execute(
                 self,
                 ctx: RunContext[object],
@@ -639,14 +768,17 @@ class TestOrdering:
                 order.append('outer')
                 return str(result)[:4]
 
+        seen: list[object] = []
+
         def record(info: ToolResultInfo) -> bool:
             order.append('guard')
-            assert info.result == 'the full untruncated result'
+            seen.append(info.result)
             return True
 
         agent = Agent(
             _scripted(_calls_lookup(query='k'), ModelResponse(parts=[TextPart(content='done')])),
-            capabilities=[Truncating(), ToolGuard(result_guard=record)],
+            deps_type=type(None),
+            capabilities=[ToolGuard[None](result_guard=record), Truncating()],
         )
 
         @agent.tool_plain
@@ -656,6 +788,7 @@ class TestOrdering:
         await agent.run('hi')
 
         assert order == ['guard', 'outer']
+        assert seen == ['the full untruncated result'], 'the guard saw the truncated result'
 
 
 class TestSharedVerdicts:
@@ -667,6 +800,19 @@ class TestSharedVerdicts:
     def test_replace_still_requires_a_value(self):
         with pytest.raises(UserError, match="action='replace'"):
             GuardResult(action='replace')
+
+    @pytest.mark.parametrize(
+        ('action', 'kwargs'),
+        [
+            ('block', {'replacement': 'ignored'}),
+            ('retry', {'message': 'm', 'replacement': 'ignored'}),
+            ('replace', {'replacement': 'x', 'message': 'ignored'}),
+        ],
+    )
+    def test_a_field_the_action_does_not_read_is_refused(self, action: str, kwargs: dict[str, object]):
+        """Accepting it would discard a substitution or a message the guard believed it had set."""
+        with pytest.raises(UserError, match=f"action='{action}'"):
+            GuardResult(action=action, **kwargs)  # type: ignore[arg-type]
 
     def test_allow_rejects_an_explicit_none_replacement(self):
         with pytest.raises(UserError, match="action='allow'"):
