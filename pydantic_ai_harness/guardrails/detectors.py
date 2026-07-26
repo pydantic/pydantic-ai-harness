@@ -54,6 +54,14 @@ from pydantic_ai_harness.guardrails._capability import GuardResult
 TextDetector = Callable[[str], GuardResult]
 """A check over text. Plug one into `InputGuard`, or into `OutputGuard` via `for_text`."""
 
+_NEWLINE = r'(?:\r?\n|\\+n)'
+"""A line break as it reaches a detector.
+
+A key pasted from a JSON service-account file or a `.env` line carries the two characters
+a backslash and an `n` where the file had a newline. Requiring a real one left the most common way a
+private key arrives in a support chat unredacted.
+"""
+
 DEFAULT_SECRET_PATTERNS: Mapping[str, str] = {
     # Vendor key bodies are base64url, whose alphabet includes `_`. A class that
     # stops at `_` redacts half a key and leaves the rest under a label saying it
@@ -77,19 +85,18 @@ DEFAULT_SECRET_PATTERNS: Mapping[str, str] = {
     # which an encrypted key carries and whose `:` and `,` the body class stops
     # at, leaving the whole key to the pattern below.
     'private_key': (
-        r'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----\s*\n'
-        r'(?:[A-Za-z-]+: [^\n]*\n)*'
-        r'[A-Za-z0-9+/=\s]*?'
-        r'-----END[^-\n]*PRIVATE KEY(?: BLOCK)?-----'
+        rf'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----[ \t]*{_NEWLINE}'
+        rf'(?:[A-Za-z-]+: [^\n]*{_NEWLINE})*'
+        rf'[A-Za-z0-9+/=\s\\]*?'
+        rf'-----END[^-\n]*PRIVATE KEY(?: BLOCK)?-----'
     ),
     # A block with no END marker: take the header and the base64 lines under it,
     # and stop at the first line that is not body. Running to the end of the
-    # input instead would delete whatever the user wrote after it. `\r?` because
-    # a body line ending in CRLF would otherwise stop the run at the first line.
+    # input instead would delete whatever the user wrote after it.
     'private_key_body': (
-        r'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----\s*\n'
-        r'(?:[A-Za-z-]+: [^\n]*\n)*\s*'
-        r'(?:[A-Za-z0-9+/=]+\r?\n?)+'
+        rf'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----[ \t]*{_NEWLINE}'
+        rf'(?:[A-Za-z-]+: [^\n]*{_NEWLINE})*\s*'
+        rf'(?:[A-Za-z0-9+/=]+(?:{_NEWLINE})?)+'
     ),
 }
 """Credential shapes worth redacting, in the order they are applied.
@@ -108,12 +115,15 @@ DEFAULT_PII_PATTERNS: Mapping[str, str] = {
     # from the IBAN registry rather than any two letters: the set is closed, and
     # anchoring on it is what keeps a build id or a patent number from reading
     # as an account. Case-insensitive, since the printed form is uppercase but
-    # the standard is not.
+    # the standard is not. Spaces are allowed only where the printed form puts
+    # them -- every fourth character -- and the whole match is checked against
+    # the ISO 7064 mod-97 digit. Allowing a space before any character let the
+    # pattern run across word boundaries and eat whole sentences.
     'iban': (
         r'\b(?i:AD|AE|AL|AT|AZ|BA|BE|BG|BH|BI|BR|BY|CH|CR|CY|CZ|DE|DJ|DK|DO|EE|EG|ES|FI|FK|FO|FR|GB|GE|GI|GL|GR'  # codespell:ignore fo
         r'|GT|HN|HR|HU|IE|IL|IQ|IS|IT|JO|KW|KZ|LB|LC|LI|LT|LU|LV|LY|MA|MC|MD|ME|MK|MN|MR|MT|MU|NI|NL|NO|OM|PK|PL'
         r'|PS|PT|QA|RO|RS|RU|SA|SC|SD|SE|SI|SK|SM|SO|ST|SV|TL|TN|TR|UA|VA|VG|XK)'
-        r'\d{2}(?:[ ]?[A-Za-z0-9]){10,30}\b'
+        r'\d{2}(?:[A-Za-z0-9]{10,30}|(?: [A-Za-z0-9]{4}){2,7}(?: [A-Za-z0-9]{1,3})?)\b'
     ),
     # 13 to 19 digits, the range ISO/IEC 7812 allows, in any grouping: fixing
     # the groups to 4-4-4-4 and Amex's 4-6-5 left a 13-digit Visa, a 14-digit
@@ -150,7 +160,22 @@ def _luhn(digits: str) -> bool:
     return len(values) >= 12 and total % 10 == 0
 
 
-_VALIDATORS: Mapping[str, Callable[[str], bool]] = {'credit_card': _luhn}
+def _iban_mod97(candidate: str) -> bool:
+    """Whether a candidate satisfies the ISO 7064 mod-97 check every IBAN carries.
+
+    The country code narrows the prefix; nothing narrowed the body, so any `XX##` token
+    followed by ten more letters or digits read as an account number -- `RS232 serial cable
+    adapter and reboot` among them. A shape this loose needs the checksum the standard
+    defines, the same way `credit_card` needs Luhn.
+    """
+    compact = ''.join(candidate.split()).upper()
+    if not 15 <= len(compact) <= 34:
+        return False
+    rotated = compact[4:] + compact[:4]
+    return int(''.join(str(int(character, 36)) for character in rotated)) % 97 == 1
+
+
+_VALIDATORS: Mapping[str, Callable[[str], bool]] = {'credit_card': _luhn, 'iban': _iban_mod97}
 """Semantic checks that a shape alone cannot make. A name absent here is taken on its shape."""
 
 
@@ -164,12 +189,18 @@ def _compile(
     `only` has dropped that built-in -- would otherwise be judged by a check
     written for different text and silently never match.
     """
-    selected = dict(patterns) if only is None else {}
-    if only is not None:
-        for name in only:
+    if only is None:
+        selected = dict(patterns)
+    else:
+        # `only` filters, it does not reorder. Both mappings document an application order
+        # that other patterns depend on -- `iban` before `credit_card` is what stops a spaced
+        # account number being labelled a card -- and building the dict by iterating `only`
+        # handed that order to the caller's argument order instead.
+        requested = set(only)
+        for name in requested:
             if name not in patterns:
                 raise UserError(f'Unknown pattern {name!r}; available: {sorted(patterns)}.')
-            selected[name] = patterns[name]
+        selected = {name: pattern for name, pattern in patterns.items() if name in requested}
     if extra:
         clashes = sorted(set(extra) & set(selected))
         if clashes:
@@ -192,7 +223,16 @@ def _redactor(
 ) -> TextDetector:
     """A detector that rewrites every match and allows text with none."""
 
-    def detect(text: str) -> GuardResult:
+    # `object` rather than `str`: a detector plugged straight into an `OutputGuard` is
+    # handed the agent output unchanged, and the point of the check below is to name that
+    # rather than let `re.sub` raise a TypeError from three frames down.
+    def detect(text: object) -> GuardResult:
+        if not isinstance(text, str):
+            raise UserError(
+                f'A text detector received {type(text).__name__}, which it cannot scan. An OutputGuard '
+                'hands the guard the agent output unchanged, so wrap the detector in for_text() to say '
+                'what should happen when that output is not text.'
+            )
         cleaned = text
         for name, pattern, valid in compiled:
             substitution = placeholder.replace('{name}', name)
@@ -274,6 +314,11 @@ def blocked_keywords(
             which is useful to an operator and visible to the model, so pass
             something neutral when the list itself is sensitive.
     """
+    if isinstance(keywords, str):
+        raise UserError(
+            'blocked_keywords() was given a single string, which would be one keyword per character and '
+            f'block nearly every input. Pass a sequence: blocked_keywords([{keywords!r}]).'
+        )
     flags = 0 if case_sensitive else re.IGNORECASE
     terms = tuple(keywords)
     if any(not keyword for keyword in terms):

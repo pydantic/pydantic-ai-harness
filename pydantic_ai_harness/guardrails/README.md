@@ -143,7 +143,13 @@ redact_personal_data('git clone git@github.com:pydantic/pydantic-ai.git')
 
 An input guard rewrites the prompt in place, so the model receives the broken version. On an agent that handles code or paths, use `personal_data(only=['us_ssn', 'credit_card', 'iban'])`, or put the detector on the output rather than the prompt. `credit_card` has it less badly. It covers the 13 to 19 digits ISO/IEC 7812 allows, in any grouping, and only where the leading digit is 2 to 6, which is what a payment card starts with and a millisecond timestamp does not. Every match is then checked against the Luhn algorithm, which discards most of the runs that are left. Not all of them -- roughly one run of four consecutive years in ten satisfies the checksum by chance, so a prompt listing years can still lose one.
 
+`iban` has the same problem and the same answer: a country code plus two digits is a shape ordinary text hits constantly, so spaces are allowed only where the printed form puts them and every match is checked against the ISO 7064 mod-97 digit an IBAN carries.
+
 An AWS *secret* access key is deliberately absent from the defaults. It is forty characters of base64 with no distinguishing prefix, so a pattern for it would take ordinary text with it.
+
+`only=` selects patterns; it does not reorder them. The application order is part of each mapping's contract -- `iban` runs before `credit_card` so a spaced account number is not labelled a card -- and it holds whatever order you list.
+
+A private key is matched whether its line breaks are real newlines or the escaped `\n` a JSON service-account file or a `.env` line carries, which is how one usually reaches a chat window.
 
 **What these do not do.** A regex finds a credential because credentials have a
 shape. It does not find a prompt injection, which is ordinary language, and it

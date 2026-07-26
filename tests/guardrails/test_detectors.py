@@ -7,8 +7,9 @@ import time
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.tools import RunContext
 
 from pydantic_ai_harness import GuardResult, InputGuard, OutputBlocked, OutputGuard
 from pydantic_ai_harness.guardrails.detectors import (
@@ -213,6 +214,52 @@ class TestSecretRedaction:
         assert secrets(placeholder='***')(f'k {_OPENAI_KEY}').replacement == 'k ***'
 
 
+class TestKeyPastedFromAFile:
+    """The most common way a private key reaches a chat is inside JSON or a `.env` line."""
+
+    _BODY = 'MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ'
+
+    def test_a_service_account_json_is_redacted(self):
+        """Its newlines are the two characters backslash-n, not a line break."""
+        import json
+
+        pem = f'-----BEGIN PRIVATE KEY-----\n{self._BODY}\n-----END PRIVATE KEY-----\n'
+        document = json.dumps({'type': 'service_account', 'private_key': pem})
+
+        replacement = str(redact_secrets(document).replacement)
+
+        assert self._BODY not in replacement
+        assert '[redacted:private_key]' in replacement
+
+    def test_a_dotenv_line_is_redacted(self):
+        line = f'PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\\n{self._BODY}\\n-----END PRIVATE KEY-----"'
+
+        replacement = str(redact_secrets(line).replacement)
+
+        assert self._BODY not in replacement
+
+    def test_an_escaped_key_with_no_end_marker_is_still_taken(self):
+        line = f'key=-----BEGIN PRIVATE KEY-----\\n{self._BODY}'
+
+        assert self._BODY not in str(redact_secrets(line).replacement)
+
+
+class TestPatternOrder:
+    """`only` filters; it does not hand the application order to the caller's argument order."""
+
+    def test_only_keeps_the_declared_order(self):
+        iban = 'DE89 3704 0044 0532 0130 00'
+        detector = personal_data(only=['credit_card', 'iban'])
+
+        assert detector(f'iban {iban}').replacement == 'iban [redacted:iban]'
+
+    def test_a_reordered_subset_of_the_secret_patterns_keeps_the_whole_block(self):
+        pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----'
+        detector = secrets(only=['private_key_body', 'private_key'])
+
+        assert detector(pem).replacement == '[redacted:private_key]'
+
+
 class TestPersonalData:
     """Personal data is rewritten too, for the same reason."""
 
@@ -275,6 +322,41 @@ class TestPersonalData:
         """The country code comes from the IBAN registry, not from any two letters."""
         assert redact_personal_data(text).action == 'allow'
 
+    @pytest.mark.parametrize(
+        'text',
+        [
+            'plug in the RS232 serial cable adapter and reboot',
+            'the CH340 driver installed correctly on Linux',
+            'model MC68000 assembly language reference manual',
+            'error code PL99 returned by the payment provider gateway',
+        ],
+    )
+    def test_a_sentence_is_not_an_account_number(self, text: str):
+        """A space before every character let the pattern run across words and eat the sentence."""
+        assert redact_personal_data(text).action == 'allow'
+
+    @pytest.mark.parametrize(
+        'iban',
+        [
+            'GB29NWBK60161331926819',
+            'FR14 2004 1010 0505 0001 3M02 606',
+            'NL91ABNA0417164300',
+            'ES91 2100 0418 4502 0005 1332',
+            'IT60X0542811101000000123456',
+        ],
+    )
+    def test_a_real_iban_still_matches(self, iban: str):
+        """Narrowing the shape must not cost the accounts the detector exists for."""
+        assert redact_personal_data(f'iban {iban}').replacement == 'iban [redacted:iban]'
+
+    def test_a_token_too_short_to_be_an_iban_is_left_alone(self):
+        """The shortest real IBAN is 15 characters; the pattern can match 14."""
+        assert redact_personal_data('ref DE891234567890 filed').action == 'allow'
+
+    def test_a_country_code_with_a_wrong_check_digit_is_left_alone(self):
+        """The ISO 7064 mod-97 digit is what a shape alone cannot check."""
+        assert redact_personal_data('iban DE88 3704 0044 0532 0130 00').action == 'allow'
+
     def test_a_spaced_iban_keeps_its_own_label(self):
         """Declared before `credit_card`, whose digit groups would otherwise claim the middle of it."""
         assert redact_personal_data('iban DE89 3704 0044 0532 0130 00').replacement == 'iban [redacted:iban]'
@@ -320,6 +402,11 @@ class TestBlockedKeywords:
         assert detector(f'I know {keyword}').action == 'block'
         assert detector(f'{keyword}x').action == 'allow'
 
+    def test_a_bare_string_is_refused(self):
+        """`str` is an `Iterable[str]`, so it would be one keyword per character."""
+        with pytest.raises(UserError, match='single string'):
+            blocked_keywords('internal-only')
+
     def test_an_empty_keyword_is_refused(self):
         """An empty pattern matches at position 0 of anything, so it would block every input."""
         with pytest.raises(UserError, match='empty keyword'):
@@ -339,6 +426,50 @@ class TestForText:
     def test_a_non_string_fails_loudly_by_default(self):
         with pytest.raises(UserError, match='cannot rewrite without changing'):
             for_text(redact_secrets)(42)
+
+    async def test_a_structured_output_reaches_the_detector_through_a_guard(self):
+        """The scenario `for_text` exists for, driven through the capability rather than by hand."""
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            text: str
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart(tool_name='final_result', args={'text': 'ok'})])
+
+        agent = Agent(
+            FunctionModel(respond),
+            deps_type=type(None),
+            output_type=Answer,
+            capabilities=[OutputGuard(guard=for_text(redact_secrets))],
+        )
+
+        with pytest.raises(UserError, match='cannot rewrite without changing'):
+            await agent.run('hi')
+
+    async def test_a_structured_output_can_be_skipped_deliberately(self):
+        from pydantic import BaseModel
+
+        class Answer(BaseModel):
+            text: str
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart(tool_name='final_result', args={'text': 'ok'})])
+
+        agent = Agent(
+            FunctionModel(respond),
+            deps_type=type(None),
+            output_type=Answer,
+            capabilities=[OutputGuard(guard=for_text(redact_secrets, on_other='allow'))],
+        )
+        result = await agent.run('hi')
+
+        assert result.output == Answer(text='ok')
+
+    def test_a_detector_used_without_for_text_says_so(self):
+        """`re.sub` would otherwise raise a TypeError three frames down that names nothing."""
+        with pytest.raises(UserError, match='wrap the detector in for_text'):
+            redact_secrets(42)  # type: ignore[arg-type]
 
     def test_a_non_string_can_be_skipped_deliberately(self):
         assert for_text(redact_secrets, on_other='allow')(42).action == 'allow'
@@ -480,6 +611,85 @@ class TestGuardChain:
 
         with pytest.raises(UserError, match='got generator'):
             await agent.run('hi')
+
+    async def test_a_bare_false_mid_chain_blocks(self):
+        agent = Agent(
+            _echo_prompt(),
+            deps_type=type(None),
+            capabilities=[InputGuard(guard=[redact_secrets, lambda prompt: False])],
+        )
+        result = await agent.run('hi')
+
+        assert result.output == 'Request blocked by input guardrail.'
+
+    async def test_a_guard_taking_run_context_works_beside_one_that_does_not(self):
+        """`_takes_ctx` is decided per element, so a mixed chain has to be read per element."""
+        seen: list[str] = []
+
+        def with_ctx(ctx: RunContext[None], prompt: str) -> GuardResult:
+            seen.append(f'ctx:{prompt}')
+            return GuardResult.allow()
+
+        agent = Agent(
+            _echo_prompt(),
+            deps_type=type(None),
+            capabilities=[InputGuard(guard=[redact_secrets, with_ctx])],
+        )
+        await agent.run(f'k {_OPENAI_KEY}')
+
+        assert seen == ['ctx:k [redacted:openai_key]']
+
+    async def test_a_retry_in_a_chain_names_the_guard_that_returned_it(self):
+        agent = Agent(
+            _echo_prompt(),
+            deps_type=type(None),
+            capabilities=[InputGuard(guard=[redact_secrets, lambda prompt: GuardResult.retry('again')])],
+        )
+
+        with pytest.raises(UserError, match='guard at position 1 did'):
+            await agent.run('hi')
+
+    async def test_an_output_chain_retries_and_re_runs_on_the_new_output(self):
+        outputs = iter(['first with a secret', 'second is clean'])
+        seen: list[str] = []
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[TextPart(content=next(outputs))])
+
+        def once(output: object) -> GuardResult:
+            seen.append(str(output))
+            return GuardResult.retry('drop the secret') if 'secret' in str(output) else GuardResult.allow()
+
+        agent = Agent(
+            FunctionModel(respond),
+            deps_type=type(None),
+            capabilities=[OutputGuard(guard=[for_text(redact_secrets), once])],
+        )
+        result = await agent.run('hi')
+
+        assert seen == ['first with a secret', 'second is clean']
+        assert result.output == 'second is clean'
+
+    async def test_a_parallel_input_guard_runs_a_chain_and_blocks_from_any_position(self):
+        agent = Agent(
+            _echo_prompt(),
+            deps_type=type(None),
+            capabilities=[InputGuard(guard=[redact_secrets, blocked_keywords(['classified'])], parallel=True)],
+        )
+        result = await agent.run('this is classified')
+
+        assert result.output == "Blocked term: 'classified'."
+
+    async def test_a_parallel_input_guard_refuses_a_chain_that_redacts(self):
+        """The model call already started with the original prompt, so a redaction is too late."""
+        agent = Agent(
+            _echo_prompt(),
+            deps_type=type(None),
+            capabilities=[InputGuard(guard=[blocked_keywords(['nope']), redact_secrets], parallel=True)],
+        )
+
+        with pytest.raises(UserError, match='incompatible with GuardResult.replace'):
+            await agent.run(f'k {_OPENAI_KEY}')
 
     async def test_a_mid_chain_replacement_must_still_be_prompt_text(self):
         agent = Agent(
