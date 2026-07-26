@@ -194,9 +194,11 @@ def _require_prompt_text(replacement: object, position: int) -> None:
 def _is_guard_sequence(guard: object) -> TypeGuard[Sequence[_GuardCallable]]:
     """Whether a `guard` field holds several guards rather than one.
 
-    A callable is not a `Sequence`, so the shape tells the two forms apart.
+    Callability decides first. Being a `Sequence` is what a chain looks like,
+    but a guard that is itself a callable sequence would otherwise be taken
+    apart and its elements invoked, so the single-callable form has to win.
     """
-    return isinstance(guard, Sequence)
+    return not callable(guard) and isinstance(guard, Sequence)
 
 
 def _as_guards(guard: object, *, capability: str) -> tuple[_GuardCallable, ...]:

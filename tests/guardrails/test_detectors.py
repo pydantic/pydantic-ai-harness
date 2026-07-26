@@ -70,6 +70,19 @@ class TestSecretRedaction:
         }
         assert secrets(only=[name])(samples[name]).action == 'replace'
 
+    def test_a_private_key_is_removed_whole(self):
+        """Replacing the BEGIN line alone would leave the key material sitting in the text."""
+        pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAx7Vv9mKq\n-----END RSA PRIVATE KEY-----'
+        result = redact_secrets(f'here:\n{pem}\ndone')
+
+        assert result.replacement == 'here:\n[redacted:private_key]\ndone'
+
+    def test_an_unterminated_private_key_is_taken_to_the_end(self):
+        """A truncated block is not worth keeping either, so the match runs to the end."""
+        result = redact_secrets('log: -----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEA')
+
+        assert result.replacement == 'log: [redacted:private_key]'
+
     def test_a_subset_leaves_the_rest_alone(self):
         detector = secrets(only=['aws_access_key'])
 
@@ -137,6 +150,19 @@ class TestBlockedKeywords:
         result = blocked_keywords(['classified'], message='Not available.')('classified')
 
         assert result.message == 'Not available.'
+
+    @pytest.mark.parametrize('keyword', ['C++', 'a.b!', '#tag'])
+    def test_whole_words_still_matches_a_keyword_ending_in_punctuation(self, keyword: str):
+        """`\\b` needs a word character beside it, so it would leave these silently inert."""
+        detector = blocked_keywords([keyword], whole_words=True)
+
+        assert detector(f'I know {keyword}').action == 'block'
+        assert detector(f'{keyword}x').action == 'allow'
+
+    def test_an_empty_keyword_is_refused(self):
+        """An empty pattern matches at position 0 of anything, so it would block every input."""
+        with pytest.raises(UserError, match='empty keyword'):
+            blocked_keywords(['ok', ''])
 
     def test_no_keywords_is_refused(self):
         with pytest.raises(UserError, match='no keywords'):
@@ -229,6 +255,22 @@ class TestGuardChain:
         result = await agent.run('hi')
 
         assert result.output == 'key [redacted:openai_key] for [redacted:email]'
+
+    async def test_a_callable_that_is_also_a_sequence_stays_one_guard(self):
+        """Callability decides, so a guard that happens to be a sequence is not taken apart."""
+
+        class CallableList(list[str]):
+            def __call__(self, prompt: str) -> GuardResult:
+                return GuardResult.block('refused by the callable itself')
+
+        agent = Agent(
+            _echo_prompt(),
+            deps_type=type(None),
+            capabilities=[InputGuard(guard=CallableList(['not', 'guards']))],
+        )
+        result = await agent.run('hi')
+
+        assert result.output == 'refused by the callable itself'
 
     async def test_an_empty_chain_is_refused(self):
         """A guardrail that inspects nothing reads as configured and behaves as absent."""

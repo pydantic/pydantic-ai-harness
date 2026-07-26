@@ -99,7 +99,7 @@ into a chain beside your own.
 ```python
 from pydantic_ai_harness.guardrails import detectors
 
-detectors.redact_secrets  # rewrites API keys, tokens, and private keys out of text
+detectors.redact_secrets  # rewrites API keys, tokens, and whole private-key blocks out of text
 detectors.redact_personal_data  # rewrites emails, card numbers, IBANs, US SSNs
 detectors.blocked_keywords(['internal-only'])  # refuses text containing any of them
 ```

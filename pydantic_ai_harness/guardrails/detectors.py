@@ -51,7 +51,10 @@ DEFAULT_SECRET_PATTERNS: Mapping[str, str] = {
     'stripe_key': r'sk_(?:live|test)_[A-Za-z0-9]{20,}',
     'google_api_key': r'AIza[A-Za-z0-9_-]{35}',
     'jwt': r'eyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}',
-    'private_key': r'-----BEGIN\s+(?:RSA|EC|DSA|OPENSSH|PGP)?\s*PRIVATE KEY-----',
+    # The whole PEM block, not its header: replacing the BEGIN line alone would
+    # leave the key material sitting in the text. An unterminated block is taken
+    # to the end of the input, since a partial key is not worth keeping either.
+    'private_key': r'-----BEGIN[^-]*PRIVATE KEY-----[\s\S]*?(?:-----END[^-]*PRIVATE KEY-----|\Z)',
 }
 """Credential shapes worth redacting. Distinctive prefixes, so false positives are rare."""
 
@@ -161,8 +164,15 @@ def blocked_keywords(
             something neutral when the list itself is sensitive.
     """
     flags = 0 if case_sensitive else re.IGNORECASE
+    terms = tuple(keywords)
+    if any(not keyword for keyword in terms):
+        raise UserError('blocked_keywords() was given an empty keyword, which would match every input.')
     compiled = tuple(
-        re.compile(rf'\b{re.escape(keyword)}\b' if whole_words else re.escape(keyword), flags) for keyword in keywords
+        # `(?<!\w)`/`(?!\w)` rather than `\b`: a boundary needs a word character on
+        # one side, so `\bC\+\+\b` never matches `C++` and the keyword would be
+        # silently inert.
+        re.compile(rf'(?<!\w){re.escape(keyword)}(?!\w)' if whole_words else re.escape(keyword), flags)
+        for keyword in terms
     )
     if not compiled:
         raise UserError('blocked_keywords() was given no keywords, so it would never match anything.')
