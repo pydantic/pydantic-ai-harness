@@ -306,7 +306,7 @@ Any exception raised by the guard propagates as-is -- use `InputBlocked` / `Outp
 class GuardResult:
     action: Literal['allow', 'block', 'replace', 'retry', 'approve']
     message: str | None = None
-    replacement: object | None = None
+    replacement: object = ...  # an unset sentinel, so `replace(None)` is valid
     # classmethods: allow(), block(message=None), replace(value), retry(message), approve()
 
 

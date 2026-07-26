@@ -26,7 +26,8 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeGuard
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Any, TypeGuard, cast
 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
 from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, SkipToolExecution, UserError
@@ -55,12 +56,15 @@ _RESULT_DIRECTION = 'tool result'
 
 
 def _is_arguments(value: object) -> TypeGuard[Mapping[str, Any]]:
-    """Whether a `replace` verdict carries tool arguments.
+    """Whether a `replace` verdict carries something shaped like tool arguments.
 
-    Only the mapping shape is checked. A mapping with non-string keys fails
-    later against the tool's own signature, in an error that names the tool.
+    Shape and key type only. The values are **not** re-validated against the
+    tool's schema: a guard that substitutes them is trusted to keep them valid,
+    the same way a tool body is trusted with what it returns. Keys are checked
+    because they become keyword arguments, where a non-string one raises a bare
+    `TypeError` from the interpreter that names neither the tool nor the guard.
     """
-    return isinstance(value, Mapping)
+    return isinstance(value, Mapping) and all(isinstance(key, str) for key in cast('Mapping[object, object]', value))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -82,7 +86,13 @@ class ToolResultInfo(ToolCallInfo):
     """The tool call and its return value, as a result guard sees them."""
 
     result: object
-    """What the tool returned, before any other capability transforms it."""
+    """What the tool returned, before any other capability transforms it.
+
+    A tool may return a [`ToolReturn`][pydantic_ai.messages.ToolReturn] wrapper
+    rather than a bare value, in which case that wrapper is what arrives here.
+    Stringifying it yields a repr and replacing it with a string discards its
+    metadata, so read `result.return_value` when you mean the payload.
+    """
 
 
 ToolGuardFunc = (
@@ -183,6 +193,22 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
     the arguments, use `guard`.
     """
 
+    def __post_init__(self) -> None:
+        """Reject a bare string where a collection of tool names is meant.
+
+        `str` satisfies `Sequence[str]`, so pyright accepts `hidden='danger'`
+        and the set built from it holds the six letters of the word. The tool
+        stays on the wire and nothing reports it -- a safety control failing
+        open. `tools='delete_all'` fails the other way, matching any tool whose
+        name is a substring of it.
+        """
+        for field_name, value in (('tools', self.tools), ('hidden', self.hidden)):
+            if isinstance(value, str):
+                raise UserError(
+                    f'ToolGuard.{field_name} takes a collection of tool names, not a single string. '
+                    f'Pass [{value!r}] rather than {value!r}.'
+                )
+
     def get_ordering(self) -> CapabilityOrdering:
         """Sit innermost: see the final arguments, and the tool result before other capabilities rewrite it."""
         return CapabilityOrdering(position='innermost')
@@ -214,7 +240,10 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
         if self.guard is None or not self._guards(call.tool_name):
             return args
 
-        info = ToolCallInfo(name=call.tool_name, args=args, tool_call_id=call.tool_call_id)
+        # A read-only view: the dict passed here is the one the tool is about to be
+        # called with, so a guard mutating it would change the call while reporting
+        # `allow`, bypassing both the `replace` contract and its span.
+        info = ToolCallInfo(name=call.tool_name, args=MappingProxyType(args), tool_call_id=call.tool_call_id)
         verdict = await evaluate(self.guard, ctx, info)
         match verdict.action:
             case 'allow':
@@ -232,7 +261,13 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
                 # deferring the call forever.
                 if ctx.tool_call_approved:
                     return args
-                trace_approval(ctx, direction=_ARGS_DIRECTION, tool_name=call.tool_name)
+                trace_approval(
+                    ctx,
+                    direction=_ARGS_DIRECTION,
+                    tool_name=call.tool_name,
+                    tool_call_id=call.tool_call_id,
+                    args=args,
+                )
                 raise ApprovalRequired
             case 'replace':
                 if not _is_arguments(verdict.replacement):
@@ -265,7 +300,9 @@ class ToolGuard(AbstractCapability[AgentDepsT]):
         if self.result_guard is None or not self._guards(call.tool_name):
             return result
 
-        info = ToolResultInfo(name=call.tool_name, args=args, tool_call_id=call.tool_call_id, result=result)
+        info = ToolResultInfo(
+            name=call.tool_name, args=MappingProxyType(args), tool_call_id=call.tool_call_id, result=result
+        )
         verdict = await evaluate(self.result_guard, ctx, info)
         match verdict.action:
             case 'allow':

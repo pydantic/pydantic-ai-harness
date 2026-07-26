@@ -208,11 +208,24 @@ def trace_redaction(
     ctx.tracer.start_span(f'guardrail redacted {direction}', attributes=attributes).end()
 
 
-def trace_approval(ctx: RunContext[AgentDepsT], *, direction: str, tool_name: str) -> None:
+def trace_approval(
+    ctx: RunContext[AgentDepsT],
+    *,
+    direction: str,
+    tool_name: str,
+    tool_call_id: str,
+    args: object,
+) -> None:
     """Record a zero-duration span marking a tool call deferred for approval.
 
-    Carries no content attributes: the span says which tool was deferred, and
-    the arguments are already on the tool-call span.
+    Deferring means the tool never executes, so no `execute_tool` span is ever
+    created and this is the only record of what was asked for. It therefore
+    carries the call id, to correlate with the `DeferredToolRequests` an
+    application answers, and the arguments when `trace_include_content` allows
+    it -- the one case where an operator most needs to see them.
     """
     attributes = direction_attributes(direction, 'approve', tool_name)
+    attributes['guardrail.tool_call_id'] = tool_call_id
+    if ctx.trace_include_content:
+        attributes['guardrail.arguments'] = str(args)
     ctx.tracer.start_span(f'guardrail deferred {direction}', attributes=attributes).end()

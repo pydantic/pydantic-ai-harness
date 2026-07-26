@@ -16,6 +16,7 @@ from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, SkipToolExecuti
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
+    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -185,6 +186,23 @@ class TestArgumentGuard:
         await agent.run('hi')
 
         assert seen == [{'query': '[redacted]'}]
+
+    async def test_replace_with_non_string_keys_is_a_user_error(self):
+        """They become keyword arguments, where the interpreter's TypeError names nothing useful."""
+        guard = ToolGuard[object](guard=lambda call: GuardResult.replace({1: 'x'}))
+
+        with pytest.raises(UserError, match='must provide replacement arguments'):
+            await _guard_args(guard, {'query': 'x'})
+
+    async def test_the_arguments_a_guard_sees_are_read_only(self):
+        """Mutating them would change the call while reporting `allow`, with no redaction span."""
+
+        def mutate(call: ToolCallInfo) -> GuardResult:
+            call.args['query'] = 'MUTATED'  # pyright: ignore[reportIndexIssue]
+            return GuardResult.allow()  # pragma: no cover - the mutation above raises first
+
+        with pytest.raises(TypeError):
+            await _guard_args(ToolGuard(guard=mutate), {'query': 'original'})
 
     async def test_replace_with_a_non_mapping_is_a_user_error(self):
         guard = ToolGuard[object](guard=lambda call: GuardResult.replace('not a mapping'))
@@ -411,7 +429,21 @@ class TestResultGuard:
         guard = ToolGuard[object](result_guard=lambda info: False, tools=['dangerous'])
 
         assert await _guard_result(guard, 'x', tool_name='safe') == 'x'
-        assert await _guard_result(guard, 'x', tool_name='dangerous') != 'x'
+        assert await _guard_result(guard, 'x', tool_name='dangerous') == 'Tool result blocked by tool guardrail.'
+
+
+class TestConfigurationShape:
+    """A bare string satisfies `Sequence[str]`, and both fields misbehave on one."""
+
+    def test_a_bare_string_for_hidden_is_refused(self):
+        """`set('danger')` holds six letters, so the tool it names would stay on the wire."""
+        with pytest.raises(UserError, match='ToolGuard.hidden takes a collection'):
+            ToolGuard[object](hidden='danger')  # pyright: ignore[reportArgumentType]
+
+    def test_a_bare_string_for_tools_is_refused(self):
+        """Substring membership would make it match any tool whose name it contains."""
+        with pytest.raises(UserError, match='ToolGuard.tools takes a collection'):
+            ToolGuard[object](tools='delete_all')  # pyright: ignore[reportArgumentType]
 
 
 class TestHiddenTools:
@@ -437,6 +469,30 @@ class TestHiddenTools:
         await agent.run('hi')
 
         assert offered == [['safe']]
+
+    async def test_a_hidden_tool_cannot_be_called(self):
+        """Withholding the definition is only half of it; the name must not resolve either."""
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if any(isinstance(part, RetryPromptPart) for message in messages for part in message.parts):
+                return ModelResponse(parts=[TextPart(content='gave up')])
+            return ModelResponse(parts=[ToolCallPart(tool_name='danger', args={}, tool_call_id='c1')])
+
+        agent = Agent(FunctionModel(respond), deps_type=type(None), capabilities=[ToolGuard(hidden=['danger'])])
+
+        @agent.tool_plain
+        def danger() -> str:  # pragma: no cover - the point is that it is unreachable
+            return 'boom'
+
+        @agent.tool_plain
+        def safe() -> str:  # pragma: no cover - never called by this script
+            return 'ok'
+
+        result = await agent.run('hi')
+        retries = [p for m in result.all_messages() for p in m.parts if isinstance(p, RetryPromptPart)]
+
+        assert result.output == 'gave up'
+        assert "Unknown tool name: 'danger'" in str(retries[0].content)
 
     async def test_no_hidden_tools_leaves_definitions_untouched(self):
         tool_defs = [_tool_def('a'), _tool_def('b')]
@@ -528,12 +584,13 @@ class TestTracing:
             'guardrail.tool': 'lookup',
         }
 
-    async def test_approval_span_carries_no_content(self):
+    async def test_the_approval_span_is_the_only_record_of_the_call(self):
+        """Deferring means the tool never runs, so no `execute_tool` span carries the arguments."""
         tracer, exporter = _recording_tracer()
         guard = ToolGuard[object](guard=lambda call: GuardResult.approve())
 
         with pytest.raises(ApprovalRequired):
-            await _guard_args(guard, {}, ctx=_run_ctx(trace_include_content=True, tracer=tracer))
+            await _guard_args(guard, {'q': 'x'}, ctx=_run_ctx(trace_include_content=True, tracer=tracer))
 
         span = _only_span(exporter)
         assert span.name == 'guardrail deferred tool args'
@@ -541,6 +598,22 @@ class TestTracing:
             'guardrail.direction': 'tool args',
             'guardrail.action': 'approve',
             'guardrail.tool': 'lookup',
+            'guardrail.tool_call_id': 'call-1',
+            'guardrail.arguments': "{'q': 'x'}",
+        }
+
+    async def test_the_approval_span_omits_the_arguments_by_default(self):
+        tracer, exporter = _recording_tracer()
+        guard = ToolGuard[object](guard=lambda call: GuardResult.approve())
+
+        with pytest.raises(ApprovalRequired):
+            await _guard_args(guard, {'q': 'x'}, ctx=_run_ctx(tracer=tracer))
+
+        assert dict(_only_span(exporter).attributes or {}) == {
+            'guardrail.direction': 'tool args',
+            'guardrail.action': 'approve',
+            'guardrail.tool': 'lookup',
+            'guardrail.tool_call_id': 'call-1',
         }
 
 

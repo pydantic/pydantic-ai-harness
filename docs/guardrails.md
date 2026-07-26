@@ -5,7 +5,7 @@ description: Validate the user prompt before it reaches the model, the tool call
 
 # Input, Output & Tool Guardrails
 
-Guardrails put a validation layer on the two edges of an agent run: the prompt on its way *in* to the model, and the output on its way *out* to the caller. Reach for them when unstructured input or output must be screened before it is acted on -- a prompt-injection attempt you never want to send, PII you must redact, an off-topic request you want to refuse cheaply, or an answer that must cite its sources before you show it. Without a guardrail the framework sends whatever the user typed and returns whatever the model produced, verbatim; a guardrail interposes a callable you control that gets the final say.
+Guardrails put a validation layer on the three edges of an agent run: the prompt on its way *in* to the model, the tool calls the model makes along the way, and the output on its way *out* to the caller. Reach for them when unstructured input or output must be screened before it is acted on -- a prompt-injection attempt you never want to send, PII you must redact, an off-topic request you want to refuse cheaply, or an answer that must cite its sources before you show it. Without a guardrail the framework sends whatever the user typed and returns whatever the model produced, verbatim; a guardrail interposes a callable you control that gets the final say.
 
 > The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
 

@@ -5,7 +5,7 @@ callable decide what to do with the user prompt. `OutputGuard` runs as the
 model output is processed and decides what to do with the agent output.
 
 A guard returns a bare `bool` (`True` = allow) or a
-[`GuardResult`][pydantic_ai_harness.guardrails.GuardResult] — one of four
+[`GuardResult`][pydantic_ai_harness.guardrails.GuardResult] -- one of five
 outcomes:
 
 - `allow` — let the value through unchanged.
@@ -13,7 +13,8 @@ outcomes:
   message via [`SkipModelRequest`][pydantic_ai.exceptions.SkipModelRequest];
   `OutputGuard` raises [`OutputBlocked`][pydantic_ai_harness.guardrails.OutputBlocked].
 - `replace` — substitute a sanitized value (redaction) and continue.
-- `retry` — send the output back to the model to try again (`OutputGuard` only).
+- `retry` -- send the output back to the model to try again (not valid for input).
+- `approve` -- defer a tool call for human approval ([`ToolGuard`][pydantic_ai_harness.ToolGuard] arguments only).
 
 A guard that raises propagates the exception so the caller sees a hard
 failure. Guards may be sync or async and may optionally take a
@@ -111,7 +112,7 @@ def _replace_prompt(messages: Sequence[ModelMessage], new_content: str) -> bool:
 class InputGuard(AbstractCapability[AgentDepsT]):
     """Validate the user prompt before it reaches the model.
 
-    The `guard` callable receives the prompt text and returns one of the four
+    The `guard` callable receives the prompt text and returns one of the
     outcomes (see the module docstring). `replace` rewrites the prompt sent to
     the model and also overwrites the original in the run's message history,
     so a redacted secret is not retained; a `str` replacement overwrites a
@@ -264,7 +265,7 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
 
     The `guard` callable receives the output — no automatic stringification, so
     a typed output arrives as the Pydantic model instance — and returns one of
-    the four outcomes (see the module docstring): `allow` exposes the output,
+    the outcomes (see the module docstring): `allow` exposes the output,
     `block` raises [`OutputBlocked`][pydantic_ai_harness.guardrails.OutputBlocked],
     `replace` substitutes a sanitized output (redaction), and `retry` sends the
     output back to the model to try again.
