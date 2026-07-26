@@ -108,7 +108,7 @@ The two redactors rewrite rather than refuse, which is the useful default:
 an agent that quoted a key back has still done the work, and blocking the answer
 loses it while leaving the key in the message history either way.
 
-Both are factories when you need to narrow or extend them:
+Each is `secrets()` and `personal_data()` called with the defaults. Use those factories directly when you need to narrow or extend them:
 
 ```python
 from pydantic_ai_harness.guardrails.detectors import secrets

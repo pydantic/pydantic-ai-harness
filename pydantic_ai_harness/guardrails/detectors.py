@@ -43,7 +43,10 @@ TextDetector = Callable[[str], GuardResult]
 """A check over text. Plug one into `InputGuard`, or into `OutputGuard` via `for_text`."""
 
 DEFAULT_SECRET_PATTERNS: Mapping[str, str] = {
-    'openai_key': r'sk-[A-Za-z0-9]{20,}',
+    # Hyphens included for project keys (`sk-proj-...`); the lookahead keeps an
+    # Anthropic key from matching here and being labelled as OpenAI's, so the
+    # label does not depend on the order these are declared in.
+    'openai_key': r'sk-(?!ant-)[A-Za-z0-9-]{20,}',
     'anthropic_key': r'sk-ant-[A-Za-z0-9-]{20,}',
     'aws_access_key': r'AKIA[0-9A-Z]{16}',
     'github_token': r'(?:ghp|gho|ghs|ghr|github_pat)_[A-Za-z0-9_]{20,}',

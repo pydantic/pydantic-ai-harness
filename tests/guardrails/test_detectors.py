@@ -70,6 +70,17 @@ class TestSecretRedaction:
         }
         assert secrets(only=[name])(samples[name]).action == 'replace'
 
+    @pytest.mark.parametrize('key', ['sk-abcdefghijklmnopqrstuvwxyz01', 'sk-proj-AbCdEfGhIjKlMnOpQrStUv'])
+    def test_both_shapes_of_openai_key_match(self, key: str):
+        """Project keys carry hyphens, which an alphanumeric-only class stops at."""
+        assert redact_secrets(f'k={key}').replacement == 'k=[redacted:openai_key]'
+
+    def test_an_anthropic_key_keeps_its_own_label(self):
+        """Allowing hyphens makes the OpenAI shape a prefix of this one, so it is excluded explicitly."""
+        result = redact_secrets('k=sk-ant-abcdefghijklmnopqrstuvwx')
+
+        assert result.replacement == 'k=[redacted:anthropic_key]'
+
     def test_a_private_key_is_removed_whole(self):
         """Replacing the BEGIN line alone would leave the key material sitting in the text."""
         pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAx7Vv9mKq\n-----END RSA PRIVATE KEY-----'
