@@ -102,6 +102,13 @@ class ToolResultInfo(ToolCallInfo):
     rather than a bare value, in which case that wrapper is what arrives here.
     Stringifying it yields a repr and replacing it with a string discards its
     metadata, so read `result.return_value` when you mean the payload.
+
+    This is the object the tool produced, not a copy: read it, and return
+    `GuardResult.replace` to change it. Mutating it in place changes what the
+    model sees while the verdict says `allow`, with no redaction span to show
+    for it. The arguments a guard sees *are* copied, because they come from the
+    tool's own schema and are therefore small and copyable; a return value is
+    whatever the tool chose to return, which can be neither.
     """
 
 
