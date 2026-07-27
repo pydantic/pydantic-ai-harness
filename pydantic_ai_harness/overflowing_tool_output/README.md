@@ -29,13 +29,35 @@ dropping context already inside it.
 | `Spill` | zero-LLM | no | A handle + preview + shape sketch; full payload read back on demand |
 | `Summarize` | one LLM call | yes | A size-gated summary (inherits the run's model by default) |
 
-`Spill` is lossless: the full payload is persisted and the model reads slices of it through
-the registered `read_tool_result(handle, offset, limit, from_end, pattern)` tool (the Claude
-Code pattern, the core [#4352](https://github.com/pydantic/pydantic-ai/issues/4352) design).
-That tool is bounded: `offset >= 0`, `limit` clamped to a built-in line cap, the joined output
-capped, and `pattern` is a literal substring (not a regex), so a model-supplied value cannot
-hang the host with catastrophic backtracking. The read-back tool's own returns are exempt from
-reduction, so a `read_tool_result` result is never itself spilled or truncated.
+`Spill` is lossless: the full payload is persisted and the model queries it through two
+registered tools (the Claude Code pattern, the core
+[#4352](https://github.com/pydantic/pydantic-ai/issues/4352) design):
+
+- `grep_tool_result(handle, pattern, context_lines=2, max_matches=20, is_regex=False)` --
+  find where something is. Returns matched lines with 1-based line numbers plus surrounding
+  context, grep-style. `pattern` is a literal substring by default; set `is_regex=True` for a
+  Python regex. The regex is applied per line (backtracking is bounded to a line length), and
+  matches, context, and joined output are each capped.
+- `read_tool_result(handle, offset=0, limit=200, from_end=False, pattern=None, unit='lines')`
+  -- read a specific range once grep shows where to look. `unit='lines'` slices by line
+  (optionally filtered to lines containing a literal `pattern`); `unit='bytes'` slices by byte
+  offset for payloads without useful line breaks. `offset >= 0`, `limit` clamped to a built-in
+  cap, joined output capped.
+
+The intended loop is grep to locate, then read the range around a match. A wrong or expired
+handle returns a guiding message rather than raising, so it never consumes a tool retry (PR
+[#293](https://github.com/pydantic/pydantic-ai-harness/pull/293)). The query tools' own
+returns are exempt from reduction, so a `grep_tool_result` or `read_tool_result` result is
+never itself spilled or truncated.
+
+### Every elision leaves an explicit marker
+
+Whenever content is removed -- spilled, truncated, or a read-back capped -- the model-visible
+text carries a uniform marker so nothing is dropped silently. A spilled span names the handle
+and both query tools (`[... 40 lines / 1,200 bytes omitted; search it with grep_tool_result(...),
+read ranges with read_tool_result(...) ...]`); a lossy `Truncate` names the omitted span and
+says to re-run the tool (there is no handle to query). Markers carry no timestamps, so an
+identical return reduces to identical bytes -- a moving marker would bust the prompt cache.
 
 ### Both `return_value` and `content` are reduced
 
@@ -96,7 +118,7 @@ spill -> truncate.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.overflow import (
+from pydantic_ai_harness.overflowing_tool_output import (
     Band,
     OverflowingToolOutput,
     Truncate,
@@ -161,7 +183,7 @@ agent that still wants to read a spill. To bound disk use, opt into age-based pr
 from datetime import timedelta
 
 from pydantic_ai import Agent
-from pydantic_ai_harness.experimental.overflow import LocalFileStore, OverflowingToolOutput
+from pydantic_ai_harness.overflowing_tool_output import LocalFileStore, OverflowingToolOutput
 
 store = LocalFileStore(cleanup_after=timedelta(hours=6))  # default: None = keep forever
 agent = Agent('openai:gpt-4o', capabilities=[OverflowingToolOutput(store=store)])

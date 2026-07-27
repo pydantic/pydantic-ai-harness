@@ -19,11 +19,13 @@ from pydantic_ai_harness.overflowing_tool_output._bands import (
     SummarizeFunc,
     Truncate,
 )
-from pydantic_ai_harness.overflowing_tool_output._capability import READ_TOOL_NAME, OverflowingToolOutput
+from pydantic_ai_harness.overflowing_tool_output._capability import OverflowingToolOutput
+from pydantic_ai_harness.overflowing_tool_output._markers import GREP_TOOL_NAME, READ_TOOL_NAME
 from pydantic_ai_harness.overflowing_tool_output._payload import TruncationStrategy
 from pydantic_ai_harness.overflowing_tool_output._store import LocalFileStore, OverflowStore
 
 __all__ = [
+    'GREP_TOOL_NAME',
     'READ_TOOL_NAME',
     'Action',
     'Band',

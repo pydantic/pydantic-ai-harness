@@ -6,6 +6,7 @@ emits a `DeprecationWarning`. Import from `pydantic_ai_harness.overflowing_tool_
 
 from pydantic_ai_harness.experimental._warn import warn_moved
 from pydantic_ai_harness.overflowing_tool_output import (
+    GREP_TOOL_NAME,
     READ_TOOL_NAME,
     Action,
     Band,
@@ -23,6 +24,7 @@ from pydantic_ai_harness.overflowing_tool_output import (
 warn_moved('overflow', 'overflowing_tool_output')
 
 __all__ = [
+    'GREP_TOOL_NAME',
     'READ_TOOL_NAME',
     'Action',
     'Band',

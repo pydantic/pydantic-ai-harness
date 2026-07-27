@@ -16,6 +16,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, SystemPromptPart
 from pydantic_core import to_json
 
 from pydantic_ai_harness.compaction._shared import estimate_token_count
+from pydantic_ai_harness.overflowing_tool_output._markers import elision_marker
 
 
 class TruncationStrategy(str, Enum):
@@ -114,25 +115,27 @@ def _sketch_sequence(items: Sequence[object]) -> str:
 
 
 def truncate_text(text: str, max_chars: int, strategy: TruncationStrategy) -> str:
-    """Cut `text` down to roughly `max_chars`, annotating what was removed.
+    """Cut `text` down to roughly `max_chars`, leaving a marker where content was removed.
 
-    Returns `text` unchanged when it already fits.
+    Truncation is lossy -- nothing is stored -- so the marker carries no handle: it names
+    the omitted span and says to re-run the tool to recover it. Returns `text` unchanged
+    when it already fits.
     """
     total = len(text)
     if total <= max_chars:
         return text
 
     if strategy is TruncationStrategy.head:
-        return f'{text[:max_chars]}\n\n[truncated: showing first {max_chars:,} of {total:,} chars]'
+        omitted = total - max_chars
+        marker = elision_marker(omitted=f'last {omitted:,} of {total:,} chars', handle=None)
+        return f'{text[:max_chars]}\n\n{marker}'
     if strategy is TruncationStrategy.tail:
-        return f'[truncated: showing last {max_chars:,} of {total:,} chars]\n\n{text[-max_chars:]}'
+        omitted = total - max_chars
+        marker = elision_marker(omitted=f'first {omitted:,} of {total:,} chars', handle=None)
+        return f'{marker}\n\n{text[-max_chars:]}'
 
     head_chars = max_chars * 2 // 5
     tail_chars = max_chars - head_chars
     omitted = total - head_chars - tail_chars
-    return (
-        f'{text[:head_chars]}\n\n'
-        f'[truncated: {omitted:,} chars omitted from the middle; '
-        f'showing first {head_chars:,} + last {tail_chars:,} of {total:,} chars]\n\n'
-        f'{text[-tail_chars:]}'
-    )
+    marker = elision_marker(omitted=f'{omitted:,} of {total:,} chars from the middle', handle=None)
+    return f'{text[:head_chars]}\n\n{marker}\n\n{text[-tail_chars:]}'

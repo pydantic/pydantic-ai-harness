@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import re
 import warnings
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeGuard
+from typing import Any, Literal, TypeGuard
 
 from pydantic_ai import FunctionToolset
 from pydantic_ai.capabilities import AbstractCapability
@@ -22,6 +23,14 @@ from pydantic_ai_harness.overflowing_tool_output._bands import (
     Summarize,
     Truncate,
 )
+from pydantic_ai_harness.overflowing_tool_output._markers import (
+    GREP_TOOL_NAME,
+    READ_TOOL_NAME,
+    elision_marker,
+    missing_handle_message,
+    spill_header,
+    summary_header,
+)
 from pydantic_ai_harness.overflowing_tool_output._payload import (
     is_binary,
     json_sketch,
@@ -33,8 +42,8 @@ from pydantic_ai_harness.overflowing_tool_output._payload import (
 )
 from pydantic_ai_harness.overflowing_tool_output._store import LocalFileStore, OverflowStore
 
-READ_TOOL_NAME = 'read_tool_result'
-"""Name of the registered read-back tool. Its own returns are exempt from reduction."""
+_QUERY_TOOL_NAMES = (READ_TOOL_NAME, GREP_TOOL_NAME)
+"""The spill query tools. Their own returns are exempt from reduction (never re-spilled)."""
 
 _DEFAULT_THRESHOLD = 10_000
 """Default band threshold (characters) -- below this, returns pass through untouched."""
@@ -163,7 +172,13 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
     # --- toolset ---
 
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
-        """Register the `read_tool_result` tool for reading spilled payloads on demand."""
+        """Register the query tools for spilled payloads: `read_tool_result` and `grep_tool_result`.
+
+        When a tool return overflows, its full payload is stored and the model-visible text
+        carries a marker naming the handle. These two tools let the model get the stored
+        content back: `grep_tool_result` to find where something is, `read_tool_result` to
+        read a specific line or byte range.
+        """
         store = self._store
 
         async def read_tool_result(
@@ -173,20 +188,50 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
             limit: int = 200,
             from_end: bool = False,
             pattern: str | None = None,
+            unit: Literal['lines', 'bytes'] = 'lines',
         ) -> str:
-            """Read a slice of a spilled tool result.
+            """Read a range of a spilled tool result. Use this once `grep_tool_result` shows where to look.
+
+            With `unit='lines'` (default) the range is line-based: return `limit` lines
+            starting `offset` lines in. With `unit='bytes'` the range is byte-based: return
+            `limit` bytes starting at byte `offset` (for payloads without useful line breaks).
 
             Args:
                 ctx: The run context (supplied by the agent).
-                handle: The handle from the overflowed tool return.
-                offset: Number of matching lines to skip from the start (or end). Must be >= 0.
-                limit: Maximum number of lines to return (>= 1; clamped to a built-in cap).
-                from_end: Count `offset`/`limit` from the end of the result.
-                pattern: Optional literal substring; only lines containing it are returned.
+                handle: The handle from the `[Tool output too large ... stored as ...]` marker.
+                offset: Lines (or bytes) to skip from the start, or from the end if `from_end`. Must be >= 0.
+                limit: Maximum lines (or bytes) to return (>= 1; clamped to a built-in cap).
+                from_end: Count `offset`/`limit` from the end of the result (for tailing logs).
+                pattern: Line mode only -- a literal substring; only lines containing it are returned.
+                unit: `'lines'` (default) or `'bytes'`. `pattern` is rejected with `unit='bytes'`.
             """
-            return await _read_slice(store, handle, offset, limit, from_end, pattern)
+            return await _read_slice(store, handle, offset, limit, from_end, pattern, unit)
 
-        return FunctionToolset([read_tool_result])
+        async def grep_tool_result(
+            ctx: RunContext[AgentDepsT],
+            handle: str,
+            pattern: str,
+            context_lines: int = 2,
+            max_matches: int = 20,
+            is_regex: bool = False,
+        ) -> str:
+            """Search a spilled tool result for `pattern`, returning matched lines with line numbers.
+
+            Use this first to locate content in a large spilled payload, then read the
+            surrounding range with `read_tool_result(handle, offset=<line number>, ...)`.
+            Each match prints its 1-based line number and `context_lines` lines on each side.
+
+            Args:
+                ctx: The run context (supplied by the agent).
+                handle: The handle from the `[Tool output too large ... stored as ...]` marker.
+                pattern: What to search for. A literal substring by default; a Python regex if `is_regex`.
+                context_lines: Lines of context to show on each side of a match (>= 0; clamped).
+                max_matches: Stop after this many matches (>= 1; clamped to a built-in cap).
+                is_regex: Treat `pattern` as a Python regular expression instead of a literal substring.
+            """
+            return await _grep_slice(store, handle, pattern, context_lines, max_matches, is_regex)
+
+        return FunctionToolset([read_tool_result, grep_tool_result])
 
     # --- reduction ---
 
@@ -201,7 +246,7 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
     ) -> Any:
         """Reduce the tool result -- both `return_value` and model-visible `content`."""
         original: object = result
-        if call.tool_name == READ_TOOL_NAME:
+        if call.tool_name in _QUERY_TOOL_NAMES:
             return original
         if not await matches_tool_selector(self.tool_filter, ctx, tool_def):
             return original
@@ -393,7 +438,14 @@ class OverflowingToolOutput(AbstractCapability[AgentDepsT]):
             summary = await self._summarize(ctx, call, action, unit.text)
         except Exception:
             return await self._fallback(ctx, call, action.then, unit)
-        return summary, None
+        # Mark the summary the same way every other elision path is marked: an explicit
+        # bracketed header so the model (and any downstream model) knows this body is a
+        # harness-generated stand-in, not the tool's real output. `Summarize` does not spill
+        # the original, so there is no retrieval handle.
+        size_unit = 'tokens' if self.over_tokens else 'chars'
+        amount = measure(unit.text, over_tokens=self.over_tokens, tokenizer=self.tokenizer)
+        header = summary_header(size_desc=f'{amount:,} {size_unit}', handle=None)
+        return f'{header}\n{summary}', None
 
     async def _summarize(
         self,
@@ -465,7 +517,7 @@ def _copy_mapping(source: Mapping[object, object]) -> dict[str, object]:
 
 
 def _build_spill_preview(handle: str, unit: _Unit, preview_chars: int, *, over_tokens: bool) -> str:
-    """Compose the model-visible spill stand-in: marker, sketch, and a head/tail preview."""
+    """Compose the model-visible spill stand-in: header, shape sketch, and a head/tail preview."""
     if unit.binary:
         size_desc = f'{len(unit.data):,} bytes (binary)'
         body = f'<{len(unit.data):,} bytes of binary data>'
@@ -475,36 +527,72 @@ def _build_spill_preview(handle: str, unit: _Unit, preview_chars: int, *, over_t
         size_unit = 'tokens' if over_tokens else 'chars'
         amount = measure(text, over_tokens=over_tokens, tokenizer=None) if over_tokens else len(text)
         size_desc = f'{amount:,} {size_unit}'
-        body = _head_tail_preview(text, preview_chars)
+        body = _head_tail_preview(text, preview_chars, handle)
         sketch = json_sketch(unit.value)
 
-    header = (
-        f'[Tool output too large ({size_desc}); stored to handle {handle!r}. '
-        f'Read it with read_tool_result(handle={handle!r}, offset=0, limit=200, '
-        f'from_end=False, pattern=None).]'
-    )
-    parts = [header]
+    parts = [spill_header(size_desc=size_desc, handle=handle)]
     if sketch:
         parts.append(f'shape: {sketch}')
     parts.append(body)
     return '\n'.join(parts)
 
 
-def _head_tail_preview(text: str, preview_chars: int) -> str:
-    """Return a head+tail slice of `text` with a middle-elision marker."""
+def _head_tail_preview(text: str, preview_chars: int, handle: str) -> str:
+    """Return a head+tail slice of `text` with a middle-elision marker pointing at `handle`.
+
+    The full text is spilled to `handle`, so the marker names both query tools: the omitted
+    middle is retrievable, it is not lost.
+    """
     if len(text) <= preview_chars:
         return text
     head_chars = preview_chars // 2
     tail_chars = preview_chars - head_chars
-    omitted = len(text) - head_chars - tail_chars
-    return f'{text[:head_chars]}\n...[{omitted:,} chars omitted]...\n{text[-tail_chars:]}'
+    omitted = text[head_chars:-tail_chars] if tail_chars else text[head_chars:]
+    omitted_lines = omitted.count('\n') + 1
+    omitted_bytes = len(omitted.encode('utf-8'))
+    marker = elision_marker(omitted=f'{omitted_lines:,} lines / {omitted_bytes:,} bytes', handle=handle)
+    return f'{text[:head_chars]}\n{marker}\n{text[-tail_chars:]}'
 
 
 _MAX_READ_LINES = 1_000
 """Hard cap on lines returned by one `read_tool_result` call."""
 
+_MAX_READ_BYTES = 50_000
+"""Hard cap on bytes returned by one `read_tool_result` byte-range call."""
+
 _MAX_READ_CHARS = 50_000
-"""Hard cap on characters returned by one `read_tool_result` call."""
+"""Hard cap on characters in the joined body of a `read`/`grep` result."""
+
+_MAX_GREP_MATCHES = 200
+"""Hard cap on matches returned by one `grep_tool_result` call."""
+
+_MAX_GREP_CONTEXT = 20
+"""Hard cap on `context_lines` for one `grep_tool_result` call."""
+
+
+async def _load(store: OverflowStore, handle: str) -> bytes | None:
+    """Read a spilled payload, returning None when the handle does not resolve.
+
+    A wrong or expired handle returns None (not an exception) so the caller can hand the
+    model a guiding message instead of consuming a tool retry (see PR #293).
+    """
+    try:
+        return await store.read(handle)
+    except OSError:
+        return None
+
+
+def _cap_body(body: str, handle: str) -> str:
+    """Clamp a joined body to `_MAX_READ_CHARS`, leaving an inline marker at the cut.
+
+    The dropped tail is still in the store, so the marker names the handle: without it the
+    body would end mid-content with no sign anything was removed.
+    """
+    if len(body) <= _MAX_READ_CHARS:
+        return body
+    dropped = len(body) - _MAX_READ_CHARS
+    marker = elision_marker(omitted=f'{dropped:,} more bytes of this view', handle=handle)
+    return f'{body[:_MAX_READ_CHARS]}\n{marker}'
 
 
 async def _read_slice(
@@ -514,33 +602,32 @@ async def _read_slice(
     limit: int,
     from_end: bool,
     pattern: str | None,
+    unit: Literal['lines', 'bytes'] = 'lines',
 ) -> str:
-    """Filter and slice a spilled payload for `read_tool_result`, bounded in both axes.
+    """Slice a spilled payload for `read_tool_result`, by line or byte range, bounded both ways.
 
-    `pattern` is a literal substring (not a regex), so a model-supplied value cannot hang
-    the host with catastrophic backtracking. `limit` is clamped and the joined output is
-    capped, so one call can never return an unbounded amount of text.
+    In line mode, `pattern` is a literal substring (not a regex), so a model-supplied value
+    cannot hang the host with catastrophic backtracking. `limit` is clamped and the joined
+    body is capped, so one call can never return an unbounded amount of text.
     """
     if offset < 0:
         raise ModelRetry('`offset` must be >= 0.')
     if limit < 1:
         raise ModelRetry('`limit` must be >= 1.')
-    limit = min(limit, _MAX_READ_LINES)
 
-    try:
-        data = await store.read(handle)
-    except OSError:
-        # Return, not raise: a wrong handle (e.g. the model passing a tool-call id) or a
-        # result that is no longer stored must not consume a tool retry and escalate to a
-        # fatal `UnexpectedModelBehavior`. Guide the model to a valid handle instead. The
-        # exception is intentionally not echoed -- a store's error can carry the resolved
-        # filesystem path or other backend detail the model has no need for.
-        return (
-            f'[No stored tool result for handle {handle!r}. Use the exact handle string from a '
-            '"[Tool output too large ... stored to handle ...]" marker; if the result is no longer '
-            'available, re-run the original tool.]'
-        )
+    data = await _load(store, handle)
+    if data is None:
+        return missing_handle_message(handle)
 
+    if unit == 'bytes':
+        if pattern is not None:
+            raise ModelRetry("`pattern` filters lines; it is not supported with unit='bytes'.")
+        return _read_bytes(data, handle, offset, min(limit, _MAX_READ_BYTES), from_end)
+    return _read_lines(data, handle, offset, min(limit, _MAX_READ_LINES), from_end, pattern)
+
+
+def _read_lines(data: bytes, handle: str, offset: int, limit: int, from_end: bool, pattern: str | None) -> str:
+    """Return a line window of `data`, optionally filtered to lines containing `pattern`."""
     lines = data.decode('utf-8', errors='replace').splitlines()
     if pattern is not None:
         lines = [line for line in lines if pattern in line]
@@ -552,10 +639,114 @@ async def _read_slice(
     else:
         window = lines[offset : offset + limit]
 
-    body = '\n'.join(window)
-    capped = ''
-    if len(body) > _MAX_READ_CHARS:
-        body = body[:_MAX_READ_CHARS]
-        capped = ', output capped'
-    header = f'[handle {handle!r}: {total:,} matching line(s); showing {len(window)}{capped}]'
+    body = _cap_body('\n'.join(window), handle)
+    filtered = f' matching {pattern!r}' if pattern is not None else ''
+    header = f'[handle {handle!r}: {total:,} line(s){filtered}; showing {len(window)}]'
     return f'{header}\n{body}' if body else header
+
+
+def _read_bytes(data: bytes, handle: str, offset: int, limit: int, from_end: bool) -> str:
+    """Return a byte window of `data`, decoded for display (replacing undecodable bytes)."""
+    total = len(data)
+    if from_end:
+        end = max(0, total - offset)
+        start = max(0, end - limit)
+    else:
+        start = offset
+        end = offset + limit
+    chunk = data[start:end]
+    body = _cap_body(chunk.decode('utf-8', errors='replace'), handle)
+    header = f'[handle {handle!r}: bytes {min(start, total):,}-{min(end, total):,} of {total:,}]'
+    return f'{header}\n{body}' if body else header
+
+
+def _match_predicate(pattern: str, is_regex: bool) -> Callable[[str], bool]:
+    """Build a per-line match test. Regex is applied per line, bounding backtracking to a line.
+
+    A literal substring (`is_regex=False`) is the safe default; an invalid regex is a
+    deterministic caller error, so it raises `ModelRetry` for the model to correct at once.
+    """
+    if not is_regex:
+        return lambda line: pattern in line
+    try:
+        compiled = re.compile(pattern)
+    except re.error as exc:
+        raise ModelRetry(
+            f'Invalid regular expression {pattern!r}: {exc}. Fix the pattern, or set is_regex=False '
+            'to search for it literally.'
+        ) from exc
+    return lambda line: compiled.search(line) is not None
+
+
+async def _grep_slice(
+    store: OverflowStore,
+    handle: str,
+    pattern: str,
+    context_lines: int,
+    max_matches: int,
+    is_regex: bool,
+) -> str:
+    """Search a spilled payload for `pattern`, returning matched lines with 1-based line numbers.
+
+    Bounded on every axis: an empty pattern, a bad regex, or out-of-range knobs raise
+    `ModelRetry`; matches, context, and joined output are each capped so one call cannot
+    return an unbounded amount of text.
+    """
+    if not pattern:
+        raise ModelRetry('`pattern` must not be empty.')
+    if context_lines < 0:
+        raise ModelRetry('`context_lines` must be >= 0.')
+    if max_matches < 1:
+        raise ModelRetry('`max_matches` must be >= 1.')
+    context_lines = min(context_lines, _MAX_GREP_CONTEXT)
+    max_matches = min(max_matches, _MAX_GREP_MATCHES)
+
+    data = await _load(store, handle)
+    if data is None:
+        return missing_handle_message(handle)
+
+    lines = data.decode('utf-8', errors='replace').splitlines()
+    matches_pattern = _match_predicate(pattern, is_regex)
+
+    hits: list[int] = []
+    more = False
+    for index, line in enumerate(lines):
+        if matches_pattern(line):
+            if len(hits) == max_matches:
+                more = True
+                break
+            hits.append(index)
+
+    if not hits:
+        return f'[handle {handle!r}: no matches for {pattern!r} in {len(lines):,} line(s).]'
+
+    shown = f'first {len(hits)} of {len(hits)}+ ' if more else f'{len(hits)} '
+    header = f'[handle {handle!r}: {shown}match(es) for {pattern!r} in {len(lines):,} line(s)]'
+    body = _cap_body(_render_grep(lines, hits, context_lines), handle)
+    return f'{header}\n{body}'
+
+
+def _render_grep(lines: list[str], hits: list[int], context_lines: int) -> str:
+    """Render matched lines and their context, grep-style with 1-based line numbers.
+
+    A `:` after the line number flags a match, a `-` flags a context line. Overlapping
+    context windows merge; non-adjacent groups are separated by a `--` line.
+    """
+    hit_set = set(hits)
+    groups: list[tuple[int, int]] = []
+    for index in hits:
+        low = max(0, index - context_lines)
+        high = min(len(lines) - 1, index + context_lines)
+        if groups and low <= groups[-1][1] + 1:
+            groups[-1] = (groups[-1][0], max(groups[-1][1], high))
+        else:
+            groups.append((low, high))
+
+    rendered: list[str] = []
+    for group_index, (low, high) in enumerate(groups):
+        if group_index > 0:
+            rendered.append('--')
+        for index in range(low, high + 1):
+            sep = ':' if index in hit_set else '-'
+            rendered.append(f'{index + 1}{sep} {lines[index]}')
+    return '\n'.join(rendered)

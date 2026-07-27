@@ -27,6 +27,7 @@ from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.overflowing_tool_output import (
+    GREP_TOOL_NAME,
     Band,
     LocalFileStore,
     OverflowingToolOutput,
@@ -39,6 +40,7 @@ from pydantic_ai_harness.overflowing_tool_output import (
 from pydantic_ai_harness.overflowing_tool_output._capability import (
     READ_TOOL_NAME,
     _build_spill_preview,
+    _grep_slice,
     _handle_key,
     _head_tail_preview,
     _read_slice,
@@ -168,16 +170,18 @@ class TestPayloadHelpers:
     def test_truncate_head(self):
         out = truncate_text('a' * 100, 10, TruncationStrategy.head)
         assert out.startswith('aaaaaaaaaa')
-        assert 'showing first 10' in out
+        # Lossy truncation leaves a handle-less marker naming the omitted span.
+        assert 'last 90 of 100 chars omitted' in out
+        assert 're-run the tool' in out
 
     def test_truncate_tail(self):
         out = truncate_text('a' * 100, 10, TruncationStrategy.tail)
         assert out.endswith('aaaaaaaaaa')
-        assert 'showing last 10' in out
+        assert 'first 90 of 100 chars omitted' in out
 
     def test_truncate_head_tail(self):
         out = truncate_text('a' * 100, 10, TruncationStrategy.head_tail)
-        assert 'omitted from the middle' in out
+        assert 'from the middle omitted' in out
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +352,7 @@ class TestPassthrough:
             tool_filter=lambda ctx, td: td.name == 'big_tool',
         )
         out = await _run(cap, 'x' * 100)
-        assert isinstance(out, str) and 'truncated' in out
+        assert isinstance(out, str) and 'omitted' in out
 
     async def test_below_threshold_passthrough(self):
         cap: OverflowingToolOutput[object] = OverflowingToolOutput(bands=[Band(over=1000, action=Truncate())])
@@ -434,7 +438,7 @@ class TestSpill:
             bands=[Band(over=10, action=Spill(then=Truncate(max_chars=15)))], store=_BrokenStore()
         )
         out = await _run(cap, 'a' * 100)
-        assert isinstance(out, str) and 'truncated' in out
+        assert isinstance(out, str) and 'omitted' in out
 
     async def test_spill_failure_no_fallback_returns_original(self):
         cap: OverflowingToolOutput[object] = OverflowingToolOutput(
@@ -491,7 +495,7 @@ class TestContentReduction:
         cap: OverflowingToolOutput[object] = OverflowingToolOutput(bands=[Band(over=10, action=Truncate(max_chars=20))])
         out = await _run(cap, ToolReturn(return_value='small', content='C' * 200))
         assert isinstance(out, ToolReturn)
-        assert isinstance(out.content, str) and 'truncated' in out.content
+        assert isinstance(out.content, str) and 'omitted' in out.content
 
     async def test_both_value_and_content_reduced(self, tmp_path: Path):
         store = LocalFileStore(base_dir=tmp_path)
@@ -534,7 +538,7 @@ class TestSummarize:
             bands=[Band(over=5, action=Summarize(summarize=lambda name, text: f'{name}:{len(text)}'))]
         )
         out = await _run(cap, 'x' * 100)
-        assert out == 'big_tool:100'
+        assert out.endswith('big_tool:100')
 
     async def test_custom_async_summarizer(self):
         async def summ(name: str, text: str) -> str:
@@ -544,14 +548,25 @@ class TestSummarize:
             bands=[Band(over=5, action=Summarize(summarize=summ))]
         )
         out = await _run(cap, 'x' * 100)
-        assert out == 'async:100'
+        assert out.endswith('async:100')
+
+    async def test_summary_carries_explicit_marker(self):
+        # The summary replaces the real tool output, so it must be marked as a harness
+        # stand-in the same way every other elision path is -- not passed off as the result.
+        cap: OverflowingToolOutput[object] = OverflowingToolOutput(
+            bands=[Band(over=5, action=Summarize(summarize=lambda name, text: 'THE GIST'))]
+        )
+        out = await _run(cap, 'x' * 100)
+        assert out.startswith('[Tool output too large (100 chars); summarized by harness.')
+        assert 're-run the tool for the full output' in out
+        assert out.endswith('\nTHE GIST')
 
     async def test_inherited_model_and_usage(self):
         # model=None resolves to ctx.model, and the call threads usage=ctx.usage.
         ctx = _make_ctx(model=_fixed_model('THE SUMMARY'))
         cap: OverflowingToolOutput[object] = OverflowingToolOutput(bands=[Band(over=5, action=Summarize())])
         out = await _run(cap, 'x' * 100, ctx=ctx)
-        assert out == 'THE SUMMARY'
+        assert out.endswith('THE SUMMARY')
         assert ctx.usage.requests == 1
 
     async def test_explicit_model_overrides_ctx(self):
@@ -560,7 +575,7 @@ class TestSummarize:
             bands=[Band(over=5, action=Summarize(model=_fixed_model('FROM EXPLICIT MODEL')))]
         )
         out = await _run(cap, 'x' * 100, ctx=ctx)
-        assert out == 'FROM EXPLICIT MODEL'
+        assert out.endswith('FROM EXPLICIT MODEL')
         assert ctx.usage.requests == 1
 
     async def test_binary_summarize_falls_back(self):
@@ -578,7 +593,7 @@ class TestSummarize:
             bands=[Band(over=5, action=Summarize(summarize=boom, then=Truncate(max_chars=10)))]
         )
         out = await _run(cap, 'a' * 100)
-        assert isinstance(out, str) and 'truncated' in out
+        assert isinstance(out, str) and 'omitted' in out
 
 
 # ---------------------------------------------------------------------------
@@ -632,10 +647,13 @@ class TestInternals:
         assert meta == {'orig': 1, 'overflow_content_handle': 'h/1.0.content'}
 
     def test_head_tail_preview_under(self):
-        assert _head_tail_preview('short', 1000) == 'short'
+        assert _head_tail_preview('short', 1000, 'h/1.0') == 'short'
 
     def test_head_tail_preview_over(self):
-        assert 'omitted' in _head_tail_preview('a' * 100, 10)
+        out = _head_tail_preview('a' * 100, 10, 'h/1.0')
+        assert 'omitted' in out
+        # The spilled middle is retrievable, so the marker names both query tools.
+        assert 'grep_tool_result' in out and 'read_tool_result' in out
 
     def test_build_spill_preview_tokens_unit(self):
         unit = _Unit(binary=False, text='x' * 100, data=b'x' * 100, value='x' * 100, suffix='')
@@ -695,7 +713,8 @@ class TestReadBack:
         store = LocalFileStore(base_dir=tmp_path)
         await store.write('h/1.0', ('x' * 60_000).encode('utf-8'))
         out = await _read_slice(store, 'h/1.0', offset=0, limit=10, from_end=False, pattern=None)
-        assert 'output capped' in out
+        # The over-cap tail is dropped with an explicit inline marker, not silently.
+        assert 'more bytes of this view omitted' in out
         assert len(out) < 60_000
 
     async def test_read_slice_missing_handle(self, tmp_path: Path):
@@ -717,6 +736,213 @@ class TestReadBack:
         tool = toolset.tools[READ_TOOL_NAME]  # type: ignore[union-attr]
         out = await tool.function(_make_ctx(), 'h/1.0')  # type: ignore[attr-defined]
         assert 'hello' in out
+
+
+# ---------------------------------------------------------------------------
+# read_tool_result byte-range mode
+# ---------------------------------------------------------------------------
+
+
+class TestReadBytes:
+    async def test_read_bytes_basic(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'0123456789')
+        out = await _read_slice(store, 'h/1.0', offset=2, limit=4, from_end=False, pattern=None, unit='bytes')
+        assert '2345' in out
+        assert 'bytes 2-6 of 10' in out
+
+    async def test_read_bytes_from_end(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'0123456789')
+        out = await _read_slice(store, 'h/1.0', offset=0, limit=3, from_end=True, pattern=None, unit='bytes')
+        assert '789' in out and '456' not in out
+
+    async def test_read_bytes_out_of_range_empty(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'short')
+        out = await _read_slice(store, 'h/1.0', offset=1000, limit=10, from_end=False, pattern=None, unit='bytes')
+        # An offset past the end yields an empty window and just the header, never an error.
+        assert 'bytes 5-5 of 5' in out
+
+    async def test_read_bytes_rejects_pattern(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'data')
+        with pytest.raises(ModelRetry, match='pattern'):
+            await _read_slice(store, 'h/1.0', offset=0, limit=10, from_end=False, pattern='x', unit='bytes')
+
+    async def test_read_bytes_output_capped(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', ('y' * 60_000).encode('utf-8'))
+        out = await _read_slice(store, 'h/1.0', offset=0, limit=60_000, from_end=False, pattern=None, unit='bytes')
+        # limit is clamped to the byte cap, so the returned view stays bounded.
+        assert len(out) < 60_000
+
+    async def test_line_header_names_pattern(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'apple\nbanana\navocado')
+        out = await _read_slice(store, 'h/1.0', offset=0, limit=200, from_end=False, pattern='av')
+        assert "matching 'av'" in out
+
+
+# ---------------------------------------------------------------------------
+# grep_tool_result / _grep_slice
+# ---------------------------------------------------------------------------
+
+
+class TestGrep:
+    async def test_grep_matches_with_line_numbers(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', '\n'.join(f'line {i}' for i in range(50)).encode('utf-8'))
+        out = await _grep_slice(store, 'h/1.0', pattern='line 7', context_lines=0, max_matches=20, is_regex=False)
+        # 1-based line numbers: 'line 7' is index 7, so line 8.
+        assert '8: line 7' in out
+        assert '1 match(es)' in out
+
+    async def test_grep_context_lines(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'a\nb\nMATCH\nc\nd')
+        out = await _grep_slice(store, 'h/1.0', pattern='MATCH', context_lines=1, max_matches=20, is_regex=False)
+        assert '2- b' in out and '3: MATCH' in out and '4- c' in out
+        assert '1- a' not in out and '5- d' not in out
+
+    async def test_grep_max_matches_cap(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', ('hit\n' * 100).encode('utf-8'))
+        out = await _grep_slice(store, 'h/1.0', pattern='hit', context_lines=0, max_matches=5, is_regex=False)
+        # Exactly max_matches shown, and the header flags that more exist.
+        assert out.count(': hit') == 5
+        assert 'first 5 of 5+' in out
+
+    async def test_grep_no_match(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'apple\nbanana')
+        out = await _grep_slice(store, 'h/1.0', pattern='zzz', context_lines=2, max_matches=20, is_regex=False)
+        assert 'no matches for' in out and '2 line(s)' in out
+
+    async def test_grep_separate_groups(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', ('X\n' + 'y\n' * 10 + 'X').encode('utf-8'))
+        out = await _grep_slice(store, 'h/1.0', pattern='X', context_lines=0, max_matches=20, is_regex=False)
+        # Two matches far apart -> two groups separated by a '--' line.
+        assert '\n--\n' in out
+
+    async def test_grep_regex(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'error 500\nok 200\nerror 404')
+        out = await _grep_slice(store, 'h/1.0', pattern=r'error \d+', context_lines=0, max_matches=20, is_regex=True)
+        assert 'error 500' in out and 'error 404' in out and 'ok 200' not in out
+
+    async def test_grep_literal_metachar_not_regex(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'plain\na.b\naxb')
+        # With is_regex=False the '.' is literal, so 'axb' must not match.
+        out = await _grep_slice(store, 'h/1.0', pattern='a.b', context_lines=0, max_matches=20, is_regex=False)
+        assert 'a.b' in out and 'axb' not in out
+
+    async def test_grep_invalid_regex(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'data')
+        with pytest.raises(ModelRetry, match='Invalid regular expression'):
+            await _grep_slice(store, 'h/1.0', pattern='(unclosed', context_lines=0, max_matches=20, is_regex=True)
+
+    async def test_grep_empty_pattern(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'data')
+        with pytest.raises(ModelRetry, match='must not be empty'):
+            await _grep_slice(store, 'h/1.0', pattern='', context_lines=0, max_matches=20, is_regex=False)
+
+    async def test_grep_negative_context(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'data')
+        with pytest.raises(ModelRetry, match='context_lines'):
+            await _grep_slice(store, 'h/1.0', pattern='x', context_lines=-1, max_matches=20, is_regex=False)
+
+    async def test_grep_max_matches_too_small(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'data')
+        with pytest.raises(ModelRetry, match='max_matches'):
+            await _grep_slice(store, 'h/1.0', pattern='x', context_lines=0, max_matches=0, is_regex=False)
+
+    async def test_grep_missing_handle(self, tmp_path: Path):
+        # Consistent with read: a bad handle returns guidance, it does not raise.
+        store = LocalFileStore(base_dir=tmp_path)
+        out = await _grep_slice(store, 'missing/1.0', pattern='x', context_lines=2, max_matches=20, is_regex=False)
+        assert 'No stored tool result' in out
+        assert str(tmp_path) not in out
+
+    async def test_grep_output_capped(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', '\n'.join('hit ' + 'x' * 500 for _ in range(200)).encode('utf-8'))
+        out = await _grep_slice(store, 'h/1.0', pattern='hit', context_lines=0, max_matches=200, is_regex=False)
+        assert 'more bytes of this view omitted' in out
+
+    async def test_get_toolset_registers_grep_tool(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        await store.write('h/1.0', b'alpha\nbeta\ngamma')
+        cap: OverflowingToolOutput[object] = OverflowingToolOutput(store=store)
+        toolset = cap.get_toolset()
+        assert toolset is not None
+        tool = toolset.tools[GREP_TOOL_NAME]  # type: ignore[union-attr]
+        out = await tool.function(_make_ctx(), 'h/1.0', 'beta')  # type: ignore[attr-defined]
+        assert '2: beta' in out
+
+    async def test_grep_tool_result_exempt_from_reduction(self):
+        # A large grep result must not itself be spilled or truncated (it would recurse).
+        cap: OverflowingToolOutput[object] = OverflowingToolOutput(bands=[Band(over=1, action=Truncate(max_chars=2))])
+        out = await _run(cap, 'x' * 100, tool_name=GREP_TOOL_NAME)
+        assert out == 'x' * 100
+
+
+# ---------------------------------------------------------------------------
+# Uniform elision markers + determinism
+# ---------------------------------------------------------------------------
+
+
+class TestElisionMarkers:
+    async def test_spill_marker_names_both_query_tools(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        cap: OverflowingToolOutput[object] = OverflowingToolOutput(
+            bands=[Band(over=10, action=Spill(preview_chars=20))], store=store
+        )
+        out = await _run(cap, 'line\n' * 500)
+        assert isinstance(out, ToolReturn) and isinstance(out.return_value, str)
+        text = out.return_value
+        # The stored-output banner and the middle-elision marker both name grep + read.
+        assert 'stored as' in text
+        assert GREP_TOOL_NAME in text and READ_TOOL_NAME in text
+        assert 'omitted' in text
+
+    async def test_truncate_marker_has_no_handle(self):
+        cap: OverflowingToolOutput[object] = OverflowingToolOutput(bands=[Band(over=10, action=Truncate(max_chars=20))])
+        out = await _run(cap, 'a' * 100)
+        assert isinstance(out, str)
+        # Lossy path: no handle, no query-tool names, explicit re-run guidance instead.
+        assert 're-run the tool' in out
+        assert GREP_TOOL_NAME not in out and READ_TOOL_NAME not in out
+
+    async def test_spill_preview_is_deterministic(self, tmp_path: Path):
+        # Two identical spills (same run/call/retry) produce byte-identical previews:
+        # no timestamps or other run-varying data, for cache-prefix stability.
+        text = 'payload line\n' * 500
+
+        async def spill_once() -> Any:
+            store = LocalFileStore(base_dir=tmp_path / os.urandom(8).hex())
+            cap: OverflowingToolOutput[object] = OverflowingToolOutput(
+                bands=[Band(over=10, action=Spill(preview_chars=40))], store=store
+            )
+            return await _run(cap, text, ctx=_make_ctx(run_id='run-x', retry=0))
+
+        first = await spill_once()
+        second = await spill_once()
+        assert isinstance(first, ToolReturn) and isinstance(second, ToolReturn)
+        assert first.return_value == second.return_value
+        assert first.metadata['overflow_handle'] == second.metadata['overflow_handle']
+
+    async def test_truncate_is_deterministic(self):
+        cap: OverflowingToolOutput[object] = OverflowingToolOutput(bands=[Band(over=10, action=Truncate(max_chars=30))])
+        first = await _run(cap, 'z' * 200)
+        second = await _run(cap, 'z' * 200)
+        assert first == second
 
 
 # ---------------------------------------------------------------------------
