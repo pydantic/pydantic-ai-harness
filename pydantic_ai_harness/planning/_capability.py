@@ -60,8 +60,20 @@ class Planning(AbstractCapability[AgentDepsT]):
     """
 
     guidance: str | None = None
-    """Static planning guidance for the system prompt. Cache-stable. `None` uses
-    the default; `''` omits guidance entirely."""
+    """Static planning guidance for the system prompt. Cache-stable.
+
+    Three states, so opting out is something you do on purpose rather than by
+    accident:
+
+    - `None` (the default): use the built-in guidance.
+    - `''`: no guidance at all.
+    - any other string: use it instead of the built-in guidance.
+
+    A single `str | None` where `None` meant "no guidance" would leave no way to
+    ask for the default explicitly, and would turn a config that resolves to
+    `None` into a silent opt-out. This matches `memory`, `exa` and
+    `runtime_authoring`, which read the same way.
+    """
 
     cache_ttl: Literal['5m', '1h'] = '5m'
     """TTL for the cache breakpoint placed before the plan reminder."""
