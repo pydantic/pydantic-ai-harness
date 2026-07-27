@@ -131,6 +131,7 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 | [Memory](memory.md) | Gives an agent a persistent, namespaced notebook with bounded prompt injection, on-demand search, and concurrency-safe stores. | -- |
 | [Runtime Authoring](runtime-authoring.md) | Lets an agent author, validate, and load real capabilities at runtime. | -- |
 | [Guardrails](guardrails.md) | Validates user input before a run starts and model output after it completes -- block or redact, with structured results. | -- |
+| [Budget Disclosure](budget-disclosure.md) | Discloses the run's remaining token, cost, and tool-call budget to the model. | -- |
 | [Managed Prompt](managed-prompt.md) | Backs an agent's instructions with a [Logfire-managed prompt](https://logfire.pydantic.dev/docs/reference/advanced/prompt-management/), so you can version, label, and roll out prompt changes from the Logfire UI without redeploying -- with a code default that keeps the agent working when no remote value is available. | `logfire` |
 | [ACP](acp.md) *(experimental)* | Serves an agent to editors (Zed, etc.) over the [Agent Client Protocol](https://agentclientprotocol.com) -- streamed text, diff-rendered edits, and tool approval. | `acp` |
 

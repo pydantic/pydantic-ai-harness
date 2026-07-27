@@ -131,6 +131,7 @@ _CAPABILITY_PAGE_META = {
     'dynamic-workflow.md': ('dynamic_workflow', 'Dynamic Workflow'),
     'planning.md': ('planning', 'Planning'),
     'runtime-authoring.md': ('runtime_authoring', 'Runtime Authoring'),
+    'budget-disclosure.md': ('budget_disclosure', 'Budget Disclosure'),
     'guardrails.md': ('guardrails', 'Input & Output Guardrails'),
     'localstack.md': ('localstack', 'LocalStack'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),

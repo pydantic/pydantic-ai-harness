@@ -22,6 +22,7 @@
       { "label": "Modal Sandbox", "slug": "modal-sandbox" },
       { "label": "Runtime Authoring", "slug": "runtime-authoring" },
       { "label": "Guardrails", "slug": "guardrails" },
+      { "label": "Budget Disclosure", "slug": "budget-disclosure" },
       { "label": "Managed Prompt", "slug": "managed-prompt" },
       { "label": "LocalStack", "slug": "localstack" },
       { "label": "ACP", "slug": "acp" }
