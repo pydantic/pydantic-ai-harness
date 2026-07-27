@@ -14,6 +14,7 @@
       { "label": "Overflowing Tool Output", "slug": "overflowing-tool-output" },
       { "label": "Cache Stability Monitor", "slug": "cache-stability" },
       { "label": "Step Persistence", "slug": "step-persistence" },
+      { "label": "Checkpoints", "slug": "checkpoints" },
       { "label": "Media", "slug": "media" },
       { "label": "Subagents", "slug": "subagents" },
       { "label": "Dynamic Workflow", "slug": "dynamic-workflow" },

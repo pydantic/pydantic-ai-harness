@@ -170,6 +170,7 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | **Memory &&nbsp;persistence** | **Memory** | Persistent, namespaced notebook with bounded prompt injection, on-demand search, and concurrency-safe stores | :white_check_mark: [Docs](pydantic_ai_harness/memory/) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Session persistence** | Save and restore full conversation state | :white_check_mark: [Docs](pydantic_ai_harness/step_persistence/) | |
 | | **Checkpointing** | Snapshot, resume (`continue_run`), and fork (`fork_run`) a run | :white_check_mark: [Docs](pydantic_ai_harness/step_persistence/) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
+| | **File checkpoints** | Shadow-git file snapshots taken before mutating tool calls, restorable mid-run | :white_check_mark: [Docs](pydantic_ai_harness/checkpoints/) | |
 | | **Media externalization** | Offload large `BinaryContent` to content-addressed stores (building blocks) | :white_check_mark: [Docs](pydantic_ai_harness/media/) | |
 | **Agent orchestration** | **Sub-agents** | Delegate subtasks to specialized child agents | :white_check_mark: [Docs](pydantic_ai_harness/subagents/) | [subagents-pydantic-ai](https://github.com/vstorm-co/subagents-pydantic-ai) (vstorm&#8209;co) |
 | | **Dynamic workflow** | Orchestrate sub-agents from a model-written Python script -- fan-out, chaining, voting in one tool call | :white_check_mark: [Docs](pydantic_ai_harness/dynamic_workflow/) | |
