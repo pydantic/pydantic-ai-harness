@@ -52,9 +52,6 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     """'run' = fresh session per run, safe concurrently; 'agent' = one session
     shared across runs inside `async with agent:` (chat loops)"""
 
-    command: str = 'browser-use'
-    """Name or path of the CLI binary"""
-
     default_timeout: float = 300.0
     """Seconds per call when the model passes no `timeout_seconds`"""
 
@@ -72,7 +69,6 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> BrowserUseToolset[AgentDepsT]:
         """Build the toolset that provides the `browser_exec` tool"""
         return BrowserUseToolset[AgentDepsT](
-            command=self.command,
             default_timeout=self.default_timeout,
             browser=self.browser,
             scope=self.scope,

@@ -121,7 +121,6 @@ from pydantic_ai_harness.browser_use import BrowserUse
 BrowserUse(
     browser='local',         # 'local', 'headless', or 'cloud'
     scope='run',             # 'agent' shares one session across runs (chat loops)
-    command='browser-use',   # CLI name or path
     default_timeout=300.0,   # seconds per call when the agent gives no timeout
     progress=None,           # narrate steps live, e.g. progress=print
     guidance=None,           # None = default instructions, '' = none, str = custom

@@ -270,14 +270,12 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
-        command: str = 'browser-use',
         default_timeout: float = 300.0,
         browser: Literal['local', 'headless', 'cloud'] = 'local',
         scope: Literal['run', 'agent'] = 'run',
         progress: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
-        self._command = command
         self._cwd = Path.cwd()
         self._default_timeout = default_timeout
         self._scope: Literal['run', 'agent'] = scope
@@ -296,7 +294,6 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         if self._scope == 'agent':
             return self
         return BrowserUseToolset[AgentDepsT](
-            command=self._command,
             default_timeout=self._default_timeout,
             browser=self._browser,
             scope=self._scope,
@@ -421,12 +418,12 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
 
     async def cli_skill_text(self) -> str | None:
         """Return the CLI's skill documentation, fetching it at most once per command"""
-        if self._command in _SKILL_CACHE:
-            return _SKILL_CACHE[self._command]
         try:
             argv = self._resolve_argv()
         except ModelRetry:
             return None
+        if argv[0] in _SKILL_CACHE:
+            return _SKILL_CACHE[argv[0]]
         exit_code, stdout, _ = await self._run_cli(
             [*argv, 'skill', 'show'],
             '',
@@ -435,7 +432,7 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
             raise_on_timeout=False,
         )
         skill = adapt_skill_to_tool(stdout.strip()) if exit_code == 0 and stdout.strip() else None
-        _SKILL_CACHE[self._command] = skill
+        _SKILL_CACHE[argv[0]] = skill
         return skill
 
     async def browser_exec(
@@ -531,7 +528,7 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
 
     def _resolve_argv(self) -> list[str]:
         """Locate the CLI, falling back to `uvx browser-use`"""
-        resolved = shutil.which(self._command)
+        resolved = shutil.which('browser-use')
         if resolved is not None:
             return [resolved]
         uvx = shutil.which('uvx')
