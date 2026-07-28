@@ -21,6 +21,7 @@
       { "label": "Memory", "slug": "memory" },
       { "label": "Modal Sandbox", "slug": "modal-sandbox" },
       { "label": "Runtime Authoring", "slug": "runtime-authoring" },
+      { "label": "Permission Policy", "slug": "permission-policy" },
       { "label": "Guardrails", "slug": "guardrails" },
       { "label": "Managed Prompt", "slug": "managed-prompt" },
       { "label": "LocalStack", "slug": "localstack" },
