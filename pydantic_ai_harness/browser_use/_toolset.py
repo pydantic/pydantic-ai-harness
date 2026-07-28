@@ -214,11 +214,36 @@ class _Session:
 _SCREENSHOT_RE = re.compile(r'(?<![\w/])(/[^\s\'"]+\.(?:png|jpe?g|webp))(?![\w])', re.IGNORECASE)
 """Absolute image path in output, as printed by `capture_screenshot()`"""
 
+_FILE_RE = re.compile(r'(?<![\w/])(/[^\s\'"]+\.[A-Za-z0-9]{1,8})(?![\w])')
+"""Any absolute file path the code printed"""
+
+_MAX_FILES = 16
+
 _MAX_SCREENSHOTS = 4
 
 _MAX_SCREENSHOT_BYTES = 8 * 1024 * 1024  # bigger than this stays out of context
 
 _MEDIA_TYPES = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp'}
+
+
+def collect_files(output: str, *, newer_than: float) -> list[dict[str, str | int]]:
+    """Files the executed code printed and wrote during this call"""
+    import mimetypes
+
+    found: list[dict[str, str | int]] = []
+    for match in dict.fromkeys(_FILE_RE.findall(output)):
+        path = Path(match)
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if stat.st_mtime < newer_than - 1 or not path.is_file():
+            continue
+        media_type = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+        found.append({'path': str(path), 'media_type': media_type, 'bytes': stat.st_size})
+        if len(found) == _MAX_FILES:
+            break
+    return found
 
 
 def collect_screenshots(output: str, *, newer_than: float) -> list[BinaryContent]:
@@ -498,12 +523,15 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         text = self._truncate('\n'.join(parts)) if parts else '(no output -- use print() in the code to return data)'
 
         images = collect_screenshots(stdout, newer_than=started)
+        files = collect_files(stdout, newer_than=started)
+        metadata = {'files': files} if files else None
         if not images:
-            return ToolReturn[str](return_value=text)
+            return ToolReturn[str](return_value=text, metadata=metadata)
         label = 'screenshot' if len(images) == 1 else 'screenshots'
         return ToolReturn[str](
             return_value=text,
             content=[f'The {label} this call captured, attached so you can look at the page:', *images],
+            metadata=metadata,
         )
 
     async def _execute(self, code: str, timeout: float, session: str | None) -> tuple[int, str, str]:

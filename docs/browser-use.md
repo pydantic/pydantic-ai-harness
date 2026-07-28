@@ -76,6 +76,21 @@ The browser stays open between calls, so the agent signs in once and keeps worki
 
 When the agent's code raises, the traceback and exit code come back to it as a [`ModelRetry`](/ai/tools-toolsets/tools-advanced/#tool-retries) rather than a hard error. The run continues and the model can fix its code and try again. The same is true when the CLI is missing or a call times out.
 
+Files the code produces flow through two channels. Screenshots come back attached as images, so the model can look at the page it captured. Every other file stays on disk, and each path the code prints is listed on the tool return's [`metadata`](/ai/tools-toolsets/tools-advanced/#advanced-tool-returns) under `files` (path, media type, size). Your application reads it from the run's `ToolReturnPart`:
+
+```python
+from pydantic_ai.messages import ModelRequest, ToolReturnPart
+
+for message in result.all_messages():
+    if isinstance(message, ModelRequest):
+        for part in message.parts:
+            if isinstance(part, ToolReturnPart) and part.metadata is not None:
+                for file in part.metadata.get('files', []):
+                    print(file['path'], file['media_type'], file['bytes'])
+```
+
+If your agent, for example, scrapes data and saves it as a CSV, you can then access the file.
+
 ## Choosing a browser
 
 | `browser` | What it uses | Reach for it when |
@@ -153,7 +168,7 @@ from pydantic_ai_harness.browser_use import BrowserUse
 agent = Agent.from_file('agent.yaml', custom_capability_types=[BrowserUse])
 ```
 
-Pass `custom_capability_types` so the spec loader knows how to build `BrowserUse`.
+Pass `custom_capability_types`, so the spec loader knows how to build `BrowserUse`.
 
 ## Further reading
 

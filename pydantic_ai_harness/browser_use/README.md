@@ -74,6 +74,21 @@ The browser and the model's Python variables both persist across calls, so the a
 
 One persistent Python session serves the whole run, so everything the code assigns survives to the next call -- including open handles that a snapshot could never carry. A call that times out restarts the session, while the browser itself is unaffected, since it lives in the CLI's daemon. Each agent run gets its own session, discarded when the run ends, so concurrent runs never see each other's variables; `scope='agent'` instead shares one session across every run inside `async with agent:`, which is what a chat loop wants.
 
+Files the code produces flow through two channels. Screenshots come back attached as images, so the model can look at the page it captured. Every other file stays on disk, and each path the code prints is listed on the tool return's `metadata` under `files` (path, media type, size). Your application reads it from the run's `ToolReturnPart`:
+
+```python
+from pydantic_ai.messages import ModelRequest, ToolReturnPart
+
+for message in result.all_messages():
+    if isinstance(message, ModelRequest):
+        for part in message.parts:
+            if isinstance(part, ToolReturnPart) and part.metadata is not None:
+                for file in part.metadata.get('files', []):
+                    print(file['path'], file['media_type'], file['bytes'])
+```
+
+If your agent, for example, scrapes data and saves it as a CSV, you can then access the file.
+
 ## Instructions
 
 The model is told about the browser twice, and the two sources divide the work.
