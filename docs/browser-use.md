@@ -70,7 +70,7 @@ These are what people most often ask a browser agent to do, in order of how comm
 |---|---|
 | `browser_exec` | Run Python in the browser and return whatever it prints. Optional `session` picks a named cloud browser; optional `timeout_seconds` bounds one call. |
 
-The agent writes Python to be executed within the browser and has a set of already made helpers -- `new_tab`, `goto_url`, `page_info`, `js`, `fill_input`, `press_key`, `scroll`, `wait_for_element`, `capture_screenshot`, tab management, and more.
+The agent writes Python to be executed within the browser and has a set of helpers -- `new_tab`, `goto_url`, `page_info`, `js`, `fill_input`, `press_key`, `scroll`, `wait_for_element`, `capture_screenshot`, tab management, and more.
 
 The browser stays open between calls, so the agent signs in once and keeps working for the rest of the run. Its calls share one persistent Python session, so variables carry over too -- open handles included -- letting it gather results across several calls and use them at the end.
 
@@ -105,7 +105,7 @@ from pydantic_ai_harness.browser_use import BrowserUse
 BrowserUse(browser='headless')
 ```
 
-`'local'` shares one browser with everything else on the machine, so you can only run one task at once. `'headless'` and `'cloud'` give each run its own browser, and both start signed out. You can import your logins to a cloud browser and run as many tasks as you want, and it automatically bypasses CAPTCHAs if necessary.
+`'local'` shares one browser with everything else on the machine, so you can only run one task at a time. `'headless'` and `'cloud'` give each run its own browser, and both start signed out. You can import your logins to a cloud browser and run as many tasks as you want, and it automatically bypasses CAPTCHAs if necessary.
 
 To point at a browser you are running yourself, set the `BU_CDP_URL` environment variable to its DevTools endpoint.
 
@@ -158,7 +158,7 @@ model: openai:gpt-5.5
 capabilities:
   - BrowserUse:
       browser: cloud
-      cloud_timeout_minutes: 30
+      default_timeout: 600
 ```
 
 ```python
@@ -173,7 +173,7 @@ Pass `custom_capability_types`, so the spec loader knows how to build `BrowserUs
 ## Further reading
 
 - [Browser Use documentation](https://docs.browser-use.com)
-- [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
+- [Pydantic AI capabilities](/ai/capabilities/overview/)
 - [Toolsets](/ai/tools-toolsets/toolsets/)
 
 ## API reference

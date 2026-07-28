@@ -10,7 +10,7 @@ Give an agent a real web browser powered by the [Browser Use](https://browser-us
 uv add pydantic-ai-harness
 ```
 
-That is the only required step. The browser is driven by the `browser-use` CLI, which runs as a separate program rather than a Python import, so it is not a dependency of your project. When the CLI is not on your PATH, the tool runs `uvx browser-use` instead. When neither is available, it hands the agent the install command rather than failing the run.
+That is the only required step. The browser is controlled by the `browser-use` CLI.
 
 Installing the CLI outright avoids the first `uvx` run's download and pins the version you get:
 
@@ -18,25 +18,21 @@ Installing the CLI outright avoids the first `uvx` run's download and pins the v
 uv tool install browser-use
 ```
 
-Local browsing needs no account or API key. Check that the CLI reaches your browser:
+Check that the CLI connects to your browser:
 
 ```bash
 browser-use --doctor
 ```
 
-It attaches to a running Chrome or Chromium with remote debugging on, and walks you through turning it on if needed. For cloud browsers, see [Cloud browsers](#cloud-browsers).
+The CLI attaches to the Google Chrome or Chromium browser on your computer. For cloud browsers, see [Cloud browsers](#cloud-browsers).
 
 ## The problem
 
-An agent with search and fetch tools can read text on public websites, but it cannot use the web. Most of what people do involves actions: booking a flight, paying a bill, cancelling a subscription buried four clicks deep in account settings, pulling last year's invoices for an expense report, rescheduling a delivery, filling in the same details across a dozen job applications.
-
-None of that is reachable by reading. Fetch one of those pages and you get a login wall, a cookie banner, or an empty shell that fills in only once JavaScript runs. The work is behind a button, and a fetch tool has no way to press it.
-
-The same limit applies to an agent checking its own work. To confirm a fix really shipped, it has to sign in and click the button a user would click.
+An agent with search and fetch tools can read text on public websites, but it cannot use the web. Most of what people do involves actions: booking a flight, paying a bill, cancelling a subscription, finding invoices for an expense report, rescheduling a delivery, filling in the same details across a dozen job applications.
 
 ## The solution
 
-`BrowserUse` gives the agent one tool that drives a real browser: your local Chrome, already signed in to the sites you use, or a fresh browser in the cloud. The agent writes short Python that navigates, clicks, types, reads the page, and takes screenshots, and gets back whatever that code prints.
+`BrowserUse` gives the agent one tool that controls a real browser: your local Chrome, already signed into the websites you use, or a browser in the cloud. The agent writes Python in the browser that navigates, clicks, types, and reads the page.
 
 ```python
 from pydantic_ai import Agent
@@ -44,37 +40,38 @@ from pydantic_ai_harness.browser_use import BrowserUse
 
 agent = Agent('openai:gpt-5.5', capabilities=[BrowserUse()])
 
-result = agent.run_sync('Open news.ycombinator.com and summarize the top 5 stories.')
+result = agent.run_sync('Open news.ycombinator.com, and summarize the top 5 stories.')
 print(result.output)
 ```
 
 ## What agents do with it
 
-- **Read what sits behind a login.** Pull the numbers off a dashboard, an invoice out of a billing portal, a thread out of a support inbox -- through the session already open in your browser, with no API to wire up first.
-- **Fill in and submit.** Complete forms, place an order, file a ticket, upload a document, work through a checkout.
-- **Handle sites that only render in a browser.** Single-page apps, infinite scroll, filters and pagination that never change the URL.
-- **Test your own app.** Sign up, click through the flow, screenshot the result, check that a fix reached staging.
-- **Repeat the same admin work.** Copy a record from one internal tool into another, every morning, without an integration between them.
+These are what people most often ask a browser agent to do, in order of how common they are:
 
-## How it works
+- **Research and compare across sites.** Answer a question that takes several sources, rank options, or check a claim -- the top repositories on GitHub, which fund recently bought a stock, what an organization is affiliated with.
+- **Pull repeated records into a table.** Scrape products, listings, prices, reviews, or videos into structured output: every offer on an Amazon product page, or every venue on Google Maps in one city.
+- **Reach a page and act on it.** Open a site, get through to the right screen, and do one thing there -- often waiting for you to log in first, then carrying on.
+- **Test a website end to end.** Walk a real user flow, audit the UX, hunt for bugs, or re-check a page after a change.
+- **Build and run browser automation.** Write UI tests for a page, script a repeatable crawl, or reproduce an interaction step by step.
+- **Fill in forms and account flows.** Registrations, surveys, course modules, assessments, and other multi-page sequences.
+- **Shop and book.** Compare products, prices, sellers, and coupons, search listings against your criteria, and go through checkout or a booking.
+- **Apply for jobs and update systems.** Work through applications, or log into an admin tool and update records, listings, and settings.
 
-`BrowserUse` adds a single `browser_exec` tool that pipes the model's Python to the `browser-use` CLI on stdin. The CLI runs that code with browser helpers already imported (`new_tab`, `goto_url`, `page_info`, `js`, `fill_input`, `capture_screenshot`, and more) against a browser it keeps alive in a background daemon.
+## Tools
 
-Two things follow from running the CLI as a subprocess. The harness pulls in no new Python packages, so nothing collides with the versions your project pins. And because the daemon holds the browser open, tabs, cookies, and logins survive from one call to the next: the agent signs in once and keeps working for the rest of the run.
-
-One call also carries a whole step -- navigate, wait, extract, act -- rather than spending a model round trip per click.
-
-## The tool
+`BrowserUse` contributes one tool to the agent:
 
 | Tool | Purpose |
 |---|---|
-| `browser_exec` | Execute Python in the persistent browser session and return what it prints. Accepts optional `session` (named cloud browser) and `timeout_seconds`. |
+| `browser_exec` | Run Python in the browser and return whatever it prints. Optional `session` picks a named cloud browser; optional `timeout_seconds` bounds one call. |
 
-The browser and the model's Python variables both persist across calls, so the agent can gather results over several calls and use them later. Code that raises comes back to the model with the traceback and exit code, so it can correct itself and try again.
+The agent writes Python to be executed within the browser and has a set of helpers -- `new_tab`, `goto_url`, `page_info`, `js`, `fill_input`, `press_key`, `scroll`, `wait_for_element`, `capture_screenshot`, tab management, and more.
 
-One persistent Python session serves the whole run, so everything the code assigns survives to the next call -- including open handles that a snapshot could never carry. A call that times out restarts the session, while the browser itself is unaffected, since it lives in the CLI's daemon. Each agent run gets its own session, discarded when the run ends, so concurrent runs never see each other's variables; `scope='agent'` instead shares one session across every run inside `async with agent:`, which is what a chat loop wants.
+The browser stays open between calls, so the agent signs in once and keeps working for the rest of the run. Its calls share one persistent Python session, so variables carry over too -- open handles included -- letting it gather results across several calls and use them at the end.
 
-Files the code produces flow through two channels. Screenshots come back attached as images, so the model can look at the page it captured. Every other file stays on disk, and each path the code prints is listed on the tool return's `metadata` under `files` (path, media type, size). Your application reads it from the run's `ToolReturnPart`:
+When the agent's code raises, the traceback and exit code come back to it as a [`ModelRetry`](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#tool-retries) rather than a hard error. The run continues and the model can fix its code and try again. The same is true when the CLI is missing or a call times out.
+
+Files the code produces flow through two channels. Screenshots come back attached as images, so the model can look at the page it captured. Every other file stays on disk, and each path the code prints is listed on the tool return's [`metadata`](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#advanced-tool-returns) under `files` (path, media type, size). Your application reads it from the run's `ToolReturnPart`:
 
 ```python
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
@@ -89,44 +86,46 @@ for message in result.all_messages():
 
 If your agent, for example, scrapes data and saves it as a CSV, you can then access the file.
 
-## Instructions
+## Choosing a browser
 
-The model is told about the browser twice, and the two sources divide the work.
+| `browser` | What it uses | Reach for it when |
+|---|---|---|
+| `'local'` (default) | Chrome or Chromium already running on your machine | You want the sites you are already signed into |
+| `'headless'` | It starts and stops headless Chromium for the run on a clean profile | You are on a server or CI, or several runs go at once and must not share tabs |
+| `'cloud'` | A [Browser Use Cloud](https://cloud.browser-use.com) browser | A site blocks automated traffic, or you want the run fully off your machine to run many browsers in parallel |
 
-The system prompt gets a short note, set with `guidance` (or `''` for none). It covers only what the CLI's own documentation cannot: that variables persist between calls here, unlike at the shell, and which values do not survive. Batching a whole step into one call is still worth doing, since it costs a round trip rather than a line of code.
+```python
+from pydantic_ai_harness.browser_use import BrowserUse
 
-The model also gets the CLI's own reference documentation, fetched once with `browser-use skill show` and appended to the `browser_exec` description. The model writes the Python this tool runs, so it needs that reference to write it correctly: full helper signatures, and the workflow the CLI recommends -- drive from the accessibility tree rather than screenshots, verify after each click, wait for load after navigating, stop and ask at a login wall, and prefer a plain HTTP fetch when no browser is needed. It is the same text the CLI hands to any other agent, and it tracks whichever CLI version is installed.
+BrowserUse(browser='headless')
+```
 
-When the CLI is missing or slow to answer, the tool keeps its short built-in description; a setup problem then surfaces when the model calls the tool, rather than breaking agent construction.
+`'local'` shares one browser with everything else on the machine, so you can only run one task at a time. `'headless'` and `'cloud'` give each run its own browser, and both start signed out. You can import your logins to a cloud browser and run as many tasks as you want, and it automatically bypasses CAPTCHAs if necessary.
+
+To point at a browser you are running yourself, set the `BU_CDP_URL` environment variable to its DevTools endpoint.
 
 ## Cloud browsers
 
-Cloud browsers are optional. Reach for one when the agent runs on a headless server, when several agents browse at once (they would otherwise fight over the tabs of one local Chrome), or when a site blocks automated traffic -- Browser Use runs cloud browsers with managed IPs and stealth settings.
-
-Sign in once and the CLI stores the credentials:
+Cloud browsers need an account. Sign in once, and the CLI remembers it:
 
 ```bash
-browser-use auth login    # add --device-code over SSH
+browser-use auth login
 browser-use auth status   # confirm it worked
 ```
 
-Or set the key yourself. Create one at <https://cloud.browser-use.com>, then export it:
+Or set the key yourself, from <https://cloud.browser-use.com>:
 
 ```bash
 export BROWSER_USE_API_KEY=your-key
 ```
 
-The environment variable wins when both are set.
-
-To run in a named cloud browser, the agent starts one with `start_remote_daemon('<name>')` and passes that name as the tool's `session` argument. To carry your logins into it, first sync your local browser profile (interactive; prints the profile to use, and re-sync when a site's login expires):
+To import all the websites you're logged into on your computer to a cloud browser, so it can complete tasks while signed into your accounts, sync your Chrome profile:
 
 ```bash
 export BROWSER_USE_API_KEY=your-key && curl -fsSL https://browser-use.com/profile.sh | sh
 ```
 
-then attach it when the browser is created: `start_remote_daemon('<name>', profileName='<profile>')`. A cloud browser without a profile starts logged out.
-
-## Options
+## Configuration
 
 Every field of `BrowserUse` with its default:
 
@@ -142,24 +141,18 @@ BrowserUse(
 )
 ```
 
-On timeout the CLI's process group is killed and the model is told it can retry; the browser daemon keeps running, so the session is not lost. To attach to a browser you run yourself, set the `BU_CDP_URL` environment variable to its DevTools endpoint; `BH_CHROME_PATH` picks the binary for headless mode.
-
-## Security
-
-The agent's code runs on your machine with no sandbox, and it reaches every site your browser is signed in to. Treat `BrowserUse` the way you treat `Shell`: give it to agents whose prompts you control. LLM provider API keys (`OPENAI_*`, `ANTHROPIC_*`, `GOOGLE_*`, ...) are scrubbed from the browser subprocess automatically; your Browser Use cloud credentials pass through, since the CLI needs them.
-
-For stronger isolation, point the agent at a cloud browser rather than your local Chrome: it starts clean, sees none of your logged-in sessions, and carries only the cookies you sync to it.
+On a timeout, the CLI is killed, and the agent is told it can retry.
 
 ## Agent spec (YAML/JSON)
 
-`BrowserUse` works with Pydantic AI's [agent spec](https://ai.pydantic.dev/agent-spec/):
+`BrowserUse` works with Pydantic AI's [agent spec](https://pydantic.dev/docs/ai/core-concepts/agent-spec/), so you can declare it in a config file instead of Python:
 
 ```yaml
 # agent.yaml
 model: openai:gpt-5.5
 capabilities:
   - BrowserUse:
-      workspace: /tmp/agent-workspace
+      browser: cloud
       default_timeout: 600
 ```
 
@@ -170,10 +163,10 @@ from pydantic_ai_harness.browser_use import BrowserUse
 agent = Agent.from_file('agent.yaml', custom_capability_types=[BrowserUse])
 ```
 
-Pass `custom_capability_types` so the spec loader knows how to instantiate `BrowserUse`.
+Pass `custom_capability_types`, so the spec loader knows how to build `BrowserUse`.
 
 ## Further reading
 
 - [Browser Use documentation](https://docs.browser-use.com)
-- [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)
-- [Toolsets](https://ai.pydantic.dev/toolsets/)
+- [Pydantic AI capabilities](https://pydantic.dev/docs/ai/capabilities/overview/)
+- [Toolsets](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/)
