@@ -1,6 +1,8 @@
-# VerificationGuard
+# Require Verification
 
-`VerificationGuard` prevents a coding agent from finishing immediately after it
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/require_verification/)
+
+`RequireVerification` prevents a coding agent from finishing immediately after it
 edits code without running a relevant check. It keeps a per-run evidence ledger:
 
 - a successful `write_file` or `edit_file` call makes older evidence stale;
@@ -17,14 +19,14 @@ The capability is opt-in. Leave it off chat or research agents that do not edit 
 from pydantic_ai import Agent
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
-from pydantic_ai_harness.verification_guard import VerificationGuard
+from pydantic_ai_harness.require_verification import RequireVerification
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
     capabilities=[
         FileSystem(root_dir='.'),
         Shell(cwd='.'),
-        VerificationGuard(),
+        RequireVerification(),
     ],
 )
 ```
@@ -37,7 +39,7 @@ By default, Markdown, MDX, and reStructuredText edits are exempt. Override
 Name custom mutation and verification tools explicitly:
 
 ```python
-VerificationGuard(
+RequireVerification(
     mutating_tools=('write_file', 'edit_file', 'apply_workspace_patch'),
     verification_tools=('run_project_checks',),
 )

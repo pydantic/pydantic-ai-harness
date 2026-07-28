@@ -84,7 +84,7 @@ def _command_passed(result: Any) -> bool:
 
 
 @dataclass
-class VerificationGuard(AbstractCapability[AgentDepsT]):
+class RequireVerification(AbstractCapability[AgentDepsT]):
     """Require fresh verification evidence before a coding run can finish.
 
     Successful file-edit tools make earlier evidence stale. Recognized verification
@@ -119,7 +119,7 @@ class VerificationGuard(AbstractCapability[AgentDepsT]):
         if self.max_attempts < 0:
             raise ValueError('max_attempts must be at least 0')
 
-    async def for_run(self, ctx: RunContext[AgentDepsT]) -> VerificationGuard[AgentDepsT]:
+    async def for_run(self, ctx: RunContext[AgentDepsT]) -> RequireVerification[AgentDepsT]:
         """Return isolated evidence state for each run."""
         return replace(self)
 

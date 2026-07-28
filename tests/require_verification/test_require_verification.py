@@ -18,7 +18,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from pydantic_ai_harness.verification_guard import VerificationGuard
+from pydantic_ai_harness.require_verification import RequireVerification
 
 pytestmark = pytest.mark.anyio
 
@@ -41,11 +41,11 @@ def _verification_nudges(messages: list[ModelMessage]) -> list[str]:
 
 def _agent(
     model_fn: Callable[[list[ModelMessage], AgentInfo], ModelResponse],
-    guard: VerificationGuard[object] | None = None,
+    guard: RequireVerification[object] | None = None,
     *,
     command_result: object | Callable[[str], object] = '(no output)',
 ) -> Agent[object, str]:
-    agent: Agent[object, str] = Agent(FunctionModel(model_fn), capabilities=[guard or VerificationGuard[object]()])
+    agent: Agent[object, str] = Agent(FunctionModel(model_fn), capabilities=[guard or RequireVerification[object]()])
 
     @agent.tool_plain
     def write_file(path: str, content: str) -> str:  # pyright: ignore[reportUnusedFunction]
@@ -217,7 +217,7 @@ async def test_documentation_only_edit_is_exempt() -> None:
 
 async def test_custom_mutation_and_verification_tools() -> None:
     calls = 0
-    guard = VerificationGuard[object](mutating_tools=('save_code',), verification_tools=('check_code',))
+    guard = RequireVerification[object](mutating_tools=('save_code',), verification_tools=('check_code',))
 
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         nonlocal calls
@@ -256,7 +256,7 @@ async def test_redirect_attempts_are_bounded() -> None:
             return ModelResponse(parts=[ToolCallPart('write_file', {'path': 'app.py', 'content': 'x = 1'})])
         return ModelResponse(parts=[TextPart(f'done-{calls}')])
 
-    result = await _agent(model_fn, VerificationGuard[object](max_attempts=2)).run('change without checks')
+    result = await _agent(model_fn, RequireVerification[object](max_attempts=2)).run('change without checks')
 
     assert result.output == 'done-4'
     assert calls == 4
@@ -274,7 +274,7 @@ async def test_unrecognized_command_does_not_count_as_verification() -> None:
             return ModelResponse(parts=[ToolCallPart('run_command', {'command': 'echo looks good'})])
         return ModelResponse(parts=[TextPart(f'done-{calls}')])
 
-    result = await _agent(model_fn, VerificationGuard[object](max_attempts=1)).run('change and echo')
+    result = await _agent(model_fn, RequireVerification[object](max_attempts=1)).run('change and echo')
 
     assert result.output == 'done-4'
     assert calls == 4
@@ -282,7 +282,7 @@ async def test_unrecognized_command_does_not_count_as_verification() -> None:
 
 async def test_shell_tool_ignores_non_string_command_argument() -> None:
     calls = 0
-    guard = VerificationGuard[object](max_attempts=1, shell_tools=('odd_shell',))
+    guard = RequireVerification[object](max_attempts=1, shell_tools=('odd_shell',))
 
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         nonlocal calls
@@ -316,7 +316,7 @@ async def test_evidence_state_is_isolated_between_runs() -> None:
             return ModelResponse(parts=[ToolCallPart('write_file', {'path': 'app.py', 'content': 'x = 1'})])
         return ModelResponse(parts=[TextPart(f'done-{calls}')])
 
-    agent = _agent(model_fn, VerificationGuard[object](max_attempts=1))
+    agent = _agent(model_fn, RequireVerification[object](max_attempts=1))
     first = await agent.run('edit code')
     second = await agent.run('answer without editing')
 
@@ -327,4 +327,4 @@ async def test_evidence_state_is_isolated_between_runs() -> None:
 
 def test_rejects_negative_attempt_limit() -> None:
     with pytest.raises(ValueError, match='max_attempts must be at least 0'):
-        VerificationGuard[object](max_attempts=-1)
+        RequireVerification[object](max_attempts=-1)
