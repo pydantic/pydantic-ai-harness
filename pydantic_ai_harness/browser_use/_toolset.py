@@ -182,16 +182,17 @@ class _Session:
         try:
             while True:
                 try:
-                    chunk = os.read(fd, 65536)
+                    chunk: bytes | None = os.read(fd, 65536)
                 except BlockingIOError:  # pragma: no cover - writer attached but idle
-                    chunk = b''
+                    chunk = None
                 if chunk:
                     chunks.append(chunk)
-                elif chunks:
+                elif chunk is not None and chunks:
                     return b''.join(chunks).decode('utf-8', errors='replace')
                 if time.monotonic() >= deadline:
                     raise TimeoutError
-                await anyio.sleep(0.02)
+                if not chunk:
+                    await anyio.sleep(0.02)
         finally:
             os.close(fd)
 

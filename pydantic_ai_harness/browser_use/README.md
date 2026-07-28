@@ -69,7 +69,7 @@ The agent writes Python to be executed within the browser and has a set of helpe
 
 The browser stays open between calls, so the agent signs in once and keeps working for the rest of the run. Its calls share one persistent Python session, so variables carry over too -- open handles included -- letting it gather results across several calls and use them at the end.
 
-When the agent's code raises, the traceback and exit code come back to it as a [`ModelRetry`](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#tool-retries) rather than a hard error. The run continues and the model can fix its code and try again. The same is true when the CLI is missing or a call times out.
+When the agent's code raises, the traceback and exit code come back to it in the tool output, along with anything it printed first. The run continues and the model can fix its code and try again. When the CLI is missing or a call times out, the tool raises a [`ModelRetry`](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#tool-retries) rather than a hard error.
 
 Files the code produces flow through two channels. Screenshots come back attached as images, so the model can look at the page it captured. Every other file stays on disk, and each path the code prints is listed on the tool return's [`metadata`](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#advanced-tool-returns) under `files` (path, media type, size). Your application reads it from the run's `ToolReturnPart`:
 
