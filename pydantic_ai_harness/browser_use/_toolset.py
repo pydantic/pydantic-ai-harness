@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -25,7 +25,8 @@ from pydantic_ai.messages import BinaryContent, ToolReturn
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 
-from pydantic_ai_harness.browser_use._progress import Detail, narrate_call, narrate_error, narrate_result
+from pydantic_ai_harness.browser_use._progress import narrate_call, narrate_error, narrate_result
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS
 
 _INSTALL_HINT = (
     'The `browser-use` CLI was not found on PATH, and no `uvx` fallback was available. Install it with:\n'
@@ -34,6 +35,10 @@ _INSTALL_HINT = (
 )
 
 _SKILL_FETCH_TIMEOUT = 30.0
+
+_MAX_TIMEOUT = 1800.0  # ceiling on a model-supplied timeout_seconds
+_MAX_OUTPUT_CHARS = 50_000
+_CLOUD_TIMEOUT_MINUTES = 60  # server-side backstop on a per-run cloud browser
 
 _ERROR_TAIL_CHARS = 2000
 """Tail of CLI output shown when cloud provisioning fails"""
@@ -265,46 +270,21 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
-        command: str,
-        cwd: Path,
-        default_timeout: float,
-        max_timeout: float,
-        max_output_chars: int,
-        workspace: Path | None,
-        env: Mapping[str, str] | None,
-        denied_env_patterns: Sequence[str],
-        fallback_to_uvx: bool,
-        persist_variables: bool = True,
+        command: str = 'browser-use',
+        default_timeout: float = 300.0,
         browser: Literal['local', 'headless', 'cloud'] = 'local',
-        cloud_session: str | None = None,
-        cloud_timeout_minutes: int = 60,
-        cdp_url: str | None = None,
-        chrome_path: str | None = None,
         scope: Literal['run', 'agent'] = 'run',
         progress: Callable[[str], None] | None = None,
-        progress_detail: Detail = 'steps',
     ) -> None:
         super().__init__()
         self._command = command
-        self._cwd = cwd.resolve()
+        self._cwd = Path.cwd()
         self._default_timeout = default_timeout
-        self._max_timeout = max_timeout
-        self._max_output_chars = max_output_chars
-        self._workspace = workspace
-        self._env = dict(env) if env is not None else None
-        self._denied_env_patterns = list(denied_env_patterns)
-        self._fallback_to_uvx = fallback_to_uvx
-        self._persist_session = persist_variables
         self._scope: Literal['run', 'agent'] = scope
         self._progress = progress
-        self._progress_detail: Detail = progress_detail
         self._enter_count = 0
         self._session: _Session | None = None
         self._browser: Literal['local', 'headless', 'cloud'] = browser
-        self._cloud_session = cloud_session
-        self._cloud_timeout_minutes = cloud_timeout_minutes
-        self._cdp_url = cdp_url
-        self._chrome_path = chrome_path
         self._headless_proc: anyio.abc.Process | None = None
         self._headless_profile: Path | None = None
         self._headless_cdp_url: str | None = None
@@ -317,23 +297,10 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
             return self
         return BrowserUseToolset[AgentDepsT](
             command=self._command,
-            cwd=self._cwd,
             default_timeout=self._default_timeout,
-            max_timeout=self._max_timeout,
-            max_output_chars=self._max_output_chars,
-            workspace=self._workspace,
-            env=self._env,
-            denied_env_patterns=self._denied_env_patterns,
-            fallback_to_uvx=self._fallback_to_uvx,
-            persist_variables=self._persist_session,
             browser=self._browser,
-            cloud_session=self._cloud_session,
-            cloud_timeout_minutes=self._cloud_timeout_minutes,
-            cdp_url=self._cdp_url,
-            chrome_path=self._chrome_path,
             scope=self._scope,
             progress=self._progress,
-            progress_detail=self._progress_detail,
         )
 
     async def __aenter__(self) -> BrowserUseToolset[AgentDepsT]:
@@ -367,12 +334,12 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
 
     async def _ensure_headless_browser(self) -> str | None:
         """Launch headless Chrome on first use and return its DevTools URL"""
-        if self._browser != 'headless' or self._cdp_url is not None:
+        if self._browser != 'headless':
             return None
         if self._headless_cdp_url is not None:
             return self._headless_cdp_url
 
-        binary = self._chrome_path or find_chrome()
+        binary = find_chrome()
         if binary is None:
             raise ModelRetry(
                 'No Chrome or Chromium binary was found to launch headless. Install Chrome, or set '
@@ -433,16 +400,14 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
 
     async def _ensure_cloud_session(self) -> str | None:
         """Return the cloud browser name for this run, provisioning one on first use"""
-        if self._browser != 'cloud' or self._cdp_url is not None:
+        if self._browser != 'cloud':
             return None
-        if self._cloud_session is not None:
-            return self._cloud_session
         if self._owned_session is not None:
             return self._owned_session
         name = f'pyai{uuid.uuid4().hex[:12]}'
         exit_code, stdout, stderr = await self._run_cli(
             self._resolve_argv(),
-            f'start_remote_daemon({name!r}, timeout={self._cloud_timeout_minutes})\n',
+            f'start_remote_daemon({name!r}, timeout={_CLOUD_TIMEOUT_MINUTES})\n',
             self._default_timeout,
             self._build_env(None),
         )
@@ -496,14 +461,14 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         """
         if self._progress is None:
             return await self._exec(code, session, timeout_seconds)
-        narrate_call(self._progress, code, self._progress_detail)
+        narrate_call(self._progress, code, 'steps')
         try:
             result = await self._exec(code, session, timeout_seconds)
         except ModelRetry as error:
             narrate_error(self._progress, str(error))
             raise
         images = sum(1 for item in (result.content or []) if not isinstance(item, str))
-        narrate_result(self._progress, str(result.return_value), images, self._progress_detail)
+        narrate_result(self._progress, str(result.return_value), images, 'steps')
         return result
 
     async def _exec(self, code: str, session: str | None, timeout_seconds: float | None) -> ToolReturn[str]:
@@ -521,7 +486,7 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
             timeout = self._default_timeout
         else:
             # floor: the first call in a session pays interpreter + daemon cold start
-            timeout = min(max(timeout_seconds, min(60.0, self._default_timeout)), self._max_timeout)
+            timeout = min(max(timeout_seconds, min(60.0, self._default_timeout)), _MAX_TIMEOUT)
 
         started = time.time()
         exit_code, stdout, stderr = await self._execute(code, timeout, session)
@@ -546,72 +511,53 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
 
     async def _execute(self, code: str, timeout: float, session: str | None) -> tuple[int, str, str]:
         """Run the model's code in this run's interpreter, starting one if needed"""
-        if self._persist_session:
-            if self._session is None or not self._session.alive:
-                self._session = _Session(self._resolve_argv(), self._cwd, self._build_env(session))
-                await self._session.start()
-            try:
-                exit_code, output = await self._session.call(code, timeout)
-            except TimeoutError:
-                await self._session.close()
-                self._session = None
-                raise ModelRetry(
-                    f'browser_exec timed out after {timeout}s, so the browser session was restarted. '
-                    'The browser itself is still open; re-read what you need from the page.'
-                ) from None
-            except (OSError, ValueError) as e:  # pragma: no cover - the session died mid-call
-                await self._session.close()
-                self._session = None
-                raise ModelRetry(f'The browser session ended unexpectedly ({e}). Try the call again.') from e
-            return exit_code, output, ''
-        return await self._run_cli(self._resolve_argv(), code, timeout, self._build_env(session))
+        if self._session is None or not self._session.alive:
+            self._session = _Session(self._resolve_argv(), self._cwd, self._build_env(session))
+            await self._session.start()
+        try:
+            exit_code, output = await self._session.call(code, timeout)
+        except TimeoutError:
+            await self._session.close()
+            self._session = None
+            raise ModelRetry(
+                f'browser_exec timed out after {timeout}s, so the browser session was restarted. '
+                'The browser itself is still open; re-read what you need from the page.'
+            ) from None
+        except (OSError, ValueError) as e:  # pragma: no cover - the session died mid-call
+            await self._session.close()
+            self._session = None
+            raise ModelRetry(f'The browser session ended unexpectedly ({e}). Try the call again.') from e
+        return exit_code, output, ''
 
     def _resolve_argv(self) -> list[str]:
         """Locate the CLI, falling back to `uvx browser-use`"""
         resolved = shutil.which(self._command)
         if resolved is not None:
             return [resolved]
-        if self._fallback_to_uvx:
-            uvx = shutil.which('uvx')
-            if uvx is not None:
-                return [uvx, 'browser-use']
+        uvx = shutil.which('uvx')
+        if uvx is not None:
+            return [uvx, 'browser-use']
         raise ModelRetry(_INSTALL_HINT)
 
-    def _build_env(self, session: str | None) -> dict[str, str] | None:
-        overlays: dict[str, str] = {}
+    def _build_env(self, session: str | None) -> dict[str, str]:
+        """Inherited environment minus LLM provider keys, plus the browser overlays"""
+        env = {
+            name: value
+            for name, value in os.environ.items()
+            if not any(fnmatch.fnmatchcase(name, pattern) for pattern in LLM_API_KEY_ENV_PATTERNS)
+        }
         if session is not None:
-            overlays['BU_NAME'] = session
-        if self._workspace is not None:
-            overlays['BH_AGENT_WORKSPACE'] = str(self._workspace)
-        endpoint = self._cdp_url or self._headless_cdp_url
-        if endpoint is not None:
-            # ws -> BU_CDP_WS, http -> BU_CDP_URL; either blocks local discovery
-            key = 'BU_CDP_WS' if endpoint.startswith(('ws://', 'wss://')) else 'BU_CDP_URL'
-            overlays[key] = endpoint
-
-        base: dict[str, str] | None
-        if self._env is None and not self._denied_env_patterns:
-            base = None
-        else:
-            base = dict(self._env) if self._env is not None else dict(os.environ)
-            if self._denied_env_patterns:
-                base = {
-                    name: value
-                    for name, value in base.items()
-                    if not any(fnmatch.fnmatchcase(name, pattern) for pattern in self._denied_env_patterns)
-                }
-        if not overlays:
-            return base
-        if base is None:
-            base = dict(os.environ)
-        return base | overlays
+            env['BU_NAME'] = session
+        if self._headless_cdp_url is not None:
+            env['BU_CDP_URL'] = self._headless_cdp_url
+        return env
 
     def _truncate(self, text: str) -> str:
         """Cap output, keeping the tail"""
-        if len(text) <= self._max_output_chars:
+        if len(text) <= _MAX_OUTPUT_CHARS:
             return text
-        marker = f'[... output truncated, showing last {self._max_output_chars} chars]\n'
-        return marker + text[-self._max_output_chars :]
+        marker = f'[... output truncated, showing last {_MAX_OUTPUT_CHARS} chars]\n'
+        return marker + text[-_MAX_OUTPUT_CHARS:]
 
     async def _run_cli(
         self,

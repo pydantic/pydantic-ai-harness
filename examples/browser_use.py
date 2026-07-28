@@ -3,7 +3,6 @@
 uv run examples/browser_use.py                       # interactive chat (needs an LLM key)
 uv run examples/browser_use.py "YOUR TASK"           # same, with a task you specify
 uv run examples/browser_use.py --cloud "YOUR TASK"   # run in a Browser Use cloud browser (Browser Use API key needed)
-uv run examples/browser_use.py --verbose "YOUR TASK"  # show each step's code and output, not just its label
 """
 
 from __future__ import annotations
@@ -42,12 +41,11 @@ def _pick_model() -> str | None:
     return next((model for env_var, model in _PROVIDERS if os.environ.get(env_var)), None)
 
 
-async def chat(model: str, cloud: bool, verbose: bool, opening_task: str | None) -> None:  # noqa: D103
+async def chat(model: str, cloud: bool, opening_task: str | None) -> None:  # noqa: D103
     capability = BrowserUse(
         browser='cloud' if cloud else 'local',
         scope='agent',
         progress=print,
-        progress_detail='code' if verbose else 'steps',
         default_timeout=180.0,
     )
     agent = Agent(model, capabilities=[capability])
@@ -79,7 +77,7 @@ def main() -> int:
         )
         return 1
 
-    asyncio.run(chat(model, '--cloud' in flags, '--verbose' in flags, ' '.join(args) or None))
+    asyncio.run(chat(model, '--cloud' in flags, ' '.join(args) or None))
     return 0
 
 
