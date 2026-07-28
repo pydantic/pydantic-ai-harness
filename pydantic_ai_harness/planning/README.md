@@ -52,6 +52,14 @@ print(result.output)
 
 Each step is a `content` string, an optional present-continuous `active_form` label, and a `status` (`pending`, `in_progress`, `completed`, `cancelled`). The convention -- stated in the guidance and the tools' replies -- is to keep exactly one step `in_progress`.
 
+All six are registered by default. `tools=` narrows that to an allowlist, and the built-in guidance follows it:
+
+```python
+Planning(tools=['write_plan'])  # whole-plan replacement only -- one tool, no step ids to track
+```
+
+Naming a tool the current mode does not register raises `ValueError`, as does an unknown key in `descriptions`.
+
 ### Subtasks and dependencies
 
 Pass `enable_subtasks=True` to add three more tools and the `blocked` status:
@@ -74,6 +82,25 @@ planning = Planning(store=agent_store)
 ```
 
 Built-in stores: `InMemoryPlanStore` (default), `SqlitePlanStore` (local file, session-scoped), `PostgresPlanStore` (server database over a caller-owned asyncpg pool), and `RedisPlanStore` (over a caller-owned `redis.asyncio` client). The Postgres and Redis stores take a client you already own, so the harness carries no database driver dependency. Any object implementing the `PlanStore` protocol works. `SqlitePlanStore` requires a file-backed database; use `InMemoryPlanStore` for ephemeral plans rather than `':memory:'`.
+
+The tail reminder reads the store on every model request, so a store that raises fails the run rather than degrading -- the reminder is not best-effort. That is deliberate: a plan the model can no longer see is not a state to continue running in silently. Retry and fallback policy belongs to the store, not to `Planning`, and `PlanStore` is a protocol precisely so you can wrap one:
+
+```python
+class BestEffort:
+    """Serve the last known plan when the backing store is unreachable."""
+
+    def __init__(self, inner: PlanStore) -> None:
+        self._inner, self._last = inner, []
+
+    async def get_items(self) -> list[PlanItem]:
+        try:
+            self._last = await self._inner.get_items()
+        except ConnectionError:
+            pass
+        return self._last
+
+    # ... delegate the other five methods to `self._inner`
+```
 
 ### Planning and executing in separate runs
 
@@ -132,6 +159,7 @@ Planning(
     store=None,              # None = fresh in-memory plan per run; or a PlanStore to persist
     enable_subtasks=False,   # add subtask/dependency tools and the 'blocked' status
     inject=True,             # surface the current plan as a cache-safe tail reminder
+    tools=None,              # None = every tool the mode registers; or an allowlist of names
     descriptions=None,       # optional per-tool description overrides, keyed by tool name
 )
 ```
