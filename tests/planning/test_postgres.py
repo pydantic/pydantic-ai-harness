@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
+import anyio
 import pytest
 
 from pydantic_ai_harness.planning import (
@@ -36,6 +37,7 @@ class FakeConnection:
     def __init__(self, rows: list[dict[str, Any]]) -> None:
         self._rows = rows
         self.create_calls = 0
+        self.advisory_locks = 0
 
     def transaction(self) -> AbstractAsyncContextManager[object]:
         conn = self
@@ -53,6 +55,9 @@ class FakeConnection:
         return (row['id'], row['content'], row['status'], row['active_form'], row['parent_id'], row['depends_on'])
 
     async def execute(self, query: str, *args: object) -> object:
+        # A real driver yields to the event loop here; without that, a missing schema
+        # guard would look correct because nothing else can interleave.
+        await anyio.sleep(0)
         if query.startswith('CREATE TABLE'):
             self.create_calls += 1
             return 'CREATE TABLE'
@@ -95,6 +100,10 @@ class FakeConnection:
         raise AssertionError(f'unexpected execute query: {query}')  # pragma: no cover
 
     async def fetchval(self, query: str, *args: object) -> object:
+        await anyio.sleep(0)
+        if 'pg_advisory_xact_lock' in query:
+            self.advisory_locks += 1
+            return None
         if 'MAX(seq)' in query:
             (session,) = args
             seqs = [int(r['seq']) for r in self._rows if r['session'] == session]
@@ -163,6 +172,23 @@ class TestPostgresStore:
         store = PostgresPlanStore(pool)
         await store.get_items()
         await store.get_items()
+        assert pool.connection.create_calls == 1
+        assert pool.connection.advisory_locks == 1
+
+    async def test_schema_created_once_under_concurrency(self) -> None:
+        """`CREATE TABLE IF NOT EXISTS` is not race-free in Postgres, so it must not run twice."""
+        pool = FakePool()
+        store = PostgresPlanStore(pool)
+        async with anyio.create_task_group() as tg:
+            for _ in range(4):
+                tg.start_soon(store.get_items)
+        assert pool.connection.create_calls == 1
+
+    async def test_remove_creates_the_schema_without_an_emitter(self) -> None:
+        """`remove_item` skips its read when no emitter is attached, so it cannot rely on one."""
+        pool = FakePool()
+        store = PostgresPlanStore(pool)
+        assert await store.remove_item('missing') is False
         assert pool.connection.create_calls == 1
 
     async def test_set_items_replaces_in_transaction(self) -> None:
