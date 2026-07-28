@@ -143,6 +143,19 @@ BrowserUse(
 
 On a timeout, the CLI is killed, and the agent is told it can retry.
 
+`scope='agent'` shares one session across runs only while the agent is held open with `async with agent:`; without it, every run still gets a fresh session:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.browser_use import BrowserUse
+
+agent = Agent('openai:gpt-5.5', capabilities=[BrowserUse(scope='agent')])
+
+async with agent:
+    await agent.run('Log into the dashboard')
+    await agent.run('Now read the numbers')  # same browser and variables
+```
+
 ## Agent spec (YAML/JSON)
 
 `BrowserUse` works with Pydantic AI's [agent spec](https://pydantic.dev/docs/ai/core-concepts/agent-spec/), so you can declare it in a config file instead of Python:
