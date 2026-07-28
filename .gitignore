@@ -38,3 +38,6 @@ wheels/
 .hypothesis/
 .vscode/
 mutants/
+
+# Local live-verification artifacts (may contain run metadata)
+scripts/evidence/
