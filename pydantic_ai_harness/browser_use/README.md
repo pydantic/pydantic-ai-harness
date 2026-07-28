@@ -163,7 +163,7 @@ from pydantic_ai_harness.browser_use import BrowserUse
 agent = Agent.from_file('agent.yaml', custom_capability_types=[BrowserUse])
 ```
 
-Pass `custom_capability_types`, so the spec loader knows how to build `BrowserUse`.
+Pass `custom_capability_types`, so the spec loader knows how to build `BrowserUse`. Loading YAML needs the `spec` extra: `uv add 'pydantic-ai-slim[spec]'`.
 
 ## Further reading
 

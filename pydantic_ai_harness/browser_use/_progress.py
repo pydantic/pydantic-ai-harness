@@ -56,7 +56,7 @@ def narrate_result(sink: Callable[[str], None], text: str, images: int, detail: 
     if detail == 'steps' and not failed:
         return
     limit = ERROR_LIMIT if failed else OUTPUT_LIMIT
-    sink(indent(clip(text.rstrip(), limit), '  | '))
+    sink(indent(clip(text.rstrip(), limit, from_end=failed), '  | '))
     if images and detail == 'code':
         sink(f'  | [{images} screenshot{"s" if images > 1 else ""} attached]')
 
@@ -70,8 +70,11 @@ def indent(text: str, prefix: str) -> str:
     return '\n'.join(prefix + line for line in text.splitlines())
 
 
-def clip(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[:limit] + ' ...'
+def clip(text: str, limit: int, *, from_end: bool = False) -> str:
+    """Truncate to `limit`; `from_end` keeps the tail, where error markers live"""
+    if len(text) <= limit:
+        return text
+    return '... ' + text[-limit:] if from_end else text[:limit] + ' ...'
 
 
 def browser_progress(
@@ -108,7 +111,7 @@ def browser_progress(
                 if detail == 'steps' and not failed:
                     continue
                 limit = error_limit if failed else output_limit
-                sink(indent(clip(text, limit), '  | '))
+                sink(indent(clip(text, limit, from_end=failed), '  | '))
                 if images and detail == 'code':
                     sink(f'  | [{images} screenshot{"s" if images > 1 else ""} attached]')
 

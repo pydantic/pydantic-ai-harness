@@ -206,7 +206,7 @@ class _Session:
                 pass
             with anyio.CancelScope(shield=True):
                 await proc.wait()
-            await proc.aclose()
+                await proc.aclose()
         if directory is not None:  # pragma: no branch
             shutil.rmtree(directory, ignore_errors=True)
 
@@ -307,11 +307,14 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         self._progress = progress
         self._enter_count = 0
         self._session: _Session | None = None
+        self._session_name: str | None = None
+        self._lock = anyio.Lock()
         self._browser: Literal['local', 'headless', 'cloud'] = browser
         self._headless_proc: anyio.abc.Process | None = None
         self._headless_profile: Path | None = None
         self._headless_cdp_url: str | None = None
         self._owned_session: str | None = None
+        self._provisioned: list[str] = []
         self.add_function(self.browser_exec, name='browser_exec')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
@@ -335,74 +338,80 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         self._enter_count = max(0, self._enter_count - 1)
         if self._enter_count > 0:
             return
-        if self._session is not None:
-            await self._session.close()
-            self._session = None
-        if self._owned_session is not None:
-            session, self._owned_session = self._owned_session, None
-            # shielded: a browser that bills must stop even on cancel
-            with anyio.CancelScope(shield=True):
+        # shielded as a whole: a browser that bills must stop even on cancel
+        with anyio.CancelScope(shield=True):
+            if self._session is not None:
+                await self._session.close()
+                self._session = None
+                self._session_name = None
+            still_running: list[str] = []
+            for name in self._provisioned:
                 try:
-                    await self._run_cli(
+                    exit_code, _, _ = await self._run_cli(
                         self._resolve_argv(),
-                        f'stop_remote_daemon({session!r})\n',
+                        f'stop_remote_daemon({name!r})\n',
                         self._default_timeout,
                         self._build_env(None),
                         raise_on_timeout=False,
                     )
                 except ModelRetry:  # pragma: no cover - the CLI vanished mid-run
-                    pass
-        await self._stop_headless_browser()
+                    exit_code = 1
+                if exit_code != 0:  # keep the name so a later exit can retry the stop
+                    still_running.append(name)
+            self._provisioned = still_running
+            if self._owned_session is not None and self._owned_session not in still_running:
+                self._owned_session = None
+            await self._stop_headless_browser()
 
     async def _ensure_headless_browser(self) -> str | None:
         """Launch headless Chrome on first use and return its DevTools URL"""
         if self._browser != 'headless':
             return None
-        if self._headless_cdp_url is not None:
+        async with self._lock:
+            if self._headless_cdp_url is not None:
+                return self._headless_cdp_url
+
+            binary = find_chrome()
+            if binary is None:
+                raise ModelRetry(
+                    'No Chrome or Chromium binary was found to launch headless. Install Chrome, or set '
+                    'BH_CHROME_PATH to the executable.'
+                )
+            profile = Path(tempfile.mkdtemp(prefix='harness_browser_profile_'))
+            try:
+                proc = await anyio.open_process(
+                    [
+                        binary,
+                        '--headless=new',
+                        '--remote-debugging-port=0',
+                        f'--user-data-dir={profile}',
+                        '--no-first-run',
+                        '--no-default-browser-check',
+                        'about:blank',
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
+            except OSError as e:
+                shutil.rmtree(profile, ignore_errors=True)
+                raise ModelRetry(f'Failed to launch headless Chrome ({binary!r}): {e}') from e
+
+            self._headless_proc = proc
+            self._headless_profile = profile
+            port_file = profile / 'DevToolsActivePort'
+            try:
+                with anyio.fail_after(_HEADLESS_STARTUP_TIMEOUT):
+                    while True:
+                        if port_file.exists() and (port := port_file.read_text().splitlines()[:1]):
+                            break
+                        await anyio.sleep(0.1)
+            except (TimeoutError, OSError) as e:
+                await self._stop_headless_browser()
+                detail = str(e) or f'not ready within {_HEADLESS_STARTUP_TIMEOUT}s'
+                raise ModelRetry(f'Headless Chrome did not report a DevTools port ({detail}).') from e
+            self._headless_cdp_url = f'http://127.0.0.1:{port[0]}'
             return self._headless_cdp_url
-
-        binary = find_chrome()
-        if binary is None:
-            raise ModelRetry(
-                'No Chrome or Chromium binary was found to launch headless. Install Chrome, or set '
-                "BH_CHROME_PATH (or the capability's `chrome_path`) to the executable."
-            )
-        profile = Path(tempfile.mkdtemp(prefix='harness_browser_profile_'))
-        try:
-            proc = await anyio.open_process(
-                [
-                    binary,
-                    '--headless=new',
-                    '--remote-debugging-port=0',
-                    f'--user-data-dir={profile}',
-                    '--no-first-run',
-                    '--no-default-browser-check',
-                    'about:blank',
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
-        except OSError as e:
-            shutil.rmtree(profile, ignore_errors=True)
-            raise ModelRetry(f'Failed to launch headless Chrome ({binary!r}): {e}') from e
-
-        self._headless_proc = proc
-        self._headless_profile = profile
-        port_file = profile / 'DevToolsActivePort'
-        try:
-            with anyio.fail_after(_HEADLESS_STARTUP_TIMEOUT):
-                while True:
-                    if port_file.exists() and (port := port_file.read_text().splitlines()[:1]):
-                        break
-                    await anyio.sleep(0.1)
-        except TimeoutError:
-            await self._stop_headless_browser()
-            raise ModelRetry(
-                f'Headless Chrome did not report a DevTools port within {_HEADLESS_STARTUP_TIMEOUT}s.'
-            ) from None
-        self._headless_cdp_url = f'http://127.0.0.1:{port[0]}'
-        return self._headless_cdp_url
 
     async def _stop_headless_browser(self) -> None:
         """Kill the launched headless Chrome and delete its profile"""
@@ -414,9 +423,10 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except OSError:  # pragma: no cover - already exited
                 pass
+            # shielded through aclose so the profile deletion below is always reached
             with anyio.CancelScope(shield=True):
                 await proc.wait()
-            await proc.aclose()
+                await proc.aclose()
         if profile is not None:
             shutil.rmtree(profile, ignore_errors=True)
 
@@ -424,22 +434,25 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         """Return the cloud browser name for this run, provisioning one on first use"""
         if self._browser != 'cloud':
             return None
-        if self._owned_session is not None:
-            return self._owned_session
-        name = f'pyai{uuid.uuid4().hex[:12]}'
-        exit_code, stdout, stderr = await self._run_cli(
-            self._resolve_argv(),
-            f'start_remote_daemon({name!r}, timeout={_CLOUD_TIMEOUT_MINUTES})\n',
-            self._default_timeout,
-            self._build_env(None),
-        )
-        if exit_code != 0:
-            raise ModelRetry(
-                'Could not start a Browser Use cloud browser. Sign in with `browser-use auth login` '
-                f'or set BROWSER_USE_API_KEY.\n\n{(stdout + stderr)[-_ERROR_TAIL_CHARS:]}'
+        async with self._lock:
+            if self._owned_session is not None:
+                return self._owned_session
+            name = f'pyai{uuid.uuid4().hex[:12]}'
+            # recorded before provisioning so cleanup can stop a half-started browser
+            self._provisioned.append(name)
+            exit_code, stdout, stderr = await self._run_cli(
+                self._resolve_argv(),
+                f'start_remote_daemon({name!r}, timeout={_CLOUD_TIMEOUT_MINUTES})\n',
+                self._default_timeout,
+                self._build_env(None),
             )
-        self._owned_session = name
-        return name
+            if exit_code != 0:
+                raise ModelRetry(
+                    'Could not start a Browser Use cloud browser. Sign in with `browser-use auth login` '
+                    f'or set BROWSER_USE_API_KEY.\n\n{(stdout + stderr)[-_ERROR_TAIL_CHARS:]}'
+                )
+            self._owned_session = name
+            return name
 
     async def cli_skill_text(self) -> str | None:
         """Return the CLI's skill documentation, fetching it at most once per command"""
@@ -535,24 +548,34 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         )
 
     async def _execute(self, code: str, timeout: float, session: str | None) -> tuple[int, str, str]:
-        """Run the model's code in this run's interpreter, starting one if needed"""
-        if self._session is None or not self._session.alive:
-            self._session = _Session(self._resolve_argv(), self._cwd, self._build_env(session))
-            await self._session.start()
-        try:
-            exit_code, output = await self._session.call(code, timeout)
-        except TimeoutError:
-            await self._session.close()
-            self._session = None
-            raise ModelRetry(
-                f'browser_exec timed out after {timeout}s, so the browser session was restarted. '
-                'The browser itself is still open; re-read what you need from the page.'
-            ) from None
-        except (OSError, ValueError) as e:  # pragma: no cover - the session died mid-call
-            await self._session.close()
-            self._session = None
-            raise ModelRetry(f'The browser session ended unexpectedly ({e}). Try the call again.') from e
-        return exit_code, output, ''
+        """Run the model's code in this run's interpreter, starting one if needed
+
+        The lock serializes concurrent calls on one interpreter (its FIFOs carry
+        one request at a time) and restarts it when a different `session` is
+        requested, since `BU_NAME` is fixed at spawn.
+        """
+        async with self._lock:
+            if self._session is not None and (not self._session.alive or session != self._session_name):
+                await self._session.close()
+                self._session = None
+            if self._session is None:
+                self._session = _Session(self._resolve_argv(), self._cwd, self._build_env(session))
+                self._session_name = session
+                await self._session.start()
+            try:
+                exit_code, output = await self._session.call(code, timeout)
+            except TimeoutError:
+                await self._session.close()
+                self._session = None
+                raise ModelRetry(
+                    f'browser_exec timed out after {timeout}s, so the browser session was restarted. '
+                    'The browser itself is still open; re-read what you need from the page.'
+                ) from None
+            except (OSError, ValueError) as e:  # pragma: no cover - the session died mid-call
+                await self._session.close()
+                self._session = None
+                raise ModelRetry(f'The browser session ended unexpectedly ({e}). Try the call again.') from e
+            return exit_code, output, ''
 
     def _resolve_argv(self) -> list[str]:
         """Locate the CLI, falling back to `uvx browser-use`"""
@@ -649,7 +672,11 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
                     'append intermediate results to files in the workspace.'
                 ) from None
         finally:
-            await proc.aclose()
+            # shielded: cancellation of the agent run must still reap the process group
+            with anyio.CancelScope(shield=True):
+                if proc.returncode is None:
+                    await self._terminate(proc)
+                await proc.aclose()
         stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
         stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
         exit_code = proc.returncode if proc.returncode is not None else 0

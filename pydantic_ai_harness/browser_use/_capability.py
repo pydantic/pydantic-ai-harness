@@ -65,6 +65,10 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
         """Reject out-of-range configuration"""
         if self.default_timeout <= 0:
             raise ValueError(f'default_timeout must be positive, got {self.default_timeout}')
+        if self.browser not in ('local', 'headless', 'cloud'):
+            raise ValueError(f"browser must be 'local', 'headless', or 'cloud', got {self.browser!r}")
+        if self.scope not in ('run', 'agent'):
+            raise ValueError(f"scope must be 'run' or 'agent', got {self.scope!r}")
 
     def get_toolset(self) -> BrowserUseToolset[AgentDepsT]:
         """Build the toolset that provides the `browser_exec` tool"""
