@@ -35,6 +35,8 @@ from pydantic_ai_harness.planning import (
     render_plan,
 )
 from pydantic_ai_harness.planning._toolset import (
+    CORE_TOOL_NAMES,
+    SUBTASK_TOOL_NAMES,
     has_cycle,
     is_blocked,
     render_flat,
@@ -180,16 +182,16 @@ class TestRenderers:
             PlanItem(content='a', status=TaskStatus.blocked),
             PlanItem(content='b', status=TaskStatus.cancelled),
         ]
-        line = status_counts_line(items, subtasks=True)
+        line = status_counts_line(items)
         assert '1 blocked' in line
         assert '1 cancelled' in line
 
     def test_render_summary_all_done_note(self) -> None:
-        done = render_summary([PlanItem(content='a', status=TaskStatus.completed)], subtasks=False)
+        done = render_summary([PlanItem(content='a', status=TaskStatus.completed)])
         assert 'All steps are completed' in done
-        pending = render_summary([PlanItem(content='a')], subtasks=False)
+        pending = render_summary([PlanItem(content='a')])
         assert 'All steps are completed' not in pending
-        cancelled_only = render_summary([PlanItem(content='a', status=TaskStatus.cancelled)], subtasks=False)
+        cancelled_only = render_summary([PlanItem(content='a', status=TaskStatus.cancelled)])
         assert 'All steps are completed' not in cancelled_only
 
     def test_render_summary_blocked_suppresses_all_done_note(self) -> None:
@@ -197,7 +199,7 @@ class TestRenderers:
             PlanItem(content='a', status=TaskStatus.completed),
             PlanItem(content='b', status=TaskStatus.blocked),
         ]
-        assert 'All steps are completed' not in render_summary(items, subtasks=True)
+        assert 'All steps are completed' not in render_summary(items)
 
     def test_status_icon_all(self) -> None:
         assert status_icon(TaskStatus.pending) == '[ ]'
@@ -288,13 +290,21 @@ class TestWritePlan:
         )
         assert result.endswith('\n\nNote: keep only one step in_progress at a time.')
 
-    async def test_subtasks_off_strips_hierarchy(self) -> None:
+    async def test_subtasks_off_rejects_hierarchy(self) -> None:
         store = InMemoryPlanStore()
         ts = _toolset(store=store)
-        await ts.write_plan(_ctx(), [PlanItem(content='A', parent_id='x', depends_on=['y'])])
-        stored = (await store.get_items())[0]
-        assert stored.parent_id is None
-        assert stored.depends_on == []
+        result = await ts.write_plan(
+            _ctx(), [PlanItem(id='y', content='B'), PlanItem(content='A', parent_id='y', depends_on=['y'])]
+        )
+        assert result == (
+            "Plan not updated: step 'A' sets parent_id/depends_on, which are only valid with subtasks enabled."
+        )
+        assert await store.get_items() == []
+
+    async def test_subtasks_off_rejects_depends_on_alone(self) -> None:
+        ts = _toolset()
+        result = await ts.write_plan(_ctx(), [PlanItem(id='y', content='B'), PlanItem(content='A', depends_on=['y'])])
+        assert 'only valid with subtasks enabled' in result
 
     async def test_subtasks_on_keeps_hierarchy(self) -> None:
         store = InMemoryPlanStore()
@@ -836,6 +846,45 @@ class TestCapability:
         """`backend` is a `Literal`, but a spec is deserialized text; nothing has checked it yet."""
         with pytest.raises(ValueError, match='Unknown planning backend'):
             Planning.from_spec(backend='postgres')  # type: ignore[arg-type]
+
+    def test_from_spec_carries_the_tool_allowlist(self) -> None:
+        assert Planning.from_spec(tools=['write_plan']).tools == ['write_plan']
+
+
+class TestToolAllowlist:
+    def _names(self, cap: Planning[None]) -> set[str]:
+        return set(PlanningToolset[None](cap).tools)
+
+    def test_default_registers_every_tool(self) -> None:
+        assert self._names(Planning[None]()) == set(CORE_TOOL_NAMES)
+        assert self._names(Planning[None](enable_subtasks=True)) == {*CORE_TOOL_NAMES, *SUBTASK_TOOL_NAMES}
+
+    def test_allowlist_narrows_the_surface(self) -> None:
+        assert self._names(Planning[None](tools=['write_plan'])) == {'write_plan'}
+        assert self._names(Planning[None](tools=['read_plan'])) == {'read_plan'}
+        assert self._names(Planning[None](tools=[])) == set()
+        assert self._names(Planning[None](enable_subtasks=True, tools=['write_plan', 'set_dependency'])) == {
+            'write_plan',
+            'set_dependency',
+        }
+
+    def test_guidance_follows_the_allowlist(self) -> None:
+        write_only = cast(str, Planning[None](tools=['write_plan']).get_instructions())
+        assert 'write_plan' in write_only
+        assert 'add_task' not in write_only
+        granular_only = cast(str, Planning[None](tools=['read_plan']).get_instructions())
+        assert 'write_plan' not in granular_only and 'read_plan' in granular_only
+        assert Planning[None](tools=[]).get_instructions() is None
+
+    def test_subtask_tools_need_subtasks_enabled(self) -> None:
+        with pytest.raises(ValueError, match='Unknown planning tools: add_subtask'):
+            PlanningToolset[None](Planning[None](tools=['write_plan', 'add_subtask']))
+
+    def test_unknown_names_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match='Unknown planning tools: write_todos'):
+            PlanningToolset[None](Planning[None](tools=['write_todos']))
+        with pytest.raises(ValueError, match='Unknown planning descriptions: red_plan'):
+            PlanningToolset[None](Planning[None](descriptions={'red_plan': 'typo'}))
 
 
 class TestReminder:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
@@ -12,19 +12,27 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
 
 from pydantic_ai_harness.planning._store import InMemoryPlanStore, PlanStore
-from pydantic_ai_harness.planning._toolset import PlanningToolset, render_plan
+from pydantic_ai_harness.planning._toolset import (
+    SUBTASK_TOOL_NAMES,
+    PlanningToolset,
+    available_tool_names,
+    render_plan,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
     from pydantic_ai.capabilities.abstract import WrapModelRequestHandler
     from pydantic_ai.models import ModelRequestContext
 
-_DEFAULT_GUIDANCE = (
+_WRITE_PLAN_GUIDANCE = (
     'You have a planning tool, `write_plan`. For multi-step work, call it first to lay out the '
     'steps, then keep it current: mark exactly one step `in_progress`, and mark a step `completed` '
-    'as soon as it is fully done. Pass the full plan every time you call `write_plan`. Use '
-    '`add_task` to append a single step, `update_task_status`/`update_task_statuses` to move steps '
-    'between statuses, and `read_plan` to see step ids before a granular edit.'
+    'as soon as it is fully done. Pass the full plan every time you call `write_plan`.'
+)
+
+_GRANULAR_GUIDANCE = (
+    'Use `add_task` to append a single step, `update_task_status`/`update_task_statuses` to move '
+    'steps between statuses, and `read_plan` to see step ids before a granular edit.'
 )
 
 _SUBTASK_GUIDANCE = (
@@ -42,7 +50,8 @@ class Planning(AbstractCapability[AgentDepsT]):
     The model owns the plan through a small toolset (`write_plan`, `read_plan`,
     `add_task`, `update_task_status`, `update_task_statuses`, `remove_task`, and
     -- when `enable_subtasks` is set -- `add_subtask`, `set_dependency`,
-    `get_available_tasks`). The current plan is surfaced back as an *ephemeral*
+    `get_available_tasks`); `tools` narrows that surface to an allowlist. The
+    current plan is surfaced back as an *ephemeral*
     reminder appended to the tail of each request behind a `CachePoint`, so the
     cached prefix stays byte-identical across turns; only the reminder is
     re-read each turn.
@@ -91,8 +100,20 @@ class Planning(AbstractCapability[AgentDepsT]):
     inject: bool = True
     """Surface the current plan as a cache-safe tail reminder each turn."""
 
+    tools: Sequence[str] | None = None
+    """Optional allowlist of tool names to register; `None` registers all of them.
+
+    The full surface is `write_plan`, `read_plan`, `add_task`, `update_task_status`,
+    `update_task_statuses`, `remove_task`, plus `add_subtask`, `set_dependency` and
+    `get_available_tasks` under `enable_subtasks`. `tools=['write_plan']` is the smallest
+    useful plan surface. Naming a tool this mode does not register raises `ValueError`.
+
+    The built-in `guidance` follows the allowlist for the whole-plan/granular/subtask split;
+    trimming within a group is better paired with a `guidance` string of your own.
+    """
+
     descriptions: dict[str, str] | None = None
-    """Optional per-tool description overrides, keyed by tool name."""
+    """Optional per-tool description overrides, keyed by tool name. Unknown names raise `ValueError`."""
 
     _resolved_store: PlanStore | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -123,15 +144,22 @@ class Planning(AbstractCapability[AgentDepsT]):
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
         """Provide static, cache-stable guidance on using the planning tools.
 
-        A custom `guidance` string is used verbatim; the default is extended with
-        the subtask/dependency workflow when `enable_subtasks` is set, so the
-        model is told about the tools it actually has.
+        A custom `guidance` string is used verbatim. The default is assembled from
+        the tools actually registered -- the granular sentence is dropped when
+        `tools` excludes them all, and the subtask/dependency workflow is added
+        under `enable_subtasks` -- so the model is not told about tools it lacks.
         """
         if self.guidance is not None:
             return self.guidance or None
-        if self.enable_subtasks:
-            return f'{_DEFAULT_GUIDANCE} {_SUBTASK_GUIDANCE}'
-        return _DEFAULT_GUIDANCE
+        registered = available_tool_names(subtasks=self.enable_subtasks) if self.tools is None else set(self.tools)
+        parts: list[str] = []
+        if 'write_plan' in registered:
+            parts.append(_WRITE_PLAN_GUIDANCE)
+        if registered & {'read_plan', 'add_task', 'update_task_status', 'update_task_statuses'}:
+            parts.append(_GRANULAR_GUIDANCE)
+        if registered & set(SUBTASK_TOOL_NAMES):
+            parts.append(_SUBTASK_GUIDANCE)
+        return ' '.join(parts) or None
 
     async def wrap_model_request(
         self,
@@ -164,6 +192,7 @@ class Planning(AbstractCapability[AgentDepsT]):
         inject: bool = True,
         guidance: str | None = None,
         cache_ttl: Literal['5m', '1h'] = '5m',
+        tools: list[str] | None = None,
     ) -> Planning[AgentDepsT]:
         """Construct a `Planning` capability from serializable options."""
         if backend != 'sqlite' and database != '.agent-plan.db':
@@ -185,6 +214,7 @@ class Planning(AbstractCapability[AgentDepsT]):
             inject=inject,
             guidance=guidance,
             cache_ttl=cache_ttl,
+            tools=tools,
         )
 
     @classmethod

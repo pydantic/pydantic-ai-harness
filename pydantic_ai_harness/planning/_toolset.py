@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING
 
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -69,6 +69,13 @@ blocked, and have no incomplete dependencies. Use it to choose the next step \
 when dependencies are involved.\
 """
 
+CORE_TOOL_NAMES = ('write_plan', 'read_plan', 'add_task', 'update_task_status', 'update_task_statuses', 'remove_task')
+"""Tools registered in every mode. `write_plan` alone was the capability's whole surface before
+the granular tools landed, so `tools=['write_plan']` restores it."""
+
+SUBTASK_TOOL_NAMES = ('add_subtask', 'set_dependency', 'get_available_tasks')
+"""Tools registered only when `enable_subtasks` is set."""
+
 _ALL_DONE_NOTE = 'All steps are completed. Do NOT call read_plan again -- respond to the user with a summary instead.'
 _MULTI_IN_PROGRESS_NOTE = '\n\nNote: keep only one step in_progress at a time.'
 
@@ -79,6 +86,25 @@ _ICONS = {
     TaskStatus.cancelled: '[-]',
     TaskStatus.blocked: '[!]',
 }
+
+
+def available_tool_names(*, subtasks: bool) -> set[str]:
+    """Return every tool name the toolset registers in the given mode."""
+    return {*CORE_TOOL_NAMES, *(SUBTASK_TOOL_NAMES if subtasks else ())}
+
+
+def reject_unknown_tool_names(names: Iterable[str] | None, offered: set[str], *, field: str) -> None:
+    """Raise if `names` mentions a tool this mode does not register.
+
+    A typo here is otherwise inert -- an unknown `descriptions` key is ignored, and an unknown
+    `tools` entry silently narrows nothing -- so it surfaces at construction instead of as a
+    tool the model never sees. Subtask tool names are only offered with `enable_subtasks`.
+    """
+    if names is None:
+        return
+    unknown = sorted(set(names) - offered)
+    if unknown:
+        raise ValueError(f'Unknown planning {field}: {", ".join(unknown)}. Available: {", ".join(sorted(offered))}.')
 
 
 def status_icon(status: TaskStatus) -> str:
@@ -242,7 +268,7 @@ def _counts(items: list[PlanItem]) -> dict[TaskStatus, int]:
     return counts
 
 
-def status_counts_line(items: list[PlanItem], *, subtasks: bool) -> str:
+def status_counts_line(items: list[PlanItem]) -> str:
     """Render the `X completed, Y in progress, Z pending` status tally."""
     counts = _counts(items)
     parts = [f'{counts[TaskStatus.completed]} completed']
@@ -255,10 +281,10 @@ def status_counts_line(items: list[PlanItem], *, subtasks: bool) -> str:
     return ', '.join(parts)
 
 
-def render_summary(items: list[PlanItem], *, subtasks: bool) -> str:
+def render_summary(items: list[PlanItem]) -> str:
     """Render the trailing `Summary:` block, with the all-done note when finished."""
     counts = _counts(items)
-    summary = f'Summary: {status_counts_line(items, subtasks=subtasks)}'
+    summary = f'Summary: {status_counts_line(items)}'
     active = counts[TaskStatus.pending] + counts[TaskStatus.in_progress] + counts[TaskStatus.blocked]
     if active == 0 and counts[TaskStatus.completed] > 0:
         summary += f'\n\n{_ALL_DONE_NOTE}'
@@ -279,44 +305,59 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
         self._capability = capability
         self._subtasks = capability.enable_subtasks
         descriptions = capability.descriptions or {}
-        self.add_function(
-            self.write_plan, name='write_plan', description=descriptions.get('write_plan', WRITE_PLAN_DESCRIPTION)
-        )
-        if self._subtasks:
+        offered = available_tool_names(subtasks=self._subtasks)
+        reject_unknown_tool_names(capability.tools, offered, field='tools')
+        reject_unknown_tool_names(descriptions, offered, field='descriptions')
+        selected = offered if capability.tools is None else set(capability.tools)
+
+        def wanted(name: str) -> bool:
+            return name in selected
+
+        if wanted('write_plan'):
             self.add_function(
-                self.read_plan_tree, name='read_plan', description=descriptions.get('read_plan', READ_PLAN_DESCRIPTION)
+                self.write_plan, name='write_plan', description=descriptions.get('write_plan', WRITE_PLAN_DESCRIPTION)
             )
-        else:
+        if wanted('read_plan'):
             self.add_function(
-                self.read_plan, name='read_plan', description=descriptions.get('read_plan', READ_PLAN_DESCRIPTION)
+                self.read_plan_tree if self._subtasks else self.read_plan,
+                name='read_plan',
+                description=descriptions.get('read_plan', READ_PLAN_DESCRIPTION),
             )
-        self.add_function(
-            self.add_task, name='add_task', description=descriptions.get('add_task', ADD_TASK_DESCRIPTION)
-        )
-        self.add_function(
-            self.update_task_status,
-            name='update_task_status',
-            description=descriptions.get('update_task_status', UPDATE_TASK_STATUS_DESCRIPTION),
-        )
-        self.add_function(
-            self.update_task_statuses,
-            name='update_task_statuses',
-            description=descriptions.get('update_task_statuses', UPDATE_TASK_STATUSES_DESCRIPTION),
-        )
-        self.add_function(
-            self.remove_task, name='remove_task', description=descriptions.get('remove_task', REMOVE_TASK_DESCRIPTION)
-        )
-        if self._subtasks:
+        if wanted('add_task'):
+            self.add_function(
+                self.add_task, name='add_task', description=descriptions.get('add_task', ADD_TASK_DESCRIPTION)
+            )
+        if wanted('update_task_status'):
+            self.add_function(
+                self.update_task_status,
+                name='update_task_status',
+                description=descriptions.get('update_task_status', UPDATE_TASK_STATUS_DESCRIPTION),
+            )
+        if wanted('update_task_statuses'):
+            self.add_function(
+                self.update_task_statuses,
+                name='update_task_statuses',
+                description=descriptions.get('update_task_statuses', UPDATE_TASK_STATUSES_DESCRIPTION),
+            )
+        if wanted('remove_task'):
+            self.add_function(
+                self.remove_task,
+                name='remove_task',
+                description=descriptions.get('remove_task', REMOVE_TASK_DESCRIPTION),
+            )
+        if wanted('add_subtask'):
             self.add_function(
                 self.add_subtask,
                 name='add_subtask',
                 description=descriptions.get('add_subtask', ADD_SUBTASK_DESCRIPTION),
             )
+        if wanted('set_dependency'):
             self.add_function(
                 self.set_dependency,
                 name='set_dependency',
                 description=descriptions.get('set_dependency', SET_DEPENDENCY_DESCRIPTION),
             )
+        if wanted('get_available_tasks'):
             self.add_function(
                 self.get_available_tasks,
                 name='get_available_tasks',
@@ -341,13 +382,16 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
         duplicates = sorted({item_id for item_id in ids if ids.count(item_id) > 1})
         if duplicates:
             return f'Plan not updated: Duplicate step ids: {", ".join(duplicates)}. Every step needs a unique id.'
-        if not self._subtasks:
-            for item in new_items:
-                item.parent_id = None
-                item.depends_on = []
         for item in new_items:
             if not self._valid_status(item.status):
                 return f"Plan not updated: status '{item.status.value}' is only valid with subtasks enabled."
+            if not self._subtasks and (item.parent_id is not None or item.depends_on):
+                # Storing them would be a write the plan does not reflect: nothing reconciles
+                # dependencies without the subtask tools, and no view renders the hierarchy.
+                return (
+                    f"Plan not updated: step '{item.content}' sets parent_id/depends_on, which are "
+                    'only valid with subtasks enabled.'
+                )
             if item.status is TaskStatus.blocked and not item.depends_on:
                 # Nothing would ever free it: reconciliation only touches steps that have
                 # dependencies, and `get_available_tasks` excludes `blocked`.
@@ -370,7 +414,7 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
         items = await self._resolve(ctx).get_items()
         if not items:
             return 'No plan yet. Use write_plan to create one.'
-        return f'{render_flat(items, subtasks=False)}\n\n{render_summary(items, subtasks=False)}'
+        return f'{render_flat(items, subtasks=False)}\n\n{render_summary(items)}'
 
     async def read_plan_tree(self, ctx: RunContext[AgentDepsT], hierarchical: bool = False) -> str:
         """Read the current plan.
@@ -383,7 +427,7 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
         if not items:
             return 'No plan yet. Use write_plan to create one.'
         body = render_tree(items) if hierarchical else render_flat(items, subtasks=True)
-        return f'{body}\n\n{render_summary(items, subtasks=True)}'
+        return f'{body}\n\n{render_summary(items)}'
 
     async def add_task(self, ctx: RunContext[AgentDepsT], content: str, active_form: str = '') -> str:
         """Add one new pending step.

@@ -41,14 +41,20 @@ class PlanItem(BaseModel):
 
     id: str = Field(default_factory=lambda: uuid4().hex[:8], description='Step id. Auto-generated if omitted.')
     content: str = Field(description='Imperative description of the step, e.g. "Add the database migration".')
-    status: TaskStatus = Field(default=TaskStatus.pending, description='Current status of this step.')
+    status: TaskStatus = Field(
+        default=TaskStatus.pending,
+        description='Current status of this step. "blocked" requires subtasks to be enabled.',
+    )
     active_form: str = Field(
         default='',
         description='Present-continuous label shown while the step runs, e.g. "Adding the database migration".',
     )
-    parent_id: str | None = Field(default=None, description='Parent step id for a subtask hierarchy.')
+    parent_id: str | None = Field(
+        default=None, description='Parent step id for a subtask hierarchy. Requires subtasks to be enabled.'
+    )
     depends_on: list[str] = Field(
-        default_factory=lambda: [], description='Ids of steps that must complete before this one.'
+        default_factory=lambda: [],
+        description='Ids of steps that must complete before this one. Requires subtasks to be enabled.',
     )
 
 
@@ -56,4 +62,7 @@ class PlanStatusUpdate(BaseModel):
     """One entry of the `update_task_statuses` batch tool."""
 
     task_id: str = Field(description='Id of the step to update (from `read_plan`).')
-    status: TaskStatus = Field(description='New status: pending, in_progress, completed, cancelled, or blocked.')
+    status: TaskStatus = Field(
+        description='New status: pending, in_progress, completed, or cancelled -- '
+        'or blocked, when subtasks are enabled.'
+    )
