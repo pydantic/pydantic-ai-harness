@@ -520,7 +520,8 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         if timeout_seconds is None or timeout_seconds <= 0:
             timeout = self._default_timeout
         else:
-            timeout = min(timeout_seconds, self._max_timeout)
+            # floor: the first call in a session pays interpreter + daemon cold start
+            timeout = min(max(timeout_seconds, min(60.0, self._default_timeout)), self._max_timeout)
 
         started = time.time()
         exit_code, stdout, stderr = await self._execute(code, timeout, session)
