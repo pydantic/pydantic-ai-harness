@@ -120,6 +120,7 @@ _CAPABILITY_PAGE_META = {
     'context.md': ('context', 'Context'),
     'pydantic-ai-docs.md': ('docs', 'Pydantic AI Docs'),
     'exa-search.md': ('exa', 'Exa Search'),
+    'browser-use.md': ('browser_use', 'Browser Use'),
     'macroscope.md': ('macroscope', 'Macroscope'),
     'compaction.md': ('compaction', 'Compaction'),
     'overflowing-tool-output.md': ('overflowing_tool_output', 'Overflowing Tool Output'),
