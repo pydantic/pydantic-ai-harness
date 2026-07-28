@@ -31,6 +31,7 @@ uv add "pydantic-ai-harness[dynamic-workflow]"  # DynamicWorkflow (adds the Mont
 uv add "pydantic-ai-harness[modal]"             # ModalSandbox (adds the Modal SDK)
 uv add "pydantic-ai-harness[logfire]"           # ManagedPrompt (Logfire-managed prompts)
 uv add "pydantic-ai-harness[exa]"               # ExaSearch + ExaAgent (web research via the Exa API)
+uv add "pydantic-ai-harness[nimble]"            # NimbleSearch + NimbleAgent (web research via the Nimble API)
 uv add "pydantic-ai-harness[skills]"            # Skills (loads SKILL.md frontmatter)
 uv add "pydantic-ai-harness[browser-use]"       # BrowserUse (autonomous web tasks via browser-use; Python 3.11+)
 uv add "pydantic-ai-harness[stackone]"          # StackOne (actions on linked business applications)
@@ -160,7 +161,9 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | | **Repo context injection** | Auto-load CLAUDE.md/AGENTS.md and repo structure | :white_check_mark: [Docs](pydantic_ai_harness/repo_context/) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Docs lookup** | On-demand `read_pyai_docs` tool for Pydantic AI docs | :white_check_mark: [Docs](pydantic_ai_harness/pydantic_ai_docs/) | |
 | | **Web research** | Web search returning relevant page excerpts, full single-page retrieval, and opt-in deep search with cited answers, backed by [Exa](https://exa.ai) | :white_check_mark: [Docs](pydantic_ai_harness/exa/) | |
+| | **Web research (Nimble)** | Web search, markdown page extract, and opt-in site map / resumable crawl, backed by [Nimble](https://www.nimbleway.com/) | :white_check_mark: [Docs](pydantic_ai_harness/nimble/) | |
 | | **Hosted research agent** | Delegate open-ended research to the [Exa](https://exa.ai) Agent API as deferred tool calls -- resolved inline or by the host application | :white_check_mark: [Docs](pydantic_ai_harness/exa/) | |
+| | **Hosted research agent (Nimble)** | Resumable [Nimble](https://www.nimbleway.com/) Web Search Agents (Agent API V2) via start/status/result tools | :white_check_mark: [Docs](pydantic_ai_harness/nimble/) | |
 | | **Autonomous browser agent** | Delegate open-ended web tasks to a [browser-use](https://github.com/browser-use/browser-use) agent that drives a real browser with its own perception-action loop | :white_check_mark: [Docs](pydantic_ai_harness/browser_use/) | |
 | | **StackOne** | Actions on the user's SaaS accounts (HRIS, ATS, CRM, and more) via [StackOne](https://www.stackone.com) -- account scoping, action filtering, and a search/execute mode for large catalogs | :white_check_mark: [Docs](pydantic_ai_harness/stackone/) | |
 | | **Verification loop** | Require fresh verification evidence (tests, checks) before a run can finish | :construction: [PR&nbsp;#355](https://github.com/pydantic/pydantic-ai-harness/pull/355) | |

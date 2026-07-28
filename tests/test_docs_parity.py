@@ -124,6 +124,7 @@ _CAPABILITY_PAGE_META = {
     'repo-context.md': ('repo_context', 'Repo Context'),
     'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),
     'exa-search.md': ('exa', 'Exa Search'),
+    'nimble-search.md': ('nimble', 'Nimble Search'),
     'macroscope.md': ('macroscope', 'Macroscope'),
     'browser-use.md': ('browser_use', 'Browser Use'),
     'compaction.md': ('compaction', 'Compaction'),

@@ -10,6 +10,7 @@
       { "label": "Repo Context", "slug": "repo-context" },
       { "label": "Pydantic AI Docs", "slug": "pydantic-ai-docs" },
       { "label": "Exa Search", "slug": "exa-search" },
+      { "label": "Nimble Search", "slug": "nimble-search" },
       { "label": "Macroscope", "slug": "macroscope" },
       { "label": "Browser Use", "slug": "browser-use" },
       { "label": "Compaction", "slug": "compaction" },

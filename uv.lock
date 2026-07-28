@@ -2621,6 +2621,25 @@ wheels = [
 ]
 
 [[package]]
+name = "nimble-python"
+version = "1.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "anyio", version = "4.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "anyio", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "distro" },
+    { name = "httpx" },
+    { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "sniffio" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/bd/0aab3fe4693997625d88184a468e1a2d84c702c263c987c743fdaad0b96d/nimble_python-1.2.0.tar.gz", hash = "sha256:c79a543399629400bc0acfdee4b8951d03393aef2c6bc8879a3bdca95db84c18", size = 323954, upload-time = "2026-07-28T09:22:11.952Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/38/df/2045d4c3c58a064eabf9870dd80af8cc40f77f4c95fec14b7b7c1d676685/nimble_python-1.2.0-py3-none-any.whl", hash = "sha256:d1e9bf33f73babc0906fc37ad2be14b167d91fc8ebc880e29c18f01ec61883e3", size = 262469, upload-time = "2026-07-28T09:22:13.299Z" },
+]
+
+[[package]]
 name = "nodeenv"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3444,6 +3463,9 @@ modal = [
 mongodb = [
     { name = "pymongo" },
 ]
+nimble = [
+    { name = "nimble-python" },
+]
 skills = [
     { name = "pyyaml" },
 ]
@@ -3487,6 +3509,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.0" },
+    { name = "nimble-python", marker = "extra == 'nimble'", specifier = ">=1.0.0" },
     { name = "pydantic-ai-slim", specifier = ">=2.22.0" },
     { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", specifier = ">=2.18.0" },
@@ -3498,7 +3521,7 @@ requires-dist = [
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.17.0" },
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
 ]
-provides-extras = ["acp", "browser-use", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "skills", "stackone", "temporal"]
+provides-extras = ["acp", "browser-use", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "nimble", "skills", "stackone", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [
