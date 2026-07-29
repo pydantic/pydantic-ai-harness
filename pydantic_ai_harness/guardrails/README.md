@@ -167,7 +167,7 @@ The outcomes map onto Pydantic AI control flow rather than a parallel mechanism:
 |---|---|---|
 | **allow** | run the tool | return the result unchanged (the guard is handed the object the tool produced, so read it and use `replace` rather than mutating it) |
 | **block** | skip execution; the refusal message becomes the tool result (`SkipToolExecution`) | the refusal message replaces the result |
-| **replace** | run the tool with substituted arguments (a mapping); the call recorded in the message history keeps the model's original arguments | substitute a sanitized result |
+| **replace** | run the tool with substituted arguments (a mapping); the call recorded in the message history keeps the model's original arguments. The replacement is trusted to match the tool's signature: keys the tool does not accept reach it as keyword arguments and raise a bare `TypeError` that names neither the tool nor the guard | substitute a sanitized result |
 | **retry** | ask the model to redo the call (`ModelRetry`) | ask the model to redo the call (`ModelRetry`); the tool has already run once, so its side effects have happened and the retry runs it again |
 | **approve** | defer the call for human approval (`ApprovalRequired`) | -- (the tool has already run) |
 

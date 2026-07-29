@@ -176,6 +176,11 @@ class ToolGuardrail(AbstractCapability[AgentDepsT]):
     run instead, raise [`ToolBlocked`][pydantic_ai_harness.ToolBlocked] (or any
     exception) from the guard.
 
+    A `replace` verdict on the argument stage is trusted to match the tool's
+    signature. Replacement keys reach the tool as keyword arguments, so one it
+    does not accept raises a bare `TypeError` that names neither the tool nor
+    the guard.
+
     Either guard may take a [`RunContext`][pydantic_ai.tools.RunContext] as a
     first parameter when it needs run state, such as `deps` for role-aware
     policy. The parameter is detected from the signature.
