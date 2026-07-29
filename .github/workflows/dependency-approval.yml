@@ -7,7 +7,7 @@ on:
 
 permissions:
   issues: write
-  pull-requests: read
+  pull-requests: write
   statuses: write
 
 concurrency:
@@ -30,6 +30,18 @@ jobs:
           LABEL_NAME: ${{ github.event.label.name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          # Revoking is `approved=false`; dropping the label is only cleanup, so a
+          # failure there must not abort the step before the status is posted.
+          revoke_approval() {
+            if ! gh api \
+              --method DELETE \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/dependencies%3Aapproved"
+            then
+              echo "::warning::Could not remove the dependencies:approved label. Approval is still revoked for this head."
+            fi
+            approved=false
+          }
+
           pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
           files="$(
             gh api \
@@ -53,10 +65,7 @@ jobs:
           ' <<<"$pr")"
 
           if [ "$ACTION" = synchronize ] && [ "$approved" = true ]; then
-            gh api \
-              --method DELETE \
-              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/dependencies%3Aapproved"
-            approved=false
+            revoke_approval
           elif [ "$ACTION" = labeled ] && [ "$LABEL_NAME" = dependencies:approved ]; then
             permission="$(
               gh api \
@@ -64,10 +73,7 @@ jobs:
                 --jq '.permission'
             )"
             if [[ ! "$permission" =~ ^(admin|maintain|write)$ ]]; then
-              gh api \
-                --method DELETE \
-                "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/dependencies%3Aapproved"
-              approved=false
+              revoke_approval
             fi
           fi
 
