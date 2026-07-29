@@ -1,15 +1,20 @@
+---
+title: Require Verification
+description: Redirect completion attempts when checks are stale after the latest code edit.
+---
+
 # Require Verification
 
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/require_verification/)
-
-`RequireVerification` redirects a coding agent that tries to finish after editing code
-without running a recognized check. It keeps a per-run evidence ledger:
+Redirect coding agents that try to finish after editing code without running a recognized
+check. `RequireVerification` keeps a per-run evidence ledger:
 
 - a successful `write_file` or `edit_file` call makes older evidence stale;
 - common test, lint, type-check, and build commands record fresh pass/fail evidence;
 - an attempted completion without a fresh pass gets a verification nudge;
 - redirects are bounded by `max_attempts` so a missing tool or broken environment
   cannot trap the run in a loop.
+
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/require_verification/)
 
 The capability is opt-in. Leave it off chat or research agents that do not edit code.
 
@@ -58,15 +63,20 @@ type-check, or build tools are classified automatically, and the Harness shell r
 exit-code or timeout markers are treated as failures. Common formatter and fix commands
 also count as edits, so checks run before them become stale.
 
-The guard only observes tools named in its configuration and recognized shell command
-forms. If another tool can modify source files, add its name to `mutating_tools`.
+The capability only observes tools named in its configuration and recognized shell
+command forms. If another tool can modify source files, add its name to
+`mutating_tools`.
 
 ## Scope
 
 - Verification shell commands must be standalone. Chained, piped, background, and
   command-substitution forms do not count because their final shell status may hide a
   failed check.
-- Any non-exempt edit invalidates all earlier evidence. The guard does not try to infer
-  a test's dependency closure.
+- Any non-exempt edit invalidates all earlier evidence. The capability does not try to
+  infer a test's dependency closure.
 - After `max_attempts` redirects, the run may finish without passing evidence. The
   capability does not add a machine-readable verification verdict to the run result.
+
+## API reference
+
+::: pydantic_ai_harness.require_verification.RequireVerification

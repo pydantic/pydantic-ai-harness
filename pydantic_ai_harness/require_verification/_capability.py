@@ -57,6 +57,21 @@ _MUTATING_COMMAND = re.compile(
     re.IGNORECASE,
 )
 
+_VERIFICATION_COMMAND_PREFIX = re.compile(
+    r'^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*(?:command\s+)?'
+    r'(?:(?:uv|poetry|pipenv)\s+run\s+)?'
+    r'(?:(?:\S*[/\\])?(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?\s+-m\s+)?'
+    r'(?:\S*[/\\])?'
+    r'(?:pytest|py\.test|unittest|tox|nox|go|cargo|dotnet|npm|pnpm|yarn|bun|mvn|gradle|gradlew|'
+    r'make|ruff|flake8|pylint|eslint|golangci-lint|biome|pyright|basedpyright|mypy|tsc)'
+    r'(?:\.exe)?\b',
+    re.IGNORECASE,
+)
+
+_UV_BUILD_PREFIX = re.compile(r'^\s*(?:\S*[/\\])?uv(?:\.exe)?\s+build\b', re.IGNORECASE)
+
+_UNSAFE_VERIFICATION_SHELL_FORM = re.compile(r'[;&|`\r\n]|\$\(')
+
 _NUDGE = (
     'You edited code, but there is no fresh passing verification evidence after the latest edit. '
     'Run the relevant tests, lint, type checking, or build now. If verification cannot run, explain '
@@ -73,6 +88,10 @@ class _Evidence:
 
 
 def _verification_kind(command: str) -> VerificationKind | None:
+    if _UNSAFE_VERIFICATION_SHELL_FORM.search(command) or not (
+        _VERIFICATION_COMMAND_PREFIX.search(command) or _UV_BUILD_PREFIX.search(command)
+    ):
+        return None
     return next((kind for kind, pattern in _VERIFICATION_PATTERNS if pattern.search(command)), None)
 
 
@@ -85,7 +104,7 @@ def _command_passed(result: Any) -> bool:
 
 @dataclass
 class RequireVerification(AbstractCapability[AgentDepsT]):
-    """Require fresh verification evidence before a coding run can finish.
+    """Redirect a bounded number of unverified completion attempts after code edits.
 
     Successful file-edit tools make earlier evidence stale. Recognized verification
     commands then record passing or failing evidence against the current edit generation.

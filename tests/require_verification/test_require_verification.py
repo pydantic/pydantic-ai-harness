@@ -95,6 +95,9 @@ async def test_redirects_completion_until_fresh_verification() -> None:
     'command',
     [
         'pytest -q',
+        'uv run pytest -q',
+        'python -m pytest -q',
+        'env CI=1 pytest -q',
         'pnpm run test',
         'ruff check .',
         'make lint',
@@ -262,7 +265,19 @@ async def test_redirect_attempts_are_bounded() -> None:
     assert calls == 4
 
 
-async def test_unrecognized_command_does_not_count_as_verification() -> None:
+@pytest.mark.parametrize(
+    'command',
+    [
+        'echo looks good',
+        'echo pytest',
+        'uv run echo pytest',
+        'python -c "print(\'pytest\')"',
+        'pytest || true',
+        'pytest; true',
+        'pytest | tee test.log',
+    ],
+)
+async def test_non_verification_shell_forms_do_not_count(command: str) -> None:
     calls = 0
 
     def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -271,10 +286,10 @@ async def test_unrecognized_command_does_not_count_as_verification() -> None:
         if calls == 1:
             return ModelResponse(parts=[ToolCallPart('write_file', {'path': 'app.py', 'content': 'x = 1'})])
         if calls == 2:
-            return ModelResponse(parts=[ToolCallPart('run_command', {'command': 'echo looks good'})])
+            return ModelResponse(parts=[ToolCallPart('run_command', {'command': command})])
         return ModelResponse(parts=[TextPart(f'done-{calls}')])
 
-    result = await _agent(model_fn, RequireVerification[object](max_attempts=1)).run('change and echo')
+    result = await _agent(model_fn, RequireVerification[object](max_attempts=1)).run('change and run command')
 
     assert result.output == 'done-4'
     assert calls == 4

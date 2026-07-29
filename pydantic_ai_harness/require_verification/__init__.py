@@ -1,4 +1,4 @@
-"""Fresh verification enforcement for coding-agent runs."""
+"""Fresh verification redirects for coding-agent runs."""
 
 from ._capability import RequireVerification
 
