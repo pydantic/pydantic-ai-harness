@@ -100,11 +100,31 @@ agent = Agent(
 
 It is only consulted when resolution fails, so it costs nothing on a model the registry does know.
 
+`TestModel` is one of the models that does not resolve: its `model_id` is `test:test`, so a fraction
+is taken of `fallback_context_window` and `max_fraction=0.9` becomes a 180,000-token trigger. A
+compaction config exercised only against `TestModel` will look like it never fires; pass
+`context_window=` or `fallback_context_window=` in the test to put the trigger where you can reach it.
+
 ### When the window resolves to the wrong number
 
 Resolution can also succeed and be wrong, which `fallback_context_window` cannot help with -- it
-applies only when resolution fails. Two cases:
+applies only when resolution fails. Three cases:
 
+- **The registry entry itself is wrong.** Harness reads `genai-prices` and cannot validate it.
+  Measured against `genai-prices` 0.0.71:
+
+  | model id | registry records | real window |
+  |---|---|---|
+  | `anthropic:claude-sonnet-4-5` | 1,000,000 | 200,000 |
+  | `anthropic:claude-opus-4-6` | 200,000 | 1,000,000 |
+  | `google:gemini-2.5-pro` (also the `google-gla:` and `google-vertex:` forms) | no window recorded | 1,000,000 |
+
+  An over-recorded window is the direction that breaks a run. On `anthropic:claude-sonnet-4-5`,
+  `max_fraction=0.9` resolves to a 900,000-token trigger against a 200,000-token window: compaction
+  never fires, and the provider rejects the request instead. **Pass `context_window=200_000`
+  explicitly on Anthropic Sonnet-class models** (`claude-sonnet-4-5` today; check any Sonnet id you
+  use against the provider's own documentation before relying on the resolved number). An
+  under-recorded window is safe but wasteful -- it compacts earlier than it has to.
 - The registry records the maximum a model can be made to accept. Where that maximum is gated --
   a beta header, a pricing tier -- an ordinary request gets less, and a fraction of the recorded
   number never triggers before the provider rejects the request.
@@ -130,6 +150,14 @@ results, retry prompts, extended-thinking blocks, provider-side tool results, an
 instructions, once. It is a ~4-characters-per-token approximation, not a tokenizer; pass
 `tokenizer=` to any strategy to measure with the real one. `FilePart` is not counted -- its
 payload is binary, and its length in characters would mean nothing.
+
+**If you already set an absolute `max_tokens`, re-check it.** The estimator used to count only user
+and system prompts, tool returns, response text, and tool calls. `ThinkingPart` / `CompactionPart`
+content, `RetryPromptPart` content, `NativeToolCallPart` / `NativeToolReturnPart`, and the most
+recent `ModelRequest.instructions` are now counted too, so the same history measures higher and an
+unchanged `max_tokens` compacts earlier. How much earlier depends on how much of the history is
+thinking blocks, retries, and instructions; on a thinking-heavy tool-calling history it can be
+several times the old count. What each strategy clears is unchanged -- only when it runs.
 
 ## Reporting usage: `ReportContextUsage`
 
@@ -159,9 +187,9 @@ bridge.
 Order matters: register the monitor *after* a compaction capability to observe the compacted history,
 or before it to see what triggered the compaction.
 
-`used_tokens` counts message parts, the same way the triggers do. Instructions
-(`ModelRequest.instructions`) and tool schemas are outside that count, so the reading is lower than
-what the provider bills; tool-schema accounting is tracked in
+`used_tokens` counts the same way the triggers do: every message part that is sent, plus the most
+recent `ModelRequest.instructions` once. Tool schemas are outside that count, so the reading is lower
+than what the provider bills; tool-schema accounting is tracked in
 [#100](https://github.com/pydantic/pydantic-ai-harness/issues/100).
 
 ## Compacting outside a run: `compact_now`
@@ -187,9 +215,9 @@ whatever the history size. A strategy that defines its own stop condition still 
 `TieredCompaction` escalates only until the history fits its target, so a history already under
 target comes back unchanged. Pass the tier directly if you need it to run regardless.
 
-`focus` steers strategies that write prose -- `SummarizingCompaction`,
-via `with_focus` -- and is passed over by the ones that drop or blank content by rule, since they have
-nothing to steer. `TieredCompaction` is focusable when any of its tiers is, so a focus reaches the
+`focus` steers strategies that write prose -- `SummarizingCompaction`, via the exported
+`SupportsFocus` protocol's `with_focus` -- and is passed over by the ones that drop or blank content
+by rule, since they have nothing to steer. `TieredCompaction` is focusable when any of its tiers is, so a focus reaches the
 summarizing tier rather than stopping at the wrapper.
 
 A compaction that changes the history emits the same `compact_messages` span the in-run path emits,

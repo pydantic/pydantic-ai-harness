@@ -25,10 +25,10 @@ class ContextUsage:
     used_tokens: int
     """Estimated tokens in the message history about to be sent.
 
-    Counted by `estimate_token_count`, which reads message parts only. Instructions
-    (`ModelRequest.instructions`) and tool schemas are not part of the count, so a gauge
-    built on this reads lower than what the provider bills. Tool-schema accounting is
-    tracked separately in pydantic/pydantic-ai-harness#100.
+    Counted by `estimate_token_count`: every message part that is sent, plus the most recent
+    `ModelRequest.instructions` once. Tool schemas are outside the count, so a gauge built on
+    this reads lower than what the provider bills. Tool-schema accounting is tracked separately
+    in pydantic/pydantic-ai-harness#100.
     """
 
     window_tokens: int
