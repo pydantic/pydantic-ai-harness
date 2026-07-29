@@ -15,9 +15,9 @@ Agents take unstructured input from users and return unstructured output to call
 
 ## The solution
 
-Three capabilities -- `InputGuard`, `OutputGuard`, and `ToolGuard` -- each wrap a `guard` callable you supply. The guard inspects a value and returns one of five outcomes. For the run's two edges:
+Three capabilities -- `InputGuardrail`, `OutputGuardrail`, and `ToolGuardrail` -- each wrap a `guard` callable you supply. The guard inspects a value and returns one of five outcomes. For the run's two edges:
 
-| Outcome | `InputGuard` | `OutputGuard` |
+| Outcome | `InputGuardrail` | `OutputGuardrail` |
 |---|---|---|
 | **allow** | send the prompt to the model | return the output to the caller |
 | **block** | skip the model call; a refusal message becomes the response | raise `OutputBlocked` |
@@ -25,69 +25,69 @@ Three capabilities -- `InputGuard`, `OutputGuard`, and `ToolGuard` -- each wrap 
 | **retry** | -- (not valid for input) | send the output back to the model to try again |
 | **approve** | -- (not valid for input) | -- (not valid for output) |
 
-`ToolGuard` uses the same outcomes on both sides of a tool call; see [Tool calls](#tool-calls). The asymmetry between input `block` and output `block` is deliberate. Blocking the input spends no tokens, so a graceful refusal is almost always right. Blocking the output means the model already produced something you do not want exposed, so raising forces the caller to decide what to do next.
+`ToolGuardrail` uses the same outcomes on both sides of a tool call; see [Tool calls](#tool-calls). The asymmetry between input `block` and output `block` is deliberate. Blocking the input spends no tokens, so a graceful refusal is almost always right. Blocking the output means the model already produced something you do not want exposed, so raising forces the caller to decide what to do next.
 
-Both `InputGuard`, `OutputGuard`, and their supporting types are top-level exports:
+Both `InputGuardrail`, `OutputGuardrail`, and their supporting types are top-level exports:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness import GuardResult, InputGuard, OutputGuard
+from pydantic_ai_harness import GuardrailResult, InputGuardrail, OutputGuardrail
 
 
 def no_secrets(prompt: str) -> bool:
     return 'api_key' not in prompt.lower()
 
 
-def no_pii(output: object) -> GuardResult:
+def no_pii(output: object) -> GuardrailResult:
     if 'SSN' in str(output):
-        return GuardResult.block('The response contained personal data.')
-    return GuardResult.allow()
+        return GuardrailResult.block('The response contained personal data.')
+    return GuardrailResult.allow()
 
 
 agent = Agent(
     'openai:gpt-5.4',
     capabilities=[
-        InputGuard(guard=no_secrets),
-        OutputGuard(guard=no_pii),
+        InputGuardrail(guard=no_secrets),
+        OutputGuardrail(guard=no_pii),
     ],
 )
 ```
 
-A guard returns a bare `bool` (`True` = allow, `False` = block) for the simple case, or a `GuardResult` for the richer outcomes. Guards may also be async -- return an awaitable `bool`/`GuardResult`, for example to call a moderation API.
+A guard returns a bare `bool` (`True` = allow, `False` = block) for the simple case, or a `GuardrailResult` for the richer outcomes. Guards may also be async -- return an awaitable `bool`/`GuardrailResult`, for example to call a moderation API.
 
-`OutputGuard` receives the output unchanged -- no automatic stringification. For a string output the guard reads it directly; for a typed (Pydantic model) output the guard gets the model instance, so pick the serialization that fits the check (read a field, or call `output.model_dump_json()` for JSON text). This avoids the trap of `str(MyModel(...))` producing a `MyModel(field=...)` repr that hides field contents from regex-based checks.
+`OutputGuardrail` receives the output unchanged -- no automatic stringification. For a string output the guard reads it directly; for a typed (Pydantic model) output the guard gets the model instance, so pick the serialization that fits the check (read a field, or call `output.model_dump_json()` for JSON text). This avoids the trap of `str(MyModel(...))` producing a `MyModel(field=...)` repr that hides field contents from regex-based checks.
 
-## `GuardResult`
+## `GuardrailResult`
 
-Construct a `GuardResult` with its classmethods, not the raw fields:
+Construct a `GuardrailResult` with its classmethods, not the raw fields:
 
 ```python
-from pydantic_ai_harness import GuardResult
+from pydantic_ai_harness import GuardrailResult
 
-GuardResult.allow()                 # let the value through
-GuardResult.block('reason')         # refuse; `reason` is optional (a default is used otherwise)
-GuardResult.replace(cleaned_value)  # substitute a sanitized value and continue
-GuardResult.retry('instruction')    # ask the model to redo the output or the tool call
-GuardResult.approve()               # ToolGuard arguments only: defer the call for human approval
+GuardrailResult.allow()                 # let the value through
+GuardrailResult.block('reason')         # refuse; `reason` is optional (a default is used otherwise)
+GuardrailResult.replace(cleaned_value)  # substitute a sanitized value and continue
+GuardrailResult.retry('instruction')    # ask the model to redo the output or the tool call
+GuardrailResult.approve()               # ToolGuardrail arguments only: defer the call for human approval
 ```
 
 The block/retry message is produced at the moment the guard decides, so it can carry the guard's own reasoning rather than a string frozen at construction time.
 
 ## Redaction (`replace`)
 
-Return `GuardResult.replace(value)` to sanitize rather than refuse. `InputGuard` rewrites the prompt sent to the model; `OutputGuard` substitutes the output returned to the caller.
+Return `GuardrailResult.replace(value)` to sanitize rather than refuse. `InputGuardrail` rewrites the prompt sent to the model; `OutputGuardrail` substitutes the output returned to the caller.
 
 ```python
-def scrub_emails(text: str) -> GuardResult:
+def scrub_emails(text: str) -> GuardrailResult:
     cleaned = EMAIL_RE.sub('[email]', text)
-    return GuardResult.replace(cleaned) if cleaned != text else GuardResult.allow()
+    return GuardrailResult.replace(cleaned) if cleaned != text else GuardrailResult.allow()
 
 
 agent = Agent(
     'openai:gpt-5.4',
     capabilities=[
-        InputGuard(guard=scrub_emails),   # strip PII before it reaches the model
-        OutputGuard(guard=scrub_emails),  # strip PII before it reaches the caller
+        InputGuardrail(guard=scrub_emails),   # strip PII before it reaches the model
+        OutputGuardrail(guard=scrub_emails),  # strip PII before it reaches the caller
     ],
 )
 ```
@@ -96,16 +96,16 @@ Input redaction requires sequential mode -- it is incompatible with `parallel=Tr
 
 ## Retry (`retry`)
 
-`OutputGuard` can send a bad output back to the model instead of blocking it. Return `GuardResult.retry(instruction)` -- the instruction is the retry prompt the model sees. This reuses pydantic-ai's normal retry machinery and counts against the run's output-retry budget.
+`OutputGuardrail` can send a bad output back to the model instead of blocking it. Return `GuardrailResult.retry(instruction)` -- the instruction is the retry prompt the model sees. This reuses pydantic-ai's normal retry machinery and counts against the run's output-retry budget.
 
 ```python
-def must_cite_sources(output: object) -> GuardResult:
+def must_cite_sources(output: object) -> GuardrailResult:
     if not has_citations(output):
-        return GuardResult.retry('Include at least one source citation.')
-    return GuardResult.allow()
+        return GuardrailResult.retry('Include at least one source citation.')
+    return GuardrailResult.allow()
 
 
-OutputGuard(guard=must_cite_sources)
+OutputGuardrail(guard=must_cite_sources)
 ```
 
 ## Accessing run context
@@ -114,14 +114,14 @@ A guard may take a `RunContext` as its first parameter when it needs run state -
 
 ```python
 from pydantic_ai import RunContext
-from pydantic_ai_harness import InputGuard
+from pydantic_ai_harness import InputGuardrail
 
 
 def tenant_policy(ctx: RunContext[MyDeps], prompt: str) -> bool:
     return ctx.deps.tier == 'pro' or 'advanced-feature' not in prompt
 
 
-InputGuard(guard=tenant_policy)
+InputGuardrail(guard=tenant_policy)
 ```
 
 ## Parallel input guards
@@ -129,7 +129,7 @@ InputGuard(guard=tenant_policy)
 A slow guard (an LLM classifier, a network call) run sequentially adds its latency to every turn. Set `parallel=True` to run the guard concurrently with the model call instead, overlapping the two so the guard adds no latency on the pass path. The model call is cancelled the moment the guard reports a violation.
 
 ```python
-InputGuard(guard=slow_async_classifier, parallel=True)
+InputGuardrail(guard=slow_async_classifier, parallel=True)
 ```
 
 Parallel mode trades tokens for latency: sequential mode never calls the model when the guard blocks, but parallel mode has already started the model call -- if the guard trips only after the model has responded, those tokens were spent. For fast local checks (regex, keyword lookup) sequential is the better default. `replace` is not available under `parallel=True`.
@@ -152,41 +152,41 @@ Any exception raised by the guard propagates as-is -- use `InputBlocked` / `Outp
 
 ## Tool calls
 
-`ToolGuard` inspects both sides of a tool call: `guard` sees the validated arguments before the tool runs, `result_guard` sees what it returned before the model does.
+`ToolGuardrail` inspects both sides of a tool call: `guard` sees the validated arguments before the tool runs, `result_guard` sees what it returned before the model does.
 
 ```python
 from pathlib import Path
 
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai_harness import GuardResult, ToolCallInfo, ToolGuard, ToolResultInfo
+from pydantic_ai_harness import GuardrailResult, ToolCallInfo, ToolGuardrail, ToolResultInfo
 
 WORKSPACE = Path('/workspace')
 
 
-def stay_in_the_workspace(call: ToolCallInfo) -> GuardResult:
+def stay_in_the_workspace(call: ToolCallInfo) -> GuardrailResult:
     if call.name == 'write_file':
         # `resolve()` before the containment check: a prefix test on the raw
         # string accepts `/workspace/../etc/passwd`.
         target = Path(str(call.args['path'])).resolve()
         if not target.is_relative_to(WORKSPACE):
-            return GuardResult.block(f'{target} is outside the workspace.')
-    return GuardResult.allow()
+            return GuardrailResult.block(f'{target} is outside the workspace.')
+    return GuardrailResult.allow()
 
 
-def scrub_secrets(info: ToolResultInfo) -> GuardResult:
+def scrub_secrets(info: ToolResultInfo) -> GuardrailResult:
     # Text only. `str()` on a structured result or a `ToolReturn` yields a repr, and
     # replacing it with that string would change the result's type -- but only on the
     # calls where the pattern happened to match.
     if not isinstance(info.result, str):
-        return GuardResult.allow()
+        return GuardrailResult.allow()
     cleaned = SECRET_RE.sub('[redacted]', info.result)
-    return GuardResult.replace(cleaned) if cleaned != info.result else GuardResult.allow()
+    return GuardrailResult.replace(cleaned) if cleaned != info.result else GuardrailResult.allow()
 
 
 agent = Agent(
     'openai:gpt-5.4',
-    capabilities=[ToolGuard(guard=stay_in_the_workspace, result_guard=scrub_secrets)],
+    capabilities=[ToolGuardrail(guard=stay_in_the_workspace, result_guard=scrub_secrets)],
 )
 
 
@@ -215,22 +215,22 @@ The outcomes map onto Pydantic AI control flow rather than a parallel mechanism:
 
 ### Human in the loop
 
-Pydantic AI already owns the approval round trip: a call raising `ApprovalRequired` is held back, the run finishes with a `DeferredToolRequests` output, and you resume it with the human's answers. `ToolGuard` plugs into that rather than inventing a second mechanism, which means approvals a guard asks for and tools marked `requires_approval=True` arrive in the same place.
+Pydantic AI already owns the approval round trip: a call raising `ApprovalRequired` is held back, the run finishes with a `DeferredToolRequests` output, and you resume it with the human's answers. `ToolGuardrail` plugs into that rather than inventing a second mechanism, which means approvals a guard asks for and tools marked `requires_approval=True` arrive in the same place.
 
 ```python
 from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
-from pydantic_ai_harness import GuardResult, ToolCallInfo, ToolGuard
+from pydantic_ai_harness import GuardrailResult, ToolCallInfo, ToolGuardrail
 
 
-def confirm_production(call: ToolCallInfo) -> GuardResult:
+def confirm_production(call: ToolCallInfo) -> GuardrailResult:
     if call.args.get('env') == 'prod':
-        return GuardResult.approve()
-    return GuardResult.allow()
+        return GuardrailResult.approve()
+    return GuardrailResult.allow()
 
 
 agent = Agent(
     'openai:gpt-5.4',
-    capabilities=[ToolGuard(guard=confirm_production)],
+    capabilities=[ToolGuardrail(guard=confirm_production)],
     output_type=[str, DeferredToolRequests],
 )
 
@@ -256,7 +256,7 @@ A denial reaches the model as the tool's result, so the agent can explain itself
 
 Two shapes of approval, and which to reach for:
 
-| | Deferred (`GuardResult.approve()`) | In-process (an async guard) |
+| | Deferred (`GuardrailResult.approve()`) | In-process (an async guard) |
 |---|---|---|
 | The run | ends, then resumes from `message_history` | stays open; the tool call awaits |
 | Fits | HTTP APIs, queues, durable execution, anything that cannot hold a process open | CLIs, TUIs, desktop apps, a websocket to an operator |
@@ -265,21 +265,21 @@ Two shapes of approval, and which to reach for:
 The in-process shape needs nothing extra -- a guard may be async, so it can await the human directly:
 
 ```python
-async def ask_the_operator(call: ToolCallInfo) -> GuardResult:
+async def ask_the_operator(call: ToolCallInfo) -> GuardrailResult:
     if await operator_approves(call.name, call.args):
-        return GuardResult.allow()
-    return GuardResult.block('The operator declined this action.')
+        return GuardrailResult.allow()
+    return GuardrailResult.block('The operator declined this action.')
 
 
-ToolGuard(guard=ask_the_operator)
+ToolGuardrail(guard=ask_the_operator)
 ```
 
-Pydantic AI also offers approval without a guard at all: `requires_approval=True` on a tool, or `ApprovalRequiredToolset` for a synchronous predicate over a whole toolset. Reach for `ToolGuard` when the decision is async, needs `deps`, or should sit alongside the other verdicts.
+Pydantic AI also offers approval without a guard at all: `requires_approval=True` on a tool, or `ApprovalRequiredToolset` for a synchronous predicate over a whole toolset. Reach for `ToolGuardrail` when the decision is async, needs `deps`, or should sit alongside the other verdicts.
 
 Two fields narrow what a guard sees:
 
 ```python
-ToolGuard(
+ToolGuardrail(
     guard=stay_in_the_workspace,
     tools=['write_file', 'run_shell'],  # guard only these; None (default) guards every tool
     hidden=['delete_everything'],       # withhold these from the model entirely
@@ -292,15 +292,15 @@ ToolGuard(
 
 Three kinds of call never reach the execution hooks, so neither `guard` nor `result_guard` is consulted for them:
 
-- **Output tools**, which produce the agent's structured output. Screen that with `OutputGuard`.
+- **Output tools**, which produce the agent's structured output. Screen that with `OutputGuardrail`.
 - **External and deferred tools**, which the run hands back to your application in `DeferredToolRequests` instead of executing. Pydantic AI rejects them before any execution hook runs, so a guard cannot vet the arguments -- your application is the thing that executes them, and the check belongs there. `hidden` *does* cover them, since it works on the tool definitions.
 - **Provider-side builtin tools** such as web search, which run inside the provider and come back as builtin call/return parts rather than tool executions.
 
-A `ToolGuard` is a control over tools this run executes. For the ones it does not, `hidden` is the lever that still applies.
+A `ToolGuardrail` is a control over tools this run executes. For the ones it does not, `hidden` is the lever that still applies.
 
 ## Streaming
 
-`OutputGuard` inspects the **final** output only -- during `run_stream()` partial chunks reach the caller before the guard runs, so a `block` or `replace` verdict cannot un-send content already streamed. Use `run()` / `run_sync()` when the output must be screened before any of it is exposed. `GuardResult.retry()` is **not** supported under `run_stream()` and surfaces there as `UnexpectedModelBehavior`. `InputGuard` (including `parallel=True`) works the same in streamed and non-streamed runs.
+`OutputGuardrail` inspects the **final** output only -- during `run_stream()` partial chunks reach the caller before the guard runs, so a `block` or `replace` verdict cannot un-send content already streamed. Use `run()` / `run_sync()` when the output must be screened before any of it is exposed. `GuardrailResult.retry()` is **not** supported under `run_stream()` and surfaces there as `UnexpectedModelBehavior`. `InputGuardrail` (including `parallel=True`) works the same in streamed and non-streamed runs.
 
 ## Tracing
 
@@ -308,7 +308,7 @@ A `ToolGuard` is a control over tools this run executes. For the ones it does no
 
 Tool spans add a `guardrail.tool` attribute naming the tool, and `approve` records `guardrail deferred tool args` with no content attributes at all.
 
-`OutputGuard` positions its block/redact spans so they are always captured by an enclosing `Instrumentation` span regardless of capability order, while `InputGuard` runs innermost so any capability that morphs messages (a prompt rewriter, a context manager) runs first and the guard sees the final prompt the model will receive. `ToolGuard` also runs innermost, which puts it last among argument hooks (it sees the arguments every other capability has finished modifying) and first among result hooks (it sees the raw tool result, before a capability such as [`OverflowingToolOutput`](overflowing-tool-output.md) truncates or offloads it).
+`OutputGuardrail` positions its block/redact spans so they are always captured by an enclosing `Instrumentation` span regardless of capability order, while `InputGuardrail` runs innermost so any capability that morphs messages (a prompt rewriter, a context manager) runs first and the guard sees the final prompt the model will receive. `ToolGuardrail` also runs innermost, which puts it last among argument hooks (it sees the arguments every other capability has finished modifying) and first among result hooks (it sees the raw tool result, before a capability such as [`ToolOutputLimits`](tool-output-limits.md) truncates or offloads it).
 
 ## Relationship to `pydantic-ai-shields`
 
@@ -317,16 +317,16 @@ Tool spans add a `guardrail.tool` attribute naming the tool, and `approve` recor
 ## API
 
 ```python
-InputGuard(
-    guard,              # Callable[..., bool | GuardResult | Awaitable[bool | GuardResult]]
+InputGuardrail(
+    guard,              # Callable[..., bool | GuardrailResult | Awaitable[bool | GuardrailResult]]
     parallel=False,     # run concurrently with the model call
 )
 
-OutputGuard(
-    guard,              # Callable[..., bool | GuardResult | Awaitable[bool | GuardResult]]
+OutputGuardrail(
+    guard,              # Callable[..., bool | GuardrailResult | Awaitable[bool | GuardrailResult]]
 )
 
-ToolGuard(
+ToolGuardrail(
     guard=None,         # inspects a ToolCallInfo before the tool runs
     result_guard=None,  # inspects a ToolResultInfo after it runs
     tools=None,         # Sequence[str] | None -- restrict both guards to these tool names
@@ -334,6 +334,6 @@ ToolGuard(
 )
 ```
 
-The guard callable takes the inspected value -- the prompt for `InputGuard`, the output for `OutputGuard`, a `ToolCallInfo` or `ToolResultInfo` for `ToolGuard` -- optionally preceded by a `RunContext`. `InputGuardFunc`, `OutputGuardFunc`, `ToolGuardFunc`, and `ToolResultGuardFunc` are the exported signature aliases; `GuardrailError` is the base for `InputBlocked`, `OutputBlocked`, and `ToolBlocked`.
+The guard callable takes the inspected value -- the prompt for `InputGuardrail`, the output for `OutputGuardrail`, a `ToolCallInfo` or `ToolResultInfo` for `ToolGuardrail` -- optionally preceded by a `RunContext`. `InputGuardrailFunc`, `OutputGuardrailFunc`, `ToolGuardrailFunc`, and `ToolResultGuardrailFunc` are the exported signature aliases; `GuardrailError` is the base for `InputBlocked`, `OutputBlocked`, and `ToolBlocked`.
 
 Source: [`pydantic_ai_harness/guardrails/`](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/guardrails/).

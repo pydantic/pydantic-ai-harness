@@ -1,10 +1,11 @@
 """Input, output, and tool guardrails for Pydantic AI agents."""
 
+from pydantic_ai_harness._warn import warn_class_renamed
 from pydantic_ai_harness.guardrails._capability import (
-    InputGuard,
-    InputGuardFunc,
-    OutputGuard,
-    OutputGuardFunc,
+    InputGuardrail,
+    InputGuardrailFunc,
+    OutputGuardrail,
+    OutputGuardrailFunc,
 )
 from pydantic_ai_harness.guardrails._exceptions import (
     GuardrailError,
@@ -12,28 +13,44 @@ from pydantic_ai_harness.guardrails._exceptions import (
     OutputBlocked,
     ToolBlocked,
 )
-from pydantic_ai_harness.guardrails._shared import GuardResult
-from pydantic_ai_harness.guardrails._tool_guard import (
+from pydantic_ai_harness.guardrails._shared import GuardrailResult
+from pydantic_ai_harness.guardrails._tool_guardrail import (
     ToolCallInfo,
-    ToolGuard,
-    ToolGuardFunc,
-    ToolResultGuardFunc,
+    ToolGuardrail,
+    ToolGuardrailFunc,
+    ToolResultGuardrailFunc,
     ToolResultInfo,
 )
 
 __all__ = [
-    'GuardResult',
     'GuardrailError',
+    'GuardrailResult',
     'InputBlocked',
-    'InputGuard',
-    'InputGuardFunc',
+    'InputGuardrail',
+    'InputGuardrailFunc',
     'OutputBlocked',
-    'OutputGuard',
-    'OutputGuardFunc',
+    'OutputGuardrail',
+    'OutputGuardrailFunc',
     'ToolBlocked',
     'ToolCallInfo',
-    'ToolGuard',
-    'ToolGuardFunc',
-    'ToolResultGuardFunc',
+    'ToolGuardrail',
+    'ToolGuardrailFunc',
+    'ToolResultGuardrailFunc',
     'ToolResultInfo',
 ]
+
+_RENAMED: dict[str, object] = {
+    'GuardResult': GuardrailResult,
+    'InputGuard': InputGuardrail,
+    'InputGuardFunc': InputGuardrailFunc,
+    'OutputGuard': OutputGuardrail,
+    'OutputGuardFunc': OutputGuardrailFunc,
+}
+
+
+def __getattr__(name: str) -> object:
+    renamed = _RENAMED.get(name)
+    if renamed is not None:
+        warn_class_renamed(name, name.replace('Guard', 'Guardrail'), 'pydantic_ai_harness.guardrails')
+        return renamed
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

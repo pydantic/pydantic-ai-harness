@@ -2,23 +2,25 @@
 
 from typing import TYPE_CHECKING
 
+from ._warn import HarnessDeprecationWarning
+
 if TYPE_CHECKING:
     from .code_mode import CodeMode
     from .filesystem import FileSystem
     from .guardrails import (
         GuardrailError,
-        GuardResult,
+        GuardrailResult,
         InputBlocked,
-        InputGuard,
-        InputGuardFunc,
+        InputGuardrail,
+        InputGuardrailFunc,
         OutputBlocked,
-        OutputGuard,
-        OutputGuardFunc,
+        OutputGuardrail,
+        OutputGuardrailFunc,
         ToolBlocked,
         ToolCallInfo,
-        ToolGuard,
-        ToolGuardFunc,
-        ToolResultGuardFunc,
+        ToolGuardrail,
+        ToolGuardrailFunc,
+        ToolResultGuardrailFunc,
         ToolResultInfo,
     )
     from .logfire import ManagedPrompt
@@ -27,40 +29,48 @@ if TYPE_CHECKING:
 __all__ = [
     'CodeMode',
     'FileSystem',
-    'GuardResult',
     'GuardrailError',
+    'GuardrailResult',
+    'HarnessDeprecationWarning',
     'InputBlocked',
-    'InputGuard',
-    'InputGuardFunc',
+    'InputGuardrail',
+    'InputGuardrailFunc',
     'LLM_API_KEY_ENV_PATTERNS',
     'ManagedPrompt',
     'OutputBlocked',
-    'OutputGuard',
-    'OutputGuardFunc',
+    'OutputGuardrail',
+    'OutputGuardrailFunc',
     'Shell',
     'ToolBlocked',
     'ToolCallInfo',
-    'ToolGuard',
-    'ToolGuardFunc',
-    'ToolResultGuardFunc',
+    'ToolGuardrail',
+    'ToolGuardrailFunc',
+    'ToolResultGuardrailFunc',
     'ToolResultInfo',
 ]
 
 _GUARDRAIL_EXPORTS = {
-    'GuardResult',
     'GuardrailError',
+    'GuardrailResult',
     'InputBlocked',
-    'InputGuard',
-    'InputGuardFunc',
+    'InputGuardrail',
+    'InputGuardrailFunc',
     'OutputBlocked',
-    'OutputGuard',
-    'OutputGuardFunc',
+    'OutputGuardrail',
+    'OutputGuardrailFunc',
     'ToolBlocked',
     'ToolCallInfo',
-    'ToolGuard',
-    'ToolGuardFunc',
-    'ToolResultGuardFunc',
+    'ToolGuardrail',
+    'ToolGuardrailFunc',
+    'ToolResultGuardrailFunc',
     'ToolResultInfo',
+    # Pre-rename names; `pydantic_ai_harness.guardrails.__getattr__` emits the
+    # deprecation warning when these resolve.
+    'GuardResult',
+    'InputGuard',
+    'InputGuardFunc',
+    'OutputGuard',
+    'OutputGuardFunc',
 }
 
 

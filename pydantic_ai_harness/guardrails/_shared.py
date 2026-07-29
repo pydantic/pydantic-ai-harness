@@ -1,6 +1,6 @@
 """Verdict vocabulary shared by the input, output, and tool guardrails.
 
-`GuardResult` is the single result type every guard returns, so the same five
+`GuardrailResult` is the single result type every guard returns, so the same five
 outcomes read the same way on all three edges of a run. The helpers here
 normalize a guard's return value and record the non-`allow` outcomes as spans.
 """
@@ -33,18 +33,18 @@ _UNSET = _Unset()
 
 
 @dataclass(frozen=True, kw_only=True)
-class GuardResult:
+class GuardrailResult:
     """The outcome a guard reports for the value it inspected.
 
-    Construct one with the classmethods -- `GuardResult.allow()`,
-    `GuardResult.block()`, `GuardResult.replace()`, `GuardResult.retry()`,
-    `GuardResult.approve()` -- rather than the raw fields. A guard may also
+    Construct one with the classmethods -- `GuardrailResult.allow()`,
+    `GuardrailResult.block()`, `GuardrailResult.replace()`, `GuardrailResult.retry()`,
+    `GuardrailResult.approve()` -- rather than the raw fields. A guard may also
     return a bare `bool`: `True` is `allow()`, `False` is `block()`.
 
     Not every outcome applies to every guard. `retry` and `approve` are
-    rejected by [`InputGuard`][pydantic_ai_harness.InputGuard]; `approve` is
-    rejected by [`OutputGuard`][pydantic_ai_harness.OutputGuard] and by the
-    result stage of [`ToolGuard`][pydantic_ai_harness.ToolGuard]. Each raises
+    rejected by [`InputGuardrail`][pydantic_ai_harness.InputGuardrail]; `approve` is
+    rejected by [`OutputGuardrail`][pydantic_ai_harness.OutputGuardrail] and by the
+    result stage of [`ToolGuardrail`][pydantic_ai_harness.ToolGuardrail]. Each raises
     `UserError` naming the guard and the outcome.
     """
 
@@ -66,63 +66,63 @@ class GuardResult:
         match self.action:
             case 'allow':
                 if self.message is not None or self.replacement is not _UNSET:
-                    raise UserError("GuardResult(action='allow') must not set `message` or `replacement`.")
+                    raise UserError("GuardrailResult(action='allow') must not set `message` or `replacement`.")
             case 'approve':
                 if self.message is not None or self.replacement is not _UNSET:
-                    raise UserError("GuardResult(action='approve') must not set `message` or `replacement`.")
+                    raise UserError("GuardrailResult(action='approve') must not set `message` or `replacement`.")
             case 'replace':
                 if self.replacement is _UNSET:
-                    raise UserError("GuardResult(action='replace') requires a `replacement` value.")
+                    raise UserError("GuardrailResult(action='replace') requires a `replacement` value.")
                 if self.message is not None:
-                    raise UserError("GuardResult(action='replace') must not set `message`.")
+                    raise UserError("GuardrailResult(action='replace') must not set `message`.")
             case 'retry':
                 if self.message is None:
-                    raise UserError("GuardResult(action='retry') requires a `message`.")
+                    raise UserError("GuardrailResult(action='retry') requires a `message`.")
                 if self.replacement is not _UNSET:
-                    raise UserError("GuardResult(action='retry') must not set `replacement`.")
+                    raise UserError("GuardrailResult(action='retry') must not set `replacement`.")
             case 'block':
                 # `message=None` is valid: a default is supplied at the use site. A
                 # `replacement` is not: nothing reads it here, so accepting one would
                 # silently discard a substitution the guard believed it had made.
                 if self.replacement is not _UNSET:
-                    raise UserError("GuardResult(action='block') must not set `replacement`.")
+                    raise UserError("GuardrailResult(action='block') must not set `replacement`.")
             case _:  # pragma: no cover - assert_never exhaustiveness guard
                 assert_never(self.action)
 
     @classmethod
-    def allow(cls) -> GuardResult:
+    def allow(cls) -> GuardrailResult:
         """Let the value through unchanged."""
         return cls(action='allow')
 
     @classmethod
-    def block(cls, message: str | None = None) -> GuardResult:
+    def block(cls, message: str | None = None) -> GuardrailResult:
         """Refuse the value. `message` is the refusal text; `None` uses a default."""
         return cls(action='block', message=message)
 
     @classmethod
-    def replace(cls, value: object) -> GuardResult:
+    def replace(cls, value: object) -> GuardrailResult:
         """Substitute `value` for the inspected one and continue.
 
-        For `InputGuard`, `value` is the replacement prompt text sent to the
-        model. For `OutputGuard`, it is the agent output returned to the caller.
-        For `ToolGuard`, it is the replacement tool arguments (a mapping) or the
+        For `InputGuardrail`, `value` is the replacement prompt text sent to the
+        model. For `OutputGuardrail`, it is the agent output returned to the caller.
+        For `ToolGuardrail`, it is the replacement tool arguments (a mapping) or the
         replacement tool result, depending on the stage. `None` is a valid
         replacement.
         """
         return cls(action='replace', replacement=value)
 
     @classmethod
-    def retry(cls, message: str) -> GuardResult:
+    def retry(cls, message: str) -> GuardrailResult:
         """Send the value back to the model to try again.
 
         `message` is the instruction the model sees on the retry. Valid for
-        `OutputGuard` and for both stages of `ToolGuard`.
+        `OutputGuardrail` and for both stages of `ToolGuardrail`.
         """
         return cls(action='retry', message=message)
 
     @classmethod
-    def approve(cls) -> GuardResult:
-        """Defer the tool call for human approval -- `ToolGuard` argument stage only.
+    def approve(cls) -> GuardrailResult:
+        """Defer the tool call for human approval -- `ToolGuardrail` argument stage only.
 
         Raises [`ApprovalRequired`][pydantic_ai.exceptions.ApprovalRequired], so
         the call surfaces in
@@ -133,8 +133,8 @@ class GuardResult:
         return cls(action='approve')
 
 
-GuardOutcome = bool | GuardResult
-"""What a guard callable returns: a bare `bool` (`True` = allow), or a `GuardResult`."""
+GuardOutcome = bool | GuardrailResult
+"""What a guard callable returns: a bare `bool` (`True` = allow), or a `GuardrailResult`."""
 
 
 def takes_ctx(func: Callable[..., object]) -> bool:
@@ -157,14 +157,14 @@ async def evaluate(
     guard: Callable[..., GuardOutcome | Awaitable[GuardOutcome]],
     ctx: RunContext[AgentDepsT],
     value: object,
-) -> GuardResult:
-    """Call `guard` (passing `ctx` when declared), await it, and normalize to `GuardResult`."""
+) -> GuardrailResult:
+    """Call `guard` (passing `ctx` when declared), await it, and normalize to `GuardrailResult`."""
     outcome = guard(ctx, value) if takes_ctx(guard) else guard(value)
     if inspect.isawaitable(outcome):
         outcome = await outcome
-    if isinstance(outcome, GuardResult):
+    if isinstance(outcome, GuardrailResult):
         return outcome
-    return GuardResult.allow() if outcome else GuardResult.block()
+    return GuardrailResult.allow() if outcome else GuardrailResult.block()
 
 
 def direction_attributes(direction: str, action: str, tool_name: str | None) -> dict[str, str]:
