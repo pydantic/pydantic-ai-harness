@@ -284,10 +284,23 @@ def _extract_prompt(ctx: RunContext[AgentDepsT], messages: Sequence[ModelMessage
 
 
 def _replace_prompt(messages: Sequence[ModelMessage], new_content: str) -> bool:
-    """Rewrite the most recent user prompt to `new_content`. Returns whether one was found."""
+    """Rewrite the most recent user prompt to `new_content`. Returns whether one was found.
+
+    A multimodal prompt is refused rather than rewritten. Its `content` is a
+    sequence of parts, and a `str` written over it would send the model the
+    replacement text alone -- the images, documents and audio the user attached
+    would be gone, with nothing in the run to say so.
+    """
     for message in reversed(messages):
         for part in reversed(message.parts):
             if isinstance(part, UserPromptPart):
+                if not isinstance(part.content, str):
+                    raise UserError(
+                        'An InputGuardrail returned GuardrailResult.replace() for a multimodal prompt. The prompt '
+                        f'holds {type(part.content).__name__} rather than text, so writing the replacement over it '
+                        'would drop the attached parts. Return GuardrailResult.allow() or GuardrailResult.block() '
+                        'for prompts that are not plain text, or guard the output instead.'
+                    )
                 part.content = new_content
                 return True
     return False
@@ -326,9 +339,12 @@ class InputGuardrail(AbstractCapability[AgentDepsT]):
 
     The `guard` callable receives the prompt text and returns one of the four
     outcomes (see the module docstring). `replace` rewrites the prompt sent to
-    the model and also overwrites the original in the run's message history,
-    so a redacted secret is not retained; a `str` replacement overwrites a
-    multimodal prompt's other parts. `retry` is not valid for an input guardrail.
+    the model and also overwrites the original in the run's message history, so
+    a redacted secret is not retained. `retry` is not valid for an input
+    guardrail, and neither is `replace` on a multimodal prompt: the guard sees
+    the whole prompt rendered as text, and writing one string back over a
+    prompt built from several parts would drop the attached ones, so it raises
+    [`UserError`][pydantic_ai.exceptions.UserError] instead.
 
     ```python
     from pydantic_ai import Agent
