@@ -117,6 +117,27 @@ class TestBelgieSandbox:
             await toolset.run_typescript('third')
         assert len(fake_belgie.runtimes) == 2
 
+    async def test_toolset_retains_owned_session_when_cleanup_fails(self, fake_belgie: FakeBelgie) -> None:
+        toolset = BelgieSandbox[None]().get_toolset()
+        assert _is_abstract_toolset(toolset)
+        run_toolset = await toolset.for_run(_run_context())
+        await run_toolset.__aenter__()
+        assert isinstance(run_toolset, _BelgieSandboxTools)
+        await run_toolset.run_typescript('code')
+        fake_belgie.runtime_exit_error = RuntimeError('cleanup failed')
+
+        with pytest.raises(RuntimeError, match='cleanup failed'):
+            await run_toolset.__aexit__(None, None, None)
+
+        assert fake_belgie.runtimes[0].exit_calls == 1
+        assert not fake_belgie.runtimes[0].exited
+        fake_belgie.runtime_exit_error = None
+        await run_toolset.__aexit__(None, None, None)
+        assert fake_belgie.runtimes[0].exit_calls == 2
+        assert fake_belgie.runtimes[0].exited
+        with pytest.raises(BelgieSandboxExecutionError, match='not active'):
+            await run_toolset.run_typescript('after close')
+
     async def test_script_failure_and_output_limit_are_retries(self, fake_belgie: FakeBelgie) -> None:
         async with _toolset(BelgieSandbox(max_output_bytes=4)) as toolset:
             fake_belgie.script_error = BelgieJavaScriptError('bad syntax')
@@ -245,7 +266,6 @@ class TestBelgieSandbox:
         [
             ({'allow_package_imports': 1}, 'allow_package_imports must be a bool'),
             ({'allow_network': 1}, 'allow_network must be a bool'),
-            ({'enable_rendering': 1}, 'enable_rendering must be a bool'),
             ({'max_old_generation_size_mb': 0}, 'must be a positive integer or None'),
             ({'timeout': 0}, 'timeout must be a positive finite number'),
             ({'timeout': float('inf')}, 'timeout must be a positive finite number'),
@@ -273,14 +293,12 @@ class TestBelgieSandbox:
         open_profile = BelgieSandbox(
             allow_package_imports=True,
             allow_network=True,
-            enable_rendering=True,
             timeout=12,
             max_output_bytes=100,
         ).get_instructions()
         assert open_profile is not None
         assert 'imports are enabled' in open_profile
         assert 'network access is enabled' in open_profile
-        assert '@belgie/render' in open_profile
         assert '12s deadline' in open_profile
 
         assert BelgieSandbox(instructions='Custom.').get_instructions() == 'Custom.'

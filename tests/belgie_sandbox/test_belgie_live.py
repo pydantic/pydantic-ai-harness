@@ -1,4 +1,7 @@
-"""Offline smoke tests against the real embedded Belgie runtime."""
+"""Offline smoke tests against the real embedded Belgie runtime.
+
+Run with `make integration-belgie`.
+"""
 
 from __future__ import annotations
 
@@ -16,8 +19,6 @@ pytestmark = [pytest.mark.anyio, pytest.mark.belgie_live]
     reason='Belgie supports Python 3.12-3.14',
 )
 async def test_real_runtime_executes_typescript_and_denies_host_access() -> None:
-    pytest.importorskip('belgie')
-
     async with BelgieSandboxSession() as session:
         result = await session.run_script(
             """

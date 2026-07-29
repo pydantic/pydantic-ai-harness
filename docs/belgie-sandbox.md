@@ -85,7 +85,7 @@ BelgieSandbox(defer_loading=True)
 With no explicit `id`, this registers as `belgie_sandbox`. The tool and
 instructions reach the model after the capability is loaded.
 
-## Security profile
+## Default isolation
 
 Each agent run gets a separate temporary Belgie `Environment` and Deno
 `Runtime`. The runtime starts lazily on the first tool call, so an unused
@@ -95,7 +95,7 @@ The default profile:
 
 - disables npm, JSR, URL, and relative imports;
 - denies runtime network access, including `fetch`;
-- denies host environment variables, files, writes, subprocesses, FFI, and
+- denies host environment variables, filesystem paths, subprocesses, writes, FFI, and
   system information;
 - permits reads only from the run's temporary workspace;
 - applies a 30-second execution deadline and a 50 KiB JSON result limit;
@@ -109,15 +109,14 @@ Belgie provides an embedded language sandbox, not a container or virtual
 machine. Use an OS- or cloud-isolated sandbox when untrusted code must have a
 separate kernel, filesystem, or network namespace.
 
-## Package imports, network, and TSX rendering
+## Opting into packages and network
 
-Enable higher-risk features independently:
+Enable the two higher-risk features independently:
 
 ```python
 BelgieSandbox(
     allow_package_imports=True,
     allow_network=True,
-    enable_rendering=True,
 )
 ```
 
@@ -127,25 +126,6 @@ does not grant runtime `fetch`.
 
 `allow_network=True` grants unrestricted Deno runtime network access. Host
 files, environment variables, subprocesses, and FFI remain denied.
-
-`enable_rendering=True` installs `@belgie/render`, enables package resolution,
-and grants its Vite build access to the temporary `node_modules`, native loader,
-and documented system probes:
-
-```tsx
-import { render } from "@belgie/render";
-
-function Widget() {
-  return <main>Hello from Belgie</main>;
-}
-
-export default function run() {
-  return render({ widget: <Widget />, plugins: [] });
-}
-```
-
-The returned HTML is ordinary tool data; Pydantic AI does not mount it as an
-application. Rendered documents may need a larger `max_output_bytes`.
 
 ## Lifecycle and reusable sessions
 
@@ -158,19 +138,24 @@ cancellation.
 Use a caller-owned session for explicit reuse across runs:
 
 ```python
+import asyncio
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.belgie_sandbox import (
     BelgieSandbox,
     BelgieSandboxSession,
 )
 
-async with BelgieSandboxSession(allow_package_imports=True) as session:
-    agent = Agent(
-        'anthropic:claude-sonnet-4-6',
-        capabilities=[BelgieSandbox(session=session)],
-    )
-    await agent.run('Run a TypeScript transform.')
-    await agent.run('Run another transform in the same Deno worker.')
+async def main() -> None:
+    async with BelgieSandboxSession(allow_package_imports=True) as session:
+        agent = Agent(
+            'anthropic:claude-sonnet-4-6',
+            capabilities=[BelgieSandbox(session=session)],
+        )
+        await agent.run('Run a TypeScript transform.')
+        await agent.run('Run another transform in the same Deno worker.')
+
+asyncio.run(main())
 ```
 
 An injected session must already be open. The capability does not enter or
@@ -209,7 +194,6 @@ from pydantic_ai_harness.belgie_sandbox import BelgieSandbox
 BelgieSandbox(
     allow_package_imports=False,
     allow_network=False,
-    enable_rendering=False,
     max_old_generation_size_mb=128,
     timeout=30.0,
     max_output_bytes=50 * 1024,

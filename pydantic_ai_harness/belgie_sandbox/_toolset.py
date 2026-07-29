@@ -31,10 +31,10 @@ Export a callable function, preferably `export default async function run() { ..
 `export function run() { ... }`. The exported function is called without arguments. Return \
 the JSON-serializable value you want sent back; console output is not captured.
 
-This is Deno, not Node.js. Host files, environment variables, subprocesses, FFI, system \
-information, remote package imports, and `fetch` are unavailable unless the host explicitly \
-enabled the corresponding Belgie Sandbox option. External agent tools are not callable from \
-inside this sandbox.
+This is Deno, not Node.js. The owned runtime denies host files, environment variables, subprocesses, \
+FFI, and system information. Remote package imports and `fetch` are unavailable unless the host \
+explicitly enables their Belgie Sandbox options. Caller-supplied runtimes define their own permissions. \
+External agent tools are not callable from inside this sandbox.
 """
 
 
@@ -46,7 +46,6 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
         *,
         allow_package_imports: bool,
         allow_network: bool,
-        enable_rendering: bool,
         max_old_generation_size_mb: int | None,
         timeout: float,
         max_output_bytes: int,
@@ -58,7 +57,6 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
         super().__init__(max_retries=max_retries, sequential=True, id=toolset_id)
         self._allow_package_imports = allow_package_imports
         self._allow_network = allow_network
-        self._enable_rendering = enable_rendering
         self._max_old_generation_size_mb = max_old_generation_size_mb
         self._timeout = timeout
         self._max_output_bytes = max_output_bytes
@@ -80,7 +78,6 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
         return BelgieSandboxToolset[AgentDepsT](
             allow_package_imports=self._allow_package_imports,
             allow_network=self._allow_network,
-            enable_rendering=self._enable_rendering,
             max_old_generation_size_mb=self._max_old_generation_size_mb,
             timeout=self._timeout,
             max_output_bytes=self._max_output_bytes,
@@ -108,10 +105,10 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
     async def __aexit__(self, *args: object) -> None:
         """Close only a session created by this run."""
         session = self._session
-        self._session = None
-        self._entered = False
         if session is not None and self._external_session is None:
             await session.close()
+        self._session = None
+        self._entered = False
 
     async def _require_session(self) -> BelgieSandboxSession:
         if not self._entered:
@@ -121,7 +118,6 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
         session = BelgieSandboxSession(
             allow_package_imports=self._allow_package_imports,
             allow_network=self._allow_network,
-            enable_rendering=self._enable_rendering,
             max_old_generation_size_mb=self._max_old_generation_size_mb,
         )
         await session.__aenter__()

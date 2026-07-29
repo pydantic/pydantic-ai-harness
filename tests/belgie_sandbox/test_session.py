@@ -49,11 +49,10 @@ class TestBelgieSandboxSession:
         assert fake_belgie.environments[0].exited
         assert fake_belgie.runtimes[0].exited
 
-    async def test_package_network_and_rendering_are_explicit(self, fake_belgie: FakeBelgie) -> None:
+    async def test_package_imports_and_network_are_explicit(self, fake_belgie: FakeBelgie) -> None:
         session = BelgieSandboxSession(
             allow_package_imports=True,
             allow_network=True,
-            enable_rendering=True,
             max_old_generation_size_mb=None,
         )
 
@@ -61,29 +60,20 @@ class TestBelgieSandboxSession:
             workspace = session.workspace
             assert workspace is not None
             environment = fake_belgie.environments[0]
-            assert environment.dependencies == {'@belgie/render': 'npm:@belgie/render'}
+            assert environment.dependencies is None
             assert environment.options is not None
             assert environment.options.allow_remote is True
             assert environment.options.no_npm is False
-            assert environment.install_calls == 1
+            assert environment.install_calls == 0
 
             options = fake_belgie.runtimes[0].options
             assert options is not None
             assert options.max_old_generation_size_mb is None
             assert options.permissions is not None
-            assert options.permissions.kwargs['allow_net'] == []
-            assert options.permissions.kwargs['allow_ffi'] == [str(workspace / 'node_modules')]
-            read_paths = options.permissions.kwargs['allow_read']
-            assert isinstance(read_paths, list)
-            assert str(workspace) in read_paths
-            assert options.permissions.kwargs['allow_sys'] == (
-                'homedir',
-                'uid',
-                'gid',
-                'cpus',
-                'osRelease',
-                'systemMemoryInfo',
-            )
+            assert options.permissions.kwargs == {
+                'allow_read': [str(workspace)],
+                'allow_net': [],
+            }
 
     async def test_package_imports_do_not_enable_runtime_network(self, fake_belgie: FakeBelgie) -> None:
         async with BelgieSandboxSession(allow_package_imports=True):
@@ -136,6 +126,32 @@ class TestBelgieSandboxSession:
         assert session.workspace is None
         assert fake_belgie.environments[0].exited
 
+    async def test_start_failure_retains_state_when_cleanup_fails(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.start_error = RuntimeError('worker failed')
+        fake_belgie.environment_exit_error = RuntimeError('cleanup failed')
+        session = BelgieSandboxSession()
+
+        startup_error = fake_belgie.start_error
+        with pytest.raises(
+            BelgieSandboxUnavailableError, match='worker failed.*Cleanup also failed.*cleanup failed'
+        ) as exc_info:
+            await session.__aenter__()
+
+        assert exc_info.value.__cause__ is startup_error
+        workspace = session.workspace
+        assert workspace is not None
+        assert workspace.exists()
+        assert fake_belgie.environments[0].exit_calls == 1
+        assert not fake_belgie.environments[0].exited
+        with pytest.raises(BelgieSandboxError, match='pending cleanup'):
+            await session.__aenter__()
+        fake_belgie.environment_exit_error = None
+        await session.close()
+        assert session.workspace is None
+        assert not workspace.exists()
+        assert fake_belgie.environments[0].exit_calls == 2
+        assert fake_belgie.environments[0].exited
+
     async def test_start_cancellation_is_preserved(self, fake_belgie: FakeBelgie) -> None:
         fake_belgie.start_error = asyncio.CancelledError()
         session = BelgieSandboxSession()
@@ -145,6 +161,71 @@ class TestBelgieSandboxSession:
 
         assert session.workspace is None
         assert fake_belgie.environments[0].exited
+
+    async def test_start_cancellation_is_preserved_when_cleanup_fails(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.start_error = asyncio.CancelledError()
+        cleanup_error = RuntimeError('cleanup failed')
+        fake_belgie.environment_exit_error = cleanup_error
+        session = BelgieSandboxSession()
+
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            await session.__aenter__()
+
+        assert exc_info.value.__cause__ is cleanup_error
+        workspace = session.workspace
+        assert workspace is not None
+        assert workspace.exists()
+        assert fake_belgie.environments[0].exit_calls == 1
+        fake_belgie.environment_exit_error = None
+        await session.close()
+        assert session.workspace is None
+        assert not workspace.exists()
+        assert fake_belgie.environments[0].exit_calls == 2
+
+    async def test_close_retains_state_when_cleanup_fails(self, fake_belgie: FakeBelgie) -> None:
+        session = BelgieSandboxSession()
+        await session.__aenter__()
+        workspace = session.workspace
+        fake_belgie.runtime_exit_error = RuntimeError('cleanup failed')
+
+        with pytest.raises(RuntimeError, match='cleanup failed'):
+            await session.close()
+
+        assert session.is_open
+        assert session.workspace == workspace
+        assert fake_belgie.runtimes[0].exit_calls == 1
+        assert not fake_belgie.runtimes[0].exited
+        assert fake_belgie.environments[0].exit_calls == 0
+        fake_belgie.runtime_exit_error = None
+        await session.close()
+        assert not session.is_open
+        assert session.workspace is None
+        assert fake_belgie.runtimes[0].exit_calls == 2
+        assert fake_belgie.runtimes[0].exited
+        assert fake_belgie.environments[0].exit_calls == 1
+
+    async def test_environment_cleanup_failure_preserves_workspace_for_retry(self, fake_belgie: FakeBelgie) -> None:
+        session = BelgieSandboxSession()
+        await session.__aenter__()
+        workspace = session.workspace
+        assert workspace is not None
+        fake_belgie.environment_exit_error = RuntimeError('cleanup failed')
+
+        with pytest.raises(RuntimeError, match='cleanup failed'):
+            await session.close()
+
+        assert not session.is_open
+        assert session.workspace == workspace
+        assert workspace.exists()
+        assert fake_belgie.runtimes[0].exit_calls == 1
+        assert fake_belgie.environments[0].exit_calls == 1
+        assert not fake_belgie.environments[0].exited
+        fake_belgie.environment_exit_error = None
+        await session.close()
+        assert session.workspace is None
+        assert not workspace.exists()
+        assert fake_belgie.runtimes[0].exit_calls == 1
+        assert fake_belgie.environments[0].exit_calls == 2
 
     async def test_script_error_is_normalized(self, fake_belgie: FakeBelgie) -> None:
         fake_belgie.script_error = BelgieJavaScriptError('boom')
@@ -170,8 +251,9 @@ class TestBelgieSandboxSession:
         fake_belgie.hang = True
         async with BelgieSandboxSession() as session:
             task = asyncio.create_task(session.run_script('export default async () => await never'))
-            while not fake_belgie.scripts:
+            while not fake_belgie.scripts and not task.done():
                 await asyncio.sleep(0)
+            assert not task.done()
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await task
@@ -189,7 +271,6 @@ class TestBelgieSandboxSession:
         [
             ({'allow_package_imports': 1}, 'allow_package_imports must be a bool'),
             ({'allow_network': 1}, 'allow_network must be a bool'),
-            ({'enable_rendering': 1}, 'enable_rendering must be a bool'),
             ({'max_old_generation_size_mb': 0}, 'must be a positive integer or None'),
         ],
     )

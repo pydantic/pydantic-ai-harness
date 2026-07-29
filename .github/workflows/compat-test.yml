@@ -82,7 +82,7 @@ jobs:
       # packages in the pydantic-ai repo and version-track together; testing slim
       # from-source against a stale graph from PyPI would mask cross-package issues
       # (e.g. a slim PR depending on an unreleased graph change).
-      - run: uv sync --frozen --all-extras --group lint --group dev
+      - run: uv sync --frozen --all-extras --no-extra belgie --group lint --group dev
       - run: |
           uv pip install --no-deps \
             -e "${RUNNER_TEMP}/pydantic-ai/pydantic_ai_slim" \

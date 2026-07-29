@@ -148,6 +148,7 @@ executionEnvironments = [
 [tool.pytest.ini_options]
 testpaths = ['tests']
 xfail_strict = true
+addopts = ['-m', 'not belgie_live']
 markers = [
     'belgie_live: runs against the real embedded Belgie runtime',
     'modal_live: runs against a real Modal control plane; needs credentials',
@@ -164,7 +165,7 @@ anyio_mode = 'auto'
 [tool.coverage.run]
 branch = true
 source = ['pydantic_ai_harness', 'tests']
-omit = ['tests/**/test_modal_live.py']
+omit = ['tests/**/test_belgie_live.py', 'tests/**/test_modal_live.py']
 
 [tool.coverage.paths]
 source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']

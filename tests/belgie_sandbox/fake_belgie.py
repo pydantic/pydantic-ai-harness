@@ -15,6 +15,8 @@ class FakeBelgie:
         self.result: object = {'ok': True}
         self.script_error: Exception | None = None
         self.start_error: BaseException | None = None
+        self.environment_exit_error: BaseException | None = None
+        self.runtime_exit_error: BaseException | None = None
         self.hang = False
         self.cancelled = False
         self.environments: list[_Environment] = []
@@ -68,16 +70,10 @@ class _RuntimePermissions:
         *,
         allow_read: list[str] | None = None,
         allow_net: list[str] | None = None,
-        allow_ffi: list[str] | None = None,
-        allow_sys: tuple[str, ...] | None = None,
     ) -> None:
         self.kwargs: dict[str, object] = {'allow_read': allow_read}
         if allow_net is not None:
             self.kwargs['allow_net'] = allow_net
-        if allow_ffi is not None:
-            self.kwargs['allow_ffi'] = allow_ffi
-        if allow_sys is not None:
-            self.kwargs['allow_sys'] = allow_sys
 
 
 class _RuntimeOptions:
@@ -107,6 +103,7 @@ class _Environment:
         self.install_calls = 0
         self.entered = False
         self.exited = False
+        self.exit_calls = 0
         control.environments.append(self)
 
     async def __aenter__(self) -> _Environment:
@@ -114,9 +111,12 @@ class _Environment:
         return self
 
     async def __aexit__(self, *args: object) -> None:
+        self.exit_calls += 1
+        if self.control.environment_exit_error is not None:
+            raise self.control.environment_exit_error
         self.exited = True
 
-    async def install(self) -> object:
+    async def install(self) -> object:  # pragma: no cover - retained to match the upstream environment protocol
         self.install_calls += 1
         return object()
 
@@ -161,6 +161,7 @@ class _Runtime:
         self.options = options
         self.entered = False
         self.exited = False
+        self.exit_calls = 0
         control.runtimes.append(self)
 
     async def __aenter__(self) -> _ActiveRuntime:
@@ -170,6 +171,9 @@ class _Runtime:
         return _ActiveRuntime(self.control)
 
     async def __aexit__(self, *args: object) -> None:
+        self.exit_calls += 1
+        if self.control.runtime_exit_error is not None:
+            raise self.control.runtime_exit_error
         self.exited = True
 
 

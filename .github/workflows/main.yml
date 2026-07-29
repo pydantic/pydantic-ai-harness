@@ -21,15 +21,14 @@ permissions:
   contents: read
 
 jobs:
-  # Detect whether a pull request or branch push touches LocalStack. The live
-  # integration job installs the AWS CLI, pulls the LocalStack image, and starts
-  # a real container against an external auth token -- weight that only pays off
-  # when LocalStack code or its CI wiring changes. Tag pushes skip detection so
-  # releases always exercise the live path.
+  # Detect whether a pull request or branch push touches a capability with a
+  # heavyweight integration tier. Tag pushes skip detection so releases always
+  # exercise each live path.
   changes:
     if: github.event_name == 'pull_request' || github.ref_type == 'branch'
     runs-on: ubuntu-latest
     outputs:
+      belgie: ${{ steps.detect-belgie.outputs.belgie }}
       localstack: ${{ steps.detect.outputs.localstack }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -60,6 +59,30 @@ jobs:
             echo 'localstack=true' >> "$GITHUB_OUTPUT"
           fi
 
+      - id: detect-belgie
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+            pydantic_ai_harness/belgie_sandbox \
+            tests/belgie_sandbox \
+            tests/conftest.py \
+            docs/belgie-sandbox.md \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            .github/workflows/main.yml
+          then
+            echo 'belgie=false' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+            echo 'belgie=true' >> "$GITHUB_OUTPUT"
+          fi
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -73,7 +96,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: lint
 
-      - run: uv sync --locked --all-groups --all-extras
+      - run: uv sync --locked --all-groups --all-extras --no-extra belgie
 
       - uses: pre-commit/action@646c83fcd040023954eafda54b4db0192ce70507 # v3.0.0
         with:
@@ -94,7 +117,7 @@ jobs:
           - name: slim
             extras: ''
           - name: all-extras
-            extras: '--all-extras'
+            extras: '--all-extras --no-extra belgie'
     name: test on ${{ matrix.python-version }} (${{ matrix.install.name }})
     env:
       COVERAGE_FILE: coverage-data/.coverage.${{ matrix.python-version }}-${{ matrix.install.name }}
@@ -148,7 +171,7 @@ jobs:
       # The lock validation must be off here: this job deviates from the lock
       # on purpose, and under UV_LOCKED=1 the lowest-direct resolution fails
       # because uv refuses to write the lowest-resolved lockfile it produces.
-      - run: uv sync --resolution lowest-direct --group dev --all-extras
+      - run: uv sync --resolution lowest-direct --group dev --all-extras --no-extra belgie
         env:
           UV_LOCKED: '0'
       - run: uv run --no-sync pytest
@@ -184,8 +207,27 @@ jobs:
           env -u UV_LOCKED uv lock \
             --upgrade-package pydantic-ai-slim \
             --upgrade-package pydantic-graph
-      - run: uv sync --locked --group dev --all-extras
+      - run: uv sync --locked --group dev --all-extras --no-extra belgie
       - run: uv run --no-sync pytest
+
+  belgie-integration:
+    needs: [changes]
+    if: ${{ always() && (github.ref_type == 'tag' || needs.changes.outputs.belgie == 'true') }}
+    runs-on: ubuntu-latest
+    name: Belgie integration tests
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts or use secrets
+          cache-suffix: belgie
+
+      - run: uv sync --locked --group dev --extra belgie
+      - run: make integration-belgie
 
   localstack-integration:
     needs: [changes]
@@ -234,7 +276,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: localstack
 
-      - run: uv sync --locked --group dev --all-extras
+      - run: uv sync --locked --group dev --all-extras --no-extra belgie
 
       - uses: LocalStack/setup-localstack@7c8a0cb3405bc58be4c8f763f812aa000bc46303 # v0.3.2
         with:
@@ -268,22 +310,21 @@ jobs:
           path: coverage-data
           merge-multiple: true
 
-      - run: uv sync --locked --group dev --all-extras
+      - run: uv sync --locked --group dev --all-extras --no-extra belgie
       - run: uv run coverage combine coverage-data
       - run: uv run coverage report
 
   check:
     if: always()
-    needs: [changes, lint, test, test-floor, test-latest, coverage, localstack-integration]
+    needs: [changes, lint, test, test-floor, test-latest, coverage, belgie-integration, localstack-integration]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
         with:
-          # localstack-integration is skipped when a pull request or branch push
-          # doesn't touch LocalStack, when the pull request comes from a fork
-          # (no secrets there), and `changes` is skipped on tag events.
-          # Both still vote (block the merge) when they actually run and fail.
-          allowed-skips: changes, localstack-integration
+          # Integration jobs are skipped when their capability is untouched;
+          # LocalStack also skips pull requests without secrets. A job still
+          # votes (blocks the merge) when it actually runs and fails.
+          allowed-skips: changes, belgie-integration, localstack-integration
           jobs: ${{ toJSON(needs) }}
 
   release:

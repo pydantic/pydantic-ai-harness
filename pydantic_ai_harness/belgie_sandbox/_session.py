@@ -3,38 +3,124 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import math
-import sys
-from contextlib import AsyncExitStack, suppress
+from collections.abc import Callable, Coroutine, Mapping
+from contextlib import suppress
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import TracebackType
-from typing import TYPE_CHECKING
+from typing import Protocol, TypeAlias, runtime_checkable
 
 import anyio
 from typing_extensions import Self
 
-if TYPE_CHECKING:
-    from belgie import JsonOutput, Runtime, RuntimePermissions  # pyright: ignore[reportMissingTypeStubs]
-    from belgie._core import AsyncRuntime  # pyright: ignore[reportMissingTypeStubs]
-
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_OLD_GENERATION_SIZE_MB = 128
-DEFAULT_RENDER_SPECIFIER = 'npm:@belgie/render'
 
 _MISSING_BELGIE = (
     'Belgie Sandbox requires Belgie and Python 3.12-3.14. Install it with `uv add "pydantic-ai-harness[belgie]"`.'
 )
-_DEFAULT_RENDER_SYS_PERMISSIONS = ('homedir', 'uid', 'gid', 'cpus', 'osRelease', 'systemMemoryInfo')
-_DEFAULT_RENDER_READ_PATHS = (
-    ()
-    if sys.platform == 'win32'
-    else (
-        '/etc',
-        '/proc',
-        '/usr/bin/ldd',
-    )
-)
+
+JsonPrimitive: TypeAlias = None | bool | int | float | str
+JsonOutput: TypeAlias = JsonPrimitive | list['JsonOutput'] | dict[str, 'JsonOutput']
+
+
+class _EnvironmentOptionsFactory(Protocol):  # pragma: no cover - structural typing
+    def __call__(self, *, allow_remote: bool, no_npm: bool) -> object: ...
+
+
+class _RuntimePermissionsFactory(Protocol):  # pragma: no cover - structural typing
+    def __call__(self, *, allow_read: list[str], allow_net: list[str] | None = None) -> object: ...
+
+
+class _RuntimeOptionsFactory(Protocol):  # pragma: no cover - structural typing
+    def __call__(self, *, max_old_generation_size_mb: int | None, permissions: object) -> object: ...
+
+
+@runtime_checkable
+class _ActiveEnvironment(Protocol):  # pragma: no cover - structural typing
+    async def install(self) -> object: ...
+
+
+class _EnvironmentContext(Protocol):  # pragma: no cover - structural typing
+    async def __aenter__(self) -> object: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...
+
+
+class _EnvironmentFactory(Protocol):  # pragma: no cover - structural typing
+    def __call__(
+        self,
+        dependencies: Mapping[str, str] | None = None,
+        *,
+        path: str | Path | None = None,
+        options: object | None = None,
+    ) -> _EnvironmentContext: ...
+
+
+class _RuntimeContext(Protocol):  # pragma: no cover - structural typing
+    async def __aenter__(self) -> object: ...
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> bool | None: ...
+
+
+class _RuntimeFactory(Protocol):  # pragma: no cover - structural typing
+    def __call__(self, *, env: object | None = None, options: object | None = None) -> _RuntimeContext: ...
+
+
+class _ScriptFactory(Protocol):  # pragma: no cover - structural typing
+    def __call__(self, content: str) -> object: ...
+
+
+@runtime_checkable
+class _AsyncRuntime(Protocol):  # pragma: no cover - structural typing
+    def __call__(self, target: object) -> Callable[[], Coroutine[object, object, JsonOutput]]: ...
+
+
+@runtime_checkable
+class _BelgieModule(Protocol):  # pragma: no cover - structural typing
+    Environment: _EnvironmentFactory
+    EnvironmentOptions: _EnvironmentOptionsFactory
+    Runtime: _RuntimeFactory
+    RuntimeOptions: _RuntimeOptionsFactory
+    RuntimePermissions: _RuntimePermissionsFactory
+    Script: _ScriptFactory
+
+
+@runtime_checkable
+class _BelgieErrorsModule(Protocol):  # pragma: no cover - structural typing
+    BelgieError: type[Exception]
+
+
+def _load_belgie() -> _BelgieModule:
+    try:
+        module = importlib.import_module('belgie')
+    except ImportError as error:
+        raise BelgieSandboxUnavailableError(_MISSING_BELGIE) from error
+    if not isinstance(module, _BelgieModule):  # pragma: no cover - checked against the installed integration
+        raise BelgieSandboxUnavailableError('The installed Belgie package does not provide the required runtime API.')
+    return module
+
+
+def _load_belgie_error() -> type[Exception]:
+    try:
+        module = importlib.import_module('belgie.errors')
+    except ImportError as error:  # pragma: no cover - an open session proves the dependency exists
+        raise BelgieSandboxUnavailableError(_MISSING_BELGIE) from error
+    if not isinstance(module, _BelgieErrorsModule):  # pragma: no cover - checked against the installed integration
+        raise BelgieSandboxUnavailableError('The installed Belgie package does not provide its public error API.')
+    return module.BelgieError
 
 
 class BelgieSandboxError(RuntimeError):
@@ -76,14 +162,12 @@ class BelgieSandboxSession:
         *,
         allow_package_imports: bool = False,
         allow_network: bool = False,
-        enable_rendering: bool = False,
         max_old_generation_size_mb: int | None = DEFAULT_MAX_OLD_GENERATION_SIZE_MB,
-        runtime: Runtime | None = None,
+        runtime: _RuntimeContext | None = None,
     ) -> None:
         for name, value in (
             ('allow_package_imports', allow_package_imports),
             ('allow_network', allow_network),
-            ('enable_rendering', enable_rendering),
         ):
             if type(value) is not bool:
                 raise ValueError(f'{name} must be a bool, got {value!r}.')
@@ -99,7 +183,6 @@ class BelgieSandboxSession:
                 for name, value, default in (
                     ('allow_package_imports', allow_package_imports, False),
                     ('allow_network', allow_network, False),
-                    ('enable_rendering', enable_rendering, False),
                     (
                         'max_old_generation_size_mb',
                         max_old_generation_size_mb,
@@ -116,11 +199,12 @@ class BelgieSandboxSession:
 
         self._allow_package_imports = allow_package_imports
         self._allow_network = allow_network
-        self._enable_rendering = enable_rendering
         self._max_old_generation_size_mb = max_old_generation_size_mb
-        self._runtime = runtime
-        self._active_runtime: AsyncRuntime | None = None
-        self._exit_stack: AsyncExitStack | None = None
+        self._configured_runtime = runtime
+        self._runtime_context: _RuntimeContext | None = None
+        self._environment_context: _EnvironmentContext | None = None
+        self._temporary_directory: TemporaryDirectory[str] | None = None
+        self._active_runtime: _AsyncRuntime | None = None
         self._workspace: Path | None = None
 
     @property
@@ -135,9 +219,12 @@ class BelgieSandboxSession:
 
     async def __aenter__(self) -> Self:
         """Create and enter the configured Belgie runtime."""
-        if self._exit_stack is not None:
+        if any(
+            resource is not None
+            for resource in (self._runtime_context, self._environment_context, self._temporary_directory)
+        ):
             raise BelgieSandboxError(
-                'The session is already open; exit it before entering again. '
+                'The session is already open or has pending cleanup; close it before entering again. '
                 'Use a separate session per concurrent context.'
             )
         try:
@@ -145,62 +232,63 @@ class BelgieSandboxSession:
         except RuntimeError as error:
             raise BelgieSandboxError('Belgie Sandbox requires an asyncio event loop.') from error
 
+        belgie = _load_belgie()
         try:
-            from belgie import (  # pyright: ignore[reportMissingTypeStubs]
-                Environment,
-                EnvironmentOptions,
-                Runtime,
-                RuntimeOptions,
-            )
-        except ImportError as error:
-            raise BelgieSandboxUnavailableError(_MISSING_BELGIE) from error
-
-        stack = AsyncExitStack()
-        try:
-            if self._runtime is not None:
-                active_runtime = await stack.enter_async_context(self._runtime)
+            if self._configured_runtime is not None:
+                runtime_context = self._configured_runtime
             else:
-                workspace = Path(stack.enter_context(TemporaryDirectory(prefix='belgie-sandbox-'))).resolve()
+                temporary_directory = TemporaryDirectory(prefix='belgie-sandbox-')
+                self._temporary_directory = temporary_directory
+                workspace = Path(temporary_directory.name).resolve()
                 self._workspace = workspace
-                packages_enabled = self._allow_package_imports or self._enable_rendering
-                dependencies = {'@belgie/render': DEFAULT_RENDER_SPECIFIER} if self._enable_rendering else None
-                environment = Environment(
-                    dependencies,
+                environment_context = belgie.Environment(
+                    None,
                     path=workspace,
-                    options=EnvironmentOptions(allow_remote=packages_enabled, no_npm=not packages_enabled),
-                )
-                active_environment = await stack.enter_async_context(environment)
-                if self._enable_rendering:
-                    await active_environment.install()
-                runtime = Runtime(
-                    env=active_environment,
-                    options=RuntimeOptions(
-                        max_old_generation_size_mb=self._max_old_generation_size_mb,
-                        permissions=self._runtime_permissions(workspace),
+                    options=belgie.EnvironmentOptions(
+                        allow_remote=self._allow_package_imports,
+                        no_npm=not self._allow_package_imports,
                     ),
                 )
-                active_runtime = await stack.enter_async_context(runtime)
+                active_environment = await environment_context.__aenter__()
+                self._environment_context = environment_context
+                if not isinstance(  # pragma: no cover - checked against the installed integration
+                    active_environment, _ActiveEnvironment
+                ):
+                    raise BelgieSandboxUnavailableError(
+                        'The installed Belgie package returned an incompatible environment.'
+                    )
+                runtime_context = belgie.Runtime(
+                    env=active_environment,
+                    options=belgie.RuntimeOptions(
+                        max_old_generation_size_mb=self._max_old_generation_size_mb,
+                        permissions=belgie.RuntimePermissions(
+                            allow_read=[str(workspace)],
+                            allow_net=[] if self._allow_network else None,
+                        ),
+                    ),
+                )
+
+            active_runtime = await runtime_context.__aenter__()
+            self._runtime_context = runtime_context
+            if not isinstance(
+                active_runtime, _AsyncRuntime
+            ):  # pragma: no cover - checked against installed integration
+                raise BelgieSandboxUnavailableError('The installed Belgie package returned an incompatible runtime.')
+            self._active_runtime = active_runtime
         except BaseException as error:
-            self._workspace = None
-            with anyio.CancelScope(shield=True):
-                await stack.aclose()
+            try:
+                await self._close_resources(None, None, None)
+            except BaseException as cleanup_error:
+                if isinstance(error, Exception):
+                    raise BelgieSandboxUnavailableError(
+                        f'Could not start the Belgie sandbox: {error}. Cleanup also failed: {cleanup_error}'
+                    ) from error
+                raise error from cleanup_error
             if isinstance(error, Exception):
                 raise BelgieSandboxUnavailableError(f'Could not start the Belgie sandbox: {error}') from error
             raise
 
-        self._active_runtime = active_runtime
-        self._exit_stack = stack
         return self
-
-    def _runtime_permissions(self, workspace: Path) -> RuntimePermissions:
-        from belgie import RuntimePermissions  # pyright: ignore[reportMissingTypeStubs]
-
-        return RuntimePermissions(
-            allow_read=([str(workspace), *_DEFAULT_RENDER_READ_PATHS] if self._enable_rendering else [str(workspace)]),
-            allow_net=[] if self._allow_network else None,
-            allow_ffi=[str(workspace / 'node_modules')] if self._enable_rendering else None,
-            allow_sys=_DEFAULT_RENDER_SYS_PERMISSIONS if self._enable_rendering else None,
-        )
 
     async def __aexit__(
         self,
@@ -209,14 +297,31 @@ class BelgieSandboxSession:
         traceback: TracebackType | None,
     ) -> None:
         """Close the runtime, environment, and owned temporary workspace."""
-        stack = self._exit_stack
-        self._exit_stack = None
-        self._active_runtime = None
-        self._workspace = None
-        if stack is None:
-            return
+        await self._close_resources(exc_type, exc, traceback)
+
+    async def _close_resources(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
         with anyio.CancelScope(shield=True):
-            await stack.__aexit__(exc_type, exc, traceback)
+            runtime_context = self._runtime_context
+            if runtime_context is not None:
+                await runtime_context.__aexit__(exc_type, exc, traceback)
+                self._runtime_context = None
+                self._active_runtime = None
+
+            environment_context = self._environment_context
+            if environment_context is not None:
+                await environment_context.__aexit__(exc_type, exc, traceback)
+                self._environment_context = None
+
+            temporary_directory = self._temporary_directory
+            if temporary_directory is not None:
+                temporary_directory.cleanup()
+                self._temporary_directory = None
+                self._workspace = None
 
     async def close(self) -> None:
         """Close the session without an active exception context."""
@@ -232,15 +337,12 @@ class BelgieSandboxSession:
         if type(timeout) is bool or not math.isfinite(timeout) or timeout <= 0:
             raise ValueError(f'timeout must be a positive finite number, got {timeout!r}.')
 
-        try:
-            from belgie import Script  # pyright: ignore[reportMissingTypeStubs]
-            from belgie.errors import BelgieError  # pyright: ignore[reportMissingTypeStubs]
-        except ImportError as error:  # pragma: no cover - an open session proves the dependency exists
-            raise BelgieSandboxUnavailableError(_MISSING_BELGIE) from error
+        belgie = _load_belgie()
+        belgie_error = _load_belgie_error()
 
         try:
-            script: Script[[], JsonOutput] = Script(source)
-            task: asyncio.Task[JsonOutput] = asyncio.create_task(active_runtime(script)())
+            script = belgie.Script(source)
+            task = asyncio.create_task(active_runtime(script)())
             try:
                 return await asyncio.wait_for(task, timeout=float(timeout))
             except TimeoutError as error:
@@ -253,7 +355,7 @@ class BelgieSandboxSession:
                 raise
         except BelgieSandboxTimeoutError:
             raise
-        except BelgieError as error:
+        except belgie_error as error:
             raise BelgieSandboxExecutionError(f'Belgie script execution failed:\n{error}') from error
         except (TypeError, ValueError) as error:
             raise BelgieSandboxExecutionError(f'Belgie script returned an invalid JSON value:\n{error}') from error

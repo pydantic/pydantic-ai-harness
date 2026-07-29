@@ -105,15 +105,14 @@ Deno permission boundary is appropriate for constrained local code execution;
 use an OS- or cloud-isolated sandbox when the threat model requires a separate
 kernel, filesystem, or network namespace.
 
-## Opting into packages, network, and rendering
+## Opting into packages and network
 
-The three higher-risk features are independent:
+The two higher-risk features are independent:
 
 ```python
 BelgieSandbox(
     allow_package_imports=True,  # npm:, jsr:, and URL module resolution
     allow_network=True,          # runtime fetch/WebSocket access
-    enable_rendering=True,       # install @belgie/render for TSX
 )
 ```
 
@@ -122,26 +121,6 @@ execute third-party code. It does not enable runtime `fetch`.
 
 `allow_network=True` grants unrestricted runtime network access. It does not
 expose host files, environment variables, or subprocesses.
-
-`enable_rendering=True` installs `@belgie/render`, enables package resolution,
-and grants the temporary `node_modules` and native-loader reads/FFI/system probes
-needed by its Vite build. A script can then return self-contained HTML:
-
-```tsx
-import { render } from "@belgie/render";
-
-function Widget() {
-  return <main>Hello from Belgie</main>;
-}
-
-export default function run() {
-  return render({ widget: <Widget />, plugins: [] });
-}
-```
-
-The HTML is an ordinary tool return. Pydantic AI does not automatically mount it
-as an application UI. Rendered documents often exceed the default output limit;
-raise `max_output_bytes` deliberately when the consumer can handle that payload.
 
 ## Lifecycle and reusable sessions
 
@@ -154,19 +133,24 @@ including cancellation and error paths.
 For explicit cross-run reuse, create and enter a session yourself:
 
 ```python
+import asyncio
+
 from pydantic_ai import Agent
 from pydantic_ai_harness.belgie_sandbox import (
     BelgieSandbox,
     BelgieSandboxSession,
 )
 
-async with BelgieSandboxSession(allow_package_imports=True) as session:
-    agent = Agent(
-        'anthropic:claude-sonnet-4-6',
-        capabilities=[BelgieSandbox(session=session)],
-    )
-    await agent.run('Run a TypeScript transform.')
-    await agent.run('Run another transform in the same Deno worker.')
+async def main() -> None:
+    async with BelgieSandboxSession(allow_package_imports=True) as session:
+        agent = Agent(
+            'anthropic:claude-sonnet-4-6',
+            capabilities=[BelgieSandbox(session=session)],
+        )
+        await agent.run('Run a TypeScript transform.')
+        await agent.run('Run another transform in the same Deno worker.')
+
+asyncio.run(main())
 ```
 
 The capability requires an injected session to be open and never enters or
@@ -209,7 +193,6 @@ from pydantic_ai_harness.belgie_sandbox import BelgieSandbox
 BelgieSandbox(
     allow_package_imports=False,
     allow_network=False,
-    enable_rendering=False,
     max_old_generation_size_mb=128,
     timeout=30.0,
     max_output_bytes=50 * 1024,

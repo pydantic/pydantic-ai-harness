@@ -28,7 +28,7 @@ def anyio_backend() -> str:
 @pytest.fixture(autouse=True)
 def _no_real_belgie(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Poison Belgie except for the real-runtime smoke tier."""
-    if 'belgie_live' in request.keywords:
+    if 'belgie_live' in request.keywords:  # pragma: no cover - live tier runs without coverage
         yield
         return
     poisoned = _PoisonedBelgie('belgie')
