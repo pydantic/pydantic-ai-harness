@@ -1,4 +1,4 @@
-"""Haunt capability: honest web page reading and structured extraction."""
+"""Haunt capability for web page reading and structured extraction."""
 
 from pydantic_ai_harness.haunt._capability import HauntExtract
 from pydantic_ai_harness.haunt._toolset import (

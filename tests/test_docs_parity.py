@@ -123,6 +123,7 @@ _CAPABILITY_PAGE_META = {
     'repo-context.md': ('repo_context', 'Repo Context'),
     'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),
     'exa-search.md': ('exa', 'Exa Search'),
+    'haunt.md': ('haunt', 'Haunt Extraction'),
     'macroscope.md': ('macroscope', 'Macroscope'),
     'compaction.md': ('compaction', 'Compaction'),
     'tool-output-limits.md': ('tool_output_limits', 'Tool Output Limits'),

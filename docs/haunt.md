@@ -1,3 +1,8 @@
+---
+title: Haunt Extraction
+description: Give a Pydantic AI agent tools for reading supported web pages as Markdown and extracting specific fields as JSON through the Haunt API.
+---
+
 # Haunt Extraction
 
 > [!NOTE]
@@ -69,7 +74,8 @@ automatic retry of the same URL. The code is also available at
 parsing the message.
 
 Network errors, timeouts, rate limits, and other non-success HTTP responses
-raise `ModelRetry`. Authentication failures raise `UserError`.
+raise [`ModelRetry`](/ai/tools-toolsets/tools-advanced/#tool-retries).
+Authentication failures raise `UserError`.
 
 ## Configuration
 

@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 import httpx
 import pytest
+from pydantic import TypeAdapter
 from pydantic_ai import Agent
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturn, ToolReturnPart
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.haunt import HauntExtract, HauntExtractToolset
+from pydantic_ai_harness.haunt import HauntExtract, HauntExtractToolset, HttpxHauntClient
 
 
 @pytest.fixture
@@ -31,14 +32,14 @@ def _text(output: ToolReturn[str]) -> str:
     return body
 
 
-def _success(data: object) -> dict[str, Any]:
+def _success(data: object) -> dict[str, object]:
     """A successful Haunt response body."""
     return {'success': True, 'data': data}
 
 
-def _failure(error_code: str | None, message: str | None = None) -> dict[str, Any]:
+def _failure(error_code: str | None, message: str | None = None) -> dict[str, object]:
     """An unsuccessful Haunt response body."""
-    body: dict[str, Any] = {'success': False}
+    body: dict[str, object] = {'success': False}
     if error_code is not None:
         body['error_code'] = error_code
     if message is not None:
@@ -50,11 +51,11 @@ def _failure(error_code: str | None, message: str | None = None) -> dict[str, An
 class _FakeHauntClient:
     """In-memory `HauntClient` double: canned responses, recorded call arguments."""
 
-    response: dict[str, Any] = field(default_factory=lambda: _success({'markdown': 'alpha'}))
+    response: dict[str, object] = field(default_factory=lambda: _success({'markdown': 'alpha'}))
     error: Exception | None = None
-    calls: list[dict[str, Any]] = field(default_factory=list[dict[str, Any]])
+    calls: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
 
-    async def extract(self, url: str, prompt: str, *, response_format: str | None = None) -> dict[str, Any]:
+    async def extract(self, url: str, prompt: str, *, response_format: str | None = None) -> Mapping[str, object]:
         if self.error is not None:
             raise self.error
         self.calls.append({'url': url, 'prompt': prompt, 'response_format': response_format})
@@ -109,7 +110,8 @@ class TestExtractData:
     async def test_returns_data_as_json(self) -> None:
         client = _FakeHauntClient(response=_success({'price': '£4.99', 'in_stock': True}))
         output = await _toolset(client).extract_data('https://a.dev/p', 'the price and stock status')
-        assert json.loads(_text(output)) == {'price': '£4.99', 'in_stock': True}
+        parsed = TypeAdapter(dict[str, object]).validate_json(_text(output))
+        assert parsed == {'price': '£4.99', 'in_stock': True}
         assert output.metadata == {'error_code': None}
         assert client.calls == [
             {'url': 'https://a.dev/p', 'prompt': 'the price and stock status', 'response_format': None}
@@ -163,6 +165,105 @@ class TestHonestFailures:
         assert 'No such page.' in _text(output)
 
 
+class TestHttpxHauntClient:
+    async def test_posts_authenticated_extract_request(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == '/v1/extract'
+            assert request.headers['X-API-Key'] == 'haunt_test'
+            body = TypeAdapter(dict[str, object]).validate_json(request.content)
+            assert body == {
+                'url': 'https://a.dev',
+                'prompt': 'Read it.',
+                'response_format': 'markdown',
+            }
+            return httpx.Response(200, json={'success': True, 'data': {'markdown': 'body'}})
+
+        transport = httpx.MockTransport(handler)
+        async with HttpxHauntClient('haunt_test', transport=transport) as client:
+            payload = await client.extract(
+                'https://a.dev',
+                'Read it.',
+                response_format='markdown',
+            )
+
+        assert payload['success'] is True
+
+    async def test_does_not_follow_redirects(self) -> None:
+        requests: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                302,
+                headers={'Location': 'https://redirect.example/collect'},
+                json={'message': 'Moved'},
+            )
+
+        transport = httpx.MockTransport(handler)
+        async with HttpxHauntClient('haunt_test', transport=transport) as client:
+            with pytest.raises(ModelRetry, match='HTTP status 302'):
+                await client.extract('https://a.dev', 'Read it.')
+
+        assert len(requests) == 1
+        assert requests[0].url.host == 'hauntapi.com'
+
+    @pytest.mark.parametrize('status_code', [401, 403])
+    async def test_auth_failures_are_user_errors(self, status_code: int) -> None:
+        transport = httpx.MockTransport(lambda request: httpx.Response(status_code, request=request))
+        async with HttpxHauntClient('bad-key', transport=transport) as client:
+            with pytest.raises(UserError, match=f'HTTP status: {status_code}'):
+                await client.extract('https://a.dev', 'Read it.')
+
+    async def test_rate_limit_is_model_retry(self) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                429,
+                json={'message': 'Monthly quota exceeded'},
+                request=request,
+            )
+        )
+        async with HttpxHauntClient('haunt_test', transport=transport) as client:
+            with pytest.raises(ModelRetry, match='Monthly quota exceeded'):
+                await client.extract('https://a.dev', 'Read it.')
+
+    async def test_other_non_success_status_is_model_retry(self) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                503,
+                json={'error': 'Temporarily unavailable'},
+                request=request,
+            )
+        )
+        async with HttpxHauntClient('haunt_test', transport=transport) as client:
+            with pytest.raises(ModelRetry, match='HTTP status 503: Temporarily unavailable'):
+                await client.extract('https://a.dev', 'Read it.')
+
+    @pytest.mark.parametrize('content', [b'not json', b'[]'])
+    async def test_invalid_response_body_is_model_retry(self, content: bytes) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=content,
+                request=request,
+            )
+        )
+        async with HttpxHauntClient('haunt_test', transport=transport) as client:
+            with pytest.raises(ModelRetry, match='invalid JSON'):
+                await client.extract('https://a.dev', 'Read it.')
+
+    async def test_missing_success_field_is_model_retry(self) -> None:
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={'data': {'price': 12}},
+                request=request,
+            )
+        )
+        async with HttpxHauntClient('haunt_test', transport=transport) as client:
+            with pytest.raises(ModelRetry, match='missing boolean success field'):
+                await client.extract('https://a.dev', 'Read it.')
+
+
 class TestTransientFailures:
     async def test_network_errors_become_model_retry(self) -> None:
         client = _FakeHauntClient(error=httpx.ConnectError('boom'))
@@ -186,10 +287,12 @@ class TestHauntExtract:
         with pytest.raises(UserError, match='HAUNT_API_KEY'):
             HauntExtract[None]().get_toolset()
 
-    def test_default_client_built_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_default_client_built_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('HAUNT_API_KEY', 'test-key')
         toolset = HauntExtract[None]().get_toolset()
         assert isinstance(toolset, HauntExtractToolset)
+        async with toolset:
+            pass
 
     def test_max_text_chars_out_of_bounds_rejected(self) -> None:
         with pytest.raises(ValueError, match='max_text_chars must be at least 1, got 0'):

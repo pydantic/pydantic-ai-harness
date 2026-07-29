@@ -9,6 +9,7 @@
       { "label": "Repo Context", "slug": "repo-context" },
       { "label": "Pydantic AI Docs", "slug": "pydantic-ai-docs" },
       { "label": "Exa Search", "slug": "exa-search" },
+      { "label": "Haunt Extraction", "slug": "haunt" },
       { "label": "Macroscope", "slug": "macroscope" },
       { "label": "Compaction", "slug": "compaction" },
       { "label": "Tool Output Limits", "slug": "tool-output-limits" },

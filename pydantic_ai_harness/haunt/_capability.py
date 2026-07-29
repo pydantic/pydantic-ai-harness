@@ -1,4 +1,4 @@
-"""Haunt extraction capability that gives an agent honest web page reading and structured extraction."""
+"""Haunt capability for web page reading and structured extraction."""
 
 from __future__ import annotations
 
@@ -16,9 +16,9 @@ if TYPE_CHECKING:
 _INSTRUCTIONS = (
     'You have web extraction tools backed by the Haunt API. Use `read_page` to read a page as '
     'clean Markdown, and `extract_data` when you need specific fields, described in plain '
-    'English, as structured JSON. These tools fail honestly: when a result reports '
-    'access_denied, login_required, captcha_required, or not_found, the page really is '
-    'unavailable -- report that instead of retrying the same URL or inventing the content.'
+    'English, as structured JSON. When a result reports access_denied, login_required, '
+    'captcha_required, or not_found, treat that URL as unavailable for this run and report '
+    'the reason instead of retrying it or inventing content.'
 )
 
 
@@ -28,11 +28,9 @@ class HauntExtract(AbstractCapability[AgentDepsT]):
 
     Adds two tools: `read_page`, which returns a page as clean Markdown, and
     `extract_data`, which returns specific fields, described in plain English,
-    as structured JSON. The differentiator is honest failure: a blocked,
-    login-walled, captcha-guarded, or missing page comes back as an error code
-    with a plain-words reason (`access_denied`, `login_required`,
-    `captcha_required`, `not_found`) rather than fabricated content, so the
-    agent can branch on the failure instead of hallucinating around it.
+    as structured JSON. A blocked, login-walled, captcha-guarded, or missing
+    page comes back with a typed error code and a readable reason, allowing the
+    agent or application to choose another URL or report the problem.
 
     ```python
     from pydantic_ai import Agent
@@ -46,16 +44,16 @@ class HauntExtract(AbstractCapability[AgentDepsT]):
     """
 
     max_text_chars: int = 50_000
-    """Maximum characters of tool text returned per call (at least 1).
+    """Maximum successful source-content characters kept per call (at least 1).
 
-    Longer content is truncated head-first with a marker, so the model knows
-    content was cut.
+    A marker is appended after truncated content. Short page-level failure
+    reports are not subject to this content limit.
     """
 
     guidance: str | None = None
     """Custom extraction guidance for the system prompt.
 
-    Leave as `None` for the default guidance (which explains the honest
+    Leave as `None` for the default guidance (which explains the terminal
     failure codes), or set `''` to contribute no instructions at all.
     """
 
@@ -73,7 +71,7 @@ class HauntExtract(AbstractCapability[AgentDepsT]):
             raise ValueError(f'max_text_chars must be at least 1, got {self.max_text_chars}')
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
-        """Static extraction guidance: read or extract, and treat honest failures as final.
+        """Static extraction guidance: read or extract, and treat terminal failures as final.
 
         A non-`None` `guidance` replaces the default; `''` disables
         instructions entirely.
