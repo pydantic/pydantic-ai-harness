@@ -123,7 +123,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             tiers=[tier.with_focus(focus) if isinstance(tier, SupportsFocus) else tier for tier in self.tiers],
         )
 
-    def _target(self, model: Model | str | None) -> int:
+    def _target(self, model: Model | str) -> int:
         """Absolute token target, resolved against *model* when expressed as a fraction."""
         target = resolve_token_trigger(
             self.target_tokens, self.target_fraction, model, self.fallback_context_window, self.context_window

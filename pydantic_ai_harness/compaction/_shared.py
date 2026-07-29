@@ -212,7 +212,7 @@ def context_for_request(
 def resolve_token_trigger(
     max_tokens: int | None,
     max_fraction: float | None,
-    model: Model | str | None,
+    model: Model | str,
     fallback_context_window: int = DEFAULT_CONTEXT_WINDOW,
     context_window: int | None = None,
 ) -> int | None:
@@ -239,7 +239,7 @@ def resolve_token_trigger(
     if max_fraction is None:
         return None
     if context_window is None:
-        context_window = resolve_context_window(model) if model is not None else None
+        context_window = resolve_context_window(model)
     return max(1, int((context_window if context_window is not None else fallback_context_window) * max_fraction))
 
 
