@@ -247,6 +247,16 @@ class TestBelgieSandboxSession:
 
         assert fake_belgie.cancelled
 
+    async def test_runtime_timeout_error_is_an_execution_failure(self, fake_belgie: FakeBelgie) -> None:
+        runtime_error = TimeoutError('runtime failed before the deadline')
+        fake_belgie.script_error = runtime_error
+        async with BelgieSandboxSession() as session:
+            with pytest.raises(BelgieSandboxExecutionError, match='runtime failed before the deadline') as exc_info:
+                await session.run_script('export default () => fail()', timeout=10)
+
+        assert exc_info.value.__cause__ is runtime_error
+        assert not fake_belgie.cancelled
+
     async def test_caller_cancellation_is_preserved(self, fake_belgie: FakeBelgie) -> None:
         fake_belgie.hang = True
         async with BelgieSandboxSession() as session:

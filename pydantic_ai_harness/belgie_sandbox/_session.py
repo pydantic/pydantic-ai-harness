@@ -346,6 +346,8 @@ class BelgieSandboxSession:
             try:
                 return await asyncio.wait_for(task, timeout=float(timeout))
             except TimeoutError as error:
+                if not task.cancelled():
+                    raise BelgieSandboxExecutionError(f'Belgie script execution failed:\n{error}') from error
                 await _drain_cancelled_task(task)
                 raise BelgieSandboxTimeoutError(
                     f'Belgie script execution timed out after {timeout} seconds.'
