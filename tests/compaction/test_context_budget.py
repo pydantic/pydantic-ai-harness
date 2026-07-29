@@ -27,11 +27,11 @@ from pydantic_ai_harness.compaction import (
     ContextUsage,
     ContextUsageMonitor,
     DeduplicateFileReads,
-    LimitWarner,
-    SlidingWindow,
+    SlidingWindowCompaction,
     SummarizingCompaction,
     SupportsFocus,
     TieredCompaction,
+    WarnNearLimits,
     compact_now,
     resolve_context_window,
 )
@@ -278,7 +278,7 @@ class TestResolveTokenTrigger:
 class TestFractionTriggers:
     async def test_sliding_window_trims_when_over_the_fraction(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1_000)
-        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.1, keep_messages=2)
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.1, keep_messages=2)
         request_context = _request_context(_history(6))
 
         await capability.before_model_request(_ctx(), request_context)
@@ -287,7 +287,7 @@ class TestFractionTriggers:
 
     async def test_sliding_window_leaves_a_small_history_alone(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1_000_000)
-        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.9, keep_messages=2)
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.9, keep_messages=2)
         request_context = _request_context(_history(6))
 
         await capability.before_model_request(_ctx(), request_context)
@@ -296,7 +296,7 @@ class TestFractionTriggers:
 
     async def test_the_same_fraction_scales_with_the_window(self, monkeypatch: pytest.MonkeyPatch):
         """One configuration, two models: the trigger follows the window."""
-        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.5, keep_messages=2)
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.5, keep_messages=2)
 
         _fixed_window(monkeypatch, '_shared', 100)
         small = _request_context(_history(6))
@@ -370,12 +370,12 @@ class TestFractionTriggers:
         assert any('a summary' in _message_text(message) for message in request_context.messages)
 
     def test_a_fraction_alone_satisfies_the_trigger_requirement(self):
-        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.9)
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.9)
         assert capability.max_tokens is None
 
     def test_rejects_both_triggers(self):
         with pytest.raises(ValueError, match='Set at most one of max_tokens or max_fraction'):
-            SlidingWindow(max_tokens=1_000, max_fraction=0.9)
+            SlidingWindowCompaction(max_tokens=1_000, max_fraction=0.9)
 
 
 class TestRequestModelIsTheOneResolved:
@@ -393,7 +393,7 @@ class TestRequestModelIsTheOneResolved:
 
     async def test_sliding_window_trims_on_the_request_model(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
-        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.1, keep_messages=2)
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.1, keep_messages=2)
         request_context = _request_context(_history(6), self.REQUEST)
 
         await capability.before_model_request(_ctx(self.RUN), request_context)
@@ -402,7 +402,7 @@ class TestRequestModelIsTheOneResolved:
 
     async def test_sliding_window_stays_quiet_on_the_request_model(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, '_shared', run=1_000, request=10_000_000)
-        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.1, keep_messages=2)
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_fraction=0.1, keep_messages=2)
         request_context = _request_context(_history(6), self.REQUEST)
 
         await capability.before_model_request(_ctx(self.RUN), request_context)
@@ -433,7 +433,7 @@ class TestRequestModelIsTheOneResolved:
     async def test_tiered_compaction(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
         capability: TieredCompaction[None] = TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
             target_fraction=0.1,
         )
         request_context = _request_context(_history(6), self.REQUEST)
@@ -453,7 +453,7 @@ class TestRequestModelIsTheOneResolved:
         capability: TieredCompaction[None] = TieredCompaction(
             tiers=[
                 TieredCompaction(
-                    tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+                    tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
                     target_fraction=0.1,
                 )
             ],
@@ -483,12 +483,12 @@ class TestRequestModelIsTheOneResolved:
 
     async def test_limit_warner(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, '_shared', run=10_000_000, request=1_000)
-        capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.1, warning_threshold=0.5)
+        capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.1, warning_threshold=0.5)
         request_context = _request_context(_history(6), self.REQUEST)
 
         await capability.before_model_request(_ctx(self.RUN), request_context)
 
-        assert '[LimitWarner]' in str(request_context.messages[-1])
+        assert '[WarnNearLimits]' in str(request_context.messages[-1])
 
     async def test_context_usage_monitor(self, monkeypatch: pytest.MonkeyPatch):
         self._windows(monkeypatch, '_context_usage', run=10_000_000, request=1_000)
@@ -503,7 +503,7 @@ class TestRequestModelIsTheOneResolved:
 _FallbackFactory = Callable[[int], object]
 
 _FALLBACK_FACTORIES: list[tuple[str, _FallbackFactory]] = [
-    ('SlidingWindow', lambda w: SlidingWindow(max_fraction=0.9, fallback_context_window=w)),
+    ('SlidingWindowCompaction', lambda w: SlidingWindowCompaction(max_fraction=0.9, fallback_context_window=w)),
     ('SummarizingCompaction', lambda w: SummarizingCompaction(max_fraction=0.9, fallback_context_window=w)),
     ('ClearToolResults', lambda w: ClearToolResults(max_fraction=0.9, fallback_context_window=w)),
     (
@@ -512,14 +512,16 @@ _FALLBACK_FACTORIES: list[tuple[str, _FallbackFactory]] = [
     ),
     (
         'TieredCompaction',
-        lambda w: TieredCompaction(tiers=[SlidingWindow(max_tokens=1)], target_fraction=0.9, fallback_context_window=w),
+        lambda w: TieredCompaction(
+            tiers=[SlidingWindowCompaction(max_tokens=1)], target_fraction=0.9, fallback_context_window=w
+        ),
     ),
-    ('LimitWarner', lambda w: LimitWarner(max_context_fraction=0.9, fallback_context_window=w)),
+    ('WarnNearLimits', lambda w: WarnNearLimits(max_context_fraction=0.9, fallback_context_window=w)),
 ]
 """Every capability that resolves a fraction, so the guard below cannot miss a new one."""
 
 _OVERRIDE_FACTORIES: list[tuple[str, _FallbackFactory]] = [
-    ('SlidingWindow', lambda w: SlidingWindow(max_fraction=0.9, context_window=w)),
+    ('SlidingWindowCompaction', lambda w: SlidingWindowCompaction(max_fraction=0.9, context_window=w)),
     ('SummarizingCompaction', lambda w: SummarizingCompaction(max_fraction=0.9, context_window=w)),
     ('ClearToolResults', lambda w: ClearToolResults(max_fraction=0.9, context_window=w)),
     (
@@ -528,9 +530,11 @@ _OVERRIDE_FACTORIES: list[tuple[str, _FallbackFactory]] = [
     ),
     (
         'TieredCompaction',
-        lambda w: TieredCompaction(tiers=[SlidingWindow(max_tokens=1)], target_fraction=0.9, context_window=w),
+        lambda w: TieredCompaction(
+            tiers=[SlidingWindowCompaction(max_tokens=1)], target_fraction=0.9, context_window=w
+        ),
     ),
-    ('LimitWarner', lambda w: LimitWarner(max_context_fraction=0.9, context_window=w)),
+    ('WarnNearLimits', lambda w: WarnNearLimits(max_context_fraction=0.9, context_window=w)),
 ]
 """The same registry for the override, so a capability cannot grow a fraction without one."""
 
@@ -540,7 +544,7 @@ class TestStrategyFallbackWindow:
 
     async def test_sliding_window_uses_the_configured_fallback(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', None)
-        capability: SlidingWindow[None] = SlidingWindow(
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(
             max_fraction=0.9, keep_messages=2, fallback_context_window=10_000_000
         )
         request_context = _request_context(_history(6))
@@ -552,7 +556,7 @@ class TestStrategyFallbackWindow:
     async def test_tiered_compaction_uses_the_configured_fallback(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', None)
         capability: TieredCompaction[None] = TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
             target_fraction=0.9,
             fallback_context_window=10_000_000,
         )
@@ -562,7 +566,7 @@ class TestStrategyFallbackWindow:
 
     async def test_limit_warner_uses_the_configured_fallback(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', None)
-        capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.9, fallback_context_window=10_000_000)
+        capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.9, fallback_context_window=10_000_000)
         request_context = _request_context(_history(6))
 
         await capability.before_model_request(_ctx(), request_context)
@@ -583,7 +587,9 @@ class TestTriggerBoundary:
         _fixed_window(monkeypatch, '_shared', 1_000)
         messages = _history(3)
         exact = estimate_token_count(messages)
-        capability: SlidingWindow[None] = SlidingWindow(max_fraction=1.0, keep_messages=2, context_window=exact)
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_fraction=1.0, keep_messages=2, context_window=exact
+        )
         request_context = _request_context(messages)
 
         assert await capability.before_model_request(_ctx(), request_context) is request_context
@@ -592,7 +598,7 @@ class TestTriggerBoundary:
     async def test_one_token_over_the_trigger_compacts(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1_000)
         messages = _history(3)
-        capability: SlidingWindow[None] = SlidingWindow(
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(
             max_fraction=1.0, keep_messages=2, context_window=estimate_token_count(messages) - 1
         )
         request_context = _request_context(messages)
@@ -611,7 +617,9 @@ class TestStrategyWindowOverride:
 
     async def test_the_override_beats_a_resolved_window(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1_000_000)
-        capability: SlidingWindow[None] = SlidingWindow(max_fraction=0.1, keep_messages=2, context_window=1_000)
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_fraction=0.1, keep_messages=2, context_window=1_000
+        )
         request_context = _request_context(_history(6))
 
         await capability.before_model_request(_ctx(), request_context)
@@ -620,7 +628,7 @@ class TestStrategyWindowOverride:
 
     async def test_the_override_beats_the_fallback_too(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', None)
-        capability: SlidingWindow[None] = SlidingWindow(
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(
             max_fraction=0.1, keep_messages=2, context_window=10_000_000, fallback_context_window=1_000
         )
         request_context = _request_context(_history(6))
@@ -646,7 +654,7 @@ class TestTieredTargetFraction:
     async def test_escalates_against_a_resolved_target(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1_000)
         capability: TieredCompaction[None] = TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
             target_fraction=0.1,
         )
         request_context = _request_context(_history(6))
@@ -658,7 +666,7 @@ class TestTieredTargetFraction:
     async def test_leaves_a_history_under_target_alone(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1_000_000)
         capability: TieredCompaction[None] = TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
             target_fraction=0.9,
         )
         request_context = _request_context(_history(2))
@@ -667,28 +675,28 @@ class TestTieredTargetFraction:
 
     def test_requires_one_target(self):
         with pytest.raises(ValueError, match='One of target_tokens or target_fraction must be set'):
-            TieredCompaction(tiers=[SlidingWindow(max_tokens=1)])
+            TieredCompaction(tiers=[SlidingWindowCompaction(max_tokens=1)])
 
     def test_rejects_both_targets(self):
         with pytest.raises(ValueError, match='Set at most one of target_tokens or target_fraction'):
-            TieredCompaction(tiers=[SlidingWindow(max_tokens=1)], target_tokens=100, target_fraction=0.5)
+            TieredCompaction(tiers=[SlidingWindowCompaction(max_tokens=1)], target_tokens=100, target_fraction=0.5)
 
 
 class TestLimitWarnerFraction:
     async def test_warns_against_the_resolved_window(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 1_000)
-        capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.1, warning_threshold=0.5)
+        capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.1, warning_threshold=0.5)
         request_context = _request_context(_history(6))
 
         await capability.before_model_request(_ctx(), request_context)
 
         warning = request_context.messages[-1]
         assert isinstance(warning, ModelRequest)
-        assert '[LimitWarner]' in str(warning.parts[0].content)  # type: ignore[union-attr]
+        assert '[WarnNearLimits]' in str(warning.parts[0].content)  # type: ignore[union-attr]
 
     async def test_stays_quiet_below_the_threshold(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, '_shared', 10_000_000)
-        capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.9)
+        capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.9)
         request_context = _request_context(_history(2))
 
         await capability.before_model_request(_ctx(), request_context)
@@ -696,20 +704,20 @@ class TestLimitWarnerFraction:
         assert len(request_context.messages) == 4
 
     def test_a_fraction_alone_satisfies_the_limit_requirement(self):
-        capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.9)
+        capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.9)
         assert 'context_window' in capability._active_kinds
 
     def test_rejects_both_context_limits(self):
         with pytest.raises(ValueError, match='Set at most one of max_context_tokens or max_context_fraction'):
-            LimitWarner(max_context_tokens=1_000, max_context_fraction=0.9)
+            WarnNearLimits(max_context_tokens=1_000, max_context_fraction=0.9)
 
     def test_warn_on_accepts_a_fraction_configured_kind(self):
-        capability: LimitWarner[None] = LimitWarner(max_context_fraction=0.9, warn_on=['context_window'])
+        capability: WarnNearLimits[None] = WarnNearLimits(max_context_fraction=0.9, warn_on=['context_window'])
         assert capability._active_kinds == ('context_window',)
 
     def test_requires_at_least_one_limit(self):
         with pytest.raises(ValueError, match='At least one of max_iterations, max_context_tokens'):
-            LimitWarner()
+            WarnNearLimits()
 
 
 # ---------------------------------------------------------------------------
@@ -916,7 +924,7 @@ class TestCompactNowSpan:
     async def test_emits_the_compaction_span(self, capfire: CaptureLogfire):
         from opentelemetry.trace import get_tracer
 
-        strategy: SlidingWindow[None] = SlidingWindow(max_tokens=1, keep_messages=2)
+        strategy: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_tokens=1, keep_messages=2)
 
         await compact_now(strategy, _history(4), model=TestModel(), tracer=get_tracer('test'))
 
@@ -924,14 +932,14 @@ class TestCompactNowSpan:
         assert len(spans) == 1
         attrs = spans[0]['attributes']
         assert attrs['gen_ai.conversation.compacted'] is True
-        assert attrs['compaction.strategy'] == 'SlidingWindow'
+        assert attrs['compaction.strategy'] == 'SlidingWindowCompaction'
         assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
 
     async def test_the_span_is_measured_with_the_tokenizer_it_was_given(self, capfire: CaptureLogfire):
         """Without it the manual path reports the heuristic where the in-run path reported a real count."""
         from opentelemetry.trace import get_tracer
 
-        strategy: SlidingWindow[None] = SlidingWindow(max_tokens=1, keep_messages=2)
+        strategy: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_tokens=1, keep_messages=2)
         messages = _history(4)
         characters = sum(len(_message_text(message)) for message in messages)
 
@@ -944,7 +952,7 @@ class TestCompactNowSpan:
         from opentelemetry.trace import get_tracer
 
         tiered: TieredCompaction[None] = TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
             target_tokens=1_000_000,
         )
 
@@ -956,7 +964,7 @@ class TestCompactNowSpan:
         from opentelemetry.trace import get_tracer
 
         tiered: TieredCompaction[None] = TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
             target_tokens=1,
         )
 
@@ -965,7 +973,7 @@ class TestCompactNowSpan:
         assert self._spans(capfire)[0]['attributes']['compaction.strategy'] == 'TieredCompaction'
 
     async def test_a_default_tracer_records_nothing(self, capfire: CaptureLogfire):
-        strategy: SlidingWindow[None] = SlidingWindow(max_tokens=1, keep_messages=2)
+        strategy: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_tokens=1, keep_messages=2)
 
         await compact_now(strategy, _history(4), model=TestModel())
 
@@ -1008,7 +1016,7 @@ class TestPositionalCompatibility:
     """
 
     def test_sliding_window(self):
-        assert SlidingWindow(None, 1_000, 40).keep_messages == 40
+        assert SlidingWindowCompaction(None, 1_000, 40).keep_messages == 40
 
     def test_summarizing_compaction(self):
         assert SummarizingCompaction('openai:gpt-4o', None, 1_000, 15).keep_messages == 15
@@ -1021,28 +1029,28 @@ class TestPositionalCompatibility:
         assert strategy.max_tokens == 1_000
 
     def test_tiered_compaction(self):
-        strategy = TieredCompaction([SlidingWindow(max_tokens=1)], 100, len)
+        strategy = TieredCompaction([SlidingWindowCompaction(max_tokens=1)], 100, len)
         assert strategy.tokenizer is len
 
     def test_limit_warner(self):
-        assert LimitWarner(10, 1_000, 2_000).max_total_tokens == 2_000
+        assert WarnNearLimits(10, 1_000, 2_000).max_total_tokens == 2_000
 
     def test_the_new_fields_stay_keyword_only(self):
         import dataclasses
 
         cases = [
-            (SlidingWindow, 'max_fraction'),
+            (SlidingWindowCompaction, 'max_fraction'),
             (SummarizingCompaction, 'max_fraction'),
             (ClearToolResults, 'max_fraction'),
             (DeduplicateFileReads, 'max_fraction'),
             (TieredCompaction, 'target_fraction'),
-            (LimitWarner, 'max_context_fraction'),
-            (SlidingWindow, 'fallback_context_window'),
+            (WarnNearLimits, 'max_context_fraction'),
+            (SlidingWindowCompaction, 'fallback_context_window'),
             (SummarizingCompaction, 'fallback_context_window'),
             (ClearToolResults, 'fallback_context_window'),
             (DeduplicateFileReads, 'fallback_context_window'),
             (TieredCompaction, 'fallback_context_window'),
-            (LimitWarner, 'fallback_context_window'),
+            (WarnNearLimits, 'fallback_context_window'),
         ]
         for cls, name in cases:
             field = next(f for f in dataclasses.fields(cls) if f.name == name)
@@ -1054,7 +1062,7 @@ class TestFocusPropagation:
 
     def _tiered(self) -> TieredCompaction[None]:
         return TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2), SummarizingCompaction(max_messages=1)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2), SummarizingCompaction(max_messages=1)],
             target_tokens=100,
         )
 
@@ -1112,7 +1120,7 @@ class TestManualCompactionSemantics:
 
     async def test_an_unconditional_strategy_runs_whatever_the_size(self):
         history = self._short_history()
-        strategy: SlidingWindow[None] = SlidingWindow(max_tokens=1_000_000, keep_messages=2)
+        strategy: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_tokens=1_000_000, keep_messages=2)
 
         result = await compact_now(strategy, history, model=TestModel())
 
@@ -1122,7 +1130,7 @@ class TestManualCompactionSemantics:
         """Already under target is not a missed compaction: there is nothing left to reclaim."""
         history = self._short_history()
         tiered: TieredCompaction[None] = TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
             target_tokens=1_000_000,
         )
 
@@ -1132,7 +1140,7 @@ class TestManualCompactionSemantics:
 
     async def test_a_tiered_strategy_over_target_still_escalates(self):
         tiered: TieredCompaction[None] = TieredCompaction(
-            tiers=[SlidingWindow(max_tokens=1, keep_messages=2)],
+            tiers=[SlidingWindowCompaction(max_tokens=1, keep_messages=2)],
             target_tokens=1,
         )
 
