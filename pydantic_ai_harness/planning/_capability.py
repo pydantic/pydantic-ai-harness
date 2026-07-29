@@ -7,7 +7,14 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import CachePoint, ModelRequest, ModelResponse, UserPromptPart
+from pydantic_ai.messages import (
+    CachePoint,
+    ModelRequest,
+    ModelRequestPart,
+    ModelResponse,
+    TextContent,
+    UserPromptPart,
+)
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
 
@@ -52,9 +59,9 @@ class Planning(AbstractCapability[AgentDepsT]):
     -- when `enable_subtasks` is set -- `add_subtask`, `set_dependency`,
     `get_available_tasks`); `tools` narrows that surface to an allowlist. The
     current plan is surfaced back as an *ephemeral*
-    reminder appended to the tail of each request behind a `CachePoint`, so the
-    cached prefix stays byte-identical across turns; only the reminder is
-    re-read each turn.
+    reminder appended to the tail of each request, with a `CachePoint` before it
+    when the request already contains user content. The cached prefix stays
+    byte-identical across turns; only the reminder is re-read each turn.
 
     By default the plan lives in memory for the duration of a single run (a
     fresh, isolated plan per run). Pass a `store` (or `store_resolver`) to
@@ -85,7 +92,7 @@ class Planning(AbstractCapability[AgentDepsT]):
     """
 
     cache_ttl: Literal['5m', '1h'] = '5m'
-    """TTL for the cache breakpoint placed before the plan reminder."""
+    """TTL for the cache breakpoint placed before the plan reminder when valid."""
 
     store: PlanStore | None = None
     """Storage backend. `None` keeps a fresh in-memory plan per run (the original
@@ -168,7 +175,14 @@ class Planning(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        """Append the current plan as an ephemeral tail reminder behind a cache breakpoint."""
+        """Append the current plan as an ephemeral tail reminder.
+
+        A cache breakpoint is appended to the latest non-empty textual user
+        prompt, leaving the live reminder in a separate part after it. Bedrock
+        maps each `UserPromptPart` independently, so placing a `CachePoint` first
+        in the reminder part would still be invalid even when earlier request
+        parts contain user content.
+        """
         if not self.inject:
             return await handler(request_context)
         items = await self.resolve_store(ctx).get_items()
@@ -177,8 +191,9 @@ class Planning(AbstractCapability[AgentDepsT]):
         messages = request_context.messages
         last = messages[-1]
         if isinstance(last, ModelRequest):
-            reminder = UserPromptPart(content=[CachePoint(ttl=self.cache_ttl), _reminder_text(render_plan(items))])
-            messages[-1] = replace(last, parts=[*last.parts, reminder])
+            parts = _with_cache_point(last.parts, ttl=self.cache_ttl)
+            reminder = UserPromptPart(content=_reminder_text(render_plan(items)))
+            messages[-1] = replace(last, parts=[*parts, reminder])
         return await handler(request_context)
 
     @classmethod
@@ -225,3 +240,33 @@ class Planning(AbstractCapability[AgentDepsT]):
 
 def _reminder_text(plan: str) -> str:
     return f'<plan-reminder>\nYour current plan (keep it updated with the planning tools):\n\n{plan}\n</plan-reminder>'
+
+
+def _with_cache_point(parts: Sequence[ModelRequestPart], *, ttl: Literal['5m', '1h']) -> list[ModelRequestPart]:
+    """Append a cache point to the latest cacheable `UserPromptPart`.
+
+    A `CachePoint` must follow content within the same `UserPromptPart` for
+    Bedrock. Tool-return and retry parts therefore cannot safely host the
+    breakpoint, and non-text-only prompts are left unchanged rather than
+    risking provider-specific document/media constraints.
+    """
+    updated = list(parts)
+    for index in range(len(updated) - 1, -1, -1):
+        part = updated[index]
+        if not isinstance(part, UserPromptPart):
+            continue
+        content = [part.content] if isinstance(part.content, str) else list(part.content)
+        if any(isinstance(item, CachePoint) for item in content):
+            return updated
+        if any(_is_text_user_content_item(item) for item in content):
+            updated[index] = replace(part, content=[*content, CachePoint(ttl=ttl)])
+            return updated
+    return updated
+
+
+def _is_text_user_content_item(item: object) -> bool:
+    if isinstance(item, str):
+        return bool(item)
+    if isinstance(item, TextContent):
+        return bool(item.content)
+    return False

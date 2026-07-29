@@ -8,12 +8,18 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import (
+    BinaryContent,
     CachePoint,
     ModelMessage,
     ModelRequest,
+    ModelRequestPart,
     ModelResponse,
+    RetryPromptPart,
+    SystemPromptPart,
+    TextContent,
     TextPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -923,13 +929,54 @@ class TestReminder:
         original = ModelRequest(parts=[UserPromptPart('hi')])
         seen, _ = await self._run_hook(cap, [original])
         assert len(original.parts) == 1  # append-only
+        cached_prompt = seen[-1].parts[0]
+        assert isinstance(cached_prompt, UserPromptPart)
+        cached_content = cached_prompt.content
+        assert isinstance(cached_content, list)
+        assert cached_content[0] == 'hi'
+        assert isinstance(cached_content[1], CachePoint)
+        assert cached_content[1].ttl == '1h'
         reminder = cast(UserPromptPart, seen[-1].parts[-1])
-        content = reminder.content
-        assert isinstance(content, list)
-        assert isinstance(content[0], CachePoint)
-        assert content[0].ttl == '1h'
-        assert '<plan-reminder>' in cast(str, content[1])
-        assert 'Do X' in cast(str, content[1])
+        assert isinstance(reminder.content, str)
+        assert '<plan-reminder>' in reminder.content
+        assert 'Do X' in reminder.content
+
+    @pytest.mark.parametrize(
+        ('parts', 'expected_cache_points'),
+        [
+            ([SystemPromptPart('instructions only')], 0),
+            ([UserPromptPart('')], 0),
+            ([UserPromptPart([TextContent('goal')])], 1),
+            ([UserPromptPart([BinaryContent(data=b'x', media_type='image/png')])], 0),
+            ([ToolReturnPart('tool', 'result')], 0),
+            ([RetryPromptPart('retry')], 0),
+            ([UserPromptPart(['goal', CachePoint(ttl='1h')])], 1),
+        ],
+    )
+    async def test_cachepoint_requires_prior_user_content(
+        self, parts: list[ModelRequestPart], expected_cache_points: int
+    ) -> None:
+        store = InMemoryPlanStore()
+        cap = Planning[None](store=store)
+        await store.add_item(PlanItem(content='Do X', status=TaskStatus.in_progress))
+        original = ModelRequest(parts=parts)
+
+        seen, _ = await self._run_hook(cap, [original])
+
+        reminder = seen[-1].parts[-1]
+        assert isinstance(reminder, UserPromptPart)
+        assert isinstance(reminder.content, str)
+        assert '<plan-reminder>' in reminder.content
+
+        cache_points = 0
+        for part in seen[-1].parts:
+            if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
+                continue
+            for index, item in enumerate(part.content):
+                if isinstance(item, CachePoint):
+                    cache_points += 1
+                    assert index > 0  # Bedrock rejects a leading cache point in each user part.
+        assert cache_points == expected_cache_points
 
     async def test_last_not_model_request_passthrough(self) -> None:
         store = InMemoryPlanStore()
@@ -973,12 +1020,10 @@ class TestEndToEnd:
         result = await agent.run('go')
         assert result.output == 'done'
         sent = '\n'.join(
-            c
+            part.content
             for msg in captured['messages']
             for part in msg.parts
-            if isinstance(part, UserPromptPart) and not isinstance(part.content, str)
-            for c in part.content
-            if isinstance(c, str)
+            if isinstance(part, UserPromptPart) and isinstance(part.content, str)
         )
         assert '<plan-reminder>' in sent
         assert 'Step A' in sent
