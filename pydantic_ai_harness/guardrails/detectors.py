@@ -1,19 +1,19 @@
 """Ready-made checks to plug into a guard.
 
 These are plain functions returning a
-[`GuardResult`][pydantic_ai_harness.GuardResult], not capabilities. That is the
-difference that makes them compose: several go into one `InputGuard` or
-`OutputGuard` and run as a chain, next to whatever you write yourself, sharing
+[`GuardrailResult`][pydantic_ai_harness.GuardrailResult], not capabilities. That is the
+difference that makes them compose: several go into one `InputGuardrail` or
+`OutputGuardrail` and run as a chain, next to whatever you write yourself, sharing
 one place in the capability list and one set of spans.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness import InputGuard
+from pydantic_ai_harness import InputGuardrail
 from pydantic_ai_harness.guardrails.detectors import blocked_keywords, redact_secrets
 
 agent = Agent(
     'openai:gpt-5.4',
-    capabilities=[InputGuard(guard=[redact_secrets, blocked_keywords(['internal-only'])])],
+    capabilities=[InputGuardrail(guard=[redact_secrets, blocked_keywords(['internal-only'])])],
 )
 ```
 
@@ -49,10 +49,10 @@ from typing import Literal
 
 from pydantic_ai.exceptions import UserError
 
-from pydantic_ai_harness.guardrails._capability import GuardResult
+from pydantic_ai_harness.guardrails._capability import GuardrailResult
 
-TextDetector = Callable[[str], GuardResult]
-"""A check over text. Plug one into `InputGuard`, or into `OutputGuard` via `for_text`."""
+TextDetector = Callable[[str], GuardrailResult]
+"""A check over text. Plug one into `InputGuardrail`, or into `OutputGuardrail` via `for_text`."""
 
 _NEWLINE = r'(?:\r?\n|\\+n)'
 """A line break as it reaches a detector.
@@ -223,13 +223,13 @@ def _redactor(
 ) -> TextDetector:
     """A detector that rewrites every match and allows text with none."""
 
-    # `object` rather than `str`: a detector plugged straight into an `OutputGuard` is
+    # `object` rather than `str`: a detector plugged straight into an `OutputGuardrail` is
     # handed the agent output unchanged, and the point of the check below is to name that
     # rather than let `re.sub` raise a TypeError from three frames down.
-    def detect(text: object) -> GuardResult:
+    def detect(text: object) -> GuardrailResult:
         if not isinstance(text, str):
             raise UserError(
-                f'A text detector received {type(text).__name__}, which it cannot scan. An OutputGuard '
+                f'A text detector received {type(text).__name__}, which it cannot scan. An OutputGuardrail '
                 'hands the guard the agent output unchanged, so wrap the detector in for_text() to say '
                 'what should happen when that output is not text.'
             )
@@ -244,7 +244,7 @@ def _redactor(
                 return out if valid is None or valid(match.group()) else match.group()
 
             cleaned = pattern.sub(replace, cleaned)
-        return GuardResult.replace(cleaned) if cleaned != text else GuardResult.allow()
+        return GuardrailResult.replace(cleaned) if cleaned != text else GuardrailResult.allow()
 
     return detect
 
@@ -333,22 +333,22 @@ def blocked_keywords(
     if not compiled:
         raise UserError('blocked_keywords() was given no keywords, so it would never match anything.')
 
-    def detect(text: str) -> GuardResult:
+    def detect(text: str) -> GuardrailResult:
         for pattern in compiled:
             match = pattern.search(text)
             if match:
-                return GuardResult.block(message or f'Blocked term: {match.group()!r}.')
-        return GuardResult.allow()
+                return GuardrailResult.block(message or f'Blocked term: {match.group()!r}.')
+        return GuardrailResult.allow()
 
     return detect
 
 
 def for_text(
     detector: TextDetector, *, on_other: Literal['raise', 'allow'] = 'raise'
-) -> Callable[[object], GuardResult]:
+) -> Callable[[object], GuardrailResult]:
     """Adapt a text detector to a guard over a value that may not be text.
 
-    An `OutputGuard` receives the agent output unchanged, which for a structured
+    An `OutputGuardrail` receives the agent output unchanged, which for a structured
     output is a model instance rather than a string. Substituting a scrubbed
     string for it would change the output's type, so this refuses to guess:
     `'raise'` fails loudly, telling you to apply the detector to a field
@@ -356,11 +356,11 @@ def for_text(
     types carry nothing to check.
     """
 
-    def guard(value: object) -> GuardResult:
+    def guard(value: object) -> GuardrailResult:
         if isinstance(value, str):
             return detector(value)
         if on_other == 'allow':
-            return GuardResult.allow()
+            return GuardrailResult.allow()
         raise UserError(
             f'A text detector received {type(value).__name__}, which it cannot rewrite without changing the '
             "output's type. Apply it to a field of the output, or pass on_other='allow' to skip non-text."

@@ -50,14 +50,52 @@ capability keeps its own optional dependencies, so importing the root package
 must not pull in a capability's extras. Users import a capability from its
 submodule (`from pydantic_ai_harness.<name> import ...`).
 
-Naming: the module name is the capability name, one module per capability or
-strategy. Prefer a longer descriptive name over a terse one (e.g.
-`overflowing_tool_output`, not `overflow`). A known term is fine as-is (e.g.
-`compaction`). If you are unsure what to name a capability, ask the user (via the
-ask-user tool) rather than guessing -- a name is a public commitment once shipped.
+### Naming Capabilities
 
-When a capability's module path changes, keep the old path working as a
-`DeprecationWarning` shim so existing imports do not break.
+Class names follow one rule with two branches:
+
+1. **Noun, when the capability names a thing**: something the model can use --
+   a tool, faculty, or integration (`Shell`, `Memory`, `PydanticAIDocs`); a
+   subsystem with its own stores, types, or tools (`CodeMode`,
+   `StepPersistence`, `RepoContext`, `ToolOutputLimits`); or a named strategy
+   (`SlidingWindowCompaction`, `TieredCompaction`). Use the noun the feature's
+   documentation would use.
+2. **Imperative verb phrase, when the capability acts on the run and one verb
+   phrase states its entire contract** (`ClearToolResults`,
+   `DeduplicateFileReads`, `WarnNearLimits`, `WarnOnCacheBusts`). The name
+   should read as a plain answer to "what will this do to my agent?". Do not
+   wrap the action in a nominalization (`ToolResultEviction`): the noun form
+   adds formality, not information. If the verb phrase would be incomplete or
+   generic, the capability is a feature area -- use branch 1.
+
+Additional constraints:
+
+- The first word of a verb-phrase name must read unambiguously as a verb.
+  `AuthorCapabilities` fails this ("author" reads as a noun first); pick a
+  different verb or use a noun name.
+- No abbreviations: `PydanticAIDocs`, not `PyaiDocs`.
+- Name the behavior, not the problem it solves: `ToolOutputLimits`, not
+  `OverflowingToolOutput`.
+- If the natural noun already names a public type (usually the callable the
+  capability wraps, like core's `HistoryProcessor`), the capability takes the
+  verb phrase and the noun stays reserved for the type.
+- Third-party integrations carry the vendor name (`ExaSearch`, `ModalSandbox`,
+  `LocalStack`). Pydantic-family products (Logfire) do not need it.
+- Ties go to the incumbent: many capabilities read acceptably in both forms.
+  If an existing shipped name is not misleading, keep it.
+
+Module naming: a single-capability module is the snake_case of its class
+(`tool_output_limits`); a family of related capabilities gets a domain module
+(`compaction`, `guardrails`); a vendor integration gets a vendor module (`exa`,
+`logfire`). One module per capability, family, or vendor. Prefer a longer
+descriptive name over a terse one (e.g. `tool_output_limits`, not `overflow`).
+If you are unsure what to name a capability, ask the user (via the ask-user
+tool) rather than guessing -- a name is a public commitment once shipped.
+
+When a class or module is renamed, keep the old name working for at least one
+release: a renamed module keeps a shim package at its old path, and a renamed
+class keeps a module-level `__getattr__` alias, both emitting
+`HarnessDeprecationWarning` via the helpers in `pydantic_ai_harness/_warn.py`.
 
 Top-level re-exports in `pydantic_ai_harness/__init__.py` (`CodeMode`,
 `FileSystem`, `Shell`, `ManagedPrompt`) are the exception, not the rule. Once an
@@ -76,8 +114,6 @@ warnings where practical.
 - Avoid `Any` in new public signatures.
 - Avoid casts. Fix the type shape instead.
 - Keep defaults conservative and easy to explain.
-- Do not add package dependencies without a clear issue and package-manager
-  command.
 - New remote-execution capabilities cap tool output with
   `max_output_bytes` / `max_output_lines` (the `modal_sandbox` names), not a new
   spelling. The released `max_output_chars` (shell) and `max_read_lines`
@@ -85,6 +121,26 @@ warnings where practical.
 - Line offsets in model-facing file tools are 1-indexed, matching `grep -n`,
   editors, and stack traces (`modal_sandbox` is the reference; `filesystem` is
   0-based pending migration).
+
+### Policy Lives In The Pluggable Component
+
+When a capability takes a dependency behind a `Protocol` -- `PlanStore`,
+`MemoryStore`, a client, a sandbox -- retry, fallback and degradation policy
+belongs to the implementation of that protocol, not to fields on the capability.
+
+The capability's job is to state what it does when the dependency fails, and to
+keep the protocol small enough to wrap. A caller who wants
+degraded-but-alive behavior writes a wrapping implementation; that is what the
+protocol is for. The alternative is a capability that grows one `on_x_error=`
+field per dependency and ends up owning behavior it cannot test end to end.
+
+Worked example: `planning`'s tail reminder reads its `PlanStore` on every model
+request, so a store that raises fails the run. `Planning` has no error-handling
+knob; the README documents the behavior and sketches a wrapping store instead.
+
+This is the same boundary as `core-boundary.md`, one level down: there, harness
+does not reimplement core semantics; here, a capability does not reimplement its
+dependency's operational policy.
 
 ## Composition Checks
 

@@ -11,7 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness import GuardResult, InputGuard, OutputBlocked, OutputGuard
+from pydantic_ai_harness import GuardrailResult, InputGuardrail, OutputBlocked, OutputGuardrail
 from pydantic_ai_harness.guardrails.detectors import (
     DEFAULT_PII_PATTERNS,
     DEFAULT_SECRET_PATTERNS,
@@ -441,7 +441,7 @@ class TestForText:
             FunctionModel(respond),
             deps_type=type(None),
             output_type=Answer,
-            capabilities=[OutputGuard(guard=for_text(redact_secrets))],
+            capabilities=[OutputGuardrail(guard=for_text(redact_secrets))],
         )
 
         with pytest.raises(UserError, match='cannot rewrite without changing'):
@@ -460,7 +460,7 @@ class TestForText:
             FunctionModel(respond),
             deps_type=type(None),
             output_type=Answer,
-            capabilities=[OutputGuard(guard=for_text(redact_secrets, on_other='allow'))],
+            capabilities=[OutputGuardrail(guard=for_text(redact_secrets, on_other='allow'))],
         )
         result = await agent.run('hi')
 
@@ -482,14 +482,14 @@ class TestGuardChain:
         """The second guard sees the cleaned text, which is what makes ordering useful."""
         seen: list[str] = []
 
-        def record(prompt: str) -> GuardResult:
+        def record(prompt: str) -> GuardrailResult:
             seen.append(prompt)
-            return GuardResult.allow()
+            return GuardrailResult.allow()
 
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[redact_secrets, record])],
+            capabilities=[InputGuardrail(guard=[redact_secrets, record])],
         )
         result = await agent.run(f'my key is {_OPENAI_KEY}')
 
@@ -499,14 +499,14 @@ class TestGuardChain:
     async def test_the_first_block_ends_the_chain(self):
         reached: list[str] = []
 
-        def never(prompt: str) -> GuardResult:  # pragma: no cover - the point is that it is not reached
+        def never(prompt: str) -> GuardrailResult:  # pragma: no cover - the point is that it is not reached
             reached.append(prompt)
-            return GuardResult.allow()
+            return GuardrailResult.allow()
 
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[blocked_keywords(['classified']), never])],
+            capabilities=[InputGuardrail(guard=[blocked_keywords(['classified']), never])],
         )
         result = await agent.run('this is classified')
 
@@ -517,7 +517,7 @@ class TestGuardChain:
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[redact_secrets, blocked_keywords(['nope'])])],
+            capabilities=[InputGuardrail(guard=[redact_secrets, blocked_keywords(['nope'])])],
         )
 
         result = await agent.run('nothing sensitive here')
@@ -531,7 +531,7 @@ class TestGuardChain:
         agent = Agent(
             FunctionModel(respond),
             deps_type=type(None),
-            capabilities=[OutputGuard(guard=[for_text(redact_secrets), for_text(blocked_keywords(['classified']))])],
+            capabilities=[OutputGuardrail(guard=[for_text(redact_secrets), for_text(blocked_keywords(['classified']))])],
         )
 
         with pytest.raises(OutputBlocked, match='Blocked term'):
@@ -544,7 +544,7 @@ class TestGuardChain:
         agent = Agent(
             FunctionModel(respond),
             deps_type=type(None),
-            capabilities=[OutputGuard(guard=[for_text(redact_secrets), for_text(redact_personal_data)])],
+            capabilities=[OutputGuardrail(guard=[for_text(redact_secrets), for_text(redact_personal_data)])],
         )
         result = await agent.run('hi')
 
@@ -554,13 +554,13 @@ class TestGuardChain:
         """Callability decides, so a guard that happens to be a sequence is not taken apart."""
 
         class CallableList(list[str]):
-            def __call__(self, prompt: str) -> GuardResult:
-                return GuardResult.block('refused by the callable itself')
+            def __call__(self, prompt: str) -> GuardrailResult:
+                return GuardrailResult.block('refused by the callable itself')
 
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=CallableList(['not', 'guards']))],
+            capabilities=[InputGuardrail(guard=CallableList(['not', 'guards']))],
         )
         result = await agent.run('hi')
 
@@ -577,7 +577,7 @@ class TestGuardChain:
     )
     async def test_a_shape_that_is_not_a_guard_is_named(self, guard: object, match: str):
         """Left alone these reach `inspect.signature` as a bare TypeError naming nothing useful."""
-        agent = Agent(_echo_prompt(), deps_type=type(None), capabilities=[InputGuard(guard=guard)])  # type: ignore[arg-type]
+        agent = Agent(_echo_prompt(), deps_type=type(None), capabilities=[InputGuardrail(guard=guard)])  # type: ignore[arg-type]
 
         with pytest.raises(UserError, match=match):
             await agent.run('hi')
@@ -585,7 +585,7 @@ class TestGuardChain:
     async def test_an_empty_chain_is_refused(self):
         """A guardrail that inspects nothing reads as configured and behaves as absent."""
         guards: list[TextDetector] = []
-        agent = Agent(_echo_prompt(), deps_type=type(None), capabilities=[InputGuard(guard=guards)])
+        agent = Agent(_echo_prompt(), deps_type=type(None), capabilities=[InputGuardrail(guard=guards)])
 
         with pytest.raises(UserError, match='empty sequence of guards'):
             await agent.run('hi')
@@ -595,7 +595,7 @@ class TestGuardChain:
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard={redact_secrets})],  # type: ignore[arg-type]
+            capabilities=[InputGuardrail(guard={redact_secrets})],  # type: ignore[arg-type]
         )
 
         with pytest.raises(UserError, match='got set'):
@@ -606,7 +606,7 @@ class TestGuardChain:
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=(guard for guard in [redact_secrets]))],  # type: ignore[arg-type]
+            capabilities=[InputGuardrail(guard=(guard for guard in [redact_secrets]))],  # type: ignore[arg-type]
         )
 
         with pytest.raises(UserError, match='got generator'):
@@ -616,7 +616,7 @@ class TestGuardChain:
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[redact_secrets, lambda prompt: False])],
+            capabilities=[InputGuardrail(guard=[redact_secrets, lambda prompt: False])],
         )
         result = await agent.run('hi')
 
@@ -626,14 +626,14 @@ class TestGuardChain:
         """`_takes_ctx` is decided per element, so a mixed chain has to be read per element."""
         seen: list[str] = []
 
-        def with_ctx(ctx: RunContext[None], prompt: str) -> GuardResult:
+        def with_ctx(ctx: RunContext[None], prompt: str) -> GuardrailResult:
             seen.append(f'ctx:{prompt}')
-            return GuardResult.allow()
+            return GuardrailResult.allow()
 
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[redact_secrets, with_ctx])],
+            capabilities=[InputGuardrail(guard=[redact_secrets, with_ctx])],
         )
         await agent.run(f'k {_OPENAI_KEY}')
 
@@ -643,7 +643,7 @@ class TestGuardChain:
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[redact_secrets, lambda prompt: GuardResult.retry('again')])],
+            capabilities=[InputGuardrail(guard=[redact_secrets, lambda prompt: GuardrailResult.retry('again')])],
         )
 
         with pytest.raises(UserError, match='guard at position 1 did'):
@@ -656,14 +656,14 @@ class TestGuardChain:
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             return ModelResponse(parts=[TextPart(content=next(outputs))])
 
-        def once(output: object) -> GuardResult:
+        def once(output: object) -> GuardrailResult:
             seen.append(str(output))
-            return GuardResult.retry('drop the secret') if 'secret' in str(output) else GuardResult.allow()
+            return GuardrailResult.retry('drop the secret') if 'secret' in str(output) else GuardrailResult.allow()
 
         agent = Agent(
             FunctionModel(respond),
             deps_type=type(None),
-            capabilities=[OutputGuard(guard=[for_text(redact_secrets), once])],
+            capabilities=[OutputGuardrail(guard=[for_text(redact_secrets), once])],
         )
         result = await agent.run('hi')
 
@@ -674,7 +674,7 @@ class TestGuardChain:
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[redact_secrets, blocked_keywords(['classified'])], parallel=True)],
+            capabilities=[InputGuardrail(guard=[redact_secrets, blocked_keywords(['classified'])], parallel=True)],
         )
         result = await agent.run('this is classified')
 
@@ -685,17 +685,17 @@ class TestGuardChain:
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[blocked_keywords(['nope']), redact_secrets], parallel=True)],
+            capabilities=[InputGuardrail(guard=[blocked_keywords(['nope']), redact_secrets], parallel=True)],
         )
 
-        with pytest.raises(UserError, match='incompatible with GuardResult.replace'):
+        with pytest.raises(UserError, match='incompatible with GuardrailResult.replace'):
             await agent.run(f'k {_OPENAI_KEY}')
 
     async def test_a_mid_chain_replacement_must_still_be_prompt_text(self):
         agent = Agent(
             _echo_prompt(),
             deps_type=type(None),
-            capabilities=[InputGuard(guard=[lambda prompt: GuardResult.replace(123), redact_secrets])],
+            capabilities=[InputGuardrail(guard=[lambda prompt: GuardrailResult.replace(123), redact_secrets])],
         )
 
         with pytest.raises(UserError, match='guard at position 0 returned int'):
