@@ -662,6 +662,14 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             raise ModelRetry(
                 'The code crashed the sandbox worker and the session was reset. Revise the code and try again.'
             ) from e
+        except Exception as e:
+            # The session may have been invalidated by a host-side binding or protocol failure.
+            # Make the reset visible so the model can rebuild state on its next attempt.
+            run_state.reset()
+            raise ModelRetry(
+                'Code execution failed and the session was reset. '
+                'Re-import dependencies, recreate required state, and try again.'
+            ) from e
         except BaseException as e:
             # Convert a sandbox panic to a retry (see `is_sandbox_panic`);
             # interruptions re-raise unchanged after dropping the suspended session.

@@ -1827,6 +1827,26 @@ class TestCodeMode:
         with pytest.raises(ModelRetry, match='Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
 
+    async def test_unexpected_execution_error_reports_session_reset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unexpected execution failure tells the model that the REPL state was dropped."""
+
+        async def _fail(self: Any, state: Any) -> Any:
+            raise RuntimeError('invalid exception payload')
+
+        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        run_code = tools['run_code']
+
+        await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
+        with monkeypatch.context() as patcher:
+            patcher.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _fail)
+            with pytest.raises(ModelRetry, match='session was reset'):
+                await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
+        with pytest.raises(ModelRetry, match='Type error in code'):
+            await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
+
     async def test_cancellation_propagates_and_resets_session(self) -> None:
         """Cancellation drops the suspended session before propagating to the caller."""
         started = asyncio.Event()
