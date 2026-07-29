@@ -145,7 +145,7 @@ An input guard rewrites the prompt in place, so the model receives the broken ve
 
 `iban` has the same problem and the same answer: a country code plus two digits is a shape ordinary text hits constantly, so spaces are allowed only where the printed form puts them and every match is checked against the ISO 7064 mod-97 digit an IBAN carries.
 
-An AWS *secret* access key is deliberately absent from the defaults. It is forty characters of base64 with no distinguishing prefix, so a pattern for it would take ordinary text with it.
+An AWS *secret* access key is deliberately absent from the defaults. It is forty characters of base64 with no distinguishing prefix, so nothing in the value marks it as a key and a pattern for the shape alone would take ordinary base64 with it. Matching one means anchoring on the name written beside it -- `aws_secret_access_key = ...` -- which is what `pydantic-ai-shields` does, and which finds the key only where it is written as an assignment. That narrower pattern is not shipped here; pass it through `extra=` if that is how keys reach your agent.
 
 `only=` selects patterns; it does not reorder them. The application order is part of each mapping's contract -- `iban` runs before `credit_card` so a spaced account number is not labelled a card -- and it holds whatever order you list.
 

@@ -105,10 +105,13 @@ DEFAULT_SECRET_PATTERNS: Mapping[str, str] = {
 
 Prefixed and left-anchored on a word boundary, so false positives are rare: a
 prefix is also a substring of ordinary text, and `sk-` without the boundary
-takes the rest of `task-management-and-deployment` with it. An AWS *secret*
-access key has no distinctive shape -- it is 40 characters of base64 -- and is
-deliberately absent rather than matched by a pattern that would also take
-ordinary text.
+takes the rest of `task-management-and-deployment` with it.
+
+An AWS *secret* access key is deliberately absent. It is 40 characters of
+base64 with no prefix, so nothing in the value marks it as a key; matching one
+means anchoring on the name written beside it, which finds the key only where
+it appears as an assignment. That narrower pattern is left to `extra` rather
+than shipped as a default.
 """
 
 DEFAULT_PII_PATTERNS: Mapping[str, str] = {
@@ -121,6 +124,17 @@ DEFAULT_PII_PATTERNS: Mapping[str, str] = {
     # them -- every fourth character -- and the whole match is checked against
     # the ISO 7064 mod-97 digit. Allowing a space before any character let the
     # pattern run across word boundaries and eat whole sentences.
+    #
+    # External assumption. The 89 codes below are the IBAN-adopting countries
+    # and territories in the ISO 13616 IBAN Registry, which SWIFT maintains as
+    # registration authority and republishes as members join. Verified
+    # 2026-07-29 against
+    # <https://www.swift.com/standards/data-standards/iban-international-bank-account-number>.
+    # To re-check: download the registry (PDF or .txt) from that page, take its
+    # `IBAN prefix country code (ISO 3166)` column, and diff it against this
+    # list. A missing code means real IBANs from a new member pass through
+    # unredacted, so add it and bump the date; if nothing changed, bump the date
+    # alone.
     'iban': (
         r'\b(?i:AD|AE|AL|AT|AZ|BA|BE|BG|BH|BI|BR|BY|CH|CR|CY|CZ|DE|DJ|DK|DO|EE|EG|ES|FI|FK|FO|FR|GB|GE|GI|GL|GR'  # codespell:ignore fo
         r'|GT|HN|HR|HU|IE|IL|IQ|IS|IT|JO|KW|KZ|LB|LC|LI|LT|LU|LV|LY|MA|MC|MD|ME|MK|MN|MR|MT|MU|NI|NL|NO|OM|PK|PL'
