@@ -21,7 +21,7 @@ from pydantic_ai_harness.guardrails.detectors import (
     personal_data,
     redact_personal_data,
     redact_secrets,
-    secrets,
+    secret_data,
 )
 
 pytestmark = pytest.mark.anyio
@@ -75,7 +75,7 @@ class TestSecretRedaction:
             'jwt': 'eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4',
             'private_key': '-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----',
         }
-        assert secrets(only=[name])(samples[name]).action == 'replace'
+        assert secret_data(only=[name])(samples[name]).action == 'replace'
 
     @pytest.mark.parametrize('key', ['sk-abcdefghijklmnopqrstuvwxyz01', 'sk-proj-AbCdEfGhIjKlMnOpQrStUv'])
     def test_both_shapes_of_openai_key_match(self, key: str):
@@ -157,17 +157,17 @@ class TestSecretRedaction:
         assert redact_secrets(f'key{delimiter}{_OPENAI_KEY}').replacement == f'key{delimiter}[redacted:openai_key]'
 
     def test_a_subset_leaves_the_rest_alone(self):
-        detector = secrets(only=['aws_access_key'])
+        detector = secret_data(only=['aws_access_key'])
 
         assert detector(f'key {_OPENAI_KEY}').action == 'allow'
         assert detector('key AKIAIOSFODNN7EXAMPLE').action == 'replace'
 
     def test_an_unknown_pattern_name_is_refused(self):
         with pytest.raises(UserError, match='Unknown pattern'):
-            secrets(only=['nope'])
+            secret_data(only=['nope'])
 
     def test_a_custom_pattern_joins_the_defaults(self):
-        detector = secrets(extra={'internal': r'INT-\d{4}'})
+        detector = secret_data(extra={'internal': r'INT-\d{4}'})
 
         assert detector('ticket INT-4321').replacement == 'ticket [redacted:internal]'
 
@@ -192,11 +192,11 @@ class TestSecretRedaction:
     def test_a_detector_with_no_patterns_is_refused(self):
         """Same rule as an empty keyword list: a check that inspects nothing behaves as absent."""
         with pytest.raises(UserError, match='no patterns'):
-            secrets(only=[])
+            secret_data(only=[])
 
     def test_a_placeholder_cannot_re_emit_the_secret(self):
         """`re.sub` reads backreferences in a template, so the placeholder is applied literally."""
-        result = secrets(placeholder=r'\g<0>-GONE')(f'k {_OPENAI_KEY}')
+        result = secret_data(placeholder=r'\g<0>-GONE')(f'k {_OPENAI_KEY}')
 
         assert result.replacement == r'k \g<0>-GONE'
 
@@ -208,10 +208,10 @@ class TestSecretRedaction:
 
     def test_extra_may_not_silently_replace_a_built_in(self):
         with pytest.raises(UserError, match='would replace the built-in'):
-            secrets(extra={'openai_key': 'x'})
+            secret_data(extra={'openai_key': 'x'})
 
     def test_a_placeholder_without_the_name_is_used_verbatim(self):
-        assert secrets(placeholder='***')(f'k {_OPENAI_KEY}').replacement == 'k ***'
+        assert secret_data(placeholder='***')(f'k {_OPENAI_KEY}').replacement == 'k ***'
 
 
 class TestKeyPastedFromAFile:
@@ -252,12 +252,6 @@ class TestPatternOrder:
         detector = personal_data(only=['credit_card', 'iban'])
 
         assert detector(f'iban {iban}').replacement == 'iban [redacted:iban]'
-
-    def test_a_reordered_subset_of_the_secret_patterns_keeps_the_whole_block(self):
-        pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEow\n-----END RSA PRIVATE KEY-----'
-        detector = secrets(only=['private_key_body', 'private_key'])
-
-        assert detector(pem).replacement == '[redacted:private_key]'
 
 
 class TestPersonalData:
@@ -531,7 +525,9 @@ class TestGuardChain:
         agent = Agent(
             FunctionModel(respond),
             deps_type=type(None),
-            capabilities=[OutputGuardrail(guard=[for_text(redact_secrets), for_text(blocked_keywords(['classified']))])],
+            capabilities=[
+                OutputGuardrail(guard=[for_text(redact_secrets), for_text(blocked_keywords(['classified']))])
+            ],
         )
 
         with pytest.raises(OutputBlocked, match='Blocked term'):

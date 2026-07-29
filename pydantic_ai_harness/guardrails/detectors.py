@@ -249,7 +249,7 @@ def _redactor(
     return detect
 
 
-def secrets(
+def secret_data(
     *,
     only: Iterable[str] | None = None,
     extra: Mapping[str, str] | None = None,
@@ -282,14 +282,15 @@ def personal_data(
     telling the agent something it needs, so blocking the turn would break
     ordinary use; removing it before it reaches the model does not.
 
-    Args and behaviour match [`secrets`][pydantic_ai_harness.guardrails.detectors.secrets],
+    Args and behaviour match
+    [`secret_data`][pydantic_ai_harness.guardrails.detectors.secret_data],
     over `DEFAULT_PII_PATTERNS`.
     """
     return _redactor(_compile(DEFAULT_PII_PATTERNS, only, extra), placeholder)
 
 
-redact_secrets = secrets()
-"""`secrets()` with every default pattern, for the common case."""
+redact_secrets = secret_data()
+"""`secret_data()` with every default pattern, for the common case."""
 
 redact_personal_data = personal_data()
 """`personal_data()` with every default pattern, for the common case."""
