@@ -294,9 +294,28 @@ class TestHauntExtract:
         async with toolset:
             pass
 
+    async def test_default_client_is_recreated_for_a_second_run(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('HAUNT_API_KEY', 'test-key')
+        toolset = HauntExtract[None]().get_toolset()
+        async with toolset:
+            first_client = toolset._client  # pyright: ignore[reportPrivateUsage]
+        async with toolset:
+            second_client = toolset._client  # pyright: ignore[reportPrivateUsage]
+        assert first_client is not second_client
+
     def test_max_text_chars_out_of_bounds_rejected(self) -> None:
         with pytest.raises(ValueError, match='max_text_chars must be at least 1, got 0'):
             HauntExtract[None](max_text_chars=0)
+
+    def test_max_text_chars_bool_rejected(self) -> None:
+        with pytest.raises(ValueError, match='max_text_chars must be an integer, got True'):
+            HauntExtract[None](max_text_chars=True)
+
+    def test_max_text_chars_float_rejected_at_runtime(self) -> None:
+        capability = HauntExtract[None].__new__(HauntExtract)
+        object.__setattr__(capability, 'max_text_chars', 1.5)
+        with pytest.raises(ValueError, match='max_text_chars must be an integer, got 1.5'):
+            capability.__post_init__()
 
     def test_instructions_reference_the_tools_and_honesty(self) -> None:
         instructions = HauntExtract[None]().get_instructions()

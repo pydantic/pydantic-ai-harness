@@ -179,6 +179,7 @@ class HauntExtractToolset(FunctionToolset[AgentDepsT]):
 
     def __init__(self, *, client: HauntClient | None, max_text_chars: int) -> None:
         super().__init__()
+        self._uses_default_client = client is None
         if client is None:
             owned_client = _default_client()
             self._owned_client: HttpxHauntClient | None = owned_client
@@ -191,7 +192,11 @@ class HauntExtractToolset(FunctionToolset[AgentDepsT]):
         self.add_function(self.extract_data, name='extract_data')
 
     async def __aenter__(self) -> Self:
-        """Enter the toolset context."""
+        """Enter the toolset context with a usable default HTTP client."""
+        if self._uses_default_client and self._owned_client is None:
+            owned_client = _default_client()
+            self._owned_client = owned_client
+            self._client = owned_client
         await super().__aenter__()
         return self
 
@@ -200,6 +205,7 @@ class HauntExtractToolset(FunctionToolset[AgentDepsT]):
         try:
             if self._owned_client is not None:
                 await self._owned_client.aclose()
+                self._owned_client = None
         finally:
             await super().__aexit__(*args)
         return None

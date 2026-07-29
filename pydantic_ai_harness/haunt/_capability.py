@@ -67,6 +67,8 @@ class HauntExtract(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         """Validate configuration."""
+        if type(self.max_text_chars) is not int:
+            raise ValueError(f'max_text_chars must be an integer, got {self.max_text_chars!r}')
         if self.max_text_chars < 1:
             raise ValueError(f'max_text_chars must be at least 1, got {self.max_text_chars}')
 
