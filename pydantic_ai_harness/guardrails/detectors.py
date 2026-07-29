@@ -220,21 +220,30 @@ def _compile(
     )
 
 
+def _require_text(value: object) -> str:
+    """Return `value` as text, naming the mistake when it is not.
+
+    Every detector takes `object` rather than `str`, because one plugged
+    straight into an `OutputGuardrail` is handed the agent output unchanged.
+    Checking here says which knob answers that, instead of letting `re` raise a
+    TypeError from three frames down.
+    """
+    if not isinstance(value, str):
+        raise UserError(
+            f'A text detector received {type(value).__name__}, which it cannot scan. An OutputGuardrail '
+            'hands the guard the agent output unchanged, so wrap the detector in for_text() to say '
+            'what should happen when that output is not text.'
+        )
+    return value
+
+
 def _redactor(
     compiled: tuple[tuple[str, re.Pattern[str], Callable[[str], bool] | None], ...], placeholder: str
 ) -> TextDetector:
     """A detector that rewrites every match and allows text with none."""
 
-    # `object` rather than `str`: a detector plugged straight into an `OutputGuardrail` is
-    # handed the agent output unchanged, and the point of the check below is to name that
-    # rather than let `re.sub` raise a TypeError from three frames down.
     def detect(text: object) -> GuardrailResult:
-        if not isinstance(text, str):
-            raise UserError(
-                f'A text detector received {type(text).__name__}, which it cannot scan. An OutputGuardrail '
-                'hands the guard the agent output unchanged, so wrap the detector in for_text() to say '
-                'what should happen when that output is not text.'
-            )
+        text = _require_text(text)
         cleaned = text
         for name, pattern, valid in compiled:
             substitution = placeholder.replace('{name}', name)
@@ -336,7 +345,8 @@ def blocked_keywords(
     if not compiled:
         raise UserError('blocked_keywords() was given no keywords, so it would never match anything.')
 
-    def detect(text: str) -> GuardrailResult:
+    def detect(text: object) -> GuardrailResult:
+        text = _require_text(text)
         for pattern in compiled:
             match = pattern.search(text)
             if match:

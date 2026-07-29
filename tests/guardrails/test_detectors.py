@@ -466,10 +466,15 @@ class TestForText:
 
         assert result.output == Answer(text='ok')
 
-    def test_a_detector_used_without_for_text_says_so(self):
-        """`re.sub` would otherwise raise a TypeError three frames down that names nothing."""
+    @pytest.mark.parametrize(
+        'detector',
+        [redact_secrets, redact_personal_data, blocked_keywords(['internal-only'])],
+        ids=['secrets', 'personal_data', 'blocked_keywords'],
+    )
+    def test_a_detector_used_without_for_text_says_so(self, detector: TextDetector):
+        """`re` would otherwise raise a TypeError three frames down that names nothing to do about it."""
         with pytest.raises(UserError, match='wrap the detector in for_text'):
-            redact_secrets(42)  # type: ignore[arg-type]
+            detector(42)  # type: ignore[arg-type]
 
     def test_a_non_string_can_be_skipped_deliberately(self):
         assert for_text(redact_secrets, on_other='allow')(42).action == 'allow'
