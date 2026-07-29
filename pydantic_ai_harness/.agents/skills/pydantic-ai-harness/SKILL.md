@@ -47,6 +47,7 @@ APIs are subject to change between releases; breaking changes ship deprecation w
 | Capability | Module | Description |
 |---|---|---|
 | `CodeMode` | `pydantic_ai_harness.code_mode` (also top-level) | Wraps eligible tools into a single sandboxed `run_code` tool so the model orchestrates them in Python -- see [Code Mode](./references/CODE-MODE.md) |
+| `BelgieSandbox` | `pydantic_ai_harness.belgie_sandbox` | Adds a restricted embedded-Deno `run_typescript` tool without hiding other agent tools; requires the `belgie` extra and Python 3.12-3.14 |
 | `FileSystem` | `pydantic_ai_harness.filesystem` (also top-level) | Read, write, edit, and search files under a root directory, with traversal prevention |
 | `Shell` | `pydantic_ai_harness.shell` (also top-level) | Run commands in a subprocess with allowlists, a default denylist, timeouts, and env masking |
 | `ManagedPrompt` | `pydantic_ai_harness.logfire` (also top-level) | Back an agent's instructions with a Logfire-managed prompt |
@@ -77,6 +78,7 @@ Each capability declares its own extra. Code Mode needs the Monty sandbox:
 
 ```bash
 uv add "pydantic-ai-harness[codemode]"   # `code-mode` is also accepted as an alias
+uv add "pydantic-ai-harness[belgie]"      # BelgieSandbox; Python 3.12-3.14
 ```
 
 Requires Python 3.10+ and `pydantic-ai-slim>=2.18.0`.

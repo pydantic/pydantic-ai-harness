@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+import asyncio
+import sys
+from pathlib import Path
+
+import pytest
+
+from pydantic_ai_harness.belgie_sandbox import (
+    BelgieSandboxError,
+    BelgieSandboxExecutionError,
+    BelgieSandboxSession,
+    BelgieSandboxTimeoutError,
+    BelgieSandboxUnavailableError,
+)
+
+from .fake_belgie import BelgieJavaScriptError, FakeBelgie
+
+pytestmark = pytest.mark.anyio
+
+
+class TestBelgieSandboxSession:
+    async def test_default_session_is_restricted_and_temporary(self, fake_belgie: FakeBelgie) -> None:
+        session = BelgieSandboxSession()
+
+        async with session:
+            workspace = session.workspace
+            assert workspace is not None
+            assert workspace.exists()
+            assert session.is_open
+            assert await session.run_script('export default () => ({ ok: true })') == {'ok': True}
+
+            environment = fake_belgie.environments[0]
+            assert environment.dependencies is None
+            assert environment.options is not None
+            assert environment.options.allow_remote is False
+            assert environment.options.no_npm is True
+            assert environment.install_calls == 0
+
+            options = fake_belgie.runtimes[0].options
+            assert options is not None
+            assert options.max_old_generation_size_mb == 128
+            assert options.permissions is not None
+            assert options.permissions.kwargs == {'allow_read': [str(workspace)]}
+
+        assert not session.is_open
+        assert session.workspace is None
+        assert not workspace.exists()
+        assert fake_belgie.environments[0].exited
+        assert fake_belgie.runtimes[0].exited
+
+    async def test_package_network_and_rendering_are_explicit(self, fake_belgie: FakeBelgie) -> None:
+        session = BelgieSandboxSession(
+            allow_package_imports=True,
+            allow_network=True,
+            enable_rendering=True,
+            max_old_generation_size_mb=None,
+        )
+
+        async with session:
+            workspace = session.workspace
+            assert workspace is not None
+            environment = fake_belgie.environments[0]
+            assert environment.dependencies == {'@belgie/render': 'npm:@belgie/render'}
+            assert environment.options is not None
+            assert environment.options.allow_remote is True
+            assert environment.options.no_npm is False
+            assert environment.install_calls == 1
+
+            options = fake_belgie.runtimes[0].options
+            assert options is not None
+            assert options.max_old_generation_size_mb is None
+            assert options.permissions is not None
+            assert options.permissions.kwargs['allow_net'] == []
+            assert options.permissions.kwargs['allow_ffi'] == [str(workspace / 'node_modules')]
+            read_paths = options.permissions.kwargs['allow_read']
+            assert isinstance(read_paths, list)
+            assert str(workspace) in read_paths
+            assert options.permissions.kwargs['allow_sys'] == (
+                'homedir',
+                'uid',
+                'gid',
+                'cpus',
+                'osRelease',
+                'systemMemoryInfo',
+            )
+
+    async def test_package_imports_do_not_enable_runtime_network(self, fake_belgie: FakeBelgie) -> None:
+        async with BelgieSandboxSession(allow_package_imports=True):
+            options = fake_belgie.runtimes[0].options
+            assert options is not None
+            assert options.permissions is not None
+            assert 'allow_net' not in options.permissions.kwargs
+
+    async def test_custom_runtime_is_entered_and_has_no_workspace(self, fake_belgie: FakeBelgie) -> None:
+        runtime = fake_belgie.module.Runtime()  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+        session = BelgieSandboxSession(runtime=runtime)  # pyright: ignore[reportArgumentType]
+
+        async with session:
+            assert session.workspace is None
+            assert await session.run_script('export default () => 1') == {'ok': True}
+
+        assert runtime.entered
+        assert runtime.exited
+        assert fake_belgie.environments == []
+
+    async def test_rejects_double_enter(self, fake_belgie: FakeBelgie) -> None:
+        session = BelgieSandboxSession()
+        async with session:
+            with pytest.raises(BelgieSandboxError, match='already open'):
+                await session.__aenter__()
+
+    async def test_requires_asyncio(self, fake_belgie: FakeBelgie, monkeypatch: pytest.MonkeyPatch) -> None:
+        def no_loop() -> None:
+            raise RuntimeError('no loop')
+
+        monkeypatch.setattr(asyncio, 'get_running_loop', no_loop)
+        with pytest.raises(BelgieSandboxError, match='requires an asyncio'):
+            await BelgieSandboxSession().__aenter__()
+
+    async def test_missing_dependency_is_terminal(
+        self, fake_belgie: FakeBelgie, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(sys.modules, 'belgie', None)
+        with pytest.raises(BelgieSandboxUnavailableError, match='Python 3.12-3.14'):
+            await BelgieSandboxSession().__aenter__()
+
+    async def test_start_failure_cleans_up(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.start_error = RuntimeError('worker failed')
+        session = BelgieSandboxSession()
+
+        with pytest.raises(BelgieSandboxUnavailableError, match='worker failed'):
+            await session.__aenter__()
+
+        assert not session.is_open
+        assert session.workspace is None
+        assert fake_belgie.environments[0].exited
+
+    async def test_start_cancellation_is_preserved(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.start_error = asyncio.CancelledError()
+        session = BelgieSandboxSession()
+
+        with pytest.raises(asyncio.CancelledError):
+            await session.__aenter__()
+
+        assert session.workspace is None
+        assert fake_belgie.environments[0].exited
+
+    async def test_script_error_is_normalized(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.script_error = BelgieJavaScriptError('boom')
+        async with BelgieSandboxSession() as session:
+            with pytest.raises(BelgieSandboxExecutionError, match='execution failed'):
+                await session.run_script('throw new Error("boom")')
+
+    async def test_invalid_json_error_is_normalized(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.script_error = TypeError('BigInt is not JSON')
+        async with BelgieSandboxSession() as session:
+            with pytest.raises(BelgieSandboxExecutionError, match='invalid JSON'):
+                await session.run_script('export default () => 1n')
+
+    async def test_timeout_cancels_script(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.hang = True
+        async with BelgieSandboxSession() as session:
+            with pytest.raises(BelgieSandboxTimeoutError, match='0.01 seconds'):
+                await session.run_script('export default async () => await never', timeout=0.01)
+
+        assert fake_belgie.cancelled
+
+    async def test_caller_cancellation_is_preserved(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.hang = True
+        async with BelgieSandboxSession() as session:
+            task = asyncio.create_task(session.run_script('export default async () => await never'))
+            while not fake_belgie.scripts:
+                await asyncio.sleep(0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert fake_belgie.cancelled
+
+    async def test_rejects_calls_while_closed(self, fake_belgie: FakeBelgie) -> None:
+        session = BelgieSandboxSession()
+        with pytest.raises(BelgieSandboxError, match='not open'):
+            await session.run_script('export default () => 1')
+        await session.__aexit__(None, None, None)
+
+    @pytest.mark.parametrize(
+        ('kwargs', 'message'),
+        [
+            ({'allow_package_imports': 1}, 'allow_package_imports must be a bool'),
+            ({'allow_network': 1}, 'allow_network must be a bool'),
+            ({'enable_rendering': 1}, 'enable_rendering must be a bool'),
+            ({'max_old_generation_size_mb': 0}, 'must be a positive integer or None'),
+        ],
+    )
+    async def test_rejects_invalid_configuration(
+        self, fake_belgie: FakeBelgie, kwargs: dict[str, object], message: str
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            BelgieSandboxSession(**kwargs)  # pyright: ignore[reportArgumentType]
+
+    async def test_runtime_rejects_owned_settings(self, fake_belgie: FakeBelgie) -> None:
+        runtime = fake_belgie.module.Runtime()  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+        with pytest.raises(ValueError, match='cannot be combined with `runtime`'):
+            BelgieSandboxSession(runtime=runtime, allow_network=True)  # pyright: ignore[reportArgumentType]
+
+    @pytest.mark.parametrize(
+        ('source', 'timeout', 'error_type', 'message'),
+        [
+            (1, 1.0, TypeError, 'source must be a string'),
+            ('code', 0, ValueError, 'timeout must be a positive finite number'),
+            ('code', True, ValueError, 'timeout must be a positive finite number'),
+        ],
+    )
+    async def test_validates_run_arguments(
+        self,
+        fake_belgie: FakeBelgie,
+        source: object,
+        timeout: object,
+        error_type: type[Exception],
+        message: str,
+    ) -> None:
+        async with BelgieSandboxSession() as session:
+            with pytest.raises(error_type, match=message):
+                await session.run_script(source, timeout=timeout)  # pyright: ignore[reportArgumentType]
+
+
+def test_public_session_workspace_type() -> None:
+    """Keep the public workspace contract concrete for callers."""
+    assert BelgieSandboxSession().workspace is None
+    assert Path is not None

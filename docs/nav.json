@@ -4,6 +4,7 @@
     "items": [
       { "label": "Overview", "slug": "index" },
       { "label": "Code Mode", "slug": "code-mode" },
+      { "label": "Belgie Sandbox", "slug": "belgie-sandbox" },
       { "label": "FileSystem", "slug": "filesystem" },
       { "label": "Shell", "slug": "shell" },
       { "label": "Repo Context", "slug": "repo-context" },

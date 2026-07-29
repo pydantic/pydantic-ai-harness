@@ -114,6 +114,7 @@ _CAPABILITY_DOC_PAGES = _capability_doc_pages()
 # or empty heading, fails instead of passing on a substring match.
 _CAPABILITY_PAGE_META = {
     'code-mode.md': ('code_mode', 'Code Mode'),
+    'belgie-sandbox.md': ('belgie_sandbox', 'Belgie Sandbox'),
     'skills.md': ('skills', 'Skills'),
     'filesystem.md': ('filesystem', 'FileSystem'),
     'shell.md': ('shell', 'Shell'),

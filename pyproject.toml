@@ -66,6 +66,9 @@ exa = [
 skills = [
     "pyyaml>=6.0.2",
 ]
+belgie = [
+    "belgie>=0.37.0 ; python_full_version >= '3.12' and python_full_version < '3.15'",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'
@@ -145,7 +148,10 @@ executionEnvironments = [
 [tool.pytest.ini_options]
 testpaths = ['tests']
 xfail_strict = true
-markers = ['modal_live: runs against a real Modal control plane; needs credentials']
+markers = [
+    'belgie_live: runs against the real embedded Belgie runtime',
+    'modal_live: runs against a real Modal control plane; needs credentials',
+]
 filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
