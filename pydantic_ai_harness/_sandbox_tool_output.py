@@ -1,7 +1,7 @@
-"""Presentation helpers for Modal sandbox file and command output.
+"""Presentation helpers for remote sandbox file and command output.
 
-Pure formatting stays separate from the Modal I/O layer so output behavior can be
-tested without provisioning a sandbox.
+Pure formatting stays separate from provider I/O so output behavior can be tested
+without provisioning a sandbox.
 
 `read_file`-style tools want `render_file_window` (line-addressable, head-first, with a
 continuation offset). Free-form command output wants `truncate_output` (tail-first, so
@@ -55,10 +55,10 @@ def _tail_bytes(line: str, max_bytes: int) -> str:
 def guard_read_size(size_bytes: int, *, max_bytes: int) -> None:
     """Refuse to read a file larger than `max_bytes`, pointing the model at shell tools.
 
-    A `read_file`-style tool loads the whole file before windowing it, so an oversized
-    file would transfer and decode in full just to return a small slice. This is provider
-    agnostic: the caller supplies the size (however its backend reports it) and the policy
-    lives here so every backend refuses the same way.
+    A `read_file`-style tool should not transfer or decode an oversized file just to
+    return a small slice. This is provider agnostic: the caller supplies the size
+    (however its backend reports it) and the policy lives here so every backend refuses
+    the same way. Providers should still bound the actual read to handle a growth race.
 
     Raises:
         ModelRetry: if the file is too large, telling the model to read part of it instead.
