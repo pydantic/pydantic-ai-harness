@@ -79,24 +79,26 @@ DEFAULT_SECRET_PATTERNS: Mapping[str, str] = {
     'google_api_key': r'\bAIza[A-Za-z0-9_-]{35}',
     'google_oauth_secret': r'\bGOCSPX-[A-Za-z0-9_-]{20,}',
     'jwt': r'\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}',
-    # A complete PEM block. The newline after the header is required so prose
-    # naming both markers in one sentence is not swallowed as a key. The
-    # optional header lines are RFC 1421 fields (`Proc-Type`, `DEK-Info`),
+    # A PEM block, terminated or not. The newline after the header is required
+    # so prose naming both markers in one sentence is not swallowed as a key.
+    # The optional header lines are RFC 1421 fields (`Proc-Type`, `DEK-Info`),
     # which an encrypted key carries and whose `:` and `,` the body class stops
-    # at, leaving the whole key to the pattern below.
+    # at.
+    #
+    # The two tails share one name rather than sitting under two, because
+    # `only` selects by name: a caller narrowing to private keys would pick the
+    # terminated shape, and a key pasted without its END marker -- the usual way
+    # one reaches a chat window -- would then pass through unredacted under a
+    # setting that says it is covered. Alternation is ordered, so a complete
+    # block is claimed by the first tail and the second is reached only when no
+    # END marker follows. That tail stops at the first line that is not body,
+    # since running to the end of the input would delete whatever the user wrote
+    # after the key.
     'private_key': (
         rf'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----[ \t]*{_NEWLINE}'
         rf'(?:[A-Za-z-]+: [^\n]*{_NEWLINE})*'
-        rf'[A-Za-z0-9+/=\s\\]*?'
-        rf'-----END[^-\n]*PRIVATE KEY(?: BLOCK)?-----'
-    ),
-    # A block with no END marker: take the header and the base64 lines under it,
-    # and stop at the first line that is not body. Running to the end of the
-    # input instead would delete whatever the user wrote after it.
-    'private_key_body': (
-        rf'-----BEGIN[^-\n]*PRIVATE KEY(?: BLOCK)?-----[ \t]*{_NEWLINE}'
-        rf'(?:[A-Za-z-]+: [^\n]*{_NEWLINE})*\s*'
-        rf'(?:[A-Za-z0-9+/=]+(?:{_NEWLINE})?)+'
+        rf'(?:[A-Za-z0-9+/=\s\\]*?-----END[^-\n]*PRIVATE KEY(?: BLOCK)?-----'
+        rf'|\s*(?:[A-Za-z0-9+/=]+(?:{_NEWLINE})?)+)'
     ),
 }
 """Credential shapes worth redacting, in the order they are applied.

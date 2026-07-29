@@ -65,7 +65,6 @@ class TestSecretRedaction:
             'slack_app_token': 'xapp-1-A01B2C3D4E5-1234567890123-abcdef',
             'stripe_webhook_secret': 'whsec_abcdefghijklmnopqrstuvwx',
             'google_oauth_secret': 'GOCSPX-abcdefghijklmnopqrstuv',
-            'private_key_body': '-----BEGIN PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n',
             'anthropic_key': 'sk-ant-abcdefghijklmnopqrstuvwx',
             'aws_access_key': 'AKIAIOSFODNN7EXAMPLE',
             'github_token': 'ghp_abcdefghijklmnopqrstuvwxyz0123',
@@ -99,7 +98,14 @@ class TestSecretRedaction:
         """Running to the end of the input instead would delete whatever the user wrote after it."""
         result = redact_secrets('key:\n-----BEGIN PRIVATE KEY-----\nMIIEow\n\nAlso deploy to prod.')
 
-        assert result.replacement == 'key:\n[redacted:private_key_body]\nAlso deploy to prod.'
+        assert result.replacement == 'key:\n[redacted:private_key]\nAlso deploy to prod.'
+
+    def test_narrowing_to_private_key_still_covers_an_unterminated_one(self):
+        """`only` selects by name, so the two PEM shapes have to share one or a narrowed detector misses one."""
+        detector = secret_data(only=['aws_access_key', 'private_key'])
+        result = detector('-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAxyz\n\nrest of my message')
+
+        assert result.replacement == '[redacted:private_key]\nrest of my message'
 
     def test_an_encrypted_private_key_is_removed_whole(self):
         """Its RFC 1421 headers carry `:` and `,`, which the base64 body class stops at."""
@@ -125,7 +131,7 @@ class TestSecretRedaction:
             ),
             (
                 'k:\r\n-----BEGIN PRIVATE KEY-----\r\nMIIEowIBAAK\r\nabcdEFGH1234+/==\r\n\r\nAlso deploy.',
-                'k:\r\n[redacted:private_key_body]\r\nAlso deploy.',
+                'k:\r\n[redacted:private_key]\r\nAlso deploy.',
             ),
         ],
     )

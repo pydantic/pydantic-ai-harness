@@ -149,7 +149,7 @@ An AWS *secret* access key is deliberately absent from the defaults. It is forty
 
 `only=` selects patterns; it does not reorder them. The application order is part of each mapping's contract -- `iban` runs before `credit_card` so a spaced account number is not labelled a card -- and it holds whatever order you list.
 
-A private key is matched whether its line breaks are real newlines or the escaped `\n` a JSON service-account file or a `.env` line carries, which is how one usually reaches a chat window.
+A private key is matched whether its line breaks are real newlines or the escaped `\n` a JSON service-account file or a `.env` line carries, which is how one usually reaches a chat window. Terminated or not, it is one `private_key` pattern rather than two names, so `only=['private_key']` cannot select the complete block and leave a key pasted without its `END` marker unredacted.
 
 **What these do not do.** A regex finds a credential because credentials have a
 shape. It does not find a prompt injection, which is ordinary language, and it
