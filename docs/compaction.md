@@ -28,7 +28,7 @@ An agent that runs for many turns accumulates history: tool outputs, file reads,
 | `SummarizingCompaction` | one LLM call | Summarizes older messages into a structured summary, keeping the recent tail | Old context still matters but must be compressed; use behind the cheap tiers |
 | `TieredCompaction` | escalates | Runs cheap passes first, summarizes only if still over `target_tokens` | You want a sensible default: spend the expensive summary only when needed |
 | `WarnNearLimits` | zero-LLM | Injects an URGENT/CRITICAL warning as limits approach | You want the agent to wrap up rather than have its history rewritten |
-| `ContextUsageMonitor` | zero-LLM | Reports context usage to your application; never edits history | You want a live context gauge in a UI |
+| `ReportContextUsage` | zero-LLM | Reports context usage to your application; never edits history | You want a live context gauge in a UI |
 
 ## Triggers
 
@@ -105,19 +105,19 @@ instructions, once. It is a ~4-characters-per-token approximation, not a tokeniz
 `tokenizer=` to any strategy to measure with the real one. `FilePart` is not counted -- its
 payload is binary, and its length in characters would mean nothing.
 
-## Reporting usage: `ContextUsageMonitor`
+## Reporting usage: `ReportContextUsage`
 
-A strategy knows when to act but says nothing about how close the run is to the limit, so an application that wants to show `context: 73%` ends up re-counting the history and guessing the denominator. `ContextUsageMonitor` does neither -- it reuses the same estimator and the same resolved window, and only observes:
+A strategy knows when to act but says nothing about how close the run is to the limit, so an application that wants to show `context: 73%` ends up re-counting the history and guessing the denominator. `ReportContextUsage` does neither -- it reuses the same estimator and the same resolved window, and only observes:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import ContextUsageMonitor, SummarizingCompaction
+from pydantic_ai_harness.compaction import ReportContextUsage, SummarizingCompaction
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
     capabilities=[
         SummarizingCompaction(max_fraction=0.9, keep_messages=20),
-        ContextUsageMonitor(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
+        ReportContextUsage(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
     ],
 )
 ```

@@ -1,4 +1,4 @@
-"""`ContextUsageMonitor` -- report how full the context is, for a host application."""
+"""`ReportContextUsage` -- report how full the context is, for a host application."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ class ContextUsage:
 
 
 @dataclass
-class ContextUsageMonitor(AbstractCapability[AgentDepsT]):
+class ReportContextUsage(AbstractCapability[AgentDepsT]):
     """Report context usage to the application before each model request.
 
     A compaction strategy knows when to act but says nothing about how close the run is to
@@ -64,13 +64,13 @@ class ContextUsageMonitor(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_ai_harness.compaction import ContextUsageMonitor, SummarizingCompaction
+        from pydantic_ai_harness.compaction import ReportContextUsage, SummarizingCompaction
 
         agent = Agent(
             'anthropic:claude-sonnet-4-6',
             capabilities=[
                 SummarizingCompaction(max_fraction=0.9, keep_messages=20),
-                ContextUsageMonitor(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
+                ReportContextUsage(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
             ],
         )
         ```

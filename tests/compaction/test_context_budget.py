@@ -25,8 +25,8 @@ from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.compaction import (
     ClearToolResults,
     ContextUsage,
-    ContextUsageMonitor,
     DeduplicateFileReads,
+    ReportContextUsage,
     SlidingWindowCompaction,
     SummarizingCompaction,
     SupportsFocus,
@@ -490,10 +490,10 @@ class TestRequestModelIsTheOneResolved:
 
         assert '[WarnNearLimits]' in str(request_context.messages[-1])
 
-    async def test_context_usage_monitor(self, monkeypatch: pytest.MonkeyPatch):
-        self._windows(monkeypatch, '_context_usage', run=10_000_000, request=1_000)
+    async def test_report_context_usage(self, monkeypatch: pytest.MonkeyPatch):
+        self._windows(monkeypatch, '_report_context_usage', run=10_000_000, request=1_000)
         seen: list[ContextUsage] = []
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
 
         await monitor.before_model_request(_ctx(self.RUN), _request_context(_history(2), self.REQUEST))
 
@@ -730,11 +730,11 @@ class TestContextUsage:
         assert ContextUsage(used_tokens=250, window_tokens=1_000, resolved=True).fraction == 0.25
 
 
-class TestContextUsageMonitor:
+class TestReportContextUsage:
     async def test_reports_before_each_request(self, monkeypatch: pytest.MonkeyPatch):
-        _fixed_window(monkeypatch, '_context_usage', 1_000)
+        _fixed_window(monkeypatch, '_report_context_usage', 1_000)
         seen: list[ContextUsage] = []
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
 
         request_context = _request_context(_history(2))
         assert await monitor.before_model_request(_ctx(), request_context) is request_context
@@ -745,8 +745,8 @@ class TestContextUsageMonitor:
         assert seen[0].resolved is True
 
     async def test_never_edits_the_history(self, monkeypatch: pytest.MonkeyPatch):
-        _fixed_window(monkeypatch, '_context_usage', 1_000)
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=lambda _: None)
+        _fixed_window(monkeypatch, '_report_context_usage', 1_000)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=lambda _: None)
         messages = _history(3)
         request_context = _request_context(messages)
 
@@ -755,13 +755,13 @@ class TestContextUsageMonitor:
         assert request_context.messages == messages
 
     async def test_an_async_callback_is_awaited(self, monkeypatch: pytest.MonkeyPatch):
-        _fixed_window(monkeypatch, '_context_usage', 1_000)
+        _fixed_window(monkeypatch, '_report_context_usage', 1_000)
         seen: list[ContextUsage] = []
 
         async def record(usage: ContextUsage) -> None:
             seen.append(usage)
 
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=record)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=record)
 
         await monitor.before_model_request(_ctx(), _request_context(_history(2)))
 
@@ -771,27 +771,27 @@ class TestContextUsageMonitor:
         def _explode(_model: Any) -> int | None:  # pragma: no cover -- must not be called
             raise AssertionError('an explicit window must not consult the registry')
 
-        monkeypatch.setattr('pydantic_ai_harness.compaction._context_usage.resolve_context_window', _explode)
+        monkeypatch.setattr('pydantic_ai_harness.compaction._report_context_usage.resolve_context_window', _explode)
         seen: list[ContextUsage] = []
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append, context_window=4_242)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append, context_window=4_242)
 
         await monitor.before_model_request(_ctx(), _request_context(_history(2)))
 
         assert (seen[0].window_tokens, seen[0].resolved) == (4_242, True)
 
     async def test_falls_back_for_an_unknown_model(self, monkeypatch: pytest.MonkeyPatch):
-        _fixed_window(monkeypatch, '_context_usage', None)
+        _fixed_window(monkeypatch, '_report_context_usage', None)
         seen: list[ContextUsage] = []
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
 
         await monitor.before_model_request(_ctx(), _request_context(_history(2)))
 
         assert (seen[0].window_tokens, seen[0].resolved) == (DEFAULT_CONTEXT_WINDOW, False)
 
     async def test_custom_fallback(self, monkeypatch: pytest.MonkeyPatch):
-        _fixed_window(monkeypatch, '_context_usage', None)
+        _fixed_window(monkeypatch, '_report_context_usage', None)
         seen: list[ContextUsage] = []
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append, fallback_context_window=32_000)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append, fallback_context_window=32_000)
 
         await monitor.before_model_request(_ctx(), _request_context(_history(2)))
 
@@ -799,22 +799,22 @@ class TestContextUsageMonitor:
 
     async def test_each_request_resolves_independently(self, monkeypatch: pytest.MonkeyPatch):
         seen: list[ContextUsage] = []
-        monitor: ContextUsageMonitor[None] = ContextUsageMonitor(on_usage=seen.append)
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
 
-        _fixed_window(monkeypatch, '_context_usage', 1_000)
+        _fixed_window(monkeypatch, '_report_context_usage', 1_000)
         await monitor.before_model_request(_ctx(), _request_context(_history(2)))
-        _fixed_window(monkeypatch, '_context_usage', 2_000)
+        _fixed_window(monkeypatch, '_report_context_usage', 2_000)
         await monitor.before_model_request(_ctx(), _request_context(_history(2)))
 
         assert [reading.window_tokens for reading in seen] == [1_000, 2_000]
 
     def test_rejects_a_non_positive_window(self):
         with pytest.raises(ValueError, match='context_window must be positive'):
-            ContextUsageMonitor(on_usage=lambda _: None, context_window=0)
+            ReportContextUsage(on_usage=lambda _: None, context_window=0)
 
     def test_rejects_a_non_positive_fallback(self):
         with pytest.raises(ValueError, match='fallback_context_window must be positive'):
-            ContextUsageMonitor(on_usage=lambda _: None, fallback_context_window=0)
+            ReportContextUsage(on_usage=lambda _: None, fallback_context_window=0)
 
 
 # ---------------------------------------------------------------------------
@@ -1003,7 +1003,7 @@ class TestNewExports:
         import pydantic_ai_harness
         import pydantic_ai_harness.compaction as compaction
 
-        for name in ('ContextUsage', 'ContextUsageMonitor', 'compact_now', 'resolve_context_window'):
+        for name in ('ContextUsage', 'ReportContextUsage', 'compact_now', 'resolve_context_window'):
             assert hasattr(compaction, name)
             assert not hasattr(pydantic_ai_harness, name)
 
