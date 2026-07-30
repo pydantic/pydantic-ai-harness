@@ -708,6 +708,7 @@ class TestInjection:
             capabilities=[Memory(store=store, guidance='', heading='H' * 50, max_tokens=5)],
         ).run('go')
         assert captured[0].startswith('<memory>\n')
+        assert len(captured[0]) <= 20
         assert 'H' * 50 not in captured[0]
 
     async def test_composed_instances_render_distinct_headings(self) -> None:
@@ -727,9 +728,10 @@ class TestInjection:
                 Memory(store=store, agent_name='team', guidance='', heading='Team notes').prefix_tools('team'),
             ],
         ).run('go')
-        blocks = '\n'.join(captured[0])
-        assert '## Your notes' in blocks
-        assert '## Team notes' in blocks
+        blocks = captured[0]
+        assert len(blocks) == 2
+        assert any('## Your notes' in block and 'your fact' in block for block in blocks)
+        assert any('## Team notes' in block and 'team fact' in block for block in blocks)
 
     async def test_external_oversized_main_and_file_listing_are_backend_bounded(self) -> None:
         store = UnboundedListingStore()
@@ -835,11 +837,13 @@ class TestInjection:
 
         await Agent(
             FunctionModel(model),
-            capabilities=[Memory(store=store, guidance='Keep memory factual.', max_tokens=100)],
+            capabilities=[Memory(store=store, guidance='Keep memory factual.', heading='Team notes', max_tokens=100)],
         ).run('go')
 
         instructions, context = captured[0]
         assert context.startswith('<memory>\n')
+        assert '## Team notes' in instructions
+        assert '## Team notes' in context
         assert len(instructions) + len(context) <= 400
         tiny_guidance = Memory[None](max_tokens=1).get_instructions()
         assert isinstance(tiny_guidance, str)
@@ -1229,7 +1233,7 @@ class TestConfigurationAndSpecs:
         capability = Memory[None](InMemoryStore(), None, 'main', 'tenant')
         assert (capability.agent_name, capability.namespace) == ('main', 'tenant')
 
-    def test_spec_schema_and_custom_capability_loading(self) -> None:
+    async def test_spec_schema_and_custom_capability_loading(self) -> None:
         schema = AgentSpec.model_json_schema_with_capabilities([Memory])
         params = schema['$defs']['spec_params_Memory']
         assert params['additionalProperties'] is False
@@ -1251,10 +1255,25 @@ class TestConfigurationAndSpecs:
             'namespace',
         }
         agent = Agent.from_spec(
-            {'model': 'test', 'capabilities': [{'Memory': {'inject_memory': False}}]},
+            {
+                'model': 'test',
+                'capabilities': [
+                    {
+                        'Memory': {
+                            'agent_name': 'storage-id',
+                            'heading': 'Team notes',
+                            'inject_memory': False,
+                        }
+                    }
+                ],
+            },
             custom_capability_types=[Memory],
         )
-        assert isinstance(agent, Agent)
+        with agent.override(model=TestModel(call_tools=[])):
+            result = await agent.run('go')
+        instructions = _latest_instructions(result.all_messages())
+        assert '## Team notes' in instructions
+        assert 'storage-id' not in instructions
 
     def test_from_spec_backends_and_cross_backend_validation(self, tmp_path: Path) -> None:
         assert isinstance(Memory.from_spec().store, InMemoryStore)

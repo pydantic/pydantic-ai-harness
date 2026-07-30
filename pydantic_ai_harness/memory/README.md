@@ -44,6 +44,8 @@ The namespace is resolved by application code, not supplied to the tools. The mo
 
 Automatic injection is enabled by default. Trusted usage guidance remains in model instructions, while model-written memory is enclosed in `<memory>` delimiters in a user-role part on the current request. Together, the guidance, main notebook, and file listing share a finite `max_tokens` budget, estimated at four characters per token. The default is 2,000 approximate tokens. `max_lines` is an additional limit on the main notebook. Backend reads are limited by `max_memory_size`, and the number of requested paths is derived from the prompt budget, so the capability never requests an unbounded file or listing. Content that does not fit is omitted with a prompt directing the model to use `read_memory` or `search_memory`.
 
+When `heading` is set, the same `## {heading}` labels both the trusted guidance and the user-role memory block.
+
 ```python
 from pydantic_ai_harness.memory import FileStore, Memory
 
@@ -180,7 +182,7 @@ Memory(
     FileStore('.agent-memory'),
     store_resolver=None,               # optional per-run store resolver
     agent_name='main',                 # storage segment inside the namespace; never shown to the model
-    heading='',                        # optional `## {heading}` on the injected block; set to distinguish blocks
+    heading='',                        # optional heading on guidance and injected content
     namespace='',                      # string or per-run resolver
     inject_memory=True,                # False keeps prompts cache-stable
     max_tokens=2_000,                  # finite approximate total injection budget

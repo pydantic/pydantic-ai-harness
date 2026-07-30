@@ -65,11 +65,11 @@ class Memory(AbstractCapability[AgentDepsT]):
     key only; never rendered into the model-facing memory block."""
 
     heading: str = field(default='', kw_only=True)
-    """Markdown heading for the injected memory block, rendered as `## {heading}`
-    when set. The default is empty: the block already sits inside `<memory>`
-    markers, so none is added. Set a distinct value per instance when several
-    `Memory` capabilities share one agent (for example `heading='Team notes'`)
-    so the model can tell the blocks apart."""
+    """Markdown heading for rendered guidance and the injected memory block,
+    rendered as `## {heading}` when set. The default is empty: the block already
+    sits inside `<memory>` markers, so none is added. Set a distinct value per
+    instance when several `Memory` capabilities share one agent (for example
+    `heading='Team notes'`) so the model can tell the blocks apart."""
 
     namespace: str | Callable[[RunContext[AgentDepsT]], str] = ''
     """Static or per-run tenant namespace, never exposed as a tool argument."""
