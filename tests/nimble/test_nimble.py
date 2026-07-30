@@ -456,6 +456,25 @@ class TestErrorsAndConfig:
             NimbleSearch(max_text_chars=0)
         with pytest.raises(ValueError, match='include_domains or exclude_domains'):
             NimbleSearch(include_domains=['a.com'], exclude_domains=['b.com'])
+        with pytest.raises(ValueError, match='sequence of strings'):
+            NimbleSearch(include_domains='example.com')  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match='sequence of strings'):
+            NimbleSearch(exclude_domains='example.com')  # type: ignore[arg-type]
+
+    async def test_release_keeps_client_if_close_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class _BoomClient(_FakeNimbleClient):
+            async def close(self) -> None:
+                raise RuntimeError('close failed')
+
+        boom = _BoomClient()
+        from pydantic_ai_harness.nimble._toolset import _OwnedClientLifecycle
+
+        lifecycle = _OwnedClientLifecycle(explicit_client=None)
+        lifecycle._owned_client = boom  # pyright: ignore[reportPrivateUsage]
+        lifecycle._active_runs = 1  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(RuntimeError, match='close failed'):
+            await lifecycle.release_after_run()
+        assert lifecycle._owned_client is boom  # pyright: ignore[reportPrivateUsage]
 
     def test_from_spec_and_instructions(self) -> None:
         cap = NimbleSearch.from_spec(include_map=True, include_crawl=True)

@@ -158,9 +158,8 @@ class _OwnedClientLifecycle:  # pyright: ignore[reportUnusedClass]
             if self._active_runs > 0:
                 self._active_runs -= 1
             if self._active_runs == 0 and self._owned_client is not None:
-                owned = self._owned_client
+                await _aclose_client(self._owned_client)
                 self._owned_client = None
-                await _aclose_client(owned)
 
 
 def _page_return_text(url: str, markdown: str, max_text_chars: int) -> str:

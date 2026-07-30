@@ -116,6 +116,8 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
             )
         if self.search_depth not in ('lite', 'fast', 'deep'):
             raise ValueError(f'search_depth must be lite, fast, or deep, got {self.search_depth!r}')
+        if isinstance(self.include_domains, str) or isinstance(self.exclude_domains, str):
+            raise ValueError('include_domains and exclude_domains must be a sequence of strings, not a single str')
         if self.include_domains and self.exclude_domains:
             raise ValueError('Specify include_domains or exclude_domains, not both.')
         self._client_lifecycle = _OwnedClientLifecycle(explicit_client=self.client)
