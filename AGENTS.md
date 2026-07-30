@@ -117,9 +117,9 @@ Applies to docs, READMEs, docstrings, comments, commit messages, and PR text.
 
 ## Package management
 
-- Use `uv` for all dependency operations
-- Never edit `pyproject.toml` or `uv.lock` directly -- use `uv add`, `uv remove`
-- External PRs that change dependencies are auto-closed by CI
+- Change dependencies only when required. Use `uv` and link an issue.
+- PRs touching `pyproject.toml` or `uv.lock` require the
+  `dependencies:approved` label; pushes clear approval.
 
 ## Commands
 
@@ -172,7 +172,21 @@ need.
 
 ## Contributing rules for AICAs
 
-- Never change `pyproject.toml` or `uv.lock` -- if a dependency is needed, open an issue
 - Always link sources for any claims made during research
 - Run `make lint && make typecheck && make test` before every commit
 - Commit messages should summarize the "why", not the "what"
+
+## Pushing changes
+
+**A restriction is a conclusion you earn from a real failure, not a field you read.** Never report an
+operation as blocked, unavailable, or not-permitted based on a metadata flag, a config field, or a
+docs claim — attempt it and quote the actual error. (`maintainerCanModify: false` on a PR does *not*
+mean you cannot push: it governs the upstream-maintainer auto-grant, not your own access to the
+fork.) If you genuinely cannot attempt it, say "not attempted", never "we can't".
+
+**Pushing is not the end of the task.** After you push, do not go idle. The work is done when
+**CI is green and there are no unresolved comments** — see the `pushing-commits-to-the-repo` skill
+for the full loop.
+
+**Do not leave work uncommitted.** Don't end a turn with unstaged or uncommitted local changes
+unless the user's own instructions say otherwise.

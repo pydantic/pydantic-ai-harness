@@ -33,7 +33,9 @@ uv add "pydantic-ai-harness[logfire]"           # ManagedPrompt (Logfire-managed
 uv add "pydantic-ai-harness[exa]"               # ExaSearch + ExaAgent (web research via the Exa API)
 uv add "pydantic-ai-harness[skills]"            # Skills (loads SKILL.md frontmatter)
 uv add "pydantic-ai-harness[browser-use]"       # BrowserUse (autonomous web tasks via browser-use; Python 3.11+)
+uv add "pydantic-ai-harness[stackone]"          # StackOne (actions on linked business applications)
 uv add "pydantic-ai-harness[acp]"               # ACP (serve an agent to editors over the Agent Client Protocol)
+uv add "pydantic-ai-harness[mongodb]"           # MongoDB backends for step persistence + media externalization (adds pymongo)
 ```
 
 The `code-mode` extra is also supported as an alias.
@@ -138,7 +140,7 @@ It composes with the rest of the harness:
 
 `DynamicWorkflow`'s API is subject to change while planned extensions (structured sub-agent inputs, durable workflows) settle the call contract. Breaking changes ship deprecation warnings where practical.
 
-[Full tutorial →](pydantic_ai_harness/dynamic_workflow/)
+[Full tutorial ->](pydantic_ai_harness/dynamic_workflow/)
 
 ## Capability matrix
 
@@ -158,6 +160,7 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | | **Docs lookup** | On-demand `read_pyai_docs` tool for Pydantic AI docs | :white_check_mark: [Docs](pydantic_ai_harness/pydantic_ai_docs/) | |
 | | **Web research** | Web search returning relevant page excerpts, full single-page retrieval, and opt-in deep search with cited answers, backed by [Exa](https://exa.ai) | :white_check_mark: [Docs](pydantic_ai_harness/exa/) | |
 | | **Hosted research agent** | Delegate open-ended research to the [Exa](https://exa.ai) Agent API as deferred tool calls -- resolved inline or by the host application | :white_check_mark: [Docs](pydantic_ai_harness/exa/) | |
+| | **StackOne** | Actions on the user's SaaS accounts (HRIS, ATS, CRM, and more) via [StackOne](https://www.stackone.com) -- account scoping, action filtering, and a search/execute mode for large catalogs | :white_check_mark: [Docs](pydantic_ai_harness/stackone/) | |
 | | **Autonomous browser agent** | Delegate open-ended web tasks to a [browser-use](https://github.com/browser-use/browser-use) agent that drives a real browser with its own perception-action loop | :white_check_mark: [Docs](pydantic_ai_harness/browser_use/) | |
 | | **Verification loop** | Require fresh verification evidence (tests, checks) before a run can finish | :construction: [PR&nbsp;#355](https://github.com/pydantic/pydantic-ai-harness/pull/355) | |
 | | **Code review** | Run a local [Macroscope](https://docs.macroscope.com/cli) review (`macroscope codereview`) and hand findings to the agent | :white_check_mark: [Docs](pydantic_ai_harness/macroscope/) | |
@@ -172,12 +175,13 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | **Memory &&nbsp;persistence** | **Memory** | Persistent, namespaced notebook with bounded prompt injection, on-demand search, and concurrency-safe stores | :white_check_mark: [Docs](pydantic_ai_harness/memory/) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Session persistence** | Save and restore full conversation state | :white_check_mark: [Docs](pydantic_ai_harness/step_persistence/) | |
 | | **Checkpointing** | Snapshot, resume (`continue_run`), and fork (`fork_run`) a run | :white_check_mark: [Docs](pydantic_ai_harness/step_persistence/) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
-| | **Media externalization** | Offload large `BinaryContent` to content-addressed stores (building blocks) | :white_check_mark: [Docs](pydantic_ai_harness/media/) | |
+| | **Media externalization** | Offload large `BinaryContent` and large text parts to content-addressed stores -- disk, SQLite, S3, MongoDB (building blocks) | :white_check_mark: [Docs](pydantic_ai_harness/media/) | |
+| | **Conversation search** | BM25-search the history `StepPersistence` stores -- turns compaction dropped and past runs -- with a dependency-free `search_conversation_history` tool | :white_check_mark: [Docs](pydantic_ai_harness/conversation_search/) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | **Agent orchestration** | **Sub-agents** | Delegate subtasks to specialized child agents | :white_check_mark: [Docs](pydantic_ai_harness/subagents/) | [subagents-pydantic-ai](https://github.com/vstorm-co/subagents-pydantic-ai) (vstorm&#8209;co) |
 | | **Dynamic workflow** | Orchestrate sub-agents from a model-written Python script -- fan-out, chaining, voting in one tool call | :white_check_mark: [Docs](pydantic_ai_harness/dynamic_workflow/) | |
 | | **Skills** | Load Agent Skill instructions as on-demand capabilities | :white_check_mark: [Docs](pydantic_ai_harness/skills/) | [pydantic-ai-skills](https://github.com/DougTrajano/pydantic-ai-skills) (DougTrajano), [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Planning** | Break complex tasks into structured plans before execution | :white_check_mark: [Docs](pydantic_ai_harness/planning/) | |
-| | **Capability creation** | Let an agent author, validate, and load real capabilities at runtime | :white_check_mark: [Docs](pydantic_ai_harness/capability_creation/) | |
+| | **Runtime capability creation** | Let an agent create, validate, and persist Pydantic AI capabilities during one run for the orchestrator to load on the next run | :white_check_mark: [Docs](pydantic_ai_harness/capability_creation/) | |
 | | **Task tracking** | Track tasks, subtasks, and dependencies | :construction: [PR&nbsp;#404](https://github.com/pydantic/pydantic-ai-harness/pull/404) | [pydantic-ai-todo](https://github.com/vstorm-co/pydantic-ai-todo) (vstorm&#8209;co) |
 | **Safety &&nbsp;guardrails** | **Input guardrails** | Validate user input before the agent run starts | :white_check_mark: [Docs](pydantic_ai_harness/guardrails/) | [pydantic-ai-shields](https://github.com/vstorm-co/pydantic-ai-shields) (vstorm&#8209;co) |
 | | **Output guardrails** | Validate model output after the run completes | :white_check_mark: [Docs](pydantic_ai_harness/guardrails/) | [pydantic-ai-shields](https://github.com/vstorm-co/pydantic-ai-shields) (vstorm&#8209;co) |

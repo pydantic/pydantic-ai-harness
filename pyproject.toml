@@ -63,11 +63,17 @@ acp = [
 exa = [
     "exa-py>=2.16.0",
 ]
+mongodb = [
+    "pymongo>=4.17.0",
+]
 skills = [
     "pyyaml>=6.0.2",
 ]
 browser-use = [
     "browser-use>=0.13.6 ; python_full_version >= '3.11'",
+]
+stackone = [
+    "pydantic-ai-slim[mcp]>=2.18.0",
 ]
 
 [project.urls]
@@ -92,6 +98,7 @@ dev = [
     "pydantic-ai-slim[spec]>=2.18.0",
     "pytest-examples>=0.0.18",
     "pytest-recording>=0.13.4",
+    "mongomock-motor>=0.0.36",
 ]
 lint = [
     'ruff>=0.14',

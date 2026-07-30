@@ -114,8 +114,6 @@ warnings where practical.
 - Avoid `Any` in new public signatures.
 - Avoid casts. Fix the type shape instead.
 - Keep defaults conservative and easy to explain.
-- Do not add package dependencies without a clear issue and package-manager
-  command.
 - New remote-execution capabilities cap tool output with
   `max_output_bytes` / `max_output_lines` (the `modal_sandbox` names), not a new
   spelling. The released `max_output_chars` (shell) and `max_read_lines`
@@ -123,6 +121,26 @@ warnings where practical.
 - Line offsets in model-facing file tools are 1-indexed, matching `grep -n`,
   editors, and stack traces (`modal_sandbox` is the reference; `filesystem` is
   0-based pending migration).
+
+### Policy Lives In The Pluggable Component
+
+When a capability takes a dependency behind a `Protocol` -- `PlanStore`,
+`MemoryStore`, a client, a sandbox -- retry, fallback and degradation policy
+belongs to the implementation of that protocol, not to fields on the capability.
+
+The capability's job is to state what it does when the dependency fails, and to
+keep the protocol small enough to wrap. A caller who wants
+degraded-but-alive behavior writes a wrapping implementation; that is what the
+protocol is for. The alternative is a capability that grows one `on_x_error=`
+field per dependency and ends up owning behavior it cannot test end to end.
+
+Worked example: `planning`'s tail reminder reads its `PlanStore` on every model
+request, so a store that raises fails the run. `Planning` has no error-handling
+knob; the README documents the behavior and sketches a wrapping store instead.
+
+This is the same boundary as `core-boundary.md`, one level down: there, harness
+does not reimplement core semantics; here, a capability does not reimplement its
+dependency's operational policy.
 
 ## Composition Checks
 
