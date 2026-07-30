@@ -1842,8 +1842,10 @@ class TestCodeMode:
         await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
         with monkeypatch.context() as patcher:
             patcher.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _fail)
-            with pytest.raises(ModelRetry, match='session was reset'):
+            with pytest.raises(ModelRetry, match='session was reset') as exc_info:
                 await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
+        # The retry message is the only record of the host-side error, so it must name it.
+        assert 'RuntimeError: invalid exception payload' in str(exc_info.value)
         with pytest.raises(ModelRetry, match='Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
 
