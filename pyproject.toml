@@ -29,16 +29,16 @@ classifiers = [
 ]
 dependencies = [
     "httpx>=0.28.1",
-    "pydantic-ai-slim>=2.14.1",
+    "pydantic-ai-slim>=2.18.0",
 ]
 
 [project.optional-dependencies]
 code-mode = [
-    'pydantic-monty>=0.0.16',
+    "pydantic-monty>=0.0.19",
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 codemode = [
-    'pydantic-monty>=0.0.16',
+    "pydantic-monty>=0.0.19",
 ]
 temporal = [
     'pydantic-ai-slim[temporal]',
@@ -48,13 +48,13 @@ dbos = [
 ]
 logfire = [
     'logfire>=4.31.0',
-    "pydantic-ai-slim[spec]>=2.14.1",
+    "pydantic-ai-slim[spec]>=2.18.0",
 ]
 modal = [
     "modal>=1.5.0",
 ]
 dynamic-workflow = [
-    "pydantic-monty>=0.0.16",
+    "pydantic-monty>=0.0.19",
 ]
 acp = [
     # The SDK breaks across minors, so cap per minor.
@@ -62,6 +62,15 @@ acp = [
 ]
 exa = [
     "exa-py>=2.16.0",
+]
+mongodb = [
+    "pymongo>=4.17.0",
+]
+skills = [
+    "pyyaml>=6.0.2",
+]
+stackone = [
+    "pydantic-ai-slim[mcp]>=2.18.0",
 ]
 
 [project.urls]
@@ -83,9 +92,10 @@ dev = [
     'logfire[httpx]>=4.31.0',
     'dirty-equals>=0.9.0',
     'inline-snapshot>=0.32.5',
-    "pydantic-ai-slim[spec]>=2.14.1",
+    "pydantic-ai-slim[spec]>=2.18.0",
     "pytest-examples>=0.0.18",
     "pytest-recording>=0.13.4",
+    "mongomock-motor>=0.0.36",
 ]
 lint = [
     'ruff>=0.14',

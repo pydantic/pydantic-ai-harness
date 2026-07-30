@@ -1,0 +1,106 @@
+name: Dependency approval
+
+on:
+  pull_request_target: # zizmor: ignore[dangerous-triggers] -- Base-owned workflow; no checkout or pull-request code execution.
+    branches: [main]
+    types: [opened, reopened, synchronize, edited, labeled, unlabeled]
+
+permissions:
+  issues: write
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: dependency-approval-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: evaluate dependency approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # This workflow runs from the base branch. Do not check out or execute
+      # pull-request code here.
+      - name: Require maintainer approval for dependency files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ACTION: ${{ github.event.action }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # Revoking is `approved=false`; dropping the label is only cleanup, so a
+          # failure there must not abort the step before the status is posted.
+          revoke_approval() {
+            if ! gh api \
+              --method DELETE \
+              "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/dependencies%3Aapproved"
+            then
+              echo "::warning::Could not remove the dependencies:approved label. Approval is still revoked for this head."
+            fi
+            approved=false
+          }
+
+          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+          files="$(
+            gh api \
+              --paginate \
+              --slurp \
+              "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100"
+          )"
+          expected="$(jq -r '.changed_files' <<<"$pr")"
+          found="$(jq -r 'flatten | length' <<<"$files")"
+          changed="$(jq -r '
+            flatten |
+            any(
+              .filename == "pyproject.toml" or
+              .filename == "uv.lock" or
+              .previous_filename == "pyproject.toml" or
+              .previous_filename == "uv.lock"
+            )
+          ' <<<"$files")"
+          approved="$(jq -r '
+            .labels | any(.name == "dependencies:approved")
+          ' <<<"$pr")"
+
+          if [ "$ACTION" = synchronize ] && [ "$approved" = true ]; then
+            revoke_approval
+          elif [ "$ACTION" = labeled ] && [ "$LABEL_NAME" = dependencies:approved ]; then
+            permission="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/collaborators/$GITHUB_ACTOR/permission" \
+                --jq '.permission'
+            )"
+            if [[ ! "$permission" =~ ^(admin|maintain|write)$ ]]; then
+              revoke_approval
+            fi
+          fi
+
+          if [ "$found" -ne "$expected" ]; then
+            state=error
+            description='Could not inspect every changed file.'
+            error='The changed-file list was incomplete.'
+          elif [ "$changed" = false ]; then
+            state=success
+            description='No dependency files changed.'
+          elif [ "$approved" = true ]; then
+            state=success
+            description='Dependency changes approved by a maintainer.'
+          else
+            state=failure
+            description='Maintainer must add dependencies:approved.'
+            error='A maintainer must add dependencies:approved because this PR changes pyproject.toml or uv.lock.'
+          fi
+
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/statuses/$HEAD_SHA" \
+            -f state="$state" \
+            -f context='dependency approval' \
+            -f description="$description"
+
+          if [ "$state" != success ]; then
+            echo "::error::$error"
+            exit 1
+          fi

@@ -18,7 +18,9 @@ Use this before opening a PR or reviewing a capability change.
 - The implementation uses Pydantic AI hooks/toolsets instead of duplicating core
   runtime behavior.
 - Capability ordering is justified when present.
-- Dependency changes were made through `uv` and have a clear reason.
+- Dependency changes are required, linked to an issue, and made through `uv`;
+  every PR touching `pyproject.toml` or `uv.lock` carries
+  `dependencies:approved` for the current head.
 - A capability that adds heavy CI machinery (a Docker image, an external service
   with a secret, a large system binary, live network calls) scopes its expensive
   job to its own paths and keeps the aggregate check green when that job is
@@ -77,6 +79,10 @@ well before now, or that was built against unreleased Pydantic AI changes.
 - Tests cover the public `Agent(..., capabilities=[...])` path where possible.
 - Lower-level tests cover lifecycle, schemas, retries, and metadata when needed.
 - Error paths and important option combinations are covered.
+- For a stateful capability, or one that overrides `for_run`, require a public
+  `Agent` durability-composition test for every supported wrapper or an
+  explicit, tested incompatibility. Mocked lifecycle tests alone do not
+  establish state continuity across activity, process, or replay boundaries.
 - Relevant protocol-shaped output is snapshotted.
 - `make lint`, `make typecheck`, and `make test` pass before handoff.
 
@@ -109,7 +115,7 @@ Checks:
   purpose. Mechanism belongs lower down.
 - **Name matches the capability.** The doc filename, its `# H1`, and the
   README's `# H1` all use the capability's descriptive name (e.g.
-  "Overflowing Tool Output", not "Overflow"; "Runtime Authoring", not
+  "Tool Output Limits", not "Overflow"; "Runtime Capability Creation", not
   "Authoring").
 - **Source link.** Each page links its source module
   (`https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/<module>/`)
