@@ -1,4 +1,4 @@
-# Compaction capabilities
+# Compaction
 
 > [!NOTE]
 > Import these capabilities from their submodule -- there is no top-level `pydantic_ai_harness` re-export:
@@ -10,24 +10,26 @@
 > The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
 
 A menu of strategies for keeping an agent's conversation history within a model's context
-window. Each is a Pydantic AI `Capability` that runs in the `before_model_request` hook; edits
-**persist** into the run's message history, so a trim/clear/summary carries forward to later
+window. Each is a Pydantic AI `Capability` that edits the message history just before each
+request goes out; edits **persist** into the run's message history, so a trim/clear/summary carries forward to later
 steps (it is not recomputed from the full history every turn).
 
 All strategies preserve tool-call / tool-return **pairing** -- core does not validate this, and a
 provider rejects an orphaned pair. The zero-LLM strategies never call a model.
+
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/compaction/)
 
 ## The menu
 
 | Capability | Cost | What it does | Reach for it when |
 |---|---|---|---|
 | `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
-| `SlidingWindow` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
+| `SlidingWindowCompaction` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
 | `ClearToolResults` | zero-LLM | Blanks the content of old tool *results* in place, keeping the last `keep_pairs` | Tool outputs dominate context and can be re-fetched on demand (the cheap first tier) |
 | `DeduplicateFileReads` | zero-LLM | Blanks every file read superseded by a newer read of the same file | The agent re-reads files and only the latest version matters |
 | `SummarizingCompaction` | one LLM call | Summarizes older messages into a structured summary, keeping the recent tail | Old context still matters but must be compressed; use behind the cheap tiers |
-| `TieredCompaction` | escalates | Runs cheap passes first, summarizes only if still over `target_tokens` | You want the SOTA default: spend the expensive summary only when needed |
-| `LimitWarner` | zero-LLM | Injects an URGENT/CRITICAL warning as limits approach | You want the agent to wrap up rather than have its history rewritten |
+| `TieredCompaction` | escalates | Runs cheap passes first, summarizes only if still over `target_tokens` | You want a sensible default: spend the expensive summary only when needed |
+| `WarnNearLimits` | zero-LLM | Injects an URGENT/CRITICAL warning as limits approach | You want the agent to wrap up rather than have its history rewritten |
 
 ## Triggers
 
@@ -42,8 +44,8 @@ whole history -- the failure it targets is one oversized part, not a large total
 
 A single model response of repeated whitespace, or a single tool call with a giant payload, can
 produce one part so large the *next* request exceeds the provider's context cap. None of the other
-strategies can reach it: `SlidingWindow` drops the oldest messages but the offender is the newest;
-`ClearToolResults` only touches tool *results*; `LimitWarner` never edits history; and feeding the
+strategies can reach it: `SlidingWindowCompaction` drops the oldest messages but the offender is the newest;
+`ClearToolResults` only touches tool *results*; `WarnNearLimits` never edits history; and feeding the
 history to `SummarizingCompaction` hits the same cap.
 
 `ClampOversizedMessages` truncates the offending part in place, keeping a head slice and a tail slice
@@ -70,7 +72,10 @@ It clamps two kinds of part inside each `ModelResponse`:
   shape for a giant payload (e.g. a runaway `write_plan`). The args are replaced with a small JSON
   object `{"_clamped": "<head>...<tail>"}` so they stay valid function arguments; the original call
   already executed, so this only shrinks the history copy. Set `clamp_tool_call_args=False` to clamp
-  response text only.
+  response text only. Framework-typed call parts -- core's `search_tools` and `load_capability`
+  calls -- are never clamped, because their typed args are validated when persisted history is
+  restored (for example a `StepPersistence` resume) and the `_clamped` object would fail that
+  round-trip.
 
 Request-side parts (user prompts, tool *returns*, system prompts) are deliberately out of scope:
 user input should not be silently rewritten, and oversized tool returns are the job of
@@ -93,6 +98,25 @@ TieredCompaction(
     target_tokens=120_000,
 )
 ```
+
+## `SlidingWindowCompaction` and `ClearToolResults` options
+
+`SlidingWindowCompaction` keeps the last `keep_messages` down to a tail; pass `keep_tokens` instead for a token
+budget rather than a message count. By default `preserve_first_user_message=True` keeps the first user
+turn even when it falls outside the window, so the agent does not lose the original task.
+
+`ClearToolResults` keeps the last `keep_pairs` intact. Set `clear_tool_inputs=True` to also blank the
+arguments of the cleared calls, and `exclude_tools` to a set of tool names whose results are never
+cleared. Framework-typed tool results -- core's `search_tools` and `load_capability` returns -- are
+left intact (a small token floor), because their structured content is re-parsed on later requests and
+rewriting it via `dataclasses.replace` would bypass validation and corrupt the part.
+
+## `WarnNearLimits` thresholds
+
+Warnings begin at `warning_threshold` (default `0.7`, a fraction of the limit) and escalate to CRITICAL
+for iterations once the remaining request count drops to `critical_remaining_iterations` (default `3`).
+It watches `max_iterations`, `max_context_tokens`, and `max_total_tokens`, warning on whichever are
+configured; narrow that with `warn_on`.
 
 ## Cost: why summarization is the last resort
 
@@ -141,6 +165,11 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
 running agent's model. No token caps are imposed on the summary call.
 
+By default `incremental=True` extends an existing summary from a prior compaction rather than
+regenerating it from scratch, and `preserve_first_user_message=True` keeps the original task turn even
+when it falls outside the window. Pass `keep_tokens` to trim the retained tail to a token budget instead
+of `keep_messages`.
+
 ## Usage accounting
 
 The summary call is a real request to the model, so its full usage -- tokens **and** the request
@@ -180,7 +209,7 @@ to keep span cardinality low. Attributes:
 | Attribute | Type | Meaning |
 |---|---|---|
 | `gen_ai.conversation.compacted` | bool | Always `true`; the OpenTelemetry GenAI convention's flag for a compacted context |
-| `compaction.strategy` | str | Strategy class name (e.g. `SlidingWindow`, `SummarizingCompaction`) |
+| `compaction.strategy` | str | Strategy class name (e.g. `SlidingWindowCompaction`, `SummarizingCompaction`) |
 | `compaction.messages_before` | int | Message count before compaction |
 | `compaction.messages_after` | int | Message count after compaction |
 | `compaction.tokens_before` | int | Estimated token count before compaction |

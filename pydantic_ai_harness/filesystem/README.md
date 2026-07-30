@@ -2,6 +2,8 @@
 
 Give an agent sandboxed, pattern-filtered access to a directory tree.
 
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/filesystem/)
+
 ## The problem
 
 Letting an agent touch the filesystem directly is risky: path traversal
@@ -33,7 +35,7 @@ print(result.output)
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read a text file with line numbers and a content hash. Binary files are detected and not dumped. |
+| `read_file` | Read a text file with line numbers and a content hash. Binary files are detected and not dumped. Supports `offset`/`limit` paging. |
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement; `old_text` must match exactly once. Optional `expected_hash`. |
 | `multi_edit` | Ordered exact-string replacements applied to one file all-or-nothing: if any `old_string` is missing, nothing is written. Per-edit matching is first-occurrence (or every occurrence with `replace_all`). Optional `expected_hash`. |
@@ -67,7 +69,7 @@ need `**`.
 | `denied_patterns` | Matching paths are always rejected (denylist). |
 | `protected_patterns` | Matching paths are read-only -- reads succeed, writes are rejected. |
 
-`protected_patterns` defaults to `.git/`, `.env`/`.env.*`, `*.pem`, `*.key`,
+`protected_patterns` defaults to `.git/*`, `.env`/`.env.*`, `*.pem`, `*.key`,
 and `**/secrets*`. Pass an empty list to disable protection.
 
 ### Direct access vs. walkers
@@ -87,13 +89,20 @@ The three rules apply at two different granularities:
 So with `allowed_patterns=['*.py']`, `list_directory('.')` succeeds and shows
 only the `.py` entries; `read_file('notes.md')` is rejected.
 
-> Dotfiles and dot-directories (`.git`, `.env`, `.github`, …) are skipped by
+Note that the walkers filter entries with write-level access, so
+`protected_patterns` matches are omitted from `list_directory`, `search_files`,
+and `find_files` output even though those exact paths remain directly readable
+via `read_file`/`file_info`.
+
+> Dotfiles and dot-directories (`.git`, `.env`, `.github`, ...) are skipped by
 > all three walkers -- `list_directory`, `search_files`, and `find_files` --
 > regardless of patterns.
 
 ## Configuration
 
 ```python
+from pydantic_ai_harness import FileSystem
+
 FileSystem(
     root_dir='.',                  # str | Path -- sandbox root
     allowed_patterns=[],           # allowlist globs (empty = allow all)

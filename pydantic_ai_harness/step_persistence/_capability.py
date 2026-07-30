@@ -7,21 +7,22 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from pydantic_ai import CallToolsNode
+from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
-from pydantic_ai.messages import ModelResponse, ToolCallPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 
-from pydantic_ai_harness.step_persistence._context import current_run_id, snapshot_saved
+from pydantic_ai_harness.step_persistence._context import current_run_id, live_run_history, snapshot_saved
 from pydantic_ai_harness.step_persistence._helpers import is_provider_valid
 from pydantic_ai_harness.step_persistence._store import InMemoryStepStore, StepStore
 from pydantic_ai_harness.step_persistence._types import (
     ContinuableSnapshot,
     EventKind,
     RunRecord,
+    SnapshotState,
     StepEvent,
     ToolEffectRecord,
 )
@@ -31,6 +32,15 @@ def _empty_metadata() -> dict[str, str]:
     return {}
 
 
+def _has_model_response(messages: list[ModelMessage]) -> bool:
+    """A history worth rescuing as a resume point on error.
+
+    A history without a model response is equivalent to restarting the run,
+    so it is not worth persisting.
+    """
+    return any(isinstance(message, ModelResponse) for message in messages)
+
+
 @dataclass
 class StepPersistence(AbstractCapability[AgentDepsT]):
     """Append-only step log + continuable snapshots + tool-effect ledger.
@@ -38,14 +48,21 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     The capability emits a `StepEvent` at every interesting boundary
     (run/model-request/tool-call start, completion, failure), records a
     `ToolEffectRecord` per tool call so the orchestrator can decide whether
-    replay is safe, and saves a `ContinuableSnapshot` at every
-    provider-valid boundary -- the end of each `CallToolsNode` -- plus a
-    fallback save at `after_run` if the run reached no such boundary.
+    replay is safe, and saves a `ContinuableSnapshot` at every settled
+    `CallToolsNode` boundary -- folding in the pending tool-return request, so
+    the point is durable the moment the tool completes -- plus a fallback save
+    at `after_run` when the run ends past that boundary. A run that *fails*
+    saves the live at-failure history (see `on_run_error`), classified by its
+    tool-work state: `complete` when every tool call is resolved,
+    `interrupted` otherwise.
 
     A run that crashes between `before_tool_execute` and `after_tool_execute`
-    leaves a visible event trail and a `started` tool-effect record, but no
-    new continuable snapshot -- the latest snapshot reflects the last
-    provider-valid state.
+    leaves a visible event trail, a `started` tool-effect record (the
+    `unknown_after_crash` signal), and an `interrupted` snapshot carrying
+    every completed cycle. The default `latest_snapshot` / `continue_run`
+    read path only returns `complete` snapshots; pass
+    `include_interrupted=True` to resume from the interrupted frontier after
+    consulting `list_unresolved_tool_effects`.
 
     ```python
     from pydantic_ai import Agent
@@ -119,20 +136,24 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         `ValueError` for any other `backend` value -- silently falling
         back to in-memory storage would turn a typo into accidental
         non-durability.
+
+        `max_snapshots_per_run` (default `None`, unbounded) is forwarded to
+        the constructed store to bound per-run snapshot growth.
         """
         backend = kwargs.pop('backend', 'memory')
+        max_snapshots_per_run = kwargs.pop('max_snapshots_per_run', None)
         if backend == 'memory':
-            return cls(store=InMemoryStepStore(), **kwargs)
+            return cls(store=InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run), **kwargs)
         if backend == 'file':
             from pydantic_ai_harness.step_persistence._store import FileStepStore
 
             directory = kwargs.pop('directory', '.step-persistence')
-            return cls(store=FileStepStore(directory), **kwargs)
+            return cls(store=FileStepStore(directory, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
         if backend == 'sqlite':
             from pydantic_ai_harness.step_persistence._store import SqliteStepStore
 
             database = kwargs.pop('database', '.step-persistence.db')
-            return cls(store=SqliteStepStore(database=database), **kwargs)
+            return cls(store=SqliteStepStore(database=database, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
         raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
@@ -196,10 +217,12 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     ) -> AgentRunResult[Any]:
         """Push this run's id onto the contextvar so nested delegates can read it."""
         token = current_run_id.set(self._effective_run_id(ctx))
-        saved_token = snapshot_saved.set(False)
+        saved_token = snapshot_saved.set(0)
+        history_token = live_run_history.set(None)
         try:
             return await handler()
         finally:
+            live_run_history.reset(history_token)
             snapshot_saved.reset(saved_token)
             current_run_id.reset(token)
 
@@ -239,15 +262,19 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     ) -> AgentRunResult[Any]:
         """Emit `run_completed`, saving a final snapshot only as a fallback.
 
-        The terminal `CallToolsNode` already saved the final provider-valid
-        snapshot via `after_node_run`, carrying the correct `step_index`. By
-        `after_run`, `ctx.run_step` is reset to 0, so re-saving here would both
-        duplicate the tail and stamp a misleading `step_index`. We only save
-        when the run produced no snapshot at all (no provider-valid node
-        boundary was reached), as a last-resort capture of the final state.
+        When a terminal `CallToolsNode` already saved the final history via
+        `after_node_run` it carries the correct `step_index`, whereas by
+        `after_run` `ctx.run_step` is reset to 0 -- so re-saving would both
+        duplicate the tail and stamp a misleading `step_index`. We save only
+        when the run ended past the newest boundary snapshot.
+
+        That covers a run which reached no provider-valid boundary at all, and
+        `Agent.run_stream`, which ends through `SetFinalResult` rather than a
+        terminal `CallToolsNode` and appends its closing response after the last
+        boundary -- leaving `after_run` the only hook that sees the full run.
         """
-        if not snapshot_saved.get():
-            messages = result.all_messages()
+        messages = result.all_messages()
+        if len(messages) > snapshot_saved.get():
             if is_provider_valid(messages):
                 await self.store.save_snapshot(
                     ContinuableSnapshot(
@@ -262,13 +289,78 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         await self.store.append_event(self._make_event(ctx, kind='run_completed'))
         return result
 
+    def _stash_live_history(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Hold the live message list by reference so `on_run_error` can read the at-failure history.
+
+        `on_run_error` cannot read the live history itself: its `RunContext`
+        holds the start-of-run list, which `UserPromptNode.run` replaces with
+        the run's working list. This leans on a pydantic-ai core invariant:
+        that rebind happens exactly once, and every later change to
+        `ctx.state.message_history` is an in-place mutation (`append` /
+        `[:]=` -- the discipline `capture_run_messages` requires, stated in
+        `pydantic_ai._agent_graph`). If core ever rebinds the list mid-run
+        again, this stash silently goes stale and the error-path snapshot
+        persists a pre-failure history while believing it is the at-failure
+        one -- `tests/step_persistence` pins the invariant so that surfaces
+        as a test failure, not silent data loss.
+
+        Re-stashed at every boundary because the first `after_node_run`
+        (the `UserPromptNode` boundary) still sees the pre-rebind list; from
+        the next boundary on, the stashed reference is the live list. The
+        stashed `run_step` is the last completed boundary's, so an error
+        snapshot's `step_index` can lag the failing request by one.
+        """
+        live_run_history.set((ctx.messages, ctx.run_step))
+
+    async def _save_continuable_snapshot(
+        self,
+        ctx: RunContext[AgentDepsT],
+        messages: list[ModelMessage],
+        step_index: int,
+        state: SnapshotState = 'complete',
+    ) -> None:
+        await self.store.save_snapshot(
+            ContinuableSnapshot(
+                run_id=self._effective_run_id(ctx),
+                step_index=step_index,
+                messages=messages,
+                conversation_id=ctx.conversation_id,
+                parent_run_id=self.parent_run_id,
+                agent_name=self.agent_name,
+                state=state,
+            )
+        )
+
     async def on_run_error(
         self,
         ctx: RunContext[AgentDepsT],
         *,
         error: BaseException,
     ) -> AgentRunResult[Any]:
-        """Emit `run_failed` so a killed run leaves a visible event trail."""
+        """Persist the live at-failure history as the run's last resume point, then emit `run_failed`.
+
+        The single error-path save site: reads the list reference stashed by
+        `after_node_run` (see `_stash_live_history`), whose content at this
+        point is the full history the run had built when it failed -- including
+        a failing model request's payload and any partial tool returns captured
+        by the graph during unwind. Nothing is compared against the store:
+        the live history is by definition the newest state, so an earlier
+        boundary snapshot is simply superseded, and a history a sticky
+        processor trimmed is persisted as trimmed -- exactly what the next
+        request would have sent.
+
+        The history is saved whenever it contains a model response (a bare
+        prompt equals restarting the run), classified `complete` when every
+        tool call is resolved and `interrupted` otherwise. Interrupted
+        snapshots stay off the default `latest_snapshot` read path.
+        """
+        stashed = live_run_history.get()
+        if stashed is not None:
+            messages, step_index = stashed
+            captured = list(messages)
+            if _has_model_response(captured):
+                state: SnapshotState = 'complete' if is_provider_valid(captured) else 'interrupted'
+                await self._save_continuable_snapshot(ctx, captured, step_index, state)
         await self.store.append_event(self._make_event(ctx, kind='run_failed', error=repr(error)))
         raise error
 
@@ -297,6 +389,13 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
         error: Exception,
     ) -> ModelResponse:
+        """Emit `model_request_failed` and re-raise.
+
+        No snapshot is saved here: the failing request's payload already sits
+        in the live history (the graph appends the request before sending), so
+        `on_run_error`'s save covers it. A failure the model layer recovers
+        from (retry, fallback) needs no rescue at all.
+        """
         await self.store.append_event(self._make_event(ctx, kind='model_request_failed', error=repr(error)))
         raise error
 
@@ -402,15 +501,36 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         node: AgentNode[AgentDepsT],
         result: NodeResult[AgentDepsT],
     ) -> NodeResult[AgentDepsT]:
-        """Save a mid-run continuable snapshot after `CallToolsNode` succeeds.
+        """Save a continuable snapshot after a settled `CallToolsNode`, and refresh the live-history stash.
 
         At that boundary every tool call from the preceding `ModelRequestNode`
-        has a matching tool return, so the history is provider-valid.
-        Snapshots are filtered through `is_provider_valid` defensively in case
-        a custom node reshapes history.
+        has a matching tool return, so the history is provider-valid. The
+        returned `ModelRequestNode` carries those returns and is not yet in
+        `ctx.messages`, so its request is folded in before validation --
+        without it a worker killed right after a completed tool call would
+        leave no resume point at all (#373). `is_provider_valid` doubles as a
+        defense in case a custom node reshapes history, and the saved count
+        goes to `snapshot_saved` so `after_run` can tell whether the run ended
+        past this boundary.
+
+        This save is the durable one: it lands in the store while the run is
+        still healthy, so it survives a hard kill that fires no hook. The
+        error path (`on_run_error`) only rescues histories that a raise unwinds
+        through.
+
+        Every node boundary also re-stashes the live message list so that
+        `on_run_error` can persist the at-failure history when a later node
+        raises before its own `after_node_run` fires. The stash holds that list
+        by reference, so the snapshot candidate rebinds to a new list rather
+        than appending to it -- an append would leak `result.request` into the
+        history the error path later reads, duplicating it once the graph
+        appends the request itself.
         """
+        self._stash_live_history(ctx)
+        messages = list(ctx.messages)
         if isinstance(node, CallToolsNode):
-            messages = list(ctx.messages)
+            if isinstance(result, ModelRequestNode):
+                messages = [*messages, result.request]
             if is_provider_valid(messages):
                 await self.store.save_snapshot(
                     ContinuableSnapshot(
@@ -422,5 +542,5 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
                         agent_name=self.agent_name,
                     )
                 )
-                snapshot_saved.set(True)
+                snapshot_saved.set(len(messages))
         return result

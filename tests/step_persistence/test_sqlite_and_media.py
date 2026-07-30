@@ -10,6 +10,7 @@ SQLite-specific behavior and the media plumbing.
 from __future__ import annotations
 
 import base64
+import logging
 import sqlite3
 from pathlib import Path
 
@@ -141,6 +142,104 @@ class TestSqliteStepStoreProtocol:
         assert snap is not None
         assert snap.step_index == 2
         assert len(snap.messages) == 2
+
+    async def test_latest_snapshot_default_skips_newer_interrupted(self, tmp_path: Path) -> None:
+        store = SqliteStepStore(database=tmp_path / 'runs.db', media_store=None)
+        settled: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='hello')]),
+            ModelResponse(parts=[TextPart(content='settled')]),
+        ]
+        frontier: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='hello')]),
+            ModelResponse(parts=[TextPart(content='frontier')]),
+        ]
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=0, messages=settled))
+        await store.save_snapshot(
+            ContinuableSnapshot(run_id='r1', step_index=1, messages=frontier, state='interrupted')
+        )
+
+        default = await store.latest_snapshot(run_id='r1')
+        assert default is not None
+        assert default.state == 'complete'
+        assert default.step_index == 0
+
+        opted = await store.latest_snapshot(run_id='r1', include_interrupted=True)
+        assert opted is not None
+        assert opted.state == 'interrupted'
+        assert opted.step_index == 1
+
+    async def test_only_interrupted_defaults_to_none(self, tmp_path: Path) -> None:
+        store = SqliteStepStore(database=tmp_path / 'runs.db', media_store=None)
+        msgs: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content='a')])]
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=0, messages=msgs, state='interrupted'))
+
+        assert await store.latest_snapshot(run_id='r1') is None
+        assert await store.latest_snapshot(run_id='r1', include_interrupted=True) is not None
+
+    async def test_legacy_database_without_state_column_migrates(self, tmp_path: Path) -> None:
+        """A database created before the `state` column existed gains it on open.
+
+        Rows written by the gated design were all provider-valid, so the
+        migration default `complete` is correct for them.
+        """
+        db = tmp_path / 'runs.db'
+        conn = sqlite3.connect(db)
+        conn.executescript(
+            'CREATE TABLE snapshots ('
+            'seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, step_index INTEGER NOT NULL, '
+            'conversation_id TEXT, parent_run_id TEXT, agent_name TEXT, timestamp TEXT NOT NULL, '
+            'messages TEXT NOT NULL);'
+        )
+        conn.execute(
+            'INSERT INTO snapshots (run_id, step_index, conversation_id, parent_run_id, agent_name, '
+            "timestamp, messages) VALUES ('r1', 3, NULL, NULL, NULL, '2026-01-01T00:00:00+00:00', '[]')"
+        )
+        conn.commit()
+        conn.close()
+
+        store = SqliteStepStore(database=db, media_store=None)
+        legacy = await store.latest_snapshot(run_id='r1')
+        assert legacy is not None
+        assert legacy.state == 'complete'
+        assert legacy.step_index == 3
+
+        msgs: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content='a')])]
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=4, messages=msgs, state='interrupted'))
+        assert (await store.latest_snapshot(run_id='r1')) is not None
+        opted = await store.latest_snapshot(run_id='r1', include_interrupted=True)
+        assert opted is not None
+        assert opted.step_index == 4
+
+    async def test_failed_state_migration_surfaces_instead_of_pinning_a_broken_schema(self, tmp_path: Path) -> None:
+        """A migration that fails for a reason other than "column is already there" must raise.
+
+        Swallowing it would mark the schema ready and leave every later read
+        failing on the missing column, with no retry. A readonly database
+        reproduces that class of failure: the `CREATE TABLE IF NOT EXISTS`
+        pass is a no-op on the existing tables, then `ALTER TABLE` raises.
+        """
+        db = tmp_path / 'runs.db'
+        await SqliteStepStore(database=db, media_store=None).register_run(RunRecord(run_id='r1'))
+
+        rollback = sqlite3.connect(db)
+        rollback.executescript(
+            'DROP TABLE snapshots;'
+            'CREATE TABLE snapshots ('
+            'seq INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, step_index INTEGER NOT NULL, '
+            'conversation_id TEXT, parent_run_id TEXT, agent_name TEXT, timestamp TEXT NOT NULL, '
+            'messages TEXT NOT NULL);'
+            'CREATE INDEX idx_snapshots_run ON snapshots(run_id, seq);'
+        )
+        rollback.commit()
+        rollback.close()
+
+        readonly = sqlite3.connect(f'file:{db}?mode=ro', uri=True, check_same_thread=False)
+        try:
+            store = SqliteStepStore(connection=readonly, media_store=None)
+            with pytest.raises(sqlite3.OperationalError, match='readonly database'):
+                await store.latest_snapshot(run_id='r1')
+        finally:
+            readonly.close()
 
     async def test_snapshot_seq_monotonic_across_reset_step(self, tmp_path: Path) -> None:
         """A reused `run_id` with `step_index` reset to 0 must not clobber the prior snapshot.
@@ -576,3 +675,102 @@ class TestMediaStoreResolution:
     def test_sqlite_store_none_disables_media(self, tmp_path: Path) -> None:
         store = SqliteStepStore(database=tmp_path / 'r.db', media_store=None)
         assert store._media_store is None  # type: ignore[reportPrivateUsage]
+
+
+# ---------------------------------------------------------------------------
+# list_snapshots (read seam consumed by `conversation_search`)
+# ---------------------------------------------------------------------------
+
+
+class TestSqliteListSnapshots:
+    async def test_returns_all_in_write_order(self, tmp_path: Path) -> None:
+        store = SqliteStepStore(database=tmp_path / 'runs.db', media_store=None)
+        first: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content='first message')])]
+        second = first + [ModelResponse(parts=[TextPart(content='second message')])]
+        await store.save_snapshot(
+            ContinuableSnapshot(run_id='r1', step_index=0, messages=first, conversation_id='conv')
+        )
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=1, messages=second))
+
+        snaps = await store.list_snapshots(run_id='r1')
+        assert [s.step_index for s in snaps] == [0, 1]
+        assert snaps[0].conversation_id == 'conv'
+        assert len(snaps[1].messages) == 2
+        assert await store.list_snapshots(run_id='missing') == []
+
+    async def test_skips_corrupt_rows(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        db = tmp_path / 'runs.db'
+        store = SqliteStepStore(database=db, media_store=None)
+        await store.save_snapshot(
+            ContinuableSnapshot(
+                run_id='r1',
+                step_index=0,
+                messages=[ModelRequest(parts=[UserPromptPart(content='the good one')])],
+            )
+        )
+        conn = sqlite3.connect(db, check_same_thread=False, isolation_level=None)
+        try:
+            conn.execute(
+                'INSERT INTO snapshots (run_id, step_index, timestamp, messages) VALUES (?, ?, ?, ?)',
+                ('r1', 1, '2026-01-01T00:00:00+00:00', '{not valid json'),
+            )
+            # TEXT affinity leaves BLOBs alone, violating `isinstance(messages, str)`.
+            conn.execute(
+                'INSERT INTO snapshots (run_id, step_index, timestamp, messages) VALUES (?, ?, ?, ?)',
+                ('r1', 2, '2026-01-01T00:00:00+00:00', b'\x00bin'),
+            )
+        finally:
+            conn.close()
+
+        with caplog.at_level(logging.WARNING):
+            snaps = await store.list_snapshots(run_id='r1')
+
+        assert [s.step_index for s in snaps] == [0]
+        assert sum('unparsable' in record.message for record in caplog.records) == 2
+
+    async def test_default_skips_interrupted_include_flag_returns_them(self, tmp_path: Path) -> None:
+        store = SqliteStepStore(database=tmp_path / 'runs.db', media_store=None)
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=0, messages=[]))
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=1, messages=[], state='interrupted'))
+
+        default = await store.list_snapshots(run_id='r1')
+        assert [(s.step_index, s.state) for s in default] == [(0, 'complete')]
+
+        everything = await store.list_snapshots(run_id='r1', include_interrupted=True)
+        assert [(s.step_index, s.state) for s in everything] == [(0, 'complete'), (1, 'interrupted')]
+
+    async def test_restores_externalized_media(self, tmp_path: Path) -> None:
+        store = SqliteStepStore(database=tmp_path / 'runs.db')
+        payload = b'\xab' * 70_000
+        await store.save_snapshot(
+            ContinuableSnapshot(run_id='r1', step_index=0, messages=_sample_messages_with_media(70_000))
+        )
+
+        snaps = await store.list_snapshots(run_id='r1')
+        assert len(snaps) == 1
+        first = snaps[0].messages[0]
+        assert isinstance(first, ModelRequest)
+        prompt = first.parts[0]
+        assert isinstance(prompt, UserPromptPart)
+        assert isinstance(prompt.content, list)
+        binary = prompt.content[1]
+        assert isinstance(binary, BinaryContent)
+        assert binary.data == payload
+
+    async def test_file_store_restores_externalized_media(self, tmp_path: Path) -> None:
+        store = FileStepStore(tmp_path / 'runs')
+        payload = b'\xab' * 70_000
+        await store.save_snapshot(
+            ContinuableSnapshot(run_id='r1', step_index=0, messages=_sample_messages_with_media(70_000))
+        )
+
+        snaps = await store.list_snapshots(run_id='r1')
+        assert len(snaps) == 1
+        first = snaps[0].messages[0]
+        assert isinstance(first, ModelRequest)
+        prompt = first.parts[0]
+        assert isinstance(prompt, UserPromptPart)
+        assert isinstance(prompt.content, list)
+        binary = prompt.content[1]
+        assert isinstance(binary, BinaryContent)
+        assert binary.data == payload

@@ -9,27 +9,33 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer
 from pydantic_ai.messages import (
+    LoadCapabilityCallPart,
     ModelMessage,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     SystemPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
+    ToolSearchCallPart,
+    ToolSearchReturnContent,
+    ToolSearchReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets._tool_search import parse_discovered_tools
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
     ClearToolResults,
     DeduplicateFileReads,
-    LimitWarner,
-    SlidingWindow,
+    SlidingWindowCompaction,
     SummarizingCompaction,
     TieredCompaction,
+    WarnNearLimits,
     estimate_token_count,
 )
 from pydantic_ai_harness.compaction._clamp_oversized_messages import (
@@ -259,34 +265,34 @@ class TestFindTokenCutoff:
 
 
 # ---------------------------------------------------------------------------
-# SlidingWindow
+# SlidingWindowCompaction
 # ---------------------------------------------------------------------------
 
 
-class TestSlidingWindow:
+class TestSlidingWindowCompaction:
     def test_validation_no_trigger(self):
         with pytest.raises(ValueError, match='At least one of max_messages or max_tokens must be set'):
-            SlidingWindow()
+            SlidingWindowCompaction()
 
     def test_validation_negative_max_messages(self):
         with pytest.raises(ValueError, match='max_messages must be positive'):
-            SlidingWindow(max_messages=0)
+            SlidingWindowCompaction(max_messages=0)
 
     def test_validation_negative_max_tokens(self):
         with pytest.raises(ValueError, match='max_tokens must be positive'):
-            SlidingWindow(max_tokens=-1)
+            SlidingWindowCompaction(max_tokens=-1)
 
     def test_validation_negative_keep_messages(self):
         with pytest.raises(ValueError, match='keep_messages must be non-negative'):
-            SlidingWindow(max_messages=10, keep_messages=-1)
+            SlidingWindowCompaction(max_messages=10, keep_messages=-1)
 
     def test_validation_negative_keep_tokens(self):
         with pytest.raises(ValueError, match='keep_tokens must be non-negative'):
-            SlidingWindow(max_messages=10, keep_tokens=-1)
+            SlidingWindowCompaction(max_messages=10, keep_tokens=-1)
 
     @pytest.mark.anyio
     async def test_no_trim_below_threshold(self):
-        sw = SlidingWindow(max_messages=10, keep_messages=5)
+        sw = SlidingWindowCompaction(max_messages=10, keep_messages=5)
         messages: list[ModelMessage] = [_user('a'), _assistant('b')]
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -295,7 +301,7 @@ class TestSlidingWindow:
 
     @pytest.mark.anyio
     async def test_trims_when_above_message_threshold(self):
-        sw = SlidingWindow(max_messages=5, keep_messages=3, preserve_first_user_message=False)
+        sw = SlidingWindowCompaction(max_messages=5, keep_messages=3, preserve_first_user_message=False)
         messages: list[ModelMessage] = [_user(f'msg-{i}') for i in range(8)]
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -304,7 +310,7 @@ class TestSlidingWindow:
 
     @pytest.mark.anyio
     async def test_trims_by_token_threshold(self):
-        sw = SlidingWindow(max_tokens=10, keep_messages=2)
+        sw = SlidingWindowCompaction(max_tokens=10, keep_messages=2)
         messages: list[ModelMessage] = [_user('x' * 40) for _ in range(5)]
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -313,7 +319,7 @@ class TestSlidingWindow:
 
     @pytest.mark.anyio
     async def test_preserves_tool_pairs(self):
-        sw = SlidingWindow(max_messages=4, keep_messages=2)
+        sw = SlidingWindowCompaction(max_messages=4, keep_messages=2)
         messages: list[ModelMessage] = [
             _user('start'),
             _tool_call('fn', 'tc1'),
@@ -329,7 +335,7 @@ class TestSlidingWindow:
 
     @pytest.mark.anyio
     async def test_keep_tokens_mode(self):
-        sw = SlidingWindow(max_messages=3, keep_tokens=10, preserve_first_user_message=False)
+        sw = SlidingWindowCompaction(max_messages=3, keep_tokens=10, preserve_first_user_message=False)
         # Each message = 20 chars = 5 tokens.  Total = 50 tokens.
         messages: list[ModelMessage] = [_user('x' * 20) for _ in range(10)]
         rc = _make_request_context(messages)
@@ -340,46 +346,46 @@ class TestSlidingWindow:
 
 
 # ---------------------------------------------------------------------------
-# LimitWarner
+# WarnNearLimits
 # ---------------------------------------------------------------------------
 
 
-class TestLimitWarner:
+class TestWarnNearLimits:
     def test_validation_no_limits(self):
         with pytest.raises(ValueError, match='At least one of'):
-            LimitWarner()
+            WarnNearLimits()
 
     def test_validation_negative_max_iterations(self):
         with pytest.raises(ValueError, match='max_iterations must be positive'):
-            LimitWarner(max_iterations=-1)
+            WarnNearLimits(max_iterations=-1)
 
     def test_validation_negative_max_context_tokens(self):
         with pytest.raises(ValueError, match='max_context_tokens must be positive'):
-            LimitWarner(max_context_tokens=0)
+            WarnNearLimits(max_context_tokens=0)
 
     def test_validation_negative_max_total_tokens(self):
         with pytest.raises(ValueError, match='max_total_tokens must be positive'):
-            LimitWarner(max_total_tokens=-5)
+            WarnNearLimits(max_total_tokens=-5)
 
     def test_validation_bad_threshold(self):
         with pytest.raises(ValueError, match='warning_threshold'):
-            LimitWarner(max_iterations=10, warning_threshold=0)
+            WarnNearLimits(max_iterations=10, warning_threshold=0)
 
     def test_validation_negative_critical_remaining(self):
         with pytest.raises(ValueError, match='critical_remaining_iterations'):
-            LimitWarner(max_iterations=10, critical_remaining_iterations=-1)
+            WarnNearLimits(max_iterations=10, critical_remaining_iterations=-1)
 
     def test_validation_empty_warn_on(self):
         with pytest.raises(ValueError, match='warn_on must not be empty'):
-            LimitWarner(max_iterations=10, warn_on=[])
+            WarnNearLimits(max_iterations=10, warn_on=[])
 
     def test_validation_warn_on_without_limit(self):
         with pytest.raises(ValueError, match="'total_tokens' requires"):
-            LimitWarner(max_iterations=10, warn_on=['total_tokens'])
+            WarnNearLimits(max_iterations=10, warn_on=['total_tokens'])
 
     @pytest.mark.anyio
     async def test_no_warning_below_threshold(self):
-        lw = LimitWarner(max_iterations=100)
+        lw = WarnNearLimits(max_iterations=100)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         ctx = _make_ctx(requests=10)
@@ -389,7 +395,7 @@ class TestLimitWarner:
 
     @pytest.mark.anyio
     async def test_iteration_warning_urgent(self):
-        lw = LimitWarner(max_iterations=20, warning_threshold=0.7, critical_remaining_iterations=3)
+        lw = WarnNearLimits(max_iterations=20, warning_threshold=0.7, critical_remaining_iterations=3)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         # 15/20 = 75% usage, 5 remaining > critical_remaining_iterations=3 => URGENT.
@@ -402,11 +408,11 @@ class TestLimitWarner:
         assert isinstance(text, UserPromptPart)
         assert isinstance(text.content, str)
         assert 'URGENT' in text.content
-        assert '[LimitWarner]' in text.content
+        assert '[WarnNearLimits]' in text.content
 
     @pytest.mark.anyio
     async def test_iteration_warning_critical(self):
-        lw = LimitWarner(max_iterations=10, warning_threshold=0.7, critical_remaining_iterations=3)
+        lw = WarnNearLimits(max_iterations=10, warning_threshold=0.7, critical_remaining_iterations=3)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         ctx = _make_ctx(requests=9)  # 1 remaining.
@@ -420,7 +426,7 @@ class TestLimitWarner:
 
     @pytest.mark.anyio
     async def test_context_window_warning(self):
-        lw = LimitWarner(max_context_tokens=10)
+        lw = WarnNearLimits(max_context_tokens=10)
         # Create a message that exceeds 70% of 10 tokens.
         messages: list[ModelMessage] = [_user('x' * 40)]  # ~10 tokens.
         rc = _make_request_context(messages)
@@ -430,7 +436,7 @@ class TestLimitWarner:
 
     @pytest.mark.anyio
     async def test_total_tokens_warning(self):
-        lw = LimitWarner(max_total_tokens=100)
+        lw = WarnNearLimits(max_total_tokens=100)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         ctx = _make_ctx(input_tokens=50, output_tokens=30)  # 80 total.
@@ -439,8 +445,8 @@ class TestLimitWarner:
 
     @pytest.mark.anyio
     async def test_strips_old_warnings(self):
-        lw = LimitWarner(max_iterations=10, warning_threshold=0.7)
-        old_warning = ModelRequest(parts=[UserPromptPart(content='[LimitWarner]\nOld warning')])
+        lw = WarnNearLimits(max_iterations=10, warning_threshold=0.7)
+        old_warning = ModelRequest(parts=[UserPromptPart(content='[WarnNearLimits]\nOld warning')])
         messages: list[ModelMessage] = [_user('hi'), old_warning]
         rc = _make_request_context(messages)
         ctx = _make_ctx(requests=5)  # Below threshold.
@@ -449,8 +455,19 @@ class TestLimitWarner:
         assert len(result.messages) == 1
 
     @pytest.mark.anyio
+    async def test_strips_legacy_limit_warner_markers(self):
+        lw = WarnNearLimits(max_iterations=10, warning_threshold=0.7)
+        legacy_warning = ModelRequest(parts=[UserPromptPart(content='[LimitWarner]\nOld warning')])
+        messages: list[ModelMessage] = [_user('hi'), legacy_warning]
+        rc = _make_request_context(messages)
+        ctx = _make_ctx(requests=5)  # Below threshold.
+        result = await lw.before_model_request(ctx, rc)
+        # Warnings injected before the rename are still recognized and stripped.
+        assert len(result.messages) == 1
+
+    @pytest.mark.anyio
     async def test_multiple_warnings_ordered(self):
-        lw = LimitWarner(max_iterations=10, max_total_tokens=100)
+        lw = WarnNearLimits(max_iterations=10, max_total_tokens=100)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         ctx = _make_ctx(requests=8, input_tokens=50, output_tokens=30)
@@ -704,10 +721,10 @@ class TestExports:
         import pydantic_ai_harness.compaction as compaction
 
         names = [
-            'SlidingWindow',
+            'SlidingWindowCompaction',
             'ClearToolResults',
             'DeduplicateFileReads',
-            'LimitWarner',
+            'WarnNearLimits',
             'SummarizingCompaction',
             'TieredCompaction',
         ]
@@ -762,14 +779,14 @@ class TestUserPromptMultiModal:
         assert 'User: ' in text
 
 
-class TestLimitWarnerEdgeCases:
-    """Cover LimitWarner edge cases for marker detection and stripping."""
+class TestWarnNearLimitsEdgeCases:
+    """Cover WarnNearLimits edge cases for marker detection and stripping."""
 
     @pytest.mark.anyio
     async def test_strip_warning_with_only_marker_message(self):
         """A message composed entirely of a marker part should be removed."""
-        lw = LimitWarner(max_iterations=100)
-        marker_msg = ModelRequest(parts=[UserPromptPart(content='[LimitWarner]\nold')])
+        lw = WarnNearLimits(max_iterations=100)
+        marker_msg = ModelRequest(parts=[UserPromptPart(content='[WarnNearLimits]\nold')])
         messages: list[ModelMessage] = [_user('real'), marker_msg]
         rc = _make_request_context(messages)
         ctx = _make_ctx(requests=5)
@@ -780,8 +797,8 @@ class TestLimitWarnerEdgeCases:
     @pytest.mark.anyio
     async def test_strip_warning_system_prompt_marker(self):
         """Marker in a SystemPromptPart should also be detected."""
-        lw = LimitWarner(max_iterations=100)
-        marker_msg = ModelRequest(parts=[SystemPromptPart(content='[LimitWarner]\nold')])
+        lw = WarnNearLimits(max_iterations=100)
+        marker_msg = ModelRequest(parts=[SystemPromptPart(content='[WarnNearLimits]\nold')])
         messages: list[ModelMessage] = [_user('real'), marker_msg]
         rc = _make_request_context(messages)
         ctx = _make_ctx(requests=5)
@@ -791,11 +808,11 @@ class TestLimitWarnerEdgeCases:
     @pytest.mark.anyio
     async def test_strip_mixed_parts_keeps_non_marker(self):
         """A message with both marker and non-marker parts should keep the non-marker parts."""
-        lw = LimitWarner(max_iterations=100)
+        lw = WarnNearLimits(max_iterations=100)
         mixed = ModelRequest(
             parts=[
                 UserPromptPart(content='keep this'),
-                UserPromptPart(content='[LimitWarner]\nremove this'),
+                UserPromptPart(content='[WarnNearLimits]\nremove this'),
             ]
         )
         messages: list[ModelMessage] = [mixed]
@@ -808,9 +825,23 @@ class TestLimitWarnerEdgeCases:
         assert len(first.parts) == 1
 
     @pytest.mark.anyio
+    async def test_keeps_already_empty_request(self):
+        """An already-empty ModelRequest must survive stripping so history still ends with a
+        ModelRequest. pydantic-ai's empty-response retry appends an empty ModelRequest;
+        dropping it left history ending on a ModelResponse and crashed the next request with
+        `Processed history must end with a ModelRequest`."""
+        lw = WarnNearLimits(max_iterations=100)
+        messages: list[ModelMessage] = [_user('real'), ModelResponse(parts=[]), ModelRequest(parts=[])]
+        rc = _make_request_context(messages)
+        ctx = _make_ctx(requests=5)
+        result = await lw.before_model_request(ctx, rc)
+        assert len(result.messages) == 3
+        assert isinstance(result.messages[-1], ModelRequest)
+
+    @pytest.mark.anyio
     async def test_context_warning_below_threshold(self):
         """Context window should not warn when below threshold."""
-        lw = LimitWarner(max_context_tokens=1000)
+        lw = WarnNearLimits(max_context_tokens=1000)
         messages: list[ModelMessage] = [_user('hi')]  # ~0.5 tokens, well below 70%.
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -820,7 +851,7 @@ class TestLimitWarnerEdgeCases:
     @pytest.mark.anyio
     async def test_total_tokens_warning_critical(self):
         """Total tokens at or above limit should produce CRITICAL."""
-        lw = LimitWarner(max_total_tokens=100)
+        lw = WarnNearLimits(max_total_tokens=100)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         ctx = _make_ctx(input_tokens=60, output_tokens=50)  # 110 total, above limit.
@@ -835,7 +866,7 @@ class TestLimitWarnerEdgeCases:
     @pytest.mark.anyio
     async def test_context_window_critical(self):
         """Context window at or above limit should produce CRITICAL."""
-        lw = LimitWarner(max_context_tokens=5)
+        lw = WarnNearLimits(max_context_tokens=5)
         messages: list[ModelMessage] = [_user('x' * 40)]  # ~10 tokens, well above 5.
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -849,7 +880,7 @@ class TestLimitWarnerEdgeCases:
 
     def test_warn_on_subset(self):
         """Can configure warn_on to only include specific limits."""
-        lw = LimitWarner(max_iterations=10, max_total_tokens=100, warn_on=['iterations'])
+        lw = WarnNearLimits(max_iterations=10, max_total_tokens=100, warn_on=['iterations'])
         assert lw._active_kinds == ('iterations',)
 
 
@@ -868,13 +899,13 @@ class TestCompactionEdgeCases:
         assert len(result.messages) == 3
 
 
-class TestSlidingWindowEdgeCases:
-    """Cover SlidingWindow edge cases."""
+class TestSlidingWindowCompactionEdgeCases:
+    """Cover SlidingWindowCompaction edge cases."""
 
     @pytest.mark.anyio
     async def test_cutoff_zero_no_trim(self):
         """When the cutoff resolves to 0, messages should not be trimmed."""
-        sw = SlidingWindow(max_messages=2, keep_messages=10)
+        sw = SlidingWindowCompaction(max_messages=2, keep_messages=10)
         # 3 messages, but keep_messages=10 => cutoff=0.
         messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c')]
         rc = _make_request_context(messages)
@@ -885,7 +916,7 @@ class TestSlidingWindowEdgeCases:
     @pytest.mark.anyio
     async def test_token_not_triggered_when_below(self):
         """Token trigger should not fire below threshold."""
-        sw = SlidingWindow(max_tokens=999999, keep_messages=2)
+        sw = SlidingWindowCompaction(max_tokens=999999, keep_messages=2)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         ctx = _make_ctx()
@@ -893,13 +924,13 @@ class TestSlidingWindowEdgeCases:
         assert len(result.messages) == 1
 
 
-class TestLimitWarnerMarkerDetection:
+class TestWarnNearLimitsMarkerDetection:
     """Cover _is_marker_part return False for non-text parts."""
 
     @pytest.mark.anyio
     async def test_non_string_user_prompt_not_detected_as_marker(self):
         """UserPromptPart with non-string content should not match marker."""
-        lw = LimitWarner(max_iterations=100)
+        lw = WarnNearLimits(max_iterations=100)
         # Create a ModelRequest with a ToolReturnPart (not a marker).
         messages: list[ModelMessage] = [
             _user('real'),
@@ -913,11 +944,11 @@ class TestLimitWarnerMarkerDetection:
     @pytest.mark.anyio
     async def test_strip_preserves_model_responses(self):
         """ModelResponse messages pass through strip unchanged."""
-        lw = LimitWarner(max_iterations=100)
+        lw = WarnNearLimits(max_iterations=100)
         messages: list[ModelMessage] = [
             _user('hi'),
             _assistant('response'),
-            ModelRequest(parts=[UserPromptPart(content='[LimitWarner]\nold')]),
+            ModelRequest(parts=[UserPromptPart(content='[WarnNearLimits]\nold')]),
         ]
         rc = _make_request_context(messages)
         ctx = _make_ctx(requests=5)
@@ -927,12 +958,12 @@ class TestLimitWarnerMarkerDetection:
         assert isinstance(result.messages[1], ModelResponse)
 
 
-class TestLimitWarnerTotalTokensBelowThreshold:
+class TestWarnNearLimitsTotalTokensBelowThreshold:
     """Cover _build_total_tokens_warning returning None when below threshold."""
 
     @pytest.mark.anyio
     async def test_total_tokens_below_threshold(self):
-        lw = LimitWarner(max_total_tokens=1000)
+        lw = WarnNearLimits(max_total_tokens=1000)
         messages: list[ModelMessage] = [_user('hi')]
         rc = _make_request_context(messages)
         ctx = _make_ctx(input_tokens=10, output_tokens=10)  # 20 total, 2% of 1000.
@@ -947,7 +978,7 @@ class TestLimitWarnerTotalTokensBelowThreshold:
 
 class TestTokenizerParameter:
     """Tests for the optional tokenizer parameter on estimate_token_count,
-    SlidingWindow, and Compaction."""
+    SlidingWindowCompaction, and Compaction."""
 
     def test_estimate_token_count_with_tokenizer(self):
         """Custom tokenizer should override the heuristic."""
@@ -972,9 +1003,9 @@ class TestTokenizerParameter:
 
     @pytest.mark.anyio
     async def test_sliding_window_with_tokenizer(self):
-        """SlidingWindow should use the tokenizer for token-based triggers."""
+        """SlidingWindowCompaction should use the tokenizer for token-based triggers."""
         # Custom tokenizer: 1 token per character.
-        sw = SlidingWindow(
+        sw = SlidingWindowCompaction(
             max_tokens=10,
             keep_tokens=5,
             tokenizer=lambda s: len(s),
@@ -991,9 +1022,9 @@ class TestTokenizerParameter:
 
     @pytest.mark.anyio
     async def test_sliding_window_tokenizer_threshold_check(self):
-        """SlidingWindow tokenizer should be used for the trigger check."""
+        """SlidingWindowCompaction tokenizer should be used for the trigger check."""
         # Tokenizer that inflates counts: 100 tokens per char.
-        sw = SlidingWindow(
+        sw = SlidingWindowCompaction(
             max_tokens=50,
             keep_messages=1,
             tokenizer=lambda s: len(s) * 100,
@@ -1077,7 +1108,7 @@ class TestPreserveFirstUserMessage:
 
     @pytest.mark.anyio
     async def test_sliding_window_preserves_first_user(self):
-        sw = SlidingWindow(max_messages=3, keep_messages=2, preserve_first_user_message=True)
+        sw = SlidingWindowCompaction(max_messages=3, keep_messages=2, preserve_first_user_message=True)
         messages: list[ModelMessage] = [
             _user('original task'),
             _assistant('got it'),
@@ -1095,7 +1126,7 @@ class TestPreserveFirstUserMessage:
     @pytest.mark.anyio
     async def test_sliding_window_no_duplicate_when_in_window(self):
         """First user message should not be duplicated if already in the kept window."""
-        sw = SlidingWindow(max_messages=3, keep_messages=5, preserve_first_user_message=True)
+        sw = SlidingWindowCompaction(max_messages=3, keep_messages=5, preserve_first_user_message=True)
         messages: list[ModelMessage] = [
             _user('task'),
             _assistant('ok'),
@@ -1110,7 +1141,7 @@ class TestPreserveFirstUserMessage:
     @pytest.mark.anyio
     async def test_sliding_window_disabled_preserve(self):
         """When preserve_first_user_message=False, first user message is not kept."""
-        sw = SlidingWindow(max_messages=3, keep_messages=1, preserve_first_user_message=False)
+        sw = SlidingWindowCompaction(max_messages=3, keep_messages=1, preserve_first_user_message=False)
         messages: list[ModelMessage] = [
             _user('original'),
             _assistant('a'),
@@ -1178,7 +1209,7 @@ class TestPreserveFirstUserMessage:
     @pytest.mark.anyio
     async def test_sliding_window_no_user_messages(self):
         """When there are no user messages, preservation is a no-op."""
-        sw = SlidingWindow(max_messages=2, keep_messages=1, preserve_first_user_message=True)
+        sw = SlidingWindowCompaction(max_messages=2, keep_messages=1, preserve_first_user_message=True)
         messages: list[ModelMessage] = [
             _assistant('a'),
             _assistant('b'),
@@ -1567,6 +1598,36 @@ class TestClearToolResults:
         assert _return_contents(twice) == ['[tool result cleared]']
         assert _call_args(twice) == ['{}']
 
+    @pytest.mark.anyio
+    async def test_preserves_typed_tool_search_return(self):
+        # `ToolSearchReturnPart` subclasses `ToolReturnPart` but carries structured content that
+        # core's `parse_discovered_tools` re-reads on the next request. Blanking it to a string
+        # crashed that reader; clearing must skip typed subclasses and touch only plain results.
+        cap = ClearToolResults(max_messages=1, keep_pairs=0)
+        search_content: ToolSearchReturnContent = {'discovered_tools': [{'name': 'alpha'}, {'name': 'beta'}]}
+        messages: list[ModelMessage] = [
+            _tool_call('fn', 'u1'),
+            _tool_return('fn', 'u1', 'plain result'),
+            ModelResponse(parts=[ToolCallPart(tool_name='search_tools', args='{}', tool_call_id='ts1')]),
+            ModelRequest(parts=[ToolSearchReturnPart(content=search_content, tool_call_id='ts1')]),
+        ]
+        result = await cap.before_model_request(_make_ctx(), _make_request_context(messages))
+
+        returns = {
+            p.tool_call_id: p
+            for m in result.messages
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, ToolReturnPart)
+        }
+        # Plain result blanked, typed search return kept intact (concrete type + structured content).
+        assert type(returns['u1']) is ToolReturnPart
+        assert returns['u1'].content == cap.placeholder
+        assert type(returns['ts1']) is ToolSearchReturnPart
+        assert returns['ts1'].content == search_content
+        # The real next-request regression: core still recovers the discovered names.
+        assert parse_discovered_tools(result.messages) == {'alpha', 'beta'}
+
 
 # ---------------------------------------------------------------------------
 # DeduplicateFileReads
@@ -1912,6 +1973,31 @@ class TestClampOversizedMessages:
         assert part.tool_call_id == 'c1'
 
     @pytest.mark.anyio
+    async def test_preserves_typed_tool_call_subclasses(self):
+        # `ToolSearchCallPart` and `LoadCapabilityCallPart` subclass `ToolCallPart` but narrow
+        # `args` to a typed shape that `ModelMessagesTypeAdapter` validates when persisted
+        # history is restored (e.g. `StepPersistence` resume). Replacing that shape with the
+        # `_clamped` object made the round-trip fail; clamping must skip typed subclasses and
+        # touch only plain tool calls.
+        search_call = ToolSearchCallPart(args={'queries': ['find tools for ' + 'x' * 5_000]}, tool_call_id='ts1')
+        load_call = LoadCapabilityCallPart(args='{"id": "' + 'c' * 5_000 + '"}', tool_call_id='lc1')
+        plain_call = ToolCallPart(tool_name='write_plan', args='p' * 5_000, tool_call_id='c1')
+        messages: list[ModelMessage] = [ModelResponse(parts=[search_call, load_call, plain_call])]
+        cap = ClampOversizedMessages(max_part_chars=1_000, keep_head_chars=50, keep_tail_chars=50)
+        result = await cap.compact(messages, _make_ctx())
+
+        search, load, plain = result[0].parts
+        # Typed subclasses pass through as the same objects; the plain call is still clamped.
+        assert search is search_call
+        assert load is load_call
+        assert isinstance(plain, ToolCallPart)
+        assert plain.args_as_dict().keys() == {_CLAMP_ARGS_KEY}
+        # The real regression: the compacted history survives the round-trip `StepPersistence`
+        # restores through. Equality covers the concrete part classes too, so this also pins
+        # that the typed parts come back typed with their structured args intact.
+        assert ModelMessagesTypeAdapter.validate_json(ModelMessagesTypeAdapter.dump_json(result)) == result
+
+    @pytest.mark.anyio
     async def test_small_tool_call_args_untouched(self):
         call = ModelResponse(parts=[ToolCallPart(tool_name='t', args='{"a": 1}', tool_call_id='c1')])
         cap = ClampOversizedMessages(max_part_chars=1_000)
@@ -1997,6 +2083,47 @@ class TestPublicPath:
         )
         result = await agent.run('hello')
         assert result.output is not None
+
+    @pytest.mark.anyio
+    async def test_clear_does_not_break_tool_search_on_next_request(self):
+        # Regression for #380 through the real agent graph. Core re-reads a
+        # `ToolSearchReturnPart`'s structured content on every request via
+        # `parse_discovered_tools`; blanking it to a string used to crash the *next*
+        # request. Drive a multi-request run (search -> clear fires -> another request)
+        # and assert it completes with discovery intact.
+        from pydantic_ai import Agent, Tool
+        from pydantic_ai.capabilities import ToolSearch
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        def hidden_gem(x: int) -> int:
+            return x + 1
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            step = sum(isinstance(m, ModelResponse) for m in messages)
+            if step == 0:  # discover the deferred tool
+                args = {'queries': ['hidden']}
+                return ModelResponse(parts=[ToolCallPart(tool_name='search_tools', args=args, tool_call_id='ts0')])
+            if step == 1:  # call it, forcing the request that re-reads the (cleared) search result
+                return ModelResponse(parts=[ToolCallPart(tool_name='hidden_gem', args={'x': 1}, tool_call_id='hg1')])
+            return ModelResponse(parts=[TextPart(content='done')])
+
+        agent = Agent(
+            FunctionModel(model_fn),
+            tools=[Tool(hidden_gem, defer_loading=True)],
+            capabilities=[ToolSearch(), ClearToolResults(max_messages=1, keep_pairs=0)],
+        )
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        messages = result.all_messages()
+        search_returns = [
+            p for m in messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, ToolSearchReturnPart)
+        ]
+        # The typed search return kept its concrete type and structured (dict) content.
+        assert search_returns
+        assert all(isinstance(p.content, dict) for p in search_returns)
+        # Core still recovers the discovered tool -- the read that crashed in #380.
+        assert parse_discovered_tools(messages) == {'hidden_gem'}
 
 
 # ---------------------------------------------------------------------------
@@ -2128,7 +2255,7 @@ class TestCompactionSpan:
 
         agent: Agent[None, str] = Agent(
             TestModel(),
-            capabilities=[SlidingWindow(max_tokens=1, keep_messages=1)],
+            capabilities=[SlidingWindowCompaction(max_tokens=1, keep_messages=1)],
         )
         agent.instrument = InstrumentationSettings()
         history: list[ModelMessage] = [_user('first'), _assistant('a'), _user('second'), _assistant('b')]
@@ -2141,7 +2268,7 @@ class TestCompactionSpan:
         assert len(spans) == 1
         attrs = spans[0]['attributes']
         assert attrs['gen_ai.conversation.compacted'] is True
-        assert attrs['compaction.strategy'] == 'SlidingWindow'
+        assert attrs['compaction.strategy'] == 'SlidingWindowCompaction'
         assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
         assert attrs['compaction.tokens_before'] > attrs['compaction.tokens_after']
 
@@ -2153,7 +2280,7 @@ class TestCompactionSpan:
 
         agent: Agent[None, str] = Agent(
             TestModel(),
-            capabilities=[SlidingWindow(max_tokens=1_000_000, keep_messages=1)],
+            capabilities=[SlidingWindowCompaction(max_tokens=1_000_000, keep_messages=1)],
         )
         agent.instrument = InstrumentationSettings()
         await agent.run('short prompt')
@@ -2227,7 +2354,7 @@ class TestCompactionSpan:
         comp: TieredCompaction[None] = TieredCompaction(
             tiers=[
                 ClearToolResults(max_tokens=1, keep_pairs=0),
-                SlidingWindow(max_tokens=1, keep_messages=1),
+                SlidingWindowCompaction(max_tokens=1, keep_messages=1),
             ],
             target_tokens=1,
         )

@@ -9,6 +9,8 @@ prose match the code as written) is a review-time concern, not a unit test.
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -22,11 +24,12 @@ _NAMESPACE_PACKAGES = {_PACKAGE / 'experimental'}
 
 
 def _is_deprecation_shim(package: Path) -> bool:
-    """A package left at a moved capability's old path re-exports it and calls `warn_moved`.
+    """A package left at a moved or renamed capability's old path re-exports it and warns.
 
     Such shims carry no docs of their own, so they are excluded from the capability tables.
     """
-    return 'warn_moved(' in (package / '__init__.py').read_text(encoding='utf-8')
+    source = (package / '__init__.py').read_text(encoding='utf-8')
+    return 'warn_moved(' in source or 'warn_module_renamed(' in source
 
 
 def _capability_packages() -> list[Path]:
@@ -67,8 +70,297 @@ def test_capability_has_readme(package: Path) -> None:
 def test_capability_linked_from_top_readme(package: Path) -> None:
     top_readme = (_ROOT / 'README.md').read_text(encoding='utf-8')
     link_target = f'{package.relative_to(_ROOT).as_posix()}/'
-    assert link_target in top_readme, (
+    # Require an actual Markdown link to the package, not just the path appearing
+    # anywhere (prose or an unrelated URL would otherwise satisfy the check).
+    linked = any(t.startswith(link_target) for t in _markdown_link_targets(top_readme))
+    assert linked, (
         f'{package.relative_to(_ROOT)} is not linked from the top-level README.md. '
         f'Add a row for it (linking `{link_target}`) to the "What\'s available today" or "Roadmap" tables '
         'so the README stays in step with the code.'
+    )
+
+
+# --- Unified-docs page checks (docs/*.md) -----------------------------------
+#
+# The flat pages under `docs/` render on the unified site. These mechanical
+# checks encode the capability-authoring rules agreed in the 2026-07-10 team
+# sync: purpose-first leads, a source link on every page, names that match the
+# capability, and no leftover "experimental" framing on graduated capabilities.
+# ACP is the one page that stays experimental.
+
+_DOCS_DIR = _ROOT / 'docs'
+_NON_CAPABILITY_PAGES = {'index.md', 'mutation-testing.md'}
+_ACP_PAGE = 'acp.md'
+
+_SOURCE_LINK = 'github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/'
+# Framing that must not appear on a graduated (non-ACP) capability page.
+_EXPERIMENTAL_MARKERS = ('HarnessExperimentalWarning', 'removed in any release', '!!! warning "Experimental')
+# Lifecycle hook names must not lead a page -- mechanism goes below the purpose.
+_LEAD_HOOK_NAMES = ('before_model_request', 'after_model_request', 'before_tool_execute', 'after_tool_execute')
+# ClassName-style headings are a smell, except where the class name IS the name.
+_ALLOWED_CLASSNAME_HEADINGS = {'FileSystem', 'LocalStack', 'StackOne'}
+_FORBIDDEN_HEADINGS = {'overflow', 'authoring', 'overflow capability', 'compaction capabilities'}
+
+
+def _capability_doc_pages() -> list[Path]:
+    return [p for p in sorted(_DOCS_DIR.glob('*.md')) if p.name not in _NON_CAPABILITY_PAGES]
+
+
+_CAPABILITY_DOC_PAGES = _capability_doc_pages()
+
+# Each capability doc page maps to its source module (for the source-link check)
+# and its expected H1 (for the heading check). Keeping this explicit makes the
+# checks page-specific: a page that links the wrong module, or carries a generic
+# or empty heading, fails instead of passing on a substring match.
+_CAPABILITY_PAGE_META = {
+    'code-mode.md': ('code_mode', 'Code Mode'),
+    'skills.md': ('skills', 'Skills'),
+    'filesystem.md': ('filesystem', 'FileSystem'),
+    'shell.md': ('shell', 'Shell'),
+    'managed-prompt.md': ('logfire', 'Managed Prompt'),
+    'memory.md': ('memory', 'Memory'),
+    'modal-sandbox.md': ('modal_sandbox', 'Modal Sandbox'),
+    'repo-context.md': ('repo_context', 'Repo Context'),
+    'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),
+    'exa-search.md': ('exa', 'Exa Search'),
+    'macroscope.md': ('macroscope', 'Macroscope'),
+    'compaction.md': ('compaction', 'Compaction'),
+    'tool-output-limits.md': ('tool_output_limits', 'Tool Output Limits'),
+    'warn-on-cache-busts.md': ('warn_on_cache_busts', 'Warn On Cache Busts'),
+    'step-persistence.md': ('step_persistence', 'Step Persistence'),
+    'conversation-search.md': ('conversation_search', 'Conversation Search'),
+    'media.md': ('media', 'Media Externalization'),
+    'subagents.md': ('subagents', 'Subagents'),
+    'dynamic-workflow.md': ('dynamic_workflow', 'Dynamic Workflow'),
+    'planning.md': ('planning', 'Planning'),
+    'capability-creation.md': ('capability_creation', 'Runtime Capability Creation'),
+    'guardrails.md': ('guardrails', 'Input & Output Guardrails'),
+    'localstack.md': ('localstack', 'LocalStack'),
+    'stackone.md': ('stackone', 'StackOne'),
+    'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
+}
+
+
+def _markdown_link_targets(text: str) -> list[str]:
+    """Every `](target)` destination in the text -- so a bare path mention is not a link."""
+    return re.findall(r'\]\(([^)\s]+)\)', text)
+
+
+def _strip_frontmatter(text: str) -> str:
+    if text.startswith('---\n'):
+        end = text.find('\n---', 4)
+        if end != -1:
+            return text[end + 4 :]
+    return text
+
+
+def _heading_problem(h1: str) -> str | None:
+    """Return why an H1 fails the name rule, or None if it is fine."""
+    name = h1[2:].strip() if h1.startswith('# ') else h1.strip()
+    if not name:
+        return 'missing H1 heading'
+    if name.lower() in _FORBIDDEN_HEADINGS:
+        return f'"{name}" is a short/legacy form -- use the full capability name'
+    for word in name.split():
+        if word in _ALLOWED_CLASSNAME_HEADINGS:
+            continue
+        if re.search(r'[a-z][A-Z]', word):
+            return f'"{name}" is ClassName-style ("{word}") -- use spaced words'
+    return None
+
+
+def _h1(text: str) -> str:
+    for line in _strip_frontmatter(text).splitlines():
+        if line.startswith('# '):
+            return line
+    return ''
+
+
+def _lead_paragraph(text: str) -> str:
+    """The first prose paragraph after the H1, skipping links, notes, and admonitions."""
+    lines = _strip_frontmatter(text).splitlines()
+    start = next((i + 1 for i, ln in enumerate(lines) if ln.startswith('# ')), 0)
+    collected: list[str] = []
+    in_fence = False
+    for line in lines[start:]:
+        stripped = line.strip()
+        if in_fence:
+            if stripped.startswith('```'):
+                in_fence = False
+            continue
+        if not collected:
+            if not stripped:
+                continue
+            if stripped.startswith('```'):
+                in_fence = True
+                continue
+            # Skip non-prose preamble: headings, blockquotes, admonitions,
+            # links/images, tables, and indented admonition bodies.
+            if stripped.startswith(('#', '>', '!!!', '[', '![', '|')) or line.startswith('    '):
+                continue
+            collected.append(stripped)
+        elif not stripped:
+            break
+        else:
+            collected.append(stripped)
+    return ' '.join(collected)
+
+
+def test_strip_frontmatter_handles_missing_close() -> None:
+    assert _strip_frontmatter('---\ntitle: x\n---\nbody') == '\nbody'
+    # Opened but never closed -- returned unchanged rather than swallowing the file.
+    assert _strip_frontmatter('---\nnot closed') == '---\nnot closed'
+    assert _strip_frontmatter('no frontmatter') == 'no frontmatter'
+
+
+def test_h1_missing_returns_empty() -> None:
+    assert _h1('# Title\nbody') == '# Title'
+    assert _h1('just prose, no heading') == ''
+
+
+def test_heading_problem_flags_each_failure_mode() -> None:
+    assert _heading_problem('') == 'missing H1 heading'
+    assert _heading_problem('# Overflow') is not None  # forbidden short form
+    assert _heading_problem('# SubAgents') is not None  # ClassName-style
+    assert _heading_problem('# FileSystem') is None  # allowlisted ClassName
+    assert _heading_problem('# Code Mode') is None
+
+
+def test_lead_paragraph_skips_preamble_and_fences() -> None:
+    doc = (
+        '---\ntitle: x\n---\n'
+        '# Title\n\n'
+        '```python\ncode\n```\n\n'
+        '> a note\n'
+        '[Source](x)\n'
+        '    indented body\n\n'
+        'The real lead.\n\n'
+        'second paragraph\n'
+    )
+    # Fenced block, blockquote, link, and indented lines are skipped; collection
+    # stops at the blank line after the first prose paragraph.
+    assert _lead_paragraph(doc) == 'The real lead.'
+    # A lead that runs to EOF exercises multi-line collection and loop exhaustion.
+    assert _lead_paragraph('# T\n\nline one\nline two') == 'line one line two'
+
+
+def test_capability_doc_pages_discovered() -> None:
+    # Guard against a moved docs root making every check below vacuously pass.
+    assert len(_CAPABILITY_DOC_PAGES) >= 12
+    # A new capability page must declare its module + expected heading here, so
+    # the source-link and heading checks below stay page-specific.
+    unmapped = sorted(p.name for p in _CAPABILITY_DOC_PAGES if p.name not in _CAPABILITY_PAGE_META)
+    assert not unmapped, f'add {unmapped} to _CAPABILITY_PAGE_META (source module + expected heading)'
+
+
+@pytest.mark.parametrize('page', _CAPABILITY_DOC_PAGES, ids=lambda p: p.name)
+def test_doc_page_links_its_source(page: Path) -> None:
+    module, _ = _CAPABILITY_PAGE_META[page.name]
+    expected = f'{_SOURCE_LINK}{module}/'
+    targets = _markdown_link_targets(page.read_text(encoding='utf-8'))
+    assert any(expected in t for t in targets), (
+        f'{page.relative_to(_ROOT)} must link its own source module as a Markdown link '
+        f'(target containing `{expected}`), not just mention the prefix or link a different module.'
+    )
+
+
+@pytest.mark.parametrize('page', _CAPABILITY_DOC_PAGES, ids=lambda p: p.name)
+def test_doc_page_heading_matches_capability(page: Path) -> None:
+    _, expected_name = _CAPABILITY_PAGE_META[page.name]
+    h1 = _h1(page.read_text(encoding='utf-8'))
+    assert h1, f'{page.relative_to(_ROOT)} has no H1 heading.'
+    actual = h1[2:].strip()
+    assert actual == expected_name, (
+        f'{page.relative_to(_ROOT)} H1 is "{actual}"; expected "{expected_name}" '
+        '(doc filename, H1, and capability name must agree).'
+    )
+
+
+@pytest.mark.parametrize('page', _CAPABILITY_DOC_PAGES, ids=lambda p: p.name)
+def test_doc_page_lead_is_purpose_first(page: Path) -> None:
+    lead = _lead_paragraph(page.read_text(encoding='utf-8'))
+    hit = next((h for h in _LEAD_HOOK_NAMES if h in lead), None)
+    assert hit is None, (
+        f'{page.relative_to(_ROOT)}: opening paragraph names the `{hit}` hook. '
+        'Lead with the purpose (what it is for, when to use it); move mechanism lower.'
+    )
+
+
+@pytest.mark.parametrize(
+    'page',
+    [p for p in _CAPABILITY_DOC_PAGES if p.name != _ACP_PAGE],
+    ids=lambda p: p.name,
+)
+def test_graduated_doc_page_has_no_experimental_framing(page: Path) -> None:
+    text = page.read_text(encoding='utf-8')
+    hit = next((m for m in _EXPERIMENTAL_MARKERS if m in text), None)
+    assert hit is None, (
+        f'{page.relative_to(_ROOT)}: graduated capability still carries experimental framing ({hit!r}). '
+        'Only ACP keeps an experimental note; soften the rest to the README stability note.'
+    )
+
+
+# --- Site-nav parity (docs/nav.json) ----------------------------------------
+#
+# Every flat page under `docs/` must appear in the unified-site nav, and every
+# nav entry must point at a page that exists. `docs/skills.md` once shipped
+# orphaned from the nav; these checks fail CI the moment a page and the nav
+# disagree, in either direction.
+
+_NAV_JSON = _DOCS_DIR / 'nav.json'
+# The one page allowed to be absent from the site nav: a dev-only doc that is not
+# a capability page. Excluding any other page requires a reviewed edit here.
+_NAV_EXCLUDED_PAGES = {'mutation-testing.md'}
+
+
+def _nav_slugs() -> set[str]:
+    groups = json.loads(_NAV_JSON.read_text(encoding='utf-8'))
+    return {item['slug'] for group in groups for item in group['items']}
+
+
+_NAV_SLUGS = _nav_slugs()
+_NAV_LISTED_PAGES = [p for p in sorted(_DOCS_DIR.glob('*.md')) if p.name not in _NAV_EXCLUDED_PAGES]
+
+
+def test_nav_parity_inputs_discovered() -> None:
+    # Guard against an emptied nav or a moved docs root making the parity checks
+    # below vacuously pass.
+    assert len(_NAV_SLUGS) >= 12
+    assert len(_NAV_LISTED_PAGES) >= 12
+    # Pin the excluded set so a contributor can only drop a page from the nav
+    # check via a reviewed edit to this named constant, not silently.
+    assert _NAV_EXCLUDED_PAGES == {'mutation-testing.md'}
+
+
+@pytest.mark.parametrize('page', _NAV_LISTED_PAGES, ids=lambda p: p.name)
+def test_doc_page_is_in_site_nav(page: Path) -> None:
+    assert page.stem in _NAV_SLUGS, (
+        f'{page.relative_to(_ROOT)} is not listed in docs/nav.json, so it ships orphaned from the site nav. '
+        f'Add a `{{ "label": "...", "slug": "{page.stem}" }}` entry to docs/nav.json '
+        '(or add the page to _NAV_EXCLUDED_PAGES if it is intentionally unlisted).'
+    )
+
+
+@pytest.mark.parametrize('slug', sorted(_NAV_SLUGS), ids=lambda s: s)
+def test_nav_slug_has_page(slug: str) -> None:
+    assert (_DOCS_DIR / f'{slug}.md').exists(), (
+        f'docs/nav.json lists slug "{slug}" but docs/{slug}.md does not exist. '
+        'Fix the slug or remove its entry from docs/nav.json.'
+    )
+
+
+@pytest.mark.parametrize('package', _CAPABILITY_PACKAGES, ids=lambda p: str(p.relative_to(_ROOT)))
+def test_capability_readme_heading_matches_capability(package: Path) -> None:
+    problem = _heading_problem(_h1((package / 'README.md').read_text(encoding='utf-8')))
+    assert problem is None, f'{package.relative_to(_ROOT) / "README.md"}: {problem}'
+
+
+@pytest.mark.parametrize('package', _CAPABILITY_PACKAGES, ids=lambda p: str(p.relative_to(_ROOT)))
+def test_capability_readme_links_source(package: Path) -> None:
+    module = package.relative_to(_ROOT / 'pydantic_ai_harness').as_posix()
+    expected = f'{_SOURCE_LINK}{module}/'
+    targets = _markdown_link_targets((package / 'README.md').read_text(encoding='utf-8'))
+    assert any(expected in t for t in targets), (
+        f'{package.relative_to(_ROOT) / "README.md"} must link its own source module '
+        f'(a Markdown link containing `{expected}`), so parity tooling can find the implementation.'
     )
