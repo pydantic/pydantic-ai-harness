@@ -417,6 +417,30 @@ class TestNimbleAgent:
         await cap.after_run(ctx, result=AsyncMock(spec=AgentRunResult))
         assert fake.closed is True
 
+    async def test_toolset_resolves_fresh_client_after_close(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        clients: list[_FakeNimbleClient] = []
+
+        def fake_async_nimble(**kwargs: Any) -> _FakeNimbleClient:
+            client = _FakeNimbleClient(search_results=[_search_result()])
+            clients.append(client)
+            return client
+
+        monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
+        monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
+        cap = NimbleSearch[None]()
+        ctx = AsyncMock(spec=RunContext)
+        await cap.before_run(ctx)
+        toolset = cap.get_toolset()
+        await toolset.web_search('q')
+        assert len(clients) == 1
+        await cap.after_run(ctx, result=AsyncMock(spec=AgentRunResult))
+        assert clients[0].closed is True
+        await cap.before_run(ctx)
+        await toolset.web_search('q2')
+        assert len(clients) == 2
+        assert clients[1].closed is False
+        assert clients[1].search_calls[-1]['query'] == 'q2'
+
     def test_missing_api_key_raises_user_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('NIMBLE_API_KEY', raising=False)
         with pytest.raises(UserError, match='NIMBLE_API_KEY'):

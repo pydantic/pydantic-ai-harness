@@ -93,6 +93,9 @@ class NimbleClient(Protocol):
         ...  # pragma: no cover
 
 
+GetNimbleClient = Callable[[], NimbleClient]
+
+
 def _default_client() -> NimbleClient:  # pyright: ignore[reportUnusedFunction]
     """Build an `AsyncNimble` client from `NIMBLE_API_KEY`.
 
@@ -226,7 +229,7 @@ class NimbleSearchToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
-        client: NimbleClient,
+        get_client: GetNimbleClient,
         num_results: int,
         max_text_chars: int,
         search_depth: SearchDepth,
@@ -237,7 +240,7 @@ class NimbleSearchToolset(FunctionToolset[AgentDepsT]):
         include_crawl: bool,
     ) -> None:
         super().__init__()
-        self._client = client
+        self._get_client = get_client
         self._num_results = num_results
         self._max_text_chars = max_text_chars
         self._search_depth = search_depth
@@ -252,6 +255,11 @@ class NimbleSearchToolset(FunctionToolset[AgentDepsT]):
         if include_crawl:
             self.add_function(self.crawl_start, name='crawl_start')
             self.add_function(self.crawl_status, name='crawl_status')
+
+    @property
+    def _client(self) -> NimbleClient:
+        """Resolve the live client (may be replaced after a prior run closes)."""
+        return self._get_client()
 
     @_recoverable
     async def web_search(self, query: str) -> ToolReturn[str]:

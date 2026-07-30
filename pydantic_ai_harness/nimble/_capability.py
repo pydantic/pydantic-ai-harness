@@ -135,8 +135,10 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> NimbleSearchToolset[AgentDepsT]:
         """Build the toolset providing Nimble research tools."""
+        get_client = self._client_lifecycle.resolve
+        get_client()  # fail fast on missing API key / materialize factory client
         return NimbleSearchToolset[AgentDepsT](
-            client=self._client_lifecycle.resolve(),
+            get_client=get_client,
             num_results=self.num_results,
             max_text_chars=self.max_text_chars,
             search_depth=self.search_depth,

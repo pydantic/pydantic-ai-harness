@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -75,14 +75,19 @@ class NimbleAgentToolset(FunctionToolset[AgentDepsT]):
     - Mode 3: omit both for an anonymous one-shot (still returns `wsa_…`)
     """
 
-    def __init__(self, *, client: NimbleClient) -> None:
+    def __init__(self, *, get_client: Callable[[], NimbleClient]) -> None:
         super().__init__()
-        self._client = client
+        self._get_client = get_client
         self.add_function(self.agents_list, name='agents_list')
         self.add_function(self.agent_templates_list, name='agent_templates_list')
         self.add_function(self.agent_run_start, name='agent_run_start')
         self.add_function(self.agent_run_status, name='agent_run_status')
         self.add_function(self.agent_run_result, name='agent_run_result')
+
+    @property
+    def _client(self) -> NimbleClient:
+        """Resolve the live client (may be replaced after a prior run closes)."""
+        return self._get_client()
 
     @_recoverable
     async def agents_list(self, limit: int | None = None, offset: int | None = None) -> ToolReturn[str]:
@@ -316,7 +321,9 @@ class NimbleAgent(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> NimbleAgentToolset[AgentDepsT]:
         """Build the toolset providing Web Search Agent lifecycle tools."""
-        return NimbleAgentToolset[AgentDepsT](client=self._client_lifecycle.resolve())
+        get_client = self._client_lifecycle.resolve
+        get_client()  # fail fast on missing API key / materialize factory client
+        return NimbleAgentToolset[AgentDepsT](get_client=get_client)
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Retain a factory-built client for this run (safe under concurrency)."""
