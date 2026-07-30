@@ -394,10 +394,28 @@ class TestNimbleAgent:
         monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
         monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
         cap = NimbleAgent[None]()
-        cap.get_toolset()  # materialize owned client
+        await cap.before_run(AsyncMock(spec=RunContext))
+        cap.get_toolset()
         result = await cap.after_run(AsyncMock(spec=RunContext), result=AsyncMock(spec=AgentRunResult))
         assert fake.closed is True
         assert result is not None
+
+    async def test_concurrent_runs_do_not_close_shared_client_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeNimbleClient()
+
+        def fake_async_nimble(**kwargs: Any) -> _FakeNimbleClient:
+            return fake
+
+        monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
+        monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
+        cap = NimbleSearch[None]()
+        ctx = AsyncMock(spec=RunContext)
+        await cap.before_run(ctx)
+        await cap.before_run(ctx)
+        await cap.after_run(ctx, result=AsyncMock(spec=AgentRunResult))
+        assert fake.closed is False
+        await cap.after_run(ctx, result=AsyncMock(spec=AgentRunResult))
+        assert fake.closed is True
 
     def test_missing_api_key_raises_user_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('NIMBLE_API_KEY', raising=False)

@@ -16,9 +16,8 @@ from pydantic_ai_harness.nimble._toolset import (
     AgentEffort,
     NimbleClient,
     NimbleSource,
-    _aclose_client,  # pyright: ignore[reportPrivateUsage]
-    _default_client,  # pyright: ignore[reportPrivateUsage]
     _json_dump,  # pyright: ignore[reportPrivateUsage]
+    _OwnedClientLifecycle,  # pyright: ignore[reportPrivateUsage]
     _recoverable,  # pyright: ignore[reportPrivateUsage]
     _source_list,  # pyright: ignore[reportPrivateUsage]
 )
@@ -298,9 +297,16 @@ class NimbleAgent(AbstractCapability[AgentDepsT]):
     """
 
     client: NimbleClient | None = None
-    """Nimble client to use; when `None`, an `AsyncNimble` is built from `NIMBLE_API_KEY`."""
+    """Nimble client to use; when `None`, an `AsyncNimble` is built from `NIMBLE_API_KEY`.
 
-    _owned_client: NimbleClient | None = field(default=None, init=False, repr=False)
+    Factory-built clients send `X-Client-Source: pydantic-ai` and are closed when
+    the last concurrent run ends.
+    """
+
+    _client_lifecycle: _OwnedClientLifecycle = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._client_lifecycle = _OwnedClientLifecycle(explicit_client=self.client)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
         """Static guidance for discovering and running Web Search Agents."""
@@ -308,16 +314,13 @@ class NimbleAgent(AbstractCapability[AgentDepsT]):
             return self.guidance or None
         return _INSTRUCTIONS
 
-    def _resolved_client(self) -> NimbleClient:
-        if self.client is not None:
-            return self.client
-        if self._owned_client is None:
-            self._owned_client = _default_client()
-        return self._owned_client
-
     def get_toolset(self) -> NimbleAgentToolset[AgentDepsT]:
         """Build the toolset providing Web Search Agent lifecycle tools."""
-        return NimbleAgentToolset[AgentDepsT](client=self._resolved_client())
+        return NimbleAgentToolset[AgentDepsT](client=self._client_lifecycle.resolve())
+
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Retain a factory-built client for this run (safe under concurrency)."""
+        await self._client_lifecycle.retain_for_run()
 
     async def after_run(
         self,
@@ -325,11 +328,8 @@ class NimbleAgent(AbstractCapability[AgentDepsT]):
         *,
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
-        """Close a factory-built client after the agent run finishes."""
-        owned = self._owned_client
-        self._owned_client = None
-        if owned is not None:
-            await _aclose_client(owned)
+        """Release a factory-built client; close it when no runs remain."""
+        await self._client_lifecycle.release_after_run()
         return result
 
     @classmethod

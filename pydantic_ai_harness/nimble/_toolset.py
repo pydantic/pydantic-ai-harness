@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import inspect
 import json
 import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any, Concatenate, Literal, ParamSpec, Protocol, TypedDict, TypeVar, cast
 
 import httpx
@@ -109,16 +111,56 @@ def _default_client() -> NimbleClient:  # pyright: ignore[reportUnusedFunction]
 
 
 async def _aclose_client(client: NimbleClient) -> None:  # pyright: ignore[reportUnusedFunction]
-    """Close an owned AsyncNimble-like client if it exposes `close`.
-
-    Called from capability `after_run` for factory-built clients.
-    """
+    """Close an owned AsyncNimble-like client if it exposes `close`."""
     close = getattr(client, 'close', None)
     if close is None:
         return
     result = close()
     if inspect.isawaitable(result):
         await result
+
+
+@dataclass
+class _OwnedClientLifecycle:  # pyright: ignore[reportUnusedClass]
+    """Reference-counted factory client shared safely across concurrent agent runs.
+
+    `before_run` retains; `after_run` releases and closes only when the last run ends.
+    Explicit `client=` on the capability bypasses this entirely.
+    """
+
+    explicit_client: NimbleClient | None
+    _owned_client: NimbleClient | None = field(default=None, init=False, repr=False)
+    _active_runs: int = field(default=0, init=False, repr=False)
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+
+    def resolve(self) -> NimbleClient:
+        """Return the explicit client, or lazily create a factory-owned one."""
+        if self.explicit_client is not None:
+            return self.explicit_client
+        if self._owned_client is None:
+            self._owned_client = _default_client()
+        return self._owned_client
+
+    async def retain_for_run(self) -> None:
+        """Increment the active-run count, creating the owned client if needed."""
+        if self.explicit_client is not None:
+            return
+        async with self._lock:
+            if self._owned_client is None:
+                self._owned_client = _default_client()
+            self._active_runs += 1
+
+    async def release_after_run(self) -> None:
+        """Decrement the active-run count; close the owned client when it hits zero."""
+        if self.explicit_client is not None:
+            return
+        async with self._lock:
+            if self._active_runs > 0:
+                self._active_runs -= 1
+            if self._active_runs == 0 and self._owned_client is not None:
+                owned = self._owned_client
+                self._owned_client = None
+                await _aclose_client(owned)
 
 
 def _page_return_text(url: str, markdown: str, max_text_chars: int) -> str:

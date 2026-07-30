@@ -17,8 +17,7 @@ from pydantic_ai_harness.nimble._toolset import (
     NimbleSearchToolset,
     SearchDepth,
     TimeRange,
-    _aclose_client,  # pyright: ignore[reportPrivateUsage]
-    _default_client,  # pyright: ignore[reportPrivateUsage]
+    _OwnedClientLifecycle,  # pyright: ignore[reportPrivateUsage]
 )
 
 if TYPE_CHECKING:
@@ -102,10 +101,10 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
 
     Any object satisfying the `NimbleClient` protocol works: use it to pass an API
     key explicitly or substitute a fake in tests. Factory-built clients send
-    `X-Client-Source: pydantic-ai` and are closed after each agent run.
+    `X-Client-Source: pydantic-ai` and are closed when the last concurrent run ends.
     """
 
-    _owned_client: NimbleClient | None = field(default=None, init=False, repr=False)
+    _client_lifecycle: _OwnedClientLifecycle = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate configuration bounds and domain filter exclusivity."""
@@ -119,6 +118,7 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
             raise ValueError(f'search_depth must be lite, fast, or deep, got {self.search_depth!r}')
         if self.include_domains and self.exclude_domains:
             raise ValueError('Specify include_domains or exclude_domains, not both.')
+        self._client_lifecycle = _OwnedClientLifecycle(explicit_client=self.client)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
         """Static research guidance adapted to which opt-in tools are enabled."""
@@ -131,17 +131,10 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
             instructions += _CRAWL_INSTRUCTIONS_SUFFIX
         return instructions
 
-    def _resolved_client(self) -> NimbleClient:
-        if self.client is not None:
-            return self.client
-        if self._owned_client is None:
-            self._owned_client = _default_client()
-        return self._owned_client
-
     def get_toolset(self) -> NimbleSearchToolset[AgentDepsT]:
         """Build the toolset providing Nimble research tools."""
         return NimbleSearchToolset[AgentDepsT](
-            client=self._resolved_client(),
+            client=self._client_lifecycle.resolve(),
             num_results=self.num_results,
             max_text_chars=self.max_text_chars,
             search_depth=self.search_depth,
@@ -152,17 +145,18 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
             include_crawl=self.include_crawl,
         )
 
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Retain a factory-built client for this run (safe under concurrency)."""
+        await self._client_lifecycle.retain_for_run()
+
     async def after_run(
         self,
         ctx: RunContext[AgentDepsT],
         *,
         result: AgentRunResult[Any],
     ) -> AgentRunResult[Any]:
-        """Close a factory-built client after the agent run finishes."""
-        owned = self._owned_client
-        self._owned_client = None
-        if owned is not None:
-            await _aclose_client(owned)
+        """Release a factory-built client; close it when no runs remain."""
+        await self._client_lifecycle.release_after_run()
         return result
 
     @classmethod
