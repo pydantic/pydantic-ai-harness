@@ -1828,7 +1828,13 @@ class TestCodeMode:
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
 
     async def test_unexpected_execution_error_reports_session_reset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """An unexpected execution failure tells the model that the REPL state was dropped."""
+        """An unexpected execution failure tells the model that the REPL state was dropped.
+
+        No public code path raises a bare host-side exception on purpose, so the
+        executor is patched to fail the way a host-binding bug does (e.g.
+        pydantic/monty#631, which replaces the sandbox exception with a bare
+        `RuntimeError` when the traceback payload fails span validation).
+        """
 
         async def _fail(self: Any, state: Any) -> Any:
             raise RuntimeError('invalid exception payload')
@@ -1839,6 +1845,7 @@ class TestCodeMode:
         tools = await wrapper.get_tools(ctx)
         run_code = tools['run_code']
 
+        # Seed REPL state that the model would rely on in later feeds.
         await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
         with monkeypatch.context() as patcher:
             patcher.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _fail)
@@ -1846,6 +1853,7 @@ class TestCodeMode:
                 await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
         # The retry message is the only record of the host-side error, so it must name it.
         assert 'RuntimeError: invalid exception payload' in str(exc_info.value)
+        # `x` is undefined in the fresh session's type check, proving the reset happened.
         with pytest.raises(ModelRetry, match='Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
 
