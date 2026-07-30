@@ -159,7 +159,7 @@ from pathlib import Path
 
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai_harness import GuardrailResult, ToolCallInfo, ToolGuardrail, ToolResultInfo
+from pydantic_ai_harness.guardrails import GuardrailResult, ToolCallInfo, ToolGuardrail, ToolResultInfo
 
 WORKSPACE = Path('/workspace')
 
@@ -219,7 +219,7 @@ Pydantic AI already owns the approval round trip: a call raising `ApprovalRequir
 
 ```python
 from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
-from pydantic_ai_harness import GuardrailResult, ToolCallInfo, ToolGuardrail
+from pydantic_ai_harness.guardrails import GuardrailResult, ToolCallInfo, ToolGuardrail
 
 
 def confirm_production(call: ToolCallInfo) -> GuardrailResult:

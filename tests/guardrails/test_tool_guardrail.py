@@ -28,14 +28,14 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness import (
+from pydantic_ai_harness.guardrails import (
+    GuardrailError,
     GuardrailResult,
     ToolBlocked,
     ToolCallInfo,
     ToolGuardrail,
     ToolResultInfo,
 )
-from pydantic_ai_harness.guardrails import GuardrailError
 
 pytestmark = pytest.mark.anyio
 

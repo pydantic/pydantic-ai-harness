@@ -16,12 +16,6 @@ if TYPE_CHECKING:
         OutputBlocked,
         OutputGuardrail,
         OutputGuardrailFunc,
-        ToolBlocked,
-        ToolCallInfo,
-        ToolGuardrail,
-        ToolGuardrailFunc,
-        ToolResultGuardrailFunc,
-        ToolResultInfo,
     )
     from .logfire import ManagedPrompt
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
@@ -41,12 +35,6 @@ __all__ = [
     'OutputGuardrail',
     'OutputGuardrailFunc',
     'Shell',
-    'ToolBlocked',
-    'ToolCallInfo',
-    'ToolGuardrail',
-    'ToolGuardrailFunc',
-    'ToolResultGuardrailFunc',
-    'ToolResultInfo',
 ]
 
 _GUARDRAIL_EXPORTS = {
@@ -58,12 +46,6 @@ _GUARDRAIL_EXPORTS = {
     'OutputBlocked',
     'OutputGuardrail',
     'OutputGuardrailFunc',
-    'ToolBlocked',
-    'ToolCallInfo',
-    'ToolGuardrail',
-    'ToolGuardrailFunc',
-    'ToolResultGuardrailFunc',
-    'ToolResultInfo',
     # Pre-rename names; `pydantic_ai_harness.guardrails.__getattr__` emits the
     # deprecation warning when these resolve.
     'GuardResult',

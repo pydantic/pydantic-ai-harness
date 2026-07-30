@@ -145,7 +145,7 @@ class ToolGuardrail(AbstractCapability[AgentDepsT]):
     from pathlib import Path
 
     from pydantic_ai import Agent
-    from pydantic_ai_harness import GuardrailResult, ToolCallInfo, ToolGuardrail
+    from pydantic_ai_harness.guardrails import GuardrailResult, ToolCallInfo, ToolGuardrail
 
 
     def no_writes_outside_workspace(call: ToolCallInfo) -> GuardrailResult:
