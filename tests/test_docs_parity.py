@@ -9,6 +9,7 @@ prose match the code as written) is a review-time concern, not a unit test.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -23,11 +24,12 @@ _NAMESPACE_PACKAGES = {_PACKAGE / 'experimental'}
 
 
 def _is_deprecation_shim(package: Path) -> bool:
-    """A package left at a moved capability's old path re-exports it and calls `warn_moved`.
+    """A package left at a moved or renamed capability's old path re-exports it and warns.
 
     Such shims carry no docs of their own, so they are excluded from the capability tables.
     """
-    return 'warn_moved(' in (package / '__init__.py').read_text(encoding='utf-8')
+    source = (package / '__init__.py').read_text(encoding='utf-8')
+    return 'warn_moved(' in source or 'warn_module_renamed(' in source
 
 
 def _capability_packages() -> list[Path]:
@@ -96,7 +98,7 @@ _EXPERIMENTAL_MARKERS = ('HarnessExperimentalWarning', 'removed in any release',
 # Lifecycle hook names must not lead a page -- mechanism goes below the purpose.
 _LEAD_HOOK_NAMES = ('before_model_request', 'after_model_request', 'before_tool_execute', 'after_tool_execute')
 # ClassName-style headings are a smell, except where the class name IS the name.
-_ALLOWED_CLASSNAME_HEADINGS = {'FileSystem', 'LocalStack'}
+_ALLOWED_CLASSNAME_HEADINGS = {'FileSystem', 'LocalStack', 'StackOne'}
 _FORBIDDEN_HEADINGS = {'overflow', 'authoring', 'overflow capability', 'compaction capabilities'}
 
 
@@ -118,22 +120,24 @@ _CAPABILITY_PAGE_META = {
     'managed-prompt.md': ('logfire', 'Managed Prompt'),
     'memory.md': ('memory', 'Memory'),
     'modal-sandbox.md': ('modal_sandbox', 'Modal Sandbox'),
-    'context.md': ('context', 'Context'),
-    'pydantic-ai-docs.md': ('docs', 'Pydantic AI Docs'),
+    'repo-context.md': ('repo_context', 'Repo Context'),
+    'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),
     'exa-search.md': ('exa', 'Exa Search'),
     'macroscope.md': ('macroscope', 'Macroscope'),
     'compaction.md': ('compaction', 'Compaction'),
-    'overflowing-tool-output.md': ('overflowing_tool_output', 'Overflowing Tool Output'),
-    'cache-stability.md': ('cache_stability', 'Cache Stability Monitor'),
+    'tool-output-limits.md': ('tool_output_limits', 'Tool Output Limits'),
+    'warn-on-cache-busts.md': ('warn_on_cache_busts', 'Warn On Cache Busts'),
     'step-persistence.md': ('step_persistence', 'Step Persistence'),
     'audit-log.md': ('audit_log', 'Audit Log'),
+    'conversation-search.md': ('conversation_search', 'Conversation Search'),
     'media.md': ('media', 'Media Externalization'),
     'subagents.md': ('subagents', 'Subagents'),
     'dynamic-workflow.md': ('dynamic_workflow', 'Dynamic Workflow'),
     'planning.md': ('planning', 'Planning'),
-    'runtime-authoring.md': ('runtime_authoring', 'Runtime Authoring'),
+    'capability-creation.md': ('capability_creation', 'Runtime Capability Creation'),
     'guardrails.md': ('guardrails', 'Input & Output Guardrails'),
     'localstack.md': ('localstack', 'LocalStack'),
+    'stackone.md': ('stackone', 'StackOne'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
 }
 
@@ -294,6 +298,55 @@ def test_graduated_doc_page_has_no_experimental_framing(page: Path) -> None:
     assert hit is None, (
         f'{page.relative_to(_ROOT)}: graduated capability still carries experimental framing ({hit!r}). '
         'Only ACP keeps an experimental note; soften the rest to the README stability note.'
+    )
+
+
+# --- Site-nav parity (docs/nav.json) ----------------------------------------
+#
+# Every flat page under `docs/` must appear in the unified-site nav, and every
+# nav entry must point at a page that exists. `docs/skills.md` once shipped
+# orphaned from the nav; these checks fail CI the moment a page and the nav
+# disagree, in either direction.
+
+_NAV_JSON = _DOCS_DIR / 'nav.json'
+# The one page allowed to be absent from the site nav: a dev-only doc that is not
+# a capability page. Excluding any other page requires a reviewed edit here.
+_NAV_EXCLUDED_PAGES = {'mutation-testing.md'}
+
+
+def _nav_slugs() -> set[str]:
+    groups = json.loads(_NAV_JSON.read_text(encoding='utf-8'))
+    return {item['slug'] for group in groups for item in group['items']}
+
+
+_NAV_SLUGS = _nav_slugs()
+_NAV_LISTED_PAGES = [p for p in sorted(_DOCS_DIR.glob('*.md')) if p.name not in _NAV_EXCLUDED_PAGES]
+
+
+def test_nav_parity_inputs_discovered() -> None:
+    # Guard against an emptied nav or a moved docs root making the parity checks
+    # below vacuously pass.
+    assert len(_NAV_SLUGS) >= 12
+    assert len(_NAV_LISTED_PAGES) >= 12
+    # Pin the excluded set so a contributor can only drop a page from the nav
+    # check via a reviewed edit to this named constant, not silently.
+    assert _NAV_EXCLUDED_PAGES == {'mutation-testing.md'}
+
+
+@pytest.mark.parametrize('page', _NAV_LISTED_PAGES, ids=lambda p: p.name)
+def test_doc_page_is_in_site_nav(page: Path) -> None:
+    assert page.stem in _NAV_SLUGS, (
+        f'{page.relative_to(_ROOT)} is not listed in docs/nav.json, so it ships orphaned from the site nav. '
+        f'Add a `{{ "label": "...", "slug": "{page.stem}" }}` entry to docs/nav.json '
+        '(or add the page to _NAV_EXCLUDED_PAGES if it is intentionally unlisted).'
+    )
+
+
+@pytest.mark.parametrize('slug', sorted(_NAV_SLUGS), ids=lambda s: s)
+def test_nav_slug_has_page(slug: str) -> None:
+    assert (_DOCS_DIR / f'{slug}.md').exists(), (
+        f'docs/nav.json lists slug "{slug}" but docs/{slug}.md does not exist. '
+        'Fix the slug or remove its entry from docs/nav.json.'
     )
 
 

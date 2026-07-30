@@ -21,16 +21,20 @@ permissions:
   contents: read
 
 jobs:
-  # Detect whether a pull request or branch push touches LocalStack. The live
-  # integration job installs the AWS CLI, pulls the LocalStack image, and starts
-  # a real container against an external auth token -- weight that only pays off
-  # when LocalStack code or its CI wiring changes. Tag pushes skip detection so
-  # releases always exercise the live path.
+  # Detect whether a pull request or branch push touches a capability whose live
+  # integration job is too heavy to run on every PR. Each such capability gets its
+  # own detect step and its own output; tag pushes skip detection entirely so
+  # releases always exercise the live paths.
+  #
+  # The LocalStack job installs the AWS CLI, pulls the LocalStack image, and starts
+  # a real container against an external auth token. The MongoDB job starts a
+  # mongod service container and moves tens of megabytes through it.
   changes:
     if: github.event_name == 'pull_request' || github.ref_type == 'branch'
     runs-on: ubuntu-latest
     outputs:
       localstack: ${{ steps.detect.outputs.localstack }}
+      mongodb: ${{ steps.detect-mongodb.outputs.mongodb }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -58,6 +62,34 @@ jobs:
               exit "$status"
             fi
             echo 'localstack=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A second step rather than extra paths on `detect`: the LocalStack step's
+      # exact lines are asserted by tests/localstack/test_ci_workflow.py, and the
+      # two capabilities need independent answers anyway.
+      - id: detect-mongodb
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+            pydantic_ai_harness/step_persistence \
+            pydantic_ai_harness/media \
+            tests/step_persistence \
+            tests/media \
+            integration_tests/mongodb \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            .github/workflows/main.yml
+          then
+            echo 'mongodb=false' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+            echo 'mongodb=true' >> "$GITHUB_OUTPUT"
           fi
 
   lint:
@@ -187,12 +219,64 @@ jobs:
       - run: uv sync --locked --group dev --all-extras
       - run: uv run --no-sync pytest
 
+  # Guard the pymongo-free import path. The `test` matrix's slim job installs the
+  # `dev` group, which carries `mongomock-motor` -- and that pulls Motor/PyMongo
+  # in transitively, so even "slim" has pymongo present. This job installs the
+  # base package alone (no groups, no extras), so a capability that imports
+  # pymongo at module top instead of behind the lazy `__getattr__` fails here.
+  base-import:
+    runs-on: ubuntu-latest
+    name: base install imports without extras
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-suffix: base-import
+
+      - run: uv sync --locked --no-default-groups
+
+      # `find_spec` assertion keeps the smoke test honest: if a base dependency
+      # ever pulls pymongo back in, this fails loudly rather than passing while
+      # testing nothing.
+      - run: >
+          uv run --no-sync python -c "import importlib.util;
+          assert importlib.util.find_spec('pymongo') is None, 'base install must not have pymongo, or this smoke test no longer guards the lazy-import path';
+          import pydantic_ai_harness;
+          import pydantic_ai_harness.step_persistence;
+          import pydantic_ai_harness.media"
+
   localstack-integration:
     needs: [changes]
     # Skip on pull requests and branch pushes that leave LocalStack untouched;
     # always run on tags so releases exercise the live path. `always()` lets this
     # evaluate even though `changes` is skipped on tag events.
-    if: ${{ always() && (github.ref_type == 'tag' || needs.changes.outputs.localstack == 'true') }}
+    #
+    # Also skip on pull requests that cannot read repository secrets, which is where
+    # LOCALSTACK_AUTH_TOKEN comes from. LOCALSTACK_REQUIRE_AUTH_TOKEN turns an empty
+    # token into a failure rather than a skip, and `check` allows this job to be
+    # skipped but not to fail -- so without this guard such a pull request is red for
+    # a reason unrelated to its changes. Two cases qualify:
+    #
+    #   - cross-repository (fork) branches, which never receive repository secrets
+    #   - Dependabot-triggered runs, which read a separate secrets store; their
+    #     branches live in this repo, so the head-repo check alone lets them through
+    #
+    # Both touch pyproject.toml or uv.lock routinely, which is what trips the path
+    # filter in `changes`. Keying on github.actor rather than the branch name is
+    # deliberate: it tracks who triggered the run, so a maintainer pushing to a
+    # Dependabot branch regains secrets and the job runs. Either way the live
+    # LocalStack run happens once the change reaches main.
+    if: >-
+      ${{ always()
+          && (github.ref_type == 'tag' || needs.changes.outputs.localstack == 'true')
+          && (github.event_name != 'pull_request'
+              || (github.event.pull_request.head.repo.full_name == github.repository
+                  && github.actor != 'dependabot[bot]')) }}
     runs-on: ubuntu-latest
     name: LocalStack integration tests
     env:
@@ -228,6 +312,69 @@ jobs:
           # The job executes the full PR checkout, so path detection is not a security boundary.
           LOCALSTACK_AUTH_TOKEN: ${{ secrets.LOCALSTACK_AUTH_TOKEN }} # zizmor: ignore[secrets-outside-env]
 
+  mongodb-integration:
+    needs: [changes]
+    # Same path scoping as `localstack-integration`: run on tags so releases
+    # exercise the live path, otherwise only when the change touches the Mongo
+    # backends. `always()` lets this evaluate even though `changes` is skipped on
+    # tag events.
+    #
+    # Deliberately no fork clause here, unlike `localstack-integration`. That
+    # job's extra condition exists because LOCALSTACK_AUTH_TOKEN is a repository
+    # secret and LOCALSTACK_REQUIRE_AUTH_TOKEN turns its absence into a failure,
+    # so a run that cannot read secrets would go red for reasons unrelated to its
+    # changes. It guards a secret, not a trust boundary. The mongod service below
+    # starts with authentication disabled and this job reads no secret, so an
+    # external contributor's pull request gets the same signal a maintainer
+    # branch does. Do not copy the LocalStack condition here.
+    if: >-
+      ${{ always()
+          && (github.ref_type == 'tag' || needs.changes.outputs.mongodb == 'true') }}
+    runs-on: ubuntu-latest
+    name: MongoDB integration tests
+    # `localstack-integration` has no timeout because the capability owns its
+    # container and enforces its own startup timeout. Nothing here does: if the
+    # service container never becomes reachable the job would otherwise sit on a
+    # runner for the six-hour default.
+    timeout-minutes: 15
+    # A `services:` container, where `localstack-integration` starts nothing.
+    # That difference follows the capabilities: `localstack` ships a
+    # `LocalStackContainer` class whose lifecycle is part of its public surface,
+    # so its live tests drive Docker themselves. The Mongo backends take a
+    # connection URL and own no container, so there is nothing for the tests to
+    # start and the runner provides mongod instead.
+    services:
+      mongodb:
+        image: mongo:8
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Without this an unreachable server is a skip, which is what a developer
+      # without a local mongod wants and exactly what must not happen here: a
+      # service container that never came up would report green having tested
+      # nothing.
+      MONGODB_REQUIRE_LIVE: '1'
+      MONGODB_TEST_URL: mongodb://127.0.0.1:27017
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-suffix: mongodb
+
+      - run: uv sync --locked --group dev --extra mongodb
+
+      - run: make integration-mongodb
+
   coverage:
     needs: [test]
     runs-on: ubuntu-latest
@@ -253,15 +400,18 @@ jobs:
 
   check:
     if: always()
-    needs: [changes, lint, test, test-floor, test-latest, coverage, localstack-integration]
+    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, localstack-integration, mongodb-integration]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
         with:
           # localstack-integration is skipped when a pull request or branch push
-          # doesn't touch LocalStack, and `changes` is skipped on tag events.
-          # Both still vote (block the merge) when they actually run and fail.
-          allowed-skips: changes, localstack-integration
+          # doesn't touch LocalStack, when the pull request comes from a fork
+          # (no secrets there), and `changes` is skipped on tag events.
+          # mongodb-integration is skipped only on the path filter -- it needs no
+          # secret, so it runs on fork pull requests too.
+          # All three still vote (block the merge) when they actually run and fail.
+          allowed-skips: changes, localstack-integration, mongodb-integration
           jobs: ${{ toJSON(needs) }}
 
   release:
