@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -42,167 +43,80 @@ _INSTRUCTIONS = (
 
 @dataclass
 class BrowserUse(AbstractCapability[AgentDepsT]):
-    """Delegation of open-ended web tasks to an autonomous [browser-use](https://github.com/browser-use/browser-use) agent.
+    """Web browsing for agents powered by the [Browser Use](https://browser-use.com) SDK.
 
-    Adds one tool, `browse_web`, which hands a self-contained natural-language
-    goal to a browser-use `Agent`. That agent drives a real Chromium over CDP
-    with its own perception-action loop (indexed DOM, screenshots, planning,
-    self-healing) and returns a text result; the browser session is killed when
-    the run ends, on success or failure.
+    Adds a `browse_web` tool: the model hands one web task to an autonomous
+    browser-use agent that drives a real browser -- headless Chromium, a
+    browser you run over CDP, or a Browser Use cloud browser -- and returns
+    the result. The browser session is killed when the call ends, on success
+    or failure.
 
     ```python
-    from browser_use import ChatAnthropic
     from pydantic_ai import Agent
-
     from pydantic_ai_harness.browser_use import BrowserUse
 
-    agent = Agent(
-        'anthropic:claude-sonnet-4-6',
-        capabilities=[BrowserUse(llm=ChatAnthropic(model='claude-sonnet-4-6'))],
-    )
+    agent = Agent('openai:gpt-5.5', capabilities=[BrowserUse(llm='openai:gpt-5.5')])
     ```
 
-    Each `browse_web` call launches (or attaches to, with `cdp_url`) a browser
-    and runs the sub-agent's loop to completion, so calls are long and cost one
-    LLM call per step. The host model is told to reach for it when a task needs
-    judgement about unknown pages, not for scripted flows.
+    Each call runs the browser agent's loop to completion (one LLM call per
+    step), so calls are long; the host model delegates whole goals, not clicks.
     """
 
     llm: ChatModelInput | None = None
-    """The chat model driving the sub-agent.
-
-    Accepts a Pydantic AI model or model name string (e.g.
-    `'anthropic:claude-sonnet-4-6'`), which is wrapped in
-    `PydanticAIChatModel` -- one model configuration for host and sub-agent,
-    with Pydantic AI's structured-output handling and Logfire tracing. A
-    browser-use chat model (e.g. `browser_use.ChatAnthropic(...)`) is used
-    as-is.
-
-    With `None`, browser-use falls back to its own default model selection,
-    which ends at its hosted `ChatBrowserUse` model (a separate account and
-    `BROWSER_USE_API_KEY`). Pass an explicit model to keep inference in your
-    own stack.
-    """
+    """Browser agent's model: a Pydantic AI model/string (wrapped in `PydanticAIChatModel`), a
+    browser-use chat model as-is, or `None` for Browser Use's hosted model (`BROWSER_USE_API_KEY`)."""
 
     browser_profile: BrowserProfile | None = field(default=None, repr=False)
-    """Full browser configuration: proxy, `user_data_dir`, `storage_state`, viewport, and the rest.
-
-    Kept out of `repr()` for the same reason as `sensitive_data`: a profile carries proxy
-    credentials and `storage_state` cookies.
-
-    `None` uses browser-use's defaults. The capability's `headless`,
-    `allowed_domains`, and `cdp_url` fields override the profile when set,
-    mirroring how `BrowserSession` itself merges a profile with directly
-    passed fields.
-    """
+    """Full browser-use `BrowserProfile`: proxy, `user_data_dir`, cookies, viewport, and the rest.
+    Out of `repr()` -- it can carry proxy credentials and cookies."""
 
     allowed_domains: list[str] | None = None
-    """Domains the sub-agent may navigate to; `None` means no restriction.
-
-    Enforced by browser-use's `BrowserProfile`; navigation outside the list is
-    blocked. Glob patterns like `'*.example.com'` are supported. When set, it
-    overrides the `browser_profile`'s own `allowed_domains`.
-    """
+    """Navigation allowlist, e.g. `['*.example.com']`; `None` = unrestricted. Overrides the profile's."""
 
     headless: bool | None = None
-    """Run the browser without a visible window.
-
-    `None` (the default) means headless, except when a `browser_profile` is
-    given, which then keeps its own setting. Set `False` to watch the agent
-    work.
-    """
+    """`False` shows the browser window on local launches. `None` = headless, unless a profile decides."""
 
     max_steps: int = 50
-    """Hard cap on the sub-agent's perception-action steps per `browse_web` call.
-
-    Each step is one LLM call. When the cap is hit before the task finishes,
-    the tool reports that the agent stopped without a result.
-    """
+    """Cap on browser-agent steps per call (one LLM call each)."""
 
     use_vision: bool | Literal['auto'] = True
-    """Send page screenshots to the sub-agent's model.
-
-    Vision makes the agent markedly better on visual layouts but adds image
-    tokens on every step; turn it off for text-heavy tasks on a budget, or use
-    `'auto'` to follow the model's declared vision support.
-    """
+    """Send page screenshots to the browser agent's model; `'auto'` follows the model's support."""
 
     output_schema: type[BaseModel] | None = None
-    """Pydantic model class the sub-agent's final result must conform to. `None` returns prose.
-
-    Forwarded to browser-use as `output_model_schema`; the tool then returns
-    the validated result as JSON. A final result that does not parse surfaces
-    as a retry prompt to the host model.
-    """
+    """Pydantic model class for a structured, validated JSON result; `None` returns prose."""
 
     sensitive_data: dict[str, str | dict[str, str]] | None = field(default=None, repr=False)
-    """Secrets the sub-agent may type without its model ever seeing the values.
-
-    Kept out of `repr()`, so the values do not reach a traceback, a log line, or a span
-    attribute. Keeping them from the sub-agent's model and then printing them in a dataclass
-    repr would be an odd place to stop.
-
-    browser-use shows the model only the placeholder keys (e.g.
-    `{'x_password': '...'}`; the model writes `<secret>x_password</secret>`)
-    and substitutes the real values in the browser. Scope entries per domain
-    with the nested form `{'https://example.com': {'x_password': '...'}}`, and
-    combine with `allowed_domains` so the values cannot be typed elsewhere.
-    """
+    """Secrets typed by the browser, never shown to the model. Nest per domain to scope them.
+    Out of `repr()` to stay out of logs."""
 
     extend_system_message: str | None = None
-    """Extra instructions appended to the browser agent's own system prompt.
-
-    Use it to give the sub-agent standing constraints ("never submit forms",
-    "prefer the English version of pages") without replacing browser-use's
-    prompt.
-    """
+    """Extra standing instructions for the browser agent."""
 
     agent_settings: BrowserAgentSettings | None = None
-    """The remaining browser-use `Agent` options (judge, planning, timeouts, custom tools, ...).
-
-    `None` behaves like an empty `BrowserAgentSettings`, i.e. browser-use's own
-    defaults. See `BrowserAgentSettings` for the full list.
-    """
+    """Every remaining `browser_use.Agent` option; `None` = browser-use's defaults."""
 
     session_scope: Literal['call', 'agent'] = 'call'
-    """How long a browser session lives.
-
-    `'call'` (the default) gives every `browse_web` call a fresh session and
-    kills it when the call ends, so concurrent calls run in parallel -- one
-    browser process each, with the memory that implies. `'agent'` keeps one
-    session alive across calls -- tabs, logins, and page state carry over, and
-    calls are serialized on the shared browser -- until `aclose()` is called
-    (or the capability is used as an async context manager); after that the
-    capability is closed for good. For cookie/login persistence alone, a
-    `browser_profile` with a `user_data_dir` also works in `'call'` scope.
-    """
+    """`'call'` = fresh browser per call, parallel-safe; `'agent'` = one shared session across runs
+    (logins and tabs carry over) until `aclose()` or the `async with` block ends."""
 
     cdp_url: str | None = None
-    """Attach to an existing Chromium over CDP instead of launching one locally.
+    """Attach to a browser you run yourself, over CDP. Overrides the profile's."""
 
-    Points the session at a remote browser, e.g. a container or a hosted
-    browser service. When set, it overrides the `browser_profile`'s own
-    `cdp_url`. Ending a call disconnects from an attached browser rather than
-    terminating it: browser-use only kills a browser process it launched
-    itself, so a browser you manage survives `'call'` scope.
-    """
+    use_cloud: bool | None = None
+    """`True` = a [Browser Use Cloud](https://cloud.browser-use.com) browser (needs
+    `BROWSER_USE_API_KEY`; bills while the session is alive). Overrides the profile's."""
 
     guidance: str | None = None
-    """Custom delegation guidance for the system prompt.
+    """Host-model instructions: `None` = default, `''` = none, str = custom."""
 
-    Leave as `None` for the default guidance, or set `''` to contribute no
-    instructions at all.
-    """
+    progress: Callable[[str], None] | None = None
+    """Narrate the browser agent's steps live, e.g. `progress=print`."""
 
     browser_agent: BrowserAgentFactory | None = None
-    """Factory for the sub-agent; `None` builds a real `browser_use.Agent`.
-
-    Use it to intercept sub-agent construction, or to substitute a fake in
-    tests.
-    """
+    """Factory for building the browser agent; `None` builds a real `browser_use.Agent`. The seam for tests."""
 
     _toolset: BrowserUseToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
-    """The cached toolset, so `'agent'`-scoped session state has one owner."""
+    """Cached so `'agent'`-scoped session state has one owner."""
 
     def __post_init__(self) -> None:
         """Warn when flat secrets have no effective navigation allowlist."""
@@ -222,21 +136,13 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
             )
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
-        """Static delegation guidance: when to hand a task to `browse_web`.
-
-        A non-`None` `guidance` replaces the default; `''` disables
-        instructions entirely.
-        """
+        """Delegation guidance; `guidance` replaces it, `''` disables it."""
         if self.guidance is not None:
             return self.guidance or None
         return _INSTRUCTIONS
 
     def get_toolset(self) -> BrowserUseToolset[AgentDepsT]:
-        """The toolset providing the `browse_web` tool (built once, then reused).
-
-        Caching keeps `'agent'`-scoped session state in one place, so repeated
-        calls do not each spawn their own shared browser.
-        """
+        """The toolset providing `browse_web`, built once and cached."""
         if self._toolset is None:
             self._toolset = BrowserUseToolset[AgentDepsT](
                 browser_agent=self.browser_agent if self.browser_agent is not None else default_browser_agent,
@@ -252,20 +158,13 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
                 settings=self.agent_settings if self.agent_settings is not None else BrowserAgentSettings(),
                 session_scope=self.session_scope,
                 cdp_url=self.cdp_url,
+                use_cloud=self.use_cloud,
+                progress=self.progress,
             )
         return self._toolset
 
     async def aclose(self) -> None:
-        """Kill the shared browser session, if one is alive (`'agent'` scope).
-
-        Call it when the capability is no longer needed, or use the capability
-        as an async context manager. In `'agent'` scope it closes for good: a
-        later `browse_web` raises rather than starting a browser that nothing
-        would close. A no-op in `'call'` scope, where no session is retained
-        between calls, and before the first `browse_web` call. It waits for an
-        in-flight `browse_web` call to finish rather than closing the browser
-        under it, so cancel the run first if you need to close sooner.
-        """
+        """Kill the shared browser session (`'agent'` scope) for good; waits for in-flight calls."""
         if self._toolset is not None:
             await self._toolset.aclose()
 
@@ -294,15 +193,10 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
         extend_system_message: str | None = None,
         session_scope: Literal['call', 'agent'] = 'call',
         cdp_url: str | None = None,
+        use_cloud: bool | None = None,
         guidance: str | None = None,
     ) -> BrowserUse[AgentDepsT]:
-        """Construct the capability from serializable spec options.
-
-        The `llm`, `browser_profile`, `output_schema`, `agent_settings`, and
-        `browser_agent` fields are not spec-serializable: spec-loaded instances
-        use browser-use's own default model selection, default browser and
-        agent configuration, prose output, and the default agent factory.
-        """
+        """Build from serializable spec options; the object-valued fields keep their defaults."""
         return cls(
             allowed_domains=allowed_domains,
             headless=headless,
@@ -312,5 +206,6 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
             extend_system_message=extend_system_message,
             session_scope=session_scope,
             cdp_url=cdp_url,
+            use_cloud=use_cloud,
             guidance=guidance,
         )

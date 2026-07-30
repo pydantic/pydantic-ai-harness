@@ -1,16 +1,5 @@
-"""Typed passthrough for the browser-use `Agent` constructor options.
-
-`BrowserAgentSettings` mirrors the plain-value options of `browser_use.Agent`
-(v0.13.x) with browser-use's own defaults, so the whole configurable surface is
-reachable from the capability without writing a custom factory. Three groups are
-deliberately absent: options the capability already owns as first-class fields
-(task, llm, session, vision, output schema, sensitive data, system-message
-extension, signal handling), options that are objects the caller has to build in
-code (browser-use's callbacks, `injected_agent_state`, `skill_service` -- these
-belong in a `BrowserAgentFactory`), and options the toolset controls or that are
-not user-facing (`browser`, `browser_profile`, the deprecated `controller` alias
-of `tools`, per-run identity like `task_id` and `source`, and private ones).
-"""
+"""Typed passthrough for the browser-use `Agent` constructor options"""
+# ruff: noqa: D415
 
 from __future__ import annotations
 

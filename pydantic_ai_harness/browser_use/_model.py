@@ -1,11 +1,5 @@
-"""A browser-use chat model backed by a Pydantic AI model.
-
-Lets the browser-use sub-agent run on the same model configuration as the host
-agent: one provider setup, Pydantic AI's structured-output handling (tool
-calling with validation retries, instead of browser-use's provider-sensitive
-`response_format`), and Logfire tracing when `logfire.instrument_pydantic_ai()`
-is active.
-"""
+"""A browser-use chat model backed by a Pydantic AI model"""
+# ruff: noqa: D415
 
 from __future__ import annotations
 

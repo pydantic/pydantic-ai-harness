@@ -1,143 +1,103 @@
 ---
 title: Browser Use
-description: Delegate open-ended web tasks from a Pydantic AI agent to an autonomous browser-use agent -- one browse_web tool hands over a natural-language goal, browser-use drives a real browser, and the result comes back as text or validated JSON.
+description: Your agent can log into websites, click buttons, fill out forms, extract data, and complete tasks for you.
 ---
 
 # Browser Use
 
-`BrowserUse` delegates open-ended web tasks to an autonomous
-[browser-use](https://github.com/browser-use/browser-use) agent. The
-capability adds one tool, `browse_web`: the host agent hands over a
-self-contained natural-language goal, browser-use drives a real Chromium with
-its own perception-action loop (indexed DOM, screenshots, planning,
-self-healing), and the tool returns a text result.
+Give an agent a real web browser powered by the [Browser Use](https://browser-use.com) Python SDK: delegate whole tasks to an autonomous browser agent that clicks, types, extracts data, fills out forms, and completes them -- in a headless browser on your machine, a browser you already use with your logins saved, or one in the cloud.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/browser_use/)
 
-## The problem
-
-Low-level browser tools (goto, click a selector, extract text) work well when
-the flow is known: the host model decides every action, which is cheap and
-deterministic. On an unknown page layout or a fuzzy goal ("find the price of
-the Pro plan", "fill in this form"), the host model ends up micro-managing a
-DOM it cannot perceive well, burning a model round-trip per click and getting
-stuck on dynamic pages.
-
-browser-use already ships an agent tuned for exactly that loop: it indexes the
-live DOM into numbered elements, feeds the model page state (optionally with
-screenshots), plans, detects loops, and recovers from failed actions.
-`BrowserUse` integrates it the way the harness integrates other agents (see
-[Subagents](subagents.md) and `ExaAgent` on [Exa Search](exa-search.md)): as a
-delegation target, not as a bag of low-level tools. The host agent stays
-high-level and calls `browse_web` with a goal; the sub-agent does the browsing
-and reports back.
-
-## Usage
-
-Install the `browser-use` extra (Python 3.11+; the rest of the harness
-supports 3.10). browser-use talks to Chromium directly over CDP and downloads
-a browser on first run when none is found locally:
+## Installation
 
 ```bash
 uv add "pydantic-ai-harness[browser-use]"
 ```
 
-Then pass `BrowserUse` to an `Agent` via the `capabilities` parameter, with a
-model for the sub-agent:
+That is the only required step. The extra needs Python 3.11+.
+
+The browser is driven directly over CDP: by default, headless Chromium is launched on your machine per session, downloaded on first run if none is found. For cloud browsers, see [Cloud browsers](#cloud-browsers).
+
+## The problem
+
+An agent with search and fetch tools can read text on public websites, but it cannot use the web. Most of what people do involves actions: booking a flight, paying a bill, cancelling a subscription, finding invoices for an expense report, rescheduling a delivery, filling in the same details across a dozen job applications.
+
+## The solution
+
+`BrowserUse` gives the agent one tool that hands whole tasks to a real browser. An autonomous [browser-use](https://github.com/browser-use/browser-use) agent looks at the page, plans, clicks, types, scrapes data, and reports back when the task is done.
 
 ```python
 from pydantic_ai import Agent
-
 from pydantic_ai_harness.browser_use import BrowserUse
 
-agent = Agent(
-    'anthropic:claude-sonnet-4-6',
-    capabilities=[
-        BrowserUse(
-            llm='anthropic:claude-sonnet-4-6',
-            allowed_domains=['example.com'],
-        )
-    ],
-)
+agent = Agent('openai:gpt-5.5', capabilities=[BrowserUse(llm='openai:gpt-5.5')])
 
-result = agent.run_sync('Check example.com and tell me the price of the Pro plan.')
+result = agent.run_sync('Open news.ycombinator.com, and summarize the top 5 stories.')
 print(result.output)
 ```
 
-Each `browse_web` call runs the sub-agent's loop to completion in a browser
-session. The tool result is the sub-agent's final text; when the sub-agent
-stops without finishing (step budget exhausted, repeated failures) or judges
-its own result incomplete, the tool says so instead of presenting a partial
-answer as a clean one.
+## What agents do with it
 
-## The sub-agent's model
+These are what people most often ask a browser agent to do, in order of how common they are:
 
-Pass the sub-agent's model as a Pydantic AI model or model name string -- the
-same configuration your host agent uses. The capability wraps it in
-`PydanticAIChatModel`, an implementation of browser-use's chat-model protocol
-on top of a Pydantic AI model. That buys three things:
+- **Research and compare across sites.** Answer a question that takes several sources, rank options, or check a claim -- the top repositories on GitHub, which fund recently bought a stock, what an organization is affiliated with.
+- **Pull repeated records into a table.** Scrape products, listings, prices, reviews, or videos into structured output: every offer on an Amazon product page, or every venue on Google Maps in one city.
+- **Reach a page and act on it.** Open a site, get through to the right screen, and do one thing there -- often waiting for you to log in first, then carrying on.
+- **Test a website end to end.** Walk a real user flow, audit the UX, hunt for bugs, or re-check a page after a change.
+- **Build and run browser automation.** Write UI tests for a page, script a repeatable crawl, or reproduce an interaction step by step.
+- **Fill in forms and account flows.** Registrations, surveys, course modules, assessments, and other multi-page sequences.
+- **Shop and book.** Compare products, prices, sellers, and coupons, search listings against your criteria, and go through checkout or a booking.
+- **Apply for jobs and update systems.** Work through applications, or log into an admin tool and update records, listings, and settings.
 
-- **one provider setup** for host and sub-agent (keys, gateways, base URLs);
-- **structured output via Pydantic AI's tool calling**, with validation
-  retries -- browser-use's own forced `response_format` schema is rejected by
-  some providers (e.g. Anthropic models behind OpenRouter);
-- **observability**: sub-agent LLM calls appear in Logfire when
-  `logfire.instrument_pydantic_ai()` is active.
+## Tools
 
-browser-use's own model wrappers (`ChatAnthropic`, `ChatOpenAI`, `ChatGoogle`,
-...) are also accepted and used as-is.
+`BrowserUse` contributes one tool to the agent:
 
-With `llm=None`, browser-use falls back to its own default model selection,
-which ends at its hosted `ChatBrowserUse` model. That is a separate account and
-API key (`BROWSER_USE_API_KEY`), billed by browser-use, and invisible to your
-own model observability. Pass an explicit `llm` to keep inference in your own
-stack.
+| Tool | Purpose |
+|---|---|
+| `browse_web` | Hand one web task, stated in natural language, to the browser agent, and return its result. |
 
-Two cost knobs to know about:
+Each call runs the browser agent's loop to completion, up to `max_steps` steps. The [prompting guide](https://docs.browser-use.com/open-source/customize/agent/prompting-guide) covers how to phrase tasks that browser agents do well.
 
-- `use_vision` (default `True`) sends a screenshot with every step, which
-  makes the sub-agent markedly better on visual layouts but adds image tokens
-  on each of its model calls. Use `'auto'` to follow the model's declared
-  vision support, or `False` for text-heavy tasks on a budget.
-- browser-use runs a **judge** model call at the end of each task by default,
-  evaluating the result. Disable it with
-  `BrowserAgentSettings(use_judge=False)` if that extra call matters.
+Set `progress` (e.g. `progress=print`) to watch the task and each step live while your browser agent runs.
 
-## Agent settings
+## The browser agent's model
 
-Everything else `browser_use.Agent` takes is available through
-`agent_settings`, a typed mirror of its constructor options with browser-use's
-own defaults: judge, planning, timeouts, failure budgets, thinking and flash
-modes, screenshot sizing, custom action registries (`tools`), initial actions,
-GIF recording, and the rest.
+Pass `llm` the same model string or `Model` your host agent uses. It carries over all the configuration from `PydanticAIChatModel`, including your API key and structured output. Browser Use's own [chat models](https://docs.browser-use.com/open-source/supported-models) (`ChatOpenAI`, `ChatAnthropic`, ...) pass through as-is. `llm=None` uses Browser Use's hosted model, billed to your `BROWSER_USE_API_KEY`.
 
-```python
-from pydantic_ai_harness.browser_use import BrowserAgentSettings, BrowserUse
+## Choosing a browser
 
-BrowserUse(
-    llm='anthropic:claude-sonnet-4-6',
-    agent_settings=BrowserAgentSettings(
-        use_judge=False,  # skip the extra judge call per task
-        step_timeout=60,
-        flash_mode=True,
-    ),
-)
+| Configuration | What it uses | Reach for it when |
+|---|---|---|
+| (default) | Headless Chromium launched per session on a clean profile | You are on a server or CI, or several runs go at once and must not share tabs |
+| `cdp_url` | A browser you run yourself, via its DevTools endpoint | You want the sites you are already signed into |
+| `use_cloud=True` | A [Browser Use Cloud](https://cloud.browser-use.com) browser | You want to bypass CAPTCHAs, or you want the run fully off your machine to run many browsers in parallel |
+
+`headless=False` shows the browser window on local launches. `cdp_url` connects to [your own Chrome](https://docs.browser-use.com/open-source/customize/browser/real-browser) or a [remote browser](https://docs.browser-use.com/open-source/customize/browser/remote). For everything else -- [staying logged in](https://docs.browser-use.com/open-source/customize/browser/authentication) with a persistent `user_data_dir`, proxy, cookies, viewport -- pass a [`BrowserProfile`](https://docs.browser-use.com/open-source/customize/browser/all-parameters) as `browser_profile`; it covers every browser option.
+
+## Cloud browsers
+
+Cloud browsers need an account. Set the key from <https://cloud.browser-use.com>:
+
+```bash
+export BROWSER_USE_API_KEY=your-key
 ```
 
-The `*_llm` fields (`judge_llm`, `page_extraction_llm`, `fallback_llm`) accept
-the same inputs as `llm`. See `BrowserAgentSettings` for the full list.
+To import all the websites you're logged into on your computer to a cloud browser, so it can complete tasks while signed into your accounts, sync your Chrome profile:
+
+```bash
+export BROWSER_USE_API_KEY=your-key && curl -fsSL https://browser-use.com/profile.sh | sh
+```
+
+A cloud browser is provisioned when a session starts, released when it stops, and bills while it runs. It automatically bypasses CAPTCHAs if necessary.
 
 ## Structured output
 
-Set `output_schema` to a Pydantic model class and the sub-agent is asked to
-produce its final result in that shape (browser-use's `output_model_schema`).
-The tool then returns the validated result as JSON; a final result that does
-not parse surfaces to the host model as a retry prompt instead of malformed
-output:
+Set `output_schema` to a Pydantic model class, and the browser agent produces its [final result in that schema](https://docs.browser-use.com/open-source/customize/agent/output-format). The tool returns the validated result as JSON:
 
 ```python
 from pydantic import BaseModel
-
 from pydantic_ai_harness.browser_use import BrowserUse
 
 
@@ -149,18 +109,9 @@ class Product(BaseModel):
 BrowserUse(output_schema=Product)
 ```
 
-A schema does not hide a run the sub-agent gave up on: browser-use parses the
-final result whether or not the agent reported success, so when it reports
-failure the tool returns the JSON labelled as an incomplete result rather than
-as a clean answer.
+## Secrets & Security
 
-## Secrets
-
-`sensitive_data` lets the sub-agent type credentials without its model ever
-seeing the values: the model is shown only placeholder keys and writes
-`<secret>key</secret>`, and browser-use substitutes the real value in the
-browser. Scope entries to a domain with the nested form, and combine with
-`allowed_domains` so the values cannot be typed anywhere else:
+[`sensitive_data`](https://docs.browser-use.com/open-source/examples/templates/sensitive-data) lets the browser agent type credentials without its model ever seeing the values. You can also scope your secrets to a specific domain, so the values cannot be typed elsewhere, and prevent your agent from accessing other domains.
 
 ```python
 from pydantic_ai_harness.browser_use import BrowserUse
@@ -171,91 +122,6 @@ BrowserUse(
 )
 ```
 
-Flat `sensitive_data` values are available on every domain. Constructing
-`BrowserUse` with flat values and no effective `allowed_domains` emits a
-warning; configure an allowlist on the capability or `browser_profile`, or use
-the domain-scoped nested form shown above.
-
-## Sessions and safety
-
-- **One session per call** by default; cleanup is attempted in a `finally`,
-  including after an exception or cancelled run. Cleanup failures and the
-  30-second cleanup timeout are logged; the session is retained for another
-  attempt before the next call or by `aclose()`. Concurrent calls each drive
-  their own browser, so N calls in flight means N Chromium processes and their
-  memory. See
-  [Session reuse](#session-reuse) for the shared alternative, which serializes
-  calls on one browser.
-- **Domain allowlist.** `allowed_domains` is enforced by browser-use's
-  `BrowserProfile`: navigation outside the list is blocked inside the
-  sub-agent, not just discouraged in the prompt. Glob patterns like
-  `'*.example.com'` work.
-- **Full browser control.** `browser_profile` accepts a complete browser-use
-  `BrowserProfile` for everything the convenience fields do not cover: proxy,
-  a persistent `user_data_dir` (staying logged in across calls),
-  `storage_state` cookies, viewport size, `prohibited_domains`, a specific
-  Chromium binary, and so on. The capability's `headless`, `allowed_domains`,
-  and `cdp_url` override the profile when set, exactly like directly passed
-  fields on a hand-built `BrowserSession`.
-- **Step budget.** `max_steps` (default 50) caps the sub-agent's loop; each
-  step is one of its model calls. On hitting the cap the tool reports that the
-  agent stopped without a result.
-- **Sub-agent instructions.** `extend_system_message` appends standing
-  constraints to the browser agent's own system prompt ("never submit forms",
-  "prefer the English version of pages").
-- **Remote browsers.** `cdp_url` attaches the session to an existing Chromium
-  (a container, a hosted browser service) instead of launching one locally.
-  Ending a call disconnects from an attached browser rather than terminating
-  it -- browser-use only kills a browser process it launched itself -- so a
-  browser you manage survives `'call'` scope.
-- **Telemetry.** browser-use collects anonymized telemetry by default; set
-  `ANONYMIZED_TELEMETRY=false` to disable it.
-
-## Session reuse
-
-`session_scope` controls how long a browser lives:
-
-- `'call'` (the default): every `browse_web` call gets a fresh session, killed
-  when the call ends when cleanup succeeds. No browser state carries over.
-- `'agent'`: one session is kept alive and reused across calls -- tabs,
-  logins, and page state carry over, and calls are serialized on the shared
-  browser. Close it with `aclose()`, or use the capability as an async context
-  manager. Closing is final: a `browse_web` after `aclose()` raises rather than
-  starting a browser that nothing is left to close.
-
-```python
-from pydantic_ai import Agent
-
-from pydantic_ai_harness.browser_use import BrowserUse
-
-
-async def main():
-    async with BrowserUse(llm='anthropic:claude-sonnet-4-6', session_scope='agent') as browser:
-        agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[browser])
-        first = await agent.run('Log in to app.example.com with the stored credentials.')
-        await agent.run('Now open the latest report.', message_history=first.all_messages())
-```
-
-A run that fails in `'agent'` scope kills the shared session (its state is
-unknown) and the next call starts fresh. For cookie and login persistence
-alone -- without keeping a browser process alive -- a `browser_profile` with a
-`user_data_dir` also works in `'call'` scope.
-
-`'agent'` scope is not compatible with durable execution capabilities such as
-Temporal, DBOS, or Prefect: its live browser session and lock cannot survive an
-activity, process, or replay boundary. If composing this capability with
-durable execution, use the default `'call'` scope so each tool invocation owns
-its browser, and validate that composition for the durability integration you
-use; the capability does not currently include durability integration tests.
-
-## Instructions
-
-The capability contributes short delegation guidance to the system prompt:
-hand `browse_web` one self-contained goal in natural language, and prefer it
-when the page layout is unknown or the task needs judgement. Set `guidance` to
-replace the text, or to `''` to contribute no instructions at all. (`guidance`
-steers the *host* model; `extend_system_message` steers the *sub-agent*.)
-
 ## Configuration
 
 Every field of `BrowserUse` with its default:
@@ -264,36 +130,45 @@ Every field of `BrowserUse` with its default:
 from pydantic_ai_harness.browser_use import BrowserUse
 
 BrowserUse(
-    llm=None,                    # Pydantic AI model/string or browser-use chat model; None = browser-use's default
-    browser_profile=None,        # full BrowserProfile (proxy, user_data_dir, storage_state, ...)
-    allowed_domains=None,        # navigation allowlist; None = unrestricted; overrides the profile
-    headless=None,               # None = headless, unless a browser_profile decides otherwise
-    max_steps=50,                # cap on sub-agent steps per call (one LLM call each)
-    use_vision=True,             # send screenshots; 'auto' follows the model, False disables
+    llm=None,                    # browser agent's model: Pydantic AI model/string; None = Browser Use's hosted model
+    browser_profile=None,        # full browser-use BrowserProfile: proxy, user_data_dir, cookies, ...
+    allowed_domains=None,        # navigation allowlist, e.g. ['*.example.com']; None = unrestricted
+    headless=None,               # False shows the browser window on local launches
+    max_steps=50,                # cap on browser-agent steps per call (one LLM call each)
+    use_vision=True,             # send page screenshots to the browser agent's model
     output_schema=None,          # Pydantic model class for a structured, validated result
     sensitive_data=None,         # secrets typed by the browser, never shown to the model
-    extend_system_message=None,  # extra standing instructions for the sub-agent
-    agent_settings=None,         # BrowserAgentSettings: every remaining plain-value Agent option
-    session_scope='call',        # 'call' = fresh browser per call; 'agent' = one shared session
-    cdp_url=None,                # attach to a remote Chromium over CDP; overrides the profile
-    guidance=None,               # host-model instructions: None = default, '' = none, str = custom
-    browser_agent=None,          # BrowserAgentFactory; None builds a real browser_use.Agent
+    extend_system_message=None,  # extra standing instructions for the browser agent
+    agent_settings=None,         # BrowserAgentSettings: every remaining browser_use.Agent option
+    session_scope='call',        # 'agent' shares one browser session across runs (chat loops)
+    cdp_url=None,                # attach to a browser you run yourself, over CDP
+    use_cloud=None,              # True = a Browser Use Cloud browser (needs BROWSER_USE_API_KEY)
+    guidance=None,               # None = default instructions, '' = none, str = custom
+    progress=None,               # narrate the browser agent's steps live, e.g. progress=print
+    browser_agent=None,          # factory for building the browser agent; the seam for tests
 )
 ```
 
-## Custom agent factory
+`session_scope='agent'` keeps one browser session across runs -- tabs, logins, and page state carry over -- until the capability is closed with `aclose()` or `async with`:
 
-`agent_settings` covers browser-use's plain-value options; the ones you have to
-build in code (callbacks, injected agent state, a custom skill service) go
-through the factory instead. Pass a `BrowserAgentFactory` as `browser_agent` for
-those, or to substitute a fake in tests so nothing launches a browser. It
-receives a `BrowserTask` with everything the tool
-prepared for the call, including the resolved `settings`, and returns the
-agent to run:
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.browser_use import BrowserUse
+
+
+async def main():
+    async with BrowserUse(llm='openai:gpt-5.5', session_scope='agent') as browser:
+        agent = Agent('openai:gpt-5.5', capabilities=[browser])
+        first = await agent.run('Log in to app.example.com with the stored credentials.')
+        await agent.run('Now open the latest report.', message_history=first.all_messages())
+```
+
+A run that fails in `'agent'` scope kills the shared session, and the next call starts fresh. The default `'call'` scope gives every call its own browser, so concurrent calls run in parallel.
+
+`agent_settings` takes a `BrowserAgentSettings` covering [the rest of `browser_use.Agent`'s options](https://docs.browser-use.com/open-source/customize/agent/all-parameters) (judge, planning, flash mode, timeouts, GIF recording, custom [tools](https://docs.browser-use.com/open-source/customize/tools/basics), and so on). Options you have to build in code -- callbacks, injected state, a custom skill service -- go through a `browser_agent` factory instead, which also substitutes a fake in tests:
 
 ```python
 from browser_use import Agent as BrowserUseAgent
-
 from pydantic_ai_harness.browser_use import BrowserAgent, BrowserTask, BrowserUse
 
 
@@ -302,12 +177,7 @@ def factory(request: BrowserTask) -> BrowserAgent:
         task=request.task,
         llm=request.llm,
         browser_session=request.browser_session,
-        use_vision=request.use_vision,
-        output_model_schema=request.output_schema,
-        sensitive_data=request.sensitive_data,
-        extend_system_message=request.extend_system_message,
         enable_signal_handler=False,
-        use_judge=request.settings.use_judge,
         skill_ids=['*'],
     )
 
@@ -315,64 +185,33 @@ def factory(request: BrowserTask) -> BrowserAgent:
 BrowserUse(browser_agent=factory)
 ```
 
-`BrowserTask` is a dataclass so new fields can be added without breaking
-existing factories: unpack what you forward, ignore the rest (the default
-factory, `default_browser_agent`, forwards all of `settings`). The factory
-must not start or stop the session itself; the tool owns the session
-lifecycle.
-
-## BrowserUse vs scripted browser tools
-
-The two approaches complement each other rather than compete:
-
-| | Scripted tools (Playwright-style) | `BrowserUse` |
-|---|---|---|
-| Who decides each action | the host model | the browser-use sub-agent |
-| Page addressing | CSS selectors / coordinates | indexed DOM elements |
-| Cost profile | one host-model call per action | one sub-agent call per step, plus the delegation |
-| Determinism | high | lower; self-healing LLM loop |
-| Best for | known, repeatable flows | fuzzy goals on unknown or changing pages |
-
-If your flow is fully known, scripted tools are cheaper and more predictable.
-Reach for `BrowserUse` when the task needs judgement about pages you have not
-seen.
-
 ## Agent spec (YAML/JSON)
 
-`BrowserUse` works with Pydantic AI's
-[agent spec](/ai/core-concepts/agent-spec/):
+`BrowserUse` works with Pydantic AI's [agent spec](/ai/core-concepts/agent-spec/), so you can declare it in a config file instead of Python:
 
 ```yaml
 # agent.yaml
-model: anthropic:claude-sonnet-4-6
+model: openai:gpt-5.5
 capabilities:
   - BrowserUse:
-      allowed_domains: [example.com]
+      use_cloud: true
       max_steps: 30
-      session_scope: call
 ```
 
 ```python
 from pydantic_ai import Agent
-
 from pydantic_ai_harness.browser_use import BrowserUse
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[BrowserUse])
 ```
 
-The `llm`, `browser_profile`, `output_schema`, `agent_settings`, and
-`browser_agent` fields are not spec-serializable; spec-loaded instances use
-browser-use's own default model selection and browser and agent configuration,
-prose output, and the default agent factory.
-
-The API may change between releases while the capability settles; breaking
-changes ship deprecation warnings where practical.
+Pass `custom_capability_types`, so the spec loader knows how to build `BrowserUse`. Loading YAML needs the `spec` extra: `uv add 'pydantic-ai-slim[spec]'`. The `llm`, `browser_profile`, `output_schema`, `agent_settings`, `progress`, and `browser_agent` fields are not spec-serializable; spec-loaded instances use Browser Use's defaults for them.
 
 ## Further reading
 
-- [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
+- [Browser Use documentation](https://docs.browser-use.com/open-source/introduction)
+- [Pydantic AI capabilities](/ai/capabilities/overview/)
 - [Toolsets](/ai/tools-toolsets/toolsets/)
-- [browser-use documentation](https://docs.browser-use.com)
 
 ## API reference
 

@@ -1,12 +1,13 @@
-"""The `browse_web` toolset and the factory contract for building browser-use agents."""
+"""The `browse_web` toolset and the factory contract for building browser-use agents"""
+# ruff: noqa: D415
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from typing import Literal, Protocol
+from typing import Literal, Protocol, TypeAlias
 
 import anyio
 from pydantic import BaseModel, ValidationError
@@ -19,7 +20,9 @@ from pydantic_ai_harness.browser_use._settings import BrowserAgentSettings
 
 try:
     from browser_use import Agent as _BrowserUseAgent
+    from browser_use.agent.views import AgentOutput
     from browser_use.browser import BrowserProfile, BrowserSession
+    from browser_use.browser.views import BrowserStateSummary
     from browser_use.llm.base import BaseChatModel
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -30,30 +33,27 @@ logger = logging.getLogger(__name__)
 
 _TOOL_NAME = 'browse_web'
 
-# Teardown runs shielded from cancellation, so an unresponsive browser could otherwise hang the
-# caller forever on exit. Bound it instead: a browser that will not close within this window is
-# retained for a later cleanup attempt, which is strictly better than wedging the run.
+StepCallback: TypeAlias = Callable[[BrowserStateSummary, AgentOutput, int], None]
+"""Sync form of browser-use's `register_new_step_callback`."""
+
+
+def _narrator(sink: Callable[[str], None]) -> StepCallback:
+    """Report each step's goal to `sink`."""
+
+    def narrate(browser_state_summary: BrowserStateSummary, output: AgentOutput, step_number: int) -> None:
+        goal = (output.next_goal or output.evaluation_previous_goal or '').strip()
+        if goal:
+            sink(f'  - {goal}')
+
+    return narrate
+
+
+# teardown is shielded from cancellation, so bound it -- a wedged browser must not hang exit
 _TEARDOWN_TIMEOUT = 30
 
 
 async def _kill(session: BrowserSession) -> bool:
-    """Close a browser session, even while the caller is being cancelled.
-
-    `BrowserSession.kill` is not a single round-trip: it saves storage state,
-    dispatches a stop event, and drains the event bus, so it suspends several
-    times over CDP. Unshielded, the first of those awaits inside a cancelled
-    scope raises and leaves a live Chromium behind -- holding a lock on
-    `user_data_dir` if the profile has one. The same shape as `ModalSandbox`'s
-    teardown, for the same reason.
-
-    Its failures are swallowed for that same reason. `kill()` can raise -- it awaits a
-    storage-state save, a forced stop and an event-bus drain, none of which are wrapped
-    upstream -- and it runs in a `finally`, where a raise replaces whatever was unwinding
-    through it: a completed browse becomes a `TimeoutError` to the caller, a real error
-    becomes a teardown error, and a cancellation stops propagating. The browser is left to
-    the caller retains the session for another attempt, so nothing is gained by
-    letting it through.
-    """
+    """Close a browser session, even while the caller is being cancelled"""
     succeeded = True
     with anyio.CancelScope(shield=True):
         with anyio.move_on_after(_TEARDOWN_TIMEOUT) as timeout_scope:
@@ -72,16 +72,7 @@ async def _kill(session: BrowserSession) -> bool:
 
 
 class BrowserAgentHistory(Protocol):
-    """The subset of browser-use's `AgentHistoryList` that the `browse_web` tool reads.
-
-    `final_result` is the text of the agent's final `done` action (or `None` when
-    it never finished), `errors` collects per-step error messages, `is_successful`
-    is the agent's own verdict on the finished task (`None` while not done), and
-    `structured_output` is the final result parsed against the configured output
-    schema (`None` when no schema was configured; raises a pydantic
-    `ValidationError` when the result does not parse). A real `AgentHistoryList`
-    satisfies this protocol as-is.
-    """
+    """The subset of browser-use's `AgentHistoryList` that the `browse_web` tool reads"""
 
     def final_result(self) -> None | str:
         """The text of the final result, or `None` when the agent never finished."""
@@ -105,23 +96,19 @@ class BrowserAgent(Protocol):
     """A ready-to-run browser agent for one task, as built by a `BrowserAgentFactory`."""
 
     def run(self, max_steps: int = 500) -> Awaitable[BrowserAgentHistory]:
-        """Run the agent's own loop until the task finishes or `max_steps` is reached.
+        """Run the loop until done or `max_steps`.
 
-        Declared as returning `Awaitable` (not `async def`) so that
-        `browser_use.Agent.run`, whose tracing decorator types it as returning
-        a plain `Coroutine`, satisfies the protocol; an `async def`
-        implementation satisfies it too.
+        `Awaitable` rather than `async def` so `browser_use.Agent.run`'s
+        decorated `Coroutine` return type satisfies the protocol.
         """
         ...  # pragma: no cover
 
 
 @dataclass
 class BrowserTask:
-    """Everything the `browse_web` tool passes to a `BrowserAgentFactory` for one call.
+    """What `browse_web` passes to a `BrowserAgentFactory` for one call.
 
-    A dataclass rather than keyword arguments so that new fields can be added
-    without breaking existing factories: unpack what you forward, ignore the
-    rest.
+    A dataclass so new fields don't break existing factories.
     """
 
     task: str
@@ -131,62 +118,43 @@ class BrowserTask:
     """The resolved chat model; `None` means browser-use's own default."""
 
     browser_session: BrowserSession
-    """The session to browse in. Owned by the tool: killed after the call in
-    `'call'` scope, kept alive and reused in `'agent'` scope."""
+    """The session to browse in; the tool owns its lifecycle."""
 
     use_vision: bool | Literal['auto']
-    """Whether to send page screenshots to the model (`'auto'` follows the model's capabilities)."""
+    """Send page screenshots to the model; `'auto'` follows the model's capabilities."""
 
     output_schema: type[BaseModel] | None
-    """Schema the agent's final result must conform to, forwarded as browser-use's `output_model_schema`."""
+    """Forwarded as browser-use's `output_model_schema`."""
 
     sensitive_data: dict[str, str | dict[str, str]] | None = field(repr=False)
-    """Secret placeholders for browser-use to substitute without showing the values to the model.
-
-    Kept out of `repr()`: a `BrowserTask` is what a factory receives, so it is the object most
-    likely to end up in a log line or a traceback."""
+    """Secret placeholders browser-use substitutes in the browser. Out of `repr()` to stay out of logs."""
 
     extend_system_message: str | None
-    """Extra instructions appended to the browser agent's own system prompt."""
+    """Extra instructions appended to the browser agent's system prompt."""
 
     settings: BrowserAgentSettings
-    """The remaining browser-use `Agent` options, always a concrete instance.
+    """The remaining browser-use `Agent` options; `*_llm` fields arrive resolved."""
 
-    Its `*_llm` fields arrive resolved to browser-use chat models, so factories
-    can forward them verbatim.
-    """
+    on_step: StepCallback | None = None
+    """Narration callback (from `progress`); forward as `register_new_step_callback`."""
 
 
 class BrowserAgentFactory(Protocol):
-    """Builds the browser agent that `browse_web` runs for one task.
+    """Builds the browser agent `browse_web` runs for one task.
 
-    The default factory constructs a real `browser_use.Agent` from the
-    `BrowserTask`, forwarding `BrowserTask.settings` in full. Pass a custom one
-    via `BrowserUse.browser_agent` to intercept construction, or to substitute
-    a fake in tests. Two rules: the factory must not start or stop the session
-    itself (`browse_web` owns the session lifecycle), and it should keep
-    browser-use's signal handling off (`enable_signal_handler=False`) -- the
-    sub-agent must not install its own SIGINT handling inside a host
-    application.
+    Don't start or stop the session (the tool owns it), and keep
+    `enable_signal_handler=False`.
     """
 
     def __call__(self, request: BrowserTask) -> BrowserAgent:
-        """Build a runnable browser agent for one `browse_web` call."""
+        """Build a runnable browser agent for one call."""
         ...  # pragma: no cover
 
 
 def default_browser_agent(request: BrowserTask) -> BrowserAgent:
-    """Build a real `browser_use.Agent` (the default `BrowserAgentFactory`).
-
-    The `resolve_chat_model` calls on the settings' `*_llm` fields narrow their
-    static type; the toolset already resolved the values, so at runtime they
-    pass through unchanged.
-    """
+    """Build a real `browser_use.Agent` (the default factory)."""
     settings = request.settings
-    # Explicit type arguments: `Agent`'s context and structured-output type
-    # variables are unconstrained by this call, and neither is used here.
-    # Signal handling stays off: the sub-agent must not install its own SIGINT
-    # pause/resume handling inside a host application.
+    # signal handler off: no SIGINT hijacking inside a host app
     return _BrowserUseAgent[None, BaseModel](
         task=request.task,
         llm=request.llm,
@@ -196,6 +164,7 @@ def default_browser_agent(request: BrowserTask) -> BrowserAgent:
         sensitive_data=request.sensitive_data,
         extend_system_message=request.extend_system_message,
         enable_signal_handler=False,
+        register_new_step_callback=request.on_step,
         tools=settings.tools,
         override_system_message=settings.override_system_message,
         max_failures=settings.max_failures,
@@ -260,6 +229,8 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         settings: BrowserAgentSettings,
         session_scope: Literal['call', 'agent'],
         cdp_url: str | None,
+        use_cloud: bool | None,
+        progress: Callable[[str], None] | None,
     ) -> None:
         super().__init__()
         self._browser_agent = browser_agent
@@ -272,8 +243,7 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         self._output_schema = output_schema
         self._sensitive_data = sensitive_data
         self._extend_system_message = extend_system_message
-        # Resolve the settings' chat models once, so every factory (custom
-        # ones included) receives a `BrowserTask` with ready-to-use models.
+        # resolve *_llm once so every factory gets ready-to-use models
         self._settings = replace(
             settings,
             page_extraction_llm=resolve_chat_model(settings.page_extraction_llm),
@@ -282,6 +252,9 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         )
         self._session_scope: Literal['call', 'agent'] = session_scope
         self._cdp_url = cdp_url
+        self._use_cloud = use_cloud
+        self._progress = progress
+        self._on_step = _narrator(progress) if progress is not None else None
         self._shared_session: BrowserSession | None = None
         self._pending_cleanup: list[BrowserSession] = []
         self._session_closed = False
@@ -293,27 +266,22 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         self.add_function(self.browse_web, name=_TOOL_NAME)
 
     def _build_session(self) -> BrowserSession:
-        """A fresh session, merging the profile with the capability's overrides.
-
-        `BrowserSession` itself merges a provided `browser_profile` with directly
-        passed fields, letting the non-`None` direct fields win, so the
-        capability's `headless`, `allowed_domains`, and `cdp_url` override the
-        profile exactly like they would on a hand-built session. `headless`
-        defaults to on only when no profile is given; a profile keeps its own
-        setting.
-
-        In `'agent'` scope the session is created with `keep_alive=True`:
-        without it, `browser_use.Agent` kills the session at the end of each
-        run, which would break reuse across calls. The toolset's own
-        `kill()` (in `aclose` and on a failed run) is a force stop and closes
-        the browser regardless.
-        """
+        """A fresh session: the capability's fields override the profile."""
+        # headless default only applies to a plain local launch
         headless = self._headless
-        if headless is None and self._browser_profile is None:
+        if headless is None and self._browser_profile is None and not self._use_cloud:
             headless = True
+        profile = self._browser_profile
+        if self._use_cloud is not None:
+            # folded into the profile: the session's typed overloads split cloud and local kwargs
+            if profile is None:
+                profile = BrowserProfile(use_cloud=self._use_cloud)
+            else:
+                profile = profile.model_copy(update={'use_cloud': self._use_cloud})
+        # keep_alive in 'agent' scope, or browser_use.Agent kills the session after each run
         return BrowserSession(
             cdp_url=self._cdp_url,
-            browser_profile=self._browser_profile,
+            browser_profile=profile,
             headless=headless,
             allowed_domains=self._allowed_domains,
             keep_alive=True if self._session_scope == 'agent' else None,
@@ -331,6 +299,7 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
                 sensitive_data=self._sensitive_data,
                 extend_system_message=self._extend_system_message,
                 settings=self._settings,
+                on_step=self._on_step,
             )
         )
         return await agent.run(max_steps=self._max_steps)
@@ -377,6 +346,8 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
             The browser agent's final text result, or JSON conforming to the
             configured output schema when one is set.
         """
+        if self._progress is not None:
+            self._progress(f'* {task}')
         await self._retry_pending_cleanup()
         if self._session_scope == 'call':
             history = await self._run_in_fresh_session(task)
@@ -431,24 +402,13 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
                 return await self._run_agent(task, self._shared_session)
             except BaseException:
                 # A failed or cancelled run can leave the shared browser in an
-                # unknown state; kill it so the next call starts fresh. Dropping
+                # unknown state; kill it so the next call starts fresh.
                 session, self._shared_session = self._shared_session, None
                 await self._close_session(session)
                 raise
 
     async def aclose(self) -> None:
-        """Kill the shared browser session and refuse to open another.
-
-        In `'agent'` session scope it closes for good, so a later `browse_web`
-        raises rather than starting a browser nothing would close. In either
-        scope it retries sessions retained after an earlier teardown failure or
-        timeout. Safe to call multiple times.
-
-        It coordinates with `browse_web`, so it waits for in-flight calls to
-        finish before the final cleanup attempt -- and a call can run for
-        `max_steps` steps of up to `BrowserAgentSettings.step_timeout` each.
-        Cancel the run first if you need to close sooner.
-        """
+        """Kill the shared browser session and refuse to open another"""
         if self._session_scope == 'call':
             async with self._call_condition:
                 await self._call_condition.wait_for(lambda: not self._call_cleanup_in_progress)

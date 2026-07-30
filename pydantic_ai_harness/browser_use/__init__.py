@@ -1,4 +1,5 @@
-"""BrowserUse capability: delegate open-ended web tasks to an autonomous browser-use agent."""
+"""BrowserUse capability: delegate open-ended web tasks to an autonomous browser-use agent"""
+# ruff: noqa: D415
 
 from pydantic_ai_harness.browser_use._capability import BrowserUse
 from pydantic_ai_harness.browser_use._model import ChatModelInput, PydanticAIChatModel, resolve_chat_model
@@ -9,6 +10,7 @@ from pydantic_ai_harness.browser_use._toolset import (
     BrowserAgentHistory,
     BrowserTask,
     BrowserUseToolset,
+    StepCallback,
     default_browser_agent,
 )
 
@@ -22,6 +24,7 @@ __all__ = [
     'BrowserUseToolset',
     'ChatModelInput',
     'PydanticAIChatModel',
+    'StepCallback',
     'default_browser_agent',
     'resolve_chat_model',
 ]
