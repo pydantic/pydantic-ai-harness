@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 import pytest
@@ -1208,6 +1208,26 @@ class TestConfigurationAndSpecs:
         assert scope == 'tenant/conversation/researcher'
         with pytest.raises(ValueError, match='invalid memory path'):
             Memory[None](namespace='/tenant').resolve_scope(_ctx())
+
+    def test_positional_field_order_is_stable(self) -> None:
+        """New fields must be keyword-only; inserting one would rebind callers' positional arguments."""
+        assert [f.name for f in fields(Memory) if f.init and not f.kw_only] == [
+            'store',
+            'store_resolver',
+            'agent_name',
+            'namespace',
+            'inject_memory',
+            'max_tokens',
+            'max_lines',
+            'max_memory_size',
+            'max_search_results',
+            'max_search_result_chars',
+            'max_search_files',
+            'guidance',
+            'injection_errors',
+        ]
+        capability = Memory[None](InMemoryStore(), None, 'main', 'tenant')
+        assert (capability.agent_name, capability.namespace) == ('main', 'tenant')
 
     def test_spec_schema_and_custom_capability_loading(self) -> None:
         schema = AgentSpec.model_json_schema_with_capabilities([Memory])

@@ -64,7 +64,7 @@ class Memory(AbstractCapability[AgentDepsT]):
     """Storage segment that isolates memory within a namespace. Part of the scope
     key only; never rendered into the model-facing memory block."""
 
-    heading: str = ''
+    heading: str = field(default='', kw_only=True)
     """Markdown heading for the injected memory block, rendered as `## {heading}`
     when set. The default is empty: the block already sits inside `<memory>`
     markers, so none is added. Set a distinct value per instance when several
