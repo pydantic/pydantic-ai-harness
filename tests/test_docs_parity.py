@@ -138,6 +138,7 @@ _CAPABILITY_PAGE_META = {
     'localstack.md': ('localstack', 'LocalStack'),
     'stackone.md': ('stackone', 'StackOne'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
+    'permission-policy.md': ('permission_policy', 'Permission Policy'),
 }
 
 
