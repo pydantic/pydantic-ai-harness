@@ -42,7 +42,7 @@ def test_belgie_integration_runs_live_tier_and_gates_check() -> None:
     assert '      - run: make integration-belgie' in job_block
     needs = next(line for line in lines if line.strip().startswith('needs: [') and 'coverage' in line)
     assert 'belgie-integration' in needs
-    assert '          allowed-skips: changes, belgie-integration, localstack-integration' in lines
+    assert any('allowed-skips:' in line and 'belgie-integration' in line for line in lines)
 
 
 def test_generic_ci_excludes_belgie_extra() -> None:

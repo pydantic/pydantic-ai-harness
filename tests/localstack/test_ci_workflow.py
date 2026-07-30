@@ -68,7 +68,7 @@ def test_localstack_integration_is_scoped_to_localstack_changes() -> None:
 
     # A skipped live job must not fail the required aggregate check; a job that
     # actually runs and fails still votes (see allowed-skips semantics).
-    assert any('allowed-skips: changes, belgie-integration, localstack-integration' in line for line in lines)
+    assert any('allowed-skips: changes, localstack-integration' in line for line in lines)
 
 
 def test_localstack_integration_skips_pull_requests_without_secrets() -> None:
