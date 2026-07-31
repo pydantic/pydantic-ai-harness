@@ -42,15 +42,26 @@ jobs:
             approved=false
           }
 
-          pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
-          files="$(
-            gh api \
-              --paginate \
-              --slurp \
-              "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100"
-          )"
-          expected="$(jq -r '.changed_files' <<<"$pr")"
-          found="$(jq -r 'flatten | length' <<<"$files")"
+          # `changed_files` on the PR object and the paginated files listing are
+          # populated independently, so they disagree for a few seconds after a
+          # PR opens or a push lands. A disagreement is a stale read, not an
+          # incomplete diff, so refetch both until they agree before judging.
+          for attempt in 1 2 3 4 5; do
+            pr="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER")"
+            files="$(
+              gh api \
+                --paginate \
+                --slurp \
+                "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files?per_page=100"
+            )"
+            expected="$(jq -r '.changed_files' <<<"$pr")"
+            found="$(jq -r 'flatten | length' <<<"$files")"
+            if [ "$found" -eq "$expected" ]; then
+              break
+            fi
+            echo "::notice::Listed $found of $expected changed files (attempt $attempt); refetching."
+            sleep "$((attempt * 3))"
+          done
           changed="$(jq -r '
             flatten |
             any(

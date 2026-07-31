@@ -28,6 +28,7 @@ classifiers = [
     'Typing :: Typed',
 ]
 dependencies = [
+    "genai-prices>=0.0.71",
     "httpx>=0.28.1",
     "pydantic-ai-slim>=2.18.0",
 ]
@@ -71,6 +72,9 @@ skills = [
 ]
 belgie = [
     "belgie>=0.37.0 ; python_full_version >= '3.12' and python_full_version < '3.15'",
+]
+stackone = [
+    "pydantic-ai-slim[mcp]>=2.18.0",
 ]
 
 [project.urls]
