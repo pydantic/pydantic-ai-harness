@@ -49,7 +49,7 @@ from typing import Literal
 
 from pydantic_ai.exceptions import UserError
 
-from pydantic_ai_harness.guardrails._capability import GuardrailResult
+from pydantic_ai_harness.guardrails._shared import GuardrailResult
 
 TextDetector = Callable[[str], GuardrailResult]
 """A check over text. Plug one into `InputGuardrail`, or into `OutputGuardrail` via `for_text`."""
