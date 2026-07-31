@@ -557,6 +557,32 @@ class TestGuardChain:
 
         assert result.output == 'key [redacted:openai_key] for [redacted:email]'
 
+    async def test_an_output_chain_can_accumulate_a_replacement_of_none(self):
+        """`None` is a replacement like any other, so the chain has to carry it to the end.
+
+        The chain closes by rebuilding a `replace` verdict from the accumulated
+        value. A `None` default on `GuardrailResult.replacement` could not tell
+        that verdict apart from one carrying no replacement, and rejected it.
+        """
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[TextPart(content='here is the classified plan')])
+
+        def drop(output: object) -> GuardrailResult:
+            return GuardrailResult.replace(None)
+
+        def allow_anything(output: object) -> bool:
+            return True
+
+        agent = Agent(
+            FunctionModel(respond),
+            deps_type=type(None),
+            capabilities=[OutputGuardrail(guard=[drop, allow_anything])],
+        )
+        result = await agent.run('hi')
+
+        assert result.output is None
+
     async def test_a_callable_that_is_also_a_sequence_stays_one_guard(self):
         """Callability decides, so a guard that happens to be a sequence is not taken apart."""
 
