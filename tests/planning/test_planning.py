@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import cast
 from unittest.mock import MagicMock
 
@@ -942,24 +943,43 @@ class TestReminder:
         assert 'Do X' in reminder.content
 
     @pytest.mark.parametrize(
-        ('parts', 'expected_cache_points'),
+        ('parts', 'expected_cache_ttls'),
         [
-            ([SystemPromptPart('instructions only')], 0),
-            ([UserPromptPart('')], 0),
-            ([UserPromptPart([TextContent('goal')])], 1),
-            ([UserPromptPart([BinaryContent(data=b'x', media_type='image/png')])], 0),
-            ([ToolReturnPart('tool', 'result')], 0),
-            ([RetryPromptPart('retry')], 0),
-            ([UserPromptPart(['goal', CachePoint(ttl='1h')])], 1),
+            ([SystemPromptPart('instructions only')], ()),
+            ([UserPromptPart('')], ()),
+            ([UserPromptPart([TextContent('goal')])], ('5m',)),
+            (
+                [UserPromptPart(['goal', BinaryContent(data=b'x', media_type='image/png')])],
+                ('5m',),
+            ),
+            ([UserPromptPart([BinaryContent(data=b'x', media_type='image/png')])], ()),
+            ([ToolReturnPart('tool', 'result')], ()),
+            ([RetryPromptPart('retry')], ()),
+            ([UserPromptPart(['goal', CachePoint(ttl='1h')])], ('1h',)),
+            ([UserPromptPart(['goal', CachePoint(ttl='5m'), CachePoint(ttl='1h')])], ('5m',)),
+            ([UserPromptPart([CachePoint(ttl='1h'), 'goal'])], ('1h',)),
+            (
+                [UserPromptPart([CachePoint(ttl='1h'), 'goal', BinaryContent(data=b'x', media_type='image/png')])],
+                ('1h',),
+            ),
+            ([UserPromptPart('earlier goal'), UserPromptPart([CachePoint(ttl='1h')])], ('1h',)),
+            (
+                [
+                    UserPromptPart([CachePoint(ttl='5m')]),
+                    UserPromptPart(['later goal', CachePoint(ttl='1h')]),
+                ],
+                ('1h',),
+            ),
         ],
     )
     async def test_cachepoint_requires_prior_user_content(
-        self, parts: list[ModelRequestPart], expected_cache_points: int
+        self, parts: list[ModelRequestPart], expected_cache_ttls: tuple[str, ...]
     ) -> None:
         store = InMemoryPlanStore()
         cap = Planning[None](store=store)
         await store.add_item(PlanItem(content='Do X', status=TaskStatus.in_progress))
         original = ModelRequest(parts=parts)
+        original_parts = cast(list[ModelRequestPart], deepcopy(original.parts))
 
         seen, _ = await self._run_hook(cap, [original])
 
@@ -968,15 +988,19 @@ class TestReminder:
         assert isinstance(reminder.content, str)
         assert '<plan-reminder>' in reminder.content
 
-        cache_points = 0
+        cache_ttls: list[str] = []
         for part in seen[-1].parts:
             if not isinstance(part, UserPromptPart) or isinstance(part.content, str):
                 continue
             for index, item in enumerate(part.content):
                 if isinstance(item, CachePoint):
-                    cache_points += 1
-                    assert index > 0  # Bedrock rejects a leading cache point in each user part.
-        assert cache_points == expected_cache_points
+                    cache_ttls.append(item.ttl)
+                    previous = cast(object, part.content[index - 1]) if index else None
+                    assert (isinstance(previous, str) and bool(previous)) or (
+                        isinstance(previous, TextContent) and bool(previous.content)
+                    )
+        assert cache_ttls == list(expected_cache_ttls)
+        assert original.parts == original_parts
 
     async def test_last_not_model_request_passthrough(self) -> None:
         store = InMemoryPlanStore()

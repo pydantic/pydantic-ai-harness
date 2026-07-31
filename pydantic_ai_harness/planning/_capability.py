@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import (
@@ -13,6 +13,7 @@ from pydantic_ai.messages import (
     ModelRequestPart,
     ModelResponse,
     TextContent,
+    UserContent,
     UserPromptPart,
 )
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -246,21 +247,52 @@ def _with_cache_point(parts: Sequence[ModelRequestPart], *, ttl: Literal['5m', '
     """Append a cache point to the latest cacheable `UserPromptPart`.
 
     A `CachePoint` must follow content within the same `UserPromptPart` for
-    Bedrock. Tool-return and retry parts therefore cannot safely host the
-    breakpoint, and non-text-only prompts are left unchanged rather than
-    risking provider-specific document/media constraints.
+    Bedrock. Tool-return, retry, and non-text-only prompt parts cannot safely
+    host a generated breakpoint. Existing leading or detached cache points are
+    moved directly after the latest safe textual item; if none exists, they are
+    removed rather than forwarding a request that Bedrock will reject.
     """
     updated = list(parts)
+    displaced_cache_point: CachePoint | None = None
+    has_valid_cache_point = False
+
+    for index, part in enumerate(updated):
+        if not isinstance(part, UserPromptPart):
+            continue
+        content: list[UserContent] = [part.content] if isinstance(part.content, str) else list(part.content)
+        normalized_content: list[UserContent] = []
+        changed = False
+        for item in content:
+            if isinstance(item, CachePoint):
+                previous = cast(object, normalized_content[-1]) if normalized_content else None
+                if previous is not None and _is_text_user_content_item(previous):
+                    has_valid_cache_point = True
+                    normalized_content.append(item)
+                else:
+                    displaced_cache_point = displaced_cache_point or item
+                    changed = True
+            else:
+                normalized_content.append(item)
+        if changed:
+            updated[index] = replace(part, content=normalized_content)
+
+    if has_valid_cache_point:
+        return updated
+
     for index in range(len(updated) - 1, -1, -1):
         part = updated[index]
         if not isinstance(part, UserPromptPart):
             continue
         content = [part.content] if isinstance(part.content, str) else list(part.content)
-        if any(isinstance(item, CachePoint) for item in content):
-            return updated
-        if any(_is_text_user_content_item(item) for item in content):
-            updated[index] = replace(part, content=[*content, CachePoint(ttl=ttl)])
-            return updated
+        for content_index in range(len(content) - 1, -1, -1):
+            item = cast(object, content[content_index])
+            if _is_text_user_content_item(item):
+                cache_point = displaced_cache_point or CachePoint(ttl=ttl)
+                updated[index] = replace(
+                    part,
+                    content=[*content[: content_index + 1], cache_point, *content[content_index + 1 :]],
+                )
+                return updated
     return updated
 
 
