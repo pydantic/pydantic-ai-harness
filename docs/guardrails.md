@@ -1,6 +1,6 @@
 ---
 title: Input, Output & Tool Guardrails
-description: Validate the user prompt before it reaches the model, the tool calls the model makes, and the output before it reaches the caller, with allow/block/replace/retry/approve verdicts and optional parallel execution.
+description: Validate the user prompt before it reaches the model, the tool calls the model makes, and the output before it reaches the caller, with allow/block/replace/retry/approve verdicts, chains of guards, ready-made secret and PII detectors, and optional parallel execution.
 ---
 
 # Input, Output & Tool Guardrails
@@ -89,11 +89,17 @@ capabilities: the chain is one place in the capability list, one ordering
 decision, and one set of spans, and only the chain threads a redaction into the
 check that follows it.
 
-An empty sequence is refused. A guardrail that inspects nothing reads as
-configured and behaves as absent, which is worth an error rather than a quiet
-pass. A set and a one-shot iterator are refused too: a set has no order for the
-chain to run in, and an iterator is spent after the first request, since the
-chain is rebuilt per request.
+A redaction reaches the run's message history only if the chain finishes: a
+later `block` ends it before `InputGuardrail` writes the cleaned prompt back, so
+the original stays in the history. Put the redactor last when that matters, at
+the cost of the checks after it no longer seeing the cleaned text.
+
+An empty sequence is refused -- when the guardrail first runs, not when it is
+constructed. A guardrail that inspects nothing reads as configured and behaves
+as absent, which is worth an error rather than a quiet pass. A set and a
+one-shot iterator are refused the same way: a set has no order for the chain to
+run in, and an iterator is spent after the first request, since the chain is
+rebuilt per request.
 
 ## Ready-made detectors
 
@@ -135,6 +141,12 @@ OutputGuardrail(guard=for_text(redact_secrets))  # raises on a non-string output
 OutputGuardrail(guard=for_text(redact_secrets, on_other='allow'))  # skips it deliberately
 ```
 
+A detector on the input side needs a text prompt. A multimodal prompt reaches
+the guard rendered as text, so a detector that matches one returns `replace`,
+which `InputGuardrail` refuses rather than dropping the attached parts (see
+"Redaction (`replace`)" below). Guard the output instead when prompts can carry
+attachments.
+
 **Where a shape is not enough.** `email` matches anything shaped like an address, because that is all an address is:
 
 ```python
@@ -148,7 +160,7 @@ An input guard rewrites the prompt in place, so the model receives the broken ve
 
 `iban` has the same problem and the same answer: a country code plus two digits is a shape ordinary text hits constantly, so spaces are allowed only where the printed form puts them and every match is checked against the ISO 7064 mod-97 digit an IBAN carries.
 
-An AWS *secret* access key is deliberately absent from the defaults. It is forty characters of base64 with no distinguishing prefix, so nothing in the value marks it as a key and a pattern for the shape alone would take ordinary base64 with it. Matching one means anchoring on the name written beside it -- `aws_secret_access_key = ...` -- which is what `pydantic-ai-shields` does, and which finds the key only where it is written as an assignment. That narrower pattern is not shipped here; pass it through `extra=` if that is how keys reach your agent.
+An AWS *secret* access key is deliberately absent from the defaults. It is forty characters of base64 with no distinguishing prefix, so nothing in the value marks it as a key and a pattern for the shape alone would take ordinary base64 with it. Matching one means anchoring on the name written beside it -- `aws_secret_access_key = ...` -- which is what [`pydantic-ai-shields`](https://github.com/vstorm-co/pydantic-ai-shields) does, and which finds the key only where it is written as an assignment. That narrower pattern is not shipped here; pass it through `extra=` if that is how keys reach your agent.
 
 `only=` selects patterns; it does not reorder them. The application order is part of each mapping's contract -- `iban` runs before `credit_card` so a spaced account number is not labelled a card -- and it holds whatever order you list.
 
@@ -414,7 +426,7 @@ Tool spans add a `guardrail.tool` attribute naming the tool. `approve` records `
 
 ## Relationship to `pydantic-ai-shields`
 
-`pydantic-ai-shields` ships each detector as its own capability. The equivalents here are functions instead, which is what lets several run as one chain, share a redaction, and sit beside a guard you wrote.
+[`pydantic-ai-shields`](https://github.com/vstorm-co/pydantic-ai-shields) ships each detector as its own capability. The equivalents here are functions instead, which is what lets several run as one chain, share a redaction, and sit beside a guard you wrote.
 
 Two things it has that this deliberately does not. Its `PromptInjection` matches phrases like "ignore previous instructions": injection is ordinary language, so a pattern list catches the examples and misses the attack while flagging a pasted log, and a check that reads as protection without being it is worse than none. Its `NoRefusals` blocks the model from declining, which is a decision about what an agent may say rather than a guardrail on data, and not one to make a default.
 

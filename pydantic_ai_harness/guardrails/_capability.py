@@ -139,8 +139,9 @@ class InputGuardrail(AbstractCapability[AgentDepsT]):
     The `guard` callable receives the prompt text and returns one of the
     outcomes (see the module docstring). `replace` rewrites the prompt sent to
     the model and also overwrites the original in the run's message history, so
-    a redacted secret is not retained. `retry` is not valid for an input
-    guardrail, and neither is `replace` on a multimodal prompt: the guard sees
+    a redacted secret is not retained -- unless a later guard in a chain blocks,
+    which ends the chain before the rewrite happens. `retry` is not valid for an
+    input guardrail, and neither is `replace` on a multimodal prompt: the guard sees
     the whole prompt rendered as text, and writing one string back over a
     prompt built from several parts would drop the attached ones, so it raises
     [`UserError`][pydantic_ai.exceptions.UserError] instead.
