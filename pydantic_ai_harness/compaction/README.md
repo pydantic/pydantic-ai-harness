@@ -1,11 +1,11 @@
 # Compaction
 
 A menu of strategies for keeping an agent's conversation history within a model's context
-window. Most are Pydantic AI `Capability` classes that edit the message history just before each
-request goes out. `FallbackCompaction` is instead a composing `CompactionStrategy` used through
-`TieredCompaction` or `compact_now`; it has no request trigger of its own. Edits **persist** into the
-run's message history, so a trim, clear, or summary carries forward to later steps (it is not
-recomputed from the full history every turn).
+window. Most are Pydantic AI `Capability` classes that edit message history before a request.
+`FallbackCompaction` is instead a composing `CompactionStrategy` used through `TieredCompaction`
+or `compact_now`; it has no request trigger of its own. Most edits **persist** into the run history,
+so a trim, clear, or summary carries forward to later steps. `TrimRetryHistory` is the exception:
+it wraps each model call with a request-local message list without changing the source run history.
 
 All strategies preserve tool-call / tool-return **pairing** -- core does not validate this, and a
 provider rejects an orphaned pair. The zero-LLM strategies never call a model.
@@ -24,6 +24,7 @@ alternative: they work with every model and keep the compaction logic (and its c
 | `SlidingWindowCompaction` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
 | `ClearToolResults` | zero-LLM | Blanks the content of old tool *results* in place, keeping the last `keep_pairs` | Tool outputs dominate context and can be re-fetched on demand (the cheap first tier) |
 | `DeduplicateFileReads` | zero-LLM | Blanks every file read superseded by a newer read of the same file | The agent re-reads files and only the latest version matters |
+| `TrimRetryHistory` | zero-LLM | Keeps only the newest output-validation retry pair in the model-facing request | Repeated invalid outputs bloat retry requests, but the source run history must stay intact |
 | `SummarizingCompaction` | one LLM call | Summarizes older messages into a structured summary, keeping the recent tail | Old context still matters but must be compressed; use behind the cheap tiers |
 | `TieredCompaction` | escalates | Runs cheap passes first, summarizes only if still over `target_tokens` | You want a sensible default: spend the expensive summary only when needed |
 | `FallbackCompaction` | depends on chain | Tries the next strategy when one raises | Summarization can fail and deterministic truncation must keep the run alive |
@@ -45,7 +46,8 @@ estimated by the implementation. `DeduplicateFileReads` runs on every request wh
 cheap and near-lossless). `TieredCompaction` triggers and stops on a single `target_tokens` /
 `target_fraction` budget. `ClampOversizedMessages` triggers per *part* (`max_part_tokens` /
 `max_part_chars`), not on the whole history -- the failure it targets is one oversized part, not a
-large total.
+large total. `TrimRetryHistory` has no size trigger; it acts only when repeated trailing
+output-validation retry pairs are present.
 
 ### `max_fraction`: one setting for every model
 
@@ -262,6 +264,28 @@ fallback = FallbackCompaction(
 The strategies' trigger fields are not consulted when a composing strategy calls `compact`
 directly. Put `fallback` inside `TieredCompaction` to give the chain a context trigger, or pass it
 to `compact_now` for manual compaction.
+
+## `TrimRetryHistory`: keep the latest correction pair
+
+Output-validation failures append the rejected response and validation feedback before the next
+model request. `TrimRetryHistory` preserves the legitimate conversation prefix and the newest
+response/feedback pair while removing older output-validation retry pairs from the model-facing
+request.
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import TrimRetryHistory
+
+agent = Agent(
+    'openai:gpt-5.6-luna',
+    capabilities=[TrimRetryHistory()],
+)
+```
+
+At the model-call boundary, the capability replaces the request-local
+`ModelRequestContext.messages` list passed to the model handler. The persisted source run history
+remains unchanged. Only output-validation retry pairs are trimmed; function-tool retry history is
+left untouched.
 
 ## `ClampOversizedMessages`: surviving a runaway generation
 
