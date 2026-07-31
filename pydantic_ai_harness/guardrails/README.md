@@ -94,7 +94,7 @@ check that follows it.
 A redaction reaches the run's message history only if the chain finishes: a
 later `block` ends it before `InputGuardrail` writes the cleaned prompt back, so
 the original stays in the history. Put the redactor last when that matters, at
-the cost of the checks after it no longer seeing the cleaned text.
+the cost of the checks before it seeing the original text.
 
 An empty sequence is refused -- when the guardrail first runs, not when it is
 constructed. A guardrail that inspects nothing reads as configured and behaves
@@ -164,7 +164,7 @@ An input guard rewrites the prompt in place, so the model receives the broken ve
 
 An AWS *secret* access key is deliberately absent from the defaults. It is forty characters of base64 with no distinguishing prefix, so nothing in the value marks it as a key and a pattern for the shape alone would take ordinary base64 with it. Matching one means anchoring on the name written beside it -- `aws_secret_access_key = ...` -- which is what [`pydantic-ai-shields`](https://github.com/vstorm-co/pydantic-ai-shields) does, and which finds the key only where it is written as an assignment. That narrower pattern is not shipped here; pass it through `extra=` if that is how keys reach your agent.
 
-`only=` selects patterns; it does not reorder them. The application order is part of each mapping's contract -- `iban` runs before `credit_card` so a spaced account number is not labelled a card -- and it holds whatever order you list.
+`only=` selects patterns; it does not reorder them. The application order is part of each mapping's contract -- `iban` runs before `credit_card` so a spaced account number is not labelled a card -- and it holds that order whatever order you list `only` in.
 
 A private key is matched whether its line breaks are real newlines or the escaped `\n` a JSON service-account file or a `.env` line carries, which is how one usually reaches a chat window. Terminated or not, it is one `private_key` pattern rather than two names, so `only=['private_key']` cannot select the complete block and leave a key pasted without its `END` marker unredacted.
 
