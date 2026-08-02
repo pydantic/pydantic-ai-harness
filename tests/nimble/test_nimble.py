@@ -438,6 +438,23 @@ class TestNimbleAgent:
             await cap.wrap_run(AsyncMock(spec=RunContext), handler=handler)
         assert fake.closed is True
 
+    async def test_wrap_run_closes_owned_client_on_cancel(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        fake = _FakeNimbleClient()
+
+        def fake_async_nimble(**kwargs: Any) -> _FakeNimbleClient:
+            return fake
+
+        monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
+        monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
+        cap = NimbleSearch[None]()
+
+        async def handler() -> AgentRunResult[Any]:
+            raise asyncio.CancelledError()
+
+        with pytest.raises(asyncio.CancelledError):
+            await cap.wrap_run(AsyncMock(spec=RunContext), handler=handler)
+        assert fake.closed is True
+
     async def test_concurrent_wrap_runs_do_not_close_shared_client_early(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

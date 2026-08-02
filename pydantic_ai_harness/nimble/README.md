@@ -92,7 +92,8 @@ NimbleAgent(
 )
 ```
 
-Factory-built clients send `X-Client-Source: pydantic-ai` for attribution and
-are closed when the last concurrent run ends (including failed or cancelled
-runs). Pass the same `client=` to `NimbleSearch` and `NimbleAgent` when using
-both so they share one HTTP session.
+Factory-built clients send `X-Client-Source: pydantic-ai` for attribution.
+They are retained in each capability's `wrap_run` and closed when the last
+concurrent run ends (including failed or cancelled runs). Pass the same
+`client=` to `NimbleSearch` and `NimbleAgent` when using both so they share one
+HTTP session.
