@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
-from nimble_python import AuthenticationError, RateLimitError
+from nimble_python import AuthenticationError, PermissionDeniedError, RateLimitError
+from pydantic_ai import Agent
+from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.exceptions import ModelRetry, UserError
-from pydantic_ai.messages import ToolReturn
+from pydantic_ai.messages import ModelRequest, ToolReturn, ToolReturnPart
+from pydantic_ai.models.test import TestModel
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import RunContext
 
@@ -384,10 +390,19 @@ class TestNimbleAgent:
         assert isinstance(instructions, str)
         assert 'agent_name' in instructions
         assert 'use_case' in instructions
-        assert '3–15 minutes' in instructions or '3-15 minutes' in instructions
+        assert 'several minutes' in instructions
         assert NimbleAgent(guidance='').get_instructions() is None
 
-    async def test_after_run_closes_owned_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_empty_agent_id_uses_mode2(self) -> None:
+        client = _FakeNimbleClient()
+        toolset = NimbleAgent[None](client=client).get_toolset()
+        started = await toolset.agent_run_start('q', agent_id='')
+        assert started.metadata is not None
+        assert started.metadata['mode'] == 'mode2'
+        assert client.mode2_calls[0]['agent_id'] == ''
+        assert client.mode1_calls == []
+
+    async def test_wrap_run_closes_owned_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = _FakeNimbleClient()
 
         def fake_async_nimble(**kwargs: Any) -> _FakeNimbleClient:
@@ -397,13 +412,16 @@ class TestNimbleAgent:
         monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
         monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
         cap = NimbleAgent[None]()
-        await cap.before_run(AsyncMock(spec=RunContext))
         cap.get_toolset()
-        result = await cap.after_run(AsyncMock(spec=RunContext), result=AsyncMock(spec=AgentRunResult))
-        assert fake.closed is True
-        assert result is not None
+        result = AsyncMock(spec=AgentRunResult)
 
-    async def test_concurrent_runs_do_not_close_shared_client_early(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def handler() -> AgentRunResult[Any]:
+            return result
+
+        assert await cap.wrap_run(AsyncMock(spec=RunContext), handler=handler) is result
+        assert fake.closed is True
+
+    async def test_wrap_run_closes_owned_client_on_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
         fake = _FakeNimbleClient()
 
         def fake_async_nimble(**kwargs: Any) -> _FakeNimbleClient:
@@ -412,12 +430,42 @@ class TestNimbleAgent:
         monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
         monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
         cap = NimbleSearch[None]()
+
+        async def handler() -> AgentRunResult[Any]:
+            raise RuntimeError('run failed')
+
+        with pytest.raises(RuntimeError, match='run failed'):
+            await cap.wrap_run(AsyncMock(spec=RunContext), handler=handler)
+        assert fake.closed is True
+
+    async def test_concurrent_wrap_runs_do_not_close_shared_client_early(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake = _FakeNimbleClient()
+        release = asyncio.Event()
+        entered = asyncio.Event()
+
+        def fake_async_nimble(**kwargs: Any) -> _FakeNimbleClient:
+            return fake
+
+        monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
+        monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
+        cap = NimbleSearch[None]()
         ctx = AsyncMock(spec=RunContext)
-        await cap.before_run(ctx)
-        await cap.before_run(ctx)
-        await cap.after_run(ctx, result=AsyncMock(spec=AgentRunResult))
+        result = AsyncMock(spec=AgentRunResult)
+
+        async def handler() -> AgentRunResult[Any]:
+            entered.set()
+            await release.wait()
+            return result
+
+        first = asyncio.create_task(cap.wrap_run(ctx, handler=handler))
+        await entered.wait()
+        second = asyncio.create_task(cap.wrap_run(ctx, handler=handler))
+        await asyncio.sleep(0)
         assert fake.closed is False
-        await cap.after_run(ctx, result=AsyncMock(spec=AgentRunResult))
+        release.set()
+        await asyncio.gather(first, second)
         assert fake.closed is True
 
     async def test_toolset_resolves_fresh_client_after_close(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -431,17 +479,25 @@ class TestNimbleAgent:
         monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
         monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
         cap = NimbleSearch[None]()
-        ctx = AsyncMock(spec=RunContext)
-        await cap.before_run(ctx)
         toolset = cap.get_toolset()
-        await toolset.web_search('q')
+        ctx = AsyncMock(spec=RunContext)
+        result = AsyncMock(spec=AgentRunResult)
+
+        async def first_run() -> AgentRunResult[Any]:
+            await toolset.web_search('q')
+            return result
+
+        await cap.wrap_run(ctx, handler=first_run)
         assert len(clients) == 1
-        await cap.after_run(ctx, result=AsyncMock(spec=AgentRunResult))
         assert clients[0].closed is True
-        await cap.before_run(ctx)
-        await toolset.web_search('q2')
+
+        async def second_run() -> AgentRunResult[Any]:
+            await toolset.web_search('q2')
+            return result
+
+        await cap.wrap_run(ctx, handler=second_run)
         assert len(clients) == 2
-        assert clients[1].closed is False
+        assert clients[1].closed is True
         assert clients[1].search_calls[-1]['query'] == 'q2'
 
     def test_missing_api_key_raises_user_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -449,8 +505,25 @@ class TestNimbleAgent:
         with pytest.raises(UserError, match='NIMBLE_API_KEY'):
             NimbleAgent().get_toolset()
 
+    def test_get_toolset_does_not_materialize_client(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        created = 0
 
-def _status_error(cls: type[AuthenticationError] | type[RateLimitError], status: int, message: str) -> Exception:
+        def fake_async_nimble(**kwargs: Any) -> _FakeNimbleClient:
+            nonlocal created
+            created += 1
+            return _FakeNimbleClient()
+
+        monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
+        monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
+        NimbleAgent().get_toolset()
+        assert created == 0
+
+
+def _status_error(
+    cls: type[AuthenticationError] | type[PermissionDeniedError] | type[RateLimitError],
+    status: int,
+    message: str,
+) -> Exception:
     response = httpx.Response(status, request=httpx.Request('POST', 'https://sdk.nimbleway.com'))
     return cls(message, response=response, body={'error': message})
 
@@ -464,6 +537,11 @@ class TestErrorsAndConfig:
     async def test_auth_error_propagates(self) -> None:
         client = _FakeNimbleClient(error=_status_error(AuthenticationError, 401, 'bad key'))
         with pytest.raises(AuthenticationError):
+            await _toolset(client).web_search('q')
+
+    async def test_permission_denied_propagates(self) -> None:
+        client = _FakeNimbleClient(error=_status_error(PermissionDeniedError, 403, 'forbidden'))
+        with pytest.raises(PermissionDeniedError):
             await _toolset(client).web_search('q')
 
     async def test_httpx_error_becomes_model_retry(self) -> None:
@@ -481,6 +559,10 @@ class TestErrorsAndConfig:
             NimbleSearch(num_results=0)
         with pytest.raises(ValueError, match='max_text_chars'):
             NimbleSearch(max_text_chars=0)
+        with pytest.raises(ValueError, match='search_depth'):
+            NimbleSearch(search_depth='invalid')  # type: ignore[arg-type]
+        with pytest.raises(ValueError, match='time_range'):
+            NimbleSearch(time_range='invalid')  # type: ignore[arg-type]
         with pytest.raises(ValueError, match='include_domains or exclude_domains'):
             NimbleSearch(include_domains=['a.com'], exclude_domains=['b.com'])
         with pytest.raises(ValueError, match='sequence of strings'):
@@ -488,20 +570,44 @@ class TestErrorsAndConfig:
         with pytest.raises(ValueError, match='sequence of strings'):
             NimbleSearch(exclude_domains='example.com')  # type: ignore[arg-type]
 
+    async def test_exclude_domains_forwarded(self) -> None:
+        client = _FakeNimbleClient(search_results=[_search_result()])
+        await _toolset(client, exclude_domains=['spam.example']).web_search('q')
+        assert client.search_calls[-1]['exclude_domains'] == ['spam.example']
+
+    async def test_empty_map_site(self) -> None:
+        client = _FakeNimbleClient(map_links=[])
+        text = _text(await _toolset(client, include_map=True).map_site('https://example.com'))
+        assert text == "No links found for 'https://example.com'."
+
     async def test_release_keeps_client_if_close_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class _BoomClient(_FakeNimbleClient):
             async def close(self) -> None:
                 raise RuntimeError('close failed')
 
-        boom = _BoomClient()
-        from pydantic_ai_harness.nimble._toolset import _OwnedClientLifecycle
+        boom = _BoomClient(search_results=[_search_result()])
 
-        lifecycle = _OwnedClientLifecycle(explicit_client=None)
-        lifecycle._owned_client = boom  # pyright: ignore[reportPrivateUsage]
-        lifecycle._active_runs = 1  # pyright: ignore[reportPrivateUsage]
+        def fake_async_nimble(**kwargs: Any) -> _BoomClient:
+            return boom
+
+        monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
+        monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
+        cap = NimbleSearch[None]()
+        toolset = cap.get_toolset()
+        ctx = AsyncMock(spec=RunContext)
+
+        async def handler() -> AgentRunResult[Any]:
+            await toolset.web_search('q')
+            return AsyncMock(spec=AgentRunResult)
+
         with pytest.raises(RuntimeError, match='close failed'):
-            await lifecycle.release_after_run()
-        assert lifecycle._owned_client is boom  # pyright: ignore[reportPrivateUsage]
+            await cap.wrap_run(ctx, handler=handler)
+
+        # Failed close keeps the owned client for a later retry.
+        assert boom.search_calls[-1]['query'] == 'q'
+        with pytest.raises(RuntimeError, match='close failed'):
+            await cap.wrap_run(ctx, handler=handler)
+        assert len(boom.search_calls) == 2
 
     def test_from_spec_and_instructions(self) -> None:
         cap = NimbleSearch.from_spec(include_map=True, include_crawl=True)
@@ -513,15 +619,86 @@ class TestErrorsAndConfig:
         assert NimbleSearch(guidance='').get_instructions() is None
         assert NimbleSearch(guidance='custom').get_instructions() == 'custom'
 
-    def test_factory_client_sets_attribution(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_factory_client_sets_attribution(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
         created: dict[str, Any] = {}
 
-        def fake_async_nimble(*, api_key: str, client_source: str) -> AsyncMock:
+        def fake_async_nimble(*, api_key: str, client_source: str) -> _FakeNimbleClient:
             created['api_key'] = api_key
             created['client_source'] = client_source
-            return AsyncMock()
+            return _FakeNimbleClient(search_results=[_search_result()])
 
         monkeypatch.setattr('pydantic_ai_harness.nimble._toolset.AsyncNimble', fake_async_nimble)
-        NimbleSearch().get_toolset()
+        cap = NimbleSearch[None]()
+        toolset = cap.get_toolset()
+        assert created == {}
+
+        async def handler() -> AgentRunResult[Any]:
+            await toolset.web_search('q')
+            return AsyncMock(spec=AgentRunResult)
+
+        await cap.wrap_run(AsyncMock(spec=RunContext), handler=handler)
         assert created == {'api_key': 'test-key', 'client_source': 'pydantic-ai'}
+
+
+class TestAgentIntegration:
+    async def test_agent_run_uses_search_tools_and_instructions(self) -> None:
+        client = _FakeNimbleClient(
+            search_results=[_search_result('https://a.dev', title='A', content='alpha')],
+            extract_markdown='beta',
+        )
+        agent = Agent(
+            TestModel(),
+            capabilities=[NimbleSearch(include_map=False, include_crawl=False, client=client)],
+        )
+        result = await agent.run('Research something.')
+        messages = result.all_messages()
+        first = messages[0]
+        assert isinstance(first, ModelRequest)
+        assert first.instructions is not None
+        assert 'web_search' in first.instructions
+        assert 'get_page' in first.instructions
+
+        returns = {
+            part.tool_name: part.content
+            for message in messages
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        }
+        assert 'web_search' in returns
+        assert 'get_page' in returns
+        web_search = returns['web_search']
+        get_page = returns['get_page']
+        assert isinstance(web_search, str)
+        assert isinstance(get_page, str)
+        assert 'https://a.dev' in web_search
+        assert 'beta' in get_page
+
+
+class TestAgentSpec:
+    def test_spec_schema_includes_nimble_capabilities(self) -> None:
+        schema = AgentSpec.model_json_schema_with_capabilities([NimbleSearch, NimbleAgent])
+        dumped = json.dumps(schema)
+        assert 'NimbleSearch' in dumped
+        assert 'NimbleAgent' in dumped
+
+    def test_from_spec_builds_capability(self) -> None:
+        capability = NimbleSearch[None].from_spec(
+            num_results=3,
+            search_depth='fast',
+            include_map=True,
+            include_domains=['a.dev'],
+        )
+        assert capability.num_results == 3
+        assert capability.search_depth == 'fast'
+        assert capability.include_map is True
+        assert capability.include_domains == ['a.dev']
+        assert capability.client is None
+
+    def test_agent_loads_from_spec_file(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.setenv('NIMBLE_API_KEY', 'test-key')
+        spec = tmp_path / 'agent.yaml'
+        spec.write_text('model: test\ncapabilities:\n  - NimbleSearch:\n      num_results: 3\n  - NimbleAgent: {}\n')
+        agent = Agent.from_file(spec, custom_capability_types=[NimbleSearch, NimbleAgent])
+        assert isinstance(agent, Agent)

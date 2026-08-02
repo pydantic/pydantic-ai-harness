@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext
 
@@ -18,6 +18,8 @@ from pydantic_ai_harness.nimble._toolset import (
     SearchDepth,
     TimeRange,
     _OwnedClientLifecycle,  # pyright: ignore[reportPrivateUsage]
+    _VALID_SEARCH_DEPTHS,  # pyright: ignore[reportPrivateUsage]
+    _VALID_TIME_RANGES,  # pyright: ignore[reportPrivateUsage]
 )
 
 if TYPE_CHECKING:
@@ -30,10 +32,12 @@ _INSTRUCTIONS = (
     'the pages you relied on in your answer.'
 )
 
-_MAP_INSTRUCTIONS_SUFFIX = ' Use `map_site` to discover URLs on a website before targeted extraction or crawling.'
+_MAP_INSTRUCTIONS_SUFFIX = (
+    ' Use `map_site` to discover URLs on a website before targeted extraction or crawling.'
+)
 
 _CRAWL_INSTRUCTIONS_SUFFIX = (
-    ' For multi-page jobs, call `crawl_start` then `crawl_status` across turns — do not wait '
+    ' For multi-page jobs, call `crawl_start` then `crawl_status` across turns - do not wait '
     'inside a single tool call for a crawl to finish.'
 )
 
@@ -56,7 +60,9 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
     ```
 
     Authentication comes from the `NIMBLE_API_KEY` environment variable by
-    default; pass `client` to configure it explicitly.
+    default; pass `client` to configure it explicitly. When composing with
+    [`NimbleAgent`][pydantic_ai_harness.nimble.NimbleAgent], pass the same
+    `client=` to both capabilities to share one HTTP session.
     """
 
     num_results: int = 5
@@ -101,7 +107,8 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
 
     Any object satisfying the `NimbleClient` protocol works: use it to pass an API
     key explicitly or substitute a fake in tests. Factory-built clients send
-    `X-Client-Source: pydantic-ai` and are closed when the last concurrent run ends.
+    `X-Client-Source: pydantic-ai` and are closed when the last concurrent run ends
+    (including failed or cancelled runs).
     """
 
     _client_lifecycle: _OwnedClientLifecycle = field(init=False, repr=False)
@@ -114,8 +121,12 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
             raise ValueError(
                 f'max_text_chars must be between 1 and {NIMBLE_MAX_PAGE_TEXT_CHARS}, got {self.max_text_chars}'
             )
-        if self.search_depth not in ('lite', 'fast', 'deep'):
+        if self.search_depth not in _VALID_SEARCH_DEPTHS:
             raise ValueError(f'search_depth must be lite, fast, or deep, got {self.search_depth!r}')
+        if self.time_range is not None and self.time_range not in _VALID_TIME_RANGES:
+            raise ValueError(
+                f'time_range must be one of {sorted(_VALID_TIME_RANGES)}, got {self.time_range!r}'
+            )
         if isinstance(self.include_domains, str) or isinstance(self.exclude_domains, str):
             raise ValueError('include_domains and exclude_domains must be a sequence of strings, not a single str')
         if self.include_domains and self.exclude_domains:
@@ -135,10 +146,9 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> NimbleSearchToolset[AgentDepsT]:
         """Build the toolset providing Nimble research tools."""
-        get_client = self._client_lifecycle.resolve
-        get_client()  # fail fast on missing API key / materialize factory client
+        self._client_lifecycle.ensure_configured()
         return NimbleSearchToolset[AgentDepsT](
-            get_client=get_client,
+            get_client=self._client_lifecycle.resolve,
             num_results=self.num_results,
             max_text_chars=self.max_text_chars,
             search_depth=self.search_depth,
@@ -149,19 +159,13 @@ class NimbleSearch(AbstractCapability[AgentDepsT]):
             include_crawl=self.include_crawl,
         )
 
-    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Retain a factory-built client for this run (safe under concurrency)."""
+    async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
+        """Retain a factory client for the run and always release it afterward."""
         await self._client_lifecycle.retain_for_run()
-
-    async def after_run(
-        self,
-        ctx: RunContext[AgentDepsT],
-        *,
-        result: AgentRunResult[Any],
-    ) -> AgentRunResult[Any]:
-        """Release a factory-built client; close it when no runs remain."""
-        await self._client_lifecycle.release_after_run()
-        return result
+        try:
+            return await handler()
+        finally:
+            await self._client_lifecycle.release_after_run()
 
     @classmethod
     def from_spec(

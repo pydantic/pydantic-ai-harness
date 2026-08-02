@@ -6,7 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
 from pydantic_ai.messages import ToolReturn
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -32,10 +32,10 @@ _INSTRUCTIONS = (
     '`agent_run_start` with `agent_name` (create-or-reuse) plus `input`, optional '
     '`use_case` (locked at create: research | enrichment | dataset_building), '
     '`skill` (domain expertise), `effort`, and run overrides (`sources`, '
-    '`output_schema`, `input_data` for enrichment). Pass `agent_id` (`wsa_…`) only '
+    '`output_schema`, `input_data` for enrichment). Pass `agent_id` (`wsa_...`) only '
     'when reusing a known agent (Mode 2). Preserve returned `web_search_agent_id` '
-    'and run id (`task_run_…`) for `agent_run_status` / `agent_run_result` across '
-    'turns. Runs often take 3–15 minutes — never block-poll inside one tool call. '
+    'and run id (`task_run_...`) for `agent_run_status` / `agent_run_result` across '
+    'turns. Runs often take several minutes - never block-poll inside one tool call. '
     'Optional discovery: `agents_list` / `agent_templates_list`.'
 )
 
@@ -66,13 +66,13 @@ def _trust_sources(payload: Mapping[str, Any]) -> list[NimbleSource]:
 class NimbleAgentToolset(FunctionToolset[AgentDepsT]):
     """Gives an agent Nimble Web Search Agent (Agent API V2) lifecycle tools.
 
-    Tools return immediately without polling — use start, then status/result
+    Tools return immediately without polling - use start, then status/result
     across turns (resumable start / status / result).
 
     **Mode choice (stateless host default = Mode 1):**
-    - Mode 1: `agent_name` create-or-reuse via `POST /v2/agents/runs`
-    - Mode 2: explicit `agent_id` (`wsa_…`) via `POST /v2/agents/{id}/runs`
-    - Mode 3: omit both for an anonymous one-shot (still returns `wsa_…`)
+   - Mode 1: `agent_name` create-or-reuse via `POST /v2/agents/runs`
+   - Mode 2: explicit `agent_id` (`wsa_...`) via `POST /v2/agents/{id}/runs`
+   - Mode 3: omit both for an anonymous one-shot (still returns `wsa_...`)
     """
 
     def __init__(self, *, get_client: Callable[[], NimbleClient]) -> None:
@@ -150,21 +150,21 @@ class NimbleAgentToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             input: The prompt / task instructions for the run.
-            agent_id: Existing agent id (`wsa_…`) for Mode 2. Takes precedence over
+            agent_id: Existing agent id (`wsa_...`) for Mode 2. Takes precedence over
                 `agent_name` when both are set.
             agent_name: Mode 1 create-or-reuse name (stateless hosts).
             use_case: `research` | `enrichment` | `dataset_building`. Locked at agent
-                create — against an existing agent must match or be omitted (else 422).
+                create; against an existing agent must match or be omitted (else 422).
             skill: Plain-text operating instructions / domain expertise. One-time
                 override except Mode 1 first create (persists).
-            effort: Effort tier (`low`…`max`). Expect 3–15 minutes for deeper tiers.
+            effort: Effort tier (`low`...`max`). Deeper tiers often take several minutes.
             sources: One-time source guidance override (`allow`/`block`/`avoid`/`prioritize`).
             output_schema: JSON Schema override for structured output.
             input_data: Enrichment payload (rows/object); distinct from `output_schema`.
             enable_events: When true, enables SSE via the runs events endpoint later.
 
         Returns:
-            Run metadata including `task_run_…` id and `web_search_agent_id` (`wsa_…`).
+            Run metadata including `task_run_...` id and `web_search_agent_id` (`wsa_...`).
         """
         run_kwargs: dict[str, Any] = {'input': input}
         if effort is not None:
@@ -183,21 +183,22 @@ class NimbleAgentToolset(FunctionToolset[AgentDepsT]):
             run_kwargs['skill'] = skill
 
         # Requires nimble_python>=1.2.0 for typed agent_name / use_case / skill kwargs.
-        if agent_id:
+        if agent_id is not None:
             response = await self._client.agents.runs.create(agent_id, **run_kwargs)
+            mode = 'mode2'
         else:
             if agent_name is not None:
                 run_kwargs['agent_name'] = agent_name
             response = await self._client.agents.run(**run_kwargs)
+            mode = 'mode1' if agent_name is not None else 'mode3'
 
         payload = response.model_dump(mode='json')
         run_id = payload.get('id')
         wsa_id = payload.get('web_search_agent_id') or agent_id
-        mode = 'mode2' if agent_id else ('mode1' if agent_name else 'mode3')
         return ToolReturn(
             f'Started agent run {run_id!r} (agent {wsa_id!r}, {mode}). '
             f'Use agent_run_status / agent_run_result across turns; '
-            f'deeper effort tiers often take 3–15 minutes.\n\n{_json_dump(payload)}',
+            f'deeper effort tiers often take several minutes.\n\n{_json_dump(payload)}',
             metadata={
                 'agent_id': wsa_id,
                 'run_id': run_id,
@@ -212,11 +213,11 @@ class NimbleAgentToolset(FunctionToolset[AgentDepsT]):
         """Get the status of a Nimble Web Search Agent run.
 
         Args:
-            agent_id: The `wsa_…` id from `agent_run_start` (`web_search_agent_id`).
-            run_id: The `task_run_…` id from `agent_run_start`.
+            agent_id: The `wsa_...` id from `agent_run_start` (`web_search_agent_id`).
+            run_id: The `task_run_...` id from `agent_run_start`.
 
         Returns:
-            Run status metadata as JSON (`queued` | `running` | `completed` | …).
+            Run status metadata as JSON (`queued` | `running` | `completed` | ...).
         """
         response = await self._client.agents.runs.get(run_id, agent_id=agent_id)
         payload = response.model_dump(mode='json')
@@ -235,12 +236,12 @@ class NimbleAgentToolset(FunctionToolset[AgentDepsT]):
         """Get the result of a Nimble Web Search Agent run.
 
         Args:
-            agent_id: The `wsa_…` id from `agent_run_start`.
-            run_id: The `task_run_…` id from `agent_run_start`.
+            agent_id: The `wsa_...` id from `agent_run_start`.
+            run_id: The `task_run_...` id from `agent_run_start`.
 
         Returns:
             Completed output (text/json + trust) or structured failure as JSON.
-            Active runs may return a resumable error (e.g. HTTP 409) — call status again.
+            Active runs may return a resumable error (e.g. HTTP 409) - call status again.
         """
         response = await self._client.agents.runs.result(run_id, agent_id=agent_id)
         if hasattr(response, 'model_dump'):
@@ -265,9 +266,9 @@ class NimbleAgent(AbstractCapability[AgentDepsT]):
 
     Resumable lifecycle tools for research / enrichment / dataset building.
     **Default bootstrap is Mode 1** (`agent_name` create-or-reuse) because a
-    typical Pydantic AI agent is a stateless host for `wsa_…` persistence —
+    typical Pydantic AI agent is a stateless host for `wsa_...` persistence -
     the model keeps ids in message history across turns. Pass `agent_id` for
-    Mode 2 when the application already stores a `wsa_…`.
+    Mode 2 when the application already stores a `wsa_...`.
 
     ```python
     from pydantic_ai import Agent
@@ -280,8 +281,11 @@ class NimbleAgent(AbstractCapability[AgentDepsT]):
     ```
 
     Authentication comes from the `NIMBLE_API_KEY` environment variable by
-    default; pass `client` to configure it explicitly. Factory-built clients
-    send `X-Client-Source: pydantic-ai` and are closed after each agent run.
+    default; pass `client` to configure it explicitly. When composing with
+    [`NimbleSearch`][pydantic_ai_harness.nimble.NimbleSearch], pass the same
+    `client=` to both capabilities to share one HTTP session. Factory-built
+    clients send `X-Client-Source: pydantic-ai` and are closed when the last
+    concurrent run ends (including failed or cancelled runs).
     """
 
     guidance: str | None = None
@@ -295,7 +299,7 @@ class NimbleAgent(AbstractCapability[AgentDepsT]):
     """Nimble client to use; when `None`, an `AsyncNimble` is built from `NIMBLE_API_KEY`.
 
     Factory-built clients send `X-Client-Source: pydantic-ai` and are closed when
-    the last concurrent run ends.
+    the last concurrent run ends (including failed or cancelled runs).
     """
 
     _client_lifecycle: _OwnedClientLifecycle = field(init=False, repr=False)
@@ -311,23 +315,16 @@ class NimbleAgent(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> NimbleAgentToolset[AgentDepsT]:
         """Build the toolset providing Web Search Agent lifecycle tools."""
-        get_client = self._client_lifecycle.resolve
-        get_client()  # fail fast on missing API key / materialize factory client
-        return NimbleAgentToolset[AgentDepsT](get_client=get_client)
+        self._client_lifecycle.ensure_configured()
+        return NimbleAgentToolset[AgentDepsT](get_client=self._client_lifecycle.resolve)
 
-    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Retain a factory-built client for this run (safe under concurrency)."""
+    async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
+        """Retain a factory client for the run and always release it afterward."""
         await self._client_lifecycle.retain_for_run()
-
-    async def after_run(
-        self,
-        ctx: RunContext[AgentDepsT],
-        *,
-        result: AgentRunResult[Any],
-    ) -> AgentRunResult[Any]:
-        """Release a factory-built client; close it when no runs remain."""
-        await self._client_lifecycle.release_after_run()
-        return result
+        try:
+            return await handler()
+        finally:
+            await self._client_lifecycle.release_after_run()
 
     @classmethod
     def from_spec(cls, *, guidance: str | None = None) -> NimbleAgent[AgentDepsT]:

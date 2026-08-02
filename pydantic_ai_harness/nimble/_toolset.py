@@ -49,6 +49,9 @@ SearchDepth = Literal['lite', 'fast', 'deep']
 TimeRange = Literal['hour', 'day', 'week', 'month', 'year']
 AgentEffort = Literal['low', 'medium', 'high', 'x-high', 'max']
 
+_VALID_SEARCH_DEPTHS: frozenset[str] = frozenset({'lite', 'fast', 'deep'})
+_VALID_TIME_RANGES: frozenset[str] = frozenset({'hour', 'day', 'week', 'month', 'year'})
+
 
 class NimbleSource(TypedDict):
     """One source behind a tool result, carried in `ToolReturn.metadata['sources']`."""
@@ -127,14 +130,25 @@ async def _aclose_client(client: NimbleClient) -> None:  # pyright: ignore[repor
 class _OwnedClientLifecycle:  # pyright: ignore[reportUnusedClass]
     """Reference-counted factory client shared safely across concurrent agent runs.
 
-    `before_run` retains; `after_run` releases and closes only when the last run ends.
-    Explicit `client=` on the capability bypasses this entirely.
+    Capabilities retain in `wrap_run` and release in `finally` so cancelled or failed
+    runs still close the owned client. Explicit `client=` bypasses this entirely.
     """
 
     explicit_client: NimbleClient | None
     _owned_client: NimbleClient | None = field(default=None, init=False, repr=False)
     _active_runs: int = field(default=0, init=False, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+
+    def ensure_configured(self) -> None:
+        """Fail fast on a missing API key without materializing an HTTP client."""
+        if self.explicit_client is not None or self._owned_client is not None:
+            return
+        if not os.getenv('NIMBLE_API_KEY'):
+            raise UserError(
+                'Nimble capabilities need a Nimble API key: set the NIMBLE_API_KEY environment '
+                'variable, or pass a configured client, e.g. '
+                'NimbleSearch(client=AsyncNimble(api_key=...)).'
+            )
 
     def resolve(self) -> NimbleClient:
         """Return the explicit client, or lazily create a factory-owned one."""
@@ -362,7 +376,7 @@ class NimbleSearchToolset(FunctionToolset[AgentDepsT]):
         lines = [f'Found {len(links)} link(s) for {url!r}:', '']
         for link in links:
             title = link.title or '(untitled)'
-            desc = f' — {link.description}' if link.description else ''
+            desc = f' - {link.description}' if link.description else ''
             lines.append(f'- {title}: {link.url}{desc}')
         return ToolReturn('\n'.join(lines), metadata={'sources': sources})
 

@@ -2,7 +2,14 @@
 
 from pydantic_ai_harness.nimble._agent import AgentUseCase, NimbleAgent, NimbleAgentToolset
 from pydantic_ai_harness.nimble._capability import NimbleSearch
-from pydantic_ai_harness.nimble._toolset import AgentEffort, NimbleClient, NimbleSearchToolset, NimbleSource
+from pydantic_ai_harness.nimble._toolset import (
+    AgentEffort,
+    NimbleClient,
+    NimbleSearchToolset,
+    NimbleSource,
+    SearchDepth,
+    TimeRange,
+)
 
 __all__ = [
     'AgentEffort',
@@ -13,4 +20,6 @@ __all__ = [
     'NimbleSearch',
     'NimbleSearchToolset',
     'NimbleSource',
+    'SearchDepth',
+    'TimeRange',
 ]
