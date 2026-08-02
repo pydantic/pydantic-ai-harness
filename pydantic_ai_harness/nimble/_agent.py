@@ -166,39 +166,29 @@ class NimbleAgentToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Run metadata including `task_run_…` id and `web_search_agent_id` (`wsa_…`).
         """
-        run_body: dict[str, Any] = {'input': input}
+        run_kwargs: dict[str, Any] = {'input': input}
         if effort is not None:
-            run_body['effort'] = effort
+            run_kwargs['effort'] = effort
         if sources is not None:
-            run_body['sources'] = sources
+            run_kwargs['sources'] = sources
         if output_schema is not None:
-            run_body['output_schema'] = output_schema
+            run_kwargs['output_schema'] = output_schema
         if input_data is not None:
-            run_body['input_data'] = input_data
+            run_kwargs['input_data'] = input_data
         if enable_events is not None:
-            run_body['enable_events'] = enable_events
-
-        # Typed SDK params for agent_name / use_case / skill land in nimble_python>=1.2;
-        # until the extra floor is bumped, pass them via extra_body.
-        extra_body: dict[str, Any] = {}
+            run_kwargs['enable_events'] = enable_events
         if use_case is not None:
-            extra_body['use_case'] = use_case
+            run_kwargs['use_case'] = use_case
         if skill is not None:
-            extra_body['skill'] = skill
+            run_kwargs['skill'] = skill
 
+        # Requires nimble_python>=1.2.0 for typed agent_name / use_case / skill kwargs.
         if agent_id:
-            response = await self._client.agents.runs.create(
-                agent_id,
-                **run_body,
-                extra_body=extra_body or None,
-            )
+            response = await self._client.agents.runs.create(agent_id, **run_kwargs)
         else:
             if agent_name is not None:
-                extra_body['agent_name'] = agent_name
-            response = await self._client.agents.run(
-                **run_body,
-                extra_body=extra_body or None,
-            )
+                run_kwargs['agent_name'] = agent_name
+            response = await self._client.agents.run(**run_kwargs)
 
         payload = response.model_dump(mode='json')
         run_id = payload.get('id')

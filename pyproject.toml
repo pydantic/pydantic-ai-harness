@@ -69,7 +69,7 @@ mongodb = [
     "pymongo>=4.17.0",
 ]
 nimble = [
-    "nimble_python>=1.0.0",
+    "nimble_python>=1.2.0",
 ]
 skills = [
     "pyyaml>=6.0.2",

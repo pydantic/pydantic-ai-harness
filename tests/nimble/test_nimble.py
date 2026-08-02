@@ -313,11 +313,10 @@ class TestNimbleAgent:
         assert call['input'] == 'Find AI news'
         assert call['effort'] == 'medium'
         assert call['sources'] == {'prioritize': 'docs.python.org'}
-        assert call['extra_body'] == {
-            'use_case': 'research',
-            'skill': 'Prefer primary sources',
-            'agent_name': 'pydantic_harness_research',
-        }
+        assert call['agent_name'] == 'pydantic_harness_research'
+        assert call['use_case'] == 'research'
+        assert call['skill'] == 'Prefer primary sources'
+        assert 'extra_body' not in call
 
     async def test_mode2_and_mode3_start(self) -> None:
         client = _FakeNimbleClient()
@@ -331,7 +330,10 @@ class TestNimbleAgent:
         mode3 = await toolset.agent_run_start('anonymous question')
         assert mode3.metadata is not None
         assert mode3.metadata['mode'] == 'mode3'
-        assert client.mode1_calls[-1].get('extra_body') in (None, {})
+        assert 'agent_name' not in client.mode1_calls[-1]
+        assert 'use_case' not in client.mode1_calls[-1]
+        assert 'extra_body' not in client.mode1_calls[-1]
+        assert 'agent_name' not in client.mode2_calls[0]
 
     async def test_enrichment_overrides(self) -> None:
         client = _FakeNimbleClient()
@@ -349,7 +351,8 @@ class TestNimbleAgent:
         assert call['output_schema'] == schema
         assert call['input_data'] == [{'name': 'Acme'}]
         assert call['enable_events'] is True
-        assert call['extra_body']['use_case'] == 'enrichment'
+        assert call['use_case'] == 'enrichment'
+        assert 'extra_body' not in call
 
     async def test_status_result_and_trust_sources(self) -> None:
         client = _FakeNimbleClient()

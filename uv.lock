@@ -3509,7 +3509,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.0" },
-    { name = "nimble-python", marker = "extra == 'nimble'", specifier = ">=1.0.0" },
+    { name = "nimble-python", marker = "extra == 'nimble'", specifier = ">=1.2.0" },
     { name = "pydantic-ai-slim", specifier = ">=2.22.0" },
     { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", specifier = ">=2.18.0" },
