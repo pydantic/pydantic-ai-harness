@@ -53,8 +53,9 @@ You.com is a paid service with free credits to explore. Create an account at
 ### `you_search`
 
 Web and news search via the [Search API](https://docs.you.com/api-reference/search/v1-search).
-Returns unified results from web and news sources. A response without a
-`results` object returns an empty list.
+Returns unified results from web and news sources. Each result carries
+`kind='web'` or `kind='news'` so callers can recover the provider section. A
+response without a `results` object returns an empty list.
 
 ### `you_contents`
 
@@ -67,7 +68,8 @@ and get back full page content, ready for LLM consumption.
 Deep research via the [Research API](https://docs.you.com/api-reference/research/v1-research).
 Runs multiple searches, reads through sources, and synthesizes a thorough,
 well-cited answer with inline citations. Use it when a question is too complex
-for a simple lookup.
+for a simple lookup. The returned `warnings` list reports source-access issues
+or partial results.
 
 This capability uses the synchronous Research API. It supports `lite`,
 `standard`, `deep`, and `exhaustive`; the asynchronous `frontier` mode is not
@@ -79,10 +81,23 @@ Finance-focused research via the
 [Finance Research API](https://docs.you.com/api-reference/finance-research/v1-finance_research).
 Uses a finance-optimized index to research earnings, filings, market data, and
 financial news. Use it for company fundamentals, market trends, competitive
-analysis, or earnings summaries. It returns a `YouTextResearchResult`;
+analysis, or earnings summaries. It returns a `YouFinanceResearchResult`;
 structured output is available only from `you_research`.
 
 ## Parameters
+
+### Output limits
+
+| Parameter | Description |
+|---|---|
+| `max_output_bytes` | Maximum UTF-8 bytes in the complete JSON tool result. Minimum: 512. Default: 50 KiB. |
+| `max_output_lines` | Maximum lines in the indented JSON tool result. Minimum: 8. Default: 2,000. |
+
+The full result envelope is measured before it enters model context. If either
+limit is exceeded, the successful provider response is replaced with a bounded
+`YouOversizedResult`. Its size and configured limits let the application decide
+whether to issue a narrower follow-up without automatically repeating a paid
+Research or Finance Research request.
 
 ### Search parameters
 
@@ -119,7 +134,7 @@ structured output is available only from `you_research`.
 | `research_boost_domains` | Domains to boost in source ranking without filtering others (max 500). | Only if not configured |
 | `research_freshness` | Source recency filter: `'day'`, `'week'`, `'month'`, `'year'`, or `'YYYY-MM-DDtoYYYY-MM-DD'`. | Only if not configured |
 | `research_country` | ISO 3166-1 alpha-2 country code to geographically focus sources. | Only if not configured |
-| `output_schema` | JSON Schema for structured output. When set, the result is a `YouObjectResearchResult` (`content` is a JSON object, `content_type` is `'object'`); otherwise a `YouTextResearchResult`. Not valid with `research_effort='lite'`. | Never (human-only) |
+| `output_schema` | JSON Schema for structured output. The root must be an object, set `additionalProperties: false`, and list every property in `required`. When set, the result is a `YouObjectResearchResult`; otherwise a `YouTextResearchResult`. Not valid with `research_effort='lite'`. | Never (human-only) |
 
 ### Finance research parameters
 
@@ -145,8 +160,10 @@ from pydantic_ai_harness.youdotcom import Youdotcom
 
 Youdotcom(
     api_key='...',              # required -- You.com API key (excluded from repr)
-    http_client=None,           # optional httpx.AsyncClient for connection pooling
+    client=None,           # optional provider client
     timeout=None,               # request timeout override; defaults: 300s research, 60s search/contents
+    max_output_bytes=50 * 1024, # complete JSON result cap
+    max_output_lines=2000,      # complete JSON result line cap
     # Search
     count=5,                    # results per section
     offset=None,                # pagination offset (never exposed to LLM)
@@ -223,7 +240,9 @@ agent = Agent.from_file('agent.yaml', custom_capability_types=[Youdotcom])
 
 ## Error handling
 
-The toolset retries one `429 Too Many Requests` response when You.com's
+`Youdotcom.client` accepts the `YoudotcomClient` protocol, so applications can
+supply their own transport and retry policy. The bundled `YoudotcomHTTPClient`
+retries one `429 Too Many Requests` response when You.com's
 `Retry-After` delay is at most 60 seconds. Longer or repeated rate limits, and
 configuration errors (`401`, `402`, `403`, or `404`), propagate as
 `httpx.HTTPStatusError`. Other HTTP and transport errors become `ModelRetry` so

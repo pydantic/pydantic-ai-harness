@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Annotated, Final, Literal, TypeVar
+from typing import Annotated, Final, Literal, Protocol, TypeVar
 
 import anyio
 import httpx
@@ -23,7 +23,8 @@ from pydantic import (
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import FunctionToolset
-from typing_extensions import NotRequired, TypedDict
+from pydantic_core import to_json
+from typing_extensions import NotRequired, Required, TypedDict
 
 __all__ = (
     'ContentsFormat',
@@ -41,8 +42,12 @@ __all__ = (
     'SearchOffset',
     'YouContentsMetadata',
     'YouContentsResult',
+    'YouFinanceResearchResult',
+    'YoudotcomClient',
+    'YoudotcomHTTPClient',
     'YouLivecrawlContents',
     'YouObjectResearchResult',
+    'YouOversizedResult',
     'YouResearchResult',
     'YouResearchSource',
     'YouSearchResult',
@@ -50,6 +55,20 @@ __all__ = (
     'YoudotcomToolset',
 )
 
+# You.com assumptions, verified 2026-08 against the OpenAPI documents linked below:
+# - Search and Contents use `ydc-index.io`; Research and Finance Research use `api.you.com`.
+# - Every endpoint authenticates with `X-API-Key`.
+# - Domain-filtered Search requests use POST arrays; simple Search requests may use GET.
+# - This integration uses synchronous Research, whose response requires `warnings`; Finance
+#   Research returns text output without `warnings`; frontier Research requires background mode.
+# - Rate-limit responses may provide `Retry-After` as seconds or an HTTP date.
+# Re-check these assumptions by downloading the linked OpenAPI documents and comparing the
+# endpoint, security, request, response, and error schemas before changing protocol handling.
+# https://you.com/docs/openapi/web-search-api.yaml
+# https://you.com/docs/openapi/contents.yaml
+# https://you.com/docs/openapi/research.yaml
+# https://you.com/docs/openapi/finance-research.yaml
+# https://you.com/docs/error-handling/error-code-reference
 _YOU_SEARCH_URL: Final[str] = 'https://ydc-index.io/v1/search'
 _YOU_CONTENTS_URL: Final[str] = 'https://ydc-index.io/v1/contents'
 _YOU_RESEARCH_URL: Final[str] = 'https://api.you.com/v1/research'
@@ -60,6 +79,11 @@ _DEFAULT_TIMEOUT: Final[float] = 60.0
 
 _RESEARCH_TIMEOUT: Final[float] = 300.0
 """Request timeout (seconds) for research and finance research calls; exhaustive runs are slow."""
+
+_DEFAULT_MAX_OUTPUT_BYTES: Final[int] = 50 * 1024
+_DEFAULT_MAX_OUTPUT_LINES: Final[int] = 2000
+_MIN_MAX_OUTPUT_BYTES: Final[int] = 512
+_MIN_MAX_OUTPUT_LINES: Final[int] = 8
 
 Country = Literal[
     'AR',
@@ -166,7 +190,7 @@ SafeSearch = Literal['off', 'moderate', 'strict']
 LiveCrawl = Literal['web', 'news', 'all']
 """Which sections to livecrawl for full page content."""
 
-LiveCrawlFormats = Annotated[list[Literal['html', 'markdown']], Field(max_length=2)]
+LiveCrawlFormats = Annotated[list[Literal['html', 'markdown']], Field(min_length=1, max_length=2)]
 """Format(s) for livecrawled content. Pass one or both of 'html', 'markdown'."""
 
 ContentsFormat = Literal['html', 'markdown', 'metadata']
@@ -188,12 +212,27 @@ CrawlTimeoutSeconds = Annotated[int, Field(ge=1, le=60)]
 """Per-URL crawl timeout in seconds (1-60)."""
 
 _AnyUrlAdapter: TypeAdapter[AnyUrl] = TypeAdapter(AnyUrl)
+_StringObjectDictAdapter: TypeAdapter[dict[str, object]] = TypeAdapter(dict[str, object])
+_StringListAdapter: TypeAdapter[list[str]] = TypeAdapter(list[str])
 _ValueT = TypeVar('_ValueT')
 
 
 def _validate_uri(value: str) -> str:
     """Validate a URI while preserving the string value sent to You.com."""
     _AnyUrlAdapter.validate_python(value)
+    return value
+
+
+def _validate_output_schema(value: dict[str, object]) -> dict[str, object]:
+    """Validate the root rules You.com can check before Research execution."""
+    if value.get('type') != 'object' or 'anyOf' in value:
+        raise ValueError("output_schema must have an object root without top-level 'anyOf'.")
+    properties = _StringObjectDictAdapter.validate_python(value.get('properties'))
+    required = _StringListAdapter.validate_python(value.get('required'))
+    if set(required) != set(properties):
+        raise ValueError('output_schema must list every property, and only those properties, in required.')
+    if value.get('additionalProperties') is not False:
+        raise ValueError('output_schema must set additionalProperties to false.')
     return value
 
 
@@ -233,6 +272,9 @@ class YouSearchResult(TypedDict, total=False):
     Fields depend on the API response and livecrawl settings.
     """
 
+    kind: Required[Literal['web', 'news']]
+    """The provider response section this result came from."""
+
     title: str
     """The title of the search result."""
 
@@ -256,9 +298,6 @@ class YouSearchResult(TypedDict, total=False):
 
     contents: NotRequired[YouLivecrawlContents]
     """Contents of the page if livecrawl was enabled."""
-
-    authors: NotRequired[list[str]]
-    """An array of authors of the search result."""
 
 
 class YouContentsMetadata(TypedDict, total=False):
@@ -332,6 +371,9 @@ class YouTextResearchResult(TypedDict):
     sources: list[YouResearchSource]
     """Web sources used to generate the answer."""
 
+    warnings: list[str]
+    """Source-access or partial-result warnings from the provider."""
+
 
 class YouObjectResearchResult(TypedDict):
     """A structured research answer, returned when `output_schema` is configured."""
@@ -345,9 +387,170 @@ class YouObjectResearchResult(TypedDict):
     sources: list[YouResearchSource]
     """Web sources used to generate the answer."""
 
+    warnings: list[str]
+    """Source-access or partial-result warnings from the provider."""
+
+
+class YouFinanceResearchResult(TypedDict):
+    """A free-form answer from the Finance Research API."""
+
+    content: str
+    """The comprehensive response with inline citations, in Markdown."""
+
+    content_type: Literal['text']
+    """Always 'text' for a Markdown answer."""
+
+    sources: list[YouResearchSource]
+    """Web sources used to generate the answer."""
+
+
+class YouOversizedResult(TypedDict):
+    """Bounded metadata returned when a provider response exceeds a configured output limit."""
+
+    content_type: Literal['output_limit']
+    """Discriminator indicating that the provider result was too large to return."""
+
+    message: str
+    """Explanation that the provider request succeeded but its result was not returned."""
+
+    output_bytes: int
+    """Size of the complete provider result when serialized as indented JSON."""
+
+    output_lines: int
+    """Line count of the complete provider result when serialized as indented JSON."""
+
+    max_output_bytes: int
+    """Configured byte limit."""
+
+    max_output_lines: int
+    """Configured line limit."""
+
 
 YouResearchResult = YouTextResearchResult | YouObjectResearchResult
 """A result from the Research API, discriminated on `content_type`."""
+
+
+class YoudotcomClient(Protocol):
+    """Client interface used by `YoudotcomToolset` for provider requests.
+
+    Implementations own transport retries and failure mapping. The bundled
+    `YoudotcomHTTPClient` provides the default HTTP behavior.
+    """
+
+    async def request(
+        self,
+        method: Literal['GET', 'POST'],
+        url: str,
+        *,
+        api_key: str,
+        params: Mapping[str, str | int | Sequence[str]] | None,
+        json_body: Mapping[str, object] | None,
+        timeout: float,
+        retry_unprocessable: bool,
+    ) -> object:
+        """Execute one provider request and return its decoded JSON value."""
+        ...  # pragma: no cover
+
+
+class YoudotcomHTTPClient:
+    """Default You.com client backed by `httpx`."""
+
+    def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
+        self._http_client = http_client
+
+    async def request(
+        self,
+        method: Literal['GET', 'POST'],
+        url: str,
+        *,
+        api_key: str,
+        params: Mapping[str, str | int | Sequence[str]] | None,
+        json_body: Mapping[str, object] | None,
+        timeout: float,
+        retry_unprocessable: bool,
+    ) -> object:
+        """Execute a request, retrying one short provider-directed rate limit."""
+        if self._http_client is not None:
+            return await self._request_with_client(
+                self._http_client,
+                method,
+                url,
+                api_key=api_key,
+                params=params,
+                json_body=json_body,
+                timeout=timeout,
+                retry_unprocessable=retry_unprocessable,
+            )
+        async with httpx.AsyncClient() as client:
+            return await self._request_with_client(
+                client,
+                method,
+                url,
+                api_key=api_key,
+                params=params,
+                json_body=json_body,
+                timeout=timeout,
+                retry_unprocessable=retry_unprocessable,
+            )
+
+    async def _request_with_client(
+        self,
+        client: httpx.AsyncClient,
+        method: Literal['GET', 'POST'],
+        url: str,
+        *,
+        api_key: str,
+        params: Mapping[str, str | int | Sequence[str]] | None,
+        json_body: Mapping[str, object] | None,
+        timeout: float,
+        retry_unprocessable: bool,
+    ) -> object:
+        headers = {'X-API-Key': api_key}
+        for attempt in range(2):
+            try:
+                response = await client.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers=headers,
+                    timeout=timeout,
+                )
+            except httpx.RequestError as error:
+                raise ModelRetry(f'You.com request failed: {error}') from error
+
+            if response.status_code == 429 and attempt == 0:
+                delay = self._retry_delay(response, attempt)
+                if delay is not None:
+                    await anyio.sleep(delay)
+                    continue
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                non_retryable = (401, 402, 403, 404, 429)
+                if error.response.status_code in non_retryable or (
+                    error.response.status_code == 422 and not retry_unprocessable
+                ):
+                    raise
+                raise ModelRetry(f'You.com request failed: {error}') from error
+            return response.json()
+        raise AssertionError('rate-limit retry loop exhausted')  # pragma: no cover
+
+    @staticmethod
+    def _retry_delay(response: httpx.Response, attempt: int) -> float | None:
+        retry_after = response.headers.get('Retry-After')
+        if retry_after is not None:
+            try:
+                delay = max(float(retry_after), 0.0)
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                except (OverflowError, TypeError, ValueError):
+                    return None
+                delay = max((retry_at - datetime.now(retry_at.tzinfo)).total_seconds(), 0.0)
+            return delay if delay <= 60.0 else None
+        return min(float(2**attempt), 60.0)
 
 
 # ---------------------------------------------------------------------------
@@ -383,9 +586,9 @@ class _RawSearchResult(BaseModel):
     page_age: datetime | None = None
     contents: _RawLivecrawlContents | None = None
 
-    def to_result(self) -> YouSearchResult:
+    def to_result(self, kind: Literal['web', 'news']) -> YouSearchResult:
         """Convert to a public `YouSearchResult` TypedDict."""
-        result: YouSearchResult = {}
+        result: YouSearchResult = {'kind': kind}
         if self.title is not None:
             result['title'] = self.title
         if self.url is not None:
@@ -408,17 +611,14 @@ class _RawWebResult(_RawSearchResult):
 
     snippets: list[str] | None = None
     favicon_url: str | None = None
-    authors: list[str] | None = None
 
-    def to_result(self) -> YouSearchResult:
+    def to_result(self, kind: Literal['web', 'news']) -> YouSearchResult:
         """Convert to a public `YouSearchResult`, adding web-only fields."""
-        result = super().to_result()
+        result = super().to_result(kind)
         if self.snippets:
             result['snippets'] = self.snippets
         if self.favicon_url:
             result['favicon_url'] = self.favicon_url
-        if self.authors:
-            result['authors'] = self.authors
         return result
 
 
@@ -530,6 +730,7 @@ class _RawResearchResponse(BaseModel):
     """Top-level research or finance research API response."""
 
     output: _RawTextResearchOutput | _RawObjectResearchOutput = Field(discriminator='content_type')
+    warnings: list[str]
 
 
 class _RawFinanceResearchResponse(BaseModel):
@@ -549,6 +750,8 @@ class _Config(BaseModel):
 
     api_key: str = Field(repr=False)
     timeout: Annotated[float, Field(gt=0)] | None = None
+    max_output_bytes: Annotated[int, Field(ge=_MIN_MAX_OUTPUT_BYTES)] = _DEFAULT_MAX_OUTPUT_BYTES
+    max_output_lines: Annotated[int, Field(ge=_MIN_MAX_OUTPUT_LINES)] = _DEFAULT_MAX_OUTPUT_LINES
     count: SearchCount | None = None
     offset: SearchOffset | None = None
     freshness: Freshness | None = None
@@ -570,7 +773,7 @@ class _Config(BaseModel):
     research_boost_domains: Domains | None = None
     research_freshness: Freshness | None = None
     research_country: Country | None = None
-    output_schema: dict[str, object] | None = None
+    output_schema: Annotated[dict[str, object], AfterValidator(_validate_output_schema)] | None = None
     finance_research_effort: FinanceResearchEffort | None = None
 
 
@@ -592,14 +795,19 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
 
     Research and finance research use a 300s request timeout by default (exhaustive
     runs are slow); search and contents use 60s. Pass `timeout` to override all four.
+    Provider responses are measured as indented JSON before they are returned. Responses
+    over `max_output_bytes` or `max_output_lines` are replaced with bounded
+    `YouOversizedResult` metadata so paid research requests are not repeated automatically.
     """
 
     def __init__(
         self,
         *,
         api_key: str,
-        http_client: httpx.AsyncClient | None = None,
+        client: YoudotcomClient | None = None,
         timeout: float | None = None,
+        max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
+        max_output_lines: int = _DEFAULT_MAX_OUTPUT_LINES,
         # Search params
         count: SearchCount | None = None,
         offset: SearchOffset | None = None,
@@ -634,6 +842,8 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         self._config = _Config(
             api_key=api_key,
             timeout=timeout,
+            max_output_bytes=max_output_bytes,
+            max_output_lines=max_output_lines,
             count=count,
             offset=offset,
             freshness=freshness,
@@ -659,7 +869,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             finance_research_effort=finance_research_effort,
         )
 
-        self._http_client = http_client
+        self._client = client or YoudotcomHTTPClient()
 
         # Fail fast on locked-value combinations the API rejects with 422.
         config = self._config
@@ -771,7 +981,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         exclude_domains: Domains | None = None,
         boost_domains: Domains | None = None,
         crawl_timeout: CrawlTimeoutSeconds | None = None,
-    ) -> list[YouSearchResult]:
+    ) -> list[YouSearchResult] | YouOversizedResult:
         """Search the web and news using the You.com Search API.
 
         Args:
@@ -823,7 +1033,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             response = await self._request('POST', _YOU_SEARCH_URL, timeout=timeout, json_body={**params, **domains})
         else:
             response = await self._request('GET', _YOU_SEARCH_URL, timeout=timeout, params=params)
-        return self._parse_search_results(_RawSearchResponse.model_validate(response.json()))
+        return self._check_output_size(self._parse_search_results(_RawSearchResponse.model_validate(response)))
 
     async def extract_contents(
         self,
@@ -831,7 +1041,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         *,
         formats: list[ContentsFormat] | None = None,
         crawl_timeout: CrawlTimeoutSeconds | None = None,
-    ) -> list[YouContentsResult]:
+    ) -> list[YouContentsResult] | YouOversizedResult:
         """Extract clean HTML or Markdown content from web pages.
 
         Pass a list of URLs to fetch full page content for each. The API crawls
@@ -848,8 +1058,8 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         response = await self._request(
             'POST', _YOU_CONTENTS_URL, timeout=self._timeout_for(_DEFAULT_TIMEOUT), json_body=body
         )
-        items = _ContentsResponseAdapter.validate_python(response.json())
-        return [item.to_result() for item in items]
+        items = _ContentsResponseAdapter.validate_python(response)
+        return self._check_output_size([item.to_result() for item in items])
 
     async def research(
         self,
@@ -861,7 +1071,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         boost_domains: Domains | None = None,
         freshness: Freshness | None = None,
         country: Country | None = None,
-    ) -> YouResearchResult:
+    ) -> YouResearchResult | YouOversizedResult:
         """Research a complex question and return a cited, synthesized answer.
 
         The Research API runs multiple searches, reads through sources, and
@@ -894,16 +1104,20 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             country=country,
         )
         response = await self._request(
-            'POST', _YOU_RESEARCH_URL, timeout=self._timeout_for(_RESEARCH_TIMEOUT), json_body=body
+            'POST',
+            _YOU_RESEARCH_URL,
+            timeout=self._timeout_for(_RESEARCH_TIMEOUT),
+            json_body=body,
+            retry_unprocessable=self._config.output_schema is None,
         )
-        return self._parse_research_result(_RawResearchResponse.model_validate(response.json()))
+        return self._check_output_size(self._parse_research_result(_RawResearchResponse.model_validate(response)))
 
     async def finance_research(
         self,
         input: ResearchInput,
         *,
         research_effort: FinanceResearchEffort | None = None,
-    ) -> YouTextResearchResult:
+    ) -> YouFinanceResearchResult | YouOversizedResult:
         """Research a financial question and return a cited, synthesized answer.
 
         The Finance Research API uses a finance-optimized index to research
@@ -919,12 +1133,13 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         response = await self._request(
             'POST', _YOU_FINANCE_RESEARCH_URL, timeout=self._timeout_for(_RESEARCH_TIMEOUT), json_body=body
         )
-        output = _RawFinanceResearchResponse.model_validate(response.json()).output
-        return {
+        output = _RawFinanceResearchResponse.model_validate(response).output
+        result: YouFinanceResearchResult = {
             'content': output.content,
             'content_type': 'text',
             'sources': [source.to_source() for source in output.sources],
         }
+        return self._check_output_size(result)
 
     # ------------------------------------------------------------------
     # Parameter building
@@ -1105,6 +1320,22 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         """Return the configured timeout override, or *default* when unset."""
         return self._config.timeout if self._config.timeout is not None else default
 
+    def _check_output_size(self, result: _ValueT) -> _ValueT | YouOversizedResult:
+        """Return bounded metadata when a complete provider result exceeds either context proxy."""
+        rendered = to_json(result, indent=2)
+        num_bytes = len(rendered)
+        num_lines = len(rendered.splitlines())
+        if num_bytes > self._config.max_output_bytes or num_lines > self._config.max_output_lines:
+            return {
+                'content_type': 'output_limit',
+                'message': 'The You.com request succeeded, but its result exceeded the configured output limits.',
+                'output_bytes': num_bytes,
+                'output_lines': num_lines,
+                'max_output_bytes': self._config.max_output_bytes,
+                'max_output_lines': self._config.max_output_lines,
+            }
+        return result
+
     @staticmethod
     def _check_domain_combo(
         include_domains: Sequence[str] | None,
@@ -1131,85 +1362,18 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         timeout: float,
         params: dict[str, str | int | Sequence[str]] | None = None,
         json_body: dict[str, object] | None = None,
-    ) -> httpx.Response:
-        """Execute a request, retrying one rate-limited response with provider guidance."""
-        if self._http_client is not None:
-            return await self._request_with_client(
-                self._http_client,
-                method,
-                url,
-                params=params,
-                json_body=json_body,
-                timeout=timeout,
-            )
-        async with httpx.AsyncClient() as client:
-            return await self._request_with_client(
-                client,
-                method,
-                url,
-                params=params,
-                json_body=json_body,
-                timeout=timeout,
-            )
-
-    async def _request_with_client(
-        self,
-        client: httpx.AsyncClient,
-        method: Literal['GET', 'POST'],
-        url: str,
-        *,
-        params: dict[str, str | int | Sequence[str]] | None,
-        json_body: dict[str, object] | None,
-        timeout: float,
-    ) -> httpx.Response:
-        headers = {'X-API-Key': self._config.api_key}
-        for attempt in range(2):
-            try:
-                response = await client.request(
-                    method,
-                    url,
-                    params=params,
-                    json=json_body,
-                    headers=headers,
-                    timeout=timeout,
-                )
-            except httpx.RequestError as error:
-                raise ModelRetry(f'You.com request failed: {error}') from error
-
-            if response.status_code == 429 and attempt == 0:
-                delay = self._retry_delay(response, attempt)
-                if delay is not None:
-                    await anyio.sleep(delay)
-                    continue
-
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as error:
-                if error.response.status_code in (401, 402, 403, 404, 429):
-                    raise
-                raise ModelRetry(f'You.com request failed: {error}') from error
-            return response
-        raise AssertionError('rate-limit retry loop exhausted')  # pragma: no cover
-
-    @staticmethod
-    def _retry_delay(response: httpx.Response, attempt: int) -> float | None:
-        """Return a short `Retry-After` delay or fallback backoff.
-
-        A long provider delay returns `None`, leaving the 429 to propagate instead
-        of contacting the provider before that delay expires.
-        """
-        retry_after = response.headers.get('Retry-After')
-        if retry_after is not None:
-            try:
-                delay = max(float(retry_after), 0.0)
-            except ValueError:
-                try:
-                    retry_at = parsedate_to_datetime(retry_after)
-                except (TypeError, ValueError):
-                    return None
-                delay = max((retry_at - datetime.now(retry_at.tzinfo)).total_seconds(), 0.0)
-            return delay if delay <= 60.0 else None
-        return min(float(2**attempt), 60.0)
+        retry_unprocessable: bool = True,
+    ) -> object:
+        """Delegate one request to the configured provider client."""
+        return await self._client.request(
+            method,
+            url,
+            api_key=self._config.api_key,
+            params=params,
+            json_body=json_body,
+            timeout=timeout,
+            retry_unprocessable=retry_unprocessable,
+        )
 
     # ------------------------------------------------------------------
     # Response parsing
@@ -1219,13 +1383,24 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         """Convert the parsed search response into a flat list of search results."""
         if response.results is None:
             return []
-        items = [*(response.results.web or []), *(response.results.news or [])]
-        return [item.to_result() for item in items]
+        web = [item.to_result('web') for item in response.results.web or []]
+        news = [item.to_result('news') for item in response.results.news or []]
+        return [*web, *news]
 
     def _parse_research_result(self, response: _RawResearchResponse) -> YouResearchResult:
         """Convert the parsed research response into a public `YouResearchResult`."""
         output = response.output
         sources = [s.to_source() for s in output.sources]
         if isinstance(output, _RawObjectResearchOutput):
-            return {'content': output.content, 'content_type': 'object', 'sources': sources}
-        return {'content': output.content, 'content_type': 'text', 'sources': sources}
+            return {
+                'content': output.content,
+                'content_type': 'object',
+                'sources': sources,
+                'warnings': response.warnings,
+            }
+        return {
+            'content': output.content,
+            'content_type': 'text',
+            'sources': sources,
+            'warnings': response.warnings,
+        }

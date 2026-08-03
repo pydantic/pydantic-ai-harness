@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, dataclass, field
 
-import httpx
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 
@@ -22,6 +21,7 @@ from pydantic_ai_harness.youdotcom._toolset import (
     SafeSearch,
     SearchCount,
     SearchOffset,
+    YoudotcomClient,
     YoudotcomToolset,
 )
 
@@ -69,11 +69,17 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
 
     _: KW_ONLY
 
-    http_client: httpx.AsyncClient | None = None
-    """Optional shared `httpx.AsyncClient` for connection pooling. If `None`, a new client is created per request."""
+    client: YoudotcomClient | None = None
+    """Optional provider client. If `None`, `YoudotcomHTTPClient` is created for each toolset."""
 
     timeout: float | None = None
     """Request timeout in seconds applied to all four tools. If `None`, research/finance use 300s and search/contents use 60s."""
+
+    max_output_bytes: int = 50 * 1024
+    """Maximum UTF-8 bytes in a complete tool result (minimum 512) before bounded size metadata is returned."""
+
+    max_output_lines: int = 2000
+    """Maximum lines in a complete tool result (minimum 8) before bounded size metadata is returned."""
 
     # Search
     count: SearchCount | None = None
@@ -156,8 +162,10 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
         """Build and return the You.com toolset."""
         return YoudotcomToolset[AgentDepsT](
             api_key=self.api_key,
-            http_client=self.http_client,
+            client=self.client,
             timeout=self.timeout,
+            max_output_bytes=self.max_output_bytes,
+            max_output_lines=self.max_output_lines,
             count=self.count,
             offset=self.offset,
             freshness=self.freshness,
