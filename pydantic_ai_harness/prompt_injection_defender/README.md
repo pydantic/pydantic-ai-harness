@@ -91,14 +91,19 @@ what would be withheld, then set `block_high_risk=True`.
 
 ## How detection works
 
-defender applies up to three layers. This capability runs each result through them
+Defender applies up to three layers. This capability runs each result through them
 and acts on the combined verdict.
 
-- **Tier 1, pattern detection.** Deterministic rules for role markers, instruction
-  overrides, encoded payloads, invisible Unicode, and homoglyph or leetspeak
-  evasion, applied after Unicode normalization. It rewrites matched text under
-  risky field names (`subject`, `body`, `content`, and similar, with per-tool
-  overrides such as `gmail_*`). Pure standard library, always available.
+- **Tier 1, pattern detection.** Deterministic rules match instruction overrides
+  such as `Ignore all previous instructions`, role markers such as an injected
+  `System:` turn label in third-party data, encoded payloads such as Base64 text
+  that decodes to an instruction, and zero-width characters hidden between
+  letters. They also match leetspeak such as `1gn0re prev10us` and homoglyphs such
+  as a Cyrillic `а` (U+0430) substituted for a Latin `a`. Unicode normalization
+  happens before matching, which is why these disguised spellings are caught. Tier 1
+  rewrites matched text under risky field names (`subject`, `body`, `content`, and
+  similar, with per-tool overrides such as `gmail_*`). Pure standard library,
+  always available.
 - **Tier 2, local ML classification.** A bundled MiniLM classifier scores free
   text. It runs in process from a model shipped inside the package, with no
   network access. Available once `stackone-defender[onnx]` is installed.
@@ -119,16 +124,18 @@ Tier 2 classifier; install the `onnx` extra for tools that return free text.
 | Multi-modal parts (`BinaryContent`, URLs) | Passed through unscanned. |
 | `ToolReturn.metadata` | Not scanned; not visible to the model. |
 | Other objects (Pydantic models, dataclasses) | Scanned as the JSON the model would see; replaced by sanitized JSON on detection. |
+| Lists beyond defender's large-array threshold | A leading sample is scanned; the unscanned remainder passes through unchanged. |
 
-A clean result is returned unchanged, as the same object. A tool that returns or
-raises an exception is scanned by its message text, so an error carrying injected
-content can still be flagged or blocked.
+A clean result is returned unchanged, as the same object. A custom `defense` can
+raise the large-array threshold or disable large-array skipping. An exception
+returned as a value is scanned like other values. A raised generic exception is
+reported through `on_detection` when flagged, but is not suppressed.
 
-Some paths are not scanned. Provider-native tools (such as hosted web search) run
-on the provider's side and never reach your process. The agent's control-flow
-signals, `ModelRetry` and `ToolFailed`, are not intercepted. Results your
-application supplies for deferred tool calls bypass tool execution; scan those
-yourself:
+`ModelRetry` and `ToolFailed` message text is scanned. The text is rewritten or
+replaced when needed while retry and failed-result control flow is preserved.
+Provider-native tools (such as hosted web search) run on the provider's side and
+never reach your process. Results your application supplies for deferred tool calls
+bypass tool execution; scan those yourself:
 
 ```python
 from stackone_defender import create_prompt_defense
@@ -136,10 +143,11 @@ from stackone_defender import create_prompt_defense
 defense = create_prompt_defense()
 
 
-async def scan_external(external_value: object, tool_name: str) -> None:
+async def scan_external(external_value: object, tool_name: str) -> object:
     verdict = await defense.defend_tool_result_async(external_value, tool_name)
     if not verdict.allowed:
-        ...  # withhold or replace the external result before handing it back
+        return 'External result withheld.'
+    return verdict.sanitized
 ```
 
 ## Boundary tagging

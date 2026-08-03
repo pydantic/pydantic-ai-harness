@@ -21,6 +21,9 @@ External-service assumptions (verified 2026-07-23 against stackone-defender 0.7.
 - Boundary annotation wraps risky-field strings without populating `detections` or
   `fields_sanitized`, so adopting `sanitized` output is gated on `annotate_boundary` as
   well as on findings. Source: `stackone_defender/core/prompt_defense.py`.
+- Lists longer than `TraversalConfig.large_array_threshold` are sanitized as a leading
+  sample followed by one marker string when `skip_large_arrays` is enabled. Source:
+  `stackone_defender/core/tool_result_sanitizer.py`.
 - `allowed=False` requires the defense's `block_high_risk`, a threat signal
   (detections, sanitized fields, or a Tier 2/3 threat), and a high or critical
   `risk_level` (`_finalize_allowed_and_risk` in `stackone_defender/core/prompt_defense.py`).
@@ -40,9 +43,16 @@ from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import Any, TypeGuard
 
 import anyio.to_thread
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering
-from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import TextContent, ToolCallPart, ToolReturn, UserContent, is_multi_modal_content
+from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, WrapToolExecuteHandler
+from pydantic_ai.exceptions import ToolFailedError, ToolRetryError, UserError
+from pydantic_ai.messages import (
+    RetryPromptPart,
+    TextContent,
+    ToolCallPart,
+    ToolReturn,
+    UserContent,
+    is_multi_modal_content,
+)
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector, matches_tool_selector
 from pydantic_core import to_jsonable_python
 
@@ -72,10 +82,6 @@ _ESCALATED_RISKS = ('high', 'critical')
 
 _RISK_ORDER = ('low', 'medium', 'high', 'critical')
 """Risk levels from least to most severe, for picking the worst across scanned units."""
-
-_UNSCANNABLE = object()
-"""Sentinel for a value with no scannable text (binary and other multi-modal content)."""
-
 
 OnDetection = Callable[[RunContext[AgentDepsT], ToolCallPart, DefenseResult], None | Awaitable[None]]
 """Signature of the `on_detection` callback.
@@ -128,31 +134,30 @@ def _is_object_list(value: object) -> TypeGuard[list[object]]:
     return isinstance(value, list)
 
 
+def _is_opaque(value: object) -> bool:
+    """Content with no scannable text: multi-modal parts and binary blobs."""
+    return is_multi_modal_content(value) or isinstance(value, (bytes, bytearray, memoryview))
+
+
 def _project(value: object) -> object:
     """Map a tool result to the JSON-like payload the defender scans.
 
-    Returns `_UNSCANNABLE` for a value with no scannable text. Inside containers such
-    leaves become `None` (a valid JSON leaf the sanitizer passes through unchanged), so
-    positions are preserved for `_rebuild`. Anything that is not JSON-like already is
-    projected with the same serializer that renders it for the model, so the defender
-    scans what the model would see.
+    Opaque leaves project to `None`, a JSON leaf the sanitizer passes through, so positions
+    are preserved and `_rebuild` restores the original object. Anything that is not JSON-like
+    already is projected with the same serializer that renders it for the model, so the
+    defender scans what the model would see.
     """
     if value is None or isinstance(value, (str, bool, int, float)):
         return value
     if isinstance(value, TextContent):
         return value.content
-    if is_multi_modal_content(value) or isinstance(value, (bytes, bytearray, memoryview)):
-        return _UNSCANNABLE
+    if _is_opaque(value):
+        return None
     if _is_str_keyed_mapping(value):
-        return {key: _none_if_unscannable(_project(item)) for key, item in value.items()}
+        return {key: _project(item) for key, item in value.items()}
     if _is_rebuildable_sequence(value):
-        return [_none_if_unscannable(_project(item)) for item in value]
+        return [_project(item) for item in value]
     return to_jsonable_python(value, fallback=str)
-
-
-def _none_if_unscannable(projected: object) -> object:
-    """Map the unscannable sentinel to `None` so a multi-modal leaf keeps its slot in a container."""
-    return None if projected is _UNSCANNABLE else projected
 
 
 def _rebuild(original: object, projected: object, sanitized: object) -> object:
@@ -174,8 +179,14 @@ def _rebuild(original: object, projected: object, sanitized: object) -> object:
     if _is_rebuildable_sequence(original) and _is_object_list(projected) and _is_object_list(sanitized):
         if len(original) == len(projected) == len(sanitized):
             return [_rebuild(o, p, s) for o, p, s in zip(original, projected, sanitized)]
-        # A length difference means the sanitizer sampled an oversized array; its
-        # reduced output is adopted as-is.
+        # Rebuild the sampled prefix and keep the unscanned remainder.
+        if len(sanitized) < len(projected):
+            sampled_length = len(sanitized) - 1
+            rebuilt = [
+                _rebuild(o, p, s)
+                for o, p, s in zip(original[:sampled_length], projected[:sampled_length], sanitized[:sampled_length])
+            ]
+            return [*rebuilt, *original[sampled_length:]]
         return sanitized
     return sanitized
 
@@ -263,6 +274,14 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     _defense: PromptDefense = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        try:
+            self.blocked_message.format(tool_name='tool', risk_level='high')
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError) as error:
+            raise UserError(
+                f'PromptInjectionDefender got an invalid `blocked_message` placeholder in '
+                f'{self.blocked_message!r}: {error}. '
+                'Only `{tool_name}` and `{risk_level}` are supported.'
+            ) from error
         if self.defense is not None:
             if self.block_high_risk is not None:
                 raise UserError(
@@ -327,28 +346,54 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
 
         # Record a unit's diagnostics only when that unit was flagged, so the metadata
         # reflects each unit's own verdict rather than whether the value was rewritten.
-        value_record = value_verdict if value_verdict is not None and _flagged(value_verdict) else None
-        content_record = content_verdict if content_verdict is not None and _flagged(content_verdict) else None
+        records = {
+            key: verdict
+            for key, verdict in ((_METADATA_KEY, value_verdict), (_CONTENT_METADATA_KEY, content_verdict))
+            if verdict is not None and _flagged(verdict)
+        }
 
         if any(not verdict.allowed for verdict in scanned):
             # The entire result is replaced so no part of a blocked payload reaches the model.
             message = self.blocked_message.format(tool_name=call.tool_name, risk_level=_worst_risk(scanned))
-            return ToolReturn(
-                return_value=message, metadata=self._merged_metadata(metadata, value_record, content_record)
-            )
+            return ToolReturn(return_value=message, metadata=self._merged_metadata(metadata, records))
 
         rebuilt = return_value
         if value_verdict is not None and (_findings(value_verdict) or self.annotate_boundary):
             rebuilt = _rebuild(return_value, projected, value_verdict.sanitized)
 
-        if rebuilt is return_value and value_record is None and content_record is None:
+        if rebuilt is return_value and not records:
             # A clean result keeps its original type; a plain value is not wrapped in a `ToolReturn`.
             return original
 
-        new_metadata = self._merged_metadata(metadata, value_record, content_record)
+        new_metadata = self._merged_metadata(metadata, records)
         if wrapped:
             return ToolReturn(return_value=rebuilt, content=content, metadata=new_metadata)
         return ToolReturn(return_value=rebuilt, metadata=new_metadata)
+
+    async def wrap_tool_execute(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        handler: WrapToolExecuteHandler,
+    ) -> Any:
+        """Scan model-facing retry and failure text while preserving its control-flow type."""
+        try:
+            return await handler(args)
+        except (ToolRetryError, ToolFailedError) as error:
+            part = error.tool_retry if isinstance(error, ToolRetryError) else error.tool_failed
+            content = part.content
+            if not await matches_tool_selector(self.tool_filter, ctx, tool_def) or not isinstance(content, str):
+                raise
+            replacement = await self._scan_signal(ctx, call, content)
+            if replacement is None:
+                raise
+            rebuilt = replace(part, content=replacement)
+            if isinstance(rebuilt, RetryPromptPart):
+                raise ToolRetryError(rebuilt) from error
+            raise ToolFailedError(rebuilt) from error
 
     async def on_tool_execute_error(
         self,
@@ -359,26 +404,33 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
         args: dict[str, Any],
         error: Exception,
     ) -> Any:
-        """Scan a tool's raised exception by its message and block a poisoned one.
+        """Report on error text for observability without suppressing the error.
 
-        Only genuine tool exceptions reach this hook. `ModelRetry` and `ToolFailed`
-        are the agent's retry and failure signals and are left to those paths.
+        Model-facing retry and failure signals are handled in `wrap_tool_execute`.
         """
         if not await matches_tool_selector(self.tool_filter, ctx, tool_def):
             raise error
         verdict = await self._defense.defend_tool_result_async(str(error), call.tool_name)
         if _flagged(verdict):
             await self._notify(ctx, call, verdict)
-        if verdict.allowed:
-            raise error
-        message = self.blocked_message.format(tool_name=call.tool_name, risk_level=verdict.risk_level)
-        return ToolReturn(return_value=message, metadata=self._merged_metadata(None, verdict, None))
+        raise error
+
+    async def _scan_signal(self, ctx: RunContext[AgentDepsT], call: ToolCallPart, text: str) -> str | None:
+        """Return replacement text for a model-facing retry or failure, if needed."""
+        verdict = await self._defense.defend_tool_result_async(text, call.tool_name)
+        if _flagged(verdict):
+            await self._notify(ctx, call, verdict)
+        if not verdict.allowed:
+            return self.blocked_message.format(tool_name=call.tool_name, risk_level=verdict.risk_level)
+        if _findings(verdict) and isinstance(verdict.sanitized, str) and verdict.sanitized != text:
+            return verdict.sanitized
+        return None
 
     async def _scan_value(self, value: object, tool_name: str) -> tuple[DefenseResult | None, object]:
         """Scan the return value. Returns `(verdict, projection)`; no verdict when unscannable."""
+        if _is_opaque(value):
+            return None, None
         projected = _project(value)
-        if projected is _UNSCANNABLE:
-            return None, projected
         return await self._defense.defend_tool_result_async(projected, tool_name), projected
 
     async def _scan_content(self, content: str | Sequence[UserContent] | None, tool_name: str) -> DefenseResult | None:
@@ -389,7 +441,7 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
         """
         if content is None:
             return None
-        projected = content if isinstance(content, str) else [_none_if_unscannable(_project(part)) for part in content]
+        projected = content if isinstance(content, str) else [_project(part) for part in content]
         return await self._defense.defend_tool_result_async(projected, tool_name)
 
     async def _notify(self, ctx: RunContext[AgentDepsT], call: ToolCallPart, verdict: DefenseResult) -> None:
@@ -402,21 +454,18 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     def _merged_metadata(
         self,
         existing: object,
-        value_verdict: DefenseResult | None,
-        content_verdict: DefenseResult | None,
+        records: Mapping[str, DefenseResult],
     ) -> object:
         """Attach scan diagnostics to `ToolReturn.metadata`, which is not sent to the model.
 
-        Metadata of an unknown shape is returned untouched rather than replaced;
-        `on_detection` remains the channel of record for diagnostics.
+        Metadata that is not a string-keyed mapping is returned untouched rather than
+        replaced; `on_detection` remains the channel of record for diagnostics.
         """
-        if existing is not None and not _is_mapping(existing):
+        if existing is not None and not _is_str_keyed_mapping(existing):
             return existing
-        merged: dict[str, object] = {str(key): existing[key] for key in existing} if _is_mapping(existing) else {}
-        if value_verdict is not None:
-            merged[_METADATA_KEY] = _diagnostics(value_verdict)
-        if content_verdict is not None:
-            merged[_CONTENT_METADATA_KEY] = _diagnostics(content_verdict)
+        merged = dict(existing) if _is_str_keyed_mapping(existing) else {}
+        for key, verdict in records.items():
+            merged[key] = _diagnostics(verdict)
         return merged
 
 

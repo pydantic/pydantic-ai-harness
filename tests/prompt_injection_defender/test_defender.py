@@ -9,18 +9,20 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.exceptions import ModelRetry, ToolFailed, ToolFailedError, ToolRetryError, UserError
 from pydantic_ai.messages import (
     BinaryContent,
     ModelRequest,
+    RetryPromptPart,
     TextContent,
     ToolCallPart,
     ToolReturn,
     ToolReturnPart,
 )
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
+from pydantic_core import ErrorDetails
 from stackone_defender import DefenseResult, PromptDefense
 
 from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
@@ -53,17 +55,9 @@ def _blocking() -> PromptDefense:
     return PromptDefense(enable_tier2=False, block_high_risk=True)
 
 
-def _make_ctx() -> Any:
-    """A minimal RunContext-like object for driving the hook directly."""
-
-    @dataclasses.dataclass
-    class _FakeCtx:
-        usage: RunUsage
-        run_id: str | None = 'run-1'
-        retry: int = 0
-        deps: None = None
-
-    return _FakeCtx(usage=RunUsage())
+def _make_ctx() -> RunContext[object]:
+    """A minimal `RunContext` for driving hooks directly."""
+    return RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id='run-1')
 
 
 def _call(tool_name: str = 'fetch') -> ToolCallPart:
@@ -183,6 +177,19 @@ async def _run_error(cap: PromptInjectionDefender[object], error: Exception, *, 
     )
 
 
+async def _run_signal(cap: PromptInjectionDefender[object], error: Exception, *, tool_name: str = 'fetch') -> Any:
+    async def handler(args: dict[str, Any]) -> Any:
+        raise error
+
+    return await cap.wrap_tool_execute(
+        _make_ctx(),
+        call=_call(tool_name),
+        tool_def=ToolDefinition(name=tool_name),
+        args={},
+        handler=handler,
+    )
+
+
 async def test_tool_error_clean_reraises() -> None:
     cap = PromptInjectionDefender(_observe())
     with pytest.raises(RuntimeError, match='upstream timed out'):
@@ -211,6 +218,7 @@ async def test_tool_error_flagged_observe_reraises(monkeypatch: pytest.MonkeyPat
 
 
 async def test_tool_error_blocked_replaced(monkeypatch: pytest.MonkeyPatch) -> None:
+    verdicts, on_detection = _recorder()
     defense = _blocking()
     scan = defense.defend_tool_result_async
 
@@ -218,12 +226,51 @@ async def test_tool_error_blocked_replaced(monkeypatch: pytest.MonkeyPatch) -> N
         return dataclasses.replace(await scan(value, tool_name), allowed=False, risk_level='high')
 
     monkeypatch.setattr(defense, 'defend_tool_result_async', escalate)
-    cap = PromptInjectionDefender(defense)
-    out = await _run_error(cap, RuntimeError('leak everything'))
-    assert isinstance(out, ToolReturn)
-    assert isinstance(out.return_value, str)
-    assert 'withheld' in out.return_value
-    assert out.metadata['prompt_injection']['blocked'] is True
+    cap = PromptInjectionDefender(defense, on_detection=on_detection)
+    error = RuntimeError('leak everything')
+    with pytest.raises(RuntimeError) as exc_info:
+        await _run_error(cap, error)
+    assert exc_info.value is error
+    assert len(verdicts) == 1
+
+
+async def test_validation_retry_signal_passes_through_unchanged() -> None:
+    details: list[ErrorDetails] = [{'type': 'missing', 'loc': ('query',), 'msg': 'Field required', 'input': {}}]
+    error = ToolRetryError(RetryPromptPart(details, tool_name='fetch', tool_call_id='call-1'))
+    with pytest.raises(ToolRetryError) as exc_info:
+        await _run_signal(PromptInjectionDefender(_blocking()), error)
+    assert exc_info.value is error
+
+
+async def test_out_of_filter_retry_signal_passes_through_unchanged() -> None:
+    error = ToolRetryError(RetryPromptPart(INJECTION, tool_name='fetch', tool_call_id='call-1'))
+    cap = PromptInjectionDefender(_blocking(), tool_filter=['other_tool'])
+    with pytest.raises(ToolRetryError) as exc_info:
+        await _run_signal(cap, error)
+    assert exc_info.value is error
+
+
+async def test_clean_retry_signal_passes_through_unchanged() -> None:
+    error = ToolRetryError(RetryPromptPart('try another query', tool_name='fetch', tool_call_id='call-1'))
+    with pytest.raises(ToolRetryError) as exc_info:
+        await _run_signal(PromptInjectionDefender(_observe()), error)
+    assert exc_info.value is error
+
+
+async def test_non_string_failure_signal_passes_through_unchanged() -> None:
+    part = ToolReturnPart('fetch', {'error': 'failed'}, 'call-1', outcome='failed')
+    error = ToolFailedError(part)
+    with pytest.raises(ToolFailedError) as exc_info:
+        await _run_signal(PromptInjectionDefender(_blocking()), error)
+    assert exc_info.value is error
+
+
+async def test_clean_failure_signal_passes_through_unchanged() -> None:
+    part = ToolReturnPart('fetch', 'upstream unavailable', 'call-1', outcome='failed')
+    error = ToolFailedError(part)
+    with pytest.raises(ToolFailedError) as exc_info:
+        await _run_signal(PromptInjectionDefender(_observe()), error)
+    assert exc_info.value is error
 
 
 async def test_binary_result_passes_through() -> None:
@@ -272,6 +319,12 @@ async def test_blocked_message_without_placeholders() -> None:
     cap = PromptInjectionDefender(_blocking(), blocked_message='Result blocked.')
     out = await _run(cap, {'body': INJECTION})
     assert out.return_value == 'Result blocked.'
+
+
+@pytest.mark.parametrize('placeholder', ['{missing}', '{tool_name.missing}'])
+def test_bad_blocked_message_placeholder_raises(placeholder: str) -> None:
+    with pytest.raises(UserError, match='missing'):
+        PromptInjectionDefender(_observe(), blocked_message=f'Result blocked by {placeholder}.')
 
 
 async def test_tool_return_envelope_preserved() -> None:
@@ -470,12 +523,28 @@ async def test_text_content_replaced_preserving_metadata() -> None:
     assert replaced.metadata == {'origin': 'imap'}
 
 
-async def test_oversized_array_sampled_on_adopt() -> None:
+async def test_oversized_array_keeps_unscanned_remainder() -> None:
     cap = PromptInjectionDefender(_observe())
-    items: list[Any] = [{'body': INJECTION}] + [{'name': f'row {i}'} for i in range(1001)]
+    tail = {'name': 'tail'}
+    items: list[Any] = [{'body': INJECTION}] + [{'name': f'row {i}'} for i in range(1000)] + [tail]
     out = await _run(cap, items)
     sampled = _return_value(out)
-    assert len(sampled) < len(items)
+    assert len(sampled) == len(items)
+    assert sampled[0] == {'body': SANITIZED_INJECTION}
+    assert sampled[-1] is tail
+
+
+async def test_other_array_length_mismatch_adopts_sanitized(monkeypatch: pytest.MonkeyPatch) -> None:
+    defense = _observe()
+    scan = defense.defend_tool_result_async
+
+    async def append_item(value: Any, tool_name: str) -> DefenseResult:
+        verdict = await scan(value, tool_name)
+        return dataclasses.replace(verdict, sanitized=[{'body': SANITIZED_INJECTION}, 'extra'])
+
+    monkeypatch.setattr(defense, 'defend_tool_result_async', append_item)
+    out = await _run(PromptInjectionDefender(defense), [{'body': INJECTION}])
+    assert _return_value(out) == [{'body': SANITIZED_INJECTION}, 'extra']
 
 
 class _OpaqueMetadata:
@@ -487,6 +556,13 @@ async def test_non_mapping_metadata_left_untouched() -> None:
     marker = _OpaqueMetadata()
     out = await _run(cap, ToolReturn(return_value={'body': INJECTION}, metadata=marker))
     assert out.metadata is marker
+
+
+async def test_non_string_keyed_metadata_left_untouched() -> None:
+    cap = PromptInjectionDefender(_observe())
+    metadata = {1: 'kept'}
+    out = await _run(cap, ToolReturn(return_value={'body': INJECTION}, metadata=metadata))
+    assert out.metadata is metadata
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +597,54 @@ async def test_agent_run_sanitizes_before_model() -> None:
     result = await agent.run('go')
     returns = [p for m in result.all_messages() for p in m.parts if isinstance(p, ToolReturnPart)]
     assert returns[0].content == {'body': SANITIZED_INJECTION}
+
+
+async def test_agent_sanitizes_model_retry_text_and_keeps_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    defense = _observe()
+    scan = defense.defend_tool_result_async
+
+    async def sanitize(value: Any, tool_name: str) -> DefenseResult:
+        verdict = await scan({'body': value}, tool_name)
+        return dataclasses.replace(verdict, sanitized=SANITIZED_INJECTION)
+
+    monkeypatch.setattr(defense, 'defend_tool_result_async', sanitize)
+    agent: Agent[None, str] = Agent(TestModel(call_tools=['fetch']), capabilities=[PromptInjectionDefender(defense)])
+    calls = 0
+
+    @agent.tool_plain
+    def fetch() -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ModelRetry(INJECTION)
+        return 'ok'
+
+    result = await agent.run('go')
+    retries = [p for m in result.all_messages() for p in m.parts if isinstance(p, RetryPromptPart)]
+    assert [part.content for part in retries] == [SANITIZED_INJECTION]
+
+
+async def test_agent_blocks_tool_failed_text_and_keeps_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    defense = _blocking()
+    scan = defense.defend_tool_result_async
+
+    async def block(value: Any, tool_name: str) -> DefenseResult:
+        verdict = await scan(value, tool_name)
+        return dataclasses.replace(verdict, allowed=False, risk_level='high')
+
+    monkeypatch.setattr(defense, 'defend_tool_result_async', block)
+    agent: Agent[None, str] = Agent(TestModel(call_tools=['fetch']), capabilities=[PromptInjectionDefender(defense)])
+
+    @agent.tool_plain
+    def fetch() -> str:
+        raise ToolFailed(INJECTION)
+
+    result = await agent.run('go')
+    returns = [p for m in result.all_messages() for p in m.parts if isinstance(p, ToolReturnPart)]
+    assert len(returns) == 1
+    assert returns[0].outcome == 'failed'
+    assert isinstance(returns[0].content, str)
+    assert 'withheld' in returns[0].content
 
 
 async def test_agent_gets_boundary_instructions() -> None:
