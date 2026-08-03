@@ -8,23 +8,41 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.messages import (
+    CompactionPart,
     ModelMessage,
     ModelRequest,
     ModelRequestPart,
     ModelResponse,
     ModelResponsePart,
+    NativeToolCallPart,
+    NativeToolReturnPart,
     SystemPromptPart,
     TextContent,
     TextPart,
+    ThinkingPart,
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.tools import RunContext
+from typing_extensions import Self
+
+from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW, resolve_context_window
+from pydantic_ai_harness.compaction._pinning import is_pinned
+from pydantic_ai_harness.compaction._receipts import (
+    RECEIPT_EVENT_NAME,
+    drain_receipts,
+    is_receipt_part,
+    open_receipt_scope,
+    reset_receipt_scope,
+)
+
+if TYPE_CHECKING:
+    from pydantic_ai.models import Model, ModelRequestContext
 
 # ---------------------------------------------------------------------------
 # Token estimation
@@ -35,7 +53,18 @@ _CHARS_PER_TOKEN = 4
 
 
 def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
-    """Collect all text segments from a sequence of messages."""
+    """Collect all text segments from a sequence of messages.
+
+    Every part that carries text the provider is sent counts, including the ones a run only
+    grows under load: a retry prompt, an extended-thinking block, the result of a
+    provider-side tool. Leaving those out was tolerable while the budget was an absolute
+    `max_tokens` the caller had calibrated against this same estimator; a fraction of the
+    real window is only meaningful if the numerator measures the same request the
+    denominator describes.
+
+    `FilePart` is deliberately absent: its payload is binary, and counting its length as
+    characters would be a number with no relation to what the provider bills.
+    """
     segments: list[str] = []
     for msg in messages:
         if isinstance(msg, ModelRequest):
@@ -44,7 +73,10 @@ def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
                     segments.append(_user_prompt_text_for_counting(part))
                 elif isinstance(part, SystemPromptPart):
                     segments.append(part.content)
-                elif isinstance(part, ToolReturnPart):
+                else:
+                    # Everything else a request can carry is a retry prompt or a tool return
+                    # of some kind -- the tool-search and capability-load returns subclass
+                    # `ToolReturnPart` -- and all of them are sent.
                     segments.append(str(part.content))
         else:
             for part in msg.parts:
@@ -53,7 +85,31 @@ def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
                 elif isinstance(part, ToolCallPart):
                     segments.append(part.tool_name)
                     segments.append(str(part.args))
+                elif isinstance(part, (ThinkingPart, CompactionPart)):
+                    # A redacted thinking block carries a signature and no text.
+                    segments.append(part.content or '')
+                elif isinstance(part, NativeToolCallPart):
+                    segments.append(part.tool_name)
+                    segments.append(str(part.args))
+                elif isinstance(part, NativeToolReturnPart):
+                    segments.append(part.tool_name)
+                    segments.append(str(part.content))
+    segments.extend(_instructions_text(messages))
     return segments
+
+
+def _instructions_text(messages: Sequence[ModelMessage]) -> list[str]:
+    """The instructions this history would be sent with, counted once.
+
+    Every `ModelRequest` in a history carries the instructions in force when it was made, but
+    a request sends one set. Summing them would multiply a system prompt by the number of
+    turns, which is the opposite error from ignoring it. The most recent non-empty set is the
+    one that goes, mirroring how a model synthesizes instructions from history.
+    """
+    for msg in reversed(messages):
+        if isinstance(msg, ModelRequest) and msg.instructions:
+            return [msg.instructions]
+    return []
 
 
 def _user_prompt_text_for_counting(part: UserPromptPart) -> str:
@@ -111,6 +167,91 @@ def exceeds(
 
 
 # ---------------------------------------------------------------------------
+# Token triggers
+# ---------------------------------------------------------------------------
+
+
+def validate_token_trigger(
+    max_tokens: int | None,
+    max_fraction: float | None,
+    fallback_context_window: int = DEFAULT_CONTEXT_WINDOW,
+    context_window: int | None = None,
+    *,
+    tokens_name: str = 'max_tokens',
+    fraction_name: str = 'max_fraction',
+) -> None:
+    """Validate the absolute/relative token trigger a strategy was configured with.
+
+    The two triggers are mutually exclusive: a strategy that took both would have to pick one
+    and discard the other, and the caller could not tell which budget was in force. The names
+    are parameterized so `TieredCompaction`'s `target_*` pair reports its own field names.
+    """
+    if max_tokens is not None and max_fraction is not None:
+        raise ValueError(f'Set at most one of {tokens_name} or {fraction_name}.')
+    if max_tokens is not None and max_tokens < 1:
+        raise ValueError(f'{tokens_name} must be positive.')
+    if max_fraction is not None and not 0 < max_fraction <= 1:
+        raise ValueError(f'{fraction_name} must be greater than 0 and at most 1.')
+    if fallback_context_window < 1:
+        raise ValueError('fallback_context_window must be positive.')
+    if context_window is not None and context_window < 1:
+        raise ValueError('context_window must be positive.')
+
+
+def context_for_request(
+    ctx: RunContext[AgentDepsT],
+    request_context: ModelRequestContext,
+) -> RunContext[AgentDepsT]:
+    """The run context as it applies to *this* request.
+
+    A capability may replace `ModelRequestContext.model` before the request leaves, so a
+    strategy driven from `before_model_request` has to see the model the request is going to
+    rather than the one the run started with. Everything a strategy reads off the context
+    follows: the window a fraction resolves against, the model a summarizing tier calls, and
+    the same for a `TieredCompaction` nested inside another one.
+
+    Returns `ctx` itself when no capability replaced the model, which is the common case.
+    """
+    if request_context.model is ctx.model:
+        return ctx
+    return replace(ctx, model=request_context.model)
+
+
+def resolve_token_trigger(
+    max_tokens: int | None,
+    max_fraction: float | None,
+    model: Model | str,
+    fallback_context_window: int = DEFAULT_CONTEXT_WINDOW,
+    context_window: int | None = None,
+) -> int | None:
+    """Absolute token trigger for this request, or `None` when no token trigger is configured.
+
+    `max_fraction` is resolved against the model's real context window, so one configuration
+    behaves correctly on a 128K model and on a 1M one. When the window cannot be resolved
+    `fallback_context_window` stands in; it defaults to the conservative
+    `DEFAULT_CONTEXT_WINDOW`, because compacting earlier than necessary costs a summary while
+    overestimating costs the whole request.
+
+    `context_window` overrides resolution entirely. The registry can be confidently wrong --
+    it records the maximum a model can be made to accept, which for a beta-gated or
+    tier-gated window is not what an ordinary request gets, and a self-hosted endpoint
+    reports an id whose registry entry describes someone else's deployment. `fallback_*`
+    cannot cover those: it only applies when resolution *fails*, and here it succeeds.
+
+    Pass the model the request will actually be sent to. A capability may replace
+    `ModelRequestContext.model` before the request leaves, so the run's model and the request's
+    model are not always the same one.
+    """
+    if max_tokens is not None:
+        return max_tokens
+    if max_fraction is None:
+        return None
+    if context_window is None:
+        context_window = resolve_context_window(model)
+    return max(1, int((context_window if context_window is not None else fallback_context_window) * max_fraction))
+
+
+# ---------------------------------------------------------------------------
 # Tracing
 # ---------------------------------------------------------------------------
 
@@ -153,7 +294,12 @@ async def compact_with_span(
         tokenizer: Optional tokenizer for the `compaction.tokens_*` estimates. When `None`,
             uses the same ~4 characters-per-token heuristic as `estimate_token_count`.
     """
-    compacted = await compact()
+    token = open_receipt_scope()
+    try:
+        compacted = await compact()
+        receipts = drain_receipts()
+    finally:
+        reset_receipt_scope(token)
     if not _history_changed(messages, compacted):
         return messages
     with ctx.tracer.start_as_current_span(_SPAN_NAME) as span:
@@ -169,6 +315,16 @@ async def compact_with_span(
                     'compaction.tokens_after': estimate_token_count(compacted, tokenizer),
                 }
             )
+            for receipt in receipts:
+                attributes = {
+                    'compaction.receipt.strategy': receipt.strategy,
+                    'compaction.receipt.messages_dropped': receipt.dropped_messages,
+                    'compaction.receipt.tokens_dropped': receipt.dropped_tokens,
+                    'compaction.receipt.by': receipt.by,
+                }
+                if receipt.handle is not None:
+                    attributes['compaction.receipt.handle'] = receipt.handle
+                span.add_event(RECEIPT_EVENT_NAME, attributes)
     return compacted
 
 
@@ -177,12 +333,28 @@ async def compact_with_span(
 # ---------------------------------------------------------------------------
 
 
+@runtime_checkable
+class SupportsFocus(Protocol):
+    """A strategy whose output can be steered toward a topic.
+
+    Only a strategy that *writes* something -- a summary -- can be focused. One that drops or
+    blanks content by rule has nothing to steer, so `compact_now` passes a focus it cannot
+    honour over rather than rejecting it. A composing strategy is focusable when any strategy
+    it wraps is, so the hint reaches the tier that writes the prose.
+    """
+
+    def with_focus(self, focus: str) -> Self:
+        """Return a copy of this strategy that prioritizes `focus`."""
+        ...  # pragma: no cover
+
+
 class CompactionStrategy(Protocol[AgentDepsT]):
     """A history transform that can be used standalone or as a `TieredCompaction` tier.
 
-    ``compact`` applies the transform *unconditionally* (the trigger check lives in the
-    capability's ``before_model_request``).  Implementations must preserve tool-call /
-    tool-return pairing.
+    `compact` applies the transform *unconditionally* (the trigger check lives in the
+    capability's `before_model_request`).  A strategy that composes others may define its own
+    stop condition instead -- `TieredCompaction` escalates only until the history fits its
+    target.  Implementations must preserve tool-call / tool-return pairing.
     """
 
     async def compact(
@@ -299,10 +471,17 @@ def find_token_cutoff(
 # ---------------------------------------------------------------------------
 
 
+def _is_harness_marker_part(part: ModelRequestPart) -> bool:
+    """Return whether a user-role part is harness bookkeeping rather than a user turn."""
+    return is_pinned(part) or is_receipt_part(part)
+
+
 def find_first_user_message(messages: list[ModelMessage]) -> ModelRequest | None:
     """Return the first ``ModelRequest`` that contains a ``UserPromptPart``, or ``None``."""
     for msg in messages:
-        if isinstance(msg, ModelRequest) and any(isinstance(p, UserPromptPart) for p in msg.parts):
+        if isinstance(msg, ModelRequest) and any(
+            isinstance(part, UserPromptPart) and not _is_harness_marker_part(part) for part in msg.parts
+        ):
             return msg
     return None
 

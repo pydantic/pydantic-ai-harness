@@ -136,21 +136,34 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         `ValueError` for any other `backend` value -- silently falling
         back to in-memory storage would turn a typo into accidental
         non-durability.
+
+        `max_snapshots_per_run` (default `None`, unbounded) is forwarded to
+        the constructed store to bound per-run snapshot growth.
         """
         backend = kwargs.pop('backend', 'memory')
+        max_snapshots_per_run = kwargs.pop('max_snapshots_per_run', None)
         if backend == 'memory':
-            return cls(store=InMemoryStepStore(), **kwargs)
+            return cls(store=InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run), **kwargs)
         if backend == 'file':
             from pydantic_ai_harness.step_persistence._store import FileStepStore
 
             directory = kwargs.pop('directory', '.step-persistence')
-            return cls(store=FileStepStore(directory), **kwargs)
+            return cls(store=FileStepStore(directory, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
         if backend == 'sqlite':
             from pydantic_ai_harness.step_persistence._store import SqliteStepStore
 
             database = kwargs.pop('database', '.step-persistence.db')
-            return cls(store=SqliteStepStore(database=database), **kwargs)
+            return cls(store=SqliteStepStore(database=database, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
         raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+
+    def compaction_transcript_handle(self) -> str | None:
+        """Retrieval handle to this run's transcript, for compaction receipts.
+
+        Satisfies the compaction `TranscriptHandleProvider` protocol structurally (no import
+        coupling). A compaction strategy discovers this capability via `RunContext.capabilities`
+        and records its run id. Returns `None` before `for_run` has materialised the id.
+        """
+        return self.run_id
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
         """Materialise `run_id` and `parent_run_id` for this `Agent.run` call.

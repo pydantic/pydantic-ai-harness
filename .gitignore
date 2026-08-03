@@ -2,7 +2,12 @@
 .mcp.json
 .DS_Store
 .agents/settings.local.json
-.agents/skills/branch-context/
+# branch-context: the skill scaffolding (SKILL.md, scripts, templates) is
+# committed; the per-branch instances it generates are local-only.
+.agents/skills/branch-context/issue-brief.md
+.agents/skills/branch-context/pr-decisions.md
+.agents/skills/branch-context/handoffs-index.md
+.agents/skills/branch-context/handoffs/
 # .agents/ (aka .claude via the symlink) is Claude Code config. Most of it is
 # per-developer, but the agents/ dir holds shared, committed agents such as the
 # docs-parity-reviewer -- keep it tracked.

@@ -198,15 +198,17 @@ rather than on the first scan.
 
 The capability scans a result before other capabilities reshape it. A tool output
 that is later summarized or spilled to disk (for example by
-[Overflowing Tool Output](overflowing-tool-output.md)) is therefore sanitized
-first.
+[Tool Output Limits](tool-output-limits.md)) is therefore sanitized first.
 
 ## Relationship to guardrails
 
-[Input & Output Guardrails](guardrails.md) check the user prompt before a run and
-the agent output after it, using logic you write. `PromptInjectionDefender` checks
-the tool results that arrive during a run, using defender's detector. The two can
-be used together.
+[Guardrails](guardrails.md) provide `InputGuardrail`, `OutputGuardrail`, and
+`ToolGuardrail`, which run checks you write (or the ready-made `detectors`) over the
+user prompt, the agent output, and tool arguments and results.
+`PromptInjectionDefender` covers the tool-result case as a self-contained capability:
+it wraps StackOne's defender, so pattern, ML, and optional LLM detection work without
+writing detection logic. Reach for a `ToolGuardrail` to run your own checks; reach for
+this to get defender's detector out of the box.
 
 ## Further reading
 

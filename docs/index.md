@@ -35,14 +35,18 @@ Some capabilities need an extra to pull in their optional dependencies:
 ```bash
 uv add "pydantic-ai-harness[codemode]"          # Code Mode (adds the Monty sandbox)
 uv add "pydantic-ai-harness[dynamic-workflow]"  # Dynamic Workflow (adds the Monty sandbox)
+uv add "pydantic-ai-harness[modal]"             # Modal Sandbox (adds the Modal SDK)
 uv add "pydantic-ai-harness[logfire]"           # Managed Prompt (Logfire-managed prompts)
 uv add "pydantic-ai-harness[exa]"               # Exa Search (web research via the Exa API)
+uv add "pydantic-ai-harness[skills]"            # Skills (loads SKILL.md frontmatter)
+uv add "pydantic-ai-harness[stackone]"          # StackOne (actions on linked business applications)
 uv add "pydantic-ai-harness[acp]"               # ACP (Agent Client Protocol SDK)
+uv add "pydantic-ai-harness[mongodb]"           # MongoDB backends for Step Persistence and Media (adds pymongo)
 ```
 
 The `code-mode` extra is also supported as an alias for `codemode`.
 
-Requires Python 3.10+ and `pydantic-ai-slim>=2.14.1`.
+Requires Python 3.10+ and `pydantic-ai-slim>=2.18.0`.
 
 ## Quick start
 
@@ -112,25 +116,30 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 
 | Capability | What it does | Extra |
 |---|---|---|
+| [Advisor](advisor.md) | Lets an executor consult another model through a provider-native tool or a local Pydantic AI fallback. | |
 | [Code Mode](code-mode.md) | Wraps the agent's tools into a single `run_code` tool, sandboxed by [Monty](https://github.com/pydantic/monty). The model writes Python that calls the tools as functions -- with loops, conditionals, `asyncio.gather`, and local filtering -- collapsing N tool calls into one model round-trip. | `codemode` |
+| [Skills](skills.md) | Loads Agent Skill instructions only when the model needs them. | `skills` |
 | [FileSystem](filesystem.md) | Sandboxed file access scoped to a root directory: read, write, edit, search, and find files. Rejects path traversal above the root, resolves symlinks before authorizing, and keeps `.git/`, `.env`, key files, and secrets read-only by default. | -- |
 | [Shell](shell.md) | Command execution in a subprocess rooted at a working directory, gated by allowlists, denylists, timeouts, and optional environment-variable stripping (including a preset for common LLM provider credentials). | -- |
-| [Context](context.md) | Auto-loads repo context -- `CLAUDE.md`/`AGENTS.md` and repository structure -- so the agent starts a run already oriented in the project. | -- |
+| [Repo Context](repo-context.md) | Auto-loads repo context -- `CLAUDE.md`/`AGENTS.md` and repository structure -- so the agent starts a run already oriented in the project. | -- |
 | [Pydantic AI Docs](pydantic-ai-docs.md) | An on-demand `read_pyai_docs` tool that pulls Pydantic AI documentation into the run when the agent needs it, instead of preloading it. | -- |
 | [Exa Search](exa-search.md) | Web research backed by the [Exa](https://exa.ai) search API: `web_search` returns results with their most relevant excerpts, `get_page` reads a specific URL in full, and opt-in `deep_search` synthesizes a cited answer in one call. Output is budgeted per tool. | `exa` |
 | [Compaction](compaction.md) | Keeps a run within token limits: sliding-window trimming, LLM-powered summarization of older messages, and warnings before the context or iteration ceiling is hit. | -- |
-| [Overflowing Tool Output](overflowing-tool-output.md) | Reduces an oversized tool return when it is produced -- truncate, spill to a queryable file, or summarize -- so a large payload does not persist in history and get re-sent every request. | -- |
-| [Cache Stability Monitor](cache-stability.md) | Warns when a run's prompt-cache hit collapses between model requests -- a moved cacheable prefix or an expired provider cache -- reading the provider's own `cache_read_tokens` verdict. | -- |
-| [Step Persistence](step-persistence.md) | Saves and restores full conversation state; snapshot, resume (`continue_run`), and fork (`fork_run`) a run. | -- |
-| [Media](media.md) | Offloads large `BinaryContent` to content-addressed stores (local or S3) so big media does not bloat message history. | -- |
+| [Tool Output Limits](tool-output-limits.md) | Reduces an oversized tool return when it is produced -- truncate, spill to a queryable file, or summarize -- so a large payload does not persist in history and get re-sent every request. | -- |
+| [Warn On Cache Busts](warn-on-cache-busts.md) | Warns when a run's prompt-cache hit collapses between model requests -- a moved cacheable prefix or an expired provider cache -- reading the provider's own `cache_read_tokens` verdict. | -- |
+| [Step Persistence](step-persistence.md) | Saves and restores full conversation state; snapshot, resume (`continue_run`), and fork (`fork_run`) a run. In-memory, file, SQLite, and MongoDB backends. | `mongodb` (Mongo backend only) |
+| [Conversation Search](conversation-search.md) | A dependency-free BM25 `search_conversation_history` tool over the history `StepPersistence` stores: recall turns that compaction dropped from the live context, and past runs in the same store. | -- |
+| [Media](media.md) | Offloads large `BinaryContent` and large text parts to content-addressed stores (disk, SQLite, S3, MongoDB) so big payloads do not bloat message history. | `mongodb` (Mongo store only) |
 | [Subagents](subagents.md) | Delegates subtasks to specialized child agents through a delegate tool. | -- |
 | [Dynamic Workflow](dynamic-workflow.md) | Orchestrates sub-agents from a model-written Python script -- fan-out, chaining, and voting in a single tool call. | `dynamic-workflow` |
 | [Planning](planning.md) | Breaks a complex task into a structured plan before execution and tracks progress against it. | -- |
+| [System Reminders](system-reminders.md) | Re-injects behavioral guidance mid-run -- on a cadence or reactively from a condition -- to counter instruction fade in long sessions, without invalidating the prompt cache. | -- |
 | [Memory](memory.md) | Gives an agent a persistent, namespaced notebook with bounded prompt injection, on-demand search, and concurrency-safe stores. | -- |
-| [Runtime Authoring](runtime-authoring.md) | Lets an agent author, validate, and load real capabilities at runtime. | -- |
-| [Guardrails](guardrails.md) | Validates user input before a run starts and model output after it completes -- block or redact, with structured results. | -- |
-| [Prompt Injection Defender](prompt-injection-defender.md) | Scans tool results for indirect prompt injection using [defender](https://github.com/StackOneHQ/defender) by StackOne: sanitizes risky fields in place, reports every verdict, and optionally withholds high-risk results. | `prompt-injection-defender` |
+| [Runtime Capability Creation](capability-creation.md) | Lets an agent create, validate, and persist Pydantic AI capabilities during one run for the orchestrator to load on the next run. | -- |
+| [Guardrails](guardrails.md) | Validates user input, tool calls and their results, and model output -- block or redact, with structured results. | -- |
+| [Prompt Injection Defender](prompt-injection-defender.md) | Scans tool results for indirect prompt injection using [defender](https://github.com/StackOneHQ/defender-py) by StackOne: sanitizes risky fields and can withhold high-risk results. | `prompt-injection-defender` |
 | [Managed Prompt](managed-prompt.md) | Backs an agent's instructions with a [Logfire-managed prompt](https://logfire.pydantic.dev/docs/reference/advanced/prompt-management/), so you can version, label, and roll out prompt changes from the Logfire UI without redeploying -- with a code default that keeps the agent working when no remote value is available. | `logfire` |
+| [StackOne](stackone.md) | Actions on the user's SaaS accounts (HRIS, ATS, CRM, and more) via the [StackOne](https://www.stackone.com) integration platform: API-key auth, account scoping, action filtering, and a search/execute mode for large catalogs. | `stackone` |
 | [ACP](acp.md) *(experimental)* | Serves an agent to editors (Zed, etc.) over the [Agent Client Protocol](https://agentclientprotocol.com) -- streamed text, diff-rendered edits, and tool approval. | `acp` |
 
 Most capabilities are stable within the [version policy](#version-policy) below. [ACP](acp.md) is the exception -- it is still experimental, imported from `pydantic_ai_harness.experimental.acp`, and may change or be removed in a future release.
