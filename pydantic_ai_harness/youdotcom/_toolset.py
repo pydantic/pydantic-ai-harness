@@ -869,7 +869,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             finance_research_effort=finance_research_effort,
         )
 
-        self._client = client or YoudotcomHTTPClient()
+        self._client = YoudotcomHTTPClient() if client is None else client
 
         # Fail fast on locked-value combinations the API rejects with 422.
         config = self._config

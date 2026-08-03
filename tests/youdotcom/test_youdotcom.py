@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 import anyio
 import httpx
@@ -766,6 +766,38 @@ class TestFinanceResearchIntegration:
 
 
 class TestHttpBehavior:
+    async def test_falsey_client_is_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        class FalseyClient:
+            called = False
+
+            def __bool__(self) -> bool:
+                return False
+
+            async def request(
+                self,
+                method: Literal['GET', 'POST'],
+                url: str,
+                *,
+                api_key: str,
+                params: Mapping[str, str | int | Sequence[str]] | None,
+                json_body: Mapping[str, object] | None,
+                timeout: float,
+                retry_unprocessable: bool,
+            ) -> object:
+                self.called = True
+                return _make_empty_search_payload()
+
+        def unexpected_default_client() -> None:
+            raise AssertionError('default HTTP client was used')  # pragma: no cover
+
+        client = FalseyClient()
+        assert not client
+        toolset = YoudotcomToolset(api_key='test', client=client)
+        monkeypatch.setattr(httpx, 'AsyncClient', unexpected_default_client)
+
+        assert await toolset.search('test') == []
+        assert client.called
+
     @pytest.mark.parametrize('status_code', [401, 402, 403, 404, 429])
     async def test_configuration_and_rate_limit_errors_propagate(self, status_code: int) -> None:
         transport = httpx.MockTransport(lambda request: httpx.Response(status_code))
