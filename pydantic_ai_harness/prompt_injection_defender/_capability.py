@@ -350,6 +350,30 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
             return ToolReturn(return_value=rebuilt, content=content, metadata=new_metadata)
         return ToolReturn(return_value=rebuilt, metadata=new_metadata)
 
+    async def on_tool_execute_error(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: dict[str, Any],
+        error: Exception,
+    ) -> Any:
+        """Scan a tool's raised exception by its message and block a poisoned one.
+
+        Only genuine tool exceptions reach this hook. `ModelRetry` and `ToolFailed`
+        are the agent's retry and failure signals and are left to those paths.
+        """
+        if not await matches_tool_selector(self.tool_filter, ctx, tool_def):
+            raise error
+        verdict = await self._defense.defend_tool_result_async(str(error), call.tool_name)
+        if _flagged(verdict):
+            await self._notify(ctx, call, verdict)
+        if verdict.allowed:
+            raise error
+        message = self.blocked_message.format(tool_name=call.tool_name, risk_level=verdict.risk_level)
+        return ToolReturn(return_value=message, metadata=self._merged_metadata(None, verdict, None))
+
     async def _scan_value(self, value: object, tool_name: str) -> tuple[DefenseResult | None, object]:
         """Scan the return value. Returns `(verdict, projection)`; no verdict when unscannable."""
         projected = _project(value)

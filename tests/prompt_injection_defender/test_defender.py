@@ -177,6 +177,55 @@ async def test_returned_exception_can_be_blocked(monkeypatch: pytest.MonkeyPatch
     assert out.metadata['prompt_injection']['blocked'] is True
 
 
+async def _run_error(cap: PromptInjectionDefender[object], error: Exception, *, tool_name: str = 'fetch') -> Any:
+    return await cap.on_tool_execute_error(
+        _make_ctx(), call=_call(tool_name), tool_def=ToolDefinition(name=tool_name), args={}, error=error
+    )
+
+
+async def test_tool_error_clean_reraises() -> None:
+    cap = PromptInjectionDefender(_observe())
+    with pytest.raises(RuntimeError, match='upstream timed out'):
+        await _run_error(cap, RuntimeError('upstream timed out'))
+
+
+async def test_tool_error_filter_skip_reraises() -> None:
+    cap = PromptInjectionDefender(_blocking(), tool_filter=['other_tool'])
+    with pytest.raises(RuntimeError, match='boom'):
+        await _run_error(cap, RuntimeError('boom'))
+
+
+async def test_tool_error_flagged_observe_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
+    verdicts, on_detection = _recorder()
+    defense = _observe()
+    scan = defense.defend_tool_result_async
+
+    async def escalate(value: Any, tool_name: str) -> DefenseResult:
+        return dataclasses.replace(await scan(value, tool_name), risk_level='high')
+
+    monkeypatch.setattr(defense, 'defend_tool_result_async', escalate)
+    cap = PromptInjectionDefender(defense, on_detection=on_detection)
+    with pytest.raises(RuntimeError, match='suspicious error'):
+        await _run_error(cap, RuntimeError('suspicious error text'))
+    assert len(verdicts) == 1
+
+
+async def test_tool_error_blocked_replaced(monkeypatch: pytest.MonkeyPatch) -> None:
+    defense = _blocking()
+    scan = defense.defend_tool_result_async
+
+    async def escalate(value: Any, tool_name: str) -> DefenseResult:
+        return dataclasses.replace(await scan(value, tool_name), allowed=False, risk_level='high')
+
+    monkeypatch.setattr(defense, 'defend_tool_result_async', escalate)
+    cap = PromptInjectionDefender(defense)
+    out = await _run_error(cap, RuntimeError('leak everything'))
+    assert isinstance(out, ToolReturn)
+    assert isinstance(out.return_value, str)
+    assert 'withheld' in out.return_value
+    assert out.metadata['prompt_injection']['blocked'] is True
+
+
 async def test_binary_result_passes_through() -> None:
     result = BinaryContent(data=b'\x89PNG', media_type='image/png')
     assert await _run(PromptInjectionDefender(_blocking()), result) is result

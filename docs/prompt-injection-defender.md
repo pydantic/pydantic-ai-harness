@@ -118,16 +118,26 @@ Tier 2 classifier; install the `onnx` extra for tools that return free text.
 | `ToolReturn.metadata` | Not scanned; not visible to the model. |
 | Other objects (Pydantic models, dataclasses) | Scanned as the JSON the model would see; replaced by sanitized JSON on detection. |
 
-A clean result is returned unchanged, as the same object. A tool that returns an
-exception object is scanned by its message text, so an error carrying injected
+A clean result is returned unchanged, as the same object. A tool that returns or
+raises an exception is scanned by its message text, so an error carrying injected
 content can still be flagged or blocked.
 
-Two results are not scanned. Provider-native tools (such as hosted web search) run
-on the provider's side and never reach your process. Results your application
-supplies for deferred tool calls bypass tool execution; scan those yourself:
+Some paths are not scanned. Provider-native tools (such as hosted web search) run
+on the provider's side and never reach your process. The agent's control-flow
+signals, `ModelRetry` and `ToolFailed`, are not intercepted. Results your
+application supplies for deferred tool calls bypass tool execution; scan those
+yourself:
 
-```python {test="skip"}
-verdict = await defense.defend_tool_result_async(external_value, tool_name)
+```python
+from stackone_defender import create_prompt_defense
+
+defense = create_prompt_defense()
+
+
+async def scan_external(external_value: object, tool_name: str) -> None:
+    verdict = await defense.defend_tool_result_async(external_value, tool_name)
+    if not verdict.allowed:
+        ...  # withhold or replace the external result before handing it back
 ```
 
 ## Boundary tagging
