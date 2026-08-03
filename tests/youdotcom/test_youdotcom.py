@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import TypeVar
 
 import anyio
 import httpx
@@ -20,7 +20,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 from pydantic_core import to_json
 
-from pydantic_ai_harness.youdotcom import Youdotcom, YoudotcomHTTPClient, YoudotcomToolset
+from pydantic_ai_harness.youdotcom import Youdotcom, YoudotcomToolset
 
 T = TypeVar('T')
 
@@ -66,7 +66,7 @@ def _search_capture() -> tuple[httpx.AsyncClient, _CapturedRequest]:
 def _toolset_with_payload(payload: object) -> tuple[YoudotcomToolset[None], httpx.AsyncClient]:
     """Create a toolset and mock client backed by a provider response."""
     client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
-    return YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client)), client
+    return YoudotcomToolset(api_key='test', http_client=client), client
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +477,7 @@ class TestSearchRequest:
     async def test_search_without_options_uses_get(self) -> None:
         client, request = _search_capture()
         async with client:
-            assert await YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client)).search('q') == []
+            assert await YoudotcomToolset(api_key='test', http_client=client).search('q') == []
         assert request.method == 'GET'
         assert request.params == {'query': 'q'}
         assert request.body is None
@@ -485,7 +485,7 @@ class TestSearchRequest:
     async def test_search_sends_unconfigured_options(self) -> None:
         client, request = _search_capture()
         async with client:
-            toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+            toolset = YoudotcomToolset(api_key='test', http_client=client)
             await toolset.search(
                 'q',
                 count=5,
@@ -528,7 +528,7 @@ class TestSearchRequest:
     ) -> None:
         client, request = _search_capture()
         async with client:
-            toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+            toolset = YoudotcomToolset(api_key='test', http_client=client)
             await toolset.search(
                 'q',
                 include_domains=include_domains,
@@ -558,7 +558,7 @@ class TestSearchRequest:
     ) -> None:
         client, _ = _search_capture()
         async with client:
-            toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+            toolset = YoudotcomToolset(api_key='test', http_client=client)
             with pytest.raises(ModelRetry, match='include_domains cannot be combined'):
                 await toolset.search(
                     'q',
@@ -585,7 +585,7 @@ class TestContentsIntegration:
 
         transport = httpx.MockTransport(handler)
         client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client), contents_formats=['markdown'])
+        toolset = YoudotcomToolset(api_key='test', http_client=client, contents_formats=['markdown'])
         async with client:
             await toolset.extract_contents(['https://x.com'], formats=['html'])
             assert captured_body['formats'] == ['markdown']
@@ -608,7 +608,7 @@ class TestResearchIntegration:
 
         transport = httpx.MockTransport(handler)
         client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client), research_effort='deep')
+        toolset = YoudotcomToolset(api_key='test', http_client=client, research_effort='deep')
         async with client:
             await toolset.research('q', research_effort='lite')
             assert captured_body['research_effort'] == 'deep'
@@ -626,7 +626,7 @@ class TestResearchIntegration:
         client = httpx.AsyncClient(transport=transport)
         toolset = YoudotcomToolset(
             api_key='test',
-            client=YoudotcomHTTPClient(client),
+            http_client=client,
             research_include_domains=['arxiv.org'],
             research_freshness='day',
             research_country='US',
@@ -655,7 +655,7 @@ class TestResearchIntegration:
 
         transport = httpx.MockTransport(handler)
         client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         async with client:
             await toolset.research(
                 'q',
@@ -688,7 +688,7 @@ class TestResearchIntegration:
 
         transport = httpx.MockTransport(handler)
         client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client), output_schema=schema)
+        toolset = YoudotcomToolset(api_key='test', http_client=client, output_schema=schema)
         async with client:
             await toolset.research('q')
             assert captured_body['output_schema'] == schema
@@ -710,7 +710,7 @@ class TestFinanceResearchIntegration:
 
         transport = httpx.MockTransport(handler)
         client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         async with client:
             result = await toolset.finance_research('NVDA revenue growth')
             assert result['content_type'] == 'text'
@@ -729,9 +729,7 @@ class TestFinanceResearchIntegration:
 
         transport = httpx.MockTransport(handler)
         client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(
-            api_key='test', client=YoudotcomHTTPClient(client), finance_research_effort='exhaustive'
-        )
+        toolset = YoudotcomToolset(api_key='test', http_client=client, finance_research_effort='exhaustive')
         async with client:
             await toolset.finance_research('q', research_effort='deep')
             assert captured_body['research_effort'] == 'exhaustive'
@@ -740,7 +738,7 @@ class TestFinanceResearchIntegration:
         """Finance research only documents text output."""
         transport = httpx.MockTransport(lambda request: httpx.Response(200, json=_make_research_structured_payload()))
         client = httpx.AsyncClient(transport=transport)
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         async with client:
             with pytest.raises(ValidationError):
                 await toolset.finance_research('q')
@@ -754,7 +752,7 @@ class TestFinanceResearchIntegration:
     )
     async def test_finance_research_rejects_malformed_response(self, payload: dict[str, object]) -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         async with client:
             with pytest.raises(ValidationError):
                 await toolset.finance_research('q')
@@ -766,43 +764,35 @@ class TestFinanceResearchIntegration:
 
 
 class TestHttpBehavior:
-    async def test_falsey_client_is_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        class FalseyClient:
-            called = False
+    async def test_falsey_http_client_is_preserved(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        called = False
 
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal called
+            called = True
+            return httpx.Response(200, json=_make_empty_search_payload())
+
+        class FalseyAsyncClient(httpx.AsyncClient):
             def __bool__(self) -> bool:
                 return False
-
-            async def request(
-                self,
-                method: Literal['GET', 'POST'],
-                url: str,
-                *,
-                api_key: str,
-                params: Mapping[str, str | int | Sequence[str]] | None,
-                json_body: Mapping[str, object] | None,
-                timeout: float,
-                retry_unprocessable: bool,
-            ) -> object:
-                self.called = True
-                return _make_empty_search_payload()
 
         def unexpected_default_client() -> None:
             raise AssertionError('default HTTP client was used')  # pragma: no cover
 
-        client = FalseyClient()
+        client = FalseyAsyncClient(transport=httpx.MockTransport(handler))
         assert not client
-        toolset = YoudotcomToolset(api_key='test', client=client)
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         monkeypatch.setattr(httpx, 'AsyncClient', unexpected_default_client)
 
-        assert await toolset.search('test') == []
-        assert client.called
+        async with client:
+            assert await toolset.search('test') == []
+        assert called
 
     @pytest.mark.parametrize('status_code', [401, 402, 403, 404, 429])
     async def test_configuration_and_rate_limit_errors_propagate(self, status_code: int) -> None:
         transport = httpx.MockTransport(lambda request: httpx.Response(status_code))
         async with httpx.AsyncClient(transport=transport) as client:
-            toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+            toolset = YoudotcomToolset(api_key='test', http_client=client)
             with pytest.raises(httpx.HTTPStatusError):
                 await toolset.search('test')
 
@@ -814,7 +804,7 @@ class TestHttpBehavior:
             return httpx.Response(500)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+            toolset = YoudotcomToolset(api_key='test', http_client=client)
             with pytest.raises(ModelRetry, match='You.com request failed'):
                 await toolset.search('test')
 
@@ -823,7 +813,7 @@ class TestHttpBehavior:
         async with httpx.AsyncClient(transport=transport) as client:
             toolset = YoudotcomToolset(
                 api_key='test',
-                client=YoudotcomHTTPClient(client),
+                http_client=client,
                 output_schema={
                     'type': 'object',
                     'properties': {},
@@ -841,7 +831,7 @@ class TestHttpBehavior:
     async def test_long_or_invalid_retry_after_propagates(self, retry_after: str) -> None:
         transport = httpx.MockTransport(lambda request: httpx.Response(429, headers={'Retry-After': retry_after}))
         async with httpx.AsyncClient(transport=transport) as client:
-            toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+            toolset = YoudotcomToolset(api_key='test', http_client=client)
             with pytest.raises(httpx.HTTPStatusError):
                 await toolset.search('test')
 
@@ -857,7 +847,7 @@ class TestHttpBehavior:
             return httpx.Response(status, headers={'Retry-After': '0'}, json=payload)
 
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+            toolset = YoudotcomToolset(api_key='test', http_client=client)
             if second_status == 429:
                 with pytest.raises(httpx.HTTPStatusError):
                     await toolset.search('test')
@@ -881,7 +871,7 @@ class TestHttpBehavior:
 
         monkeypatch.setattr(anyio, 'sleep', capture_sleep)
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+            toolset = YoudotcomToolset(api_key='test', http_client=client)
             assert await toolset.search('test') == []
         assert delays == [1.0]
 
@@ -913,7 +903,7 @@ class TestCapability:
         client, cap_req = _search_capture()
         cap = Youdotcom(
             api_key='k',
-            client=YoudotcomHTTPClient(client),
+            http_client=client,
             count=3,
             offset=6,
             freshness='week',
@@ -955,7 +945,7 @@ class TestCapability:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         cap = Youdotcom(
             api_key='k',
-            client=YoudotcomHTTPClient(client),
+            http_client=client,
             contents_formats=['markdown', 'metadata'],
             crawl_timeout=15,
             max_age=3600,
@@ -983,7 +973,7 @@ class TestCapability:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         cap = Youdotcom(
             api_key='k',
-            client=YoudotcomHTTPClient(client),
+            http_client=client,
             research_effort='deep',
             research_exclude_domains=['spam.com'],
             research_boost_domains=['good.com'],
@@ -1021,7 +1011,7 @@ class TestCapability:
         )
         agent = Agent(
             TestModel(call_tools=['you_search']),
-            capabilities=[Youdotcom(api_key='test', client=YoudotcomHTTPClient(client))],
+            capabilities=[Youdotcom(api_key='test', http_client=client)],
             name='test-agent',
         )
         async with client:
@@ -1238,7 +1228,7 @@ class TestMalformedResearchResponse:
             'warnings': [],
         }
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(200, json=payload)))
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         async with client:
             with pytest.raises(ValidationError):
                 await toolset.research('q')
@@ -1248,7 +1238,7 @@ class TestMalformedResearchResponse:
             'output': {'content': 'answer', 'content_type': 'text', 'sources': []},
         }
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda req: httpx.Response(200, json=payload)))
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         async with client:
             with pytest.raises(ValidationError):
                 await toolset.research('q')
@@ -1267,7 +1257,7 @@ class TestOutputLimits:
             'results': {'web': [{'title': 'large', 'description': 'x' * 1000}], 'news': []},
         }
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client), max_output_bytes=512)
+        toolset = YoudotcomToolset(api_key='test', http_client=client, max_output_bytes=512)
         async with client:
             result = await toolset.search('q')
         assert not isinstance(result, list)
@@ -1284,7 +1274,7 @@ class TestOutputLimits:
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
         toolset = YoudotcomToolset(
             api_key='test',
-            client=YoudotcomHTTPClient(client),
+            http_client=client,
             max_output_bytes=10_000,
             max_output_lines=8,
         )
@@ -1304,7 +1294,7 @@ class TestOutputLimits:
         client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload)))
         toolset = YoudotcomToolset(
             api_key='test',
-            client=YoudotcomHTTPClient(client),
+            http_client=client,
             max_output_bytes=10_000,
             max_output_lines=20,
         )
@@ -1334,21 +1324,21 @@ class TestTimeouts:
 
     async def test_research_uses_long_default_timeout(self) -> None:
         client, seen = self._timeout_capture(_make_research_empty_payload())
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         async with client:
             await toolset.research('q')
             assert seen['read'] == 300.0
 
     async def test_search_uses_short_default_timeout(self) -> None:
         client, seen = self._timeout_capture(_make_empty_search_payload())
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client))
+        toolset = YoudotcomToolset(api_key='test', http_client=client)
         async with client:
             await toolset.search('q')
             assert seen['read'] == 60.0
 
     async def test_configured_timeout_overrides_default(self) -> None:
         client, seen = self._timeout_capture(_make_research_empty_payload())
-        toolset = YoudotcomToolset(api_key='test', client=YoudotcomHTTPClient(client), timeout=5.0)
+        toolset = YoudotcomToolset(api_key='test', http_client=client, timeout=5.0)
         async with client:
             await toolset.research('q')
             assert seen['read'] == 5.0

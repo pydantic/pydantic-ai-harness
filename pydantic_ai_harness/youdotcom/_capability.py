@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import KW_ONLY, dataclass, field
 
+import httpx
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 
@@ -21,7 +22,6 @@ from pydantic_ai_harness.youdotcom._toolset import (
     SafeSearch,
     SearchCount,
     SearchOffset,
-    YoudotcomClient,
     YoudotcomToolset,
 )
 
@@ -69,8 +69,8 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
 
     _: KW_ONLY
 
-    client: YoudotcomClient | None = None
-    """Optional provider client. If `None`, `YoudotcomHTTPClient` is created for each toolset."""
+    http_client: httpx.AsyncClient | None = None
+    """Optional shared HTTP client for connection pooling or custom transports."""
 
     timeout: float | None = None
     """Request timeout in seconds applied to all four tools. If `None`, research/finance use 300s and search/contents use 60s."""
@@ -162,7 +162,7 @@ class Youdotcom(AbstractCapability[AgentDepsT]):
         """Build and return the You.com toolset."""
         return YoudotcomToolset[AgentDepsT](
             api_key=self.api_key,
-            client=self.client,
+            http_client=self.http_client,
             timeout=self.timeout,
             max_output_bytes=self.max_output_bytes,
             max_output_lines=self.max_output_lines,

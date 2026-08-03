@@ -160,7 +160,7 @@ from pydantic_ai_harness.youdotcom import Youdotcom
 
 Youdotcom(
     api_key='...',              # required -- You.com API key (excluded from repr)
-    client=None,           # optional provider client
+    http_client=None,           # optional shared httpx.AsyncClient
     timeout=None,               # request timeout override; defaults: 300s research, 60s search/contents
     max_output_bytes=50 * 1024, # complete JSON result cap
     max_output_lines=2000,      # complete JSON result line cap
@@ -240,9 +240,9 @@ agent = Agent.from_file('agent.yaml', custom_capability_types=[Youdotcom])
 
 ## Error handling
 
-`Youdotcom.client` accepts the `YoudotcomClient` protocol, so applications can
-supply their own transport and retry policy. The bundled `YoudotcomHTTPClient`
-retries one `429 Too Many Requests` response when You.com's
+Pass `http_client` to reuse an `httpx.AsyncClient` or supply a custom transport.
+The capability retains You.com authentication and error handling, including one
+retry for a `429 Too Many Requests` response when You.com's
 `Retry-After` delay is at most 60 seconds. Longer or repeated rate limits, and
 configuration errors (`401`, `402`, `403`, or `404`), propagate as
 `httpx.HTTPStatusError`. Other HTTP and transport errors become `ModelRetry` so

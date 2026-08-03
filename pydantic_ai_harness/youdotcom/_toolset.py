@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from email.utils import parsedate_to_datetime
-from typing import Annotated, Final, Literal, Protocol, TypeVar
+from typing import Annotated, Final, Literal, TypeVar
 
 import anyio
 import httpx
@@ -43,8 +43,6 @@ __all__ = (
     'YouContentsMetadata',
     'YouContentsResult',
     'YouFinanceResearchResult',
-    'YoudotcomClient',
-    'YoudotcomHTTPClient',
     'YouLivecrawlContents',
     'YouObjectResearchResult',
     'YouOversizedResult',
@@ -430,129 +428,6 @@ YouResearchResult = YouTextResearchResult | YouObjectResearchResult
 """A result from the Research API, discriminated on `content_type`."""
 
 
-class YoudotcomClient(Protocol):
-    """Client interface used by `YoudotcomToolset` for provider requests.
-
-    Implementations own transport retries and failure mapping. The bundled
-    `YoudotcomHTTPClient` provides the default HTTP behavior.
-    """
-
-    async def request(
-        self,
-        method: Literal['GET', 'POST'],
-        url: str,
-        *,
-        api_key: str,
-        params: Mapping[str, str | int | Sequence[str]] | None,
-        json_body: Mapping[str, object] | None,
-        timeout: float,
-        retry_unprocessable: bool,
-    ) -> object:
-        """Execute one provider request and return its decoded JSON value."""
-        ...  # pragma: no cover
-
-
-class YoudotcomHTTPClient:
-    """Default You.com client backed by `httpx`."""
-
-    def __init__(self, http_client: httpx.AsyncClient | None = None) -> None:
-        self._http_client = http_client
-
-    async def request(
-        self,
-        method: Literal['GET', 'POST'],
-        url: str,
-        *,
-        api_key: str,
-        params: Mapping[str, str | int | Sequence[str]] | None,
-        json_body: Mapping[str, object] | None,
-        timeout: float,
-        retry_unprocessable: bool,
-    ) -> object:
-        """Execute a request, retrying one short provider-directed rate limit."""
-        if self._http_client is not None:
-            return await self._request_with_client(
-                self._http_client,
-                method,
-                url,
-                api_key=api_key,
-                params=params,
-                json_body=json_body,
-                timeout=timeout,
-                retry_unprocessable=retry_unprocessable,
-            )
-        async with httpx.AsyncClient() as client:
-            return await self._request_with_client(
-                client,
-                method,
-                url,
-                api_key=api_key,
-                params=params,
-                json_body=json_body,
-                timeout=timeout,
-                retry_unprocessable=retry_unprocessable,
-            )
-
-    async def _request_with_client(
-        self,
-        client: httpx.AsyncClient,
-        method: Literal['GET', 'POST'],
-        url: str,
-        *,
-        api_key: str,
-        params: Mapping[str, str | int | Sequence[str]] | None,
-        json_body: Mapping[str, object] | None,
-        timeout: float,
-        retry_unprocessable: bool,
-    ) -> object:
-        headers = {'X-API-Key': api_key}
-        for attempt in range(2):
-            try:
-                response = await client.request(
-                    method,
-                    url,
-                    params=params,
-                    json=json_body,
-                    headers=headers,
-                    timeout=timeout,
-                )
-            except httpx.RequestError as error:
-                raise ModelRetry(f'You.com request failed: {error}') from error
-
-            if response.status_code == 429 and attempt == 0:
-                delay = self._retry_delay(response, attempt)
-                if delay is not None:
-                    await anyio.sleep(delay)
-                    continue
-
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as error:
-                non_retryable = (401, 402, 403, 404, 429)
-                if error.response.status_code in non_retryable or (
-                    error.response.status_code == 422 and not retry_unprocessable
-                ):
-                    raise
-                raise ModelRetry(f'You.com request failed: {error}') from error
-            return response.json()
-        raise AssertionError('rate-limit retry loop exhausted')  # pragma: no cover
-
-    @staticmethod
-    def _retry_delay(response: httpx.Response, attempt: int) -> float | None:
-        retry_after = response.headers.get('Retry-After')
-        if retry_after is not None:
-            try:
-                delay = max(float(retry_after), 0.0)
-            except ValueError:
-                try:
-                    retry_at = parsedate_to_datetime(retry_after)
-                except (OverflowError, TypeError, ValueError):
-                    return None
-                delay = max((retry_at - datetime.now(retry_at.tzinfo)).total_seconds(), 0.0)
-            return delay if delay <= 60.0 else None
-        return min(float(2**attempt), 60.0)
-
-
 # ---------------------------------------------------------------------------
 # Internal parsing models -- search
 # ---------------------------------------------------------------------------
@@ -804,7 +679,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         self,
         *,
         api_key: str,
-        client: YoudotcomClient | None = None,
+        http_client: httpx.AsyncClient | None = None,
         timeout: float | None = None,
         max_output_bytes: int = _DEFAULT_MAX_OUTPUT_BYTES,
         max_output_lines: int = _DEFAULT_MAX_OUTPUT_LINES,
@@ -869,7 +744,7 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
             finance_research_effort=finance_research_effort,
         )
 
-        self._client = YoudotcomHTTPClient() if client is None else client
+        self._http_client = http_client
 
         # Fail fast on locked-value combinations the API rejects with 422.
         config = self._config
@@ -1364,16 +1239,85 @@ class YoudotcomToolset(FunctionToolset[AgentDepsT]):
         json_body: dict[str, object] | None = None,
         retry_unprocessable: bool = True,
     ) -> object:
-        """Delegate one request to the configured provider client."""
-        return await self._client.request(
-            method,
-            url,
-            api_key=self._config.api_key,
-            params=params,
-            json_body=json_body,
-            timeout=timeout,
-            retry_unprocessable=retry_unprocessable,
-        )
+        """Execute a request, retrying one short provider-directed rate limit."""
+        if self._http_client is not None:
+            return await self._request_with_client(
+                self._http_client,
+                method,
+                url,
+                params=params,
+                json_body=json_body,
+                timeout=timeout,
+                retry_unprocessable=retry_unprocessable,
+            )
+        async with httpx.AsyncClient() as client:
+            return await self._request_with_client(
+                client,
+                method,
+                url,
+                params=params,
+                json_body=json_body,
+                timeout=timeout,
+                retry_unprocessable=retry_unprocessable,
+            )
+
+    async def _request_with_client(
+        self,
+        client: httpx.AsyncClient,
+        method: Literal['GET', 'POST'],
+        url: str,
+        *,
+        params: dict[str, str | int | Sequence[str]] | None,
+        json_body: dict[str, object] | None,
+        timeout: float,
+        retry_unprocessable: bool,
+    ) -> object:
+        headers = {'X-API-Key': self._config.api_key}
+        for attempt in range(2):
+            try:
+                response = await client.request(
+                    method,
+                    url,
+                    params=params,
+                    json=json_body,
+                    headers=headers,
+                    timeout=timeout,
+                )
+            except httpx.RequestError as error:
+                raise ModelRetry(f'You.com request failed: {error}') from error
+
+            if response.status_code == 429 and attempt == 0:
+                delay = self._retry_delay(response, attempt)
+                if delay is not None:
+                    await anyio.sleep(delay)
+                    continue
+
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                non_retryable = (401, 402, 403, 404, 429)
+                if error.response.status_code in non_retryable or (
+                    error.response.status_code == 422 and not retry_unprocessable
+                ):
+                    raise
+                raise ModelRetry(f'You.com request failed: {error}') from error
+            return response.json()
+        raise AssertionError('rate-limit retry loop exhausted')  # pragma: no cover
+
+    @staticmethod
+    def _retry_delay(response: httpx.Response, attempt: int) -> float | None:
+        retry_after = response.headers.get('Retry-After')
+        if retry_after is not None:
+            try:
+                delay = max(float(retry_after), 0.0)
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(retry_after)
+                except (OverflowError, TypeError, ValueError):
+                    return None
+                delay = max((retry_at - datetime.now(retry_at.tzinfo)).total_seconds(), 0.0)
+            return delay if delay <= 60.0 else None
+        return min(float(2**attempt), 60.0)
 
     # ------------------------------------------------------------------
     # Response parsing
