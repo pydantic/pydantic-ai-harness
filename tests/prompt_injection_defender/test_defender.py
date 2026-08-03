@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import dataclasses
+import operator
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Any
 
@@ -217,7 +219,8 @@ async def test_tool_error_flagged_observe_reraises(monkeypatch: pytest.MonkeyPat
     assert len(verdicts) == 1
 
 
-async def test_tool_error_blocked_replaced(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_tool_error_blocked_still_reraises(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Blocking never suppresses a raised error; the verdict is only reported.
     verdicts, on_detection = _recorder()
     defense = _blocking()
     scan = defense.defend_tool_result_async
@@ -523,7 +526,22 @@ async def test_text_content_replaced_preserving_metadata() -> None:
     assert replaced.metadata == {'origin': 'imap'}
 
 
-async def test_oversized_array_keeps_unscanned_remainder() -> None:
+async def test_default_defense_scans_oversized_array_in_full() -> None:
+    # The default defense disables the library's large-array sampling, so an injection
+    # past the sampling threshold is still found and nothing passes through unscanned.
+    cap: PromptInjectionDefender[object] = PromptInjectionDefender()
+    kept = {'name': 'row 0'}
+    items: list[Any] = [kept] + [{'name': f'row {i}'} for i in range(1, 1200)] + [{'body': INJECTION}]
+    out = await _run(cap, items)
+    scanned = _return_value(out)
+    assert len(scanned) == len(items)
+    assert scanned[0] is kept
+    assert scanned[-1] == {'body': SANITIZED_INJECTION}
+
+
+async def test_sampling_defense_keeps_unscanned_remainder() -> None:
+    # A supplied defense with the library's default traversal samples large arrays;
+    # the unscanned remainder is kept rather than dropped.
     cap = PromptInjectionDefender(_observe())
     tail = {'name': 'tail'}
     items: list[Any] = [{'body': INJECTION}] + [{'name': f'row {i}'} for i in range(1000)] + [tail]
@@ -532,6 +550,29 @@ async def test_oversized_array_keeps_unscanned_remainder() -> None:
     assert len(sampled) == len(items)
     assert sampled[0] == {'body': SANITIZED_INJECTION}
     assert sampled[-1] is tail
+
+
+class _IntIndexSequence(Sequence[Any]):
+    """A `Sequence` whose `__getitem__` supports integers only, as the ABC requires."""
+
+    def __init__(self, items: list[Any]) -> None:
+        self._items = items
+
+    def __getitem__(self, index: Any) -> Any:
+        # `operator.index` raises `TypeError` on a slice, like an integer-only sequence.
+        return self._items[operator.index(index)]
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+async def test_sampling_defense_rebuilds_slice_free_sequence() -> None:
+    cap = PromptInjectionDefender(_observe())
+    items: list[Any] = [{'body': INJECTION}] + [{'name': f'row {i}'} for i in range(1001)]
+    out = await _run(cap, _IntIndexSequence(items))
+    sampled = _return_value(out)
+    assert len(sampled) == len(items)
+    assert sampled[0] == {'body': SANITIZED_INJECTION}
 
 
 async def test_other_array_length_mismatch_adopts_sanitized(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -599,16 +640,8 @@ async def test_agent_run_sanitizes_before_model() -> None:
     assert returns[0].content == {'body': SANITIZED_INJECTION}
 
 
-async def test_agent_sanitizes_model_retry_text_and_keeps_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    defense = _observe()
-    scan = defense.defend_tool_result_async
-
-    async def sanitize(value: Any, tool_name: str) -> DefenseResult:
-        verdict = await scan({'body': value}, tool_name)
-        return dataclasses.replace(verdict, sanitized=SANITIZED_INJECTION)
-
-    monkeypatch.setattr(defense, 'defend_tool_result_async', sanitize)
-    agent: Agent[None, str] = Agent(TestModel(call_tools=['fetch']), capabilities=[PromptInjectionDefender(defense)])
+async def test_agent_sanitizes_model_retry_text_and_keeps_retry() -> None:
+    agent: Agent[None, str] = Agent(TestModel(call_tools=['fetch']), capabilities=[PromptInjectionDefender(_observe())])
     calls = 0
 
     @agent.tool_plain
@@ -624,16 +657,10 @@ async def test_agent_sanitizes_model_retry_text_and_keeps_retry(monkeypatch: pyt
     assert [part.content for part in retries] == [SANITIZED_INJECTION]
 
 
-async def test_agent_blocks_tool_failed_text_and_keeps_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    defense = _blocking()
-    scan = defense.defend_tool_result_async
-
-    async def block(value: Any, tool_name: str) -> DefenseResult:
-        verdict = await scan(value, tool_name)
-        return dataclasses.replace(verdict, allowed=False, risk_level='high')
-
-    monkeypatch.setattr(defense, 'defend_tool_result_async', block)
-    agent: Agent[None, str] = Agent(TestModel(call_tools=['fetch']), capabilities=[PromptInjectionDefender(defense)])
+async def test_agent_blocks_tool_failed_text_and_keeps_failure() -> None:
+    agent: Agent[None, str] = Agent(
+        TestModel(call_tools=['fetch']), capabilities=[PromptInjectionDefender(_blocking())]
+    )
 
     @agent.tool_plain
     def fetch() -> str:

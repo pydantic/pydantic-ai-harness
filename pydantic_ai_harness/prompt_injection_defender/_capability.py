@@ -17,13 +17,20 @@ External-service assumptions (verified 2026-07-23 against stackone-defender 0.7.
   string or a list of strings produces no `detections`, no `fields_sanitized`, and no
   block, even with `block_high_risk=True`. Free-text results are covered by the Tier 2
   classifier, which requires the separate `stackone-defender[onnx]` install. Source:
-  `stackone_defender/core/tool_result_sanitizer.py`.
+  `stackone_defender/core/tool_result_sanitizer.py`. This module therefore scans retry
+  and failure text wrapped as `{'content': text}`: `content` is a default risky field
+  name (`DEFAULT_RISKY_FIELDS` in `stackone_defender/config.py`), so Tier 1 inspects
+  the wrapped text. A per-tool `tool_overrides` entry that excludes `content` opts that
+  tool's text out of the wrapped scan.
 - Boundary annotation wraps risky-field strings without populating `detections` or
   `fields_sanitized`, so adopting `sanitized` output is gated on `annotate_boundary` as
   well as on findings. Source: `stackone_defender/core/prompt_defense.py`.
 - Lists longer than `TraversalConfig.large_array_threshold` are sanitized as a leading
   sample followed by one marker string when `skip_large_arrays` is enabled. Source:
-  `stackone_defender/core/tool_result_sanitizer.py`.
+  `stackone_defender/core/tool_result_sanitizer.py`. `PromptDefense(config=...)` merges
+  a `{'traversal': {...}}` override over the library defaults (`create_config` in
+  `stackone_defender/config.py`), which is how the default defense below disables
+  sampling.
 - `allowed=False` requires the defense's `block_high_risk`, a threat signal
   (detections, sanitized fields, or a Tier 2/3 threat), and a high or critical
   `risk_level` (`_finalize_allowed_and_risk` in `stackone_defender/core/prompt_defense.py`).
@@ -76,6 +83,9 @@ _METADATA_KEY = 'prompt_injection'
 
 _CONTENT_METADATA_KEY = 'prompt_injection_content'
 """Diagnostics key on `ToolReturn.metadata` for scanned `ToolReturn.content`."""
+
+_TEXT_WRAP_KEY = 'content'
+"""Risky field key that bare text is wrapped under so Tier 1 inspects it."""
 
 _ESCALATED_RISKS = ('high', 'critical')
 """Risk levels that indicate the defender escalated beyond its `'medium'` starting level."""
@@ -179,14 +189,17 @@ def _rebuild(original: object, projected: object, sanitized: object) -> object:
     if _is_rebuildable_sequence(original) and _is_object_list(projected) and _is_object_list(sanitized):
         if len(original) == len(projected) == len(sanitized):
             return [_rebuild(o, p, s) for o, p, s in zip(original, projected, sanitized)]
-        # Rebuild the sampled prefix and keep the unscanned remainder.
+        # A sampling defense scanned a leading sample and appended one marker string;
+        # rebuild that prefix and keep the unscanned remainder. The default defense
+        # disables sampling, so this only applies to a supplied `defense` that samples.
         if len(sanitized) < len(projected):
+            items = list(original)  # a `Sequence` need not support slicing
             sampled_length = len(sanitized) - 1
             rebuilt = [
                 _rebuild(o, p, s)
-                for o, p, s in zip(original[:sampled_length], projected[:sampled_length], sanitized[:sampled_length])
+                for o, p, s in zip(items[:sampled_length], projected[:sampled_length], sanitized[:sampled_length])
             ]
-            return [*rebuilt, *original[sampled_length:]]
+            return [*rebuilt, *items[sampled_length:]]
         return sanitized
     return sanitized
 
@@ -229,7 +242,8 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     defense: PromptDefense | None = None
     """A fully configured `stackone_defender.PromptDefense` to scan with.
 
-    Defaults to one built from `block_high_risk` and `annotate_boundary` below. Supply
+    Defaults to one built from `block_high_risk` and `annotate_boundary` below, with the
+    library's large-array sampling disabled so long lists are scanned in full. Supply
     your own (via `create_prompt_defense(...)`) for custom tiers, thresholds, per-tool
     risky-field overrides, semantic field extraction, or Tier 3.
     """
@@ -293,7 +307,10 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
         else:
             # The `create_prompt_defense` factory takes untyped `**kwargs`, which pyright
             # strict rejects; `PromptDefense` itself accepts the same keyword arguments.
+            # Large-array sampling is disabled so long lists are scanned in full; with
+            # the library default, items past the threshold reach the model unscanned.
             self._defense = PromptDefense(
+                config={'traversal': {'skip_large_arrays': False}},
                 block_high_risk=bool(self.block_high_risk),
                 annotate_boundary=self.annotate_boundary,
             )
@@ -410,20 +427,29 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
         """
         if not await matches_tool_selector(self.tool_filter, ctx, tool_def):
             raise error
-        verdict = await self._defense.defend_tool_result_async(str(error), call.tool_name)
+        await self._scan_text(ctx, call, str(error))
+        raise error
+
+    async def _scan_text(self, ctx: RunContext[AgentDepsT], call: ToolCallPart, text: str) -> DefenseResult:
+        """Scan bare text, wrapped under a risky key so Tier 1 inspects it, and report a flagged verdict."""
+        verdict = await self._defense.defend_tool_result_async({_TEXT_WRAP_KEY: text}, call.tool_name)
         if _flagged(verdict):
             await self._notify(ctx, call, verdict)
-        raise error
+        return verdict
 
     async def _scan_signal(self, ctx: RunContext[AgentDepsT], call: ToolCallPart, text: str) -> str | None:
         """Return replacement text for a model-facing retry or failure, if needed."""
-        verdict = await self._defense.defend_tool_result_async(text, call.tool_name)
-        if _flagged(verdict):
-            await self._notify(ctx, call, verdict)
+        verdict = await self._scan_text(ctx, call, text)
         if not verdict.allowed:
             return self.blocked_message.format(tool_name=call.tool_name, risk_level=verdict.risk_level)
-        if _findings(verdict) and isinstance(verdict.sanitized, str) and verdict.sanitized != text:
-            return verdict.sanitized
+        sanitized = verdict.sanitized
+        if (
+            _findings(verdict)
+            and _is_str_keyed_mapping(sanitized)
+            and isinstance(replacement := sanitized.get(_TEXT_WRAP_KEY), str)
+            and replacement != text
+        ):
+            return replacement
         return None
 
     async def _scan_value(self, value: object, tool_name: str) -> tuple[DefenseResult | None, object]:

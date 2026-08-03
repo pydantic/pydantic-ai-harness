@@ -124,15 +124,17 @@ Tier 2 classifier; install the `onnx` extra for tools that return free text.
 | Multi-modal parts (`BinaryContent`, URLs) | Passed through unscanned. |
 | `ToolReturn.metadata` | Not scanned; not visible to the model. |
 | Other objects (Pydantic models, dataclasses) | Scanned as the JSON the model would see; replaced by sanitized JSON on detection. |
-| Lists beyond defender's large-array threshold | A leading sample is scanned; the unscanned remainder passes through unchanged. |
+| Lists beyond defender's large-array threshold | Scanned in full by the default defense. With a custom `defense` that samples, the leading sample is scanned and the remainder passes through unchanged. |
 
-A clean result is returned unchanged, as the same object. A custom `defense` can
-raise the large-array threshold or disable large-array skipping. An exception
-returned as a value is scanned like other values. A raised generic exception is
-reported through `on_detection` when flagged, but is not suppressed.
+A clean result is returned unchanged, as the same object. The default defense
+disables defender's large-array sampling; a custom `defense` keeps whatever
+traversal it configures. An exception returned as a value is scanned like other
+values. A raised generic exception is reported through `on_detection` when
+flagged, but is not suppressed.
 
-`ModelRetry` and `ToolFailed` message text is scanned. The text is rewritten or
-replaced when needed while retry and failed-result control flow is preserved.
+`ModelRetry` and `ToolFailed` message text is scanned under the `content` risky
+field, so pattern detection applies to it. The text is rewritten or replaced when
+needed while retry and failed-result control flow is preserved.
 Provider-native tools (such as hosted web search) run on the provider's side and
 never reach your process. Results your application supplies for deferred tool calls
 bypass tool execution; scan those yourself:
