@@ -312,7 +312,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     Some tools always stay native rather than being sandboxed:
 
     - Framework control tools (`tool_kind` set: tool search, capability loading).
-    - `defer_loading=True` tools, until discovery flips them to `defer_loading=False`.
+    - `defer_loading=True` tools, until tool search or capability loading reveals them.
     - `unless_native` tools, so `Model.prepare_request` can drop them when the
       provider supports the native tool.
 
@@ -423,10 +423,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # for them; pydantic-ai has set it on `search_tools` since 1.95.0.
             if tool.tool_def.tool_kind is not None:
                 native_tools[name] = tool
-            elif tool.tool_def.defer_loading:
-                # Stay native so Tool Search's `defer_loading`/`with_native` flags reach
-                # `Model.prepare_request` unaltered. Discovery flips `defer_loading` to
-                # False, and the tool is sandboxed from then on.
+            elif not ctx.is_tool_available(tool.tool_def):
+                # Use the run's public availability predicate so Tool Search and deferred
+                # capability reveals share the same wire-side semantics. Hidden tools stay native
+                # until revealed, then fall through to the checks below and become sandboxed.
                 native_tools[name] = tool
             elif tool.tool_def.unless_native:
                 # Keep the local fallback native so `Model.prepare_request` can drop it
@@ -661,6 +661,18 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             run_state.reset()
             raise ModelRetry(
                 'The code crashed the sandbox worker and the session was reset. Revise the code and try again.'
+            ) from e
+        except Exception as e:
+            # The session may have been invalidated by a host-side binding or protocol failure.
+            # Make the reset visible so the model can rebuild state on its next attempt. Include
+            # the error text: there is no Monty `display()` for host-side failures, and the cause
+            # chain is dropped once the retry becomes a prompt part, so this message is the only
+            # record of what failed for both the model and the transcript.
+            run_state.reset()
+            error_text = f'{type(e).__name__}: {e}'
+            raise ModelRetry(
+                'Code execution failed and the session was reset. Re-run any imports, recreate '
+                f'any state you need, and try again.\n{capture.prepend_to(error_text)}'
             ) from e
         except BaseException as e:
             # Convert a sandbox panic to a retry (see `is_sandbox_panic`);

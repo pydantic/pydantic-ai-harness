@@ -24,28 +24,212 @@ provider rejects an orphaned pair. The zero-LLM strategies never call a model.
 | Capability | Cost | What it does | Reach for it when |
 |---|---|---|---|
 | `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
-| `SlidingWindow` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
+| `SlidingWindowCompaction` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
 | `ClearToolResults` | zero-LLM | Blanks the content of old tool *results* in place, keeping the last `keep_pairs` | Tool outputs dominate context and can be re-fetched on demand (the cheap first tier) |
 | `DeduplicateFileReads` | zero-LLM | Blanks every file read superseded by a newer read of the same file | The agent re-reads files and only the latest version matters |
 | `SummarizingCompaction` | one LLM call | Summarizes older messages into a structured summary, keeping the recent tail | Old context still matters but must be compressed; use behind the cheap tiers |
 | `TieredCompaction` | escalates | Runs cheap passes first, summarizes only if still over `target_tokens` | You want a sensible default: spend the expensive summary only when needed |
-| `LimitWarner` | zero-LLM | Injects an URGENT/CRITICAL warning as limits approach | You want the agent to wrap up rather than have its history rewritten |
+| `WarnNearLimits` | zero-LLM | Injects an URGENT/CRITICAL warning as limits approach | You want the agent to wrap up rather than have its history rewritten |
+| `ReportContextUsage` | zero-LLM | Reports context usage to your application; never edits history | You want a live context gauge in a UI |
 
 ## Triggers
 
-Every size-based strategy triggers on `max_messages` and/or `max_tokens` (estimated). Token counts
-use a ~4-chars-per-token heuristic by default; pass a `tokenizer` callable (e.g. `tiktoken`) for
-accuracy. `DeduplicateFileReads` runs on every request when no trigger is set (it is cheap and
-near-lossless). `TieredCompaction` triggers and stops on a single `target_tokens` budget.
-`ClampOversizedMessages` triggers per *part* (`max_part_tokens` / `max_part_chars`), not on the
-whole history -- the failure it targets is one oversized part, not a large total.
+Every size-based strategy triggers on `max_messages`, `max_tokens` (estimated), or `max_fraction`.
+Token counts use a ~4-chars-per-token heuristic by default; pass a `tokenizer` callable (e.g.
+`tiktoken`) for accuracy. `DeduplicateFileReads` runs on every request when no trigger is set (it is
+cheap and near-lossless). `TieredCompaction` triggers and stops on a single `target_tokens` /
+`target_fraction` budget. `ClampOversizedMessages` triggers per *part* (`max_part_tokens` /
+`max_part_chars`), not on the whole history -- the failure it targets is one oversized part, not a
+large total.
+
+### `max_fraction`: one setting for every model
+
+An absolute `max_tokens` is only correct for the model it was measured against. Configure `180_000`
+and a 1M-context model compacts at a fifth of its capacity, paying for summaries it did not need; a
+128K model configured for `1_000_000` never compacts before the provider rejects the request.
+
+`max_fraction` is resolved per request against the model's real context window, so one configuration
+is correct everywhere:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[SummarizingCompaction(max_fraction=0.9, keep_messages=20)],
+)
+```
+
+That compacts at 900K on a 1M model and at 115K on a 128K one. `WarnNearLimits` takes the same shape as
+`max_context_fraction`, and `TieredCompaction` as `target_fraction`.
+
+`max_tokens` and `max_fraction` are mutually exclusive -- a strategy taking both would have to
+pick one and discard the other, leaving the caller unable to tell which budget was in force.
+
+The window comes from [`genai-prices`](https://github.com/pydantic/genai-prices), already a
+dependency of `pydantic-ai-slim`; `resolve_context_window` is exported if you want the number
+yourself. Pydantic AI does not expose it yet (`ModelProfile` has no `context_window` field), so when
+it does, that one function switches over. Nothing is cached: only a registry-confirmed number is
+ever treated as the real window.
+
+The model consulted is `ModelRequestContext.model`, the one the request will be sent to, not the one
+the run started with. A capability ordered earlier may replace it, and the budget follows.
+
+### When the window does not resolve
+
+Not every model is in the registry. A local endpoint, a bespoke deployment, a Bedrock-prefixed
+reference such as `bedrock:us.anthropic.claude-sonnet-4-5`, a model the registry knows without a
+recorded window (`google-gla:gemini-2.5-pro` today), and any `FallbackModel` (its `model_id` is a
+composite `fallback:...`) all resolve to nothing. The fraction is then taken of
+`fallback_context_window`, which defaults to a conservative 200K (`DEFAULT_CONTEXT_WINDOW`):
+compacting earlier than necessary costs one summary, overestimating costs the whole request.
+
+Every capability that takes a fraction takes the fallback too, so you are not stuck with 200K on a
+model you know the size of:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction
+
+agent = Agent(
+    'google-gla:gemini-2.5-pro',
+    capabilities=[SummarizingCompaction(max_fraction=0.9, fallback_context_window=1_000_000)],
+)
+```
+
+It is only consulted when resolution fails, so it costs nothing on a model the registry does know.
+
+`TestModel` is one of the models that does not resolve: its `model_id` is `test:test`, so a fraction
+is taken of `fallback_context_window` and `max_fraction=0.9` becomes a 180,000-token trigger. A
+compaction config exercised only against `TestModel` will look like it never fires; pass
+`context_window=` or `fallback_context_window=` in the test to put the trigger where you can reach it.
+
+### When the window resolves to the wrong number
+
+Resolution can also succeed and be wrong, which `fallback_context_window` cannot help with -- it
+applies only when resolution fails. Three cases:
+
+- **The registry entry itself is wrong.** Harness reads `genai-prices` and cannot validate it.
+  Measured against `genai-prices` 0.0.71:
+
+  | model id | registry records | real window |
+  |---|---|---|
+  | `anthropic:claude-sonnet-4-5` | 1,000,000 | 200,000 |
+  | `anthropic:claude-opus-4-6` | 200,000 | 1,000,000 |
+  | `google:gemini-2.5-pro` (also the `google-gla:` and `google-vertex:` forms) | no window recorded | 1,000,000 |
+
+  An over-recorded window is the direction that breaks a run. On `anthropic:claude-sonnet-4-5`,
+  `max_fraction=0.9` resolves to a 900,000-token trigger against a 200,000-token window: compaction
+  never fires, and the provider rejects the request instead. **Pass `context_window=200_000`
+  explicitly on Anthropic Sonnet-class models** (`claude-sonnet-4-5` today; check any Sonnet id you
+  use against the provider's own documentation before relying on the resolved number). An
+  under-recorded window is safe but wasteful -- it compacts earlier than it has to.
+- The registry records the maximum a model can be made to accept. Where that maximum is gated --
+  a beta header, a pricing tier -- an ordinary request gets less, and a fraction of the recorded
+  number never triggers before the provider rejects the request.
+- A self-hosted or proxied endpoint reports a model id whose registry entry describes someone
+  else's deployment.
+
+`context_window` overrides resolution outright, on every capability that takes a fraction:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction
+
+agent = Agent(
+    'openai:gpt-4o',  # served by a local endpoint with a smaller window than the registry records
+    capabilities=[SummarizingCompaction(max_fraction=0.9, context_window=32_000)],
+)
+```
+
+### What counts toward the fraction
+
+The estimator counts every part that is sent: prompts, system prompts, tool calls and their
+results, retry prompts, extended-thinking blocks, provider-side tool results, and the
+instructions, once. It is a ~4-characters-per-token approximation, not a tokenizer; pass
+`tokenizer=` to any strategy to measure with the real one. `FilePart` is not counted -- its
+payload is binary, and its length in characters would mean nothing.
+
+**If you already set an absolute `max_tokens`, re-check it.** The estimator used to count only user
+and system prompts, tool returns, response text, and tool calls. `ThinkingPart` / `CompactionPart`
+content, `RetryPromptPart` content, `NativeToolCallPart` / `NativeToolReturnPart`, and the most
+recent `ModelRequest.instructions` are now counted too, so the same history measures higher and an
+unchanged `max_tokens` compacts earlier. How much earlier depends on how much of the history is
+thinking blocks, retries, and instructions; on a thinking-heavy tool-calling history it can be
+several times the old count. What each strategy clears is unchanged -- only when it runs.
+
+## Reporting usage: `ReportContextUsage`
+
+A strategy knows when to act but says nothing about how close the run is to the limit, so an
+application that wants to show `context: 73%` ends up re-counting the history and guessing the
+denominator. `ReportContextUsage` does neither -- it reuses the same estimator and the same resolved
+window, and only observes:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import ReportContextUsage, SummarizingCompaction
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[
+        SummarizingCompaction(max_fraction=0.9, keep_messages=20),
+        ReportContextUsage(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
+    ],
+)
+```
+
+Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the
+fallback rather than the model's real one, so a gauge can show that the percentage is a guess.
+`on_usage` may be a coroutine function, so a gauge that pushes over a socket does not need a sync
+bridge.
+
+Order matters: register the monitor *after* a compaction capability to observe the compacted history,
+or before it to see what triggered the compaction.
+
+`used_tokens` counts the same way the triggers do: every message part that is sent, plus the most
+recent `ModelRequest.instructions` once. Tool schemas are outside that count, so the reading is lower
+than what the provider bills; tool-schema accounting is tracked in
+[#100](https://github.com/pydantic/pydantic-ai-harness/issues/100).
+
+## Compacting outside a run: `compact_now`
+
+A strategy's `compact` takes a `RunContext`, which an application holding a conversation *between*
+runs does not have -- and that is exactly when a user types `/compact`. `compact_now` builds a
+throwaway context so the same strategy the agent uses can be driven from a command handler:
+
+```python {test="skip"}
+from pydantic_ai_harness.compaction import SummarizingCompaction, compact_now
+
+strategy = SummarizingCompaction(max_fraction=0.9, keep_messages=20)
+history = await compact_now(
+    strategy,
+    history,
+    model='anthropic:claude-sonnet-4-6',
+    focus='the auth refactor, not the earlier CSS work',
+)
+```
+
+`compact_now` applies no trigger of its own, so a strategy whose `compact` is unconditional runs
+whatever the history size. A strategy that defines its own stop condition still honours it:
+`TieredCompaction` escalates only until the history fits its target, so a history already under
+target comes back unchanged. Pass the tier directly if you need it to run regardless.
+
+`focus` steers strategies that write prose -- `SummarizingCompaction`, via the exported
+`SupportsFocus` protocol's `with_focus` -- and is passed over by the ones that drop or blank content
+by rule, since they have nothing to steer. `TieredCompaction` is focusable when any of its tiers is, so a focus reaches the
+summarizing tier rather than stopping at the wrapper.
+
+A compaction that changes the history emits the same `compact_messages` span the in-run path emits,
+so an instrumented application sees one shape however compaction was triggered. Pass `tracer=` to
+record it; without one the span goes to a no-op tracer.
 
 ## `ClampOversizedMessages`: surviving a runaway generation
 
 A single model response of repeated whitespace, or a single tool call with a giant payload, can
 produce one part so large the *next* request exceeds the provider's context cap. None of the other
-strategies can reach it: `SlidingWindow` drops the oldest messages but the offender is the newest;
-`ClearToolResults` only touches tool *results*; `LimitWarner` never edits history; and feeding the
+strategies can reach it: `SlidingWindowCompaction` drops the oldest messages but the offender is the newest;
+`ClearToolResults` only touches tool *results*; `WarnNearLimits` never edits history; and feeding the
 history to `SummarizingCompaction` hits the same cap.
 
 `ClampOversizedMessages` truncates the offending part in place, keeping a head slice and a tail slice
@@ -99,9 +283,9 @@ TieredCompaction(
 )
 ```
 
-## `SlidingWindow` and `ClearToolResults` options
+## `SlidingWindowCompaction` and `ClearToolResults` options
 
-`SlidingWindow` keeps the last `keep_messages` down to a tail; pass `keep_tokens` instead for a token
+`SlidingWindowCompaction` keeps the last `keep_messages` down to a tail; pass `keep_tokens` instead for a token
 budget rather than a message count. By default `preserve_first_user_message=True` keeps the first user
 turn even when it falls outside the window, so the agent does not lose the original task.
 
@@ -111,12 +295,12 @@ cleared. Framework-typed tool results -- core's `search_tools` and `load_capabil
 left intact (a small token floor), because their structured content is re-parsed on later requests and
 rewriting it via `dataclasses.replace` would bypass validation and corrupt the part.
 
-## `LimitWarner` thresholds
+## `WarnNearLimits` thresholds
 
 Warnings begin at `warning_threshold` (default `0.7`, a fraction of the limit) and escalate to CRITICAL
 for iterations once the remaining request count drops to `critical_remaining_iterations` (default `3`).
-It watches `max_iterations`, `max_context_tokens`, and `max_total_tokens`, warning on whichever are
-configured; narrow that with `warn_on`.
+It watches `max_iterations`, `max_context_tokens` (or `max_context_fraction`), and `max_total_tokens`,
+warning on whichever are configured; narrow that with `warn_on`.
 
 ## Cost: why summarization is the last resort
 
@@ -165,8 +349,9 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
 running agent's model. No token caps are imposed on the summary call.
 
-By default `incremental=True` extends an existing summary from a prior compaction rather than
-regenerating it from scratch, and `preserve_first_user_message=True` keeps the original task turn even
+By default `incremental=True` updates the newest existing summary from a prior compaction as an
+anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier
+releases; set `incremental=False` to retain the prior regeneration behavior. `preserve_first_user_message=True` keeps the original task turn even
 when it falls outside the window. Pass `keep_tokens` to trim the retained tail to a token budget instead
 of `keep_messages`.
 
@@ -209,7 +394,7 @@ to keep span cardinality low. Attributes:
 | Attribute | Type | Meaning |
 |---|---|---|
 | `gen_ai.conversation.compacted` | bool | Always `true`; the OpenTelemetry GenAI convention's flag for a compacted context |
-| `compaction.strategy` | str | Strategy class name (e.g. `SlidingWindow`, `SummarizingCompaction`) |
+| `compaction.strategy` | str | Strategy class name (e.g. `SlidingWindowCompaction`, `SummarizingCompaction`) |
 | `compaction.messages_before` | int | Message count before compaction |
 | `compaction.messages_after` | int | Message count after compaction |
 | `compaction.tokens_before` | int | Estimated token count before compaction |
@@ -219,6 +404,117 @@ to keep span cardinality low. Attributes:
 harness-specific. Token counts use the strategy's `tokenizer` when set, otherwise the
 ~4-chars-per-token heuristic.
 Raw message content is not recorded.
+
+## Compaction receipts
+
+Compaction is a memory wipe the model cannot veto and often cannot detect, which invites
+*resumption drift* -- the model confabulates continuity with history it no longer has. A
+receipt makes the wipe legible: after a boundary-crossing strategy rewrites history it can
+append a short, deterministic note recording how much was compacted, warning that what
+survives is secondhand, and -- when a handle provider is attached -- an identifier for persisted
+run history.
+
+```python
+SummarizingCompaction(max_messages=60, keep_messages=20, receipts=True)
+SlidingWindowCompaction(max_messages=80, keep_messages=40, receipts=True)
+```
+
+- **Deterministic receipt text.** The receipt text carries no timestamp and is a pure function
+  of the compaction. The message part still has its ordinary request timestamp.
+- **Honest wording.** `SummarizingCompaction` leaves a summary, so its receipt says the summary
+  above is secondhand; `SlidingWindowCompaction` drops history outright, so its receipt says that context
+  is gone. The blank-in-place strategies (`ClearToolResults`, `DeduplicateFileReads`,
+  `ClampOversizedMessages`) keep every message and cross no boundary, so they emit no receipt.
+- **Transcript handle.** Attach any capability exposing `compaction_transcript_handle() -> str | None`
+  (the `TranscriptHandleProvider` protocol) and the receipt gains a `Persisted run handle:` pointer.
+  `StepPersistence` implements it (returning its `run_id`), so attaching it is enough. The handle
+  addresses the persisted *run*, not a pristine transcript: compaction's edits persist into the run's
+  message history, so the run's latest snapshot reflects the **compacted** history and reading it back
+  does not recover what the receipt says was dropped. A store keeping per-step snapshots may still hold
+  pre-compaction steps, subject to its own retention (`max_snapshots_per_run` on the shipped stores).
+- **Attribution.** The receipt's `by` field uses the same coarse family heuristic as the bridge prefix,
+  with the same approximations -- see [the note below](#anchored-incremental-summarization-and-the-cross-model-bridge).
+- **Observability.** Each receipt is also emitted as a `compaction.receipt` event on the
+  `compact_messages` span.
+
+> The receipt *text* is content, so it is opt-in (`receipts=False` by default) and its exact
+> wording is provisional pending the benchmark eval-rig pass; the mechanism is structural.
+
+## Pinning: content that survives compaction
+
+Mark content that every shipped strategy must preserve verbatim with `pin`:
+
+```python
+from pydantic_ai_harness.compaction import pin
+
+# In a ModelRequest placed in the run's message history (by a capability or the user):
+pinned = pin('Durable task state the model must never lose across compaction.')
+```
+
+A pinned part is never summarized away or dropped; if a strategy would have discarded it, the
+strategy re-injects it verbatim near the top of the surviving history. This is the least
+invasive marking available today: pins use model-invisible `TextContent.metadata`, so their
+contents remain ordinary user context while compaction can distinguish them from user turns.
+
+`Planning` does **not** need pinning: its plan is re-injected ephemerally every request in
+`wrap_model_request`, so it already survives compaction by construction. Pinning is for durable
+task state and scratchpads that live *in* the history.
+
+## Keeping user messages (`keep_user_messages`)
+
+User turns are the highest signal-per-token content in a conversation, and losing them is the
+main driver of resumption drift. `SummarizingCompaction(keep_user_messages=True)` preserves
+the newest user turns from the summarized prefix alongside the summary. They consume the
+existing `keep_messages` tail budget, so at most that many retained user messages and tail
+messages survive together; compaction therefore does not grow retained copies on each cycle.
+When `keep_tokens` is set, those same retained user messages and tail messages also share its
+token budget; a user turn that does not fit is summarized instead.
+Each retained turn is bounded to `keep_user_messages_max_chars` (default 20k) with an explicit
+truncation marker when it overruns. The character budget applies per part, shared across the
+text items of a multi-part prompt; images, audio, and cache points pass through untouched. This
+supersedes `preserve_first_user_message` (which keeps only the first).
+
+```python
+SummarizingCompaction(max_tokens=120_000, keep_messages=20, keep_user_messages=True)
+```
+
+Retaining user turns leaves the summary, any receipt, and the retained turns as adjacent
+`ModelRequest`s. Providers that require one request per turn -- Bedrock Converse and Gemini among
+them -- never see that shape: Pydantic AI normalizes the history with `_merge_consecutive_messages`
+after the `before_model_request` hooks run, combining adjacent requests into a single turn before
+dispatch. `keep_user_messages` therefore needs no provider-specific handling.
+
+## Anchored incremental summarization and the cross-model bridge
+
+With `incremental=True` (the default), a prior summary is not re-summarized (which decays over
+successive compactions). It is fed back as an anchored `<previous-summary>` block with an
+*update* instruction -- preserve still-true details, remove stale ones, merge in new facts --
+so the summary is a living document updated in place under a fixed structure.
+
+> **Behavior change: `incremental=True` is the default.** Every existing `SummarizingCompaction`
+> user gets a different summary-call prompt from this release on: once a prior summary exists, the
+> summarizer is asked to *update* it under `<previous-summary>` rather than regenerate one from the
+> conversation. The summaries it produces will read differently. Set `incremental=False` to keep the
+> previous regenerate-from-scratch behavior.
+
+`bridge_prefix=True` prepends a one-line note to the summary **only** when the
+summarizer's model family differs from the family that produced the history (derived from the
+history's `model_name` and the summarizer config), marking the summary as a cross-model
+handoff so the resuming model builds on it rather than confabulating that it did the work
+itself. It never fires in the common same-model case, so it is cheap. It defaults to `False`
+because the note is prompt content.
+
+The family token is a coarse approximation: drop any `provider:` prefix, then take the leading
+token before the first `-` or `/`. It separates `gpt` from `claude` on ordinary references
+(`openai:gpt-4o` -> `gpt`, `google-gla:gemini-2.5-pro` -> `gemini`) and misreads several real ones:
+`us.anthropic.claude-sonnet-4-5-v1:0` reduces to `0`, `ollama/llama3` to `ollama`, and a `fallback:`
+model *string* to its last listed model rather than its first (a `FallbackModel` object is read
+correctly, from its first model). Bridge and receipt attribution are therefore best-effort: a
+misread family can suppress a bridge note or fire one between two same-family models. Neither
+outcome changes what compaction keeps or drops.
+
+> The update instruction and bridge-prefix wording are content, shipped minimal/neutral and
+> flagged pending the eval-rig pass; the anchoring and family-gating mechanisms are structural.
 
 ## Out of scope
 

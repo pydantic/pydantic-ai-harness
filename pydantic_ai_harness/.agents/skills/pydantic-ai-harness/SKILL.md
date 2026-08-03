@@ -2,7 +2,7 @@
 name: pydantic-ai-harness
 description: Extend Pydantic AI agents with batteries-included capabilities from pydantic-ai-harness -- Code Mode (collapse many tool calls into one sandboxed Python execution), a filesystem and shell, sub-agents, planning, context compaction, and more. Use when the user mentions pydantic-ai-harness, CodeMode, Monty, code mode, or tool sandboxing, when they want first-party filesystem/shell/sub-agent/planning/compaction capabilities for a Pydantic AI agent, when they want an agent to run agent-written Python, or when a Pydantic AI agent would benefit from orchestrating multiple tool calls in a single sandboxed script.
 license: MIT
-compatibility: Requires Python 3.10+ and pydantic-ai-slim>=2.1.0
+compatibility: Requires Python 3.10+ and pydantic-ai-slim>=2.18.0
 metadata:
   version: "0.1.0"
   author: pydantic
@@ -53,12 +53,12 @@ APIs are subject to change between releases; breaking changes ship deprecation w
 | `SubAgents` | `pydantic_ai_harness.subagents` | Delegate subtasks to specialized child agents |
 | `DynamicWorkflow` | `pydantic_ai_harness.dynamic_workflow` | Orchestrate sub-agents from a model-written Python script |
 | `Planning` | `pydantic_ai_harness.planning` | Break complex tasks into structured plans before execution |
-| compaction family (`SlidingWindow`, `SummarizingCompaction`, ...) | `pydantic_ai_harness.compaction` | Trim or summarize conversation history to stay within token limits |
-| `OverflowingToolOutput` | `pydantic_ai_harness.overflowing_tool_output` | Truncate, summarize, or spill large tool outputs |
-| `RepoContext` | `pydantic_ai_harness.context` | Auto-load CLAUDE.md/AGENTS.md and repo structure |
+| compaction family (`SlidingWindowCompaction`, `SummarizingCompaction`, ...) | `pydantic_ai_harness.compaction` | Trim or summarize conversation history to stay within token limits |
+| `ToolOutputLimits` | `pydantic_ai_harness.tool_output_limits` | Truncate, summarize, or spill large tool outputs |
+| `RepoContext` | `pydantic_ai_harness.repo_context` | Auto-load CLAUDE.md/AGENTS.md and repo structure |
 | `StepPersistence` | `pydantic_ai_harness.step_persistence` | Save, restore, resume, and fork run state |
-| `PyaiDocs` | `pydantic_ai_harness.docs` | On-demand `read_pyai_docs` tool for Pydantic AI docs |
-| `RuntimeAuthoring` | `pydantic_ai_harness.runtime_authoring` | Let an agent author, validate, and load real capabilities at runtime |
+| `PydanticAIDocs` | `pydantic_ai_harness.pydantic_ai_docs` | On-demand `read_pyai_docs` tool for Pydantic AI docs |
+| `CapabilityCreation` | `pydantic_ai_harness.capability_creation` | Let an agent author, validate, and load real capabilities at runtime |
 | media externalization | `pydantic_ai_harness.media` | Offload large `BinaryContent` to content-addressed stores |
 
 Still experimental: an ACP server adapter, imported from `pydantic_ai_harness.experimental.acp`. Importing it
@@ -79,7 +79,7 @@ Each capability declares its own extra. Code Mode needs the Monty sandbox:
 uv add "pydantic-ai-harness[codemode]"   # `code-mode` is also accepted as an alias
 ```
 
-Requires Python 3.10+ and `pydantic-ai-slim>=2.1.0`.
+Requires Python 3.10+ and `pydantic-ai-slim>=2.18.0`.
 
 ## Quick Start
 

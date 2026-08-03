@@ -1,19 +1,21 @@
 """Input and output guardrail capabilities.
 
-`InputGuard` intercepts the first model request and lets a user-supplied
-callable decide what to do with the user prompt. `OutputGuard` runs as the
+`InputGuardrail` intercepts the first model request and lets a user-supplied
+callable decide what to do with the user prompt. `OutputGuardrail` runs as the
 model output is processed and decides what to do with the agent output.
 
 A guard returns a bare `bool` (`True` = allow) or a
-[`GuardResult`][pydantic_ai_harness.guardrails.GuardResult] — one of four
+[`GuardrailResult`][pydantic_ai_harness.guardrails.GuardrailResult] -- one of five
 outcomes:
 
 - `allow` — let the value through unchanged.
-- `block` — refuse: `InputGuard` short-circuits the model call with a refusal
+- `block` — refuse: `InputGuardrail` short-circuits the model call with a refusal
   message via [`SkipModelRequest`][pydantic_ai.exceptions.SkipModelRequest];
-  `OutputGuard` raises [`OutputBlocked`][pydantic_ai_harness.guardrails.OutputBlocked].
+  `OutputGuardrail` raises [`OutputBlocked`][pydantic_ai_harness.guardrails.OutputBlocked].
 - `replace` — substitute a sanitized value (redaction) and continue.
-- `retry` — send the output back to the model to try again (`OutputGuard` only).
+- `retry` -- send the output back to the model to try again (not valid for input).
+- `approve` -- defer a tool call for human approval
+  ([`ToolGuardrail`][pydantic_ai_harness.ToolGuardrail] arguments only).
 
 A guard that raises propagates the exception so the caller sees a hard
 failure. Guards may be sync or async and may optionally take a
@@ -28,10 +30,9 @@ attached only when `RunContext.trace_include_content` is set.
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation, WrapModelRequestHandler
 from pydantic_ai.exceptions import ModelRetry, SkipModelRequest, UserError
@@ -40,6 +41,13 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 from typing_extensions import assert_never
 
 from pydantic_ai_harness.guardrails._exceptions import OutputBlocked
+from pydantic_ai_harness.guardrails._shared import (
+    GuardOutcome,
+    as_guards,
+    evaluate_all,
+    trace_block,
+    trace_redaction,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext
@@ -51,128 +59,38 @@ _DEFAULT_OUTPUT_BLOCK_MESSAGE = 'Output blocked by output guardrail.'
 _DEFAULT_OUTPUT_RETRY_MESSAGE = 'Output rejected by output guardrail.'
 
 
-@dataclass(frozen=True, kw_only=True)
-class GuardResult:
-    """The outcome a guard reports for the value it inspected.
-
-    Construct one with the classmethods — `GuardResult.allow()`,
-    `GuardResult.block()`, `GuardResult.replace()`, `GuardResult.retry()` —
-    rather than the raw fields. A guard may also return a bare `bool`: `True`
-    is `allow()`, `False` is `block()`.
-    """
-
-    action: Literal['allow', 'block', 'replace', 'retry']
-    """What the capability should do with the inspected value."""
-
-    message: str | None = None
-    """For `block`, the refusal text. For `retry`, the instruction sent back to the model."""
-
-    replacement: object | None = None
-    """For `replace`, the value substituted for the inspected one."""
-
-    def __post_init__(self) -> None:
-        """Reject field combinations the four-outcome contract does not allow."""
-        match self.action:
-            case 'allow':
-                if self.message is not None or self.replacement is not None:
-                    raise UserError("GuardResult(action='allow') must not set `message` or `replacement`.")
-            case 'replace':
-                if self.replacement is None:
-                    raise UserError("GuardResult(action='replace') requires a `replacement` value.")
-            case 'retry':
-                if self.message is None:
-                    raise UserError("GuardResult(action='retry') requires a `message`.")
-            case 'block':
-                # `message=None` is valid: a default is supplied at the use site.
-                pass
-            case _:  # pragma: no cover - assert_never exhaustiveness guard
-                assert_never(self.action)
-
-    @classmethod
-    def allow(cls) -> GuardResult:
-        """Let the value through unchanged."""
-        return cls(action='allow')
-
-    @classmethod
-    def block(cls, message: str | None = None) -> GuardResult:
-        """Refuse the value. `message` is the refusal text; `None` uses a default."""
-        return cls(action='block', message=message)
-
-    @classmethod
-    def replace(cls, value: object) -> GuardResult:
-        """Substitute `value` for the inspected one and continue.
-
-        For `InputGuard`, `value` is the replacement prompt text sent to the
-        model. For `OutputGuard`, it is the agent output returned to the caller.
-        """
-        return cls(action='replace', replacement=value)
-
-    @classmethod
-    def retry(cls, message: str) -> GuardResult:
-        """Send the output back to the model to try again — `OutputGuard` only.
-
-        `message` is the instruction the model sees on the retry.
-        """
-        return cls(action='retry', message=message)
-
-
-GuardOutcome = bool | GuardResult
-"""What a guard callable returns: a bare `bool` (`True` = allow), or a `GuardResult`."""
-
-
-InputGuardFunc = (
+InputGuardrailFunc = (
     Callable[[str], GuardOutcome | Awaitable[GuardOutcome]]
     | Callable[[RunContext[AgentDepsT], str], GuardOutcome | Awaitable[GuardOutcome]]
 )
-"""Signature of the callable passed to `InputGuard`.
+"""Signature of the callable passed to `InputGuardrail`.
 
-The callable receives the user prompt and returns `True` / `GuardResult`. It
+The callable receives the user prompt and returns `True` / `GuardrailResult`. It
 may optionally take a [`RunContext`][pydantic_ai.tools.RunContext] as a first
 argument — for `deps`, message history, or other run state — and may be sync
 or async. Raising an exception is treated as a hard failure and propagates up
 to the caller.
 """
 
-OutputGuardFunc = (
+OutputGuardrailFunc = (
     Callable[[object], GuardOutcome | Awaitable[GuardOutcome]]
     | Callable[[RunContext[AgentDepsT], object], GuardOutcome | Awaitable[GuardOutcome]]
 )
-"""Signature of the callable passed to `OutputGuard`.
+"""Signature of the callable passed to `OutputGuardrail`.
 
 The callable receives the agent output unchanged — for typed outputs this is
-the Pydantic model — and returns `True` / `GuardResult`. It may optionally take
+the Pydantic model — and returns `True` / `GuardrailResult`. It may optionally take
 a [`RunContext`][pydantic_ai.tools.RunContext] first, and may be sync or async.
 """
 
 
-def _takes_ctx(func: Callable[..., object]) -> bool:
-    """Return `True` when `func` declares a leading `RunContext` parameter.
-
-    Detected by parameter count, not annotation: a guard always takes the
-    guarded value, so a second parameter means it also wants the run context.
-    This matches pydantic-ai's own optional-`ctx` convention for output
-    validators. A callable whose signature cannot be introspected is treated
-    as taking the value only.
-    """
-    try:
-        parameters = inspect.signature(func).parameters
-    except ValueError:  # pragma: no cover - callable without an introspectable signature
-        return False
-    return len(parameters) > 1
-
-
-async def _evaluate(
-    guard: Callable[..., GuardOutcome | Awaitable[GuardOutcome]],
-    ctx: RunContext[AgentDepsT],
-    value: object,
-) -> GuardResult:
-    """Call `guard` (passing `ctx` when declared), await it, and normalize to `GuardResult`."""
-    outcome = guard(ctx, value) if _takes_ctx(guard) else guard(value)
-    if inspect.isawaitable(outcome):
-        outcome = await outcome
-    if isinstance(outcome, GuardResult):
-        return outcome
-    return GuardResult.allow() if outcome else GuardResult.block()
+def _require_prompt_text(replacement: object, position: int) -> None:
+    """A prompt replacement has to be text, since it is written back into the message."""
+    if not isinstance(replacement, str):
+        raise UserError(
+            f'GuardrailResult.replace() for an input guardrail must provide replacement prompt text (str); '
+            f'guard at position {position} returned {type(replacement).__name__}.'
+        )
 
 
 def _extract_prompt(ctx: RunContext[AgentDepsT], messages: Sequence[ModelMessage]) -> str | None:
@@ -192,64 +110,54 @@ def _extract_prompt(ctx: RunContext[AgentDepsT], messages: Sequence[ModelMessage
 
 
 def _replace_prompt(messages: Sequence[ModelMessage], new_content: str) -> bool:
-    """Rewrite the most recent user prompt to `new_content`. Returns whether one was found."""
+    """Rewrite the most recent user prompt to `new_content`. Returns whether one was found.
+
+    A multimodal prompt is refused rather than rewritten. Its `content` is a
+    sequence of parts, and a `str` written over it would send the model the
+    replacement text alone -- the images, documents and audio the user attached
+    would be gone, with nothing in the run to say so.
+    """
     for message in reversed(messages):
         for part in reversed(message.parts):
             if isinstance(part, UserPromptPart):
+                if not isinstance(part.content, str):
+                    raise UserError(
+                        'An InputGuardrail returned GuardrailResult.replace() for a multimodal prompt. The prompt '
+                        f'holds {type(part.content).__name__} rather than text, so writing the replacement over it '
+                        'would drop the attached parts. Return GuardrailResult.allow() or GuardrailResult.block() '
+                        'for prompts that are not plain text, or guard the output instead.'
+                    )
                 part.content = new_content
                 return True
     return False
 
 
-def _trace_block(ctx: RunContext[AgentDepsT], *, direction: str, message: str) -> None:
-    """Record a zero-duration span marking a guardrail refusal.
-
-    The refusal message is attached only when `ctx.trace_include_content` is
-    set — it can quote sensitive content from the guarded value, and ops
-    audiences are broader than the user who sees the refusal text.
-    """
-    attributes: dict[str, str] = {'guardrail.direction': direction, 'guardrail.action': 'block'}
-    if ctx.trace_include_content:
-        attributes['guardrail.message'] = message
-    ctx.tracer.start_span(f'guardrail blocked {direction}', attributes=attributes).end()
-
-
-def _trace_redaction(ctx: RunContext[AgentDepsT], *, direction: str, original: object, replacement: object) -> None:
-    """Record a zero-duration span marking a guardrail redaction.
-
-    The original and replacement values are attached only when
-    `ctx.trace_include_content` is set, since a redacted value is often the
-    sensitive content the guard exists to keep out of traces.
-    """
-    attributes: dict[str, str] = {'guardrail.direction': direction, 'guardrail.action': 'replace'}
-    if ctx.trace_include_content:
-        attributes['guardrail.original'] = str(original)
-        attributes['guardrail.replacement'] = str(replacement)
-    ctx.tracer.start_span(f'guardrail redacted {direction}', attributes=attributes).end()
-
-
 @dataclass
-class InputGuard(AbstractCapability[AgentDepsT]):
+class InputGuardrail(AbstractCapability[AgentDepsT]):
     """Validate the user prompt before it reaches the model.
 
-    The `guard` callable receives the prompt text and returns one of the four
+    The `guard` callable receives the prompt text and returns one of the
     outcomes (see the module docstring). `replace` rewrites the prompt sent to
-    the model and also overwrites the original in the run's message history,
-    so a redacted secret is not retained; a `str` replacement overwrites a
-    multimodal prompt's other parts. `retry` is not valid for an input guard.
+    the model and also overwrites the original in the run's message history, so
+    a redacted secret is not retained -- unless a later guard in a chain blocks,
+    which ends the chain before the rewrite happens. `retry` is not valid for an
+    input guardrail, and neither is `replace` on a multimodal prompt: the guard sees
+    the whole prompt rendered as text, and writing one string back over a
+    prompt built from several parts would drop the attached ones, so it raises
+    [`UserError`][pydantic_ai.exceptions.UserError] instead.
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness import GuardResult, InputGuard
+    from pydantic_ai_harness import GuardrailResult, InputGuardrail
 
 
-    def no_secrets(prompt: str) -> GuardResult:
+    def no_secrets(prompt: str) -> GuardrailResult:
         if 'api_key' in prompt.lower():
-            return GuardResult.block('Your message looks like it contains an API key.')
-        return GuardResult.allow()
+            return GuardrailResult.block('Your message looks like it contains an API key.')
+        return GuardrailResult.allow()
 
 
-    agent = Agent('openai:gpt-5.4', capabilities=[InputGuard(guard=no_secrets)])
+    agent = Agent('openai:gpt-5.4', capabilities=[InputGuardrail(guard=no_secrets)])
     ```
 
     The guard may take a [`RunContext`][pydantic_ai.tools.RunContext] as a
@@ -278,8 +186,13 @@ class InputGuard(AbstractCapability[AgentDepsT]):
     guard sees the final prompt that will reach the model.
     """
 
-    guard: InputGuardFunc[AgentDepsT]
-    """Callable that decides what to do with the prompt before it reaches the model."""
+    guard: InputGuardrailFunc[AgentDepsT] | Sequence[InputGuardrailFunc[AgentDepsT]]
+    """One callable, or several run in order, deciding what happens to the prompt.
+
+    In a chain the first `block` ends it, and a `replace` substitutes the text
+    the remaining guards see -- so a redactor placed first cleans the prompt the
+    ones after it inspect.
+    """
 
     parallel: bool = False
     """Run the guard concurrently with the model request and cancel the model call on failure."""
@@ -300,32 +213,43 @@ class InputGuard(AbstractCapability[AgentDepsT]):
         the prompt in `request_context`; `retry` and `replace` under
         `parallel=True` raise `UserError`.
         """
-        verdict = await _evaluate(self.guard, ctx, prompt)
+        verdict, position = await evaluate_all(
+            as_guards(self.guard, capability='InputGuardrail'),
+            ctx,
+            prompt,
+            check_replacement=_require_prompt_text,
+        )
         match verdict.action:
             case 'allow':
                 return
             case 'retry':
                 raise UserError(
-                    'An InputGuard guard cannot return GuardResult.retry() — retry applies to model output only.'
+                    f'An InputGuardrail guard cannot return GuardrailResult.retry(); guard at position {position} '
+                    'did. Retry applies to model output only.'
+                )
+            case 'approve':
+                raise UserError(
+                    'An InputGuardrail guard cannot return GuardrailResult.approve() -- approval applies to tool '
+                    'calls only.'
                 )
             case 'block':
                 message = verdict.message or _DEFAULT_INPUT_BLOCK_MESSAGE
-                _trace_block(ctx, direction='input', message=message)
+                trace_block(ctx, direction='input', message=message)
                 raise SkipModelRequest(ModelResponse(parts=[TextPart(content=message)]))
             case 'replace':
                 if self.parallel:
                     raise UserError(
-                        'InputGuard(parallel=True) is incompatible with GuardResult.replace(): the model call has '
+                        'InputGuardrail(parallel=True) is incompatible with GuardrailResult.replace(): the model call has '
                         'already started with the original prompt. Use sequential mode for prompt redaction.'
                     )
                 replacement = verdict.replacement
-                if not isinstance(replacement, str):
+                if not isinstance(replacement, str):  # pragma: no cover - `_require_prompt_text` ran on the way here
                     raise UserError(
-                        'GuardResult.replace() for an input guard must provide replacement prompt text (str).'
+                        'GuardrailResult.replace() for an input guardrail must provide replacement prompt text (str).'
                     )
                 if not _replace_prompt(request_context.messages, replacement):
-                    raise UserError('InputGuard could not find a user prompt to redact in the request.')
-                _trace_redaction(ctx, direction='input', original=prompt, replacement=replacement)
+                    raise UserError('InputGuardrail could not find a user prompt to redact in the request.')
+                trace_redaction(ctx, direction='input', original=prompt, replacement=replacement)
             case _:  # pragma: no cover - assert_never exhaustiveness guard
                 assert_never(verdict.action)
 
@@ -376,33 +300,33 @@ class InputGuard(AbstractCapability[AgentDepsT]):
 
 
 @dataclass
-class OutputGuard(AbstractCapability[AgentDepsT]):
+class OutputGuardrail(AbstractCapability[AgentDepsT]):
     """Validate the agent output as it is produced.
 
     The `guard` callable receives the output — no automatic stringification, so
     a typed output arrives as the Pydantic model instance — and returns one of
-    the four outcomes (see the module docstring): `allow` exposes the output,
+    the outcomes (see the module docstring): `allow` exposes the output,
     `block` raises [`OutputBlocked`][pydantic_ai_harness.guardrails.OutputBlocked],
     `replace` substitutes a sanitized output (redaction), and `retry` sends the
     output back to the model to try again.
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness import GuardResult, OutputGuard
+    from pydantic_ai_harness import GuardrailResult, OutputGuardrail
 
 
-    def no_pii(output: object) -> GuardResult:
+    def no_pii(output: object) -> GuardrailResult:
         if 'SSN' in str(output):
-            return GuardResult.retry('Do not include personal identifiers.')
-        return GuardResult.allow()
+            return GuardrailResult.retry('Do not include personal identifiers.')
+        return GuardrailResult.allow()
 
 
-    agent = Agent('openai:gpt-5.4', capabilities=[OutputGuard(guard=no_pii)])
+    agent = Agent('openai:gpt-5.4', capabilities=[OutputGuardrail(guard=no_pii)])
     ```
 
     The guard runs as the output is processed, so `retry` reuses pydantic-ai's
     normal retry machinery and counts against the run's output-retry budget.
-    Like `InputGuard`, the guard may take a
+    Like `InputGuardrail`, the guard may take a
     [`RunContext`][pydantic_ai.tools.RunContext] as a first parameter; it is
     detected from the signature.
 
@@ -422,8 +346,12 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
     be screened before any of it is exposed.
     """
 
-    guard: OutputGuardFunc[AgentDepsT]
-    """Callable that decides what to do with the agent output."""
+    guard: OutputGuardrailFunc[AgentDepsT] | Sequence[OutputGuardrailFunc[AgentDepsT]]
+    """One callable, or several run in order, deciding what happens to the output.
+
+    In a chain the first `block` or `retry` ends it, and a `replace` substitutes
+    the output the remaining guards see.
+    """
 
     def get_ordering(self) -> CapabilityOrdering:
         """Sit outermost (inside `Instrumentation`) so the guard sees the final processed output."""
@@ -439,18 +367,23 @@ class OutputGuard(AbstractCapability[AgentDepsT]):
         """Evaluate the guard against the processed output and act on its verdict."""
         if ctx.partial_output:
             return output
-        verdict = await _evaluate(self.guard, ctx, output)
+        verdict, _ = await evaluate_all(as_guards(self.guard, capability='OutputGuardrail'), ctx, output)
         match verdict.action:
             case 'allow':
                 return output
             case 'block':
                 message = verdict.message or _DEFAULT_OUTPUT_BLOCK_MESSAGE
-                _trace_block(ctx, direction='output', message=message)
+                trace_block(ctx, direction='output', message=message)
                 raise OutputBlocked(message)
             case 'retry':
                 raise ModelRetry(verdict.message or _DEFAULT_OUTPUT_RETRY_MESSAGE)
+            case 'approve':
+                raise UserError(
+                    'An OutputGuardrail guard cannot return GuardrailResult.approve() -- approval applies to tool '
+                    'calls only.'
+                )
             case 'replace':
-                _trace_redaction(ctx, direction='output', original=output, replacement=verdict.replacement)
+                trace_redaction(ctx, direction='output', original=output, replacement=verdict.replacement)
                 return verdict.replacement
             case _:  # pragma: no cover - assert_never exhaustiveness guard
                 assert_never(verdict.action)

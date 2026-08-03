@@ -43,7 +43,8 @@ print(result.output)
 Output is labelled with `[stdout]` / `[stderr]` markers and an `[exit code: N]`
 line on non-zero exit. When it exceeds `max_output_chars` the **tail** is kept
 (the head is dropped), so errors, stack traces, and the `[stderr]` section --
-which all land at the end -- survive truncation.
+which all land at the end -- survive truncation. Background command status and
+exit metadata follow the captured output so they remain in the retained tail.
 
 ## Command controls
 
@@ -59,6 +60,10 @@ both. `denied_commands` defaults to a list of destructive commands (`rm`,
 `rmdir`, `mkfs`, `dd`, `format`, `shutdown`, `reboot`, `halt`, `poweroff`,
 `init`); pass an empty list to disable. The executable name is extracted with
 `shlex`, so arguments don't bypass the check.
+
+An empty `allowed_commands` collection does not select allowlist mode. The
+configured `denied_commands` remain active; when omitted, this is the built-in
+denylist. Pass `denied_commands=[]` to disable command-name filtering.
 
 A denied or blocked command surfaces to the model as a `ModelRetry` (the model
 can retry with an allowed command) rather than aborting the run.

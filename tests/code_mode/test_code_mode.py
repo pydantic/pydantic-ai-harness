@@ -1262,6 +1262,51 @@ class TestCodeMode:
         assert 'demo_tool' not in run_code_desc
         assert 'load_capability' not in run_code_desc
 
+    async def test_loaded_capability_tool_folds_into_run_code(self) -> None:
+        """Once the model loads a deferred capability, its tools become callable from `run_code`.
+
+        The step after `test_deferred_capability_loader_stays_native_with_tools_all`: the member
+        tool keeps `defer_loading=True` across the reveal (it records what the capability asked
+        for), so the fold-in has to key on the run's revealed-tool set instead.
+        """
+        from pydantic_ai.capabilities import Capability
+        from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        capability = Capability[object](
+            id='demo',
+            description='Demo deferred capability.',
+            instructions='Use demo_tool.',
+            defer_loading=True,
+        )
+
+        @capability.tool_plain
+        def demo_tool() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'ok'  # pragma: no cover - only the signature reaches the model here
+
+        seen_tools: list[set[str]] = []
+        seen_descriptions: list[str] = []
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen_tools.append({td.name for td in info.function_tools})
+            description = next(td for td in info.function_tools if td.name == 'run_code').description or ''
+            seen_descriptions.append(description)
+            if 'async def demo_tool' not in description:
+                return ModelResponse(parts=[ToolCallPart(tool_name='load_capability', args={'id': 'demo'})])
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent: Agent[object, str] = Agent(
+            FunctionModel(model_fn),
+            capabilities=[capability, CodeMode[object](tools='all')],
+        )
+        result = await agent.run('inspect tools')
+
+        assert result.output == 'done'
+        assert 'async def demo_tool' not in seen_descriptions[0]
+        # Folded into `run_code` rather than surfaced as a native tool of its own.
+        assert 'async def demo_tool' in seen_descriptions[1]
+        assert 'demo_tool' not in seen_tools[1]
+
     # ---------------------------------------------------------------------------
     # Capability registration
     # ---------------------------------------------------------------------------
@@ -1827,6 +1872,36 @@ class TestCodeMode:
         with pytest.raises(ModelRetry, match='Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
 
+    async def test_unexpected_execution_error_reports_session_reset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """An unexpected execution failure tells the model that the REPL state was dropped.
+
+        No public code path raises a bare host-side exception on purpose, so the
+        executor is patched to fail the way a host-binding bug does (e.g.
+        pydantic/monty#631, which replaces the sandbox exception with a bare
+        `RuntimeError` when the traceback payload fails span validation).
+        """
+
+        async def _fail(self: Any, state: Any) -> Any:
+            raise RuntimeError('invalid exception payload')
+
+        wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        run_code = tools['run_code']
+
+        # Seed REPL state that the model would rely on in later feeds.
+        await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
+        with monkeypatch.context() as patcher:
+            patcher.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _fail)
+            with pytest.raises(ModelRetry, match='session was reset') as exc_info:
+                await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
+        # The retry message is the only record of the host-side error, so it must name it.
+        assert 'RuntimeError: invalid exception payload' in str(exc_info.value)
+        # `x` is undefined in the fresh session's type check, proving the reset happened.
+        with pytest.raises(ModelRetry, match='Type error in code'):
+            await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
+
     async def test_cancellation_propagates_and_resets_session(self) -> None:
         """Cancellation drops the suspended session before propagating to the caller."""
         started = asyncio.Event()
@@ -2251,8 +2326,8 @@ class TestToolSearchIntegration:
         description = tools['run_code'].tool_def.description
         assert description is not None
         assert 'async def add' in description
-        # Post-discovery the deferred tool comes back with `defer_loading=False`,
-        # so it folds into run_code and is no longer a separate native tool.
+        # The discovered tool keeps `defer_loading=True` (the author's intent), but it is
+        # revealed, so it folds into run_code and is no longer a separate native tool.
         assert 'async def later' in description
         assert 'later' not in tools
 

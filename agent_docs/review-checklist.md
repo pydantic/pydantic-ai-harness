@@ -18,7 +18,9 @@ Use this before opening a PR or reviewing a capability change.
 - The implementation uses Pydantic AI hooks/toolsets instead of duplicating core
   runtime behavior.
 - Capability ordering is justified when present.
-- Dependency changes were made through `uv` and have a clear reason.
+- Dependency changes are required, linked to an issue, and made through `uv`;
+  every PR touching `pyproject.toml` or `uv.lock` carries
+  `dependencies:approved` for the current head.
 - A capability that adds heavy CI machinery (a Docker image, an external service
   with a secret, a large system binary, live network calls) scopes its expensive
   job to its own paths and keeps the aggregate check green when that job is
@@ -72,6 +74,22 @@ well before now, or that was built against unreleased Pydantic AI changes.
   broken; errors that name third-party types (`modal`, `openai`, ...) as unknown
   in files the PR did not touch are the tell.
 
+## Issue References
+
+Run these checks when a change adds a link to an open issue in a docs page, a
+README, or source code.
+
+- Comment on that issue in the same PR. A link from shipped text to an issue is
+  one-directional: a reader who opens the issue later sees no sign that a
+  released artifact documents it as forthcoming or depends on what it describes.
+- State in the comment what now references the issue, and which constraint that
+  reference imposes on whoever implements it. A bare backlink is not enough. The
+  constraint is the part that reader would otherwise reconstruct from the docs
+  page.
+- Closing an issue in the same PR does not remove the requirement. The docs page
+  outlives the close, and the qualifiers it carries are often recorded nowhere
+  else.
+
 ## Tests
 
 - Tests cover the public `Agent(..., capabilities=[...])` path where possible.
@@ -113,7 +131,7 @@ Checks:
   purpose. Mechanism belongs lower down.
 - **Name matches the capability.** The doc filename, its `# H1`, and the
   README's `# H1` all use the capability's descriptive name (e.g.
-  "Overflowing Tool Output", not "Overflow"; "Runtime Authoring", not
+  "Tool Output Limits", not "Overflow"; "Runtime Capability Creation", not
   "Authoring").
 - **Source link.** Each page links its source module
   (`https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/<module>/`)
