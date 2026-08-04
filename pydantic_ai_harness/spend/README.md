@@ -123,11 +123,13 @@ store = RedisSpendStore(Redis.from_url('redis://localhost'))
 limits = SpendLimits(budgets=[Budget(usd=Decimal('100'), window='day')], store=store)
 ```
 
-It adds no dependency: `RedisClient` is a protocol of the three coroutines used, so any compatible client satisfies it. Amounts are stored as integer billionths of a dollar and incremented with `HINCRBY`, because `INCRBYFLOAT` accumulates rounding error over the tens of thousands of requests a busy day produces. Billionths rather than millionths because the residue does not average out: an agent repeats requests of near-identical shape, so the same fraction rounds the same way every time.
+It adds no dependency: `RedisClient` is a protocol of the two coroutines used, so any compatible client satisfies it. Amounts are stored as integer billionths of a dollar rather than through `INCRBYFLOAT`, which accumulates rounding error over the tens of thousands of requests a busy day produces. Billionths rather than millionths because the residue does not average out: an agent repeats requests of near-identical shape, so the same fraction rounds the same way every time.
+
+A response is applied as one Lua script: the four counters and the expiry land together or not at all, in one round trip. Split across separate commands, a failure between them leaves a window holding part of a response, which reads as a smaller number than was really spent and so releases the brake later than it should. The cost of doing it server-side is a ceiling -- the counters pass through Lua, whose numbers stop being exact integers above `2**53` billionths, about **$9,007,199** against a single key. Past that the store raises rather than rounding silently. Settling a protocol without that ceiling is [#532](https://github.com/pydantic/pydantic-ai-harness/issues/532).
 
 The default store is built per capability, so two `SpendLimits` instances do not quietly share one counter. Pass the same store object to both when you want them to.
 
-A store that fails does not fail quietly. An error reading the counter refuses the request, which is the safe direction. An error writing it propagates out of the run after the model has already answered and been charged, and the increment may be half applied. That is deliberate: a swallowed write would drift the counter down and weaken the gate, which is worse than a visible failure. If your deployment would rather keep the answer than the count, wrap the store and decide there.
+A store that fails does not fail quietly. An error reading the counter refuses the request, which is the safe direction. An error writing it propagates out of the run after the model has already answered and been charged, and the response goes uncounted -- not half counted, since the script is one unit of work. That is deliberate: a swallowed write would drift the counter down and weaken the gate, which is worse than a visible failure. If your deployment would rather keep the answer than the count, wrap the store and decide there.
 
 Any object with `get` and `add` works, so a Postgres or DynamoDB counter is a small class rather than a fork.
 
@@ -159,19 +161,13 @@ The capability declares itself innermost, so `after_model_request` reaches it be
 
 That covers the ordinary case, not every case. Pydantic AI orders innermost capabilities against non-innermost ones only, and among themselves the one listed *later* runs `after_model_request` *first*. `TemporalDurability` and `InputGuardrail` also declare themselves innermost, so either of them listed after `SpendLimits` sees a response before the counter does and can still reject a billed one. List `SpendLimits` last among your innermost capabilities when that matters.
 
-**Durable execution.** The capability hooks run in the workflow; the model request itself is the activity. Temporal's workflow sandbox restricts the clock these hooks read, so the workflow runner has to pass this package through:
+**Durable execution.** `SpendLimits` is not supported inside a Temporal workflow.
 
-```python {test="skip"}
-from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner, SandboxRestrictions
+The capability hooks run in workflow code; only the model request itself is the activity. Temporal replays workflow code, so it replays the accrual with it, and a window ends up counting the same response more than once -- one `$1` model activity leaves `$2` in the store once the workflow replays. The day and month buckets have the same problem from the other side: they come from a wall clock the workflow sandbox restricts, and under time-skipping the workflow's day and the key's day drift apart.
 
-runner = SandboxedWorkflowRunner(
-    restrictions=SandboxRestrictions.default.with_passthrough_modules('pydantic_ai_harness')
-)
-```
+The sandbox refusing that clock is what surfaces this first, and `SpendLimits` translates the error into what it means rather than into the setting that silences it. Passing the package through the sandbox removes the message, not the replay.
 
-Without it the first model request fails with `Cannot access datetime.datetime.now.__call__ from inside a workflow`; `SpendLimits` catches that and re-raises it naming this setting.
-
-A store that talks over the network also reads and writes from workflow code, which Temporal replays -- so a shared store is not workflow-safe here. Use the in-process store inside the workflow, and enforce the shared budget before starting it:
+Enforce the budget **before** starting the workflow instead. That is why `exhausted()` works without a `RunContext`:
 
 ```python
 async def start_if_funded(limits: SpendLimits[None], tenant_id: str) -> None:
@@ -186,12 +182,10 @@ inspected nothing -- which is exactly what a `SpendLimits` whose budgets are all
 the scope is missing. `exhausted` raises there instead, naming the budgets that need a
 `scope` or a run context. Use `status` for a reading, `exhausted` for a decision.
 
-The in-process store lives in the worker process, not in the workflow's replayable state, so a
-`Budget(window='run')` inside a durable workflow counts against whichever worker happened to
-serve each step. Its counter is also dropped 24 hours after its last write, which is the
-horizon a `run` key carries; a workflow that idles longer than that -- one waiting on a human
-approval -- starts the next step with its per-run ceiling back unless the budget sets its own
-`retain`.
+Making the accrual replay-safe needs the store write to happen inside an activity, which the
+capability cannot arrange without depending on `temporalio` and detecting the engine -- so it
+belongs in Pydantic AI core rather than here. Tracked in
+[#531](https://github.com/pydantic/pydantic-ai-harness/issues/531).
 
 For a per-run token ceiling and nothing else, Pydantic AI's own
 [`UsageLimits(total_tokens_limit=...)`](https://pydantic.dev/docs/ai/core-concepts/agent/#usage-limits)

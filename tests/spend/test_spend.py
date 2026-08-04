@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
@@ -889,17 +889,17 @@ class TestInMemoryStore:
 
 
 class FakeRedis:
-    """The three coroutines `RedisSpendStore` uses, over a dict."""
+    """The two coroutines `RedisSpendStore` uses, over a dict.
+
+    `eval` stands in for the server running the script: the same four increments
+    and the same expiry, applied as one step, which is what Redis guarantees.
+    """
 
     def __init__(self, *, bytes_keys: bool = False) -> None:
         self.hashes: dict[str, dict[str, int]] = {}
         self.expiries: dict[str, int] = {}
+        self.calls: list[str] = []
         self._bytes_keys = bytes_keys
-
-    async def hincrby(self, name: str, key: str, amount: int) -> int:
-        fields = self.hashes.setdefault(name, {})
-        fields[key] = fields.get(key, 0) + amount
-        return fields[key]
 
     async def hgetall(self, name: str) -> Mapping[str | bytes, str | bytes]:
         fields = self.hashes.get(name, {})
@@ -907,9 +907,21 @@ class FakeRedis:
             return {k.encode(): str(v).encode() for k, v in fields.items()}
         return {k: str(v) for k, v in fields.items()}
 
-    async def expire(self, name: str, time: int) -> bool:
-        self.expiries[name] = time
-        return True
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str | int) -> Sequence[int]:
+        self.calls.append(script)
+        name = str(keys_and_args[0])
+        usd, tokens, requests, unpriced, ttl = (int(argument) for argument in keys_and_args[1:])
+        fields = self.hashes.setdefault(name, {})
+        for field, amount in (
+            ('usd_nanos', usd),
+            ('tokens', tokens),
+            ('requests', requests),
+            ('unpriced', unpriced),
+        ):
+            fields[field] = fields.get(field, 0) + amount
+        if ttl > 0:
+            self.expiries[name] = ttl
+        return [fields['usd_nanos'], fields['tokens'], fields['requests'], fields['unpriced']]
 
 
 class TestRedisStore:
@@ -942,6 +954,22 @@ class TestRedisStore:
         await store.add('k', usd=Decimal('1'), tokens=1, requests=1, unpriced=0, ttl=timedelta(hours=2))
 
         assert client.expiries == {'acme:k': 7200}
+
+    async def test_a_response_is_one_round_trip_and_one_unit_of_work(self):
+        """Split across commands, a failure between them leaves a window holding part of a response."""
+        client = FakeRedis()
+        await RedisSpendStore(client).add('k', usd=Decimal('1'), tokens=1, requests=1, unpriced=0, ttl=None)
+
+        assert len(client.calls) == 1
+        assert 'HINCRBY' in client.calls[0]
+        assert 'EXPIRE' in client.calls[0]
+
+    async def test_an_amount_past_lua_s_exact_integer_range_is_refused(self):
+        """Silently rounding a counter is worse than saying the store cannot hold it."""
+        store = RedisSpendStore(FakeRedis())
+
+        with pytest.raises(ValueError, match='too large for `RedisSpendStore`'):
+            await store.add('k', usd=Decimal('9007200'), tokens=0, requests=1, unpriced=0, ttl=None)
 
     async def test_it_drives_the_gate(self):
         guard = SpendLimits(
@@ -1191,11 +1219,13 @@ class TestSpec:
 class TestDurableClock:
     """Temporal's workflow sandbox restricts `datetime.now`, which these hooks read."""
 
-    async def test_a_restricted_clock_is_re_raised_naming_the_sandbox_setting(self):
-        """The sandbox's own error names `datetime.datetime.now`, not the setting that fixes it.
+    async def test_a_restricted_clock_is_re_raised_naming_the_replay_problem(self):
+        """The sandbox refuses a symptom; the message names the replay behind it.
 
-        Matched by class name so the translation costs no `temporalio` import; the fake stands
-        in for the real exception, which `tests/spend/test_temporal.py` exercises end to end.
+        A caller told only to pass the module through would silence the error and get a counter
+        Temporal replays. Matched by class name so the translation costs no `temporalio` import;
+        the fake stands in for the real exception, which `tests/spend/test_temporal.py`
+        exercises end to end.
         """
 
         class RestrictedWorkflowAccessError(Exception):
@@ -1206,9 +1236,9 @@ class TestDurableClock:
 
         guard = SpendLimits[None](budgets=[Budget(usd=Decimal('5'))], clock=restricted)
 
-        with pytest.raises(UserError, match='with_passthrough_modules'):
+        with pytest.raises(UserError, match='not safe to run inside a Temporal workflow'):
             await _gate(guard)
-        with pytest.raises(UserError, match='pydantic_ai_harness'):
+        with pytest.raises(UserError, match='exhausted'):
             await guard.status()
 
     async def test_any_other_clock_failure_is_left_alone(self):

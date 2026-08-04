@@ -77,13 +77,12 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
     budget that reset every run would not be a daily budget. Per-run isolation
     comes from `Budget(window='run')`, whose key carries the run id.
 
-    Durable execution: the hooks run in the workflow, while the model request
-    itself is the activity. A store that talks over the network therefore reads
-    and writes from workflow code, which Temporal replays. Use the in-process
-    store there, and enforce a shared budget before starting the workflow with
-    `exhausted()`. Temporal's workflow sandbox also restricts the clock these
-    hooks read, so the workflow runner needs
-    `SandboxRestrictions.default.with_passthrough_modules('pydantic_ai_harness')`.
+    Durable execution: not supported inside a Temporal workflow. The hooks run in
+    workflow code while only the model request is the activity, so Temporal replays
+    the accrual and a window counts the same response more than once. Enforce the
+    budget before starting the workflow instead, with `exhausted()`, which is why
+    that method works without a `RunContext`. Tracked in
+    <https://github.com/pydantic/pydantic-ai-harness/issues/531>.
     """
 
     budgets: Sequence[Budget] = ()
@@ -403,13 +402,17 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         return cls(*args, budgets=budgets, **kwargs)
 
     def _now(self) -> datetime:
-        """The current time, naming the fix when Temporal's sandbox refuses the clock.
+        """The current time, naming the real problem when Temporal's sandbox refuses the clock.
 
         These hooks run in workflow code, and the default clock calls `datetime.now`, which
         Temporal's workflow sandbox restricts. The sandbox's own error names
-        `datetime.datetime.now` and not the setting that resolves it, so it is translated
-        here. Matched by class name rather than by importing `temporalio`, which this package
-        does not depend on.
+        `datetime.datetime.now` and not what it means here, so it is translated. Matched by
+        class name rather than by importing `temporalio`, which this package does not depend
+        on, and which `durable_exec/AGENTS.md` rules out detecting.
+
+        The message leads with the unsafety rather than the passthrough that silences it: the
+        sandbox is refusing a symptom, and a caller who only removes the symptom gets a
+        counter that Temporal replays.
         """
         try:
             return self.clock()
@@ -417,10 +420,11 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
             if type(error).__name__ != 'RestrictedWorkflowAccessError':
                 raise
             raise UserError(
-                "SpendLimits reads the clock from workflow code, which Temporal's workflow sandbox "
-                'restricts. Pass this package through the sandbox with '
-                "`SandboxRestrictions.default.with_passthrough_modules('pydantic_ai_harness')`, "
-                'and keep the in-process store inside the workflow.'
+                'SpendLimits is not safe to run inside a Temporal workflow. Its hooks run in '
+                'workflow code rather than in the model activity, so Temporal replays them and a '
+                'window counts the same response more than once; the clock they read is why the '
+                'sandbox stopped this. Enforce the budget before starting the workflow instead, '
+                'with `exhausted()`. See https://github.com/pydantic/pydantic-ai-harness/issues/531'
             ) from error
 
     def _key(

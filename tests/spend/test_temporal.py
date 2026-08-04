@@ -1,10 +1,16 @@
 """Temporal composition tests for `SpendLimits`.
 
-The capability keeps counters across runs, so `agent_docs/review-checklist.md` wants a public
-`Agent` durability-composition test rather than mocked lifecycle calls. Two things are
-established here: the workflow sandbox has to pass `pydantic_ai_harness` through before the
-capability can read its clock at all, and with that in place the budgets accumulate and the
-gate refuses a request from inside a workflow.
+`SpendLimits` is **not supported** inside a Temporal workflow: its hooks run in workflow code
+while only the model request is the activity, so Temporal replays the accrual and a window
+counts the same response more than once. See
+<https://github.com/pydantic/pydantic-ai-harness/issues/531>.
+
+What is pinned here is that behaviour being stated rather than worked around. The default
+sandbox refuses the clock these hooks read, and the capability translates that into what it
+means instead of into the setting that silences it. The remaining two tests drive the forced
+configuration -- module passed through the sandbox -- to pin what a caller who overrides the
+advice actually gets: the counters do accumulate and the gate does refuse, within one workflow
+execution. Neither asserts anything about replay, which is the part that is unsafe.
 
 These tests start a local Temporal dev server via `WorkflowEnvironment.start_local()` -- the
 Temporal SDK downloads and runs `temporalite` automatically.
@@ -149,8 +155,12 @@ class ExhaustedWorkflow:
         return 'the budget did not refuse the second request'  # pragma: no cover
 
 
-async def test_the_default_sandbox_refuses_the_clock_and_says_so(client: Client) -> None:
-    """Without the passthrough the capability cannot read the clock, and names the fix."""
+async def test_the_default_sandbox_refuses_the_clock_and_names_the_real_problem(client: Client) -> None:
+    """The sandbox refuses a symptom; the message has to name the replay, not the passthrough.
+
+    A caller told only how to silence the error would pass the module through and get a
+    counter Temporal replays, which is worse than the error they started with.
+    """
     async with Worker(
         client,
         task_queue=TASK_QUEUE,
@@ -166,12 +176,18 @@ async def test_the_default_sandbox_refuses_the_clock_and_says_so(client: Client)
             execution_timeout=timedelta(seconds=25),
         )
 
-    assert 'with_passthrough_modules' in message
-    assert 'pydantic_ai_harness' in message
+    assert 'not safe to run inside a Temporal workflow' in message
+    assert 'exhausted()' in message
+    assert 'issues/531' in message
+    assert 'with_passthrough_modules' not in message
 
 
-async def test_budgets_accumulate_inside_a_workflow(client: Client) -> None:
-    """With the passthrough the hooks run, and `status()` reads the counter workflow-side."""
+async def test_budgets_accumulate_inside_a_forced_workflow(client: Client) -> None:
+    """Overriding the advice, the hooks do run and `status()` reads the counter workflow-side.
+
+    Pins what the unsupported configuration does within a single execution. It says nothing
+    about replay, where this same accrual runs again.
+    """
     async with Worker(
         client,
         task_queue=TASK_QUEUE,
@@ -190,8 +206,11 @@ async def test_budgets_accumulate_inside_a_workflow(client: Client) -> None:
     assert Decimal(spent) == Decimal('2')
 
 
-async def test_the_gate_refuses_a_second_run_inside_a_workflow(client: Client) -> None:
-    """The counter outlives one run inside the workflow, which is what makes the gate a gate."""
+async def test_the_gate_refuses_a_second_run_inside_a_forced_workflow(client: Client) -> None:
+    """The counter outlives one run inside the workflow, which is what makes the gate a gate.
+
+    Same caveat as above: one execution, nothing asserted about replay.
+    """
     async with Worker(
         client,
         task_queue=TASK_QUEUE,

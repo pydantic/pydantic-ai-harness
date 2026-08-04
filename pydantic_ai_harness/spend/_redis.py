@@ -2,14 +2,13 @@
 
 Takes a client protocol rather than a Redis dependency, the way
 `pydantic_ai_harness.memory` takes a Postgres connection protocol: any client
-exposing these three coroutines works, and installing the harness pulls in
+exposing these two coroutines works, and installing the harness pulls in
 nothing extra.
 """
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import ROUND_HALF_UP, Decimal, localcontext
@@ -25,25 +24,50 @@ _TOKENS_FIELD = 'tokens'
 _REQUESTS_FIELD = 'requests'
 _UNPRICED_FIELD = 'unpriced'
 
+_ADD_SCRIPT = f"""
+local usd = redis.call('HINCRBY', KEYS[1], '{_USD_FIELD}', ARGV[1])
+local tokens = redis.call('HINCRBY', KEYS[1], '{_TOKENS_FIELD}', ARGV[2])
+local requests = redis.call('HINCRBY', KEYS[1], '{_REQUESTS_FIELD}', ARGV[3])
+local unpriced = redis.call('HINCRBY', KEYS[1], '{_UNPRICED_FIELD}', ARGV[4])
+local ttl = tonumber(ARGV[5])
+if ttl > 0 then
+  redis.call('EXPIRE', KEYS[1], ttl)
+end
+return {{usd, tokens, requests, unpriced}}
+"""
+"""Applies one response to a window and returns the four totals.
+
+Redis runs a script to completion without interleaving another command, so the
+four increments and the expiry either all land or none do. Issued separately --
+even pipelined -- a failure between them leaves a window counting some of a
+response and not the rest, which reads as a smaller number than was really spent
+and so releases the brake later than it should.
+"""
+
+_LUA_EXACT_INTEGER = 2**53
+"""Above this a Lua 5.1 number stops being an exact integer.
+
+The script's counters pass through Lua, so a window that accumulates more than
+this many billionths of a dollar -- about $9,007,199 against a *single* key --
+would start rounding. `_to_nanos` refuses an amount that could carry a counter
+past it rather than letting the rounding happen unannounced.
+"""
+
 
 @runtime_checkable
 class RedisClient(Protocol):
     """The part of a Redis client `RedisSpendStore` uses.
 
     `redis.asyncio.Redis` satisfies this. So does any wrapper or fake exposing
-    the same three coroutines.
+    the same two coroutines.
     """
-
-    async def hincrby(self, name: str, key: str, amount: int) -> int:
-        """Add `amount` to a hash field and return the new value."""
-        ...  # pragma: no cover
 
     async def hgetall(self, name: str) -> Mapping[str | bytes, str | bytes]:
         """Every field of a hash. An absent hash reads as empty."""
         ...  # pragma: no cover
 
-    async def expire(self, name: str, time: int) -> bool:
-        """Set a key's time to live, in seconds."""
+    async def eval(self, script: str, numkeys: int, *keys_and_args: str | int) -> Sequence[int]:
+        """Run a Lua script server-side and return what it returns."""
         ...  # pragma: no cover
 
 
@@ -65,7 +89,15 @@ def _to_nanos(usd: Decimal) -> int:
     """
     with localcontext() as context:
         context.prec = _PRECISION
-        return int((usd * _SCALE).to_integral_value(rounding=ROUND_HALF_UP))
+        nanos = int((usd * _SCALE).to_integral_value(rounding=ROUND_HALF_UP))
+    if nanos >= _LUA_EXACT_INTEGER:
+        raise ValueError(
+            f'{usd} is too large for `RedisSpendStore` to record exactly: the counter passes through '
+            f'Lua, whose numbers stop being exact integers above {_LUA_EXACT_INTEGER} billionths '
+            f'(about $9,007,199). Split the budget across more keys, or use a store that does not '
+            f'have this ceiling.'
+        )
+    return nanos
 
 
 def _from_nanos(nanos: int) -> Decimal:
@@ -106,7 +138,7 @@ class RedisSpendStore:
     """
 
     client: RedisClient
-    """Any client exposing `hincrby`, `hgetall`, and `expire`."""
+    """Any client exposing `hgetall` and `eval`."""
 
     prefix: str = 'pydantic-ai-harness:spend'
     """Namespace for the keys, so a shared Redis stays tidy."""
@@ -133,22 +165,21 @@ class RedisSpendStore:
     ) -> Spent:
         """Add to `key` and return the result.
 
-        Each `HINCRBY` returns its own new value, so the result needs no second
-        read. The four are not one atomic group, which does not matter: no
-        decision compares these fields against each other. Since they touch
-        different fields and none depends on another's result, they are issued
-        together rather than as four sequential round trips on the hot path of
-        every model request.
+        One round trip, and one unit of work: the script applies all four counters
+        and the expiry or none of them, so a failure cannot leave a window holding
+        part of a response. The script returns each new total, so the result needs
+        no second read.
         """
-        name = self._name(key)
-        nanos, total_tokens, total_requests, total_unpriced = await asyncio.gather(
-            self.client.hincrby(name, _USD_FIELD, _to_nanos(usd)),
-            self.client.hincrby(name, _TOKENS_FIELD, tokens),
-            self.client.hincrby(name, _REQUESTS_FIELD, requests),
-            self.client.hincrby(name, _UNPRICED_FIELD, unpriced),
+        nanos, total_tokens, total_requests, total_unpriced = await self.client.eval(
+            _ADD_SCRIPT,
+            1,
+            self._name(key),
+            _to_nanos(usd),
+            tokens,
+            requests,
+            unpriced,
+            0 if ttl is None else int(ttl.total_seconds()),
         )
-        if ttl is not None:
-            await self.client.expire(name, int(ttl.total_seconds()))
         return Spent(
             usd=_from_nanos(nanos),
             tokens=total_tokens,
