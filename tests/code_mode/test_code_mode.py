@@ -1214,6 +1214,39 @@ class TestCodeMode:
         # The agent's final output reflects the value flowing through the sandbox.
         assert result.output == 'sum is 10'
 
+    async def test_code_mode_stringifies_unserializable_final_expression(self) -> None:
+        """An unsupported final expression becomes a string instead of crashing serialization."""
+        from pydantic_ai.messages import (
+            ModelMessage,
+            ModelRequest,
+            ModelResponse,
+            TextPart,
+            ToolCallPart,
+            ToolReturnPart,
+        )
+        from pydantic_ai.models.function import AgentInfo, FunctionModel
+
+        observed_returns: list[Any] = []
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+                return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': 'dict'})])
+
+            last_request = messages[-1]
+            assert isinstance(last_request, ModelRequest)
+            run_code_return = next(
+                part for part in last_request.parts if isinstance(part, ToolReturnPart) and part.tool_name == 'run_code'
+            )
+            observed_returns.append(run_code_return.content)
+            return ModelResponse(parts=[TextPart(str(run_code_return.content))])
+
+        agent: Agent[object, str] = Agent(FunctionModel(model_fn), capabilities=[CodeMode[object]()])
+
+        result = await agent.run('return a class')
+
+        assert observed_returns == ["<class 'dict'>"]
+        assert result.output == "<class 'dict'>"
+
     async def test_deferred_capability_loader_stays_native_with_tools_all(self) -> None:
         """Regression for the deferred-capability bootstrap (issue #276).
 
