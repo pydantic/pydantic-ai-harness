@@ -21,9 +21,10 @@ def build_toolset(limits: SpendLimits[AgentDepsT]) -> FunctionToolset[AgentDepsT
             return 'No budgets are configured.'
         return '\n'.join(
             f'{s.budget.name} ({s.budget.window}): ${s.spent.usd} spent, '
-            f'{"no limit" if s.remaining_usd is None else f"${s.remaining_usd} left"}, '
-            f'{s.spent.tokens} tokens'
+            f'{"no limit" if s.remaining_usd is None else f"${s.remaining_usd} left"}; '
+            f'{s.spent.tokens} tokens used, '
+            f'{"no limit" if s.remaining_tokens is None else f"{s.remaining_tokens} left"}'
             for s in statuses
         )
 
-    return FunctionToolset[AgentDepsT]([get_spend])
+    return FunctionToolset[AgentDepsT]([get_spend], id='spend')

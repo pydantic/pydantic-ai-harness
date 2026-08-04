@@ -97,6 +97,11 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
 
     Returning `None` falls through to `genai-prices`. This is the way to charge
     a self-hosted model, or a negotiated rate the public registry does not know.
+
+    An amount must be finite and not negative. Anything else fails the run with
+    `UserError`, after the response's tokens and request count have been recorded:
+    a credit would move a budget away from its ceiling, and a NaN or an infinity
+    is a broken pricing function rather than a price.
     """
 
     on_spend: SpendCallback | None = None
@@ -144,6 +149,36 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         # counter is not that: it reads as two independent limits and behaves as the smaller
         # one. Comparing against a single remembered budget per slot missed any collision a
         # later budget displaced, so the slot carries every attribute the counter key does.
+        if self.defer_loading is True:
+            # Both hooks are skipped while a deferred capability is unloaded, so an
+            # exhausted budget would let requests through until the model happened to
+            # load it, and the responses it missed would never be counted. A brake that
+            # the thing being braked decides when to apply is not a brake.
+            raise UserError(
+                '`defer_loading` is not supported on `SpendLimits`: the enforcement and accounting '
+                'hooks do not run until the capability is loaded, so an exhausted budget would not '
+                'stop a request and the requests made meanwhile would go uncounted.'
+            )
+
+        # Two budgets that share a name and window but declare different scope callables are
+        # different dimensions -- per tenant and per user, say -- keyed only by what each
+        # callable returns. Nothing stops those returning the same string, and the counter
+        # that results mixes the two, because every update writes every metric. Sharing one
+        # callable is how a USD and a token ceiling deliberately share a counter.
+        scoped: dict[tuple[str, str], Budget] = {}
+        for budget in self.budgets:
+            if budget.scope is None:
+                continue
+            slot = (budget.name, budget.window)
+            prior = scoped.get(slot)
+            if prior is not None and prior.scope is not budget.scope:
+                raise UserError(
+                    f'Budgets named {budget.name!r} on the same window declare different `scope` callables, '
+                    'so they would share one counter whenever the two return the same string, mixing the '
+                    'dimensions. Give them different `name`s, or pass the same callable to both.'
+                )
+            scoped[slot] = budget
+
         seen: set[tuple[str, str, str, int]] = set()
         for budget in self.budgets:
             for kind, ceiling in (('usd', budget.usd), ('tokens', budget.tokens)):
@@ -213,7 +248,7 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         response: ModelResponse,
     ) -> ModelResponse:
         """Price the response, add it to every window, and report the result."""
-        usd, priced = self._price_of(response)
+        usd, priced, price_error = self._price_of(response)
         accrued: dict[str, Spent] = {}
         statuses: list[BudgetStatus] = []
         for budget, key in self._keyed(ctx):
@@ -242,6 +277,12 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
             result = self.on_spend(snapshot)
             if inspect.isawaitable(result):
                 await result
+
+        if price_error is not None:
+            # Raised after the store and `on_spend` have seen the response, for the reason
+            # `_price_of` gives. Ahead of the `on_unpriced` handling below, which would
+            # otherwise report a broken pricing function as an unknown model.
+            raise UserError(f'`SpendLimits.price` {price_error} for a response.')
 
         if not priced and self.on_unpriced == 'zero' and any(budget.usd is not None for budget in self.budgets):
             # Only this combination is silent: the response adds nothing in dollars, so a
@@ -415,30 +456,22 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
     def _keyed(self, ctx: RunContext[AgentDepsT]) -> list[tuple[Budget, str]]:
         """Each budget paired with the store key it accumulates under right now.
 
-        The construction-time check compares the shapes a key is built from; here the keys
-        themselves are known, so two budgets whose scopes are different callables returning
-        the same string are caught as well. That is the common way it happens: a scope written
-        twice as `lambda ctx: ctx.deps.tenant` is two objects and one key.
+        No collision check here. Every part of a key is fixed at construction -- `name`,
+        `window`, and the scope callable -- and `__post_init__` rejects the combinations
+        that would collide, so two budgets share a key only where sharing one is the
+        point. Checking again would repeat that work on every model request.
         """
         now = self._now()
-        keyed = [(budget, self._key(budget, ctx, now, None)) for budget in self.budgets]
-        claimed: dict[tuple[str, str], Budget] = {}
-        for budget, key in keyed:
-            for kind, ceiling in (('usd', budget.usd), ('tokens', budget.tokens)):
-                if ceiling is None:
-                    continue
-                prior = claimed.get((key, kind))
-                if prior is not None and prior is not budget:
-                    raise UserError(
-                        f'Budgets {prior.name!r} and {budget.name!r} accumulate under the same key {key!r} and '
-                        f'both set a `{kind}` ceiling, so only the smaller would ever apply. '
-                        'Give them different `name`s, or one scope.'
-                    )
-                claimed[(key, kind)] = budget
-        return keyed
+        return [(budget, self._key(budget, ctx, now, None)) for budget in self.budgets]
 
-    def _price_of(self, response: ModelResponse) -> tuple[Decimal, bool]:
-        """What the response cost, and whether that number is real."""
+    def _price_of(self, response: ModelResponse) -> tuple[Decimal, bool, str | None]:
+        """What the response cost, whether that number is real, and why it was rejected.
+
+        A rejected amount is reported rather than raised so the caller can finish
+        accruing the response first. The request happened and its tokens were really
+        spent, so dropping them would leave a token ceiling understating what the model
+        was asked to do -- the same reasoning `on_unpriced='raise'` already follows.
+        """
         if self.price is not None:
             supplied = self.price(response)
             if supplied is not None:
@@ -446,22 +479,22 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
                     # Checked before the comparison below, which raises `InvalidOperation`
                     # on a NaN rather than returning False. An infinity would pass that
                     # comparison and then exhaust every budget it reached at once.
-                    raise UserError(f'`SpendLimits.price` returned a non-finite amount ({supplied}) for a response.')
+                    return Decimal(0), False, f'returned a non-finite amount ({supplied})'
                 if supplied < 0:
                     # A credit would move a budget away from its ceiling, which
                     # turns a bug in the pricing function into a gate that never
                     # closes. Corrections belong in the store, not here.
-                    raise UserError(f'`SpendLimits.price` returned a negative amount ({supplied}) for a response.')
-                return supplied, True
+                    return Decimal(0), False, f'returned a negative amount ({supplied})'
+                return supplied, True, None
         if response.model_name:
             try:
-                return response.cost().total_price, True
+                return response.cost().total_price, True, None
             except (LookupError, ValueError):
                 # LookupError: the registry has no entry. ValueError: it rejects the
                 # usage shape. Either way this is a pricing failure, and letting it
                 # escape would skip `on_unpriced` and drop the accrual with it.
                 pass
-        return Decimal(0), False
+        return Decimal(0), False, None
 
 
 def _status(budget: Budget, key: str, spent: Spent) -> BudgetStatus:

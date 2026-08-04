@@ -84,6 +84,17 @@ class Budget:
     name: str = 'default'
     """Distinguishes budgets sharing a window and scope. Part of the store key."""
 
+    retain: timedelta | Literal['window default', 'forever'] = 'window default'
+    """How long a store may keep this window's counter after its last write.
+
+    `'window default'` takes the horizon from `window` (see `_TTLS`). A time window
+    may expire freely once it has rolled over, but `run` and `conversation` buckets
+    never roll over, so their defaults are a compromise between never expiring and
+    growing the store without bound -- and a conversation resumed past the horizon
+    starts again from zero. Set `'forever'` where that matters and the keys are
+    cleaned up some other way, or a `timedelta` to pick the horizon outright.
+    """
+
     def __post_init__(self) -> None:
         """Reject configurations that would quietly misbehave rather than fail.
 
@@ -99,10 +110,21 @@ class Budget:
             raise UserError(f'Budget.window must be one of {sorted(WINDOWS)}; got {self.window!r}.')
         if not self.name or SEPARATOR in self.name:
             raise UserError(f'Budget.name must be non-empty and must not contain {SEPARATOR!r}; got {self.name!r}.')
-        if self.usd is not None and self.usd <= 0:
-            raise UserError(f'Budget.usd must be positive; got {self.usd}. Use `usd=None` for no ceiling.')
+        if self.usd is not None:
+            # Checked before the comparison, which raises `InvalidOperation` on a NaN
+            # rather than returning False. An infinity passes it and reads as a ceiling
+            # that can never be reached, which `usd=None` already says outright.
+            if not self.usd.is_finite():
+                raise UserError(f'Budget.usd must be a finite amount; got {self.usd}. Use `usd=None` for no ceiling.')
+            if self.usd <= 0:
+                raise UserError(f'Budget.usd must be positive; got {self.usd}. Use `usd=None` for no ceiling.')
         if self.tokens is not None and self.tokens <= 0:
             raise UserError(f'Budget.tokens must be positive; got {self.tokens}. Use `tokens=None` for no ceiling.')
+        if isinstance(self.retain, timedelta) and self.retain <= timedelta(0):
+            raise UserError(
+                f'Budget.retain must be a positive duration; got {self.retain}. '
+                "Use 'forever' to keep the counter until something else removes it."
+            )
         if self.warn_at is not None:
             if not 0 < self.warn_at <= 1:
                 raise UserError(f'Budget.warn_at must be a fraction in (0, 1]; got {self.warn_at!r}.')
@@ -120,7 +142,11 @@ class Budget:
     @property
     def ttl(self) -> timedelta | None:
         """How long a store may keep this window's counter after its last write."""
-        return _TTLS[self.window]
+        if self.retain == 'forever':
+            return None
+        if self.retain == 'window default':
+            return _TTLS[self.window]
+        return self.retain
 
 
 def bucket(window: Window, ctx: RunContext[Any] | None, now: datetime) -> str | None:
@@ -166,6 +192,16 @@ def scope_key(budget: Budget, ctx: RunContext[Any] | None, explicit: str | None)
     resolved = budget.scope(ctx) if ctx is not None else explicit
     if resolved is None:  # pragma: no cover - callers filter these budgets out first
         raise UserError(f'Budget {budget.name!r} declares a scope, which cannot be resolved without a run.')
+    if not isinstance(resolved, str):  # pyright: ignore[reportUnnecessaryIsInstance]
+        # `scope` is annotated `-> str`, but it is supplied by the caller and a tenant id
+        # is often an int or a UUID. Checked rather than coerced: `str()` on an object
+        # with no `__str__` produces a repr carrying a memory address, which mints a new
+        # counter on every run. Without this the failure is `TypeError: argument of type
+        # 'int' is not iterable`, from the separator check below.
+        raise UserError(
+            f'The scope of budget {budget.name!r} must return a string; got {type(resolved).__name__}. '
+            'Convert it in the scope callable, so the key it produces is the one you intend.'
+        )
     if not resolved or SEPARATOR in resolved or resolved == _ANY_SCOPE:
         raise UserError(
             f'The scope of budget {budget.name!r} must be non-empty and must not be {_ANY_SCOPE!r} or '

@@ -191,6 +191,27 @@ class TestBudgetConfiguration:
         with pytest.raises(UserError, match='could never fire'):
             Budget(window='total', warn_at=0.8)
 
+    @pytest.mark.parametrize('amount', ['NaN', 'Infinity', '-Infinity'])
+    def test_a_non_finite_usd_ceiling_is_refused(self, amount: str):
+        """`NaN <= 0` raises `InvalidOperation`, and an infinity reads as a ceiling nothing reaches."""
+        with pytest.raises(UserError, match='must be a finite amount'):
+            Budget(usd=Decimal(amount))
+
+    def test_retain_defaults_to_the_window_horizon(self):
+        assert Budget(window='conversation').ttl == timedelta(days=30)
+
+    def test_retain_forever_never_expires(self):
+        """A conversation resumed past the default horizon would otherwise start again from zero."""
+        assert Budget(window='conversation', retain='forever').ttl is None
+
+    def test_retain_may_name_its_own_horizon(self):
+        assert Budget(window='run', retain=timedelta(hours=2)).ttl == timedelta(hours=2)
+
+    @pytest.mark.parametrize('retain', [timedelta(0), timedelta(seconds=-1)])
+    def test_a_non_positive_retain_is_refused(self, retain: timedelta):
+        with pytest.raises(UserError, match='must be a positive duration'):
+            Budget(retain=retain)
+
     @pytest.mark.parametrize(
         ('kwargs', 'match'),
         [
@@ -324,6 +345,16 @@ class TestKeyCollisions:
 
 class TestScope:
     """`scope` partitions one counter; it does not select a store."""
+
+    async def test_a_scope_that_returns_a_non_string_is_refused(self):
+        """A tenant id is often an int or a UUID, and the annotation alone does not stop one."""
+        guard = SpendLimits(
+            budgets=[Budget(usd=Decimal('1'), scope=lambda ctx: ctx.deps)],  # pyright: ignore[reportArgumentType, reportUnknownLambdaType, reportUnknownArgumentType, reportUnknownMemberType]
+            price=lambda r: Decimal('0.4'),
+        )
+
+        with pytest.raises(UserError, match='must return a string; got int'):
+            await _record(guard, ctx=_run_ctx(deps=7))
 
     async def test_tenants_count_separately(self):
         guard = SpendLimits(
@@ -516,6 +547,26 @@ class TestPricing:
 
         with pytest.raises(UserError, match='returned a non-finite amount'):
             await _record(guard)
+
+    @pytest.mark.parametrize(('amount', 'message'), [('-1', 'negative amount'), ('NaN', 'non-finite amount')])
+    async def test_a_rejected_price_still_records_the_response(self, amount: str, message: str):
+        """The request was billed by the provider whatever the pricing function returned."""
+        seen: list[SpendSnapshot] = []
+        guard = SpendLimits(
+            budgets=[Budget(window='total', name='audit')],
+            price=lambda r: Decimal(amount),
+            on_spend=seen.append,
+        )
+
+        with pytest.raises(UserError, match=message):
+            await _record(guard)
+
+        spent = (await guard.status())[0].spent
+        assert spent.requests == 1
+        assert spent.tokens > 0
+        assert spent.usd == Decimal(0)
+        assert spent.unpriced_requests == 1
+        assert len(seen) == 1
 
     async def test_an_unpriced_response_warns_once_per_model_against_a_usd_ceiling(self):
         """A USD ceiling cannot be reached by requests nothing can price, so it says so -- once."""
@@ -1039,18 +1090,45 @@ class TestDuplicateBudgets:
                 ]
             )
 
-    async def test_two_scopes_that_resolve_alike_are_refused_when_the_keys_are_known(self):
-        """Two lambdas are two objects and one key, which construction cannot see."""
-        guard = SpendLimits[None](
-            budgets=[
-                Budget(usd=Decimal('5'), window='day', scope=lambda ctx: 'acme', name='tenant'),
-                Budget(usd=Decimal('100'), window='day', scope=lambda ctx: 'acme', name='tenant'),
-            ],
-            price=lambda response: Decimal('1'),
-        )
+    def test_two_different_scope_callables_under_one_name_are_refused(self):
+        """Two lambdas are two dimensions, and nothing stops them returning the same string."""
+        with pytest.raises(UserError, match='different `scope` callables'):
+            SpendLimits[None](
+                budgets=[
+                    Budget(usd=Decimal('5'), window='day', scope=lambda ctx: 'acme', name='tenant'),
+                    Budget(usd=Decimal('100'), window='day', scope=lambda ctx: 'acme', name='tenant'),
+                ],
+            )
 
-        with pytest.raises(UserError, match='accumulate under the same key'):
-            await _agent(guard).run('hi')
+    def test_two_scope_dimensions_sharing_a_name_are_refused_across_metrics(self):
+        """A USD tenant budget and a token user budget merge whenever the two ids coincide."""
+        with pytest.raises(UserError, match='different `scope` callables'):
+            SpendLimits[None](
+                budgets=[
+                    Budget(usd=Decimal('5'), window='day', scope=lambda ctx: 'acme', name='shared'),
+                    Budget(tokens=1000, window='day', scope=lambda ctx: 'acme', name='shared'),
+                ],
+            )
+
+    async def test_one_scope_callable_may_carry_both_ceilings(self):
+        """Sharing the callable is how a scoped window deliberately shares its counter."""
+
+        def scope(ctx: RunContext[Any]) -> str:
+            return str(ctx.deps)
+
+        guard = SpendLimits(
+            budgets=[
+                Budget(usd=Decimal('5'), window='day', scope=scope, name='tenant'),
+                Budget(tokens=1000, window='day', scope=scope, name='tenant'),
+            ],
+            price=lambda r: Decimal('1'),
+        )
+        await _record(guard, ctx=_run_ctx(deps='acme'))
+
+        usd_budget, token_budget = await guard.status(scope='acme')
+        assert usd_budget.key == token_budget.key
+        assert usd_budget.spent.usd == Decimal('1')
+        assert token_budget.spent.tokens == 1100
 
     def test_a_usd_and_a_token_ceiling_may_share_a_counter(self):
         guard = SpendLimits[None](budgets=[Budget(usd=Decimal('5')), Budget(tokens=100)])
@@ -1063,6 +1141,11 @@ class TestDuplicateBudgets:
         )
 
         assert len(guard.budgets) == 2
+
+    def test_deferred_loading_is_refused(self):
+        """Both hooks are skipped until the model loads it, so the brake would not be holding."""
+        with pytest.raises(UserError, match='`defer_loading` is not supported'):
+            SpendLimits[None](budgets=[Budget(usd=Decimal('5'))], defer_loading=True, id='spend')
 
 
 class TestSpec:
