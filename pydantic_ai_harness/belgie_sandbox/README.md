@@ -132,9 +132,11 @@ package resolution as `allow_package_imports=True` (not only the render
 dependency). Model scripts stay workspace-restricted: they do not receive host
 path, FFI, or system-info grants. Vite runs only on a Belgie-owned renderer
 side-channel with workspace FFI/sys/write and loopback network (`localhost`) --
-not unrestricted `allow_net`. Use `plugins: []` for untrusted agents -- plugin
-factories run with the renderer's broader workspace permissions. A script can
-then return self-contained HTML:
+not unrestricted `allow_net`. That renderer privilege set is required for Vite
+and native npm add-ons; model-selected `plugins` run with those grants, so use
+`plugins: []` for untrusted agents (plugin factories can write under the
+workspace and load native code from `node_modules`). A script can then return
+self-contained HTML:
 
 ```tsx
 import { render } from "@belgie/render";

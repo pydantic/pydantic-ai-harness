@@ -299,7 +299,12 @@ class BelgieSandboxSession:
             self._entering = False
             raise BelgieSandboxError('Belgie Sandbox requires an asyncio event loop.') from error
 
-        belgie = _load_belgie()
+        try:
+            belgie = _load_belgie()
+        except BelgieSandboxError:
+            self._entering = False
+            raise
+
         try:
             if self._configured_runtime is not None:
                 runtime_context = self._configured_runtime

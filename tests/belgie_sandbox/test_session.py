@@ -181,8 +181,12 @@ class TestBelgieSandboxSession:
         self, fake_belgie: FakeBelgie, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setitem(sys.modules, 'belgie', None)
+        session = BelgieSandboxSession()
         with pytest.raises(BelgieSandboxUnavailableError, match='Python 3.12-3.14'):
-            await BelgieSandboxSession().__aenter__()
+            await session.__aenter__()
+        # Import failure must clear the entering guard so a later attempt can run.
+        with pytest.raises(BelgieSandboxUnavailableError, match='Python 3.12-3.14'):
+            await session.__aenter__()
 
     async def test_start_failure_cleans_up(self, fake_belgie: FakeBelgie) -> None:
         fake_belgie.start_error = RuntimeError('worker failed')
