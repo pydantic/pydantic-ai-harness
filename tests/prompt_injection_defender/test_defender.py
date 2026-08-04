@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib.util
 import operator
 from collections.abc import Sequence
 from datetime import datetime, timezone
+from importlib.machinery import ModuleSpec
 from typing import Any
 
 import pytest
@@ -98,9 +100,23 @@ def test_defense_with_block_high_risk_raises() -> None:
         PromptInjectionDefender(_observe(), block_high_risk=True)
 
 
+def test_defense_with_semantic_detection_raises() -> None:
+    with pytest.raises(UserError, match='semantic_detection'):
+        PromptInjectionDefender(_observe(), semantic_detection=True)
+
+
+def test_semantic_detection_without_onnxruntime_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    find_spec = importlib.util.find_spec
+
+    def missing_onnxruntime(name: str) -> Any:
+        return None if name == 'onnxruntime' else find_spec(name)
+
+    monkeypatch.setattr(importlib.util, 'find_spec', missing_onnxruntime)
+    with pytest.raises(UserError, match=r'pydantic-ai-harness\[stackone-defender-ml\]'):
+        PromptInjectionDefender(semantic_detection=True)
+
+
 async def test_default_construction_clean_short_payload() -> None:
-    # The default defense keeps Tier 2 enabled; a payload under its size floor never
-    # touches the classifier, so this stays deterministic without the onnx extra.
     cap: PromptInjectionDefender[object] = PromptInjectionDefender()
     result = {'note': 'all good'}
     assert await _run(cap, result) is result
@@ -117,20 +133,30 @@ def test_instructions_only_with_annotate_boundary() -> None:
     assert '[UD-' in instructions
 
 
-async def test_warmup_runs_at_run_start(monkeypatch: pytest.MonkeyPatch) -> None:
-    defense = _observe()
+async def test_semantic_detection_warms_model_at_run_start(monkeypatch: pytest.MonkeyPatch) -> None:
     warmups: list[bool] = []
-    monkeypatch.setattr(defense, 'warmup_tier2', lambda: warmups.append(True))
-    cap = PromptInjectionDefender(defense, warmup=True)
+
+    def found_module(name: str, package: str | None = None) -> ModuleSpec:
+        return ModuleSpec(name, loader=None)
+
+    def record_warmup(self: PromptDefense) -> None:
+        warmups.append(True)
+
+    monkeypatch.setattr(importlib.util, 'find_spec', found_module)
+    monkeypatch.setattr(PromptDefense, 'warmup_tier2', record_warmup)
+    cap: PromptInjectionDefender[object] = PromptInjectionDefender(semantic_detection=True)
     await cap.before_run(_make_ctx())
     assert warmups == [True]
 
 
 async def test_no_warmup_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    defense = _observe()
     warmups: list[bool] = []
-    monkeypatch.setattr(defense, 'warmup_tier2', lambda: warmups.append(True))
-    await PromptInjectionDefender(defense).before_run(_make_ctx())
+
+    def record_warmup(self: PromptDefense) -> None:
+        warmups.append(True)  # pragma: no cover - the assertion proves this callback is not called
+
+    monkeypatch.setattr(PromptDefense, 'warmup_tier2', record_warmup)
+    await PromptInjectionDefender().before_run(_make_ctx())
     assert warmups == []
 
 
@@ -346,6 +372,43 @@ async def test_tool_return_envelope_preserved() -> None:
     assert 'prompt_injection_content' not in out.metadata
 
 
+async def test_default_defense_sanitizes_plain_string_result() -> None:
+    out = await _run(PromptInjectionDefender(), INJECTION)
+    assert _return_value(out) == SANITIZED_INJECTION
+
+
+async def test_default_defense_sanitizes_tool_return_content() -> None:
+    result: ToolReturn[object] = ToolReturn(return_value='clean', content=INJECTION)
+    out = await _run(PromptInjectionDefender(), result)
+    assert out.return_value == 'clean'
+    assert out.content == SANITIZED_INJECTION
+    assert out.metadata['prompt_injection_content']['fields_sanitized'] == ['content']
+
+
+async def test_default_defense_sanitizes_tool_return_content_sequence() -> None:
+    binary = BinaryContent(data=b'x', media_type='image/png')
+    result: ToolReturn[object] = ToolReturn(return_value='clean', content=[TextContent(content=INJECTION), binary])
+    out = await _run(PromptInjectionDefender(), result)
+    assert out.content == [TextContent(content=SANITIZED_INJECTION), binary]
+
+
+@pytest.mark.parametrize('sanitized', [{'content': 42}, {}])
+async def test_invalid_sanitized_content_keeps_original(monkeypatch: pytest.MonkeyPatch, sanitized: object) -> None:
+    defense = _observe()
+    scan = defense.defend_tool_result_async
+
+    async def return_invalid_content(value: Any, tool_name: str) -> DefenseResult:
+        verdict = await scan(value, tool_name)
+        if value == {'content': 'caption'}:
+            return dataclasses.replace(verdict, sanitized=sanitized, detections=['invalid_content'])
+        return verdict
+
+    monkeypatch.setattr(defense, 'defend_tool_result_async', return_invalid_content)
+    result: ToolReturn[object] = ToolReturn(return_value='clean', content='caption')
+    out = await _run(PromptInjectionDefender(defense), result)
+    assert out.content == 'caption'
+
+
 async def test_blocked_tool_return_drops_content() -> None:
     cap = PromptInjectionDefender(_blocking())
     result: ToolReturn[object] = ToolReturn(
@@ -415,9 +478,8 @@ async def test_binary_value_with_clean_content_passes_through() -> None:
 
 async def test_blocked_via_content_unit(monkeypatch: pytest.MonkeyPatch) -> None:
     # An unscannable return value with blockable content: the whole result is replaced
-    # and only the content diagnostics are attached. Free-text content is blocked only
-    # by the Tier 2/3 classifiers, which unit tests do not exercise, so a real verdict
-    # is escalated to simulate a classifier threat.
+    # and only the content diagnostics are attached. Escalate a real Tier 1 verdict to
+    # isolate the whole-result replacement behavior.
     defense = _blocking()
     scan = defense.defend_tool_result_async
 
@@ -443,7 +505,8 @@ async def test_content_flag_records_content_metadata(monkeypatch: pytest.MonkeyP
 
     async def escalate(value: Any, tool_name: str) -> DefenseResult:
         verdict = await scan(value, tool_name)
-        return dataclasses.replace(verdict, risk_level='high') if value == 'suspicious caption' else verdict
+        expected = {'content': 'suspicious caption'}
+        return dataclasses.replace(verdict, risk_level='high') if value == expected else verdict
 
     monkeypatch.setattr(defense, 'defend_tool_result_async', escalate)
     verdicts, on_detection = _recorder()

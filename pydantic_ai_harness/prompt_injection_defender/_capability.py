@@ -17,11 +17,12 @@ External-service assumptions (verified 2026-07-23 against stackone-defender 0.7.
   string or a list of strings produces no `detections`, no `fields_sanitized`, and no
   block, even with `block_high_risk=True`. Free-text results are covered by the Tier 2
   classifier, which requires the separate `stackone-defender[onnx]` install. Source:
-  `stackone_defender/core/tool_result_sanitizer.py`. This module therefore scans retry
-  and failure text wrapped as `{'content': text}`: `content` is a default risky field
-  name (`DEFAULT_RISKY_FIELDS` in `stackone_defender/config.py`), so Tier 1 inspects
-  the wrapped text. A per-tool `tool_overrides` entry that excludes `content` opts that
-  tool's text out of the wrapped scan.
+  `stackone_defender/core/tool_result_sanitizer.py`. This module therefore scans bare
+  return values, `ToolReturn.content`, retry text, and failure text wrapped under the
+  `content` default risky field (`DEFAULT_RISKY_FIELDS` in
+  `stackone_defender/config.py`), so Tier 1 inspects the wrapped text. A per-tool
+  `tool_overrides` entry that excludes `content` opts that tool's text out of the
+  wrapped scan.
 - Boundary annotation wraps risky-field strings without populating `detections` or
   `fields_sanitized`, so adopting `sanitized` output is gated on `annotate_boundary` as
   well as on findings. Source: `stackone_defender/core/prompt_defense.py`.
@@ -45,6 +46,7 @@ External-service assumptions (verified 2026-07-23 against stackone-defender 0.7.
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import Any, TypeGuard
@@ -53,11 +55,18 @@ import anyio.to_thread
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, WrapToolExecuteHandler
 from pydantic_ai.exceptions import ToolFailedError, ToolRetryError, UserError
 from pydantic_ai.messages import (
+    AudioUrl,
+    BinaryContent,
+    CachePoint,
+    DocumentUrl,
+    ImageUrl,
     RetryPromptPart,
     TextContent,
     ToolCallPart,
     ToolReturn,
+    UploadedFile,
     UserContent,
+    VideoUrl,
     is_multi_modal_content,
 )
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector, matches_tool_selector
@@ -68,7 +77,7 @@ try:
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
         'stackone-defender is required for PromptInjectionDefender (Python 3.11 or newer). '
-        'Install it with: pip install "pydantic-ai-harness[prompt-injection-defender]"'
+        'Install it with: uv add "pydantic-ai-harness[stackone-defender]"'
     ) from _import_error
 
 _DEFAULT_BLOCKED_MESSAGE = (
@@ -144,6 +153,18 @@ def _is_object_list(value: object) -> TypeGuard[list[object]]:
     return isinstance(value, list)
 
 
+def _is_user_content_sequence(value: object) -> TypeGuard[Sequence[UserContent]]:
+    """A rebuilt content sequence that still satisfies `ToolReturn.content`."""
+    if not _is_rebuildable_sequence(value):
+        return False
+    return all(
+        isinstance(
+            item, (str, TextContent, ImageUrl, AudioUrl, DocumentUrl, VideoUrl, BinaryContent, UploadedFile, CachePoint)
+        )
+        for item in value
+    )
+
+
 def _is_opaque(value: object) -> bool:
     """Content with no scannable text: multi-modal parts and binary blobs."""
     return is_multi_modal_content(value) or isinstance(value, (bytes, bytearray, memoryview))
@@ -217,9 +238,10 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     diagnostics land on `ToolReturn.metadata` (not visible to the model) and on the
     `on_detection` callback.
 
-    By default the capability mirrors the library's observe-and-sanitize posture. Pass
-    `block_high_risk=True` to withhold high-risk results, or a fully configured
-    `defense` for anything beyond the defaults (tier selection, thresholds, per-tool
+    By default the capability uses deterministic pattern detection and mirrors the
+    library's observe-and-sanitize posture. Pass `semantic_detection=True` to add the
+    local ML classifier, `block_high_risk=True` to withhold high-risk results, or a
+    fully configured `defense` for anything beyond the defaults (thresholds, per-tool
     risky fields, Tier 3 adjudication).
 
     Provider-native tools (for example hosted web search) run server-side and never
@@ -257,6 +279,14 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     combined with `defense`; configure blocking on the `PromptDefense` instead.
     """
 
+    semantic_detection: bool = False
+    """Use StackOne Defender's local ML classifier in addition to pattern detection.
+
+    Requires the `stackone-defender-ml` extra. The model is loaded in a worker thread
+    at run start so the first tool call does not pay the initialization cost. Cannot
+    be combined with `defense`; configure Tier 2 on the `PromptDefense` instead.
+    """
+
     annotate_boundary: bool = False
     """Wrap untrusted risky-field strings in `[UD-*]` boundary tags.
 
@@ -277,14 +307,6 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     May reference `{tool_name}` and `{risk_level}`; literal braces must be doubled.
     """
 
-    warmup: bool = False
-    """Preload the Tier 2 model in a worker thread at run start.
-
-    Without it, the first large-enough scan pays the one-time model load inline on the
-    event loop. Loading is idempotent and shared across instances, so leaving this on
-    costs nothing after the first run.
-    """
-
     _defense: PromptDefense = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -299,12 +321,21 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
         if self.defense is not None:
             if self.block_high_risk is not None:
                 raise UserError(
-                    'PromptInjectionDefender got both `defense` and `block_high_risk`; the flag would have '
-                    'no effect. Configure blocking on the defense instead: '
-                    'create_prompt_defense(block_high_risk=...).'
+                    'PromptInjectionDefender got both `defense` and `block_high_risk`; the option would have no '
+                    'effect. Configure blocking on the supplied defense instead.'
+                )
+            if self.semantic_detection:
+                raise UserError(
+                    'PromptInjectionDefender got both `defense` and `semantic_detection`; the option would have no '
+                    'effect. Configure Tier 2 on the supplied defense instead.'
                 )
             self._defense = self.defense
         else:
+            if self.semantic_detection and importlib.util.find_spec('onnxruntime') is None:
+                raise UserError(
+                    'PromptInjectionDefender requires ONNX Runtime when `semantic_detection=True`. '
+                    'Install it with: uv add "pydantic-ai-harness[stackone-defender-ml]"'
+                )
             # The `create_prompt_defense` factory takes untyped `**kwargs`, which pyright
             # strict rejects; `PromptDefense` itself accepts the same keyword arguments.
             # Large-array sampling is disabled so long lists are scanned in full; with
@@ -313,6 +344,7 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
                 config={'traversal': {'skip_large_arrays': False}},
                 block_high_risk=bool(self.block_high_risk),
                 annotate_boundary=self.annotate_boundary,
+                enable_tier2=self.semantic_detection,
             )
 
     def get_ordering(self) -> CapabilityOrdering:
@@ -324,8 +356,8 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
         return generate_boundary_instructions() if self.annotate_boundary else None
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Optionally preload the Tier 2 model off the event loop."""
-        if self.warmup:
+        """Preload the optional semantic classifier off the event loop."""
+        if self.semantic_detection:
             await anyio.to_thread.run_sync(self._defense.warmup_tier2)
 
     async def after_tool_execute(
@@ -352,7 +384,7 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
             return_value, content, metadata = original, None, None
 
         value_verdict, projected = await self._scan_value(return_value, call.tool_name)
-        content_verdict = await self._scan_content(content, call.tool_name)
+        content_verdict, content_projected = await self._scan_content(content, call.tool_name)
         scanned = [verdict for verdict in (value_verdict, content_verdict) if verdict is not None]
         if not scanned:
             return original
@@ -378,13 +410,19 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
         if value_verdict is not None and (_findings(value_verdict) or self.annotate_boundary):
             rebuilt = _rebuild(return_value, projected, value_verdict.sanitized)
 
-        if rebuilt is return_value and not records:
+        rebuilt_content = content
+        if content_verdict is not None and (_findings(content_verdict) or self.annotate_boundary):
+            content_candidate = _rebuild(content, content_projected, content_verdict.sanitized)
+            if isinstance(content_candidate, str) or _is_user_content_sequence(content_candidate):
+                rebuilt_content = content_candidate
+
+        if rebuilt is return_value and rebuilt_content is content and not records:
             # A clean result keeps its original type; a plain value is not wrapped in a `ToolReturn`.
             return original
 
         new_metadata = self._merged_metadata(metadata, records)
         if wrapped:
-            return ToolReturn(return_value=rebuilt, content=content, metadata=new_metadata)
+            return ToolReturn(return_value=rebuilt, content=rebuilt_content, metadata=new_metadata)
         return ToolReturn(return_value=rebuilt, metadata=new_metadata)
 
     async def wrap_tool_execute(
@@ -457,18 +495,40 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
         if _is_opaque(value):
             return None, None
         projected = _project(value)
+        if isinstance(projected, str) or _is_object_list(projected):
+            return await self._scan_wrapped(projected, tool_name), projected
         return await self._defense.defend_tool_result_async(projected, tool_name), projected
 
-    async def _scan_content(self, content: str | Sequence[UserContent] | None, tool_name: str) -> DefenseResult | None:
-        """Scan `ToolReturn.content` for detection only.
-
-        Tier 1 cannot rewrite top-level strings or lists of strings, so content is never
-        rebuilt; a verdict here can still flag or (with Tier 2 or a strict defense) block.
-        """
+    async def _scan_content(
+        self, content: str | Sequence[UserContent] | None, tool_name: str
+    ) -> tuple[DefenseResult | None, object]:
+        """Scan `ToolReturn.content` under a risky key so Tier 1 can inspect and rewrite it."""
         if content is None:
-            return None
+            return None, None
         projected = content if isinstance(content, str) else [_project(part) for part in content]
-        return await self._defense.defend_tool_result_async(projected, tool_name)
+        return await self._scan_wrapped(projected, tool_name), projected
+
+    async def _scan_wrapped(self, projected: object, tool_name: str) -> DefenseResult:
+        """Scan a bare payload under the default risky field and unwrap its sanitized value."""
+        if _is_object_list(projected):
+            wrapped: object = [{_TEXT_WRAP_KEY: item} if isinstance(item, str) else item for item in projected]
+        else:
+            wrapped = {_TEXT_WRAP_KEY: projected}
+        verdict = await self._defense.defend_tool_result_async(wrapped, tool_name)
+        sanitized = verdict.sanitized
+        if _is_object_list(projected) and _is_object_list(sanitized) and len(projected) == len(sanitized):
+            unwrapped = [
+                sanitized_item[_TEXT_WRAP_KEY]
+                if isinstance(projected_item, str)
+                and _is_str_keyed_mapping(sanitized_item)
+                and _TEXT_WRAP_KEY in sanitized_item
+                else sanitized_item
+                for projected_item, sanitized_item in zip(projected, sanitized)
+            ]
+            return replace(verdict, sanitized=unwrapped)
+        if _is_str_keyed_mapping(sanitized) and _TEXT_WRAP_KEY in sanitized:
+            return replace(verdict, sanitized=sanitized[_TEXT_WRAP_KEY])
+        return verdict
 
     async def _notify(self, ctx: RunContext[AgentDepsT], call: ToolCallPart, verdict: DefenseResult) -> None:
         if self.on_detection is None:

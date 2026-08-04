@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import importlib.util
 
-# The `stackone-defender` dependency is gated on the `prompt-injection-defender` extra
+# The `stackone-defender` dependency is gated on the `stackone-defender` extras
 # and requires Python 3.11+, so slim CI runs (no extras) and 3.10 runs can't import
 # these modules. Ignore them at collection. A conditional expression rather than an
 # `if` statement: branch coverage traces statement arcs, and no single environment can

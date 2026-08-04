@@ -30,17 +30,24 @@ and acts on the verdict. Detection is described under
 ## Installation
 
 ```bash
-uv add "pydantic-ai-harness[prompt-injection-defender]"
+uv add "pydantic-ai-harness[stackone-defender]"
 ```
 
-Requires Python 3.11 or newer. The extra installs
-[stackone-defender](https://pypi.org/project/stackone-defender/), which has no
-dependencies of its own and provides pattern detection. The optional ML
-classifier needs extra packages that defender picks up once installed:
+Requires Python 3.11 or newer. This installs
+[stackone-defender](https://pypi.org/project/stackone-defender/) with its
+lightweight pattern detection. To add its local semantic classifier, install the
+ML extra and opt into semantic detection:
 
 ```bash
-pip install "stackone-defender[onnx]"
+uv add "pydantic-ai-harness[stackone-defender-ml]"
 ```
+
+```python
+capability = PromptInjectionDefender(semantic_detection=True)
+```
+
+Requesting semantic detection without the ML extra raises an error at capability
+construction with the required installation command.
 
 `stackone-defender` is pre-1.0, so the extra pins it below `0.8`.
 
@@ -104,13 +111,16 @@ and acts on the combined verdict.
   always available.
 - **Tier 2, local ML classification.** A bundled MiniLM classifier scores free
   text. It runs in process from a model shipped inside the package, with no
-  network access. Available once `stackone-defender[onnx]` is installed.
+  network access. It is enabled with `semantic_detection=True` and requires the
+  `stackone-defender-ml` extra.
 - **Tier 3, LLM adjudication.** Off by default and not wired by this capability's
   options. To use it, configure a provider on your own `PromptDefense` and pass it
   as `defense` (see [Custom defense](#custom-defense)).
 
-Because Tier 1 only rewrites risky fields, a plain-string result relies on the
-Tier 2 classifier; install the `onnx` extra for tools that return free text.
+The capability projects bare return strings and `ToolReturn.content` under the
+`content` risky field, so Tier 1 examines and rewrites them without the ML extra.
+Semantic detection adds coverage for attacks that do not match the deterministic
+patterns.
 
 ## What gets scanned
 
@@ -118,7 +128,7 @@ Tier 2 classifier; install the `onnx` extra for tools that return free text.
 |---|---|
 | `str` and JSON-like values | Scanned; risky-field strings rewritten on detection. |
 | `ToolReturn.return_value` | Scanned and rewritten like any payload. |
-| `ToolReturn.content` | Scanned for detection and blocking; not rewritten. |
+| `ToolReturn.content` | Scanned under the `content` risky field and rewritten or blocked on detection. |
 | Multi-modal parts (`BinaryContent`, URLs) | Passed through unscanned. |
 | `ToolReturn.metadata` | Not scanned; not visible to the model. |
 | Other objects (Pydantic models, dataclasses) | Scanned as the JSON the model would see; replaced by sanitized JSON on detection. |
@@ -140,7 +150,7 @@ bypass tool execution; scan those yourself:
 ```python
 from stackone_defender import create_prompt_defense
 
-defense = create_prompt_defense()
+defense = create_prompt_defense(enable_tier2=False)
 
 
 async def scan_external(external_value: object, tool_name: str) -> object:
@@ -210,9 +220,8 @@ defense = create_prompt_defense(
 capability = PromptInjectionDefender(defense)
 ```
 
-Blocking then lives on the defense; setting `block_high_risk` on the capability as
-well raises an error. Set `warmup=True` to load the Tier 2 model at run start
-rather than on the first scan.
+Tier selection and blocking then live on the defense; setting `semantic_detection`
+or `block_high_risk` on the capability as well raises an error.
 
 ## Composition
 
