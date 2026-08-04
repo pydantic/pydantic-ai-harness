@@ -115,6 +115,7 @@ _CAPABILITY_DOC_PAGES = _capability_doc_pages()
 _CAPABILITY_PAGE_META = {
     'advisor.md': ('advisor', 'Advisor'),
     'code-mode.md': ('code_mode', 'Code Mode'),
+    'belgie-sandbox.md': ('belgie_sandbox', 'Belgie Sandbox'),
     'skills.md': ('skills', 'Skills'),
     'filesystem.md': ('filesystem', 'FileSystem'),
     'shell.md': ('shell', 'Shell'),

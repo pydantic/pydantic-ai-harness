@@ -4,7 +4,8 @@ requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
-    "python_full_version >= '3.11' and python_full_version < '3.13'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
     "python_full_version < '3.11'",
 ]
 
@@ -50,7 +51,8 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
-    "python_full_version >= '3.11' and python_full_version < '3.13'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
 ]
 dependencies = [
     { name = "caio", marker = "python_full_version >= '3.11'" },
@@ -312,6 +314,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/94/1009e248bbfbab11397abca7193bea6626806be9a327d399810d523a07cb/beartype-0.22.9.tar.gz", hash = "sha256:8f82b54aa723a2848a56008d18875f91c1db02c32ef6a62319a002e3e25a975f", size = 1608866, upload-time = "2025-12-13T06:50:30.72Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/71/cc/18245721fa7747065ab478316c7fea7c74777d07f37ae60db2e84f8172e8/beartype-0.22.9-py3-none-any.whl", hash = "sha256:d16c9bbc61ea14637596c5f6fbff2ee99cbe3573e46a716401734ef50c3060c2", size = 1333658, upload-time = "2025-12-13T06:50:28.266Z" },
+]
+
+[[package]]
+name = "belgie"
+version = "0.39.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/13/0b445d8d1b49504664deb8bf05edcb640c687b25efcd5473b8c9f8078a46/belgie-0.39.0.tar.gz", hash = "sha256:f7a8a73ee31855a42ceec15aefda200271ebc988ff2107a282c2e778c4db422c", size = 867030, upload-time = "2026-08-04T20:16:19.851Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ac/96/67aa012434314c16883255960a34161757caef8e52f1696ca04fc760f1ea/belgie-0.39.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:d995ec5d7c327b69796338dda59aba2390b0295a079e47a3c4083b4565fb77a4", size = 57449270, upload-time = "2026-08-04T20:15:50.943Z" },
+    { url = "https://files.pythonhosted.org/packages/72/55/3262f39c0e080508e510a10e8def63aa71adc9277cfcdf0a005f2c11a2e9/belgie-0.39.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:14d28efdb2c272964e615cc8564e9fe655b61530ce0d70d464b5b9086c2b4294", size = 55401119, upload-time = "2026-08-04T20:15:57.642Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/0c/f430b67aba2d2fcdc4a8ff78e56673a1827b7db6cfc18a9e4790a393fd73/belgie-0.39.0-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0a0781228d8290b82867f29152523b92d49c83dd18392577bba2408dd0dab6b6", size = 64936817, upload-time = "2026-08-04T20:16:04.348Z" },
+    { url = "https://files.pythonhosted.org/packages/62/cf/47543bce1c72b36f919b80736a0bde4547a20dd6c1d15cb480a28c6362ed/belgie-0.39.0-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:8e33f9a4ebb8e350c1092da43bb3f364ebeba8b66378ac6cb465d118ae97a9f1", size = 61333140, upload-time = "2026-08-04T20:16:11.09Z" },
+    { url = "https://files.pythonhosted.org/packages/71/6d/be7d301a09d9477f6f2bf2c264dad2370c270e573d4626b57fd90a5ebc6f/belgie-0.39.0-cp312-abi3-win_amd64.whl", hash = "sha256:820fc7c08b0a52543a5c17c6db5d89d8ce16fbb100a9015ad634323be6ae30a6", size = 54238982, upload-time = "2026-08-04T20:16:17.476Z" },
 ]
 
 [[package]]
@@ -2338,6 +2353,9 @@ dependencies = [
 acp = [
     { name = "agent-client-protocol" },
 ]
+belgie = [
+    { name = "belgie", marker = "python_full_version >= '3.12' and python_full_version < '3.15'" },
+]
 code-mode = [
     { name = "pydantic-monty" },
 ]
@@ -2397,6 +2415,7 @@ lint = [
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", marker = "extra == 'acp'", specifier = ">=0.11,<0.12" },
+    { name = "belgie", marker = "python_full_version >= '3.12' and python_full_version < '3.15' and extra == 'belgie'", specifier = ">=0.39.0" },
     { name = "exa-py", marker = "extra == 'exa'", specifier = ">=2.16.0" },
     { name = "genai-prices", specifier = ">=0.0.71" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -2413,7 +2432,7 @@ requires-dist = [
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.17.0" },
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
 ]
-provides-extras = ["acp", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "skills", "stackone", "temporal"]
+provides-extras = ["acp", "belgie", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "skills", "stackone", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3300,7 +3319,8 @@ source = { registry = "https://pypi.org/simple" }
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
-    "python_full_version >= '3.11' and python_full_version < '3.13'",
+    "python_full_version == '3.12.*'",
+    "python_full_version == '3.11.*'",
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/aa/2a/9618a122aeb2a169a28b03889a2995fe297588964333d4a7d67bdf46e147/rpds_py-2026.6.3.tar.gz", hash = "sha256:1cebd1337c242e4ec2293e541f712b2da849b29f48f0c293684b71c0632625d4", size = 64051, upload-time = "2026-06-30T07:17:53.009Z" }
 wheels = [

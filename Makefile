@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := all
 
-.PHONY: .uv .prek install format lint typecheck test testcov integration-localstack integration-mongodb integration-redis all
+.PHONY: .uv .prek install format lint typecheck test testcov integration-belgie integration-localstack integration-mongodb integration-redis all
 
 .uv:
 	@uv --version || echo 'Please install uv: https://docs.astral.sh/uv/getting-started/installation/'
@@ -29,6 +29,9 @@ test:
 testcov:
 	uv run coverage run -m pytest
 	uv run coverage report
+
+integration-belgie:
+	uv run --no-sync pytest -m belgie_live tests/belgie_sandbox/test_belgie_live.py
 
 integration-localstack:
 	uv run pytest integration_tests/localstack/test_live_localstack.py

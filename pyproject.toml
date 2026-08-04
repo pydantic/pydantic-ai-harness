@@ -71,6 +71,9 @@ mongodb = [
 skills = [
     "pyyaml>=6.0.2",
 ]
+belgie = [
+    "belgie>=0.39.0 ; python_full_version >= '3.12' and python_full_version < '3.15'",
+]
 stackone = [
     "pydantic-ai-slim[mcp]>=2.18.0",
 ]
@@ -160,7 +163,11 @@ executionEnvironments = [
 [tool.pytest.ini_options]
 testpaths = ['tests']
 xfail_strict = true
-markers = ['modal_live: runs against a real Modal control plane; needs credentials']
+addopts = ['-m', 'not belgie_live']
+markers = [
+    'belgie_live: runs against the real embedded Belgie runtime',
+    'modal_live: runs against a real Modal control plane; needs credentials',
+]
 filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
@@ -173,7 +180,7 @@ anyio_mode = 'auto'
 [tool.coverage.run]
 branch = true
 source = ['pydantic_ai_harness', 'tests']
-omit = ['tests/**/test_modal_live.py']
+omit = ['tests/**/test_belgie_live.py', 'tests/**/test_modal_live.py']
 
 [tool.coverage.paths]
 source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']
