@@ -41,11 +41,19 @@ return {{usd, tokens, requests, unpriced}}
 """
 """Applies one response to a window and returns the four totals.
 
-Redis runs a script to completion without interleaving another command, so the
-four increments and the expiry either all land or none do. Issued separately --
-even pipelined -- a failure between them leaves a window counting some of a
-response and not the rest, which reads as a smaller number than was really spent
-and so releases the brake later than it should.
+Redis runs a script to completion without interleaving another command, and every
+way this one can refuse -- the ceiling below, a client or network failure before
+it starts -- happens before the first write. Issued as separate commands instead,
+a failure between them leaves a window counting some of a response and not the
+rest, which reads as a smaller number than was really spent and so releases the
+brake later than it should.
+
+Not a transaction, though: Redis does not roll back a script that fails partway,
+so a command erroring after an earlier one succeeded would leave the hash
+half-applied. What could error there is a counter passing the 64-bit signed range
+-- around 9.2 quintillion tokens or requests against one key -- which is not a
+number any deployment produces. Guarding it would mean reading three more fields
+on the hot path of every model request to prevent something unreachable.
 
 The ceiling is checked here, against the running total, and before anything is
 written. Checking the increment alone in Python would not hold: increments that
@@ -177,10 +185,12 @@ class RedisSpendStore:
     ) -> Spent:
         """Add to `key` and return the result.
 
-        One round trip, and one unit of work: the script applies all four counters
-        and the expiry or none of them, so a failure cannot leave a window holding
-        part of a response. The script returns each new total, so the result needs
-        no second read.
+        One round trip. Every failure this can actually hit -- the exact-integer
+        ceiling, a client or network error -- lands before the script writes
+        anything, so a window does not end up holding part of a response; see
+        `_ADD_SCRIPT` for the one case that is not true of and why it is not
+        guarded. The script returns each new total, so the result needs no second
+        read.
         """
         nanos, total_tokens, total_requests, total_unpriced = await self.client.eval(
             _ADD_SCRIPT,
