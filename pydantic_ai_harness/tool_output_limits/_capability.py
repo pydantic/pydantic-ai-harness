@@ -14,6 +14,7 @@ from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnContent, Us
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets import AgentToolset
 
+from pydantic_ai_harness._usage import reserved_usage_limits
 from pydantic_ai_harness.tool_output_limits._bands import (
     Action,
     Band,
@@ -414,7 +415,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         model = action.model if action.model is not None else ctx.model
         prompt = self.summary_prompt.format(tool_name=call.tool_name, output=text)
         agent: Agent[None, str] = Agent(model, instructions='You summarize oversized tool output.')
-        run = await agent.run(prompt, usage=ctx.usage)
+        run = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
         return run.output.strip()
 
 
