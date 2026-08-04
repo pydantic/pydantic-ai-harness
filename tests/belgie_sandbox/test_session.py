@@ -177,14 +177,13 @@ class TestBelgieSandboxSession:
         with pytest.raises(BelgieSandboxError, match='requires an asyncio'):
             await BelgieSandboxSession().__aenter__()
 
-    async def test_missing_dependency_is_terminal(
+    async def test_missing_dependency_clears_entering_guard(
         self, fake_belgie: FakeBelgie, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setitem(sys.modules, 'belgie', None)
         session = BelgieSandboxSession()
         with pytest.raises(BelgieSandboxUnavailableError, match='Python 3.12-3.14'):
             await session.__aenter__()
-        # Import failure must clear the entering guard so a later attempt can run.
         with pytest.raises(BelgieSandboxUnavailableError, match='Python 3.12-3.14'):
             await session.__aenter__()
 

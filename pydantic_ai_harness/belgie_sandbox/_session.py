@@ -294,114 +294,111 @@ class BelgieSandboxSession:
             )
         self._entering = True
         try:
-            asyncio.get_running_loop()
-        except RuntimeError as error:
-            self._entering = False
-            raise BelgieSandboxError('Belgie Sandbox requires an asyncio event loop.') from error
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError as error:
+                raise BelgieSandboxError('Belgie Sandbox requires an asyncio event loop.') from error
 
-        try:
             belgie = _load_belgie()
-        except BelgieSandboxError:
-            self._entering = False
-            raise
 
-        try:
-            if self._configured_runtime is not None:
-                runtime_context = self._configured_runtime
-                active_runtime = await runtime_context.__aenter__()
-                self._runtime_context = runtime_context
-                if not isinstance(
-                    active_runtime, _AsyncRuntime
-                ):  # pragma: no cover - checked against installed integration
-                    raise BelgieSandboxUnavailableError(
-                        'The installed Belgie package returned an incompatible runtime.'
-                    )
-                self._active_runtime = active_runtime
-            else:
-                temporary_directory = TemporaryDirectory(prefix='belgie-sandbox-')
-                self._temporary_directory = temporary_directory
-                workspace = Path(temporary_directory.name).resolve()
-                self._workspace = workspace
-                packages_enabled = self._allow_package_imports or self._enable_rendering
-                dependencies = dict(DEFAULT_RENDER_DEPENDENCIES) if self._enable_rendering else None
-                environment_context = belgie.Environment(
-                    dependencies,
-                    path=workspace,
-                    options=belgie.EnvironmentOptions(
-                        allow_remote=packages_enabled,
-                        no_npm=not packages_enabled,
-                    ),
-                )
-                active_environment = await environment_context.__aenter__()
-                self._environment_context = environment_context
-                if not isinstance(  # pragma: no cover - checked against the installed integration
-                    active_environment, _ActiveEnvironment
-                ):
-                    raise BelgieSandboxUnavailableError(
-                        'The installed Belgie package returned an incompatible environment.'
-                    )
-                if self._enable_rendering:
-                    await active_environment.install()
-
-                script_runtime_context = belgie.Runtime(
-                    env=active_environment,
-                    options=belgie.RuntimeOptions(
-                        max_old_generation_size_mb=self._max_old_generation_size_mb,
-                        permissions=belgie.RuntimePermissions(
-                            allow_read=[str(workspace)],
-                            allow_net=[] if self._allow_network else None,
-                        ),
-                    ),
-                )
-                active_runtime = await script_runtime_context.__aenter__()
-                self._runtime_context = script_runtime_context
-                if not isinstance(
-                    active_runtime, _AsyncRuntime
-                ):  # pragma: no cover - checked against installed integration
-                    raise BelgieSandboxUnavailableError(
-                        'The installed Belgie package returned an incompatible runtime.'
-                    )
-                self._active_runtime = active_runtime
-
-                if self._enable_rendering:
-                    render_runtime_context = belgie.Runtime(
-                        env=active_environment,
-                        options=belgie.RuntimeOptions(
-                            max_old_generation_size_mb=self._max_old_generation_size_mb,
-                            permissions=belgie.RuntimePermissions(
-                                allow_ffi=[str(workspace / 'node_modules')],
-                                # Vite needs loopback; empty allow_net would grant every host.
-                                allow_net=['localhost'],
-                                allow_read=[str(workspace)],
-                                allow_sys=DEFAULT_VITE_SYS_PERMISSIONS,
-                                allow_write=[str(workspace)],
-                            ),
-                        ),
-                    )
-                    render_runtime = await render_runtime_context.__aenter__()
-                    self._render_runtime_context = render_runtime_context
+            try:
+                if self._configured_runtime is not None:
+                    runtime_context = self._configured_runtime
+                    active_runtime = await runtime_context.__aenter__()
+                    self._runtime_context = runtime_context
                     if not isinstance(
-                        render_runtime, _AsyncRuntime
+                        active_runtime, _AsyncRuntime
                     ):  # pragma: no cover - checked against installed integration
                         raise BelgieSandboxUnavailableError(
                             'The installed Belgie package returned an incompatible runtime.'
                         )
-                    self._render_runtime = render_runtime
-        except BaseException as error:
-            try:
-                await self._close_resources(None, None, None)
-            except BaseException as cleanup_error:
-                if isinstance(error, Exception):
-                    raise BelgieSandboxUnavailableError(
-                        f'Could not start the Belgie sandbox: {error}. Cleanup also failed: {cleanup_error}'
-                    ) from error
-                raise error from cleanup_error
-            if isinstance(error, Exception):
-                raise BelgieSandboxUnavailableError(f'Could not start the Belgie sandbox: {error}') from error
-            raise
+                    self._active_runtime = active_runtime
+                else:
+                    temporary_directory = TemporaryDirectory(prefix='belgie-sandbox-')
+                    self._temporary_directory = temporary_directory
+                    workspace = Path(temporary_directory.name).resolve()
+                    self._workspace = workspace
+                    packages_enabled = self._allow_package_imports or self._enable_rendering
+                    dependencies = dict(DEFAULT_RENDER_DEPENDENCIES) if self._enable_rendering else None
+                    environment_context = belgie.Environment(
+                        dependencies,
+                        path=workspace,
+                        options=belgie.EnvironmentOptions(
+                            allow_remote=packages_enabled,
+                            no_npm=not packages_enabled,
+                        ),
+                    )
+                    active_environment = await environment_context.__aenter__()
+                    self._environment_context = environment_context
+                    if not isinstance(  # pragma: no cover - checked against the installed integration
+                        active_environment, _ActiveEnvironment
+                    ):
+                        raise BelgieSandboxUnavailableError(
+                            'The installed Belgie package returned an incompatible environment.'
+                        )
+                    if self._enable_rendering:
+                        await active_environment.install()
 
-        self._entering = False
-        return self
+                    script_runtime_context = belgie.Runtime(
+                        env=active_environment,
+                        options=belgie.RuntimeOptions(
+                            max_old_generation_size_mb=self._max_old_generation_size_mb,
+                            permissions=belgie.RuntimePermissions(
+                                allow_read=[str(workspace)],
+                                allow_net=[] if self._allow_network else None,
+                            ),
+                        ),
+                    )
+                    active_runtime = await script_runtime_context.__aenter__()
+                    self._runtime_context = script_runtime_context
+                    if not isinstance(
+                        active_runtime, _AsyncRuntime
+                    ):  # pragma: no cover - checked against installed integration
+                        raise BelgieSandboxUnavailableError(
+                            'The installed Belgie package returned an incompatible runtime.'
+                        )
+                    self._active_runtime = active_runtime
+
+                    if self._enable_rendering:
+                        render_runtime_context = belgie.Runtime(
+                            env=active_environment,
+                            options=belgie.RuntimeOptions(
+                                max_old_generation_size_mb=self._max_old_generation_size_mb,
+                                permissions=belgie.RuntimePermissions(
+                                    allow_ffi=[str(workspace / 'node_modules')],
+                                    # Vite needs loopback; empty allow_net would grant every host.
+                                    allow_net=['localhost'],
+                                    allow_read=[str(workspace)],
+                                    allow_sys=DEFAULT_VITE_SYS_PERMISSIONS,
+                                    allow_write=[str(workspace)],
+                                ),
+                            ),
+                        )
+                        render_runtime = await render_runtime_context.__aenter__()
+                        self._render_runtime_context = render_runtime_context
+                        if not isinstance(
+                            render_runtime, _AsyncRuntime
+                        ):  # pragma: no cover - checked against installed integration
+                            raise BelgieSandboxUnavailableError(
+                                'The installed Belgie package returned an incompatible runtime.'
+                            )
+                        self._render_runtime = render_runtime
+            except BaseException as error:
+                try:
+                    await self._close_resources(None, None, None)
+                except BaseException as cleanup_error:
+                    if isinstance(error, Exception):
+                        raise BelgieSandboxUnavailableError(
+                            f'Could not start the Belgie sandbox: {error}. Cleanup also failed: {cleanup_error}'
+                        ) from error
+                    raise error from cleanup_error
+                if isinstance(error, Exception):
+                    raise BelgieSandboxUnavailableError(f'Could not start the Belgie sandbox: {error}') from error
+                raise
+
+            return self
+        finally:
+            self._entering = False
 
     async def __aexit__(
         self,
