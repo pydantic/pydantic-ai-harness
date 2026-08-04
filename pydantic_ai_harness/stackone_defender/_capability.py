@@ -1,4 +1,4 @@
-"""`PromptInjectionDefender` -- scan tool results for indirect prompt injection.
+"""`StackOneDefender` -- scan tool results for indirect prompt injection.
 
 Detection and sanitization are provided by `stackone-defender`
 (https://github.com/StackOneHQ/defender), StackOne's open source prompt injection
@@ -76,7 +76,7 @@ try:
     from stackone_defender import DefenseResult, PromptDefense, generate_boundary_instructions
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
-        'stackone-defender is required for PromptInjectionDefender (Python 3.11 or newer). '
+        'stackone-defender is required for StackOneDefender (Python 3.11 or newer). '
         'Install it with: uv add "pydantic-ai-harness[stackone-defender]"'
     ) from _import_error
 
@@ -259,7 +259,7 @@ def _rebuild(original: object, projected: object, sanitized: object) -> object:
 
 
 @dataclass
-class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
+class StackOneDefender(AbstractCapability[AgentDepsT]):
     """Scan tool results for indirect prompt injection before the model sees them.
 
     Tool results (emails, tickets, documents, MCP payloads) are a primary channel for
@@ -285,11 +285,11 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
+        from pydantic_ai_harness.stackone_defender import StackOneDefender
 
         agent = Agent(
             'anthropic:claude-sonnet-4-6',
-            capabilities=[PromptInjectionDefender(block_high_risk=True)],
+            capabilities=[StackOneDefender(block_high_risk=True)],
         )
         ```
     """
@@ -347,26 +347,26 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
             self.blocked_message.format(tool_name='tool', risk_level='high')
         except (AttributeError, IndexError, KeyError, TypeError, ValueError) as error:
             raise UserError(
-                f'PromptInjectionDefender got an invalid `blocked_message` placeholder in '
+                f'StackOneDefender got an invalid `blocked_message` placeholder in '
                 f'{self.blocked_message!r}: {error}. '
                 'Only `{tool_name}` and `{risk_level}` are supported.'
             ) from error
         if self.defense is not None:
             if self.block_high_risk is not None:
                 raise UserError(
-                    'PromptInjectionDefender got both `defense` and `block_high_risk`; the option would have no '
+                    'StackOneDefender got both `defense` and `block_high_risk`; the option would have no '
                     'effect. Configure blocking on the supplied defense instead.'
                 )
             if self.semantic_detection:
                 raise UserError(
-                    'PromptInjectionDefender got both `defense` and `semantic_detection`; the option would have no '
+                    'StackOneDefender got both `defense` and `semantic_detection`; the option would have no '
                     'effect. Configure Tier 2 on the supplied defense instead.'
                 )
             self._defense = self.defense
         else:
             if self.semantic_detection and importlib.util.find_spec('onnxruntime') is None:
                 raise UserError(
-                    'PromptInjectionDefender requires ONNX Runtime when `semantic_detection=True`. '
+                    'StackOneDefender requires ONNX Runtime when `semantic_detection=True`. '
                     'Install it with: uv add "pydantic-ai-harness[stackone-defender-ml]"'
                 )
             # The `create_prompt_defense` factory takes untyped `**kwargs`, which pyright
