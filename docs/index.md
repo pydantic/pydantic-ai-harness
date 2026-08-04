@@ -117,6 +117,7 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 
 | Capability | What it does | Extra |
 |---|---|---|
+| [Advisor](advisor.md) | Lets an executor consult another model through a provider-native tool or a local Pydantic AI fallback. | |
 | [Code Mode](code-mode.md) | Wraps the agent's tools into a single `run_code` tool, sandboxed by [Monty](https://github.com/pydantic/monty). The model writes Python that calls the tools as functions -- with loops, conditionals, `asyncio.gather`, and local filtering -- collapsing N tool calls into one model round-trip. | `codemode` |
 | [Belgie Sandbox](belgie-sandbox.md) | Adds `run_typescript` for JavaScript, TypeScript, and TSX in a restricted embedded Deno runtime while preserving every other agent tool. | `belgie` |
 | [Skills](skills.md) | Loads Agent Skill instructions only when the model needs them. | `skills` |
@@ -134,6 +135,7 @@ Each capability is a self-contained battery you drop into an agent's `capabiliti
 | [Subagents](subagents.md) | Delegates subtasks to specialized child agents through a delegate tool. | -- |
 | [Dynamic Workflow](dynamic-workflow.md) | Orchestrates sub-agents from a model-written Python script -- fan-out, chaining, and voting in a single tool call. | `dynamic-workflow` |
 | [Planning](planning.md) | Breaks a complex task into a structured plan before execution and tracks progress against it. | -- |
+| [System Reminders](system-reminders.md) | Re-injects behavioral guidance mid-run -- on a cadence or reactively from a condition -- to counter instruction fade in long sessions, without invalidating the prompt cache. | -- |
 | [Memory](memory.md) | Gives an agent a persistent, namespaced notebook with bounded prompt injection, on-demand search, and concurrency-safe stores. | -- |
 | [Runtime Capability Creation](capability-creation.md) | Lets an agent create, validate, and persist Pydantic AI capabilities during one run for the orchestrator to load on the next run. | -- |
 | [Guardrails](guardrails.md) | Validates user input, tool calls and their results, and model output -- block or redact, with structured results. | -- |
