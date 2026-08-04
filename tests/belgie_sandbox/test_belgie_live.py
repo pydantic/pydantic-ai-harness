@@ -9,6 +9,7 @@ import json
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,18 @@ import pytest
 from pydantic_ai_harness.belgie_sandbox import BelgieSandboxExecutionError, BelgieSandboxSession
 
 pytestmark = [pytest.mark.anyio, pytest.mark.belgie_live]
+
+
+def _belgie_version_tuple() -> tuple[int, ...]:
+    parts: list[int] = []
+    for part in version('belgie').split('.'):
+        if not part.isdigit():
+            break
+        parts.append(int(part))
+    return tuple(parts)
+
+
+_MODULE_IMPORT_READ_ENFORCED = _belgie_version_tuple() >= (0, 39, 0)
 
 
 @pytest.mark.skipif(
@@ -78,14 +91,20 @@ export default function run(): { total: number; label: string } {
 
         # Module-graph denials can leave the embedded worker unable to accept
         # another script, so probe them in fresh sessions.
+        # Belgie 0.39+ enforces allow_read for file: module loads (#112); earlier
+        # releases load existing host files without consulting that grant.
         file_import = (
             f'import credentials from {json.dumps(module_file.as_uri())} with {{ type: "json" }};\n'
             'export default () => credentials.token;'
         )
-        async with BelgieSandboxSession() as session:
-            with pytest.raises(BelgieSandboxExecutionError, match='Requires read access') as module_info:
-                await session.run_script(file_import)
-            assert module_secret not in str(module_info.value)
+        if _MODULE_IMPORT_READ_ENFORCED:
+            async with BelgieSandboxSession() as session:
+                with pytest.raises(BelgieSandboxExecutionError, match='Requires read access') as module_info:
+                    await session.run_script(file_import)
+                assert module_secret not in str(module_info.value)
+        else:
+            async with BelgieSandboxSession() as session:
+                assert await session.run_script(file_import) == module_secret
 
         async with BelgieSandboxSession() as session:
             with pytest.raises(BelgieSandboxExecutionError, match='--no-remote'):
@@ -97,3 +116,41 @@ export default function run(): { total: number; label: string } {
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12) or sys.version_info >= (3, 15),
+    reason='Belgie supports Python 3.12-3.14',
+)
+async def test_real_runtime_renders_tsx_without_granting_script_host_access() -> None:
+    async with BelgieSandboxSession(enable_rendering=True) as session:
+        html = await session.run_script(
+            """
+import { render } from "@belgie/render";
+
+function Widget() {
+  return <main>Hello from Belgie Sandbox</main>;
+}
+
+export default function run() {
+  return render({ widget: <Widget />, plugins: [] });
+}
+""",
+            timeout=120,
+        )
+        assert isinstance(html, str)
+        assert 'Hello from Belgie Sandbox' in html
+        assert '<html' in html.lower() or '<!doctype' in html.lower() or '<main' in html.lower()
+
+        with pytest.raises(BelgieSandboxExecutionError, match='Requires read access'):
+            await session.run_script('export default () => Deno.readTextFile("/etc/passwd");')
+
+        with pytest.raises(BelgieSandboxExecutionError, match='(?i)ffi'):
+            await session.run_script(
+                """
+export default () => {
+  Deno.dlopen("libc.so.6", {});
+  return "opened";
+};
+"""
+            )

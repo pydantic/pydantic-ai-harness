@@ -82,6 +82,60 @@ class TestBelgieSandboxSession:
             assert options.permissions is not None
             assert 'allow_net' not in options.permissions.kwargs
 
+    async def test_rendering_uses_side_channel_without_script_ffi(self, fake_belgie: FakeBelgie) -> None:
+        from pydantic_ai_harness.belgie_sandbox._session import (
+            DEFAULT_RENDER_SPECIFIER,
+            DEFAULT_VITE_SYS_PERMISSIONS,
+            RENDER_REQUEST_KEY,
+        )
+
+        fake_belgie.result = {RENDER_REQUEST_KEY: 1}
+        source = 'export default () => render({ widget: null, plugins: [] })'
+        async with BelgieSandboxSession(enable_rendering=True) as session:
+            workspace = session.workspace
+            assert workspace is not None
+            assert await session.run_script(source) == '<html>rendered</html>'
+
+            environment = fake_belgie.environments[0]
+            assert environment.dependencies == {
+                '@belgie/render': DEFAULT_RENDER_SPECIFIER,
+                'react': 'npm:react@19.2.8',
+                'react-dom': 'npm:react-dom@19.2.8',
+            }
+            assert environment.options is not None
+            assert environment.options.allow_remote is True
+            assert environment.options.no_npm is False
+            assert environment.install_calls == 1
+
+            assert len(fake_belgie.runtimes) == 2
+            script_permissions = fake_belgie.runtimes[0].options
+            assert script_permissions is not None
+            assert script_permissions.permissions is not None
+            assert script_permissions.permissions.kwargs == {'allow_read': [str(workspace)]}
+
+            render_permissions = fake_belgie.runtimes[1].options
+            assert render_permissions is not None
+            assert render_permissions.permissions is not None
+            assert render_permissions.permissions.kwargs == {
+                'allow_read': [str(workspace)],
+                'allow_net': [],
+                'allow_ffi': [str(workspace / 'node_modules')],
+                'allow_sys': list(DEFAULT_VITE_SYS_PERMISSIONS),
+                'allow_write': [str(workspace)],
+            }
+            assert fake_belgie.render_calls == [(source, (workspace / '__deno_python_inline__.tsx').resolve().as_uri())]
+
+        assert all(runtime.exited for runtime in fake_belgie.runtimes)
+
+    async def test_render_request_without_side_channel_is_an_execution_error(self, fake_belgie: FakeBelgie) -> None:
+        from pydantic_ai_harness.belgie_sandbox._session import RENDER_REQUEST_KEY
+
+        fake_belgie.result = {RENDER_REQUEST_KEY: 1}
+        runtime = fake_belgie.module.Runtime()  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+        async with BelgieSandboxSession(runtime=runtime) as session:  # pyright: ignore[reportArgumentType]
+            with pytest.raises(BelgieSandboxExecutionError, match='no renderer side-channel'):
+                await session.run_script('export default () => render()')
+
     async def test_custom_runtime_is_entered_and_has_no_workspace(self, fake_belgie: FakeBelgie) -> None:
         runtime = fake_belgie.module.Runtime()  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
         session = BelgieSandboxSession(runtime=runtime)  # pyright: ignore[reportArgumentType]
@@ -281,6 +335,7 @@ class TestBelgieSandboxSession:
         [
             ({'allow_package_imports': 1}, 'allow_package_imports must be a bool'),
             ({'allow_network': 1}, 'allow_network must be a bool'),
+            ({'enable_rendering': 1}, 'enable_rendering must be a bool'),
             ({'max_old_generation_size_mb': 0}, 'must be a positive integer or None'),
         ],
     )
@@ -293,7 +348,7 @@ class TestBelgieSandboxSession:
     async def test_runtime_rejects_owned_settings(self, fake_belgie: FakeBelgie) -> None:
         runtime = fake_belgie.module.Runtime()  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
         with pytest.raises(ValueError, match='cannot be combined with `runtime`'):
-            BelgieSandboxSession(runtime=runtime, allow_network=True)  # pyright: ignore[reportArgumentType]
+            BelgieSandboxSession(runtime=runtime, enable_rendering=True)  # pyright: ignore[reportArgumentType]
 
     @pytest.mark.parametrize(
         ('source', 'timeout', 'error_type', 'message'),

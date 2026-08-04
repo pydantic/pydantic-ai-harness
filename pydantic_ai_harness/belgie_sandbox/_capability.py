@@ -45,6 +45,9 @@ class BelgieSandbox(AbstractCapability[AgentDepsT]):
     allow_network: bool = False
     """Allow unrestricted runtime network access, including `fetch`."""
 
+    enable_rendering: bool = False
+    """Install `@belgie/render` and mediate TSX rendering on a Belgie-owned side-channel."""
+
     max_old_generation_size_mb: int | None = DEFAULT_MAX_OLD_GENERATION_SIZE_MB
     """V8 old-generation heap limit in MiB, or None to leave it unbounded."""
 
@@ -68,6 +71,7 @@ class BelgieSandbox(AbstractCapability[AgentDepsT]):
         for name, value in (
             ('allow_package_imports', self.allow_package_imports),
             ('allow_network', self.allow_network),
+            ('enable_rendering', self.enable_rendering),
         ):
             if type(value) is not bool:
                 raise ValueError(f'{name} must be a bool, got {value!r}.')
@@ -93,6 +97,7 @@ class BelgieSandbox(AbstractCapability[AgentDepsT]):
                 for name, value, default in (
                     ('allow_package_imports', self.allow_package_imports, False),
                     ('allow_network', self.allow_network, False),
+                    ('enable_rendering', self.enable_rendering, False),
                     (
                         'max_old_generation_size_mb',
                         self.max_old_generation_size_mb,
@@ -123,18 +128,25 @@ class BelgieSandbox(AbstractCapability[AgentDepsT]):
                 'return JSON-serializable data. Runtime access and state lifetime depend on the supplied session.'
             )
 
+        packages_enabled = self.allow_package_imports or self.enable_rendering
         package_text = (
             'npm, JSR, and URL imports are enabled'
-            if self.allow_package_imports
+            if packages_enabled
             else 'npm, JSR, URL, and relative imports are disabled'
         )
         network_text = 'runtime network access is enabled' if self.allow_network else 'runtime `fetch` is disabled'
+        rendering_text = (
+            '; `@belgie/render` is installed for TSX rendering -- use `plugins: []` for untrusted agents'
+            if self.enable_rendering
+            else ''
+        )
         return (
             'Use `run_typescript` to execute a complete JavaScript, TypeScript, or TSX module in a '
             'temporary Belgie Deno sandbox. Export a default function or named `run` function and return '
-            f'JSON-serializable data. {package_text}; {network_text}. Host files, environment '
-            f'variables, subprocesses, and writes are unavailable. Each call has a {self.timeout:g}s deadline '
-            f'and a {self.max_output_bytes}-byte JSON output limit. The runtime is reset between agent runs.'
+            f'JSON-serializable data. {package_text}; {network_text}{rendering_text}. Host files, environment '
+            f'variables, subprocesses, FFI, and system information are unavailable to model scripts. Each call '
+            f'has a {self.timeout:g}s deadline and a {self.max_output_bytes}-byte JSON output limit. The runtime '
+            'is reset between agent runs.'
         )
 
     def for_agent(self, agent: AbstractAgent[AgentDepsT, _AgentOutputT]) -> Self:
@@ -161,6 +173,7 @@ class BelgieSandbox(AbstractCapability[AgentDepsT]):
         return BelgieSandboxToolset[AgentDepsT](
             allow_package_imports=self.allow_package_imports,
             allow_network=self.allow_network,
+            enable_rendering=self.enable_rendering,
             max_old_generation_size_mb=self.max_old_generation_size_mb,
             timeout=float(self.timeout),
             max_output_bytes=self.max_output_bytes,

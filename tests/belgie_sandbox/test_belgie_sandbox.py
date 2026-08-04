@@ -266,6 +266,7 @@ class TestBelgieSandbox:
         [
             ({'allow_package_imports': 1}, 'allow_package_imports must be a bool'),
             ({'allow_network': 1}, 'allow_network must be a bool'),
+            ({'enable_rendering': 1}, 'enable_rendering must be a bool'),
             ({'max_old_generation_size_mb': 0}, 'must be a positive integer or None'),
             ({'timeout': 0}, 'timeout must be a positive finite number'),
             ({'timeout': float('inf')}, 'timeout must be a positive finite number'),
@@ -282,24 +283,33 @@ class TestBelgieSandbox:
 
     async def test_session_rejects_owned_runtime_settings(self, fake_belgie: FakeBelgie) -> None:
         with pytest.raises(ValueError, match='cannot be combined with `session`'):
-            BelgieSandbox(session=BelgieSandboxSession(), allow_network=True)
+            BelgieSandbox(session=BelgieSandboxSession(), enable_rendering=True)
 
     async def test_instructions_reflect_configuration(self, fake_belgie: FakeBelgie) -> None:
         strict = BelgieSandbox().get_instructions()
         assert strict is not None
         assert 'imports are disabled' in strict
         assert 'fetch` is disabled' in strict
+        assert '@belgie/render' not in strict
 
         open_profile = BelgieSandbox(
             allow_package_imports=True,
             allow_network=True,
+            enable_rendering=True,
             timeout=12,
             max_output_bytes=100,
         ).get_instructions()
         assert open_profile is not None
         assert 'imports are enabled' in open_profile
         assert 'network access is enabled' in open_profile
+        assert '@belgie/render' in open_profile
+        assert 'plugins: []' in open_profile
         assert '12s deadline' in open_profile
+
+        rendering_only = BelgieSandbox(enable_rendering=True).get_instructions()
+        assert rendering_only is not None
+        assert 'imports are enabled' in rendering_only
+        assert '@belgie/render' in rendering_only
 
         assert BelgieSandbox(instructions='Custom.').get_instructions() == 'Custom.'
         assert BelgieSandbox(instructions='').get_instructions() is None

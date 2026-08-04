@@ -46,6 +46,7 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
         *,
         allow_package_imports: bool,
         allow_network: bool,
+        enable_rendering: bool,
         max_old_generation_size_mb: int | None,
         timeout: float,
         max_output_bytes: int,
@@ -57,6 +58,7 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
         super().__init__(max_retries=max_retries, sequential=True, id=toolset_id)
         self._allow_package_imports = allow_package_imports
         self._allow_network = allow_network
+        self._enable_rendering = enable_rendering
         self._max_old_generation_size_mb = max_old_generation_size_mb
         self._timeout = timeout
         self._max_output_bytes = max_output_bytes
@@ -78,6 +80,7 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
         return BelgieSandboxToolset[AgentDepsT](
             allow_package_imports=self._allow_package_imports,
             allow_network=self._allow_network,
+            enable_rendering=self._enable_rendering,
             max_old_generation_size_mb=self._max_old_generation_size_mb,
             timeout=self._timeout,
             max_output_bytes=self._max_output_bytes,
@@ -118,6 +121,7 @@ class BelgieSandboxToolset(FunctionToolset[AgentDepsT]):
         session = BelgieSandboxSession(
             allow_package_imports=self._allow_package_imports,
             allow_network=self._allow_network,
+            enable_rendering=self._enable_rendering,
             max_old_generation_size_mb=self._max_old_generation_size_mb,
         )
         await session.__aenter__()

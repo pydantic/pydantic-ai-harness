@@ -98,9 +98,9 @@ The default profile:
 - denies host environment variables, filesystem paths, subprocesses, writes, FFI, and
   system information;
 - permits reads only from the run's temporary workspace;
-- Belgie's module loader honors that same `allow_read` grant, so absolute
-  `file:` and JSON module imports of host paths are denied the same way as
-  `Deno.read*`;
+- with Belgie 0.39+, the module loader honors that same `allow_read` grant, so
+  absolute `file:` and JSON module imports of host paths are denied the same way
+  as `Deno.read*` (earlier Belgie releases may still load existing host files);
 - applies a 30-second execution deadline and a 50 KiB JSON result limit;
 - limits V8's old-generation heap to 128 MiB.
 
@@ -112,14 +112,15 @@ Belgie provides an embedded language sandbox, not a container or virtual
 machine. Use an OS- or cloud-isolated sandbox when untrusted code must have a
 separate kernel, filesystem, or network namespace.
 
-## Opting into packages and network
+## Opting into packages, network, and rendering
 
-Enable the two higher-risk features independently:
+Enable the higher-risk features independently:
 
 ```python
 BelgieSandbox(
     allow_package_imports=True,
     allow_network=True,
+    enable_rendering=True,
 )
 ```
 
@@ -129,6 +130,27 @@ does not grant runtime `fetch`.
 
 `allow_network=True` grants unrestricted Deno runtime network access. Host
 files, environment variables, subprocesses, and FFI remain denied.
+
+`enable_rendering=True` installs `@belgie/render` and enables package resolution
+for that dependency. Model scripts stay workspace-restricted: they do not receive
+host path, FFI, or system-info grants. Vite runs only on a Belgie-owned renderer
+side-channel. Use `plugins: []` for untrusted agents -- plugin factories run with
+the renderer's broader workspace permissions.
+
+```tsx
+import { render } from "@belgie/render";
+
+function Widget() {
+  return <main>Hello from Belgie</main>;
+}
+
+export default function run() {
+  return render({ widget: <Widget />, plugins: [] });
+}
+```
+
+The returned HTML is ordinary tool data; Pydantic AI does not mount it as an
+application. Rendered documents may need a larger `max_output_bytes`.
 
 ## Lifecycle and reusable sessions
 
@@ -197,6 +219,7 @@ from pydantic_ai_harness.belgie_sandbox import BelgieSandbox
 BelgieSandbox(
     allow_package_imports=False,
     allow_network=False,
+    enable_rendering=False,
     max_old_generation_size_mb=128,
     timeout=30.0,
     max_output_bytes=50 * 1024,
@@ -246,7 +269,8 @@ Caller-owned sessions and custom runtime objects are Python-only configuration.
   results are not exposed.
 - Absolute and relative host-file module imports (`file:` URLs, JSON modules)
   and direct filesystem tools are outside this capability's contract. Belgie
-  denies host module loads that fall outside the workspace `allow_read` grant.
+  0.39+ denies host module loads that fall outside the workspace `allow_read`
+  grant; earlier Belgie releases may still load existing host `file:` modules.
 - Native npm add-ons may need permissions beyond the package-import profile.
   Use a caller-configured runtime only after reviewing the package's access.
 

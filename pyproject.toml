@@ -71,7 +71,7 @@ skills = [
     "pyyaml>=6.0.2",
 ]
 belgie = [
-    "belgie>=0.37.0 ; python_full_version >= '3.12' and python_full_version < '3.15'",
+    "belgie>=0.38.0 ; python_full_version >= '3.12' and python_full_version < '3.15'",
 ]
 stackone = [
     "pydantic-ai-slim[mcp]>=2.18.0",
