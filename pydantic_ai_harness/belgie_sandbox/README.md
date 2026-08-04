@@ -93,6 +93,9 @@ By default:
 - host environment variables, filesystem paths, subprocesses, writes, FFI, and
   system information are denied;
 - the runtime can read only its temporary workspace;
+- Belgie's module loader honors that same `allow_read` grant, so absolute
+  `file:` and JSON module imports of host paths are denied the same way as
+  `Deno.read*`;
 - each call has a 30-second deadline and a 50 KiB JSON output limit;
 - V8's old-generation heap is limited to 128 MiB.
 
@@ -242,8 +245,9 @@ configuration and are not represented in agent specs.
   workflow, or replay boundaries safely.
 - Output is returned when execution completes; streaming logs and incremental
   results are not exposed.
-- Relative host-file imports and direct filesystem tools are not part of this
-  capability.
+- Absolute and relative host-file module imports (`file:` URLs, JSON modules)
+  and direct filesystem tools are not part of this capability. Belgie denies
+  host module loads that fall outside the workspace `allow_read` grant.
 - Native npm add-ons need permissions beyond the default package-import profile;
   use a caller-configured runtime only after reviewing that package's access.
 

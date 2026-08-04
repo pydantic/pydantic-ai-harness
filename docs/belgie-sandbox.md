@@ -98,6 +98,9 @@ The default profile:
 - denies host environment variables, filesystem paths, subprocesses, writes, FFI, and
   system information;
 - permits reads only from the run's temporary workspace;
+- Belgie's module loader honors that same `allow_read` grant, so absolute
+  `file:` and JSON module imports of host paths are denied the same way as
+  `Deno.read*`;
 - applies a 30-second execution deadline and a 50 KiB JSON result limit;
 - limits V8's old-generation heap to 128 MiB.
 
@@ -241,8 +244,9 @@ Caller-owned sessions and custom runtime objects are Python-only configuration.
   task, DBOS workflow, or replay boundaries.
 - Tool output is returned after execution. Streaming logs and incremental
   results are not exposed.
-- Relative host-file imports and direct filesystem tools are outside this
-  capability's contract.
+- Absolute and relative host-file module imports (`file:` URLs, JSON modules)
+  and direct filesystem tools are outside this capability's contract. Belgie
+  denies host module loads that fall outside the workspace `allow_read` grant.
 - Native npm add-ons may need permissions beyond the package-import profile.
   Use a caller-configured runtime only after reviewing the package's access.
 

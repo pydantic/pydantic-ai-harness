@@ -5,7 +5,9 @@ Run with `make integration-belgie`.
 
 from __future__ import annotations
 
+import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -18,7 +20,7 @@ pytestmark = [pytest.mark.anyio, pytest.mark.belgie_live]
     sys.version_info < (3, 12) or sys.version_info >= (3, 15),
     reason='Belgie supports Python 3.12-3.14',
 )
-async def test_real_runtime_executes_typescript_and_denies_host_access() -> None:
+async def test_real_runtime_executes_typescript_and_denies_host_access(tmp_path: Path) -> None:
     async with BelgieSandboxSession() as session:
         result = await session.run_script(
             """
@@ -40,3 +42,14 @@ export default function run(): { total: number; label: string } {
         for source in denied_sources:
             with pytest.raises(BelgieSandboxExecutionError):
                 await session.run_script(source)
+
+        secret_value = 'host-module-secret-content'
+        secret = tmp_path / 'service-account.json'
+        secret.write_text(json.dumps({'token': secret_value}), encoding='utf-8')
+        file_import = (
+            f'import credentials from {json.dumps(secret.as_uri())} with {{ type: "json" }};\n'
+            'export default () => credentials.token;'
+        )
+        with pytest.raises(BelgieSandboxExecutionError) as exc_info:
+            await session.run_script(file_import)
+        assert secret_value not in str(exc_info.value)
