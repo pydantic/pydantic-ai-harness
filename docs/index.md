@@ -36,6 +36,7 @@ Some capabilities need an extra to pull in their optional dependencies:
 uv add "pydantic-ai-harness[codemode]"          # Code Mode (adds the Monty sandbox)
 uv add "pydantic-ai-harness[dynamic-workflow]"  # Dynamic Workflow (adds the Monty sandbox)
 uv add "pydantic-ai-harness[modal]"             # Modal Sandbox (adds the Modal SDK)
+uv add "pydantic-ai-harness[e2b]"               # E2B Sandbox (adds the E2B SDK)
 uv add "pydantic-ai-harness[logfire]"           # Managed Prompt (Logfire-managed prompts)
 uv add "pydantic-ai-harness[exa]"               # Exa Search (web research via the Exa API)
 uv add "pydantic-ai-harness[skills]"            # Skills (loads SKILL.md frontmatter)

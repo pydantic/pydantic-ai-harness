@@ -29,6 +29,7 @@ Extras for specific capabilities:
 uv add "pydantic-ai-harness[codemode]"          # CodeMode (adds the Monty sandbox)
 uv add "pydantic-ai-harness[dynamic-workflow]"  # DynamicWorkflow (adds the Monty sandbox)
 uv add "pydantic-ai-harness[modal]"             # ModalSandbox (adds the Modal SDK)
+uv add "pydantic-ai-harness[e2b]"               # E2BSandbox (adds the E2B SDK)
 uv add "pydantic-ai-harness[logfire]"           # ManagedPrompt (Logfire-managed prompts)
 uv add "pydantic-ai-harness[exa]"               # ExaSearch + ExaAgent (web research via the Exa API)
 uv add "pydantic-ai-harness[skills]"            # Skills (loads SKILL.md frontmatter)
@@ -156,6 +157,7 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | | **Shell** | Execute commands with allowlists, denylists, and timeouts | :white_check_mark: [Docs](pydantic_ai_harness/shell/) | [pydantic-ai-backend](https://github.com/vstorm-co/pydantic-ai-backend) (vstorm&#8209;co) |
 | | **LocalStack** | Environment-backed AWS emulator with AWS CLI tools and optional Docker lifecycle | :white_check_mark: [Docs](pydantic_ai_harness/localstack/) | |
 | | **Modal sandbox** | Run commands and manage files in an isolated [Modal](https://modal.com) cloud sandbox | :white_check_mark: [Docs](pydantic_ai_harness/modal_sandbox/) | |
+| | **E2B sandbox** | Run commands and manage files in an isolated [E2B](https://e2b.dev) cloud sandbox with Logfire spans | :white_check_mark: [Docs](pydantic_ai_harness/e2b_sandbox/) | |
 | | **Repo context injection** | Auto-load CLAUDE.md/AGENTS.md and repo structure | :white_check_mark: [Docs](pydantic_ai_harness/repo_context/) | [pydantic-deep](https://github.com/vstorm-co/pydantic-deepagents) (vstorm&#8209;co) |
 | | **Docs lookup** | On-demand `read_pyai_docs` tool for Pydantic AI docs | :white_check_mark: [Docs](pydantic_ai_harness/pydantic_ai_docs/) | |
 | | **Web research** | Web search returning relevant page excerpts, full single-page retrieval, and opt-in deep search with cited answers, backed by [Exa](https://exa.ai) | :white_check_mark: [Docs](pydantic_ai_harness/exa/) | |

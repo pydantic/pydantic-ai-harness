@@ -74,6 +74,9 @@ skills = [
 stackone = [
     "pydantic-ai-slim[mcp]>=2.18.0",
 ]
+e2b = [
+    "e2b>=2.34.0",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'
