@@ -165,6 +165,39 @@ def _is_user_content_sequence(value: object) -> TypeGuard[Sequence[UserContent]]
     )
 
 
+def _wrap_text_leaves(value: object) -> object:
+    """Put bare string leaves in nested lists under the default risky field."""
+    if isinstance(value, str):
+        return {_TEXT_WRAP_KEY: value}
+    if _is_object_list(value):
+        return [_wrap_text_leaves(item) for item in value]
+    return value
+
+
+def _unwrap_text_leaves(projected: object, sanitized: object) -> object:
+    """Undo `_wrap_text_leaves`, including sampled list prefixes and their marker."""
+    if isinstance(projected, str):
+        if _is_str_keyed_mapping(sanitized) and _TEXT_WRAP_KEY in sanitized:
+            return sanitized[_TEXT_WRAP_KEY]
+        return sanitized
+    if not (_is_object_list(projected) and _is_object_list(sanitized)):
+        return sanitized
+    if len(sanitized) < len(projected):
+        if not sanitized:
+            return sanitized  # pragma: no cover - Defender sampling always includes a marker
+        sampled_length = len(sanitized) - 1
+        unwrapped = [
+            _unwrap_text_leaves(projected_item, sanitized_item)
+            for projected_item, sanitized_item in zip(projected[:sampled_length], sanitized[:sampled_length])
+        ]
+        return [*unwrapped, sanitized[-1]]
+    unwrapped = [
+        _unwrap_text_leaves(projected_item, sanitized_item)
+        for projected_item, sanitized_item in zip(projected, sanitized)
+    ]
+    return [*unwrapped, *sanitized[len(projected) :]]
+
+
 def _is_opaque(value: object) -> bool:
     """Content with no scannable text: multi-modal parts and binary blobs."""
     return is_multi_modal_content(value) or isinstance(value, (bytes, bytearray, memoryview))
@@ -510,25 +543,9 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
 
     async def _scan_wrapped(self, projected: object, tool_name: str) -> DefenseResult:
         """Scan a bare payload under the default risky field and unwrap its sanitized value."""
-        if _is_object_list(projected):
-            wrapped: object = [{_TEXT_WRAP_KEY: item} if isinstance(item, str) else item for item in projected]
-        else:
-            wrapped = {_TEXT_WRAP_KEY: projected}
+        wrapped = _wrap_text_leaves(projected)
         verdict = await self._defense.defend_tool_result_async(wrapped, tool_name)
-        sanitized = verdict.sanitized
-        if _is_object_list(projected) and _is_object_list(sanitized) and len(projected) == len(sanitized):
-            unwrapped = [
-                sanitized_item[_TEXT_WRAP_KEY]
-                if isinstance(projected_item, str)
-                and _is_str_keyed_mapping(sanitized_item)
-                and _TEXT_WRAP_KEY in sanitized_item
-                else sanitized_item
-                for projected_item, sanitized_item in zip(projected, sanitized)
-            ]
-            return replace(verdict, sanitized=unwrapped)
-        if _is_str_keyed_mapping(sanitized) and _TEXT_WRAP_KEY in sanitized:
-            return replace(verdict, sanitized=sanitized[_TEXT_WRAP_KEY])
-        return verdict
+        return replace(verdict, sanitized=_unwrap_text_leaves(projected, verdict.sanitized))
 
     async def _notify(self, ctx: RunContext[AgentDepsT], call: ToolCallPart, verdict: DefenseResult) -> None:
         if self.on_detection is None:

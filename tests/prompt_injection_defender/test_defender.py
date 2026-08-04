@@ -377,6 +377,11 @@ async def test_default_defense_sanitizes_plain_string_result() -> None:
     assert _return_value(out) == SANITIZED_INJECTION
 
 
+async def test_default_defense_sanitizes_nested_string_lists() -> None:
+    out = await _run(PromptInjectionDefender(), [['clean', [INJECTION]]])
+    assert _return_value(out) == [['clean', [SANITIZED_INJECTION]]]
+
+
 async def test_default_defense_sanitizes_tool_return_content() -> None:
     result: ToolReturn[object] = ToolReturn(return_value='clean', content=INJECTION)
     out = await _run(PromptInjectionDefender(), result)
@@ -613,6 +618,14 @@ async def test_sampling_defense_keeps_unscanned_remainder() -> None:
     assert len(sampled) == len(items)
     assert sampled[0] == {'body': SANITIZED_INJECTION}
     assert sampled[-1] is tail
+
+
+async def test_sampling_defense_unwraps_scanned_string_prefix() -> None:
+    cap = PromptInjectionDefender(_observe())
+    items = [INJECTION] + [f'row {i}' for i in range(1001)]
+    out = await _run(cap, items)
+    sampled = _return_value(out)
+    assert sampled == [SANITIZED_INJECTION, *items[1:]]
 
 
 class _IntIndexSequence(Sequence[Any]):
