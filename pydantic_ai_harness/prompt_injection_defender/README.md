@@ -223,7 +223,9 @@ capability = PromptInjectionDefender(defense)
 ```
 
 Tier selection and blocking then live on the defense; setting `semantic_detection`
-or `block_high_risk` on the capability as well raises an error.
+or `block_high_risk` on the capability as well raises an error. A supplied defense
+with Tier 2 enabled loads its classifier on the first large-enough scan; call
+`defense.warmup_tier2()` before the run to load it up front.
 
 ## Composition
 
