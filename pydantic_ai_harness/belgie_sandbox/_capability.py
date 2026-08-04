@@ -46,7 +46,7 @@ class BelgieSandbox(AbstractCapability[AgentDepsT]):
     """Allow unrestricted runtime network access, including `fetch`."""
 
     enable_rendering: bool = False
-    """Install `@belgie/render` and mediate TSX rendering on a Belgie-owned side-channel."""
+    """Install `@belgie/render` for TSX side-channel rendering; also enables remote package resolution."""
 
     max_old_generation_size_mb: int | None = DEFAULT_MAX_OLD_GENERATION_SIZE_MB
     """V8 old-generation heap limit in MiB, or None to leave it unbounded."""
@@ -128,12 +128,15 @@ class BelgieSandbox(AbstractCapability[AgentDepsT]):
                 'return JSON-serializable data. Runtime access and state lifetime depend on the supplied session.'
             )
 
-        packages_enabled = self.allow_package_imports or self.enable_rendering
-        package_text = (
-            'npm, JSR, and URL imports are enabled'
-            if packages_enabled
-            else 'npm, JSR, URL, and relative imports are disabled'
-        )
+        if self.enable_rendering:
+            package_text = (
+                'npm, JSR, and URL imports are enabled because rendering installs `@belgie/render` '
+                '(same remote package resolution as `allow_package_imports=True`)'
+            )
+        elif self.allow_package_imports:
+            package_text = 'npm, JSR, and URL imports are enabled'
+        else:
+            package_text = 'npm, JSR, URL, and relative imports are disabled'
         network_text = 'runtime network access is enabled' if self.allow_network else 'runtime `fetch` is disabled'
         rendering_text = (
             '; `@belgie/render` is installed for TSX rendering -- use `plugins: []` for untrusted agents'

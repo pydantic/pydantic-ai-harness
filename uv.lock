@@ -318,15 +318,15 @@ wheels = [
 
 [[package]]
 name = "belgie"
-version = "0.38.0"
+version = "0.39.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ba/2d/d28fecfe868769e21d3313d41828f130c00b856b757f50fc3f3224d73070/belgie-0.38.0.tar.gz", hash = "sha256:951194929ff076f7ece68a5a452ab36574bf792ba046360fa93440e27616b006", size = 818941, upload-time = "2026-08-01T18:46:55.267Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/13/0b445d8d1b49504664deb8bf05edcb640c687b25efcd5473b8c9f8078a46/belgie-0.39.0.tar.gz", hash = "sha256:f7a8a73ee31855a42ceec15aefda200271ebc988ff2107a282c2e778c4db422c", size = 867030, upload-time = "2026-08-04T20:16:19.851Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/06/25/f6c003ffa3771b3ff9d36db3e1f511287e46f377e450b0dcf6915aef259c/belgie-0.38.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:0f531e1fc3bcab00b4b695e48289c926a6121d4860f65d208ff40c93f26dc190", size = 57415756, upload-time = "2026-08-01T18:46:37.17Z" },
-    { url = "https://files.pythonhosted.org/packages/72/2a/63cb0bf559153b349b4803be5b8b352397b8eeb7b9630bccd2843c96fc8d/belgie-0.38.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:ded8b95fea67e1bdde7c796f3745407d445da645cbd2d9b7853a6a6ab6638739", size = 55346823, upload-time = "2026-08-01T18:46:40.823Z" },
-    { url = "https://files.pythonhosted.org/packages/72/e7/42d270c20abf8799c8febcd008ade8f48d056c21575cb5bf37597ef459ee/belgie-0.38.0-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:93fec6e341efb013a2b2b22226fc64a1070f416db43de6781fefaa20f2311ae5", size = 64870441, upload-time = "2026-08-01T18:46:44.934Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/da/3fc6a96b35e61a40bd349b1ec98b71bcdd6023e1e5f106eaed9e7859a810/belgie-0.38.0-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:d9006a4a887d152cd75ff03a76045ce9937f923f559a079544971b1e7cf66e7f", size = 61272444, upload-time = "2026-08-01T18:46:49.236Z" },
-    { url = "https://files.pythonhosted.org/packages/71/3e/4639e3045b7cbad2cc0a108c03257cdfb98bd9611e2126940a8c8ca19fb8/belgie-0.38.0-cp312-abi3-win_amd64.whl", hash = "sha256:ae5b91dcc4e1cb23c0eebc0513ea76629637b7c80e2d08e281806f3925ac4cea", size = 54200033, upload-time = "2026-08-01T18:46:52.928Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/96/67aa012434314c16883255960a34161757caef8e52f1696ca04fc760f1ea/belgie-0.39.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:d995ec5d7c327b69796338dda59aba2390b0295a079e47a3c4083b4565fb77a4", size = 57449270, upload-time = "2026-08-04T20:15:50.943Z" },
+    { url = "https://files.pythonhosted.org/packages/72/55/3262f39c0e080508e510a10e8def63aa71adc9277cfcdf0a005f2c11a2e9/belgie-0.39.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:14d28efdb2c272964e615cc8564e9fe655b61530ce0d70d464b5b9086c2b4294", size = 55401119, upload-time = "2026-08-04T20:15:57.642Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/0c/f430b67aba2d2fcdc4a8ff78e56673a1827b7db6cfc18a9e4790a393fd73/belgie-0.39.0-cp312-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:0a0781228d8290b82867f29152523b92d49c83dd18392577bba2408dd0dab6b6", size = 64936817, upload-time = "2026-08-04T20:16:04.348Z" },
+    { url = "https://files.pythonhosted.org/packages/62/cf/47543bce1c72b36f919b80736a0bde4547a20dd6c1d15cb480a28c6362ed/belgie-0.39.0-cp312-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:8e33f9a4ebb8e350c1092da43bb3f364ebeba8b66378ac6cb465d118ae97a9f1", size = 61333140, upload-time = "2026-08-04T20:16:11.09Z" },
+    { url = "https://files.pythonhosted.org/packages/71/6d/be7d301a09d9477f6f2bf2c264dad2370c270e573d4626b57fd90a5ebc6f/belgie-0.39.0-cp312-abi3-win_amd64.whl", hash = "sha256:820fc7c08b0a52543a5c17c6db5d89d8ce16fbb100a9015ad634323be6ae30a6", size = 54238982, upload-time = "2026-08-04T20:16:17.476Z" },
 ]
 
 [[package]]
@@ -2414,7 +2414,7 @@ lint = [
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", marker = "extra == 'acp'", specifier = ">=0.11,<0.12" },
-    { name = "belgie", marker = "python_full_version >= '3.12' and python_full_version < '3.15' and extra == 'belgie'", specifier = ">=0.38.0" },
+    { name = "belgie", marker = "python_full_version >= '3.12' and python_full_version < '3.15' and extra == 'belgie'", specifier = ">=0.39.0" },
     { name = "exa-py", marker = "extra == 'exa'", specifier = ">=2.16.0" },
     { name = "genai-prices", specifier = ">=0.0.71" },
     { name = "httpx", specifier = ">=0.28.1" },

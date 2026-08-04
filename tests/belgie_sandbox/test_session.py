@@ -118,7 +118,7 @@ class TestBelgieSandboxSession:
             assert render_permissions.permissions is not None
             assert render_permissions.permissions.kwargs == {
                 'allow_read': [str(workspace)],
-                'allow_net': [],
+                'allow_net': ['localhost'],
                 'allow_ffi': [str(workspace / 'node_modules')],
                 'allow_sys': list(DEFAULT_VITE_SYS_PERMISSIONS),
                 'allow_write': [str(workspace)],
@@ -153,6 +153,21 @@ class TestBelgieSandboxSession:
         async with session:
             with pytest.raises(BelgieSandboxError, match='already open'):
                 await session.__aenter__()
+
+    async def test_rejects_concurrent_enter(self, fake_belgie: FakeBelgie) -> None:
+        fake_belgie.enter_started = asyncio.Event()
+        fake_belgie.enter_gate = asyncio.Event()
+        runtime = fake_belgie.module.Runtime()  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
+        session = BelgieSandboxSession(runtime=runtime)  # pyright: ignore[reportArgumentType]
+
+        first = asyncio.create_task(session.__aenter__())
+        await fake_belgie.enter_started.wait()
+        with pytest.raises(BelgieSandboxError, match='already open'):
+            await session.__aenter__()
+        fake_belgie.enter_gate.set()
+        await first
+        await session.close()
+        assert runtime.exited
 
     async def test_requires_asyncio(self, fake_belgie: FakeBelgie, monkeypatch: pytest.MonkeyPatch) -> None:
         def no_loop() -> None:
@@ -192,9 +207,8 @@ class TestBelgieSandboxSession:
             await session.__aenter__()
 
         assert exc_info.value.__cause__ is startup_error
-        workspace = session.workspace
-        assert workspace is not None
-        assert workspace.exists()
+        # Environment exit failed, but best-effort cleanup still removed the temp workspace.
+        assert session.workspace is None
         assert fake_belgie.environments[0].exit_calls == 1
         assert not fake_belgie.environments[0].exited
         with pytest.raises(BelgieSandboxError, match='pending cleanup'):
@@ -202,7 +216,6 @@ class TestBelgieSandboxSession:
         fake_belgie.environment_exit_error = None
         await session.close()
         assert session.workspace is None
-        assert not workspace.exists()
         assert fake_belgie.environments[0].exit_calls == 2
         assert fake_belgie.environments[0].exited
 
@@ -226,30 +239,28 @@ class TestBelgieSandboxSession:
             await session.__aenter__()
 
         assert exc_info.value.__cause__ is cleanup_error
-        workspace = session.workspace
-        assert workspace is not None
-        assert workspace.exists()
+        assert session.workspace is None
         assert fake_belgie.environments[0].exit_calls == 1
         fake_belgie.environment_exit_error = None
         await session.close()
         assert session.workspace is None
-        assert not workspace.exists()
         assert fake_belgie.environments[0].exit_calls == 2
 
     async def test_close_retains_state_when_cleanup_fails(self, fake_belgie: FakeBelgie) -> None:
         session = BelgieSandboxSession()
         await session.__aenter__()
-        workspace = session.workspace
         fake_belgie.runtime_exit_error = RuntimeError('cleanup failed')
 
         with pytest.raises(RuntimeError, match='cleanup failed'):
             await session.close()
 
+        # Runtime exit failed and is retained for retry; later resources still closed.
         assert session.is_open
-        assert session.workspace == workspace
+        assert session.workspace is None
         assert fake_belgie.runtimes[0].exit_calls == 1
         assert not fake_belgie.runtimes[0].exited
-        assert fake_belgie.environments[0].exit_calls == 0
+        assert fake_belgie.environments[0].exit_calls == 1
+        assert fake_belgie.environments[0].exited
         fake_belgie.runtime_exit_error = None
         await session.close()
         assert not session.is_open
@@ -258,28 +269,26 @@ class TestBelgieSandboxSession:
         assert fake_belgie.runtimes[0].exited
         assert fake_belgie.environments[0].exit_calls == 1
 
-    async def test_environment_cleanup_failure_preserves_workspace_for_retry(self, fake_belgie: FakeBelgie) -> None:
+    async def test_environment_cleanup_failure_preserves_environment_for_retry(self, fake_belgie: FakeBelgie) -> None:
         session = BelgieSandboxSession()
         await session.__aenter__()
-        workspace = session.workspace
-        assert workspace is not None
         fake_belgie.environment_exit_error = RuntimeError('cleanup failed')
 
         with pytest.raises(RuntimeError, match='cleanup failed'):
             await session.close()
 
         assert not session.is_open
-        assert session.workspace == workspace
-        assert workspace.exists()
+        assert session.workspace is None
         assert fake_belgie.runtimes[0].exit_calls == 1
+        assert fake_belgie.runtimes[0].exited
         assert fake_belgie.environments[0].exit_calls == 1
         assert not fake_belgie.environments[0].exited
         fake_belgie.environment_exit_error = None
         await session.close()
         assert session.workspace is None
-        assert not workspace.exists()
         assert fake_belgie.runtimes[0].exit_calls == 1
         assert fake_belgie.environments[0].exit_calls == 2
+        assert fake_belgie.environments[0].exited
 
     async def test_script_error_is_normalized(self, fake_belgie: FakeBelgie) -> None:
         fake_belgie.script_error = BelgieJavaScriptError('boom')

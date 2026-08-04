@@ -17,7 +17,7 @@ from typing_extensions import Self
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_MAX_OLD_GENERATION_SIZE_MB = 128
-DEFAULT_RENDER_SPECIFIER: Final[str] = 'npm:@belgie/render@0.38.0'
+DEFAULT_RENDER_SPECIFIER: Final[str] = 'npm:@belgie/render@0.39.0'
 # Top-level react packages are required so Deno's Environment import map can resolve
 # `@belgie/render`'s bare `react` import when installing from npm (Belgie's own tests
 # often vendor a `file:` package instead).
@@ -257,6 +257,7 @@ class BelgieSandboxSession:
         self._enable_rendering = enable_rendering
         self._max_old_generation_size_mb = max_old_generation_size_mb
         self._configured_runtime = runtime
+        self._entering = False
         self._runtime_context: _RuntimeContext | None = None
         self._render_runtime_context: _RuntimeContext | None = None
         self._environment_context: _EnvironmentContext | None = None
@@ -278,7 +279,7 @@ class BelgieSandboxSession:
 
     async def __aenter__(self) -> Self:
         """Create and enter the configured Belgie runtime."""
-        if any(
+        if self._entering or any(
             resource is not None
             for resource in (
                 self._runtime_context,
@@ -291,9 +292,11 @@ class BelgieSandboxSession:
                 'The session is already open or has pending cleanup; close it before entering again. '
                 'Use a separate session per concurrent context.'
             )
+        self._entering = True
         try:
             asyncio.get_running_loop()
         except RuntimeError as error:
+            self._entering = False
             raise BelgieSandboxError('Belgie Sandbox requires an asyncio event loop.') from error
 
         belgie = _load_belgie()
@@ -362,7 +365,8 @@ class BelgieSandboxSession:
                             max_old_generation_size_mb=self._max_old_generation_size_mb,
                             permissions=belgie.RuntimePermissions(
                                 allow_ffi=[str(workspace / 'node_modules')],
-                                allow_net=[],
+                                # Vite needs loopback; empty allow_net would grant every host.
+                                allow_net=['localhost'],
                                 allow_read=[str(workspace)],
                                 allow_sys=DEFAULT_VITE_SYS_PERMISSIONS,
                                 allow_write=[str(workspace)],
@@ -391,6 +395,7 @@ class BelgieSandboxSession:
                 raise BelgieSandboxUnavailableError(f'Could not start the Belgie sandbox: {error}') from error
             raise
 
+        self._entering = False
         return self
 
     async def __aexit__(
@@ -408,30 +413,51 @@ class BelgieSandboxSession:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        first_error: BaseException | None = None
         with anyio.CancelScope(shield=True):
             render_runtime_context = self._render_runtime_context
             if render_runtime_context is not None:
-                await render_runtime_context.__aexit__(exc_type, exc, traceback)
-                self._render_runtime_context = None
-                self._render_runtime = None
-                self._render_script = None
+                try:
+                    await render_runtime_context.__aexit__(exc_type, exc, traceback)
+                except BaseException as error:
+                    first_error = first_error or error
+                else:
+                    self._render_runtime_context = None
+                    self._render_runtime = None
+                    self._render_script = None
 
             runtime_context = self._runtime_context
             if runtime_context is not None:
-                await runtime_context.__aexit__(exc_type, exc, traceback)
-                self._runtime_context = None
-                self._active_runtime = None
+                try:
+                    await runtime_context.__aexit__(exc_type, exc, traceback)
+                except BaseException as error:
+                    first_error = first_error or error
+                else:
+                    self._runtime_context = None
+                    self._active_runtime = None
 
             environment_context = self._environment_context
             if environment_context is not None:
-                await environment_context.__aexit__(exc_type, exc, traceback)
-                self._environment_context = None
+                try:
+                    await environment_context.__aexit__(exc_type, exc, traceback)
+                except BaseException as error:
+                    first_error = first_error or error
+                else:
+                    self._environment_context = None
 
             temporary_directory = self._temporary_directory
             if temporary_directory is not None:
-                temporary_directory.cleanup()
-                self._temporary_directory = None
-                self._workspace = None
+                try:
+                    temporary_directory.cleanup()
+                except BaseException as error:
+                    first_error = first_error or error
+                else:
+                    self._temporary_directory = None
+                    self._workspace = None
+
+        self._entering = False
+        if first_error is not None:
+            raise first_error
 
     async def close(self) -> None:
         """Close the session without an active exception context."""

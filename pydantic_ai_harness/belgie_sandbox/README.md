@@ -93,9 +93,8 @@ By default:
 - host environment variables, filesystem paths, subprocesses, writes, FFI, and
   system information are denied;
 - the runtime can read only its temporary workspace;
-- with Belgie 0.39+, the module loader honors that same `allow_read` grant, so
-  absolute `file:` and JSON module imports of host paths are denied the same way
-  as `Deno.read*` (earlier Belgie releases may still load existing host files);
+- the module loader honors that same `allow_read` grant, so absolute `file:` and
+  JSON module imports of host paths are denied the same way as `Deno.read*`;
 - each call has a 30-second deadline and a 50 KiB JSON output limit;
 - V8's old-generation heap is limited to 128 MiB.
 
@@ -110,7 +109,9 @@ kernel, filesystem, or network namespace.
 
 ## Opting into packages, network, and rendering
 
-The higher-risk features are independent:
+Package imports, network, and rendering are separate knobs, with one coupling:
+`enable_rendering=True` also enables remote package resolution (needed to install
+`@belgie/render`).
 
 ```python
 BelgieSandbox(
@@ -126,12 +127,14 @@ execute third-party code. It does not enable runtime `fetch`.
 `allow_network=True` grants unrestricted runtime network access. It does not
 expose host files, environment variables, or subprocesses.
 
-`enable_rendering=True` installs `@belgie/render` and enables package resolution
-for that dependency. Model scripts stay workspace-restricted: they do not receive
-host path, FFI, or system-info grants. Vite runs only on a Belgie-owned renderer
-side-channel. Use `plugins: []` for untrusted agents -- plugin factories run with
-the renderer's broader workspace permissions. A script can then return
-self-contained HTML:
+`enable_rendering=True` installs `@belgie/render` and enables the same remote
+package resolution as `allow_package_imports=True` (not only the render
+dependency). Model scripts stay workspace-restricted: they do not receive host
+path, FFI, or system-info grants. Vite runs only on a Belgie-owned renderer
+side-channel with workspace FFI/sys/write and loopback network (`localhost`) --
+not unrestricted `allow_net`. Use `plugins: []` for untrusted agents -- plugin
+factories run with the renderer's broader workspace permissions. A script can
+then return self-contained HTML:
 
 ```tsx
 import { render } from "@belgie/render";
@@ -271,9 +274,8 @@ configuration and are not represented in agent specs.
 - Output is returned when execution completes; streaming logs and incremental
   results are not exposed.
 - Absolute and relative host-file module imports (`file:` URLs, JSON modules)
-  and direct filesystem tools are not part of this capability. Belgie 0.39+
-  denies host module loads that fall outside the workspace `allow_read` grant;
-  earlier Belgie releases may still load existing host `file:` modules.
+  and direct filesystem tools are not part of this capability. Belgie denies
+  host module loads that fall outside the workspace `allow_read` grant.
 - Native npm add-ons need permissions beyond the default package-import profile;
   use a caller-configured runtime only after reviewing that package's access.
 

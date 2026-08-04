@@ -9,7 +9,6 @@ import json
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from importlib.metadata import version
 from pathlib import Path
 
 import pytest
@@ -17,18 +16,6 @@ import pytest
 from pydantic_ai_harness.belgie_sandbox import BelgieSandboxExecutionError, BelgieSandboxSession
 
 pytestmark = [pytest.mark.anyio, pytest.mark.belgie_live]
-
-
-def _belgie_version_tuple() -> tuple[int, ...]:
-    parts: list[int] = []
-    for part in version('belgie').split('.'):
-        if not part.isdigit():
-            break
-        parts.append(int(part))
-    return tuple(parts)
-
-
-_MODULE_IMPORT_READ_ENFORCED = _belgie_version_tuple() >= (0, 39, 0)
 
 
 @pytest.mark.skipif(
@@ -91,20 +78,14 @@ export default function run(): { total: number; label: string } {
 
         # Module-graph denials can leave the embedded worker unable to accept
         # another script, so probe them in fresh sessions.
-        # Belgie 0.39+ enforces allow_read for file: module loads (#112); earlier
-        # releases load existing host files without consulting that grant.
         file_import = (
             f'import credentials from {json.dumps(module_file.as_uri())} with {{ type: "json" }};\n'
             'export default () => credentials.token;'
         )
-        if _MODULE_IMPORT_READ_ENFORCED:
-            async with BelgieSandboxSession() as session:
-                with pytest.raises(BelgieSandboxExecutionError, match='Requires read access') as module_info:
-                    await session.run_script(file_import)
-                assert module_secret not in str(module_info.value)
-        else:
-            async with BelgieSandboxSession() as session:
-                assert await session.run_script(file_import) == module_secret
+        async with BelgieSandboxSession() as session:
+            with pytest.raises(BelgieSandboxExecutionError, match='Requires read access') as module_info:
+                await session.run_script(file_import)
+            assert module_secret not in str(module_info.value)
 
         async with BelgieSandboxSession() as session:
             with pytest.raises(BelgieSandboxExecutionError, match='--no-remote'):

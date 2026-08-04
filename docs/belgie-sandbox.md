@@ -98,9 +98,8 @@ The default profile:
 - denies host environment variables, filesystem paths, subprocesses, writes, FFI, and
   system information;
 - permits reads only from the run's temporary workspace;
-- with Belgie 0.39+, the module loader honors that same `allow_read` grant, so
-  absolute `file:` and JSON module imports of host paths are denied the same way
-  as `Deno.read*` (earlier Belgie releases may still load existing host files);
+- the module loader honors that same `allow_read` grant, so absolute `file:` and
+  JSON module imports of host paths are denied the same way as `Deno.read*`;
 - applies a 30-second execution deadline and a 50 KiB JSON result limit;
 - limits V8's old-generation heap to 128 MiB.
 
@@ -114,7 +113,9 @@ separate kernel, filesystem, or network namespace.
 
 ## Opting into packages, network, and rendering
 
-Enable the higher-risk features independently:
+Package imports, network, and rendering are separate knobs, with one coupling:
+`enable_rendering=True` also enables remote package resolution (needed to install
+`@belgie/render`).
 
 ```python
 BelgieSandbox(
@@ -131,11 +132,13 @@ does not grant runtime `fetch`.
 `allow_network=True` grants unrestricted Deno runtime network access. Host
 files, environment variables, subprocesses, and FFI remain denied.
 
-`enable_rendering=True` installs `@belgie/render` and enables package resolution
-for that dependency. Model scripts stay workspace-restricted: they do not receive
-host path, FFI, or system-info grants. Vite runs only on a Belgie-owned renderer
-side-channel. Use `plugins: []` for untrusted agents -- plugin factories run with
-the renderer's broader workspace permissions.
+`enable_rendering=True` installs `@belgie/render` and enables the same remote
+package resolution as `allow_package_imports=True` (not only the render
+dependency). Model scripts stay workspace-restricted: they do not receive host
+path, FFI, or system-info grants. Vite runs only on a Belgie-owned renderer
+side-channel with workspace FFI/sys/write and loopback network (`localhost`) --
+not unrestricted `allow_net`. Use `plugins: []` for untrusted agents -- plugin
+factories run with the renderer's broader workspace permissions.
 
 ```tsx
 import { render } from "@belgie/render";
@@ -269,8 +272,7 @@ Caller-owned sessions and custom runtime objects are Python-only configuration.
   results are not exposed.
 - Absolute and relative host-file module imports (`file:` URLs, JSON modules)
   and direct filesystem tools are outside this capability's contract. Belgie
-  0.39+ denies host module loads that fall outside the workspace `allow_read`
-  grant; earlier Belgie releases may still load existing host `file:` modules.
+  denies host module loads that fall outside the workspace `allow_read` grant.
 - Native npm add-ons may need permissions beyond the package-import profile.
   Use a caller-configured runtime only after reviewing the package's access.
 

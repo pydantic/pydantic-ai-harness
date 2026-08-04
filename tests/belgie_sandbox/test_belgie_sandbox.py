@@ -308,7 +308,8 @@ class TestBelgieSandbox:
 
         rendering_only = BelgieSandbox(enable_rendering=True).get_instructions()
         assert rendering_only is not None
-        assert 'imports are enabled' in rendering_only
+        assert 'imports are enabled because rendering' in rendering_only
+        assert 'allow_package_imports=True' in rendering_only
         assert '@belgie/render' in rendering_only
 
         assert BelgieSandbox(instructions='Custom.').get_instructions() == 'Custom.'

@@ -19,6 +19,8 @@ class FakeBelgie:
         self.start_error: BaseException | None = None
         self.environment_exit_error: BaseException | None = None
         self.runtime_exit_error: BaseException | None = None
+        self.enter_started: asyncio.Event | None = None
+        self.enter_gate: asyncio.Event | None = None
         self.hang = False
         self.cancelled = False
         self.environments: list[_Environment] = []
@@ -196,6 +198,10 @@ class _Runtime:
         return permissions is not None and 'allow_ffi' in permissions.kwargs
 
     async def __aenter__(self) -> _ActiveRuntime:
+        if self.control.enter_started is not None:
+            self.control.enter_started.set()
+        if self.control.enter_gate is not None:
+            await self.control.enter_gate.wait()
         if self.control.start_error is not None:
             raise self.control.start_error
         self.entered = True
