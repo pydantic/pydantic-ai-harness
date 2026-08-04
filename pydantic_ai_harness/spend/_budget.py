@@ -32,6 +32,9 @@ _ANY_SCOPE = '*'
 WINDOWS: frozenset[str] = frozenset({'run', 'conversation', 'day', 'month', 'total'})
 """The accepted `window` values, for validating one that arrived as plain data."""
 
+_RETAIN_POLICIES = frozenset({'window default', 'forever'})
+"""The `retain` values that are not a duration, for validating one that arrived as plain data."""
+
 # A time window may expire freely: its bucket has already rolled over, so the
 # counter is obsolete anyway. `run` and `conversation` buckets never roll over,
 # so expiry there hands back the ceiling rather than starting a new period --
@@ -120,10 +123,18 @@ class Budget:
                 raise UserError(f'Budget.usd must be positive; got {self.usd}. Use `usd=None` for no ceiling.')
         if self.tokens is not None and self.tokens <= 0:
             raise UserError(f'Budget.tokens must be positive; got {self.tokens}. Use `tokens=None` for no ceiling.')
-        if isinstance(self.retain, timedelta) and self.retain <= timedelta(0):
+        if isinstance(self.retain, timedelta):
+            if self.retain <= timedelta(0):
+                raise UserError(
+                    f'Budget.retain must be a positive duration; got {self.retain}. '
+                    "Use 'forever' to keep the counter until something else removes it."
+                )
+        elif self.retain not in _RETAIN_POLICIES:
+            # The annotation is a `Literal`, which nothing enforces at run time. A misspelt
+            # `'forevr'` would reach `ttl` and be returned as a string, and the store would
+            # fail on `clock() + retain` at the first recorded response instead of here.
             raise UserError(
-                f'Budget.retain must be a positive duration; got {self.retain}. '
-                "Use 'forever' to keep the counter until something else removes it."
+                f'Budget.retain must be a timedelta or one of {sorted(_RETAIN_POLICIES)}; got {self.retain!r}.'
             )
         if self.warn_at is not None:
             if not 0 < self.warn_at <= 1:

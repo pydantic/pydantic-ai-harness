@@ -25,6 +25,10 @@ _REQUESTS_FIELD = 'requests'
 _UNPRICED_FIELD = 'unpriced'
 
 _ADD_SCRIPT = f"""
+local current = tonumber(redis.call('HGET', KEYS[1], '{_USD_FIELD}') or '0')
+if current + tonumber(ARGV[1]) >= {2**53} then
+  return redis.error_reply('spend usd counter would pass the exact-integer range')
+end
 local usd = redis.call('HINCRBY', KEYS[1], '{_USD_FIELD}', ARGV[1])
 local tokens = redis.call('HINCRBY', KEYS[1], '{_TOKENS_FIELD}', ARGV[2])
 local requests = redis.call('HINCRBY', KEYS[1], '{_REQUESTS_FIELD}', ARGV[3])
@@ -42,6 +46,11 @@ four increments and the expiry either all land or none do. Issued separately --
 even pipelined -- a failure between them leaves a window counting some of a
 response and not the rest, which reads as a smaller number than was really spent
 and so releases the brake later than it should.
+
+The ceiling is checked here, against the running total, and before anything is
+written. Checking the increment alone in Python would not hold: increments that
+each pass can still carry the counter past the range where a Lua number is an
+exact integer, and past that the totals this returns are rounded.
 """
 
 _LUA_EXACT_INTEGER = 2**53
@@ -49,8 +58,8 @@ _LUA_EXACT_INTEGER = 2**53
 
 The script's counters pass through Lua, so a window that accumulates more than
 this many billionths of a dollar -- about $9,007,199 against a *single* key --
-would start rounding. `_to_nanos` refuses an amount that could carry a counter
-past it rather than letting the rounding happen unannounced.
+would start rounding. `_ADD_SCRIPT` refuses the write that would cross it rather
+than letting the rounding happen unannounced.
 """
 
 
@@ -89,15 +98,7 @@ def _to_nanos(usd: Decimal) -> int:
     """
     with localcontext() as context:
         context.prec = _PRECISION
-        nanos = int((usd * _SCALE).to_integral_value(rounding=ROUND_HALF_UP))
-    if nanos >= _LUA_EXACT_INTEGER:
-        raise ValueError(
-            f'{usd} is too large for `RedisSpendStore` to record exactly: the counter passes through '
-            f'Lua, whose numbers stop being exact integers above {_LUA_EXACT_INTEGER} billionths '
-            f'(about $9,007,199). Split the budget across more keys, or use a store that does not '
-            f'have this ceiling.'
-        )
-    return nanos
+        return int((usd * _SCALE).to_integral_value(rounding=ROUND_HALF_UP))
 
 
 def _from_nanos(nanos: int) -> Decimal:
@@ -105,6 +106,17 @@ def _from_nanos(nanos: int) -> Decimal:
     with localcontext() as context:
         context.prec = _PRECISION
         return Decimal(nanos) / _SCALE
+
+
+def _expiry_seconds(ttl: timedelta) -> int:
+    """A positive `timedelta` as whole seconds, never rounding down to none.
+
+    `EXPIRE` takes seconds, and the script reads zero as "keep this key". Truncating
+    would turn any horizon under a second -- which `Budget.retain` accepts -- into no
+    expiry at all, the opposite of what was asked for and a silent divergence from
+    `InMemorySpendStore`, which honours it exactly.
+    """
+    return max(1, -(-int(ttl.total_seconds() * 1000) // 1000))
 
 
 def _field(fields: Mapping[str | bytes, str | bytes], name: str) -> int:
@@ -178,7 +190,7 @@ class RedisSpendStore:
             tokens,
             requests,
             unpriced,
-            0 if ttl is None else int(ttl.total_seconds()),
+            0 if ttl is None else _expiry_seconds(ttl),
         )
         return Spent(
             usd=_from_nanos(nanos),

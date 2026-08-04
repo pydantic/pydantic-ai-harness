@@ -178,6 +178,24 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
                 )
             scoped[slot] = budget
 
+        # Budgets sharing a key share one counter, and one counter has one expiry: the accrual
+        # writes whichever `retain` the first of them carries, so declaration order would decide
+        # when a `'forever'` ceiling quietly rolls over. Rejected rather than reconciled -- taking
+        # the longest would silently extend the shorter budget's horizon, which is the same class
+        # of surprise pointing the other way.
+        retention: dict[tuple[str, str, bool], Budget] = {}
+        for budget in self.budgets:
+            counter = (budget.name, budget.window, budget.scope is None)
+            prior = retention.get(counter)
+            if prior is not None and prior.retain != budget.retain:
+                raise UserError(
+                    f'Budgets named {budget.name!r} on the same window and scope share one counter but set '
+                    f'different `retain` values ({prior.retain!r} and {budget.retain!r}), so the order they '
+                    'are listed in would decide when that counter expires. Give them the same `retain`, or '
+                    'different `name`s.'
+                )
+            retention[counter] = budget
+
         seen: set[tuple[str, str, str, int]] = set()
         for budget in self.budgets:
             for kind, ceiling in (('usd', budget.usd), ('tokens', budget.tokens)):

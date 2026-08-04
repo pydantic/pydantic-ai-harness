@@ -207,6 +207,11 @@ class TestBudgetConfiguration:
     def test_retain_may_name_its_own_horizon(self):
         assert Budget(window='run', retain=timedelta(hours=2)).ttl == timedelta(hours=2)
 
+    def test_a_misspelt_retain_policy_is_refused(self):
+        """The annotation is a `Literal`, which nothing enforces at run time."""
+        with pytest.raises(UserError, match='must be a timedelta or one of'):
+            Budget(retain='forevr')  # pyright: ignore[reportArgumentType]
+
     @pytest.mark.parametrize('retain', [timedelta(0), timedelta(seconds=-1)])
     def test_a_non_positive_retain_is_refused(self, retain: timedelta):
         with pytest.raises(UserError, match='must be a positive duration'):
@@ -912,6 +917,8 @@ class FakeRedis:
         name = str(keys_and_args[0])
         usd, tokens, requests, unpriced, ttl = (int(argument) for argument in keys_and_args[1:])
         fields = self.hashes.setdefault(name, {})
+        if fields.get('usd_nanos', 0) + usd >= 2**53:
+            raise RuntimeError('spend usd counter would pass the exact-integer range')
         for field, amount in (
             ('usd_nanos', usd),
             ('tokens', tokens),
@@ -964,12 +971,25 @@ class TestRedisStore:
         assert 'HINCRBY' in client.calls[0]
         assert 'EXPIRE' in client.calls[0]
 
-    async def test_an_amount_past_lua_s_exact_integer_range_is_refused(self):
-        """Silently rounding a counter is worse than saying the store cannot hold it."""
+    async def test_a_total_past_lua_s_exact_integer_range_is_refused(self):
+        """Checked against the running total, not the increment: small adds reach it too."""
         store = RedisSpendStore(FakeRedis())
+        half = Decimal('4600000')
+        await store.add('k', usd=half, tokens=0, requests=1, unpriced=0, ttl=None)
 
-        with pytest.raises(ValueError, match='too large for `RedisSpendStore`'):
-            await store.add('k', usd=Decimal('9007200'), tokens=0, requests=1, unpriced=0, ttl=None)
+        with pytest.raises(RuntimeError, match='exact-integer range'):
+            await store.add('k', usd=half, tokens=0, requests=1, unpriced=0, ttl=None)
+
+    @pytest.mark.parametrize(
+        ('retain', 'expected'),
+        [(timedelta(milliseconds=500), 1), (timedelta(seconds=1), 1), (timedelta(seconds=90), 90)],
+    )
+    async def test_a_sub_second_horizon_still_expires(self, retain: timedelta, expected: int):
+        """`EXPIRE` takes seconds and the script reads zero as "keep"; truncating would never expire."""
+        client = FakeRedis()
+        await RedisSpendStore(client).add('k', usd=Decimal('1'), tokens=1, requests=1, unpriced=0, ttl=retain)
+
+        assert client.expiries == {'pydantic-ai-harness:spend:k': expected}
 
     async def test_it_drives_the_gate(self):
         guard = SpendLimits(
@@ -1166,6 +1186,37 @@ class TestDuplicateBudgets:
     def test_different_names_keep_them_apart(self):
         guard = SpendLimits[None](
             budgets=[Budget(usd=Decimal('5'), name='tight'), Budget(usd=Decimal('100'), name='loose')]
+        )
+
+        assert len(guard.budgets) == 2
+
+    def test_co_keyed_budgets_disagreeing_on_retain_are_refused(self):
+        """One counter has one expiry, so declaration order would decide when it rolls over."""
+        with pytest.raises(UserError, match='different `retain` values'):
+            SpendLimits[None](
+                budgets=[
+                    Budget(usd=Decimal('5'), window='conversation', name='cap'),
+                    Budget(tokens=1000, window='conversation', name='cap', retain='forever'),
+                ]
+            )
+
+    def test_co_keyed_budgets_agreeing_on_retain_are_allowed(self):
+        guard = SpendLimits[None](
+            budgets=[
+                Budget(usd=Decimal('5'), window='conversation', name='cap', retain='forever'),
+                Budget(tokens=1000, window='conversation', name='cap', retain='forever'),
+            ]
+        )
+
+        assert len(guard.budgets) == 2
+
+    def test_the_same_name_on_different_windows_may_differ_in_retain(self):
+        """Different windows are different counters, so neither decides the other's expiry."""
+        guard = SpendLimits[None](
+            budgets=[
+                Budget(usd=Decimal('5'), window='day', name='cap'),
+                Budget(usd=Decimal('50'), window='month', name='cap', retain='forever'),
+            ]
         )
 
         assert len(guard.budgets) == 2
