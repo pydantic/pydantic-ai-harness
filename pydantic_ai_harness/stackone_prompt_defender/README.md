@@ -4,17 +4,17 @@
 > Import this capability from its submodule -- there is no top-level `pydantic_ai_harness` re-export:
 >
 > ```python
-> from pydantic_ai_harness.stackone_defender import StackOneDefender
+> from pydantic_ai_harness.stackone_prompt_defender import StackOnePromptDefender
 > ```
 >
 > The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
 
-`StackOneDefender` scans tool results for indirect prompt injection before
+`StackOnePromptDefender` scans tool results for indirect prompt injection before
 the model sees them, using [defender](https://github.com/StackOneHQ/defender-py) by
 StackOne. It removes injected instructions from a result, and can withhold results
 it rates high or critical risk.
 
-[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stackone_defender/)
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stackone_prompt_defender/)
 
 ## The problem
 
@@ -45,7 +45,7 @@ uv add "pydantic-ai-harness[stackone-defender-ml]"
 ```
 
 ```python
-capability = StackOneDefender(semantic_detection=True)
+capability = StackOnePromptDefender(semantic_detection=True)
 ```
 
 Requesting semantic detection without the ML extra raises an error at capability
@@ -57,11 +57,11 @@ construction with the required installation command.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.stackone_defender import StackOneDefender
+from pydantic_ai_harness.stackone_prompt_defender import StackOnePromptDefender
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[StackOneDefender()],
+    capabilities=[StackOnePromptDefender()],
 )
 
 
@@ -83,7 +83,7 @@ receives a short notice in its place.
 ## Blocking
 
 ```python
-capability = StackOneDefender(block_high_risk=True)
+capability = StackOnePromptDefender(block_high_risk=True)
 ```
 
 A result is withheld when defender rates it high or critical risk. In its place
@@ -165,7 +165,7 @@ async def scan_external(external_value: object, tool_name: str) -> object:
 ## Boundary tagging
 
 ```python
-capability = StackOneDefender(annotate_boundary=True)
+capability = StackOnePromptDefender(annotate_boundary=True)
 ```
 
 With `annotate_boundary=True`, untrusted risky-field strings are wrapped in
@@ -182,7 +182,7 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext
 from stackone_defender import DefenseResult
 
-from pydantic_ai_harness.stackone_defender import StackOneDefender
+from pydantic_ai_harness.stackone_prompt_defender import StackOnePromptDefender
 
 
 def log_detection(ctx: RunContext[None], call: ToolCallPart, verdict: DefenseResult) -> None:
@@ -191,7 +191,7 @@ def log_detection(ctx: RunContext[None], call: ToolCallPart, verdict: DefenseRes
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[StackOneDefender(on_detection=log_detection)],
+    capabilities=[StackOnePromptDefender(on_detection=log_detection)],
 )
 ```
 
@@ -213,13 +213,13 @@ Tier 3:
 ```python
 from stackone_defender import create_prompt_defense
 
-from pydantic_ai_harness.stackone_defender import StackOneDefender
+from pydantic_ai_harness.stackone_prompt_defender import StackOnePromptDefender
 
 defense = create_prompt_defense(
     block_high_risk=True,
     tier2_fields=['subject', 'body'],
 )
-capability = StackOneDefender(defense)
+capability = StackOnePromptDefender(defense)
 ```
 
 Tier selection and blocking then live on the defense; setting `semantic_detection`
@@ -239,7 +239,7 @@ first.
 [Guardrails](../guardrails/README.md) provide `InputGuardrail`, `OutputGuardrail`,
 and `ToolGuardrail`, which run checks you write (or the ready-made `detectors`) over
 the user prompt, the agent output, and tool arguments and results.
-`StackOneDefender` covers the tool-result case as a self-contained capability:
+`StackOnePromptDefender` covers the tool-result case as a self-contained capability:
 it wraps StackOne's defender, so pattern, ML, and optional LLM detection work without
 writing detection logic. Reach for a `ToolGuardrail` to run your own checks; reach for
 this to get defender's detector out of the box.
@@ -253,7 +253,7 @@ this to get defender's detector out of the box.
 ## API
 
 ```python {test="skip"}
-StackOneDefender(
+StackOnePromptDefender(
     defense: PromptDefense | None = None,
     *,
     block_high_risk: bool | None = None,
