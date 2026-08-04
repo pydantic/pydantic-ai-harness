@@ -68,9 +68,6 @@ exa = [
 mongodb = [
     "pymongo>=4.17.0",
 ]
-prompt-injection-defender = [
-    "stackone-defender>=0.7.3,<0.8 ; python_full_version >= '3.11'",
-]
 skills = [
     "pyyaml>=6.0.2",
 ]
