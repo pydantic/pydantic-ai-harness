@@ -74,6 +74,9 @@ skills = [
 stackone = [
     "pydantic-ai-slim[mcp]>=2.18.0",
 ]
+scheduling = [
+    "cronsim>=2.6",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'

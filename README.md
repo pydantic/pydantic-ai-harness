@@ -198,6 +198,7 @@ We studied leading coding agents, agent frameworks, and Claw-style assistants to
 | | **Tool error recovery** | Retry failed tool calls with backoff and budget | :construction: [PR&nbsp;#171](https://github.com/pydantic/pydantic-ai-harness/pull/171) | |
 | **Reasoning** | **Adaptive reasoning** | Adjust thinking effort based on task complexity | :construction: [PR&nbsp;#174](https://github.com/pydantic/pydantic-ai-harness/pull/174) | |
 | | **Current time** | Inject current date/time into system prompt | :construction: [PR&nbsp;#170](https://github.com/pydantic/pydantic-ai-harness/pull/170) | |
+| **Autonomy** | **Scheduling** | Model-managed schedules -- cron, intervals, one-shots -- executed by an in-process runner with results delivered to your callback | :white_check_mark: [Docs](pydantic_ai_harness/scheduling/) | |
 
 > Packages by [vstorm-co](https://github.com/vstorm-co) are endorsed by the Pydantic AI team. We're working with them to upstream some of their implementations into this repo.
 

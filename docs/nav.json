@@ -29,6 +29,7 @@
       { "label": "Managed Prompt", "slug": "managed-prompt" },
       { "label": "LocalStack", "slug": "localstack" },
       { "label": "StackOne", "slug": "stackone" },
+      { "label": "Scheduling", "slug": "scheduling" },
       { "label": "Skills", "slug": "skills" },
       { "label": "ACP", "slug": "acp" }
     ]
