@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -133,8 +134,8 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         cls,
         *,
         backend: Literal['memory', 'file', 'sqlite'] = 'memory',
-        directory: str = '.step-persistence',
-        database: str = '.step-persistence.db',
+        directory: str | Path | None = None,
+        database: str | Path | None = None,
         max_snapshots_per_run: int | None = None,
         agent_name: str | None = None,
         run_id: str | None = None,
@@ -145,37 +146,53 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         defer_loading: bool = False,
         **unsupported: Any,
     ) -> StepPersistence[Any]:
-        """Construct from a serialised spec.
+        """Construct a spec-serializable capability.
 
-        Supports `backend='memory'` (default), `backend='file'` (with
-        `directory`), or `backend='sqlite'` (with `database`). Raises
-        `ValueError` for any other `backend` value -- silently falling
-        back to in-memory storage would turn a typo into accidental
-        non-durability.
+        The explicit keyword-only signature is intentional: Pydantic AI uses
+        it to publish the capability fields in `AgentSpec` JSON schema. The
+        three backend-construction knobs are `backend`, `directory`,
+        `database`, and `max_snapshots_per_run`; the remaining arguments are
+        `StepPersistence`'s serializable base fields.
 
-        `max_snapshots_per_run` (default `None`, unbounded) is forwarded to
-        the constructed store to bound per-run snapshot growth.
+        `store` and other runtime-only values are not accepted here because a
+        live store cannot be represented in YAML or JSON. Construct the
+        capability directly in Python when a custom store is needed.
         """
+        if 'store' in unsupported:
+            raise UserError(
+                '`store` is runtime-only and cannot be loaded from an AgentSpec. '
+                'Construct StepPersistence(store=...) in Python instead.'
+            )
         if unsupported:
             raise UserError(f'StepPersistence has no spec field(s) {sorted(unsupported)}.')
+        if backend != 'file' and directory is not None:
+            raise ValueError('directory is only valid with backend="file"')
+        if backend != 'sqlite' and database is not None:
+            raise ValueError('database is only valid with backend="sqlite"')
         if backend == 'memory':
             store: StepStore = InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run)
         elif backend == 'file':
             from pydantic_ai_harness.step_persistence._store import FileStepStore
 
-            store = FileStepStore(directory, max_snapshots_per_run=max_snapshots_per_run)
+            store = FileStepStore(
+                directory or '.step-persistence',
+                max_snapshots_per_run=max_snapshots_per_run,
+            )
         elif backend == 'sqlite':
             from pydantic_ai_harness.step_persistence._store import SqliteStepStore
 
-            store = SqliteStepStore(database=database, max_snapshots_per_run=max_snapshots_per_run)
-        else:  # pragma: no cover - Literal validation rejects this through the schema
+            store = SqliteStepStore(
+                database=database or '.step-persistence.db',
+                max_snapshots_per_run=max_snapshots_per_run,
+            )
+        else:
             raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
         return cls(
             store=store,
             agent_name=agent_name,
             run_id=run_id,
             parent_run_id=parent_run_id,
-            metadata=metadata or {},
+            metadata=metadata if metadata is not None else {},
             id=id,
             description=description,
             defer_loading=defer_loading,
