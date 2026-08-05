@@ -169,6 +169,9 @@ non-empty `allowed_domains` allowlist with explicit hostnames on the capability
 or `browser_profile`. Host globs, including `'*.example.com'`, and catch-all
 entries such as `'*'` and `'https://*'` are rejected. Use the domain-scoped
 nested form shown above when the allowed domains are not known in advance.
+BrowserUse disables cross-origin iframe processing whenever `sensitive_data` is
+configured, so browser-use cannot type a secret into a field from another
+origin.
 
 ## Sessions and safety
 

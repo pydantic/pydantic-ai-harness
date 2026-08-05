@@ -233,6 +233,39 @@ class TestBrowserUseToolset:
         assert session_profile.block_ip_addresses is True
         assert session_profile.prohibited_domains == ['localhost', 'localhost.*', '*.localhost']
 
+    async def test_sensitive_data_disables_cross_origin_iframes_without_a_profile(
+        self, kill_calls: list[BrowserSession]
+    ) -> None:
+        factory = _success_factory()
+
+        await (
+            BrowserUse[None](
+                browser_agent=factory,
+                sensitive_data={'https://example.com': {'x_password': 'hunter2'}},
+            )
+            .get_toolset()
+            .browse_web('task')
+        )
+
+        assert factory.requests[0].browser_session.browser_profile.cross_origin_iframes is False
+
+    async def test_sensitive_data_disables_cross_origin_iframes_from_a_profile(
+        self, kill_calls: list[BrowserSession]
+    ) -> None:
+        factory = _success_factory()
+
+        await (
+            BrowserUse[None](
+                browser_agent=factory,
+                browser_profile=BrowserProfile(cross_origin_iframes=True),
+                sensitive_data={'https://example.com': {'x_password': 'hunter2'}},
+            )
+            .get_toolset()
+            .browse_web('task')
+        )
+
+        assert factory.requests[0].browser_session.browser_profile.cross_origin_iframes is False
+
     async def test_capability_fields_override_browser_profile(self, kill_calls: list[BrowserSession]) -> None:
         profile = BrowserProfile(headless=False, allowed_domains=['docs.example.com'])
         factory = _success_factory()

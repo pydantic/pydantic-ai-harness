@@ -361,6 +361,11 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
             headless = True
         browser_profile = self._browser_profile
         allowed_domains = self._allowed_domains
+        if self._sensitive_data is not None:
+            if browser_profile is None:
+                browser_profile = BrowserProfile(cross_origin_iframes=False)
+            else:
+                browser_profile = browser_profile.model_copy(update={'cross_origin_iframes': False})
         if self._block_ip_addresses:
             allowed_domains = _exclude_localhost_allowlist_entries(allowed_domains)
             if browser_profile is None:

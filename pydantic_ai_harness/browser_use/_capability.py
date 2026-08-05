@@ -192,7 +192,8 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     and substitutes the real values in the browser. Scope entries per domain
     with the nested form `{'https://example.com': {'x_password': '...'}}`. Flat
     entries require a non-empty `allowed_domains` on the capability or
-    `browser_profile` with explicit hostnames.
+    `browser_profile` with explicit hostnames. Secret-bearing sessions process
+    same-origin frames only.
     """
 
     extend_system_message: str | None = None
