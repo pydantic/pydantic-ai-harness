@@ -393,7 +393,7 @@ class TestFromSpecForwarding:
         assert cap.store._max_snapshots_per_run == 3
 
     async def test_file_backend_forwards_bound(self, tmp_path: Path) -> None:
-        cap = StepPersistence.from_spec(backend='file', directory=tmp_path, max_snapshots_per_run=4)
+        cap = StepPersistence.from_spec(backend='file', directory=str(tmp_path), max_snapshots_per_run=4)
         assert isinstance(cap.store, FileStepStore)
         assert cap.store._max_snapshots_per_run == 4
 

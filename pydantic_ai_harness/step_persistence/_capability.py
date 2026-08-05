@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
@@ -128,7 +129,22 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     """Free-form metadata stored on the `RunRecord` and on each event."""
 
     @classmethod
-    def from_spec(cls, *args: Any, **kwargs: Any) -> StepPersistence[Any]:
+    def from_spec(
+        cls,
+        *,
+        backend: Literal['memory', 'file', 'sqlite'] = 'memory',
+        directory: str = '.step-persistence',
+        database: str = '.step-persistence.db',
+        max_snapshots_per_run: int | None = None,
+        agent_name: str | None = None,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+        metadata: dict[str, str] | None = None,
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
+        **unsupported: Any,
+    ) -> StepPersistence[Any]:
         """Construct from a serialised spec.
 
         Supports `backend='memory'` (default), `backend='file'` (with
@@ -140,21 +156,30 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         `max_snapshots_per_run` (default `None`, unbounded) is forwarded to
         the constructed store to bound per-run snapshot growth.
         """
-        backend = kwargs.pop('backend', 'memory')
-        max_snapshots_per_run = kwargs.pop('max_snapshots_per_run', None)
+        if unsupported:
+            raise UserError(f'StepPersistence has no spec field(s) {sorted(unsupported)}.')
         if backend == 'memory':
-            return cls(store=InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        if backend == 'file':
+            store: StepStore = InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run)
+        elif backend == 'file':
             from pydantic_ai_harness.step_persistence._store import FileStepStore
 
-            directory = kwargs.pop('directory', '.step-persistence')
-            return cls(store=FileStepStore(directory, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        if backend == 'sqlite':
+            store = FileStepStore(directory, max_snapshots_per_run=max_snapshots_per_run)
+        elif backend == 'sqlite':
             from pydantic_ai_harness.step_persistence._store import SqliteStepStore
 
-            database = kwargs.pop('database', '.step-persistence.db')
-            return cls(store=SqliteStepStore(database=database, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+            store = SqliteStepStore(database=database, max_snapshots_per_run=max_snapshots_per_run)
+        else:  # pragma: no cover - Literal validation rejects this through the schema
+            raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+        return cls(
+            store=store,
+            agent_name=agent_name,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata or {},
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
+        )
 
     def compaction_transcript_handle(self) -> str | None:
         """Retrieval handle to this run's transcript, for compaction receipts.

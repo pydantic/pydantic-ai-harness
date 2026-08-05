@@ -11,12 +11,15 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from pydantic_ai import Agent, CallToolsNode, ModelRequestNode, ModelRetry, RunContext
 from pydantic_ai._agent_graph import GraphAgentState  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities.combined import CombinedCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -1016,8 +1019,50 @@ class TestStepPersistenceCapability:
         assert cap.agent_name == 'a'
 
     async def test_from_spec_file_backend(self, tmp_path: Path) -> None:
-        cap = StepPersistence.from_spec(backend='file', directory=tmp_path)
+        cap = StepPersistence.from_spec(backend='file', directory=str(tmp_path))
         assert isinstance(cap.store, FileStepStore)
+
+    def test_agent_spec_schema_exposes_step_persistence_fields(self) -> None:
+        schema = AgentSpec.model_json_schema_with_capabilities([StepPersistence])
+        params = schema['$defs']['spec_params_StepPersistence']
+        properties = params['properties']
+
+        assert params['additionalProperties'] is False
+        assert {
+            'backend',
+            'directory',
+            'database',
+            'max_snapshots_per_run',
+            'agent_name',
+            'run_id',
+            'parent_run_id',
+            'metadata',
+            'id',
+            'description',
+            'defer_loading',
+        } <= properties.keys()
+        assert properties['backend']['enum'] == ['memory', 'file', 'sqlite']
+
+    def test_agent_spec_loads_step_persistence(self, tmp_path: Path) -> None:
+        spec = {
+            'capabilities': [
+                {
+                    'StepPersistence': {
+                        'backend': 'file',
+                        'directory': str(tmp_path),
+                        'agent_name': 'worker',
+                        'metadata': {'team': 'infra'},
+                    }
+                }
+            ]
+        }
+
+        agent = Agent.from_spec(spec, custom_capability_types=[StepPersistence], model=TestModel())
+        assert isinstance(agent.root_capability, CombinedCapability)
+        capability = next(cap for cap in agent.root_capability.capabilities if isinstance(cap, StepPersistence))
+        assert isinstance(capability.store, FileStepStore)
+        assert capability.agent_name == 'worker'
+        assert capability.metadata == {'team': 'infra'}
 
     async def test_from_spec_file_backend_default_directory(self) -> None:
         cap = StepPersistence.from_spec(backend='file')
@@ -1572,7 +1617,11 @@ class TestFromSpecBackendValidation:
     def test_unknown_backend_raises(self) -> None:
         """A typo like `backend='disk'` raises instead of silently using memory."""
         with pytest.raises(ValueError, match='unknown backend'):
-            StepPersistence.from_spec(backend='disk')
+            StepPersistence.from_spec(backend=cast(Any, 'disk'))
+
+    def test_unknown_spec_field_raises(self) -> None:
+        with pytest.raises(UserError, match='no spec field'):
+            StepPersistence.from_spec(runtime_only='value')
 
     def test_memory_backend_still_works(self) -> None:
         cap: StepPersistence[Any] = StepPersistence.from_spec(backend='memory')
