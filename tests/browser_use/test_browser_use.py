@@ -199,7 +199,7 @@ class TestBrowserUseToolset:
         [request] = factory.requests
         assert request.llm is llm
         assert request.use_vision == 'auto'
-        assert request.sensitive_data is secrets
+        assert request.sensitive_data == secrets
         assert request.extend_system_message == 'Never submit forms.'
         session = request.browser_session
         assert session.browser_profile.headless is False
@@ -953,6 +953,64 @@ class TestSensitiveDataSafety:
         capability = BrowserUse[None](allowed_domains=['*.example.com'])
 
         assert capability.allowed_domains == ['*.example.com']
+
+    def test_mutating_an_allowlist_before_toolset_construction_raises(self) -> None:
+        capability = BrowserUse[None](
+            allowed_domains=['safe.example'],
+            sensitive_data={'x_password': 'hunter2'},
+        )
+        assert capability.allowed_domains is not None
+        capability.allowed_domains.clear()
+
+        with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
+            capability.get_toolset()
+
+    def test_adding_a_flat_secret_before_toolset_construction_raises(self) -> None:
+        capability = BrowserUse[None](
+            sensitive_data={'https://safe.example': {'x_password': 'hunter2'}},
+        )
+        assert capability.sensitive_data is not None
+        capability.sensitive_data['x_token'] = 'abc123'
+
+        with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
+            capability.get_toolset()
+
+    async def test_toolset_snapshots_flat_secret_configuration(self, kill_calls: list[BrowserSession]) -> None:
+        factory = _success_factory()
+        secrets: dict[str, str | dict[str, str]] = {'x_password': 'hunter2'}
+        capability = BrowserUse[None](
+            browser_agent=factory,
+            allowed_domains=['safe.example'],
+            sensitive_data=secrets,
+        )
+        toolset = capability.get_toolset()
+        assert capability.allowed_domains is not None
+        capability.allowed_domains.clear()
+        secrets['x_token'] = 'abc123'
+
+        await toolset.browse_web('task')
+
+        request = factory.requests[0]
+        assert request.browser_session.browser_profile.allowed_domains == ['safe.example']
+        assert request.sensitive_data == {'x_password': 'hunter2'}
+
+    async def test_toolset_snapshots_profile_allowlist_with_flat_secrets(
+        self, kill_calls: list[BrowserSession]
+    ) -> None:
+        factory = _success_factory()
+        profile = BrowserProfile(allowed_domains=['safe.example'])
+        capability = BrowserUse[None](
+            browser_agent=factory,
+            browser_profile=profile,
+            sensitive_data={'x_password': 'hunter2'},
+        )
+        toolset = capability.get_toolset()
+        assert profile.allowed_domains is not None
+        profile.allowed_domains.clear()
+
+        await toolset.browse_web('task')
+
+        assert factory.requests[0].browser_session.browser_profile.allowed_domains == ['safe.example']
 
     def test_empty_capability_allowlist_overrides_profile_allowlist_and_raises(self) -> None:
         with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):

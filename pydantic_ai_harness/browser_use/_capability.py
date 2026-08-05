@@ -76,6 +76,15 @@ def _has_wildcard_hostname(domain_pattern: str) -> bool:
     return '*' in hostname
 
 
+def _copy_sensitive_data(
+    sensitive_data: dict[str, str | dict[str, str]] | None,
+) -> dict[str, str | dict[str, str]] | None:
+    """Copy secret mappings before giving them to a cached toolset."""
+    if sensitive_data is None:
+        return None
+    return {key: value.copy() if isinstance(value, dict) else value for key, value in sensitive_data.items()}
+
+
 @dataclass
 class BrowserUse(AbstractCapability[AgentDepsT]):
     """Delegation of open-ended web tasks to an autonomous [browser-use](https://github.com/browser-use/browser-use) agent.
@@ -256,6 +265,10 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         """Require an effective navigation allowlist when flat secrets are configured."""
+        self._validate_sensitive_data()
+
+    def _validate_sensitive_data(self) -> None:
+        """Validate the mutable secret configuration before creating its toolset."""
         effective_allowed_domains = self.allowed_domains
         if effective_allowed_domains is not None:
             self.allowed_domains = [_normalize_allowed_domain(domain) for domain in effective_allowed_domains]
@@ -296,17 +309,22 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
         calls do not each spawn their own shared browser.
         """
         if self._toolset is None:
+            self._validate_sensitive_data()
+            sensitive_data = _copy_sensitive_data(self.sensitive_data)
+            browser_profile = self.browser_profile
+            if sensitive_data is not None and browser_profile is not None:
+                browser_profile = browser_profile.model_copy(deep=True)
             self._toolset = BrowserUseToolset[AgentDepsT](
                 browser_agent=self.browser_agent if self.browser_agent is not None else default_browser_agent,
                 llm=resolve_chat_model(self.llm),
-                browser_profile=self.browser_profile,
-                allowed_domains=self.allowed_domains,
+                browser_profile=browser_profile,
+                allowed_domains=list(self.allowed_domains) if self.allowed_domains is not None else None,
                 block_ip_addresses=self.block_ip_addresses,
                 headless=self.headless,
                 max_steps=self.max_steps,
                 use_vision=self.use_vision,
                 output_schema=self.output_schema,
-                sensitive_data=self.sensitive_data,
+                sensitive_data=sensitive_data,
                 extend_system_message=self.extend_system_message,
                 settings=self.agent_settings if self.agent_settings is not None else BrowserAgentSettings(),
                 session_scope=self.session_scope,
