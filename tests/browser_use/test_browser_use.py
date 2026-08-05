@@ -864,8 +864,8 @@ class TestCredentialsStayOutOfRepr:
 
 
 class TestSensitiveDataSafety:
-    def test_flat_secrets_without_an_allowlist_warn(self) -> None:
-        with pytest.warns(UserWarning, match='Flat `sensitive_data` values apply to every domain'):
+    def test_flat_secrets_without_an_allowlist_raise(self) -> None:
+        with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
             BrowserUse[None](sensitive_data={'x_password': 'hunter2'})
 
     @pytest.mark.parametrize(
@@ -884,39 +884,39 @@ class TestSensitiveDataSafety:
             ),
         ],
     )
-    def test_domain_scoped_secrets_do_not_warn(self, capability: BrowserUse[None]) -> None:
+    def test_restricted_or_domain_scoped_secrets_are_allowed(self, capability: BrowserUse[None]) -> None:
         assert capability.sensitive_data is not None
 
-    def test_empty_capability_allowlist_warns(self) -> None:
-        with pytest.warns(UserWarning, match='Flat `sensitive_data` values apply to every domain'):
+    def test_empty_capability_allowlist_raises(self) -> None:
+        with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
             BrowserUse[None](
                 allowed_domains=[],
                 sensitive_data={'x_password': 'hunter2'},
             )
 
-    def test_empty_profile_allowlist_warns(self) -> None:
-        with pytest.warns(UserWarning, match='Flat `sensitive_data` values apply to every domain'):
+    def test_empty_profile_allowlist_raises(self) -> None:
+        with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
             BrowserUse[None](
                 browser_profile=BrowserProfile(allowed_domains=[]),
                 sensitive_data={'x_password': 'hunter2'},
             )
 
-    def test_wildcard_capability_allowlist_warns(self) -> None:
-        with pytest.warns(UserWarning, match='Flat `sensitive_data` values apply to every domain'):
+    def test_wildcard_capability_allowlist_raises(self) -> None:
+        with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
             BrowserUse[None](
                 allowed_domains=['*'],
                 sensitive_data={'x_password': 'hunter2'},
             )
 
-    def test_wildcard_profile_allowlist_warns(self) -> None:
-        with pytest.warns(UserWarning, match='Flat `sensitive_data` values apply to every domain'):
+    def test_wildcard_profile_allowlist_raises(self) -> None:
+        with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
             BrowserUse[None](
                 browser_profile=BrowserProfile(allowed_domains=['*']),
                 sensitive_data={'x_password': 'hunter2'},
             )
 
-    def test_empty_capability_allowlist_overrides_profile_allowlist_and_warns(self) -> None:
-        with pytest.warns(UserWarning, match='Flat `sensitive_data` values apply to every domain'):
+    def test_empty_capability_allowlist_overrides_profile_allowlist_and_raises(self) -> None:
+        with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
             BrowserUse[None](
                 browser_profile=BrowserProfile(allowed_domains=['safe.example']),
                 allowed_domains=[],

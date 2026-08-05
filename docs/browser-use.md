@@ -171,11 +171,11 @@ BrowserUse(
 )
 ```
 
-Flat `sensitive_data` values are available on every domain. Constructing
-`BrowserUse` with flat values and no restrictive `allowed_domains` emits a
-warning. A wildcard allowlist such as `['*']` allows every domain. Configure a
-concrete allowlist on the capability or `browser_profile`, or use the
-domain-scoped nested form shown above.
+Flat `sensitive_data` values are available on every domain, so they require a
+non-empty `allowed_domains` allowlist without a catch-all `'*'` entry on the
+capability or `browser_profile`. A catch-all allowlist such as `['*']` allows
+every domain and is rejected. Use the domain-scoped nested form shown above
+when the allowed domains are not known in advance.
 
 ## Sessions and safety
 

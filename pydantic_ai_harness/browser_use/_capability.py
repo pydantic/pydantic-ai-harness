@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
@@ -184,8 +183,9 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     browser-use shows the model only the placeholder keys (e.g.
     `{'x_password': '...'}`; the model writes `<secret>x_password</secret>`)
     and substitutes the real values in the browser. Scope entries per domain
-    with the nested form `{'https://example.com': {'x_password': '...'}}`, and
-    combine with `allowed_domains` so the values cannot be typed elsewhere.
+    with the nested form `{'https://example.com': {'x_password': '...'}}`. Flat
+    entries require a non-empty `allowed_domains` on the capability or
+    `browser_profile` without a catch-all `'*'` entry.
     """
 
     extend_system_message: str | None = None
@@ -247,7 +247,7 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     """The cached toolset, so `'agent'`-scoped session state has one owner."""
 
     def __post_init__(self) -> None:
-        """Warn when flat secrets have no effective navigation allowlist."""
+        """Require an effective navigation allowlist when flat secrets are configured."""
         effective_allowed_domains = self.allowed_domains
         if effective_allowed_domains is not None:
             self.allowed_domains = [_normalize_allowed_domain(domain) for domain in effective_allowed_domains]
@@ -264,12 +264,9 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
             isinstance(value, str) for value in self.sensitive_data.values()
         )
         if has_flat_secrets and not has_restrictive_allowlist:
-            warnings.warn(
-                'Flat `sensitive_data` values apply to every domain when no restrictive `allowed_domains` are '
-                'configured. Set a concrete allowlist on the capability or `browser_profile`, or use domain-scoped '
-                'nested values.',
-                UserWarning,
-                stacklevel=2,
+            raise ValueError(
+                'Flat `sensitive_data` values require a non-empty `allowed_domains` allowlist without a catch-all '
+                "'*' entry on the capability or `browser_profile`; use domain-scoped nested values otherwise."
             )
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
