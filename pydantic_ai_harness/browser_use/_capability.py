@@ -69,6 +69,13 @@ def _normalize_profile_allowed_domains(
     return set(normalized) if isinstance(allowed_domains, set) else normalized
 
 
+def _has_wildcard_hostname(domain_pattern: str) -> bool:
+    """Whether a browser-use domain pattern can match more than one hostname."""
+    hostname_with_port = domain_pattern.split('://', maxsplit=1)[-1].split('/', maxsplit=1)[0]
+    hostname = hostname_with_port.split(':', maxsplit=1)[0]
+    return '*' in hostname
+
+
 @dataclass
 class BrowserUse(AbstractCapability[AgentDepsT]):
     """Delegation of open-ended web tasks to an autonomous [browser-use](https://github.com/browser-use/browser-use) agent.
@@ -185,7 +192,7 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     and substitutes the real values in the browser. Scope entries per domain
     with the nested form `{'https://example.com': {'x_password': '...'}}`. Flat
     entries require a non-empty `allowed_domains` on the capability or
-    `browser_profile` without a catch-all `'*'` entry.
+    `browser_profile` with explicit hostnames.
     """
 
     extend_system_message: str | None = None
@@ -259,14 +266,16 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
                     update={'allowed_domains': normalized_allowed_domains}
                 )
             effective_allowed_domains = normalized_allowed_domains
-        has_restrictive_allowlist = bool(effective_allowed_domains) and '*' not in effective_allowed_domains
+        has_restrictive_allowlist = bool(effective_allowed_domains) and not any(
+            _has_wildcard_hostname(domain) for domain in effective_allowed_domains
+        )
         has_flat_secrets = self.sensitive_data is not None and any(
             isinstance(value, str) for value in self.sensitive_data.values()
         )
         if has_flat_secrets and not has_restrictive_allowlist:
             raise ValueError(
-                'Flat `sensitive_data` values require a non-empty `allowed_domains` allowlist without a catch-all '
-                "'*' entry on the capability or `browser_profile`; use domain-scoped nested values otherwise."
+                'Flat `sensitive_data` values require a non-empty `allowed_domains` allowlist with explicit '
+                'hostnames on the capability or `browser_profile`; use domain-scoped nested values otherwise.'
             )
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:

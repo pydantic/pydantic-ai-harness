@@ -172,10 +172,10 @@ BrowserUse(
 ```
 
 Flat `sensitive_data` values are available on every domain, so they require a
-non-empty `allowed_domains` allowlist without a catch-all `'*'` entry on the
-capability or `browser_profile`. A catch-all allowlist such as `['*']` allows
-every domain and is rejected. Use the domain-scoped nested form shown above
-when the allowed domains are not known in advance.
+non-empty `allowed_domains` allowlist with explicit hostnames on the capability
+or `browser_profile`. Host globs, including `'*.example.com'`, and catch-all
+entries such as `'*'` and `'https://*'` are rejected. Use the domain-scoped
+nested form shown above when the allowed domains are not known in advance.
 
 ## Sessions and safety
 
@@ -190,7 +190,8 @@ when the allowed domains are not known in advance.
 - **Domain allowlist.** `allowed_domains` is enforced by browser-use's
   `BrowserProfile`: navigation outside the list is blocked inside the
   sub-agent, not just discouraged in the prompt. Glob patterns like
-  `'*.example.com'` work. A bare scheme-qualified host such as
+  `'*.example.com'` work for navigation, but not with flat `sensitive_data`.
+  A bare scheme-qualified host such as
   `'https://example.com'` is given a path boundary before browser-use matches
   it, so it does not match `https://example.com.attacker.test`.
 - **Private networks.** `block_ip_addresses=True` by default blocks direct IP

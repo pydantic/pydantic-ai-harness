@@ -184,7 +184,7 @@ class TestBrowserUseToolset:
         factory = _success_factory()
         capability = BrowserUse[None](
             llm=llm,
-            allowed_domains=['example.com', '*.example.org'],
+            allowed_domains=['example.com', 'example.org'],
             headless=False,
             max_steps=7,
             use_vision='auto',
@@ -203,7 +203,7 @@ class TestBrowserUseToolset:
         assert request.extend_system_message == 'Never submit forms.'
         session = request.browser_session
         assert session.browser_profile.headless is False
-        assert session.browser_profile.allowed_domains == ['example.com', '*.example.org']
+        assert session.browser_profile.allowed_domains == ['example.com', 'example.org']
         assert session.cdp_url == 'http://localhost:9222'
         assert factory.agent.run_calls == [7]
 
@@ -901,19 +901,25 @@ class TestSensitiveDataSafety:
                 sensitive_data={'x_password': 'hunter2'},
             )
 
-    def test_wildcard_capability_allowlist_raises(self) -> None:
+    @pytest.mark.parametrize('allowed_domains', [['*'], ['*.*'], ['*.example.com'], ['https://*'], ['*://*']])
+    def test_host_glob_capability_allowlist_raises(self, allowed_domains: list[str]) -> None:
         with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
             BrowserUse[None](
-                allowed_domains=['*'],
+                allowed_domains=allowed_domains,
                 sensitive_data={'x_password': 'hunter2'},
             )
 
-    def test_wildcard_profile_allowlist_raises(self) -> None:
+    def test_host_glob_profile_allowlist_raises(self) -> None:
         with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
             BrowserUse[None](
-                browser_profile=BrowserProfile(allowed_domains=['*']),
+                browser_profile=BrowserProfile(allowed_domains=['*.example.com']),
                 sensitive_data={'x_password': 'hunter2'},
             )
+
+    def test_host_glob_allowlist_without_flat_secrets_is_allowed(self) -> None:
+        capability = BrowserUse[None](allowed_domains=['*.example.com'])
+
+        assert capability.allowed_domains == ['*.example.com']
 
     def test_empty_capability_allowlist_overrides_profile_allowlist_and_raises(self) -> None:
         with pytest.raises(ValueError, match='Flat `sensitive_data` values require'):
