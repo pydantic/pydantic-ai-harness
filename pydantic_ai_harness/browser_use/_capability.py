@@ -214,7 +214,7 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     """
 
     agent_settings: BrowserAgentSettings | None = None
-    """The remaining browser-use `Agent` options (judge, planning, timeouts, custom tools, ...).
+    """Supported browser-use `Agent` options (judge, planning, timeouts, custom tools, ...).
 
     `None` behaves like an empty `BrowserAgentSettings`, i.e. browser-use's own
     defaults. See `BrowserAgentSettings` for the full list.

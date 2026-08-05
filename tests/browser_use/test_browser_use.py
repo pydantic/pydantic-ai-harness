@@ -17,6 +17,7 @@ import pytest
 # `tests/browser_use` shadows the top-level `browser_use` name in pyright's
 # tests execution environment, while submodule imports resolve correctly.
 from browser_use.agent.service import Agent as BrowserUseAgent
+from browser_use.agent.service import Tools  # pyright: ignore[reportPrivateImportUsage]
 from browser_use.browser import BrowserProfile, BrowserSession
 from browser_use.llm.messages import BaseMessage
 from browser_use.llm.views import ChatInvokeCompletion
@@ -625,6 +626,7 @@ class TestBrowserAgentSettings:
             seen.update(kwargs)
 
         settings = _distinctly_valued_settings()
+        settings.tools = Tools[None]()
         monkeypatch.setattr(BrowserUseAgent, '__init__', record_init)
         default_browser_agent(
             BrowserTask(
@@ -647,6 +649,57 @@ class TestBrowserAgentSettings:
             if seen[setting.name] != getattr(settings, setting.name)
         }
         assert mismatched == {}
+        assert 'available_file_paths' not in seen
+
+    def test_disables_file_reading(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The browser agent cannot send downloaded PDFs to its local parser."""
+        seen: dict[str, object] = {}
+
+        def record_init(self: object, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+        monkeypatch.setattr(BrowserUseAgent, '__init__', record_init)
+        default_browser_agent(
+            BrowserTask(
+                task='task',
+                llm=None,
+                browser_session=BrowserSession(),
+                use_vision=True,
+                output_schema=None,
+                sensitive_data=None,
+                extend_system_message=None,
+                settings=BrowserAgentSettings(),
+            )
+        )
+
+        tools = seen['tools']
+        assert isinstance(tools, Tools)
+        assert 'read_file' not in tools.registry.registry.actions  # pyright: ignore[reportUnknownMemberType]
+
+    def test_disables_file_reading_from_custom_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Custom action registries cannot restore the default parser."""
+        seen: dict[str, object] = {}
+
+        def record_init(self: object, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+        custom_tools = Tools[None]()
+        monkeypatch.setattr(BrowserUseAgent, '__init__', record_init)
+        default_browser_agent(
+            BrowserTask(
+                task='task',
+                llm=None,
+                browser_session=BrowserSession(),
+                use_vision=True,
+                output_schema=None,
+                sensitive_data=None,
+                extend_system_message=None,
+                settings=BrowserAgentSettings(tools=custom_tools),
+            )
+        )
+
+        assert seen['tools'] is custom_tools
+        assert 'read_file' not in custom_tools.registry.registry.actions  # pyright: ignore[reportUnknownMemberType]
 
 
 def _distinctly_valued_settings() -> BrowserAgentSettings:

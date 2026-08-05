@@ -21,6 +21,7 @@ from pydantic_ai_harness.browser_use._settings import BrowserAgentSettings
 
 try:
     from browser_use import Agent as _BrowserUseAgent
+    from browser_use import Tools
     from browser_use.browser import BrowserProfile, BrowserSession
     from browser_use.llm.base import BaseChatModel
 except ImportError as _import_error:  # pragma: no cover
@@ -221,6 +222,20 @@ class BrowserAgentFactory(Protocol):
         ...  # pragma: no cover
 
 
+def _safe_tools(settings: BrowserAgentSettings) -> Tools[None]:
+    """Return tools without browser-use's current PDF parser.
+
+    browser-use 0.13.7's `read_file` action calls `FileSystem.read_file_structured`,
+    which imports pypdf 6.10.2 for PDFs. Re-evaluate this restriction when
+    browser-use publishes a release with pypdf 6.14.2 or later:
+    https://github.com/browser-use/browser-use/commit/5405febce2d8834737bc7cd9afee9ad4604ec447
+    """
+    if settings.tools is None:
+        return Tools(exclude_actions=['read_file'], display_files_in_done_text=settings.display_files_in_done_text)
+    settings.tools.exclude_action('read_file')
+    return settings.tools
+
+
 def default_browser_agent(request: BrowserTask) -> BrowserAgent:
     """Build a real `browser_use.Agent` (the default `BrowserAgentFactory`).
 
@@ -242,7 +257,7 @@ def default_browser_agent(request: BrowserTask) -> BrowserAgent:
         sensitive_data=request.sensitive_data,
         extend_system_message=request.extend_system_message,
         enable_signal_handler=False,
-        tools=settings.tools,
+        tools=_safe_tools(settings),
         override_system_message=settings.override_system_message,
         max_failures=settings.max_failures,
         max_actions_per_step=settings.max_actions_per_step,
@@ -271,7 +286,6 @@ def default_browser_agent(request: BrowserTask) -> BrowserAgent:
         max_clickable_elements_length=settings.max_clickable_elements_length,
         include_tool_call_examples=settings.include_tool_call_examples,
         initial_actions=settings.initial_actions,
-        available_file_paths=settings.available_file_paths,
         file_system_path=settings.file_system_path,
         display_files_in_done_text=settings.display_files_in_done_text,
         save_conversation_path=settings.save_conversation_path,
