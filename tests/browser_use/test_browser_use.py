@@ -651,8 +651,8 @@ class TestBrowserAgentSettings:
         assert mismatched == {}
         assert 'available_file_paths' not in seen
 
-    def test_disables_file_reading(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The browser agent cannot send downloaded PDFs to its local parser."""
+    def test_disables_file_actions(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The browser agent cannot parse downloads or upload host files."""
         seen: dict[str, object] = {}
 
         def record_init(self: object, **kwargs: object) -> None:
@@ -675,9 +675,10 @@ class TestBrowserAgentSettings:
         tools = seen['tools']
         assert isinstance(tools, Tools)
         assert 'read_file' not in tools.registry.registry.actions  # pyright: ignore[reportUnknownMemberType]
+        assert 'upload_file' not in tools.registry.registry.actions  # pyright: ignore[reportUnknownMemberType]
 
-    def test_disables_file_reading_from_custom_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Custom action registries cannot restore the default parser."""
+    def test_disables_file_actions_from_custom_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Custom action registries cannot restore either restricted action."""
         seen: dict[str, object] = {}
 
         def record_init(self: object, **kwargs: object) -> None:
@@ -700,6 +701,7 @@ class TestBrowserAgentSettings:
 
         assert seen['tools'] is custom_tools
         assert 'read_file' not in custom_tools.registry.registry.actions  # pyright: ignore[reportUnknownMemberType]
+        assert 'upload_file' not in custom_tools.registry.registry.actions  # pyright: ignore[reportUnknownMemberType]
 
 
 def _distinctly_valued_settings() -> BrowserAgentSettings:

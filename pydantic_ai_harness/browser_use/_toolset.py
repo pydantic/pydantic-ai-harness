@@ -223,7 +223,7 @@ class BrowserAgentFactory(Protocol):
 
 
 def _safe_tools(settings: BrowserAgentSettings) -> Tools[None]:
-    """Return tools without browser-use's current PDF parser.
+    """Return tools without unapproved file reads or uploads.
 
     browser-use 0.13.7's `read_file` action calls `FileSystem.read_file_structured`,
     which imports pypdf 6.10.2 for PDFs. Re-evaluate this restriction when
@@ -231,8 +231,12 @@ def _safe_tools(settings: BrowserAgentSettings) -> Tools[None]:
     https://github.com/browser-use/browser-use/commit/5405febce2d8834737bc7cd9afee9ad4604ec447
     """
     if settings.tools is None:
-        return Tools(exclude_actions=['read_file'], display_files_in_done_text=settings.display_files_in_done_text)
+        return Tools(
+            exclude_actions=['read_file', 'upload_file'],
+            display_files_in_done_text=settings.display_files_in_done_text,
+        )
     settings.tools.exclude_action('read_file')
+    settings.tools.exclude_action('upload_file')
     return settings.tools
 
 
