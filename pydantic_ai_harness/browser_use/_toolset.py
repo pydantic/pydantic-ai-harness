@@ -49,8 +49,9 @@ def _pattern_allows_localhost(pattern: str) -> bool:
     """Whether a browser-use allowlist pattern would permit a localhost URL."""
     if '://' in pattern:
         hostname = urlsplit(pattern).hostname
-        if hostname is not None:
-            return any(fnmatch(host, hostname.lower()) for host in _LOCALHOST_HOSTS)
+        if hostname is None:
+            return True
+        return any(fnmatch(host, hostname.lower()) for host in _LOCALHOST_HOSTS)
     if '*' in pattern:
         if pattern.startswith('*.'):
             domain = pattern[2:]

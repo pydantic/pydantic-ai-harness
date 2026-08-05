@@ -295,6 +295,7 @@ class TestBrowserUseToolset:
         [
             BrowserUse[None](allowed_domains=['localhost']),
             BrowserUse[None](browser_profile=BrowserProfile(allowed_domains=['localhost'])),
+            BrowserUse[None](allowed_domains=['*://localhost:*/*']),
         ],
     )
     async def test_localhost_only_allowlist_requires_explicit_opt_in(
