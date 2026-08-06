@@ -12,7 +12,7 @@ import asyncio
 import functools
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar, runtime_checkable
 from unittest.mock import MagicMock
 
 import pytest
@@ -58,6 +58,11 @@ async def _close_direct_toolsets(anyio_backend: str) -> AsyncIterator[None]:
 pytestmark = pytest.mark.anyio
 
 T = TypeVar('T')
+
+
+@runtime_checkable
+class _ToolVisibilityAccessor(Protocol):
+    def visibility_of(self, tool_name: str) -> object: ...
 
 
 @pytest.fixture
@@ -1255,9 +1260,13 @@ class TestCodeMode:
         assert 'load_capability' in by_name
         assert 'run_code' in by_name
 
-        # The deferred member tool stays hidden until loaded: not folded into `run_code`
-        # and not surfaced as a plain native tool.
-        assert 'demo_tool' not in by_name
+        # The upcoming declared/visibility split retains hidden declarations in
+        # `function_tools`; use its visibility accessor when available.
+        request_parameters = model.last_model_request_parameters
+        if isinstance(request_parameters, _ToolVisibilityAccessor):
+            assert request_parameters.visibility_of('demo_tool') != 'visible'
+        else:
+            assert 'demo_tool' not in by_name
         run_code_desc = by_name['run_code'].description or ''
         assert 'demo_tool' not in run_code_desc
         assert 'load_capability' not in run_code_desc
@@ -2482,10 +2491,10 @@ class TestDynamicCatalog:
 
     async def test_for_run_returns_fresh_state_when_enabled(self) -> None:
         cap = CodeMode[object](dynamic_catalog=True)
-        cap._announced_tools.add('foo')  # pyright: ignore[reportPrivateUsage]
+        cap._in_flight_announcements.add('foo')  # pyright: ignore[reportPrivateUsage]
         fresh = await cap.for_run(build_run_context(None))
         assert fresh is not cap
-        assert fresh._announced_tools == set()  # pyright: ignore[reportPrivateUsage]
+        assert fresh._in_flight_announcements == set()  # pyright: ignore[reportPrivateUsage]
 
     async def test_for_run_returns_self_when_disabled(self) -> None:
         cap = CodeMode[object]()
@@ -2576,6 +2585,93 @@ class TestDynamicCatalog:
             )
         # Only the first discovery of `weather` announces.
         assert ctx.pending_messages is not None
+        assert len(ctx.pending_messages) == 1
+
+    async def test_announcement_in_visible_history_deduplicates_across_steps(self) -> None:
+        from pydantic_ai.messages import ModelRequest, ToolCallPart
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        result = {'discovered_tools': [{'name': 'weather'}]}
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c1'),
+            tool_def=_search_tool_def(),
+            args={},
+            result=result,
+        )
+        assert ctx.pending_messages is not None
+        [announcement] = ctx.pending_messages[0].messages
+        assert isinstance(announcement, ModelRequest)
+        ctx.messages.append(announcement)
+        ctx.pending_messages.clear()
+
+        await cap.before_model_request(ctx, request_context=None)  # pyright: ignore[reportArgumentType]
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c2'),
+            tool_def=_search_tool_def(),
+            args={},
+            result=result,
+        )
+
+        assert ctx.pending_messages == []
+
+    async def test_compaction_boundary_allows_announcement_again(self) -> None:
+        from pydantic_ai.messages import CompactionPart, ModelRequest, ModelResponse, ToolCallPart
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        result = {'discovered_tools': [{'name': 'weather'}]}
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c1'),
+            tool_def=_search_tool_def(),
+            args={},
+            result=result,
+        )
+        assert ctx.pending_messages is not None
+        [announcement] = ctx.pending_messages[0].messages
+        assert isinstance(announcement, ModelRequest)
+        ctx.messages.extend([announcement, ModelResponse(parts=[CompactionPart()])])
+        ctx.pending_messages.clear()
+
+        await cap.before_model_request(ctx, request_context=None)  # pyright: ignore[reportArgumentType]
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c2'),
+            tool_def=_search_tool_def(),
+            args={},
+            result=result,
+        )
+
+        assert len(ctx.pending_messages) == 1
+
+    async def test_dropped_announcement_is_enqueued_again(self) -> None:
+        from pydantic_ai.messages import ToolCallPart
+
+        cap = CodeMode[object](dynamic_catalog=True)
+        ctx = build_run_context(None)
+        result = {'discovered_tools': [{'name': 'weather'}]}
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c1'),
+            tool_def=_search_tool_def(),
+            args={},
+            result=result,
+        )
+        assert ctx.pending_messages is not None
+        ctx.pending_messages.clear()  # A history processor omitted the authored announcement.
+
+        await cap.before_model_request(ctx, request_context=None)  # pyright: ignore[reportArgumentType]
+        await cap.after_tool_execute(
+            ctx,
+            call=ToolCallPart(tool_name='search_tools', args={}, tool_call_id='c2'),
+            tool_def=_search_tool_def(),
+            args={},
+            result=result,
+        )
+
         assert len(ctx.pending_messages) == 1
 
     # -- discovery announcement: native search path -----------------------
