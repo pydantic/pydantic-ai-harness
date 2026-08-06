@@ -7,12 +7,12 @@ description: Persistent, namespaced agent notebooks with bounded prompt injectio
 
 Give an agent a persistent notebook that it can update, search, and reuse across runs without loading every stored file into every prompt.
 
-> [!NOTE]
-> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
->
-> ```python
-> from pydantic_ai_harness.memory import Memory
-> ```
+!!! note "Import path"
+    Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
+
+    ```python
+    from pydantic_ai_harness.memory import Memory
+    ```
 
 Memory is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the [version policy](index.md#version-policy).
 

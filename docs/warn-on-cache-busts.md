@@ -7,12 +7,12 @@ description: Warn when a run's prompt-cache hit collapses between model requests
 
 Warn when a run's prompt cache hit collapses between model requests, so a moved cacheable prefix or an expired provider cache surfaces instead of quietly re-charging tokens it could have served from cache.
 
-> [!NOTE]
-> Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
->
-> ```python
-> from pydantic_ai_harness.warn_on_cache_busts import WarnOnCacheBusts
-> ```
+!!! note "Import path"
+    Import this capability from its submodule. It is not re-exported from `pydantic_ai_harness`:
+
+    ```python
+    from pydantic_ai_harness.warn_on_cache_busts import WarnOnCacheBusts
+    ```
 
 Warn On Cache Busts is a released, non-experimental capability. Pydantic AI Harness is still on 0.x releases, so the API may change between minor releases. See the [version policy](index.md#version-policy).
 
