@@ -518,8 +518,10 @@ class StackOnePromptDefender(AbstractCapability[AgentDepsT]):
         if not verdict.allowed:
             return self.blocked_message.format(tool_name=call.tool_name, risk_level=verdict.risk_level)
         sanitized = verdict.sanitized
+        # `annotate_boundary` rewrites `sanitized` without recording findings, so adopt
+        # on it too; otherwise the model sees the untagged text (matches after_tool_execute).
         if (
-            _findings(verdict)
+            (_findings(verdict) or self.annotate_boundary)
             and _is_str_keyed_mapping(sanitized)
             and isinstance(replacement := sanitized.get(_TEXT_WRAP_KEY), str)
             and replacement != text
@@ -538,7 +540,7 @@ class StackOnePromptDefender(AbstractCapability[AgentDepsT]):
             await self._notify(ctx, call, verdict)
         if not verdict.allowed:
             return self.blocked_message.format(tool_name=call.tool_name, risk_level=verdict.risk_level)
-        if _findings(verdict):
+        if _findings(verdict) or self.annotate_boundary:
             return _rebuild(content, projected, verdict.sanitized)
         return None
 

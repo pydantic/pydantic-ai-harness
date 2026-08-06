@@ -336,6 +336,29 @@ async def test_opaque_failure_signal_passes_through_unchanged() -> None:
     assert exc_info.value is error
 
 
+async def test_annotate_boundary_retry_signal_adopted() -> None:
+    defense = PromptDefense(enable_tier2=False, annotate_boundary=True)
+    cap = StackOnePromptDefender(defense, annotate_boundary=True)
+    error = ToolRetryError(RetryPromptPart('try another query', tool_name='fetch', tool_call_id='call-1'))
+    with pytest.raises(ToolRetryError) as exc_info:
+        await _run_signal(cap, error)
+    assert exc_info.value is not error
+    content = exc_info.value.tool_retry.content
+    assert isinstance(content, str)
+    assert '[UD-' in content
+
+
+async def test_annotate_boundary_structured_signal_adopted() -> None:
+    defense = PromptDefense(enable_tier2=False, annotate_boundary=True)
+    cap = StackOnePromptDefender(defense, annotate_boundary=True)
+    error = ToolFailedError(ToolReturnPart('fetch', {'body': 'quarterly figures'}, 'call-1', outcome='failed'))
+    with pytest.raises(ToolFailedError) as exc_info:
+        await _run_signal(cap, error)
+    assert exc_info.value is not error
+    content: Any = exc_info.value.tool_failed.content
+    assert content['body'].startswith('[UD-')
+
+
 async def test_binary_result_passes_through() -> None:
     result = BinaryContent(data=b'\x89PNG', media_type='image/png')
     assert await _run(StackOnePromptDefender(_blocking()), result) is result
