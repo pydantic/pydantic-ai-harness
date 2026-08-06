@@ -467,15 +467,19 @@ class StackOnePromptDefender(AbstractCapability[AgentDepsT]):
         args: dict[str, Any],
         handler: WrapToolExecuteHandler,
     ) -> Any:
-        """Scan model-facing retry and failure text while preserving its control-flow type."""
+        """Scan model-facing retry and failure content while preserving its control-flow type."""
         try:
             return await handler(args)
         except (ToolRetryError, ToolFailedError) as error:
             part = error.tool_retry if isinstance(error, ToolRetryError) else error.tool_failed
-            content = part.content
-            if not await matches_tool_selector(self.tool_filter, ctx, tool_def) or not isinstance(content, str):
+            if not await matches_tool_selector(self.tool_filter, ctx, tool_def):
                 raise
-            replacement = await self._scan_signal(ctx, call, content)
+            content = part.content
+            replacement = (
+                await self._scan_signal(ctx, call, content)
+                if isinstance(content, str)
+                else await self._scan_structured_signal(ctx, call, content)
+            )
             if replacement is None:
                 raise
             rebuilt = replace(part, content=replacement)
@@ -521,6 +525,21 @@ class StackOnePromptDefender(AbstractCapability[AgentDepsT]):
             and replacement != text
         ):
             return replacement
+        return None
+
+    async def _scan_structured_signal(
+        self, ctx: RunContext[AgentDepsT], call: ToolCallPart, content: object
+    ) -> object | None:
+        """Return replacement content for a non-string retry or failure signal, if needed."""
+        verdict, projected = await self._scan_value(content, call.tool_name)
+        if verdict is None:
+            return None
+        if _flagged(verdict):
+            await self._notify(ctx, call, verdict)
+        if not verdict.allowed:
+            return self.blocked_message.format(tool_name=call.tool_name, risk_level=verdict.risk_level)
+        if _findings(verdict):
+            return _rebuild(content, projected, verdict.sanitized)
         return None
 
     async def _scan_value(self, value: object, tool_name: str) -> tuple[DefenseResult | None, object]:

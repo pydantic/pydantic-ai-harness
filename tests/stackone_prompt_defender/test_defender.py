@@ -302,6 +302,40 @@ async def test_clean_failure_signal_passes_through_unchanged() -> None:
     assert exc_info.value is error
 
 
+async def test_structured_failure_signal_sanitized() -> None:
+    part = ToolReturnPart('fetch', {'body': INJECTION}, 'call-1', outcome='failed')
+    error = ToolFailedError(part)
+    with pytest.raises(ToolFailedError) as exc_info:
+        await _run_signal(StackOnePromptDefender(_observe()), error)
+    assert exc_info.value is not error
+    assert exc_info.value.tool_failed.content == {'body': SANITIZED_INJECTION}
+
+
+async def test_structured_retry_signal_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    defense = _blocking()
+    scan = defense.defend_tool_result_async
+
+    async def escalate(value: Any, tool_name: str) -> DefenseResult:
+        return dataclasses.replace(await scan(value, tool_name), allowed=False, risk_level='high')
+
+    monkeypatch.setattr(defense, 'defend_tool_result_async', escalate)
+    details: list[ErrorDetails] = [{'type': 'value_error', 'loc': ('q',), 'msg': INJECTION, 'input': INJECTION}]
+    error = ToolRetryError(RetryPromptPart(details, tool_name='fetch', tool_call_id='call-1'))
+    with pytest.raises(ToolRetryError) as exc_info:
+        await _run_signal(StackOnePromptDefender(defense), error)
+    assert exc_info.value is not error
+    assert isinstance(exc_info.value.tool_retry.content, str)
+    assert 'withheld' in exc_info.value.tool_retry.content
+
+
+async def test_opaque_failure_signal_passes_through_unchanged() -> None:
+    part = ToolReturnPart('fetch', BinaryContent(data=b'\x89PNG', media_type='image/png'), 'call-1', outcome='failed')
+    error = ToolFailedError(part)
+    with pytest.raises(ToolFailedError) as exc_info:
+        await _run_signal(StackOnePromptDefender(_blocking()), error)
+    assert exc_info.value is error
+
+
 async def test_binary_result_passes_through() -> None:
     result = BinaryContent(data=b'\x89PNG', media_type='image/png')
     assert await _run(StackOnePromptDefender(_blocking()), result) is result
