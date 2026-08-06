@@ -35,6 +35,7 @@ jobs:
     outputs:
       localstack: ${{ steps.detect.outputs.localstack }}
       mongodb: ${{ steps.detect-mongodb.outputs.mongodb }}
+      redis: ${{ steps.detect-redis.outputs.redis }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -90,6 +91,32 @@ jobs:
               exit "$status"
             fi
             echo 'mongodb=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A third step for the same reason the MongoDB one is separate: the three
+      # capabilities need independent answers, and this one's paths are the spend
+      # store rather than the Mongo-backed capabilities.
+      - id: detect-redis
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+            pydantic_ai_harness/spend \
+            tests/spend \
+            integration_tests/redis \
+            Makefile \
+            pyproject.toml \
+            uv.lock \
+            .github/workflows/main.yml
+          then
+            echo 'redis=false' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+            echo 'redis=true' >> "$GITHUB_OUTPUT"
           fi
 
   lint:
@@ -375,6 +402,51 @@ jobs:
 
       - run: make integration-mongodb
 
+  redis-integration:
+    needs: [changes]
+    # Same shape as `mongodb-integration`: no fork clause, because the redis service
+    # container reads no secret and an external contributor's pull request must get
+    # the same signal a maintainer branch does.
+    if: >-
+      ${{ always()
+          && (github.ref_type == 'tag' || needs.changes.outputs.redis == 'true') }}
+    runs-on: ubuntu-latest
+    name: Redis integration tests
+    # A service container the runner owns, so nothing here starts it; without a
+    # timeout an unreachable container would sit on the six-hour default.
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:8
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Without this an unreachable server is a skip, which is what a developer
+      # without a local Redis wants and exactly what must not happen here: a
+      # service container that never came up would report green having tested
+      # nothing.
+      REDIS_REQUIRE_LIVE: '1'
+      REDIS_TEST_URL: redis://127.0.0.1:6379
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-suffix: redis
+
+      - run: uv sync --locked --group dev
+
+      - run: make integration-redis
+
   coverage:
     needs: [test]
     runs-on: ubuntu-latest
@@ -400,7 +472,7 @@ jobs:
 
   check:
     if: always()
-    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, localstack-integration, mongodb-integration]
+    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, localstack-integration, mongodb-integration, redis-integration]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
@@ -408,10 +480,10 @@ jobs:
           # localstack-integration is skipped when a pull request or branch push
           # doesn't touch LocalStack, when the pull request comes from a fork
           # (no secrets there), and `changes` is skipped on tag events.
-          # mongodb-integration is skipped only on the path filter -- it needs no
-          # secret, so it runs on fork pull requests too.
-          # All three still vote (block the merge) when they actually run and fail.
-          allowed-skips: changes, localstack-integration, mongodb-integration
+          # mongodb-integration and redis-integration are skipped only on the path
+          # filter -- neither needs a secret, so both run on fork pull requests too.
+          # All four still vote (block the merge) when they actually run and fail.
+          allowed-skips: changes, localstack-integration, mongodb-integration, redis-integration
           jobs: ${{ toJSON(needs) }}
 
   release:
