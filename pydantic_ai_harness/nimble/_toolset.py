@@ -369,6 +369,8 @@ class NimbleSearchToolset(FunctionToolset[AgentDepsT]):
         if sitemap is not None:
             map_kwargs['sitemap'] = sitemap
         response = await self._client.map(**map_kwargs)
+        if not response.success:
+            raise ModelRetry(f'Nimble map failed for {url!r}.')
         links = list(response.links)
         if not links:
             return ToolReturn(f'No links found for {url!r}.', metadata={'sources': []})

@@ -55,6 +55,7 @@ class _FakeNimbleClient:
     search_results: list[SimpleNamespace] = field(default_factory=list[SimpleNamespace])
     extract_markdown: str | None = '# Hello'
     map_links: list[SimpleNamespace] = field(default_factory=list[SimpleNamespace])
+    map_success: bool = True
     crawl_response: SimpleNamespace = field(
         default_factory=lambda: SimpleNamespace(
             crawl_id='crawl_1',
@@ -132,7 +133,7 @@ class _FakeNimbleClient:
     async def map(self, **kwargs: Any) -> SimpleNamespace:
         if self.error is not None:
             raise self.error
-        return SimpleNamespace(links=list(self.map_links))
+        return SimpleNamespace(links=list(self.map_links), success=self.map_success)
 
     async def _crawl_run(self, **kwargs: Any) -> SimpleNamespace:
         if self.error is not None:
@@ -596,6 +597,11 @@ class TestErrorsAndConfig:
         client = _FakeNimbleClient(map_links=[])
         text = _text(await _toolset(client, include_map=True).map_site('https://example.com'))
         assert text == "No links found for 'https://example.com'."
+
+    async def test_failed_map_site_retries(self) -> None:
+        client = _FakeNimbleClient(map_links=[], map_success=False)
+        with pytest.raises(ModelRetry, match='Nimble map failed'):
+            await _toolset(client, include_map=True).map_site('https://example.com')
 
     async def test_release_keeps_client_if_close_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         class _BoomClient(_FakeNimbleClient):
