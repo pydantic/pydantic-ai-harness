@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
@@ -128,33 +130,73 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     """Free-form metadata stored on the `RunRecord` and on each event."""
 
     @classmethod
-    def from_spec(cls, *args: Any, **kwargs: Any) -> StepPersistence[Any]:
-        """Construct from a serialised spec.
+    def from_spec(
+        cls,
+        *,
+        backend: Literal['memory', 'file', 'sqlite'] = 'memory',
+        directory: str | Path | None = None,
+        database: str | Path | None = None,
+        max_snapshots_per_run: int | None = None,
+        agent_name: str | None = None,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+        metadata: dict[str, str] | None = None,
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
+        **unsupported: Any,
+    ) -> StepPersistence[Any]:
+        """Construct a spec-serializable capability.
 
-        Supports `backend='memory'` (default), `backend='file'` (with
-        `directory`), or `backend='sqlite'` (with `database`). Raises
-        `ValueError` for any other `backend` value -- silently falling
-        back to in-memory storage would turn a typo into accidental
-        non-durability.
+        The explicit keyword-only signature is intentional: Pydantic AI uses
+        it to publish the capability fields in `AgentSpec` JSON schema. The
+        three backend-construction knobs are `backend`, `directory`,
+        `database`, and `max_snapshots_per_run`; the remaining arguments are
+        `StepPersistence`'s serializable base fields.
 
-        `max_snapshots_per_run` (default `None`, unbounded) is forwarded to
-        the constructed store to bound per-run snapshot growth.
+        `store` and other runtime-only values are not accepted here because a
+        live store cannot be represented in YAML or JSON. Construct the
+        capability directly in Python when a custom store is needed.
         """
-        backend = kwargs.pop('backend', 'memory')
-        max_snapshots_per_run = kwargs.pop('max_snapshots_per_run', None)
+        if 'store' in unsupported:
+            raise UserError(
+                '`store` is runtime-only and cannot be loaded from an AgentSpec. '
+                'Construct StepPersistence(store=...) in Python instead.'
+            )
+        if unsupported:
+            raise UserError(f'StepPersistence has no spec field(s) {sorted(unsupported)}.')
+        if backend != 'file' and directory is not None:
+            raise ValueError('directory is only valid with backend="file"')
+        if backend != 'sqlite' and database is not None:
+            raise ValueError('database is only valid with backend="sqlite"')
         if backend == 'memory':
-            return cls(store=InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        if backend == 'file':
+            store: StepStore = InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run)
+        elif backend == 'file':
             from pydantic_ai_harness.step_persistence._store import FileStepStore
 
-            directory = kwargs.pop('directory', '.step-persistence')
-            return cls(store=FileStepStore(directory, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        if backend == 'sqlite':
+            store = FileStepStore(
+                directory or '.step-persistence',
+                max_snapshots_per_run=max_snapshots_per_run,
+            )
+        elif backend == 'sqlite':
             from pydantic_ai_harness.step_persistence._store import SqliteStepStore
 
-            database = kwargs.pop('database', '.step-persistence.db')
-            return cls(store=SqliteStepStore(database=database, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+            store = SqliteStepStore(
+                database=database or '.step-persistence.db',
+                max_snapshots_per_run=max_snapshots_per_run,
+            )
+        else:
+            raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+        return cls(
+            store=store,
+            agent_name=agent_name,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            metadata=metadata if metadata is not None else {},
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
+        )
 
     def compaction_transcript_handle(self) -> str | None:
         """Retrieval handle to this run's transcript, for compaction receipts.
