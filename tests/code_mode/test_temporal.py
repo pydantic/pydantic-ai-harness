@@ -51,6 +51,7 @@ except ImportError:  # pragma: lax no cover
     pytest.skip('temporalio not installed', allow_module_level=True)
 
 from pydantic_ai import Agent, ToolDefinition
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.toolsets.function import FunctionToolset
@@ -165,6 +166,20 @@ code_mode_agent = Agent(
 )
 
 
+def _sandbox_url_guard_model(messages: list[ModelRequest | ModelResponse], info: AgentInfo) -> ModelResponse:
+    return ModelResponse(parts=[TextPart(content='unreachable')])  # pragma: no cover
+
+
+sandbox_url_guard_agent = Agent(
+    FunctionModel(_sandbox_url_guard_model),
+    name='code_mode_temporal_sandbox_url_guard_agent',
+    capabilities=[
+        CodeMode(monty_sandbox_url='ws://127.0.0.1:1'),
+        TemporalDurability(activity_config=BASE_ACTIVITY_CONFIG),
+    ],
+)
+
+
 @workflow.defn
 class CodeModeWorkflow:
     @workflow.run
@@ -187,6 +202,19 @@ class SandboxRestrictionWorkflow:
         except RestrictedWorkflowAccessError as e:
             return e.qualified_name
         return 'subprocess was allowed'  # pragma: no cover
+
+
+@workflow.defn
+class SandboxUrlGuardWorkflow:
+    """Exercise the workflow-side WebSocket transport guard."""
+
+    @workflow.run
+    async def run(self) -> str:
+        try:
+            await sandbox_url_guard_agent.run('test guard')
+        except UserError as e:
+            return str(e)
+        return 'sandbox URL was accepted'  # pragma: no cover
 
 
 # ---------------------------------------------------------------------------
@@ -297,3 +325,24 @@ async def test_code_mode_runs_in_temporal_workflow(client: Client) -> None:
         workflow_runner=_workflow_runner(),
     ).replay_workflow(history)
     assert replay_result.replay_failure is None
+
+
+async def test_sandbox_url_rejected_in_temporal_workflow(client: Client) -> None:
+    """The async-only WebSocket transport fails before a workflow-side tool call."""
+    async with Worker(
+        client,
+        task_queue=TASK_QUEUE,
+        workflows=[SandboxUrlGuardWorkflow],
+        plugins=[AgentPlugin(sandbox_url_guard_agent)],
+        workflow_runner=_workflow_runner(),
+    ):
+        result = await client.execute_workflow(
+            SandboxUrlGuardWorkflow.run,
+            id='test_code_mode_temporal_sandbox_url_guard',
+            task_queue=TASK_QUEUE,
+        )
+
+    assert result == (
+        '`CodeMode.monty_sandbox_url` cannot be used inside a Temporal workflow because '
+        'Monty WebSocket transport requires async worker I/O.'
+    )

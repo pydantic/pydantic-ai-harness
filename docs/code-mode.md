@@ -173,6 +173,39 @@ Printed output is limited to 10 MiB. Exceeding the limit makes `run_code` return
 
 State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state. If a worker crash or host-side execution failure invalidates the session, `run_code` returns a model retry that reports the reset; the next snippet must recreate any required state.
 
+## Remote workers over WebSockets
+
+Set `monty_sandbox_url` to run the Monty worker remotely instead of spawning local worker subprocesses:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import CodeMode
+
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[CodeMode(monty_sandbox_url='wss://sandbox.example.com/monty')],
+)
+```
+
+The URL must use `wss://` (plaintext `ws://` is only accepted for loopback hosts, e.g. a
+local relay or a TLS-terminating sidecar) and point to a server that bridges each WebSocket
+connection to one Monty worker -- Monty's `monty-server` is built for this, or any relay that
+forwards frames to a worker fits. The WebSocket side carries one binary Monty protocol frame per
+message. A relay backed by `monty subprocess` adds the worker's four-byte little-endian length
+prefix before writing each frame to stdin and removes it when reading frames from stdout.
+
+Only sandbox execution moves to the remote worker. Tool dispatch, mounted directory access,
+`os_access` calls, and print collection are still serviced by the host over the connection. The
+REPL session remains checked out for the agent run, so state persists across `run_code` calls as it
+does with local workers.
+
+The WebSocket transport has a 10-second deadline for each remote protocol turn. The deadline
+covers worker-side execution only: while the sandbox is suspended waiting for a host tool call, the
+clock is not running, so slow tools are safe. Sandbox code that computes for longer than the
+deadline between suspensions surfaces as a sandbox-crash retry and resets the session. `monty_sandbox_url` cannot be used
+inside a Temporal workflow because that workflow-side path requires Monty's synchronous snapshot
+API.
+
 ## Temporal durability
 
 Install both integrations:
@@ -202,6 +235,9 @@ plain agent from a workflow and register its activities with `PydanticAIPlugin` 
 
 `PydanticAIPlugin` passes `pydantic_monty` through Temporal's workflow sandbox. This makes Monty
 runnable there, but `run_code` still executes in workflow code and is re-executed during replay.
+CodeMode deliberately uses Monty's synchronous snapshot API in this path because Temporal's
+deterministic workflow event loop cannot be woken by Monty's async worker I/O thread. For this
+reason, `monty_sandbox_url` is not available inside a Temporal workflow.
 Model requests and, by default, nested tool calls cross Temporal activity boundaries;
 `asyncio.gather` can schedule nested tool activities concurrently. The REPL is process-local state
 for one agent run, not durable storage. Replay reconstructs it by running the recorded snippets

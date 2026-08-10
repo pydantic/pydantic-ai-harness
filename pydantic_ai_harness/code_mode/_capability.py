@@ -93,6 +93,19 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     mount: CodeModeMount | None = None
     """Host directories to expose to sandboxed `pathlib` code; each mount's `mode` controls whether writes reach the host."""
 
+    monty_sandbox_url: str | None = None
+    """Run sandboxed code on remote Monty workers reached over this `ws://` or `wss://` URL.
+
+    The URL may point to a relay or any server that bridges the WebSocket to a
+    Monty worker. Mounts, `os_access`, prints, and tool calls are still serviced
+    by the host over the connection. Plaintext `ws://` is only accepted for
+    loopback hosts; remote workers require `wss://`. Remote turns use the
+    transport's 10-second default deadline; it covers worker-side execution only
+    (waiting on a host tool call does not count), and exceeding it surfaces as a
+    sandbox-crash retry. WebSocket transport cannot run inside a Temporal
+    workflow.
+    """
+
     dynamic_catalog: bool = False
     """Keep the `run_code` tool definition cache-stable as the sandboxed toolset grows.
 
@@ -144,6 +157,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
             dynamic_catalog=self.dynamic_catalog,
             os_access=self.os_access,
             mount=self.mount,
+            monty_sandbox_url=self.monty_sandbox_url,
         )
 
     async def after_tool_execute(

@@ -1,18 +1,20 @@
-"""Shared Monty execution loop for code-execution capabilities.
+"""Sync Monty execution loop for dynamic workflows and Temporal CodeMode runs.
 
 Drives a Monty REPL via the synchronous snapshot API (`feed_start`/`resume`),
 dispatching external function calls back to a host-supplied async callback.
 
-Two capabilities build on this:
+Two execution paths use this loop:
 
-- `code_mode`: the dispatch callback runs the agent's own tools.
 - `dynamic_workflow`: the dispatch callback runs sub-agents.
+- `code_mode` inside a Temporal workflow: the callback runs the agent's own tools.
 
-The synchronous snapshot API (rather than `AsyncMonty`) is used deliberately: it exposes
-each suspension to this host-controlled loop without a background async adapter. Under
-Temporal, this loop runs workflow-side and replays. Monty's passed-through native module
-owns its worker subprocess outside the restricted Python module sandbox, while nested
-durable-wrapped tools cross their configured activity boundaries.
+Normal CodeMode runs use `AsyncMontySession.feed_run`, which resolves external
+calls in Monty's async bindings. Temporal's deterministic workflow loop cannot
+be woken by the worker I/O thread, so its CodeMode path deliberately keeps this
+sync snapshot API. The loop runs workflow-side and replays. Monty's passed-through
+native module owns its worker subprocess outside the restricted Python module
+sandbox, while nested durable-wrapped tools cross their configured activity
+boundaries.
 """
 
 from __future__ import annotations

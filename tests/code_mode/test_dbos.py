@@ -1,7 +1,8 @@
-"""DBOS integration tests for CodeMode.
+"""DBOS integration tests for CodeMode's async Monty execution path.
 
-Verifies that the snapshot-based execution loop works inside a DBOS
-durable workflow. DBOS uses SQLite locally -- no external services needed.
+DBOS runs `agent.run_sync()` on a regular asyncio loop, so CodeMode uses
+`AsyncMontySession.feed_run`. DBOS uses SQLite locally -- no external services
+are needed.
 
 Durability is attached via the `DBOSDurability` capability; pydantic-ai 2.14
 deprecated the `DBOSAgent` wrapper in its favor (pydantic/pydantic-ai#4977).
@@ -10,8 +11,8 @@ called inside an explicit `@DBOS.workflow()` rather than the wrapper starting
 one. The agent and workflow are defined at module scope so DBOS registers the
 capability's steps and the workflow before `DBOS.launch()`.
 
-DBOS defaults to `parallel_ordered_events` execution mode, which triggers
-the sequential FutureSnapshot resolution path in the execution loop.
+DBOS defaults to `parallel_ordered_events` execution mode, which makes
+CodeMode's dispatch gate serialize external tool calls in sandbox call order.
 """
 
 from __future__ import annotations
@@ -112,9 +113,7 @@ def run_code_mode_agent(prompt: str) -> dict[str, Any]:
 
 
 def test_code_mode_runs_in_dbos_workflow(dbos_instance: DBOS) -> None:
-    """CodeMode's snapshot-based execution loop works inside a DBOS durable
-    workflow. DBOS defaults to `parallel_ordered_events` mode, which triggers
-    the sequential FutureSnapshot resolution path.
+    """CodeMode's async Monty path works inside a DBOS durable workflow.
 
     The step-log assertion at the end proves the capability actually routed the
     model requests through DBOS steps: `DBOSDurability` is transparent outside

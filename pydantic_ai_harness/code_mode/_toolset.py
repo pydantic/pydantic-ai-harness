@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import keyword
 import re
 import warnings
-from collections.abc import Callable, Sequence
-from contextlib import ExitStack
+from collections import deque
+from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine, Sequence
+from contextlib import AsyncExitStack, ExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
+from ipaddress import ip_address
 from typing import Annotated, Any
+from urllib.parse import urlsplit
 
 from pydantic import Field, TypeAdapter
 from pydantic_ai import AbstractToolset, RunContext, ToolDefinition, WrapperToolset
@@ -35,6 +39,9 @@ except ImportError:  # pragma: no cover
 try:
     from pydantic_monty import (
         AbstractOS,
+        AsyncMonty,
+        AsyncMontySession,
+        AsyncMontyWebsocket,
         Monty,
         MontyCrashedError,
         MontyRuntimeError,
@@ -43,6 +50,7 @@ try:
         MontyTypingError,
         MountDir,
         OsFunction,
+        PrintCallback,
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -61,9 +69,43 @@ CodeModeOS = AbstractOS | CodeModeOSCallback
 CodeModeMount = MountDir | list[MountDir]
 
 
+def _in_temporal_workflow() -> bool:
+    """Use Monty's sync bindings where Temporal controls callback scheduling."""
+    try:
+        from temporalio import workflow
+    except ImportError:
+        return False
+    return workflow.in_workflow()
+
+
+def _check_monty_sandbox_url(url: str) -> None:
+    """Reject plaintext `ws://` to non-loopback hosts.
+
+    The WebSocket frames carry tool dispatches, mount reads, and `os_access`
+    results, so a plaintext connection to a remote host would let an on-path
+    attacker read and forge them. `ws://` stays available for loopback -- a
+    local relay or a TLS-terminating sidecar on the same machine.
+    """
+    split = urlsplit(url)
+    if split.scheme != 'ws':
+        return
+    host = split.hostname or ''
+    if host == 'localhost':
+        return
+    try:
+        if ip_address(host).is_loopback:
+            return
+    except ValueError:
+        pass
+    raise UserError(
+        f'`CodeMode.monty_sandbox_url` uses plaintext `ws://` for remote host {host!r}. '
+        'Use `wss://`, or a loopback address for a local relay.'
+    )
+
+
 @dataclass
-class _MontyRunState:
-    """Monty resources shared by every toolset view created during one agent run."""
+class _SyncMontyRunState:
+    """Sync Monty resources retained for Temporal's deterministic workflow loop."""
 
     pool: Monty | None = None
     session: MontySession | None = None
@@ -71,7 +113,7 @@ class _MontyRunState:
     _pool_stack: ExitStack = field(default_factory=ExitStack, repr=False)
     _session_stack: ExitStack = field(default_factory=ExitStack, repr=False)
 
-    def get_session(self, *, type_check: bool, type_check_stubs: str | None) -> MontySession:
+    async def get_session(self, *, type_check: bool, type_check_stubs: str | None) -> MontySession:
         """Return the run's live REPL session, creating its pool on first use."""
         if self.pool is None:
             self.pool = self._pool_stack.enter_context(Monty())
@@ -81,19 +123,179 @@ class _MontyRunState:
             )
         return self.session
 
-    def reset(self) -> None:
+    async def reset(self) -> None:
         """Return the current worker and make the next call start a fresh REPL."""
         self._session_stack.close()
         self._session_stack = ExitStack()
         self.session = None
         self.has_executed_feed = False
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Return the checked-out worker and close the owning pool."""
-        self.reset()
-        self._pool_stack.close()
-        self._pool_stack = ExitStack()
-        self.pool = None
+        try:
+            await self.reset()
+        finally:
+            self._pool_stack.close()
+            self._pool_stack = ExitStack()
+            self.pool = None
+
+
+@dataclass
+class _AsyncMontyRunState:
+    """Async local or WebSocket Monty resources shared for one agent run."""
+
+    monty_sandbox_url: str | None
+    pool: AsyncMonty | AsyncMontyWebsocket | None = None
+    session: AsyncMontySession | None = None
+    has_executed_feed: bool = False
+    _pool_stack: AsyncExitStack = field(default_factory=AsyncExitStack, repr=False)
+    _session_stack: AsyncExitStack = field(default_factory=AsyncExitStack, repr=False)
+
+    async def get_session(self, *, type_check: bool, type_check_stubs: str | None) -> AsyncMontySession:
+        """Return the run's live async REPL, dialing or spawning on first use."""
+        if self.pool is None:
+            configured_pool = (
+                AsyncMonty() if self.monty_sandbox_url is None else AsyncMontyWebsocket(self.monty_sandbox_url)
+            )
+            self.pool = await self._pool_stack.enter_async_context(configured_pool)
+        if self.session is None:
+            self.session = await self._session_stack.enter_async_context(
+                self.pool.checkout(type_check=type_check, type_check_stubs=type_check_stubs)
+            )
+        return self.session
+
+    async def reset(self) -> None:
+        """Return the current async worker and make the next call start fresh."""
+        await self._session_stack.aclose()
+        self._session_stack = AsyncExitStack()
+        self.session = None
+        self.has_executed_feed = False
+
+    async def close(self) -> None:
+        """Return the async worker before closing its local or remote pool."""
+        try:
+            await self.reset()
+        finally:
+            await self._pool_stack.aclose()
+            self._pool_stack = AsyncExitStack()
+            self.pool = None
+
+
+_MontyRunState = _SyncMontyRunState | _AsyncMontyRunState
+
+
+@dataclass(eq=False)
+class _GateRequest:
+    """One queued dispatch access request, compared by identity."""
+
+    exclusive: bool
+
+
+class _DispatchGate:
+    """Coordinate parallel dispatches with fair, sequential barriers."""
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._queue: deque[_GateRequest] = deque()
+        self._active_readers = 0
+        self._writer_active = False
+
+    @asynccontextmanager
+    async def hold(self, *, exclusive: bool) -> AsyncGenerator[None]:
+        """Wait for shared or exclusive access and release it on every exit."""
+        request = _GateRequest(exclusive=exclusive)
+        async with self._condition:
+            self._queue.append(request)
+            try:
+                await self._condition.wait_for(lambda: self._can_enter(request))
+            except BaseException:
+                self._queue.remove(request)
+                self._condition.notify_all()
+                raise
+            self._queue.remove(request)
+            if exclusive:
+                self._writer_active = True
+            else:
+                self._active_readers += 1
+            self._condition.notify_all()
+
+        try:
+            yield
+        finally:
+            async with self._condition:
+                if exclusive:
+                    self._writer_active = False
+                else:
+                    self._active_readers -= 1
+                self._condition.notify_all()
+
+    def _can_enter(self, request: _GateRequest) -> bool:
+        """Allow a writer at the head, or readers before the first writer."""
+        if self._writer_active:
+            return False
+        if request.exclusive:
+            return self._queue[0] is request and self._active_readers == 0
+        for queued in self._queue:
+            if queued is request:
+                return True
+            if queued.exclusive:
+                return False
+        return False  # pragma: no cover
+
+
+class _DispatchTracker:
+    """Own dispatch tasks so feed cancellation cannot leave host work running."""
+
+    def __init__(self) -> None:
+        self._tasks: set[asyncio.Task[Any]] = set()
+
+    async def run(self, call: Coroutine[Any, Any, Any]) -> Any:
+        """Run one dispatch as a tracked task.
+
+        If the await is interrupted (Monty's driver may cancel or drop the
+        external wrapper coroutine during feed teardown), the task is cancelled
+        here and stays tracked until done, so `cancel` can still reap it --
+        cancelling the awaiter of a task does not cancel the task itself.
+        """
+        task = asyncio.create_task(call)
+        self._tasks.add(task)
+        try:
+            return await task
+        except BaseException:
+            task.cancel()
+            raise
+        finally:
+            if task.done():
+                self._tasks.discard(task)
+
+    async def cancel(self) -> None:
+        """Cancel and reap dispatch tasks still owned by this feed."""
+        tasks = list(self._tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _run_async_feed(
+    session: AsyncMontySession,
+    code: str,
+    *,
+    external_lookup: dict[str, Any],
+    print_callback: PrintCallback | None,
+    mount: CodeModeMount | None,
+    os_access: CodeModeOS | None,
+    skip_type_check: bool,
+) -> Any:
+    """Keep async feed execution patchable without mutating pyo3 classes."""
+    return await session.feed_run(
+        code,
+        external_lookup=external_lookup,
+        print_callback=print_callback,
+        mount=mount,
+        os=os_access,
+        skip_type_check=skip_type_check,
+    )
 
 
 class _RunCodeArguments(TypedDict):
@@ -333,6 +535,19 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     mount: CodeModeMount | None = None
     """Host directories to expose to sandboxed `pathlib` code; each mount's `mode` controls whether writes reach the host."""
 
+    monty_sandbox_url: str | None = None
+    """Run sandboxed code on remote Monty workers reached over this `ws://` or `wss://` URL.
+
+    The URL may point to a relay or any server that bridges the WebSocket to a
+    Monty worker. Mounts, `os_access`, prints, and tool calls are still serviced
+    by the host over the connection. Plaintext `ws://` is only accepted for
+    loopback hosts; remote workers require `wss://`. Remote turns use the
+    transport's 10-second default deadline; it covers worker-side execution only
+    (waiting on a host tool call does not count), and exceeding it surfaces as a
+    sandbox-crash retry. WebSocket transport cannot run inside a Temporal
+    workflow.
+    """
+
     dynamic_catalog: bool = False
     """Move the sandboxed-tool catalog out of `run_code.description` and into instructions.
 
@@ -374,7 +589,19 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
     async def __aenter__(self) -> Self:
         """Enter the wrapped toolset and prepare lazy Monty resources for this run."""
-        run_state = _MontyRunState()
+        in_temporal_workflow = _in_temporal_workflow()
+        if in_temporal_workflow and self.monty_sandbox_url is not None:
+            raise UserError(
+                '`CodeMode.monty_sandbox_url` cannot be used inside a Temporal workflow because '
+                'Monty WebSocket transport requires async worker I/O.'
+            )
+        if self.monty_sandbox_url is not None:
+            _check_monty_sandbox_url(self.monty_sandbox_url)
+        run_state: _MontyRunState
+        if in_temporal_workflow:
+            run_state = _SyncMontyRunState()
+        else:
+            run_state = _AsyncMontyRunState(monty_sandbox_url=self.monty_sandbox_url)
         await self.wrapped.__aenter__()
         self._run_state = run_state
         return self
@@ -383,11 +610,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         """Exit the wrapped toolset, then tear down the worker pool."""
         run_state = self._run_state
         assert run_state is not None
-        self._run_state = None
         try:
             return await self.wrapped.__aexit__(*args)
         finally:
-            run_state.close()
+            # Detach only after a successful close, so a caller that retries teardown
+            # after a failed close can still reach the state.
+            await run_state.close()
+            self._run_state = None
 
     async def get_instructions(
         self, ctx: RunContext[AgentDepsT]
@@ -509,7 +738,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         assert run_state is not None, '`CodeModeToolset` must be entered before calling `run_code`'
 
         if restart:
-            run_state.reset()
+            await run_state.reset()
 
         fresh_repl = not run_state.has_executed_feed
 
@@ -548,9 +777,8 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             """Dispatch a single tool call from inside the sandbox.
 
             Returns the serialized tool result on success. On failure, the
-            exception propagates -- the execution loop passes it back into
-            Monty via `ExternalException` so the sandbox sees it at the
-            `await` site.
+            exception propagates through Monty's external-call adapter so the
+            sandbox sees it at the call site.
             """
             nonlocal call_counter
             original_name = sanitized_to_original.get(sandbox_name, sandbox_name)
@@ -612,21 +840,77 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         capture = PrintCapture()
 
         try:
-            session = run_state.get_session(type_check=type_check, type_check_stubs=type_check_stubs)
+            session = await run_state.get_session(type_check=type_check, type_check_stubs=type_check_stubs)
             try:
-                monty_state = session.feed_start(
-                    code,
-                    print_callback=capture.callback,
-                    os=self.os_access,
-                    mount=self.mount,
-                    skip_type_check=not type_check,
-                )
-                completed = await MontyExecutor(
-                    dispatch=dispatch_tool_call,
-                    valid_names=callable_defs,
-                    sequential_names=sequential_tools,
-                    global_sequential=global_sequential,
-                ).run(monty_state)
+                if isinstance(run_state, _SyncMontyRunState):
+                    assert isinstance(session, MontySession)
+                    monty_state = session.feed_start(
+                        code,
+                        print_callback=capture.callback,
+                        os=self.os_access,
+                        mount=self.mount,
+                        skip_type_check=not type_check,
+                    )
+                    completed = await MontyExecutor(
+                        dispatch=dispatch_tool_call,
+                        valid_names=callable_defs,
+                        sequential_names=sequential_tools,
+                        global_sequential=global_sequential,
+                    ).run(monty_state)
+                    result = completed.output
+                else:
+                    assert isinstance(session, AsyncMontySession)
+                    loop = asyncio.get_running_loop()
+                    gate = _DispatchGate()
+                    tracker = _DispatchTracker()
+
+                    async def gated_dispatch(sandbox_name: str, kwargs: dict[str, Any], *, exclusive: bool) -> Any:
+                        async with gate.hold(exclusive=exclusive):
+                            return await dispatch_tool_call(sandbox_name, kwargs)
+
+                    def make_async_external(
+                        sandbox_name: str,
+                    ) -> Callable[..., Awaitable[Any]]:
+                        async def external(*args: Any, **kwargs: Any) -> Any:
+                            if args:
+                                raise TypeError(
+                                    f'{sandbox_name}() does not accept positional arguments; use keyword arguments'
+                                )
+                            return await tracker.run(gated_dispatch(sandbox_name, kwargs, exclusive=global_sequential))
+
+                        return external
+
+                    def make_sync_external(sandbox_name: str) -> Callable[..., Any]:
+                        def external(*args: Any, **kwargs: Any) -> Any:
+                            if args:
+                                raise TypeError(
+                                    f'{sandbox_name}() does not accept positional arguments; use keyword arguments'
+                                )
+                            call = tracker.run(gated_dispatch(sandbox_name, kwargs, exclusive=True))
+                            return asyncio.run_coroutine_threadsafe(call, loop).result()
+
+                        return external
+
+                    external_lookup: dict[str, Any] = {
+                        sandbox_name: (
+                            make_sync_external(sandbox_name)
+                            if tool_def.sequential
+                            else make_async_external(sandbox_name)
+                        )
+                        for sandbox_name, tool_def in callable_defs.items()
+                    }
+                    try:
+                        result = await _run_async_feed(
+                            session,
+                            code,
+                            external_lookup=external_lookup,
+                            print_callback=capture.callback,
+                            os_access=self.os_access,
+                            mount=self.mount,
+                            skip_type_check=not type_check,
+                        )
+                    finally:
+                        await tracker.cancel()
             except MontyRuntimeError:
                 # The session is idle again and keeps assignments made before the failing line.
                 run_state.has_executed_feed = True
@@ -636,11 +920,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             if fresh_repl:
                 # No code ran, so discard the checkout-time type stubs. A later step may expose
                 # a different tool catalog (for example after Tool Search discovers a tool).
-                run_state.reset()
+                await run_state.reset()
             raise ModelRetry(f'Syntax error in code:\n{capture.prepend_to(e.display())}') from e
         except MontyTypingError as e:
             # Typing errors can only come from the fresh-feed check above.
-            run_state.reset()
+            await run_state.reset()
             raise ModelRetry(f'Type error in code:\n{capture.prepend_to(e.display())}') from e
         except MontyRuntimeError as e:
             # Exceptions raised inside dispatch_tool_call (e.g. UserError from
@@ -658,7 +942,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # request timeout) and the REPL state died with it; the pool replaces the
             # worker transparently. Reset so the retry starts from a fresh,
             # type-checked session.
-            run_state.reset()
+            await run_state.reset()
             raise ModelRetry(
                 'The code crashed the sandbox worker and the session was reset. Revise the code and try again.'
             ) from e
@@ -668,8 +952,13 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # the error text: there is no Monty `display()` for host-side failures, and the cause
             # chain is dropped once the retry becomes a prompt part, so this message is the only
             # record of what failed for both the model and the transcript.
-            run_state.reset()
+            await run_state.reset()
             error_text = f'{type(e).__name__}: {e}'
+            if self.monty_sandbox_url is not None:
+                # Dial failures embed the configured URL, which may carry routing or auth
+                # credentials in its userinfo, path, or query; keep it out of the
+                # transcript-bound retry message.
+                error_text = error_text.replace(self.monty_sandbox_url, '<monty_sandbox_url>')
             raise ModelRetry(
                 'Code execution failed and the session was reset. Re-run any imports, recreate '
                 f'any state you need, and try again.\n{capture.prepend_to(error_text)}'
@@ -678,16 +967,15 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             # Convert a sandbox panic to a retry (see `is_sandbox_panic`);
             # interruptions re-raise unchanged after dropping the suspended session.
             if not is_sandbox_panic(e):
-                run_state.reset()
+                await run_state.reset()
                 raise
             # The panic aborts the VM mid-execution, so the REPL's accumulated state cannot
             # be trusted; drop it so the retry starts from a fresh, type-checked session.
-            run_state.reset()
+            await run_state.reset()
             raise ModelRetry(
                 'The code aborted inside the sandbox and the session was reset. Revise the code and try again.'
             ) from e
 
-        result = completed.output
         printed = capture.joined
 
         # Validate result to reconstruct multimodal types (e.g. BinaryContent from

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, TypeVar
@@ -31,7 +32,7 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.function import FunctionToolset
 from pydantic_ai.usage import RunUsage
 from pydantic_core import SchemaValidator, core_schema
-from pydantic_monty import NOT_HANDLED, Monty, MountDir, OSAccess, OsFunction
+from pydantic_monty import NOT_HANDLED, AsyncMonty, MountDir, OSAccess, OsFunction
 from typing_extensions import Never, TypedDict
 
 from pydantic_ai_harness import CodeMode
@@ -39,7 +40,11 @@ from pydantic_ai_harness.code_mode import CodeModeToolset
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
+    _DispatchGate,
+    _DispatchTracker,
+    _GateRequest,
     _global_mode_is_sequential,
+    _in_temporal_workflow,
     _sanitize_tool_name,
 )
 
@@ -372,6 +377,40 @@ class TestCodeMode:
         assert len(calls) == 2
         assert len(returns) == 2
 
+    async def test_run_code_parallel_tool_calls_overlap(self) -> None:
+        """Two ordinary externals can both make progress before either finishes."""
+        both_started = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+
+        async def slow(label: str) -> str:
+            nonlocal active
+            active += 1
+            if active == 2:
+                both_started.set()
+            await release.wait()
+            active -= 1
+            return label
+
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(slow))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        call = asyncio.create_task(
+            wrapper.call_tool(
+                'run_code',
+                {'code': ('import asyncio\nawait asyncio.gather(slow(label="first"), slow(label="second"))')},
+                ctx,
+                tools['run_code'],
+            )
+        )
+        await asyncio.wait_for(both_started.wait(), timeout=1)
+        release.set()
+
+        result = await call
+        assert result.return_value == ['first', 'second']
+
     async def test_run_code_parallel_tool_calls_one_fails(self) -> None:
         """When one of several parallel tool calls fails, the error surfaces as ModelRetry."""
 
@@ -512,7 +551,7 @@ class TestCodeMode:
         with pytest.raises(ModelRetry, match=r'Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'def ('}, ctx, run_code)
 
-        # Non-fresh REPL: type checking is skipped, so feed_start raises
+        # Non-fresh REPL: type checking is skipped, so feed_run raises
         # MontySyntaxError and the retry is labelled a syntax error.
         await wrapper.call_tool('run_code', {'code': '1 + 1', 'restart': True}, ctx, run_code)
         with pytest.raises(ModelRetry, match=r'Syntax error in code'):
@@ -537,7 +576,7 @@ class TestCodeMode:
         """A `MontyTypingError` from static type checking is translated into `ModelRetry`.
 
         On a fresh REPL (first call or after restart), the code is type-checked
-        at `feed_start` against the tool stubs before execution.
+        at checkout/feed time against the tool stubs before execution.
         """
 
         def later(x: int) -> str:
@@ -578,7 +617,7 @@ class TestCodeMode:
                 raise RuntimeError('wrapped enter failed')
 
         monty = MagicMock()
-        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.Monty', monty)
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.AsyncMonty', monty)
         wrapper = CodeMode[object]().get_wrapper_toolset(FailingToolset())
         assert isinstance(wrapper, CodeModeToolset)
 
@@ -587,25 +626,25 @@ class TestCodeMode:
 
         monty.assert_not_called()
 
-    async def test_exit_releases_resources_in_reverse_entry_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_async_exit_releases_resources_in_reverse_entry_order(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The wrapped toolset exits before the Monty pool it may depend on."""
         events: list[str] = []
 
-        class TrackingMonty:
-            def __enter__(self) -> TrackingMonty:
+        class TrackingAsyncMonty:
+            async def __aenter__(self) -> TrackingAsyncMonty:
                 events.append('monty enter')
                 return self
 
-            def __exit__(self, *args: Any) -> None:
+            async def __aexit__(self, *args: Any) -> None:
                 events.append('monty exit')
 
             def checkout(self, *args: Any, **kwargs: Any) -> Any:
                 class TrackingSession:
-                    def __enter__(self) -> TrackingSession:
+                    async def __aenter__(self) -> TrackingSession:
                         events.append('session enter')
                         return self
 
-                    def __exit__(self, *args: Any) -> None:
+                    async def __aexit__(self, *args: Any) -> None:
                         events.append('session exit')
 
                 return TrackingSession()
@@ -619,14 +658,14 @@ class TestCodeMode:
                 events.append('wrapped exit')
                 return None
 
-        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.Monty', TrackingMonty)
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.AsyncMonty', TrackingAsyncMonty)
         wrapper = CodeMode[object]().get_wrapper_toolset(TrackingToolset())
         assert isinstance(wrapper, CodeModeToolset)
 
         async with wrapper:
             assert events == ['wrapped enter']
             assert wrapper._run_state is not None  # pyright: ignore[reportPrivateUsage]
-            wrapper._run_state.get_session(  # pyright: ignore[reportPrivateUsage]
+            await wrapper._run_state.get_session(  # pyright: ignore[reportPrivateUsage]
                 type_check=False, type_check_stubs=None
             )
             assert events == ['wrapped enter', 'monty enter', 'session enter']
@@ -1255,9 +1294,13 @@ class TestCodeMode:
         assert 'load_capability' in by_name
         assert 'run_code' in by_name
 
-        # The deferred member tool stays hidden until loaded: not folded into `run_code`
-        # and not surfaced as a plain native tool.
-        assert 'demo_tool' not in by_name
+        # The deferred member tool stays out of `run_code` until loaded. How it stays
+        # hidden natively depends on the model's tool-search support: `TestModel` gained
+        # it in pydantic-ai 2.26, where the unrevealed tool is sent on the wire flagged
+        # `defer_loading=True` (present but unloaded); before that it is dropped from the
+        # request entirely, with a synthetic `search_tools` tool standing in.
+        if 'demo_tool' in by_name:  # pragma: lax no cover
+            assert by_name['demo_tool'].defer_loading
         run_code_desc = by_name['run_code'].description or ''
         assert 'demo_tool' not in run_code_desc
         assert 'load_capability' not in run_code_desc
@@ -1795,7 +1838,7 @@ class TestCodeMode:
 
         # After a successful call, type checking is skipped -- falls to runtime NameError.
         await wrapper.call_tool('run_code', {'code': '1 + 1', 'restart': True}, ctx, run_code)
-        with pytest.raises(ModelRetry, match='Runtime error'):
+        with pytest.raises(ModelRetry, match=r"name 'nonexistent_tool' is not defined"):
             await wrapper.call_tool('run_code', {'code': 'await nonexistent_tool(x=1)'}, ctx, run_code)
 
     async def test_positional_args_rejected(self) -> None:
@@ -1855,7 +1898,7 @@ class TestCodeMode:
         class PanicException(BaseException):
             """Named to match the pyo3 panic class `is_sandbox_panic` recognizes."""
 
-        async def _panic(self: Any, state: Any) -> Any:
+        async def _panic(*args: Any, **kwargs: Any) -> Any:
             raise PanicException('sandbox aborted')
 
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
@@ -1866,7 +1909,7 @@ class TestCodeMode:
 
         await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
         with monkeypatch.context() as patcher:
-            patcher.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _panic)
+            patcher.setattr('pydantic_ai_harness.code_mode._toolset._run_async_feed', _panic)
             with pytest.raises(ModelRetry, match='aborted inside the sandbox'):
                 await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
         with pytest.raises(ModelRetry, match='Type error in code'):
@@ -1881,7 +1924,7 @@ class TestCodeMode:
         `RuntimeError` when the traceback payload fails span validation).
         """
 
-        async def _fail(self: Any, state: Any) -> Any:
+        async def _fail(*args: Any, **kwargs: Any) -> Any:
             raise RuntimeError('invalid exception payload')
 
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
@@ -1893,7 +1936,7 @@ class TestCodeMode:
         # Seed REPL state that the model would rely on in later feeds.
         await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
         with monkeypatch.context() as patcher:
-            patcher.setattr('pydantic_ai_harness._monty_exec.MontyExecutor.run', _fail)
+            patcher.setattr('pydantic_ai_harness.code_mode._toolset._run_async_feed', _fail)
             with pytest.raises(ModelRetry, match='session was reset') as exc_info:
                 await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
         # The retry message is the only record of the host-side error, so it must name it.
@@ -1931,6 +1974,81 @@ class TestCodeMode:
         with pytest.raises(ModelRetry, match='Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, tools['run_code'])
 
+    async def test_temporal_sync_snapshot_dispatch_paths(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The workflow-only executor retains its external dispatch and error behavior."""
+        parallel_started = asyncio.Event()
+        release_parallel = asyncio.Event()
+        events: list[str] = []
+
+        async def parallel_call(label: str) -> str:
+            events.append(f'{label} start')
+            parallel_started.set()
+            await release_parallel.wait()
+            events.append(f'{label} end')
+            return label
+
+        async def sequential_call(fail: bool = False) -> str:
+            events.append('sequential')
+            if fail:
+                raise RuntimeError('sequential failed')
+            return 'barrier'
+
+        def os_callback(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if fn == 'os.getenv':
+                return 'sync-os'
+            return NOT_HANDLED  # pragma: no cover
+
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset._in_temporal_workflow', lambda: True)
+        toolset = FunctionToolset[object](tools=[Tool(parallel_call), Tool(sequential_call, sequential=True)])
+        wrapper = CodeMode[object](os_access=os_callback).get_wrapper_toolset(toolset)
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        run_code = tools['run_code']
+
+        await wrapper.call_tool('run_code', {'code': '1 + 1'}, ctx, run_code)
+        os_result = await wrapper.call_tool(
+            'run_code',
+            {'code': 'import os\nos.getenv("THING")'},
+            ctx,
+            run_code,
+        )
+        assert os_result.return_value == 'sync-os'
+
+        with pytest.raises(ModelRetry, match=r"name 'undefined_var' is not defined"):
+            await wrapper.call_tool('run_code', {'code': 'undefined_var'}, ctx, run_code)
+        with pytest.raises(ModelRetry, match='Unknown function: missing_tool'):
+            await wrapper.call_tool('run_code', {'code': 'await missing_tool(value=1)'}, ctx, run_code)
+        with pytest.raises(ModelRetry, match='does not accept positional arguments'):
+            await wrapper.call_tool('run_code', {'code': 'await parallel_call("bad")'}, ctx, run_code)
+
+        call = asyncio.create_task(
+            wrapper.call_tool(
+                'run_code',
+                {
+                    'code': (
+                        'pending = parallel_call(label="first")\nbarrier = sequential_call()\n[await pending, barrier]'
+                    )
+                },
+                ctx,
+                run_code,
+            )
+        )
+        await parallel_started.wait()
+        assert events == ['first start']
+        release_parallel.set()
+        result = await call
+        assert result.return_value == ['first', 'barrier']
+        assert events == ['first start', 'first end', 'sequential']
+
+        with pytest.raises(ModelRetry, match='sequential failed'):
+            await wrapper.call_tool(
+                'run_code',
+                {'code': 'sequential_call(fail=True)'},
+                ctx,
+                run_code,
+            )
+
     async def test_worker_crash_becomes_model_retry_and_resets_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A `MontyCrashedError` (worker death) becomes a retry with the session reset.
 
@@ -1939,7 +2057,8 @@ class TestCodeMode:
         `MontyCrashedError` cannot be constructed or subclassed from Python.
         """
         monkeypatch.setattr(
-            'pydantic_ai_harness.code_mode._toolset.Monty', functools.partial(Monty, request_timeout=0.5)
+            'pydantic_ai_harness.code_mode._toolset.AsyncMonty',
+            functools.partial(AsyncMonty, request_timeout=0.5),
         )
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
@@ -1961,7 +2080,7 @@ class TestCodeMode:
 
     async def test_sequential_tool_rendered_as_sync_and_resolved_inline(self) -> None:
         """A tool with `sequential=True` is rendered as `def` (sync) and
-        resolved inline at FunctionSnapshot via `resume({'return_value': ...})`."""
+        bridged from Monty's worker thread into an exclusive host dispatch."""
         from dataclasses import replace as dc_replace
 
         class _SeqToolset(AbstractToolset[object]):
@@ -2021,63 +2140,51 @@ class TestCodeMode:
             assert returns[tc_id].tool_name == call.tool_name
 
     async def test_sequential_tool_barrier_awaits_pending_parallel_tasks(self) -> None:
-        """When a sequential tool is called while parallel tasks are pending,
-        the pending tasks are awaited first (barrier) before dispatching."""
-        from dataclasses import replace as dc_replace
+        """A sequential call waits for active parallel work and blocks later readers."""
+        parallel_started = asyncio.Event()
+        release_parallel = asyncio.Event()
+        events: list[str] = []
 
-        class _SeqToolset(AbstractToolset[object]):
-            def __init__(self) -> None:
-                self._inner = _build_function_toolset(add, greet)
+        async def parallel_call(label: str) -> str:
+            events.append(f'{label} start')
+            parallel_started.set()
+            await release_parallel.wait()
+            events.append(f'{label} end')
+            return label
 
-            @property
-            def id(self) -> str | None:
-                return None  # pragma: no cover
+        async def sequential_call() -> str:
+            events.append('sequential')
+            return 'barrier'
 
-            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
-                tools = await self._inner.get_tools(ctx)
-                return {
-                    n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) if n == 'add' else t
-                    for n, t in tools.items()
-                }
-
-            async def call_tool(
-                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
-            ) -> Any:
-                return await self._inner.call_tool(name, tool_args, ctx, tool)
-
-        seq_wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
+        toolset = FunctionToolset[object](tools=[Tool(parallel_call), Tool(sequential_call, sequential=True)])
+        seq_wrapper = CodeModeToolset[object](wrapped=toolset, tool_selector='all')
         ctx = await build_ctx(None, seq_wrapper)
         tools = await seq_wrapper.get_tools(ctx)
 
-        # Start a parallel call (greet, async def), then call a sequential tool (add, def).
-        # The barrier should await greet before dispatching add.
-        result = await seq_wrapper.call_tool(
-            'run_code',
-            {
-                'code': (
-                    'future_greet = greet(name="World")\n'
-                    'result_add = add(a=1, b=2)\n'
-                    'result_greet = await future_greet\n'
-                    '[result_add, result_greet]'
-                )
-            },
-            ctx,
-            tools['run_code'],
+        call = asyncio.create_task(
+            seq_wrapper.call_tool(
+                'run_code',
+                {
+                    'code': (
+                        'first = parallel_call(label="first")\n'
+                        'barrier = sequential_call()\n'
+                        'second = parallel_call(label="second")\n'
+                        '[await first, barrier, await second]'
+                    )
+                },
+                ctx,
+                tools['run_code'],
+            )
         )
-        assert result.return_value == [3, 'Hello, World!']
+        await parallel_started.wait()
+        await asyncio.sleep(0)
+        assert events == ['first start']
 
-        # Both calls recorded in metadata -- greet resolved at barrier, add resolved inline.
-        assert result.metadata['code_mode'] is True
-        calls = result.metadata['tool_calls']
-        returns = result.metadata['tool_returns']
-        assert len(calls) == 2
-        assert len(returns) == 2
-        # greet was dispatched first (parallel), add second (sequential barrier).
-        call_list = list(calls.values())
-        assert call_list[0].tool_name == 'greet'
-        assert call_list[1].tool_name == 'add'
-        for tc_id in calls:
-            assert returns[tc_id].content in (3, 'Hello, World!')
+        release_parallel.set()
+        result = await call
+
+        assert result.return_value == ['first', 'barrier', 'second']
+        assert events == ['first start', 'first end', 'sequential', 'second start', 'second end']
 
     async def test_sequential_tool_error_surfaces_as_model_retry(self) -> None:
         """An error from a sequential tool (resolved inline) surfaces as ModelRetry."""
@@ -2109,10 +2216,12 @@ class TestCodeMode:
         # Now bad args go through the runtime path in sequential resolution.
         with pytest.raises(ModelRetry, match='Runtime error'):
             await seq_wrapper.call_tool('run_code', {'code': "add(a='bad', b=3)"}, ctx, run_code)
+        with pytest.raises(ModelRetry, match='does not accept positional arguments'):
+            await seq_wrapper.call_tool('run_code', {'code': 'add(1, 2)'}, ctx, run_code)
 
     async def test_global_sequential_mode_forces_sequential_resolution(self) -> None:
         """When the parallel execution mode is `sequential`, tool calls inside the
-        sandbox are resolved sequentially via FutureSnapshot. Signatures stay `async def`."""
+        sandbox acquire exclusive dispatch access. Signatures stay `async def`."""
         from pydantic_ai.tool_manager import ToolManager
 
         wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
@@ -2136,9 +2245,54 @@ class TestCodeMode:
             )
             assert result.return_value == 30
 
+    async def test_global_sequential_mode_preserves_gather_call_order(self) -> None:
+        """Global sequential dispatch follows the sandbox's a, b, c call order."""
+        events: list[str] = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def a() -> str:
+            events.append('a')
+            first_started.set()
+            await release_first.wait()
+            return 'a'
+
+        async def b() -> str:
+            events.append('b')
+            await asyncio.sleep(0)
+            return 'b'
+
+        async def c() -> str:
+            events.append('c')
+            await asyncio.sleep(0)
+            return 'c'
+
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(a, b, c))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+
+        with ToolManager.parallel_execution_mode('sequential'):
+            tools = await wrapper.get_tools(ctx)
+            call = asyncio.create_task(
+                wrapper.call_tool(
+                    'run_code',
+                    {'code': 'import asyncio\nawait asyncio.gather(a(), b(), c())'},
+                    ctx,
+                    tools['run_code'],
+                )
+            )
+            await asyncio.wait_for(first_started.wait(), timeout=1)
+            await asyncio.sleep(0)
+            assert events == ['a']
+            release_first.set()
+            result = await call
+
+        assert result.return_value == ['a', 'b', 'c']
+        assert events == ['a', 'b', 'c']
+
     async def test_global_sequential_overrides_per_tool_sequential(self) -> None:
         """When global sequential mode is active AND a tool has `sequential=True`,
-        the tool is deferred (not resolved inline) and handled via FutureSnapshot."""
+        the sync wrapper still bridges through the same exclusive dispatch gate."""
         from dataclasses import replace as dc_replace
 
         from pydantic_ai.tool_manager import ToolManager
@@ -2167,12 +2321,12 @@ class TestCodeMode:
             tools = await seq_wrapper.get_tools(ctx)
             run_code = tools['run_code']
 
-            # Per-tool sequential renders as `def`, but global mode uses deferred path.
+            # Per-tool sequential renders as `def`; global mode keeps the dispatch exclusive.
             desc = run_code.tool_def.description or ''
             assert 'def add(' in desc
             assert 'async def add(' not in desc
 
-            # The tool still works -- global sequential resolves at FutureSnapshot.
+            # The tool still works through the exclusive dispatch path.
             result = await seq_wrapper.call_tool('run_code', {'code': 'add(a=5, b=7)'}, ctx, run_code)
             assert result.return_value == 12
 
@@ -2821,8 +2975,7 @@ class TestCodeModeOSAccess:
         assert 'Configured OS access' in description
 
     async def test_os_callback_dispatches_inside_run_code(self) -> None:
-        """The `os` captured at `feed_start` answers OS-call snapshots via `resume_auto()`,
-        so OS calls still dispatch after a tool-call suspend/resume round-trip."""
+        """The `os` passed to `feed_run` still handles calls after a tool round-trip."""
 
         def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
             if fn == 'os.getenv':
@@ -2833,14 +2986,14 @@ class TestCodeModeOSAccess:
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
-        # The tool call forces a FunctionSnapshot -> FutureSnapshot round-trip; the os.getenv
-        # afterwards only resolves if the captured `os` is still consulted after them.
+        # The tool call crosses to the host before os.getenv proves the same feed
+        # still carries the callback.
         code = "import os\nx = await add(a=2, b=3)\nhome = os.getenv('THING')\n{'sum': x, 'home': home}"
         result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
         assert result.return_value == {'sum': 5, 'home': 'envval'}
 
     async def test_os_access_persists_across_run_code_calls(self) -> None:
-        """`os` is supplied on every `feed_start`, so OS access still works on a later
+        """`os` is supplied on every `feed_run`, so OS access still works on a later
         `run_code` call that reuses the persisted (non-fresh) REPL."""
 
         def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
@@ -2926,10 +3079,8 @@ class TestCodeModeOSAccess:
     async def test_mount_exposes_host_directory(self, tmp_path: Path) -> None:
         """A `mount` exposes a host directory inside the sandbox.
 
-        The mount is fixed at `feed_start` for the whole feed (Monty does not accept `mount=` on
-        `resume`), so the `await add(...)` here forces a FunctionSnapshot -> FutureSnapshot resume
-        round-trip before the read, proving the mount is still in effect after the sandbox suspends
-        and resumes.
+        The `await add(...)` crosses to the host before the read, proving the
+        mount remains in effect after external dispatch within the same feed.
         """
         (tmp_path / 'data.txt').write_text('hello-from-host')
         wrapper = CodeMode[object](mount=MountDir(virtual_path='/work', host_path=str(tmp_path))).get_wrapper_toolset(
@@ -3033,3 +3184,94 @@ class TestGlobalModeIsSequential:
 
         assert _global_mode_is_sequential(parallel) is False
         assert _global_mode_is_sequential(sequential) is True
+
+
+def test_temporal_detection_without_temporal_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing optional Temporal dependency selects the normal async path."""
+    monkeypatch.setitem(sys.modules, 'temporalio', None)
+    assert _in_temporal_workflow() is False
+
+
+async def test_dispatch_gate_cancels_waiters_and_keeps_writers_fair() -> None:
+    """Queued readers cannot pass a writer, and canceled waiters leave the queue."""
+    gate = _DispatchGate()
+    first_shared = _GateRequest(exclusive=False)
+    second_shared = _GateRequest(exclusive=False)
+    gate._queue.extend((first_shared, second_shared))  # pyright: ignore[reportPrivateUsage]
+    assert gate._can_enter(second_shared) is True  # pyright: ignore[reportPrivateUsage]
+    gate._queue.clear()  # pyright: ignore[reportPrivateUsage]
+
+    reader_started = asyncio.Event()
+    release_reader = asyncio.Event()
+    writer_started = asyncio.Event()
+    release_writer = asyncio.Event()
+
+    async def hold_reader() -> None:
+        async with gate.hold(exclusive=False):
+            reader_started.set()
+            await release_reader.wait()
+
+    async def hold_writer() -> None:
+        async with gate.hold(exclusive=True):
+            writer_started.set()
+            await release_writer.wait()
+
+    async def wait_as_reader() -> None:
+        async with gate.hold(exclusive=False):
+            raise AssertionError('canceled reader acquired the gate')  # pragma: no cover
+
+    first_reader = asyncio.create_task(hold_reader())
+    await reader_started.wait()
+    writer = asyncio.create_task(hold_writer())
+    later_reader = asyncio.create_task(wait_as_reader())
+    await asyncio.sleep(0)
+    later_reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await later_reader
+
+    release_reader.set()
+    await first_reader
+    await writer_started.wait()
+
+    blocked_reader = asyncio.create_task(wait_as_reader())
+    await asyncio.sleep(0)
+    blocked_reader.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await blocked_reader
+
+    release_writer.set()
+    await writer
+
+
+async def test_dispatch_tracker_reaps_dropped_wrapper_via_cancel() -> None:
+    """Dropping a mid-feed wrapper leaves its dispatch task for `cancel` to reap.
+
+    Monty's driver may drop the external wrapper coroutine during feed teardown
+    (`coroutine.close()`, i.e. `GeneratorExit`), which does not stop the dispatch
+    task it is awaiting. The tracker must keep that task until `cancel` runs, so
+    host work cannot outlive the feed.
+    """
+    tracker = _DispatchTracker()
+    dispatch_started = asyncio.Event()
+    dispatch_cancelled = asyncio.Event()
+
+    async def dispatch() -> None:
+        dispatch_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            dispatch_cancelled.set()
+            raise
+
+    # Drive the wrapper to its `await task` suspension the way Monty invokes an
+    # external, then drop it, without ever cancelling the dispatch task ourselves.
+    wrapper = tracker.run(dispatch())
+    wrapper.send(None)
+    await asyncio.wait_for(dispatch_started.wait(), timeout=1)
+    wrapper.close()
+
+    assert not dispatch_cancelled.is_set()
+    assert tracker._tasks  # pyright: ignore[reportPrivateUsage]
+
+    await tracker.cancel()
+    assert dispatch_cancelled.is_set()
