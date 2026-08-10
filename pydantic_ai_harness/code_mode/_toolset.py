@@ -26,6 +26,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.tool_manager import ParallelExecutionMode, ToolManager
 from pydantic_ai.tools import AgentDepsT, ToolDenied, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
+from pydantic_core import PydanticSerializationError, to_jsonable_python
 
 try:
     from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME  # pyright: ignore[reportPrivateUsage]
@@ -115,6 +116,23 @@ _RUN_CODE_ARGS_VALIDATOR: SchemaValidatorProt = _RUN_CODE_ADAPTER.validator  # p
 # Used to serialize tool return values before sending into Monty (dump_python)
 # and to reconstruct multimodal types (e.g. BinaryContent) from Monty results (validate_python).
 _TOOL_RETURN_CONTENT_TA: TypeAdapter[Any] = TypeAdapter(ToolReturnContent)
+
+
+def _ensure_serializable_result(result: Any) -> Any:
+    """Return a tool result that can be serialized into a `ToolReturnPart`.
+
+    Most results pass through unchanged so multimodal values stay native. If a model returns an
+    unsupported Python object as the final expression, normalize only that failure path and keep
+    the rest of the structure intact. This prevents an instrumentation/history serialization error
+    from aborting the agent run.
+    """
+    try:
+        _TOOL_RETURN_CONTENT_TA.dump_json(result)
+    except PydanticSerializationError:
+        result = to_jsonable_python(result, fallback=str, bytes_mode='base64')
+        return _TOOL_RETURN_CONTENT_TA.validate_python(result)
+    return result
+
 
 _RUN_CODE_DESCRIPTION_HEAD = """\
 Write and run Python code in a sandboxed environment.
@@ -694,6 +712,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         # serialized dicts) so they flow through to the model natively.
         if result is not None:
             result = _TOOL_RETURN_CONTENT_TA.validate_python(result)
+            result = _ensure_serializable_result(result)
 
         # Build return value:
         # - No print → return result directly (multimodal content stays top-level
