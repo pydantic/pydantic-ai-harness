@@ -11,9 +11,9 @@
 
 `StackOnePromptDefender` classifies tool results for indirect prompt injection
 before the model sees them, using [defender](https://github.com/StackOneHQ/defender-py)
-by StackOne. It withholds a result it rates high or critical risk, replacing it with
-a short notice, and reports every detection. A result it does not withhold passes
-through unchanged.
+by StackOne. With `block_high_risk=True` it withholds a result it rates high or
+critical risk, replacing it with a short notice; without it the result passes
+through unchanged. Detections are reported through the `on_detection` callback.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stackone_prompt_defender/)
 
@@ -124,8 +124,8 @@ Defender applies up to three layers, and this capability acts on the verdict.
 |---|---|
 | `str` and JSON-like values | Classified; withheld when high or critical risk, otherwise passed through unchanged. |
 | `ToolReturn.return_value` | Classified like any payload; the whole `ToolReturn` is withheld when high risk. |
-| `ToolReturn.content` | Not classified separately in this release. |
-| Multi-modal parts (`BinaryContent`, URLs) | Not classified. |
+| `ToolReturn.content` | Classified alongside `return_value`; the whole result is withheld when either is high risk. |
+| Multi-modal parts (`BinaryContent`, URLs) | Carry no classifiable text, so they yield no signal. |
 | `ToolReturn.metadata` | Not scanned; not visible to the model. |
 | Other objects (Pydantic models, dataclasses) | Classified as the JSON the model would see. |
 
@@ -204,7 +204,8 @@ this to get defender's detector out of the box.
 - A bare string is only classified when `semantic_detection=True`. Tier 1 inspects
   strings under risky field names, so a string with no risky field name -- including
   one nested in a list or object -- is covered only by the semantic classifier.
-- `ToolReturn.content` and multi-modal parts are not classified.
+- Multi-modal parts (`BinaryContent`, URLs) carry no classifiable text, so an
+  injection embedded in an image or document is not detected.
 - Only normally returned results are classified. Tool data raised through
   `ModelRetry` or a failed result becomes model-facing retry or failure content
   without passing through this capability; cover that path with a `ToolGuardrail`

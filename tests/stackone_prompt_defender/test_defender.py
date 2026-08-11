@@ -185,8 +185,26 @@ async def test_blocks_tool_return_result() -> None:
 
 
 async def test_tool_return_clean_passes_through() -> None:
-    result: ToolReturn[object] = ToolReturn(return_value={'body': 'ok'}, content='note')
+    # No content exercises the single-value path.
+    result: ToolReturn[object] = ToolReturn(return_value={'body': 'ok'})
     assert await _run(StackOnePromptDefender(_observe()), result) is result
+
+
+async def test_tool_return_content_is_classified(monkeypatch: pytest.MonkeyPatch) -> None:
+    # content is model-visible, so it must be scanned alongside return_value.
+    seen: list[object] = []
+    defense = _observe()
+    inner = defense.defend_tool_result_async
+
+    async def spy(value: object, tool_name: str) -> DefenseResult:
+        seen.append(value)
+        return await inner(value, tool_name)
+
+    monkeypatch.setattr(defense, 'defend_tool_result_async', spy)
+    result: ToolReturn[object] = ToolReturn(return_value={'body': 'ok'}, content='extra context')
+    assert await _run(StackOnePromptDefender(defense), result) is result
+    assert {'body': 'ok'} in seen
+    assert 'extra context' in seen
 
 
 async def test_custom_blocked_message() -> None:

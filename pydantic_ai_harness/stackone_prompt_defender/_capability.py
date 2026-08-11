@@ -216,21 +216,29 @@ class StackOnePromptDefender(AbstractCapability[AgentDepsT]):
         args: dict[str, Any],
         result: Any,
     ) -> Any:
-        """Classify the result; withhold it when blocked, otherwise pass it through unchanged."""
+        """Classify each model-visible part; withhold the whole result when any part is blocked."""
         if not await matches_tool_selector(self.tool_filter, ctx, tool_def):
             return result
         # Keep the original result; the `isinstance` check below narrows `result` to a type pyright rejects on return.
         unchanged = result
-        payload = result.return_value if isinstance(result, ToolReturn) else result
-        verdict = await self._defense.defend_tool_result_async(
-            to_jsonable_python(payload, fallback=str), call.tool_name
-        )
-        if _flagged(verdict):
-            await self._notify(ctx, call, verdict)
-        if verdict.allowed:
+        values: list[object]
+        if isinstance(result, ToolReturn):
+            # `content` reaches the model as a separate part, so classify it alongside `return_value`.
+            values = [result.return_value, result.content] if result.content is not None else [result.return_value]
+        else:
+            values = [result]
+        verdicts = [
+            await self._defense.defend_tool_result_async(to_jsonable_python(value, fallback=str), call.tool_name)
+            for value in values
+        ]
+        for verdict in verdicts:
+            if _flagged(verdict):
+                await self._notify(ctx, call, verdict)
+        blocking = next((verdict for verdict in verdicts if not verdict.allowed), None)
+        if blocking is None:
             return unchanged
-        message = self.blocked_message.format(tool_name=call.tool_name, risk_level=verdict.risk_level)
-        blocked: ToolReturn[str] = ToolReturn(return_value=message, metadata={_METADATA_KEY: _diagnostics(verdict)})
+        message = self.blocked_message.format(tool_name=call.tool_name, risk_level=blocking.risk_level)
+        blocked: ToolReturn[str] = ToolReturn(return_value=message, metadata={_METADATA_KEY: _diagnostics(blocking)})
         return blocked
 
     async def _notify(self, ctx: RunContext[AgentDepsT], call: ToolCallPart, verdict: DefenseResult) -> None:
