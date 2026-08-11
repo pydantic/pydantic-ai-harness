@@ -1,14 +1,15 @@
 ---
 title: Prompt Injection Defender
-description: Scan tool results for indirect prompt injection before they reach the model, using defender by StackOne.
+description: Classify tool results for indirect prompt injection and withhold the risky ones, using defender by StackOne.
 ---
 
 # Prompt Injection Defender
 
-`StackOnePromptDefender` scans tool results for indirect prompt injection before
-the model sees them, using [defender](https://github.com/StackOneHQ/defender-py) by
-StackOne. It removes injected instructions from a result, and can withhold results
-it rates high or critical risk.
+`StackOnePromptDefender` classifies tool results for indirect prompt injection
+before the model sees them, using [defender](https://github.com/StackOneHQ/defender-py)
+by StackOne. It withholds a result it rates high or critical risk, replacing it with
+a short notice, and reports every detection. A result it does not withhold passes
+through unchanged.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stackone_prompt_defender/)
 
@@ -59,7 +60,7 @@ from pydantic_ai_harness.stackone_prompt_defender import StackOnePromptDefender
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[StackOnePromptDefender()],
+    capabilities=[StackOnePromptDefender(block_high_risk=True)],
 )
 
 
@@ -72,11 +73,11 @@ def read_email(message_id: str) -> dict[str, str]:
     }
 ```
 
-When the model calls `read_email`, the capability scans the return value first.
-Pattern detection finds the injected instruction in `body` and rewrites it to a
-`[REDACTED]` marker before the model sees it, leaving `subject` untouched. With
-`block_high_risk=True` the whole result is withheld instead, and the model
-receives a short notice in its place.
+When the model calls `read_email`, the capability classifies the return value.
+Pattern detection finds the injected instruction in `body` and rates the result
+high risk. With `block_high_risk=True` the whole result is withheld and the model
+receives a short notice in its place. Without it, the result passes through
+unchanged and the detection is reported through `on_detection`.
 
 ## Blocking
 
@@ -96,81 +97,39 @@ what would be withheld, then set `block_high_risk=True`.
 
 ## How detection works
 
-Defender applies up to three layers. This capability runs each result through them
-and acts on the combined verdict.
+Defender applies up to three layers, and this capability acts on the verdict.
 
 - **Tier 1, pattern detection.** Deterministic rules match instruction overrides
   such as `Ignore all previous instructions`, role markers such as an injected
-  `System:` turn label in third-party data, encoded payloads such as Base64 text
-  that decodes to an instruction, and zero-width characters hidden between
-  letters. They also match leetspeak such as `1gn0re prev10us` and homoglyphs such
-  as a Cyrillic `а` (U+0430) substituted for a Latin `a`. Unicode normalization
-  happens before matching, which is why these disguised spellings are caught. Tier 1
-  rewrites matched text under risky field names (`subject`, `body`, `content`, and
-  similar, with per-tool overrides such as `gmail_*`). Pure standard library,
-  always available.
+  `System:` turn label, encoded payloads such as Base64 that decodes to an
+  instruction, and zero-width characters hidden between letters. They also match
+  leetspeak such as `1gn0re prev10us` and homoglyphs such as a Cyrillic `а`
+  (U+0430) in place of a Latin `a`; Unicode normalization runs before matching.
+  Tier 1 inspects strings under risky field names (`subject`, `body`, `content`,
+  and similar, with per-tool overrides such as `gmail_*`), so it does not cover a
+  bare-string result on its own. Pure standard library, always available.
 - **Tier 2, local ML classification.** A bundled MiniLM classifier scores free
-  text. It runs in process from a model shipped inside the package, with no
-  network access. It is enabled with `semantic_detection=True` and requires the
-  `stackone-defender-ml` extra.
+  text, including bare strings that Tier 1 does not reach. It runs in process from
+  a model shipped inside the package, with no network access. Enable it with
+  `semantic_detection=True`; requires the `stackone-defender-ml` extra.
 - **Tier 3, LLM adjudication.** Off by default and not wired by this capability's
   options. To use it, configure a provider on your own `PromptDefense` and pass it
   as `defense` (see [Custom defense](#custom-defense)).
 
-The capability projects bare return strings and `ToolReturn.content` under the
-`content` risky field, so Tier 1 examines and rewrites them without the ML extra.
-Semantic detection adds coverage for attacks that do not match the deterministic
-patterns.
-
-## What gets scanned
+## What gets classified
 
 | Result shape | Behavior |
 |---|---|
-| `str` and JSON-like values | Scanned; risky-field strings rewritten on detection. |
-| `ToolReturn.return_value` | Scanned and rewritten like any payload. |
-| `ToolReturn.content` | Scanned under the `content` risky field and rewritten or blocked on detection. |
-| Multi-modal parts (`BinaryContent`, URLs) | Passed through unscanned. |
+| `str` and JSON-like values | Classified; withheld when high or critical risk, otherwise passed through unchanged. |
+| `ToolReturn.return_value` | Classified like any payload; the whole `ToolReturn` is withheld when high risk. |
+| `ToolReturn.content` | Not classified separately in this release. |
+| Multi-modal parts (`BinaryContent`, URLs) | Not classified. |
 | `ToolReturn.metadata` | Not scanned; not visible to the model. |
-| Other objects (Pydantic models, dataclasses) | Scanned as the JSON the model would see; replaced by sanitized JSON on detection. |
-| Lists beyond defender's large-array threshold | Scanned in full by the default defense. With a custom `defense` that samples, the leading sample is scanned and the remainder passes through unchanged. |
+| Other objects (Pydantic models, dataclasses) | Classified as the JSON the model would see. |
 
-A clean result is returned unchanged, as the same object. The default defense
-disables defender's large-array sampling; a custom `defense` keeps whatever
-traversal it configures. An exception returned as a value is scanned like other
-values. A raised generic exception is reported through `on_detection` when
-flagged, but is not suppressed.
-
-`ModelRetry` and `ToolFailed` message text is scanned under the `content` risky
-field, so pattern detection applies to it. The text is rewritten or replaced when
-needed while retry and failed-result control flow is preserved.
-Provider-native tools (such as hosted web search) run on the provider's side and
-never reach your process. Results your application supplies for deferred tool calls
-bypass tool execution; scan those yourself:
-
-```python
-from stackone_defender import create_prompt_defense
-
-defense = create_prompt_defense(enable_tier2=False)
-
-
-async def scan_external(external_value: object, tool_name: str) -> object:
-    verdict = await defense.defend_tool_result_async(external_value, tool_name)
-    if not verdict.allowed:
-        return 'External result withheld.'
-    return verdict.sanitized
-```
-
-## Boundary tagging
-
-```python
-capability = StackOnePromptDefender(annotate_boundary=True)
-```
-
-With `annotate_boundary=True`, untrusted risky-field strings are wrapped in
-`[UD-<id>]...[/UD-<id>]` tags, and defender's instructions telling the model to
-treat tagged content as data are added to the agent. If you pass a custom
-`defense`, set `annotate_boundary=True` on it as well: the setting cannot be read
-back from the defense, so the capability flag is what adds the instructions.
+A result that is not withheld is returned unchanged, as the same object; the
+capability does not rewrite tool results. Blocking replaces the whole result, so a
+withheld `ToolReturn` drops its content and metadata along with the payload.
 
 ## Observing detections
 
@@ -193,14 +152,11 @@ agent = Agent(
 )
 ```
 
-`on_detection` runs (sync or async) for each scanned value that defender blocked,
-sanitized, or rated high or critical risk. When a scan flags the value or its
-content, the result is returned as a `ToolReturn` whose metadata records the
-flagged unit's diagnostics under `prompt_injection` (value) or
-`prompt_injection_content` (content), each with `blocked`, `risk_level`,
-`detections`, `fields_sanitized`, `patterns_by_field`, `tier2_score`, and
-`latency_ms`. A clean result passes through unchanged, and metadata is never sent
-to the model.
+`on_detection` runs (sync or async) for each result defender blocked, flagged with
+a detection, or rated high or critical risk. A withheld result is returned as a
+`ToolReturn` whose metadata records the verdict under `prompt_injection`, with
+`blocked`, `risk_level`, `detections`, `fields_sanitized`, `patterns_by_field`,
+`tier2_score`, and `latency_ms`. Metadata is never sent to the model.
 
 ## Custom defense
 
@@ -227,9 +183,9 @@ with Tier 2 enabled loads its classifier on the first large-enough scan; call
 
 ## Composition
 
-The capability scans a result before other capabilities reshape it. A tool output
-that is later summarized or spilled to disk (for example by
-[Tool Output Limits](tool-output-limits.md)) is therefore sanitized first.
+The capability classifies a result before other capabilities reshape it, so a
+withheld result is replaced before anything downstream (for example
+[Tool Output Limits](tool-output-limits.md)) can summarize or spill it.
 
 ## Relationship to guardrails
 
@@ -240,6 +196,31 @@ user prompt, the agent output, and tool arguments and results.
 it wraps StackOne's defender, so pattern, ML, and optional LLM detection work without
 writing detection logic. Reach for a `ToolGuardrail` to run your own checks; reach for
 this to get defender's detector out of the box.
+
+## Limitations
+
+- A bare-string result is only classified when `semantic_detection=True`; Tier 1
+  inspects strings under risky field names.
+- `ToolReturn.content` and multi-modal parts are not classified.
+- Large lists may be sampled by defender's default traversal, so an injection past
+  the sample threshold can go unclassified. Configure traversal on a custom
+  `defense` if you need the full list scanned.
+- Provider-native tools (such as hosted web search) run on the provider's side and
+  never reach your process. Results your application supplies for deferred tool
+  calls bypass tool execution; scan those yourself:
+
+```python
+from stackone_defender import create_prompt_defense
+
+defense = create_prompt_defense(block_high_risk=True)
+
+
+async def scan_external(external_value: object, tool_name: str) -> object:
+    verdict = await defense.defend_tool_result_async(external_value, tool_name)
+    if not verdict.allowed:
+        return 'External result withheld.'
+    return external_value
+```
 
 ## Further reading
 
