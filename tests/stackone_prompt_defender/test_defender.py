@@ -195,6 +195,16 @@ async def test_custom_blocked_message() -> None:
     assert out.return_value == 'Blocked at high risk.'
 
 
+async def test_blocks_injection_past_large_array_threshold() -> None:
+    # Defender samples arrays longer than 1000 by default; the built-in defense disables that,
+    # so an injection in the tail is still classified and blocked.
+    result = [{'body': 'clean'} for _ in range(1000)] + [{'body': INJECTION}]
+    out = await _run(StackOnePromptDefender(block_high_risk=True), result)
+    assert isinstance(out, ToolReturn)
+    assert isinstance(out.return_value, str)
+    assert 'withheld' in out.return_value
+
+
 # --- Through the public Agent surface -------------------------------------
 
 

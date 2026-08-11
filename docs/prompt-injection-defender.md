@@ -199,12 +199,17 @@ this to get defender's detector out of the box.
 
 ## Limitations
 
-- A bare-string result is only classified when `semantic_detection=True`; Tier 1
-  inspects strings under risky field names.
+- A bare string is only classified when `semantic_detection=True`. Tier 1 inspects
+  strings under risky field names, so a string with no risky field name -- including
+  one nested in a list or object -- is covered only by the semantic classifier.
 - `ToolReturn.content` and multi-modal parts are not classified.
-- Large lists may be sampled by defender's default traversal, so an injection past
-  the sample threshold can go unclassified. Configure traversal on a custom
-  `defense` if you need the full list scanned.
+- Only normally returned results are classified. Tool data raised through
+  `ModelRetry` or a failed result becomes model-facing retry or failure content
+  without passing through this capability; cover that path with a `ToolGuardrail`
+  if needed.
+- The built-in defense scans large arrays in full. A custom `defense` that keeps
+  defender's default sampling classifies only the leading items of a long array, so
+  an injection past the sample threshold can go unclassified.
 - Provider-native tools (such as hosted web search) run on the provider's side and
   never reach your process. Results your application supplies for deferred tool
   calls bypass tool execution; scan those yourself:

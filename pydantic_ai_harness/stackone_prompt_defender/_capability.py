@@ -17,6 +17,8 @@ External-service assumptions (verified 2026-08-06 against stackone-defender 0.7.
   covered by the Tier 2 ML classifier, which needs the `stackone-defender[onnx]` install
   and fails open (passes content through, logs a warning) when it is missing. The library
   logs via stdlib `logging`, never `warnings.warn`.
+- Traversal samples arrays longer than 1000 items by default (`skip_large_arrays`); the
+  built-in defense turns this off so a long array is classified in full.
 - Packaging: `stackone-defender` requires Python 3.11+, has no required dependencies, and
   bundles its ONNX model in the wheel (no downloads at runtime).
 """
@@ -190,6 +192,8 @@ class StackOnePromptDefender(AbstractCapability[AgentDepsT]):
                 )
             # Construct `PromptDefense` directly; the `create_prompt_defense` factory is untyped and fails pyright strict.
             self._defense = PromptDefense(
+                # Scan large arrays in full; the default samples them, letting a tail injection reach the model.
+                config={'traversal': {'skip_large_arrays': False}},
                 block_high_risk=bool(self.block_high_risk),
                 enable_tier2=self.semantic_detection,
             )
