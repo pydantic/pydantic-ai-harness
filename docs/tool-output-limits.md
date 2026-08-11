@@ -236,6 +236,29 @@ built-in prompt entirely. The `summary_prompt` template on the capability must c
   retries get distinct handles too (keyed per `retry`), so a retried call never clobbers the
   earlier attempt's spill.
 
+## Specs
+
+`Agent.from_spec` supports the part of the configuration a spec can express:
+
+```yaml
+- ToolOutputLimits:
+    over_tokens: true
+    strip_ansi: true
+    tool_filter: [read_file, run_tests]
+```
+
+`bands` and `per_tool` hold `Action` objects with a recursive `then` fallback and, on
+`Summarize`, a model or a callable; `tokenizer` and `store` take a callable and a live
+backend. A spec naming any of them is rejected rather than silently ignored, because a spec
+that promises a summarize band and quietly gets the default spill band is worse than one that
+refuses to load. A spec that names none of them gets the default `Spill(then=Truncate())`
+band. Giving `bands` a spec form is tracked in
+[#555](https://github.com/pydantic/pydantic-ai-harness/issues/555).
+
+The fields above are what `ToolOutputLimits.from_spec` names in its signature, which is also
+what Pydantic AI reads to generate the spec's JSON schema -- so an editor following the
+`$schema` line completes and validates them.
+
 ## Relationship to other capabilities
 
 - Distinct from [compaction](compaction.md), which compresses or drops context already inside

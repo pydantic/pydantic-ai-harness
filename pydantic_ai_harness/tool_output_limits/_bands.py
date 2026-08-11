@@ -19,6 +19,11 @@ from typing import TYPE_CHECKING
 from pydantic_ai_harness.tool_output_limits._payload import TruncationStrategy
 
 if TYPE_CHECKING:
+    # Keep this deferred. Importing `Model` at runtime makes `Summarize.model` resolve, and
+    # pydantic then drops the whole `spec_ToolOutputLimits` entry from the AgentSpec schema
+    # instead of raising -- trading a loud failure for a silent one that erases every other
+    # field. `ToolOutputLimits.from_spec` publishes the schema and never reaches this
+    # annotation, so nothing is gained by resolving it.
     from pydantic_ai.models import Model
 
 _DEFAULT_TRUNCATE_CHARS = 4_000

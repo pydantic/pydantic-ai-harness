@@ -23,14 +23,18 @@ from __future__ import annotations as _annotations
 
 import ast
 import importlib
+import importlib.util
 import os
 import warnings
 from collections.abc import Iterable
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 
 import pytest
 from _pytest.mark import ParameterSet
 from pytest_examples import CodeExample, find_examples
+
+from tests.conftest import is_missing_optional_extra  # pyright: ignore[reportMissingTypeStubs]
 
 _ROOT = Path(__file__).parent.parent
 _HARNESS = 'pydantic_ai_harness'
@@ -54,16 +58,6 @@ def _harness_import_targets(tree: ast.AST) -> Iterable[tuple[str, str | None]]:
                     yield alias.name, None
 
 
-def _is_missing_harness_module(exc_name: str | None) -> bool:
-    """True when an ImportError is a genuinely absent harness module, not a missing extra.
-
-    A missing optional dependency (e.g. `acp` in the `slim` CI job) raises
-    `ModuleNotFoundError` naming the third-party package, not the harness module --
-    the harness module exists, its extra just isn't installed.
-    """
-    return exc_name is not None and exc_name.startswith(_HARNESS)
-
-
 def _snippet_problem(source: str) -> str | None:
     """Return why a snippet is invalid, or `None` if it parses and its harness imports resolve."""
     try:
@@ -76,10 +70,10 @@ def _snippet_problem(source: str) -> str | None:
             with warnings.catch_warnings():
                 warnings.simplefilter('ignore')  # a deprecated shim path still resolves; existence is what we check
                 imported = importlib.import_module(module)
-        except ImportError as exc:
-            if _is_missing_harness_module(exc.name):
-                return f'imports `{module}`, which does not exist: {exc}'
-            continue  # missing optional extra in this environment; the harness module exists
+        except ImportError as error:
+            if is_missing_optional_extra(error):
+                continue  # the harness module exists; this environment lacks its declared extra
+            return f'imports `{module}`, which does not resolve: {error}'
         if name is not None and not hasattr(imported, name):
             return f'imports `{name}` from `{module}`, but that name does not exist'
     return None
@@ -118,21 +112,32 @@ def test_snippet_problem_detects_each_failure_mode() -> None:
     assert _snippet_problem('from os import path\nimport sys') is None
     # Invalid: syntax, a module that does not exist, and a name that does not exist.
     assert 'does not parse' in (_snippet_problem('def (:') or '')
-    assert 'does not exist' in (_snippet_problem('from pydantic_ai_harness.nope import X') or '')
+    assert 'does not resolve' in (_snippet_problem('from pydantic_ai_harness.nope import X') or '')
     assert 'does not exist' in (_snippet_problem('from pydantic_ai_harness import NoSuchCapability') or '')
-
-
-def test_missing_harness_module_classification() -> None:
-    assert _is_missing_harness_module('pydantic_ai_harness.experimental.nope') is True
-    assert _is_missing_harness_module('acp') is False  # a missing extra, not a harness module
-    assert _is_missing_harness_module(None) is False
 
 
 def test_missing_optional_extra_is_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     # Simulate the `slim` environment: the harness module exists, but importing it
     # fails because its third-party extra is absent. That is not a broken snippet.
+    # `acp` is installed here, so its absence has to be simulated too -- the tolerance
+    # asks whether the module resolves, not only what the exception names.
     def _extra_missing(module: str) -> object:
         raise ModuleNotFoundError("No module named 'acp'", name='acp')
 
     monkeypatch.setattr(importlib, 'import_module', _extra_missing)
+
+    def _nothing_resolves(name: str) -> ModuleSpec | None:
+        return None
+
+    monkeypatch.setattr(importlib.util, 'find_spec', _nothing_resolves)
     assert _snippet_problem('from pydantic_ai_harness.experimental.acp import run_acp_stdio') is None
+
+
+def test_a_third_party_nothing_declares_is_still_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An undeclared import is a defect, not an uninstalled extra -- see
+    # `is_missing_optional_extra`. Tolerating it would hide the module from every check.
+    def _undeclared_missing(module: str) -> object:
+        raise ModuleNotFoundError("No module named 'requests'", name='requests')
+
+    monkeypatch.setattr(importlib, 'import_module', _undeclared_missing)
+    assert 'does not resolve' in (_snippet_problem('from pydantic_ai_harness.shell import Shell') or '')

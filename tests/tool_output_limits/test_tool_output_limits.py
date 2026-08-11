@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import os
 import time
 from datetime import timedelta
@@ -11,7 +12,8 @@ from typing import Any
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.agent.spec import AgentSpec
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -751,3 +753,72 @@ class TestAgentIntegration:
         returns = [p for m in result.all_messages() for p in m.parts if isinstance(p, ToolReturnPart)]
         small = [p for p in returns if p.tool_name == 'small_tool']
         assert small and small[0].content == 'tiny'
+
+
+# ---------------------------------------------------------------------------
+# Agent spec
+# ---------------------------------------------------------------------------
+
+
+class TestAgentSpec:
+    def test_the_schema_generates_at_all(self):
+        """Reading `__init__` reached `Summarize.model`, whose `Model` is `TYPE_CHECKING`-only.
+
+        Pydantic raised `PydanticUserError` there, so naming this capability in a spec broke
+        schema generation for every capability in it, not just this one.
+        """
+        definitions = AgentSpec.model_json_schema_with_capabilities([ToolOutputLimits])['$defs']
+
+        assert 'spec_params_ToolOutputLimits' in definitions
+
+    def test_the_schema_carries_the_options_a_spec_can_set(self):
+        schema = json.dumps(AgentSpec.model_json_schema_with_capabilities([ToolOutputLimits]), sort_keys=True)
+
+        for expressible in ('"tool_filter"', '"over_tokens"', '"strip_ansi"', '"summary_prompt"'):
+            assert expressible in schema, expressible
+        # `AbstractCapability`'s own fields reach `cls()` through `**kwargs` when `from_spec`
+        # forgets them, so they need naming to reach the schema.
+        for base_field in ('"id"', '"description"', '"defer_loading"'):
+            assert base_field in schema, base_field
+        # Bands hold `Action` objects; the tokenizer and store hold a callable and a backend.
+        for runtime_only in ('"bands"', '"per_tool"', '"tokenizer"', '"store"'):
+            assert runtime_only not in schema, runtime_only
+
+    def test_a_runtime_only_field_is_refused_by_name(self):
+        with pytest.raises(UserError, match=r"\['bands', 'store'\]"):
+            ToolOutputLimits[None].from_spec(bands=[Band(over=1, action=Truncate())], store=LocalFileStore())
+
+    def test_an_unknown_spec_field_is_named(self):
+        """`**unsupported` keeps the runtime-only message specific, so it must not swallow the rest."""
+        with pytest.raises(UserError, match=r"no spec field\(s\) \['band'\]"):
+            ToolOutputLimits[None].from_spec(band=[])
+
+    def test_the_defaults_survive_a_spec_that_sets_nothing(self):
+        capability = ToolOutputLimits[None].from_spec()
+
+        assert isinstance(capability._bands[0].action, Spill)
+        assert capability.summary_prompt == ToolOutputLimits[None]().summary_prompt
+
+    def test_a_spec_loads_and_the_options_it_names_hold(self):
+        agent = Agent.from_spec(
+            {
+                'model': 'test',
+                'capabilities': [
+                    {
+                        'ToolOutputLimits': {
+                            'over_tokens': True,
+                            'strip_ansi': True,
+                            'tool_filter': ['big_tool'],
+                            'id': 'limits',
+                        }
+                    }
+                ],
+            },
+            custom_capability_types=[ToolOutputLimits],
+        )
+
+        [capability] = [c for c in agent.root_capability.capabilities if isinstance(c, ToolOutputLimits)]
+        assert capability.over_tokens is True
+        assert capability.strip_ansi is True
+        assert capability.tool_filter == ['big_tool']
+        assert capability.id == 'limits'

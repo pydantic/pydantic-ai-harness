@@ -9,7 +9,7 @@ from typing import Any, TypeGuard
 
 from pydantic_ai import FunctionToolset
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnContent, UserContent
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets import AgentToolset
@@ -151,6 +151,62 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         self._store = self.store if self.store is not None else LocalFileStore()
         self._bands = self._prepare_bands(self.bands)
         self._per_tool = {name: self._prepare_bands(bands) for name, bands in self.per_tool.items()}
+
+    @classmethod
+    def from_spec(
+        cls,
+        *,
+        tool_filter: ToolSelector[Any] = 'all',
+        over_tokens: bool = False,
+        strip_ansi: bool = False,
+        summary_prompt: str = _DEFAULT_SUMMARY_PROMPT,
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
+        **unsupported: Any,
+    ) -> ToolOutputLimits[Any]:
+        """Build from an agent spec, covering the fields a spec can express.
+
+        Every parameter is named because that signature is what core reads to generate the
+        spec's JSON schema. Without it core reads `__init__` instead, and `bands` reaches
+        `Summarize.model`, whose `Model` annotation is only imported under `TYPE_CHECKING`
+        in `_bands.py`; pydantic then raises `PydanticUserError` while building the schema,
+        so a spec that mentions this capability at all cannot produce a schema for any
+        capability.
+
+        Moving that `Model` import out of `TYPE_CHECKING` looks like the smaller fix and is
+        the worse one: it makes the name resolve, and pydantic then drops the whole
+        `spec_ToolOutputLimits` entry from the capabilities union instead of raising. The
+        loud failure becomes a silent one, and every field here disappears from the schema
+        while the spec keeps loading. Verified, not assumed. Keep the import deferred.
+
+        `bands` and `per_tool` carry `Action` dataclasses with a recursive `then` fallback
+        and a model or callable on `Summarize`; `tokenizer` and `store` are a callable and a
+        live backend. None of them has a spec representation, so they are rejected rather
+        than dropped -- a spec that promises a summarize band and silently gets the default
+        spill band is worse than a spec that refuses to load. `**unsupported` stays so that
+        rejection keeps naming the field; core drops it from the schema, so it costs nothing
+        there. Making `bands` spec-expressible through a `BandSpec` is tracked in
+        <https://github.com/pydantic/pydantic-ai-harness/issues/555>.
+        """
+        runtime_only = sorted({'bands', 'per_tool', 'tokenizer', 'store'} & unsupported.keys())
+        if runtime_only:
+            raise UserError(
+                f'ToolOutputLimits cannot be built from a spec with {runtime_only}: bands take `Action` '
+                'objects, and the tokenizer and store take a callable or a live backend. Construct the '
+                'capability in code to use them.'
+            )
+        if unsupported:
+            raise UserError(f'ToolOutputLimits has no spec field(s) {sorted(unsupported)}.')
+        return cls(
+            tool_filter=tool_filter,
+            over_tokens=over_tokens,
+            strip_ansi=strip_ansi,
+            summary_prompt=summary_prompt,
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
+        )
 
     @staticmethod
     def _prepare_bands(bands: Sequence[Band]) -> list[Band]:
