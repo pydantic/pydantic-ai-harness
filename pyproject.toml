@@ -30,8 +30,13 @@ classifiers = [
 dependencies = [
     "genai-prices>=0.0.71",
     "httpx>=0.28.1",
-    # `CodeMode` reads `ModelRequestParameters.revealed_tool_names`, which lands in 2.22.0.
-    "pydantic-ai-slim>=2.22.0",
+    # The compaction estimator and the conversation-search indexer both have to recognise
+    # `ToolAvailabilityDeltaPart`, which lands in 2.23.0 — it is the one `ModelRequestPart`
+    # that carries no `content`, so code that walks request parts raises `AttributeError`
+    # on it rather than merely ignoring it (#577). Handling it needs the class to import,
+    # so the floor is the version that introduced it, not merely the one we lock.
+    # (`CodeMode` separately reads `ModelRequestParameters.revealed_tool_names`, from 2.22.0.)
+    "pydantic-ai-slim>=2.23.0",
 ]
 
 [project.optional-dependencies]
