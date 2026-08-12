@@ -130,6 +130,7 @@ _CAPABILITY_PAGE_META = {
     'tool-output-limits.md': ('tool_output_limits', 'Tool Output Limits'),
     'warn-on-cache-busts.md': ('warn_on_cache_busts', 'Warn On Cache Busts'),
     'step-persistence.md': ('step_persistence', 'Step Persistence'),
+    'audit-log.md': ('audit_log', 'Audit Log'),
     'conversation-search.md': ('conversation_search', 'Conversation Search'),
     'media.md': ('media', 'Media Externalization'),
     'subagents.md': ('subagents', 'Subagents'),
