@@ -148,6 +148,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 | [FileSystem](pydantic_ai_harness/filesystem/) | Harness | Read, write, edit, search files under a root; path-traversal and symlink safe, secrets read-only |
 | [Shell](pydantic_ai_harness/shell/) | Harness | Command execution with allowlists, denylists, timeouts, and credential-stripping |
 | [Modal Sandbox](pydantic_ai_harness/modal_sandbox/) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
+| [Islo Sandbox](pydantic_ai_harness/islo_sandbox/) | Harness | Commands and files in an isolated [Islo](https://islo.dev) cloud sandbox |
 
 ### Tools & native abilities
 

@@ -10,6 +10,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AgentToolset
 
+from pydantic_ai_harness._sandbox_tool_output import DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES
 from pydantic_ai_harness.modal_sandbox._session import (
     DEFAULT_APP_NAME as _DEFAULT_APP_NAME,
 )
@@ -22,7 +23,6 @@ from pydantic_ai_harness.modal_sandbox._session import (
 from pydantic_ai_harness.modal_sandbox._session import (
     ModalSandboxSession,
 )
-from pydantic_ai_harness.modal_sandbox._tool_output import DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES
 from pydantic_ai_harness.modal_sandbox._toolset import ModalSandboxToolset
 
 # read_file pulls the whole file into memory before windowing it, so cap how large a file
