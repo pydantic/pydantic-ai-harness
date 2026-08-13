@@ -118,6 +118,18 @@ def _tail_utf8(text: str, max_bytes: int | None) -> tuple[str, bool]:
     return encoded[-max_bytes:].decode('utf-8', errors='ignore'), True
 
 
+def _validate_endpoint_url(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        url = httpx.URL(value)
+    except (TypeError, httpx.InvalidURL):
+        url = None
+    if url is None or url.scheme != 'https' or not url.is_absolute_url:
+        raise ValueError(f'{name} must be an absolute HTTPS URL, got {value!r}.')
+    return value
+
+
 class IsloSandboxSession:
     """Async context manager that creates or attaches to an Islo sandbox.
 
@@ -162,8 +174,8 @@ class IsloSandboxSession:
         self._disk_gb = disk_gb
         self._internet_enabled = internet_enabled
         self._gateway_profile = gateway_profile
-        self._base_url = base_url
-        self._compute_url = compute_url
+        self._base_url = _validate_endpoint_url('base_url', base_url)
+        self._compute_url = _validate_endpoint_url('compute_url', compute_url)
         self._injected_client = client
         self._poll_interval = poll_interval
 

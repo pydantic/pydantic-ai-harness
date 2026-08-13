@@ -98,6 +98,20 @@ class TestLifecycle:
         with pytest.raises(ValueError):
             IsloSandboxSession(**kwargs)  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize(
+        ('name', 'value'),
+        [
+            ('base_url', 'http://api.example.test'),
+            ('compute_url', 'http://localhost:8080'),
+            ('base_url', '/relative'),
+            ('compute_url', 'https:///missing-host'),
+            ('base_url', 123),
+        ],
+    )
+    def test_custom_endpoint_requires_absolute_https(self, name: str, value: object) -> None:
+        with pytest.raises(ValueError, match=rf'{name} must be an absolute HTTPS URL'):
+            IsloSandboxSession(**{name: value})  # type: ignore[arg-type]
+
     async def test_missing_remote_and_configured_workdir_falls_back(self, fake_islo: FakeIslo) -> None:
         fake_islo.sandboxes.create_response = FakeSandboxResponse(workdir=None)
         async with IsloSandboxSession(workdir=None) as session:

@@ -160,7 +160,8 @@ IsloSandbox(
 
 Creation-only settings cannot be combined with `sandbox_name` or an injected
 `session`. `base_url` and `compute_url` apply to a capability-created client,
-including attach mode. Configure them on an injected session instead. Set
+including attach mode, and must be absolute HTTPS URLs. Configure them on an
+injected session instead. Set
 `instructions=''` to disable default model instructions.
 
 ## Agent specs

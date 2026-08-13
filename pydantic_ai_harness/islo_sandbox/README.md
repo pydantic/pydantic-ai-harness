@@ -152,8 +152,9 @@ IsloSandbox(
 ```
 
 Use `base_url` and `compute_url` for an Islo-compatible deployment. They apply
-to a capability-created client, including attach mode, but not to an injected
-session. Set `instructions=''` to disable the default model instructions.
+to a capability-created client, including attach mode, must be absolute HTTPS
+URLs, and do not apply to an injected session. Set `instructions=''` to disable
+the default model instructions.
 
 ## Tool-name composition
 
