@@ -192,6 +192,7 @@ class TestFiles:
     async def test_write_and_list(self, fake_islo: FakeIslo) -> None:
         fake_islo.put_file('/workspace/z.txt', b'z')
         fake_islo.put_file('/workspace/sub/nested', b'n')
+        fake_islo.add_directory('/empty')
         async with _toolset() as toolset:
             assert await toolset.write_file('a.txt', 'hé') == "Wrote 3 bytes to 'a.txt'."
             assert await toolset.list_directory() == 'a.txt\nsub/\nz.txt'
@@ -213,6 +214,11 @@ class TestFiles:
             fake_islo.sandboxes._directory_result = lambda target: FakeExecResult(exit_code=2)  # type: ignore[method-assign]
             with pytest.raises(ModelRetry, match='Could not list'):
                 await toolset.list_directory('.')
+
+    async def test_missing_directory_is_not_reported_as_empty(self, fake_islo: FakeIslo) -> None:
+        async with _toolset() as toolset:
+            with pytest.raises(ModelRetry, match='not an accessible directory'):
+                await toolset.list_directory('/missing')
 
     async def test_terminal_file_errors_end_the_run(self, fake_islo: FakeIslo) -> None:
         terminal = IsloSandboxUnavailableError('sandbox gone')
@@ -285,6 +291,13 @@ class TestLifecycle:
             async with _toolset():
                 raise RuntimeError('body failed')
         assert fake_islo.sandboxes.delete_calls == ['sandbox-owned']
+
+    async def test_run_owned_cleanup_retries_once(self, fake_islo: FakeIslo) -> None:
+        fake_islo.sandboxes.delete_errors = [FakeApiError(500, 'transient')]
+        with pytest.warns(RuntimeWarning, match='retained for cleanup retry'):
+            async with _toolset():
+                pass
+        assert fake_islo.sandboxes.delete_calls == ['sandbox-owned', 'sandbox-owned']
 
 
 class TestCapability:

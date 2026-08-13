@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import builtins
 import sys
+import time
 
+import anyio
 import pytest
 
 from pydantic_ai_harness.islo_sandbox import (
@@ -72,7 +74,8 @@ class TestLifecycle:
             assert session.sandbox_id == 'sb-existing'
             await session.write_bytes('file.txt', b'data')
 
-        assert fake_islo.sandboxes.get_calls == ['existing']
+        assert (await fake_islo.sandboxes.get_sandbox('existing')).id == 'sb-existing'
+        assert fake_islo.sandboxes.get_calls == ['existing', 'existing']
         assert fake_islo.sandboxes.create_calls == []
         assert fake_islo.sandboxes.delete_calls == []
         assert fake_islo.sandboxes.upload_calls[0][1] == '/attached/file.txt'
@@ -114,7 +117,7 @@ class TestLifecycle:
                 pass  # pragma: no cover
         assert fake_islo.sandboxes.delete_calls == ['sandbox-owned']
 
-    @pytest.mark.parametrize('status', ['deleted', 'failed', 'stopped'])
+    @pytest.mark.parametrize('status', ['deleted', 'failed', 'paused', 'stopped'])
     async def test_terminal_attach_status_is_unavailable(self, fake_islo: FakeIslo, status: str) -> None:
         fake_islo.sandboxes.attach_response = FakeSandboxResponse(name='existing', status=status)
         with pytest.raises(IsloSandboxUnavailableError, match=status):
@@ -138,6 +141,23 @@ class TestLifecycle:
         await session.close()
         assert fake_islo.sandboxes.delete_calls == ['sandbox-owned', 'sandbox-owned']
         assert session.sandbox_name is None
+
+    async def test_attach_waits_for_running(self, fake_islo: FakeIslo) -> None:
+        fake_islo.sandboxes.attach_response = FakeSandboxResponse(name='warming', status='creating')
+        fake_islo.sandboxes.ready_responses = [FakeSandboxResponse(name='warming', status='running')]
+        async with IsloSandboxSession(sandbox_name='warming', poll_interval=0.001):
+            pass
+        assert fake_islo.sandboxes.get_calls == ['warming', 'warming']
+
+    async def test_pending_cancellation_cannot_interrupt_state_reset(self, fake_islo: FakeIslo) -> None:
+        session = IsloSandboxSession()
+        await session.__aenter__()
+        with anyio.CancelScope() as scope:
+            scope.cancel()
+            await session.close()
+        assert session.sandbox_name is None
+        assert session.sandbox_id is None
+        assert fake_islo.sandboxes.delete_calls == ['sandbox-owned']
 
 
 class TestExec:
@@ -188,6 +208,19 @@ class TestExec:
         assert result.stdout == 'still here'
         assert result.returncode == -1
         assert result.timed_out is True
+        assert result.remote_may_be_running is True
+
+    @pytest.mark.parametrize('stage', ['start', 'poll'])
+    async def test_timeout_bounds_slow_control_plane_awaits(self, fake_islo: FakeIslo, stage: str) -> None:
+        if stage == 'start':
+            fake_islo.sandboxes.exec_delay = 1
+        else:
+            fake_islo.sandboxes.poll_delays = [1]
+        started = time.monotonic()
+        async with IsloSandboxSession(poll_interval=0.001) as session:
+            result = await session.exec(['slow'], timeout=0.01)
+        assert time.monotonic() - started < 0.2
+        assert result.status == 'client_timeout'
         assert result.remote_may_be_running is True
 
     @pytest.mark.parametrize(
@@ -260,6 +293,8 @@ class TestFiles:
             )
             with pytest.raises(IsloSandboxError, match='Could not parse'):
                 await session.list_files('.')
+
+        assert 'not an accessible directory' in fake_islo.sandboxes.exec_calls[0].command[2]
 
 
 class TestErrors:

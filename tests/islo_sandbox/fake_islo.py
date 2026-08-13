@@ -8,6 +8,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
+
 
 class FakeApiError(Exception):
     """Stand-in for `islo.core.api_error.ApiError`."""
@@ -83,6 +85,7 @@ class FakeSandboxesClient:
         self.download_calls: list[tuple[str, str]] = []
         self.upload_calls: list[tuple[str, str, tuple[str, bytes, str]]] = []
         self.files: dict[str, bytes] = {}
+        self.directories: set[str] = {'/workspace'}
 
         self.create_response = FakeSandboxResponse()
         self.attach_response = FakeSandboxResponse(name='sandbox-attached', id='sb-attached')
@@ -95,6 +98,8 @@ class FakeSandboxesClient:
         self.download_error: Exception | None = None
         self.upload_error: Exception | None = None
         self.responder: Responder = _default_responder
+        self.exec_delay = 0.0
+        self.poll_delays: list[float] = []
         self._next_exec = 0
         self._exec_results: dict[str, list[FakeExecResult]] = {}
 
@@ -108,9 +113,12 @@ class FakeSandboxesClient:
         self.get_calls.append(name)
         if self.get_error is not None:
             raise self.get_error
-        if self.ready_responses:
+        if name == self.attach_response.name and self.get_calls.count(name) == 1:
+            response = self.attach_response
+        elif self.ready_responses:
             return self.ready_responses.pop(0)
-        response = self.attach_response if name == self.attach_response.name else self.create_response
+        else:
+            response = self.attach_response if name == self.attach_response.name else self.create_response
         return FakeSandboxResponse(name=name, id=response.id, status=response.status, workdir=response.workdir)
 
     async def delete_sandbox(self, name: str) -> None:
@@ -128,6 +136,8 @@ class FakeSandboxesClient:
     ) -> FakeExecStarted:
         call = ExecCall(sandbox_name, command, workdir, timeout_secs)
         self.exec_calls.append(call)
+        if self.exec_delay:
+            await anyio.sleep(self.exec_delay)
         if self.exec_error is not None:
             raise self.exec_error
 
@@ -142,6 +152,8 @@ class FakeSandboxesClient:
 
     async def get_exec_result(self, sandbox_name: str, exec_id: str) -> FakeExecResult:
         self.exec_result_calls.append((sandbox_name, exec_id))
+        if self.poll_delays:
+            await anyio.sleep(self.poll_delays.pop(0))
         if self.poll_error is not None:
             raise self.poll_error
         responses = self._exec_results[exec_id]
@@ -170,8 +182,12 @@ class FakeSandboxesClient:
         if self.upload_error is not None:
             raise self.upload_error
         self.files[path] = file[1]
+        self._add_parent_directories(path)
 
     def _directory_result(self, target: str) -> FakeExecResult:
+        target = posixpath.normpath(target)
+        if target not in self.directories:
+            return FakeExecResult(stderr=f'not an accessible directory: {target}\n', exit_code=1)
         prefix = target.rstrip('/') + '/'
         entries: dict[str, bool] = {}
         for path in self.files:
@@ -184,6 +200,12 @@ class FakeSandboxesClient:
             entries[name] = bool(separator) or entries.get(name, False)
         stdout = ''.join(f'{"d" if is_dir else "f"}\t{name}\n' for name, is_dir in entries.items())
         return FakeExecResult(stdout=stdout)
+
+    def _add_parent_directories(self, path: str) -> None:
+        parent = posixpath.dirname(path)
+        while parent and parent != '/':
+            self.directories.add(parent)
+            parent = posixpath.dirname(parent)
 
 
 class FakeAsyncIslo:
@@ -230,4 +252,12 @@ class FakeIslo:
 
     def put_file(self, path: str, data: bytes) -> None:
         """Seed a file at a normalized absolute path."""
-        self.sandboxes.files[posixpath.normpath(path)] = data
+        normalized = posixpath.normpath(path)
+        self.sandboxes.files[normalized] = data
+        self.sandboxes._add_parent_directories(normalized)
+
+    def add_directory(self, path: str) -> None:
+        """Seed an empty directory and all of its parents."""
+        normalized = posixpath.normpath(path)
+        self.sandboxes.directories.add(normalized)
+        self.sandboxes._add_parent_directories(f'{normalized}/child')

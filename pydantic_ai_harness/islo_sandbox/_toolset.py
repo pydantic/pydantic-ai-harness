@@ -134,9 +134,13 @@ class IsloSandboxToolset(FunctionToolset[AgentDepsT]):
     async def __aexit__(self, *args: object) -> None:
         """Close only the session owned by this run."""
         session = self._session
-        self._session = None
         if session is not None and self._external_session is None:
             await session.__aexit__(*args)
+            if session.sandbox_name is not None:
+                # One immediate retry handles a transient control-plane failure.
+                # `delete_after` remains the backstop if both attempts fail.
+                await session.close()
+        self._session = None
 
     def _require_session(self) -> IsloSandboxSession:
         if self._session is None:

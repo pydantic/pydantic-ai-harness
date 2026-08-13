@@ -44,7 +44,7 @@ _CREATE_TIMEOUT = 180.0
 _TEARDOWN_TIMEOUT = 30.0
 _INTERNAL_COMMAND_TIMEOUT = 10.0
 _TERMINAL_EXEC_STATUSES = frozenset({'completed', 'failed', 'timeout'})
-_TERMINAL_SANDBOX_STATUSES = frozenset({'deleted', 'failed', 'stopped'})
+_TERMINAL_SANDBOX_STATUSES = frozenset({'deleted', 'failed', 'paused', 'stopped'})
 _MISSING_ISLO = (
     'The \'islo\' package is required for IsloSandbox. Install it with `uv add "pydantic-ai-harness[islo]"`.'
 )
@@ -197,7 +197,7 @@ class IsloSandboxSession:
             if self._attach_name is not None:
                 response = await sandboxes.get_sandbox(self._attach_name)
                 self._set_active(response.name, response.id, response.workdir)
-                self._ensure_sandbox_usable(response.status)
+                await self._wait_until_ready(response.status)
                 return
 
             from islo.types import LifecyclePolicy
@@ -301,10 +301,11 @@ class IsloSandboxSession:
         http_client = self._http_client
         self._http_client = None
         if http_client is not None:
-            try:
-                await http_client.aclose()
-            except Exception as e:  # pragma: no cover - httpx close is local and non-failing in supported versions
-                warnings.warn(f'Could not close the Islo HTTP client: {e}', RuntimeWarning, stacklevel=2)
+            with anyio.CancelScope(shield=True):
+                try:
+                    await http_client.aclose()
+                except Exception as e:  # pragma: no cover - httpx close is local and non-failing in supported versions
+                    warnings.warn(f'Could not close the Islo HTTP client: {e}', RuntimeWarning, stacklevel=2)
 
         self._client = None
         self._sandboxes = None
@@ -341,19 +342,35 @@ class IsloSandboxSession:
 
         sandboxes, name = self._require_open()
         applied_timeout = max(1, math.ceil(timeout))
+        deadline = time.monotonic() + timeout
         try:
-            started = await sandboxes.exec_in_sandbox(
-                name,
-                command=list(argv),
-                workdir=self._cwd,
-                timeout_secs=applied_timeout,
-            )
-            deadline = time.monotonic() + timeout
+            try:
+                with anyio.fail_after(max(0.0, deadline - time.monotonic())):
+                    started = await sandboxes.exec_in_sandbox(
+                        name,
+                        command=list(argv),
+                        workdir=self._cwd,
+                        timeout_secs=applied_timeout,
+                    )
+            except TimeoutError:
+                return IsloSandboxExecResult(
+                    stdout='',
+                    stderr='',
+                    returncode=-1,
+                    status='client_timeout',
+                    timed_out=True,
+                    applied_timeout=applied_timeout,
+                    remote_may_be_running=True,
+                )
             last_stdout = ''
             last_stderr = ''
             provider_truncated = False
             while time.monotonic() < deadline:
-                result = await sandboxes.get_exec_result(name, started.exec_id)
+                try:
+                    with anyio.fail_after(max(0.0, deadline - time.monotonic())):
+                        result = await sandboxes.get_exec_result(name, started.exec_id)
+                except TimeoutError:
+                    break
                 last_stdout = result.stdout or ''
                 last_stderr = result.stderr or ''
                 provider_truncated = result.truncated
@@ -424,6 +441,8 @@ class IsloSandboxSession:
         """List one directory using the POSIX shell available in Islo runner images."""
         target = self._resolve(path)
         script = (
+            'if [ ! -d "$1" ] || [ ! -r "$1" ] || [ ! -x "$1" ]; then '
+            'printf "not an accessible directory: %s\\n" "$1" >&2; exit 1; fi; '
             'for entry in "$1"/.[!.]* "$1"/..?* "$1"/*; do '
             '[ -e "$entry" ] || [ -L "$entry" ] || continue; '
             'name=${entry##*/}; '
