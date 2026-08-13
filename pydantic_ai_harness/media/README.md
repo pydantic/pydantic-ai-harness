@@ -60,6 +60,8 @@ full = await restore_media(lean, media_store=store)
 
 The current reader restores binary markers written before text externalization. That compatibility is upgrade-only: a release that predates text externalization treats every marker as binary, so it cannot validate a snapshot containing an externalized text marker. Keep a current reader for persisted snapshots that contain those markers.
 
+A marker records which field was moved out (`data` for binary, `content` for text), and `restore_media` re-inlines that field rather than re-deriving it from the marker's shape. A mapping can satisfy both the binary and the text discriminator at once, so shape alone would read some payloads back as the wrong kind. Recognition is still in-band: a tool payload that carries the bookkeeping keys, names a field and omits that field is read as a marker.
+
 ## API
 
 | Symbol | Purpose |

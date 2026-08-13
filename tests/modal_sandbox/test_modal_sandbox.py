@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Protocol, TypeGuard, runtime_checkable
 
 import pytest
+import sniffio
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
@@ -16,6 +17,8 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage
 
+import pydantic_ai_harness
+import pydantic_ai_harness.modal_sandbox as modal_sandbox
 from pydantic_ai_harness.modal_sandbox import (
     ModalSandbox,
     ModalSandboxError,
@@ -23,6 +26,7 @@ from pydantic_ai_harness.modal_sandbox import (
     ModalSandboxTerminalError,
     ModalSandboxUnavailableError,
 )
+from pydantic_ai_harness.modal_sandbox import ModalSandbox as Exported
 
 from .fake_modal import FakeModal, FileInfo
 
@@ -776,9 +780,6 @@ class TestCapability:
         assert ModalSandbox(sandbox_id='sb-keep', max_command_timeout=600).max_command_timeout == 600
 
     def test_exported_from_capability_submodule(self) -> None:
-        import pydantic_ai_harness
-        import pydantic_ai_harness.modal_sandbox as modal_sandbox
-        from pydantic_ai_harness.modal_sandbox import ModalSandbox as Exported
 
         assert Exported is ModalSandbox
         assert 'ModalSandboxToolset' not in modal_sandbox.__all__
@@ -788,7 +789,6 @@ class TestCapability:
 
     @pytest.mark.anyio(backends=['asyncio'])
     async def test_agent_integration(self, fake_modal: FakeModal) -> None:
-        import sniffio
 
         if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
             pytest.skip('Agent.run() requires asyncio')
@@ -800,7 +800,6 @@ class TestCapability:
 
     @pytest.mark.anyio(backends=['asyncio'])
     async def test_agent_can_call_run_command(self, fake_modal: FakeModal) -> None:
-        import sniffio
 
         if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
             pytest.skip('Agent.run() requires asyncio')
@@ -828,7 +827,6 @@ class TestCapability:
 
     @pytest.mark.anyio(backends=['asyncio'])
     async def test_agent_context_does_not_create_an_unused_base_sandbox(self, fake_modal: FakeModal) -> None:
-        import sniffio
 
         if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
             pytest.skip('Agent.run() requires asyncio')
@@ -847,7 +845,6 @@ class TestCapability:
 
     @pytest.mark.anyio(backends=['asyncio'])
     async def test_agent_run_failing_terminally_still_tears_down(self, fake_modal: FakeModal) -> None:
-        import sniffio
 
         if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
             pytest.skip('Agent.run() requires asyncio')

@@ -1,11 +1,13 @@
 import inspect
 from pathlib import Path
 
+import pydantic_ai.models
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 
 import pydantic_ai_harness
+from pydantic_ai_harness import LLM_API_KEY_ENV_PATTERNS, FileSystem, Shell
 
 
 def test_import():
@@ -14,21 +16,18 @@ def test_import():
 
 
 def test_lazy_import_filesystem():
-    from pydantic_ai_harness import FileSystem
 
     assert inspect.isclass(FileSystem)
     assert hasattr(FileSystem, 'get_toolset')
 
 
 def test_lazy_import_shell():
-    from pydantic_ai_harness import Shell
 
     assert inspect.isclass(Shell)
     assert hasattr(Shell, 'get_toolset')
 
 
 def test_lazy_import_llm_api_key_env_patterns():
-    from pydantic_ai_harness import LLM_API_KEY_ENV_PATTERNS
 
     assert isinstance(LLM_API_KEY_ENV_PATTERNS, tuple)
     assert 'OPENAI_*' in LLM_API_KEY_ENV_PATTERNS
@@ -52,6 +51,5 @@ def test_tmp_dir_fixture(tmp_dir: Path):
 
 
 async def test_allow_model_requests(allow_model_requests: None):
-    import pydantic_ai.models
 
     assert pydantic_ai.models.ALLOW_MODEL_REQUESTS is True
