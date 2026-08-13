@@ -122,6 +122,67 @@ warnings where practical.
   editors, and stack traces (`modal_sandbox` is the reference; `filesystem` is
   0-based pending migration).
 
+### The Read Signature Is The Published Schema
+
+Core generates a capability's `AgentSpec` JSON schema from one signature:
+`from_spec` when the capability overrides it, `__init__` otherwise
+(`pydantic_ai/agent/spec.py` `_get_schema_target`, then `pydantic_ai/_spec.py`
+`build_schema_types`). A spec file points an editor at that schema with its
+`# yaml-language-server: $schema=` line, so a field missing from it is a red
+squiggle on a block that loads perfectly at runtime, and a failure in any CI
+that validates specs. Nothing fails until a user opens the file, which is why
+this has now shipped from three separate authors.
+
+Four ways a signature silently publishes less than it should. The first three
+erase the whole entry; the fourth drops only the base fields:
+
+- **Variadic parameters are dropped.** `from_spec(*args, **kwargs)` leaves no
+  type hints, so the capability publishes the bare string `"<Name>"` and no
+  fields at all.
+- **Every name in the annotations must resolve at runtime.** A
+  `TYPE_CHECKING`-only import, or a core alias whose definition is a string
+  (`ModelSelection` is `'Model | KnownModelName | str'`, resolved against *your*
+  module's globals) raises `NameError`. `_get_schema_target` catches it and
+  falls back to `AbstractCapability`'s variadic `from_spec` -- straight to the
+  previous case. Import the name at runtime, or name the parameter in
+  `from_spec` with a type a spec can express.
+- **One field type with no JSON schema deletes the whole entry.**
+  `filter_serializable_type` strips only `TypeVar` and `Callable`, so an
+  arbitrary class survives into a TypedDict built with
+  `arbitrary_types_allowed=True`. A bare `X` or a nullable `X | None` then fails
+  schema generation, and pydantic drops the entire `spec_<Name>` member from the
+  capabilities union rather than raising: every other field on that capability
+  disappears with it. (`X | <something representable>` is the benign case -- only
+  `X` is dropped.)
+- **The base fields have to be named again.** `id`, `description` and
+  `defer_loading` reach `cls()` through `**kwargs` when a `from_spec` override
+  omits them, so they keep working at runtime and never appear in the schema.
+  Name them and pass them through.
+
+`**unsupported: Any` is the sanctioned catch-all. Core drops it from the schema,
+so it costs nothing there, and it keeps a runtime-only field -- a callable, a
+live client, a store -- rejected *by name* rather than silently ignored: a spec
+that promises per-tenant scoping and does not deliver it is worse than one that
+refuses to load. `SpendLimits.from_spec` is the reference implementation.
+
+A capability that should not be configurable from a spec overrides
+`get_serialization_name` to return `None` instead (`SubAgents`, the guardrails,
+`DynamicWorkflow`), which removes it from the registry entirely. That is the
+sanctioned opt-out; there is no allowlist.
+
+Confirm it by generating the schema rather than by reading the signature back.
+`AgentSpec.model_json_schema_with_capabilities([YourCapability])['$defs']` has to
+carry a `spec_<Name>` (or `short_spec_<Name>`) entry, and the properties of
+`spec_params_<Name>` have to include `id`, `description` and `defer_loading`.
+Every failure above is silent, so the generated schema is the only thing that
+answers the question.
+
+The two middle cases are silent because core swallows them: `_get_schema_target`
+catches the `NameError` and falls back, and pydantic's union handling drops a
+member it cannot schematize instead of raising. Proposed upstream in
+[pydantic-ai#7180](https://github.com/pydantic/pydantic-ai/issues/7180). Until
+that lands, generating the schema is the check.
+
 ### Policy Lives In The Pluggable Component
 
 When a capability takes a dependency behind a `Protocol` -- `PlanStore`,
