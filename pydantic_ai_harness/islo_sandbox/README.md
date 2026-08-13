@@ -53,6 +53,8 @@ model cannot loop against an unusable environment.
 The default mode creates and owns one sandbox per agent run:
 
 ```python
+from pydantic_ai_harness.islo_sandbox import IsloSandbox
+
 IsloSandbox(
     image='ghcr.io/islo-labs/islo-runner:latest',
     sandbox_timeout=900,
@@ -62,6 +64,8 @@ IsloSandbox(
 Attach to a sandbox managed elsewhere by name:
 
 ```python
+from pydantic_ai_harness.islo_sandbox import IsloSandbox
+
 IsloSandbox(sandbox_name='existing-sandbox')
 ```
 
@@ -90,8 +94,10 @@ sandbox concurrently for workloads that need filesystem or process isolation.
 
 `default_command_timeout` and the optional per-tool `timeout_seconds` control how
 long the client waits. Values round up to whole seconds before they are sent to
-Islo and are capped by `max_command_timeout`, or by `sandbox_timeout` for an
-owned sandbox.
+Islo. `max_command_timeout` sets the ceiling; without it, the ceiling is
+`sandbox_timeout` (900 seconds by default) in every lifecycle mode. Raise
+`max_command_timeout` explicitly for a reused sandbox. An owned sandbox rejects
+a command ceiling above its own lifetime.
 
 As of 2026-08-13, Islo documents `timeout_secs` as a compatibility hint and does
 not expose an exec-cancellation endpoint. A client wait timeout is therefore
@@ -114,9 +120,13 @@ command such as `head`, `tail`, `sed`, or `grep` for large or binary files.
 a directory-list endpoint. It requires a runner image with `sh`, materializes a
 bounded listing, and does not support filenames containing newline characters.
 
+Islo's Python SDK currently requires an asyncio event loop.
+
 ## Configuration
 
 ```python
+from pydantic_ai_harness.islo_sandbox import IsloSandbox
+
 IsloSandbox(
     image='ghcr.io/islo-labs/islo-runner:latest',
     sandbox_name=None,
@@ -207,3 +217,7 @@ agent = Agent.from_file('agent.yaml', custom_capability_types=[IsloSandbox])
 - [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)
 - [Unified Islo Sandbox docs](https://pydantic.dev/docs/ai/harness/islo-sandbox/)
 - [Islo Sandbox source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/islo_sandbox/)
+- [Pydantic AI Harness version policy](https://pydantic.dev/docs/ai/harness/#version-policy)
+
+The API may change between releases while Pydantic AI Harness is on 0.x
+versions.

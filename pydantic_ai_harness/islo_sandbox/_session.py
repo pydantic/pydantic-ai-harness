@@ -24,7 +24,7 @@ import time
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import anyio
 import anyio.lowlevel
@@ -49,6 +49,11 @@ _MISSING_ISLO = (
     'The \'islo\' package is required for IsloSandbox. Install it with `uv add "pydantic-ai-harness[islo]"`.'
 )
 _AUTH_MESSAGE = 'Islo rejected the credentials. Set ISLO_API_KEY to a valid Islo API key.'
+
+
+@runtime_checkable
+class _ClosableAsyncIterator(Protocol):
+    async def aclose(self) -> None: ...  # pragma: no cover - structural typing only
 
 
 class _CreateSandboxKwargs(TypedDict):
@@ -83,7 +88,14 @@ class IsloSandboxAuthError(IsloSandboxTerminalError):
 
 @dataclass(frozen=True, kw_only=True)
 class IsloSandboxExecResult:
-    """The normalized outcome of one Islo sandbox command."""
+    """The normalized outcome of one Islo sandbox command.
+
+    `status` preserves Islo's terminal state, or is `client_timeout` when the
+    Harness deadline expires. The truncation flags combine provider and local
+    limits. `remote_may_be_running` distinguishes a client deadline from a
+    confirmed provider timeout because Islo does not currently expose command
+    cancellation.
+    """
 
     stdout: str
     stderr: str
@@ -183,9 +195,13 @@ class IsloSandboxSession:
                 with anyio.fail_after(_CREATE_TIMEOUT):
                     await self._open()
             await anyio.lowlevel.checkpoint_if_cancelled()
-        except BaseException:
+        except BaseException as e:
             with anyio.CancelScope(shield=True):
                 await self.close()
+            if isinstance(e, TimeoutError):
+                raise IsloSandboxError(
+                    f'Islo sandbox creation or attachment did not become ready within {_CREATE_TIMEOUT:g}s.'
+                ) from e
             raise
         return self
 
@@ -412,8 +428,9 @@ class IsloSandboxSession:
         sandboxes, name = self._require_open()
         target = self._resolve(path)
         data = bytearray()
+        chunks = sandboxes.download_file(name, path=target)
         try:
-            async for chunk in sandboxes.download_file(name, path=target):
+            async for chunk in chunks:
                 remaining = max_bytes + 1 - len(data)
                 data.extend(chunk[:remaining])
                 if len(data) > max_bytes:
@@ -423,6 +440,10 @@ class IsloSandboxSession:
             raise
         except Exception as e:
             raise self._map_error(e, f'Could not read {target!r}', unavailable_on_404=False) from e
+        finally:
+            if isinstance(chunks, _ClosableAsyncIterator):  # pragma: no branch - SDK returns an async generator
+                with anyio.CancelScope(shield=True):
+                    await chunks.aclose()
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         """Write bytes to a sandbox file through Islo's file API."""
@@ -477,6 +498,8 @@ class IsloSandboxSession:
             from islo.core.api_error import ApiError
         except ImportError:
             return IsloSandboxError(_MISSING_ISLO)
+        if isinstance(e, httpx.HTTPStatusError) and e.response.status_code in {401, 403}:
+            return IsloSandboxAuthError(_AUTH_MESSAGE)
         if isinstance(e, ApiError):
             if e.status_code in {401, 403}:
                 return IsloSandboxAuthError(_AUTH_MESSAGE)

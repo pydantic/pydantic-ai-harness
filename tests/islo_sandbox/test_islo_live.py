@@ -15,8 +15,11 @@ import os
 import uuid
 
 import pytest
+from pydantic_ai import Agent
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 
-from pydantic_ai_harness.islo_sandbox import IsloSandboxSession
+from pydantic_ai_harness.islo_sandbox import IsloSandbox, IsloSandboxSession
 
 pytestmark = [
     pytest.mark.islo_live,
@@ -67,6 +70,29 @@ async def test_real_exec_files_and_create_configuration() -> None:
 
         entries = await session.list_files(probe)
         assert set(entries) == {('from-shell.txt', False), ('roundtrip.bin', False)}
+
+        sandbox_name = session.sandbox_name
+        async with IsloSandboxSession(sandbox_name=sandbox_name, poll_interval=0.25) as attached:
+            assert attached.sandbox_id == session.sandbox_id
+            assert await attached.read_bytes(shell_path, max_bytes=1024) == b'from-shell'
+
+        def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+                return ModelResponse(parts=[ToolCallPart('run_command', {'command': 'printf agent-e2e'}, 'run-1')])
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent: Agent[None, str] = Agent(FunctionModel(call_then_finish), capabilities=[IsloSandbox(session=session)])
+        agent_result = await agent.run('run the sandbox command')
+        assert agent_result.output == 'done'
+        assert any(
+            part.content == '[stdout]\nagent-e2e'
+            for message in agent_result.all_messages()
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        )
+
+        after_reuse = await session.exec(['printf', 'still-running'], timeout=30)
+        assert after_reuse.stdout == 'still-running'
 
     assert session.sandbox_name is None
     assert session.sandbox_id is None

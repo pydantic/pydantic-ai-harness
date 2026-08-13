@@ -7,6 +7,7 @@ import sys
 import time
 
 import anyio
+import httpx
 import pytest
 
 from pydantic_ai_harness.islo_sandbox import (
@@ -159,6 +160,16 @@ class TestLifecycle:
         assert session.sandbox_id is None
         assert fake_islo.sandboxes.delete_calls == ['sandbox-owned']
 
+    async def test_create_deadline_raises_typed_error(
+        self, fake_islo: FakeIslo, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_islo.sandboxes.create_delay = 1
+        monkeypatch.setattr('pydantic_ai_harness.islo_sandbox._session._CREATE_TIMEOUT', 0.01)
+        with pytest.raises(IsloSandboxError, match='did not become ready within'):
+            async with IsloSandboxSession():
+                pass  # pragma: no cover
+        assert fake_islo.sandboxes.delete_calls == []
+
 
 class TestExec:
     async def test_polls_and_normalizes_completed_result(self, fake_islo: FakeIslo) -> None:
@@ -264,6 +275,7 @@ class TestFiles:
         async with IsloSandboxSession() as session:
             with pytest.raises(IsloSandboxError, match='5-byte read limit'):
                 await session.read_bytes('large', max_bytes=5)
+        assert fake_islo.sandboxes.download_closed == [('sandbox-owned', '/workspace/large')]
 
     @pytest.mark.parametrize('max_bytes', [0, -1, True])
     async def test_read_limit_validation(self, max_bytes: int) -> None:
@@ -315,6 +327,15 @@ class TestErrors:
     @pytest.mark.parametrize('status', [401, 403])
     async def test_auth_errors_are_terminal(self, fake_islo: FakeIslo, status: int) -> None:
         fake_islo.sandboxes.create_error = FakeApiError(status, {'message': 'secret omitted'})
+        with pytest.raises(IsloSandboxAuthError, match='ISLO_API_KEY'):
+            async with IsloSandboxSession():
+                pass  # pragma: no cover
+
+    @pytest.mark.parametrize('status', [401, 403])
+    async def test_token_exchange_http_auth_errors_are_terminal(self, fake_islo: FakeIslo, status: int) -> None:
+        request = httpx.Request('POST', 'https://api.islo.dev/auth/token')
+        response = httpx.Response(status, request=request)
+        fake_islo.sandboxes.create_error = httpx.HTTPStatusError('auth failed', request=request, response=response)
         with pytest.raises(IsloSandboxAuthError, match='ISLO_API_KEY'):
             async with IsloSandboxSession():
                 pass  # pragma: no cover

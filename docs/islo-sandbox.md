@@ -86,8 +86,10 @@ overlapping runs that need isolation.
 
 `default_command_timeout` supplies the client wait limit and
 `max_command_timeout` caps model-supplied values. Values round up to whole
-seconds. For an owned sandbox, one command cannot be configured to outlive the
-sandbox.
+seconds. Without `max_command_timeout`, the ceiling is `sandbox_timeout` (900
+seconds by default) in every lifecycle mode. Raise `max_command_timeout`
+explicitly for a reused sandbox. An owned sandbox rejects a command ceiling
+above its own lifetime.
 
 As of 2026-08-13, Islo's `timeout_secs` command field is a compatibility hint,
 not a documented server-enforced deadline, and Islo does not document an exec

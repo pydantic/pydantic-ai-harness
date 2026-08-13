@@ -42,7 +42,14 @@ _REUSED_INSTRUCTIONS = (
 
 @dataclass(kw_only=True)
 class IsloSandbox(AbstractCapability[AgentDepsT]):
-    """Give an agent isolated command execution and file access through Islo."""
+    """Give an agent isolated command execution and file access through Islo.
+
+    Each run gets an owned sandbox by default. Set `sandbox_name` to attach to a
+    sandbox managed elsewhere, or pass an open `session` to reuse one across
+    runs. The capability provides bounded command, read, write, and listing
+    tools; creation settings cover the image, workdir, environment, resources,
+    network policy, and Islo endpoints.
+    """
 
     image: str = _DEFAULT_IMAGE
     sandbox_name: str | None = None

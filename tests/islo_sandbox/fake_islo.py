@@ -83,6 +83,7 @@ class FakeSandboxesClient:
         self.exec_calls: list[ExecCall] = []
         self.exec_result_calls: list[tuple[str, str]] = []
         self.download_calls: list[tuple[str, str]] = []
+        self.download_closed: list[tuple[str, str]] = []
         self.upload_calls: list[tuple[str, str, tuple[str, bytes, str]]] = []
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = {'/workspace'}
@@ -98,6 +99,7 @@ class FakeSandboxesClient:
         self.download_error: Exception | None = None
         self.upload_error: Exception | None = None
         self.responder: Responder = _default_responder
+        self.create_delay = 0.0
         self.exec_delay = 0.0
         self.poll_delays: list[float] = []
         self._next_exec = 0
@@ -105,6 +107,8 @@ class FakeSandboxesClient:
 
     async def create_sandbox(self, **kwargs: object) -> FakeSandboxResponse:
         self.create_calls.append(dict(kwargs))
+        if self.create_delay:
+            await anyio.sleep(self.create_delay)
         if self.create_error is not None:
             raise self.create_error
         return self.create_response
@@ -163,13 +167,16 @@ class FakeSandboxesClient:
 
     async def download_file(self, sandbox_name: str, *, path: str):  # type: ignore[no-untyped-def]
         self.download_calls.append((sandbox_name, path))
-        if self.download_error is not None:
-            raise self.download_error
-        data = self.files[path]
-        midpoint = max(1, len(data) // 2)
-        for chunk in (data[:midpoint], data[midpoint:]):
-            if chunk:
-                yield chunk
+        try:
+            if self.download_error is not None:
+                raise self.download_error
+            data = self.files[path]
+            midpoint = max(1, len(data) // 2)
+            for chunk in (data[:midpoint], data[midpoint:]):
+                if chunk:
+                    yield chunk
+        finally:
+            self.download_closed.append((sandbox_name, path))
 
     async def upload_file(
         self,
