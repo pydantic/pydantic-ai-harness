@@ -351,7 +351,7 @@ class TestWriteFile:
         os.mkfifo(fs_root / 'fifo')
 
         def fail_if_write_blocks(_: int, __: FrameType | None) -> None:
-            raise TimeoutError('write_file blocked on a FIFO')
+            raise TimeoutError('write_file blocked on a FIFO')  # pragma: no cover
 
         previous_handler = signal.signal(signal.SIGALRM, fail_if_write_blocks)
         signal.alarm(3)
