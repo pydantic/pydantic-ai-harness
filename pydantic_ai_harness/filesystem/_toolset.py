@@ -214,6 +214,19 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             os.close(descriptor)
             raise OSError(errno.ENOTDIR, 'Not a directory')
 
+    def _verify_root_descriptor_identity(self, descriptor: int) -> None:
+        """Reject a root descriptor that no longer names the tree used for resolution."""
+        if os.name == 'nt':  # pragma: no cover - Windows writes use absolute paths without a root descriptor
+            return
+
+        try:
+            current_root = os.stat(self._real_root, follow_symlinks=False)
+        except FileNotFoundError as e:
+            raise ModelRetry('Filesystem root changed while resolving the write. Retry the write.') from e
+
+        if not os.path.samestat(os.fstat(descriptor), current_root):
+            raise ModelRetry('Filesystem root changed while resolving the write. Retry the write.')
+
     def _open_root_directory(self) -> int:
         """Open the configured root without following a replacement symlink."""
         root_flags = self._directory_open_flags()
@@ -228,6 +241,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
     def _open_beneath_root(self, root_descriptor: int, resolved: Path, flags: int, mode: int = 0o666) -> int:
         """Open a canonical target through non-symlinked descriptors below an anchored root."""
+        self._verify_root_descriptor_identity(root_descriptor)
         relative_parts = resolved.relative_to(self._real_root).parts
         directory_descriptor = root_descriptor
         directory_flags = self._directory_open_flags()
@@ -306,6 +320,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
     def _write_file_under_root(self, root_descriptor: int, path: str, content: str, expected_hash: str | None) -> str:
         resolved = self._safe_resolve(path, write=True)
+        self._verify_root_descriptor_identity(root_descriptor)
 
         if resolved.exists() and not resolved.is_file():
             raise ModelRetry(f'Path {path!r} exists and is not a regular file.')

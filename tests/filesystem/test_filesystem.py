@@ -675,6 +675,50 @@ class TestWriteFile:
 
         assert replacement.read_text() == 'must remain unchanged\n'
 
+    @pytest.mark.skipif(os.name == 'nt', reason='Root descriptor identity checks require POSIX.')
+    @pytest.mark.parametrize('replacement_exists', [False, True])
+    async def test_write_rejects_root_replaced_during_resolution(
+        self,
+        toolset: FileSystemToolset[None],
+        fs_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        replacement_exists: bool,
+    ) -> None:
+        filename = 'root-race.txt'
+        (fs_root / filename).write_text('old root content\n')
+        old_root = fs_root.parent / f'{fs_root.name}-old'
+        replacement_target = fs_root / filename
+        original_open = os.open
+
+        def replace_root_after_open(
+            path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            if dir_fd is not None:
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+
+            descriptor = original_open(path, flags, mode)
+            if path == toolset._real_root:
+                fs_root.rename(old_root)
+                if replacement_exists:
+                    fs_root.mkdir()
+                    replacement_target.write_text('replacement root content\n')
+            return descriptor
+
+        monkeypatch.setattr(os, 'open', replace_root_after_open)
+        try:
+            with pytest.raises(ModelRetry, match='Filesystem root changed while resolving') as exc_info:
+                await toolset.write_file(filename, 'unsafe write\n')
+
+            assert str(fs_root) not in str(exc_info.value)
+            assert (old_root / filename).read_text() == 'old root content\n'
+            if replacement_exists:
+                assert replacement_target.read_text() == 'replacement root content\n'
+        finally:
+            if replacement_exists:
+                replacement_target.unlink()
+                fs_root.rmdir()
+            old_root.rename(fs_root)
+
     @pytest.mark.skipif(os.name == 'nt', reason='O_NOFOLLOW requires POSIX.')
     async def test_write_retries_when_root_becomes_symlink(
         self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
@@ -729,7 +773,7 @@ class TestWriteFile:
         def fail_open(  # pragma: no cover - the target open always raises
             path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
         ) -> int:
-            if path == 'new.txt':
+            if Path(path).name == 'new.txt':
                 raise OSError(errno.ENOSPC, 'No space left on device')
             if dir_fd is None:
                 return original_open(path, flags, mode)
