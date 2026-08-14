@@ -70,6 +70,11 @@ def _diagnostics(verdict: DefenseResult) -> dict[str, object]:
     }
 
 
+def _payload(value: object) -> object:
+    """Put a bare string under Defender's standard `content` field."""
+    return {'content': value} if isinstance(value, str) else to_jsonable_python(value, fallback=str)
+
+
 @dataclass
 class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     """Classify tool results for indirect prompt injection and withhold the risky ones.
@@ -214,19 +219,16 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
                     values.append({'content': text})
         else:
             values = [result]
-        verdicts = [
-            await self._defense.defend_tool_result_async(to_jsonable_python(value, fallback=str), call.tool_name)
-            for value in values
-        ]
+        verdicts = [await self._defense.defend_tool_result_async(_payload(value), call.tool_name) for value in values]
+        blocking = next((verdict for verdict in verdicts if not verdict.allowed), None)
+        blocked: ToolReturn[str] | None = None
+        if blocking is not None:
+            message = self.blocked_message.format(tool_name=call.tool_name, risk_level=blocking.risk_level)
+            blocked = ToolReturn(return_value=message, metadata={_METADATA_KEY: _diagnostics(blocking)})
         for verdict in verdicts:
             if _flagged(verdict):
                 await self._notify(ctx, call, verdict)
-        blocking = next((verdict for verdict in verdicts if not verdict.allowed), None)
-        if blocking is None:
-            return unchanged
-        message = self.blocked_message.format(tool_name=call.tool_name, risk_level=blocking.risk_level)
-        blocked: ToolReturn[str] = ToolReturn(return_value=message, metadata={_METADATA_KEY: _diagnostics(blocking)})
-        return blocked
+        return unchanged if blocked is None else blocked
 
     async def _notify(self, ctx: RunContext[AgentDepsT], call: ToolCallPart, verdict: DefenseResult) -> None:
         if self.on_detection is None:

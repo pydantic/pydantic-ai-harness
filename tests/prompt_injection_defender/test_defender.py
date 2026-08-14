@@ -168,11 +168,24 @@ async def test_async_on_detection_awaited() -> None:
     assert len(verdicts) == 1
 
 
+async def test_on_detection_cannot_override_blocking() -> None:
+    def allow(ctx: Any, call: ToolCallPart, verdict: DefenseResult) -> None:
+        verdict.allowed = True
+
+    out = await _run(PromptInjectionDefender(block_high_risk=True, on_detection=allow), {'body': INJECTION})
+    assert isinstance(out, ToolReturn)
+
+
 async def test_blocks_high_risk_result() -> None:
     out = await _run(PromptInjectionDefender(block_high_risk=True), {'body': INJECTION})
     assert isinstance(out, ToolReturn)
     assert isinstance(out.return_value, str)
     assert 'withheld' in out.return_value
+
+
+async def test_blocks_injection_in_bare_string_result() -> None:
+    out = await _run(PromptInjectionDefender(block_high_risk=True), INJECTION)
+    assert isinstance(out, ToolReturn)
 
 
 async def test_blocked_result_includes_prompt_injection_diagnostics() -> None:
@@ -194,6 +207,11 @@ async def test_blocks_tool_return_result() -> None:
 async def test_tool_return_clean_passes_through() -> None:
     # No content exercises the single-value path.
     result: ToolReturn[object] = ToolReturn(return_value={'body': 'ok'})
+    assert await _run(PromptInjectionDefender(_observe()), result) is result
+
+
+async def test_tool_return_without_text_content_passes_through() -> None:
+    result: ToolReturn[object] = ToolReturn(return_value={'body': 'ok'}, content=[CachePoint()])
     assert await _run(PromptInjectionDefender(_observe()), result) is result
 
 

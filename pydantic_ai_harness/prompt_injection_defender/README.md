@@ -67,8 +67,8 @@ replaces the rejected result before the model sees it.
 
 - `block_high_risk`: ask the built-in defense to reject detected high or critical
   risk results. The default is report-only.
-- `semantic_detection`: add local ML classification for free text, including bare
-  string return values. This requires the `prompt-injection-defender-ml` extra.
+- `semantic_detection`: add local ML classification beyond known patterns. This
+  requires the `prompt-injection-defender-ml` extra.
 - `tool_filter`: classify all tools, selected tool names, or tools accepted by a
   [`ToolSelector`](https://pydantic.dev/docs/ai/api/pydantic-ai/tools/#pydantic_ai.tools.ToolSelector).
 - `on_detection`: run a sync or async callback for each flagged verdict. A
@@ -116,10 +116,9 @@ application and is not sent to the model.
 - For `ToolReturn`, both `return_value` and model-visible `content` are classified.
   Application-only `metadata` is not. A rejected result drops the original value,
   content, and metadata.
-- The default pattern detector checks common text fields. Bare strings and strings
-  not under recognized text fields require `semantic_detection=True`. Strings in
-  `ToolReturn.content` are treated as content fields and receive default pattern
-  detection.
+- The default pattern detector checks common text fields. Bare string results and
+  strings in `ToolReturn.content` are treated as content fields. Other strings not
+  under recognized text fields require `semantic_detection=True`.
 - Referenced media is not fetched or decoded, so instructions inside images,
   audio, video, or documents are not inspected.
 
