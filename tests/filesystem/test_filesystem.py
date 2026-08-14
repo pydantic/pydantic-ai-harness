@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import errno
 import os
+import signal
 import stat
-import subprocess
-import sys
-import textwrap
 from contextlib import ExitStack
 from pathlib import Path
+from types import FrameType
 
 import pytest
 from pydantic_ai import Agent
@@ -346,49 +345,22 @@ class TestWriteFile:
         assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(control.stat().st_mode)
 
     @pytest.mark.skipif(os.name == 'nt', reason='FIFOs require POSIX.')
-    def test_write_existing_fifo_retries_without_blocking(self, fs_root: Path) -> None:
-        script = textwrap.dedent(
-            """\
-            import asyncio
-            import os
-            import sys
-            from pathlib import Path
+    async def test_write_existing_fifo_retries_without_blocking(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        os.mkfifo(fs_root / 'fifo')
 
-            from pydantic_ai.exceptions import ModelRetry
-            from pydantic_ai_harness.filesystem import FileSystemToolset
+        def fail_if_write_blocks(_: int, __: FrameType | None) -> None:
+            raise TimeoutError('write_file blocked on a FIFO')
 
-            root = Path(sys.argv[1])
-            os.mkfifo(root / 'fifo')
-            toolset = FileSystemToolset(
-                root_dir=root,
-                allowed_patterns=[],
-                denied_patterns=[],
-                protected_patterns=[],
-                max_read_lines=2000,
-                max_search_results=1000,
-                max_find_results=1000,
-            )
-
-            async def main() -> None:
-                try:
-                    await toolset.write_file('fifo', 'content')
-                except ModelRetry as error:
-                    print(error)
-                else:
-                    raise AssertionError('write_file accepted a FIFO')
-
-            asyncio.run(main())
-            """
-        )
-        result = subprocess.run(
-            [sys.executable, '-c', script, str(fs_root)],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == "Path 'fifo' exists and is not a regular file."
+        previous_handler = signal.signal(signal.SIGALRM, fail_if_write_blocks)
+        signal.alarm(3)
+        try:
+            with pytest.raises(ModelRetry, match="Path 'fifo' exists and is not a regular file"):
+                await toolset.write_file('fifo', 'content')
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_handler)
 
     async def test_write_existing_directory_retries(self, toolset: FileSystemToolset[None]) -> None:
         with pytest.raises(ModelRetry, match="Path 'subdir' exists and is not a regular file"):
