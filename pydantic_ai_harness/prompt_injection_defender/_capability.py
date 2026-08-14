@@ -108,11 +108,11 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     """
 
     defense: PromptDefense | None = None
-    """A fully configured `stackone_defender.PromptDefense` to classify with.
+    """An optional custom `stackone_defender.PromptDefense` to classify with.
 
-    Defaults to one built from `block_high_risk` and `semantic_detection` below. Supply
-    your own (via `create_prompt_defense(...)`) for custom thresholds, per-tool risky
-    fields, or Tier 3.
+    When omitted, the capability creates one from `block_high_risk` and
+    `semantic_detection`. Supply one (via `create_prompt_defense(...)`) for custom
+    thresholds, per-tool risky fields, or Tier 3.
     """
 
     _: KW_ONLY
