@@ -25,11 +25,11 @@ uv add "pydantic-ai-harness[prompt-injection-defender]"
 ```
 
 The capability requires Python 3.11 or newer. The base extra provides field-based
-pattern detection. To classify free text, including bare strings, install the ML
-extra and enable `semantic_detection`:
+pattern detection. To classify free text, including bare strings, install Defender's
+ML dependencies and enable `semantic_detection`:
 
 ```bash
-uv add "pydantic-ai-harness[prompt-injection-defender-ml]"
+uv add "stackone-defender[onnx]>=0.7.3,<0.8"
 ```
 
 ```python
@@ -66,7 +66,7 @@ replaces the rejected result before the model sees it.
 - `block_high_risk`: ask the built-in defense to reject detected high or critical
   risk results. The default is report-only.
 - `semantic_detection`: add local ML classification for free text, including bare
-  string return values. This requires the `prompt-injection-defender-ml` extra.
+  string return values. This requires `stackone-defender[onnx]`.
 - `tool_filter`: classify all tools, selected tool names, or tools accepted by a
   [`ToolSelector`](/ai/api/pydantic-ai/tools/#pydantic_ai.tools.ToolSelector).
 - `on_detection`: run a sync or async callback for each flagged verdict. A
@@ -79,7 +79,7 @@ replaces the rejected result before the model sees it.
   detection on that object rather than also setting the corresponding capability
   options.
 
-Requesting semantic detection without the ML extra, combining `defense` with a
+Requesting semantic detection without the ML dependencies, combining `defense` with a
 conflicting option, or using an invalid `blocked_message` placeholder raises a
 `UserError` when the capability is constructed.
 

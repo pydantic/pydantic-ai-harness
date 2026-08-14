@@ -122,8 +122,8 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     semantic_detection: bool = False
     """Use StackOne Defender's local ML classifier in addition to pattern detection.
 
-    Requires the `prompt-injection-defender-ml` extra. The model is preloaded at run start.
-    Cannot be combined with `defense`; configure Tier 2 on the `PromptDefense` instead.
+    Requires `stackone-defender[onnx]`. The model is preloaded at run start. Cannot be
+    combined with `defense`; configure Tier 2 on the `PromptDefense` instead.
     """
 
     tool_filter: ToolSelector[AgentDepsT] = 'all'
@@ -164,7 +164,7 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
             if self.semantic_detection and importlib.util.find_spec('onnxruntime') is None:
                 raise UserError(
                     'PromptInjectionDefender requires ONNX Runtime when `semantic_detection=True`. '
-                    'Install it with: uv add "pydantic-ai-harness[prompt-injection-defender-ml]"'
+                    'Install it with: uv add "stackone-defender[onnx]>=0.7.3,<0.8"'
                 )
             # Construct `PromptDefense` directly; the `create_prompt_defense` factory is untyped and fails pyright strict.
             self._defense = PromptDefense(
