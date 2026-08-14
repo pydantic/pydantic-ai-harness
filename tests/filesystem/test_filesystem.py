@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import stat
+import subprocess
+import sys
+import textwrap
+from contextlib import ExitStack
 from pathlib import Path
 
 import pytest
@@ -328,9 +335,98 @@ class TestReadFile:
 
 class TestWriteFile:
     async def test_write_new_file(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        result = await toolset.write_file('new.txt', 'new content\n')
+        content = 'h\N{LATIN SMALL LETTER E WITH ACUTE}llo\r\nnew content\n'
+        control = fs_root / 'control.txt'
+        control.write_text(content, encoding='utf-8')
+
+        result = await toolset.write_file('new.txt', content)
         assert 'Wrote' in result
-        assert (fs_root / 'new.txt').read_text() == 'new content\n'
+        target = fs_root / 'new.txt'
+        assert target.read_bytes() == control.read_bytes()
+        assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(control.stat().st_mode)
+
+    @pytest.mark.skipif(os.name == 'nt', reason='FIFOs require POSIX.')
+    def test_write_existing_fifo_retries_without_blocking(self, fs_root: Path) -> None:
+        script = textwrap.dedent(
+            """\
+            import asyncio
+            import os
+            import sys
+            from pathlib import Path
+
+            from pydantic_ai.exceptions import ModelRetry
+            from pydantic_ai_harness.filesystem import FileSystemToolset
+
+            root = Path(sys.argv[1])
+            os.mkfifo(root / 'fifo')
+            toolset = FileSystemToolset(
+                root_dir=root,
+                allowed_patterns=[],
+                denied_patterns=[],
+                protected_patterns=[],
+                max_read_lines=2000,
+                max_search_results=1000,
+                max_find_results=1000,
+            )
+
+            async def main() -> None:
+                try:
+                    await toolset.write_file('fifo', 'content')
+                except ModelRetry as error:
+                    print(error)
+                else:
+                    raise AssertionError('write_file accepted a FIFO')
+
+            asyncio.run(main())
+            """
+        )
+        result = subprocess.run(
+            [sys.executable, '-c', script, str(fs_root)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == "Path 'fifo' exists and is not a regular file."
+
+    async def test_write_existing_directory_retries(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match="Path 'subdir' exists and is not a regular file"):
+            await toolset.write_file('subdir', 'content')
+
+    @pytest.mark.skipif(os.name == 'nt', reason='FIFOs require POSIX.')
+    @pytest.mark.parametrize('with_reader', [False, True])
+    async def test_write_rejects_fifo_swapped_before_descriptor_open(
+        self,
+        toolset: FileSystemToolset[None],
+        fs_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        with_reader: bool,
+    ) -> None:
+        target = fs_root / 'swap.txt'
+        target.write_text('ordinary file\n')
+        original_open = os.open
+        open_calls = 0
+
+        with ExitStack() as cleanup:
+
+            def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
+                nonlocal open_calls
+                open_calls += 1
+                if open_calls == 2:
+                    target.unlink()
+                    os.mkfifo(target)
+                    assert flags & os.O_NONBLOCK
+                    if with_reader:
+                        reader = original_open(target, os.O_RDONLY | os.O_NONBLOCK)
+                        cleanup.callback(os.close, reader)
+                return original_open(path, flags, mode)
+
+            monkeypatch.setattr(os, 'open', swap_then_open)
+            with pytest.raises(ModelRetry, match="Path 'swap.txt' exists and is not a regular file"):
+                await toolset.write_file('swap.txt', 'content')
+
+        assert open_calls == 2
 
     async def test_write_nonexistent_parent_raises(self, toolset: FileSystemToolset[None]) -> None:
         with pytest.raises(ModelRetry, match="Parent directory 'deep/nested' does not exist"):
@@ -339,6 +435,74 @@ class TestWriteFile:
     async def test_write_overwrite(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         await toolset.write_file('hello.txt', 'overwritten\n')
         assert (fs_root / 'hello.txt').read_text() == 'overwritten\n'
+
+    @pytest.mark.parametrize('recreated_by_peer', [False, True])
+    async def test_write_reclassifies_target_deleted_before_fallback_open(
+        self,
+        toolset: FileSystemToolset[None],
+        fs_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        recreated_by_peer: bool,
+    ) -> None:
+        target = fs_root / 'recreated.txt'
+        target.write_text('original\n')
+        original_open = os.open
+        open_calls = 0
+
+        def replace_during_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            nonlocal open_calls
+            open_calls += 1
+            if open_calls == 2:
+                target.unlink()
+            elif open_calls == 3 and recreated_by_peer:
+                target.write_text('peer content\n')
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(os, 'open', replace_during_open)
+        result = await toolset.write_file('recreated.txt', 'final content\n')
+
+        assert open_calls == (4 if recreated_by_peer else 3)
+        assert result.startswith('Wrote 14 chars')
+        assert str(fs_root) not in result
+        assert target.read_text() == 'final content\n'
+
+    async def test_write_reclassification_churn_is_private_and_bounded(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = fs_root / 'churn.txt'
+        target.write_text('original\n')
+        open_calls = 0
+
+        def churn_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            nonlocal open_calls
+            del mode
+            open_calls += 1
+            if flags & os.O_EXCL:
+                raise FileExistsError(errno.EEXIST, 'File exists', path)
+            raise FileNotFoundError(errno.ENOENT, 'No such file', path)
+
+        monkeypatch.setattr(os, 'open', churn_open)
+        with pytest.raises(ModelRetry) as exc_info:
+            await toolset.write_file('churn.txt', 'content')
+
+        message = str(exc_info.value)
+        assert open_calls == 6
+        assert message == "Path 'churn.txt' changed repeatedly while opening. Retry the write."
+        assert str(fs_root) not in message
+
+    @pytest.mark.skipif(os.name == 'nt', reason='POSIX mode bits are required.')
+    async def test_write_overwrite_preserves_permissions(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        target = fs_root / 'hello.txt'
+        target.chmod(0o640)
+        await toolset.write_file('hello.txt', 'overwritten\n')
+        assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+    async def test_write_through_internal_symlink(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        link = fs_root / 'link.txt'
+        link.symlink_to('hello.txt')
+        await toolset.write_file('link.txt', 'through link\n')
+        assert link.is_symlink()
+        assert (fs_root / 'hello.txt').read_text() == 'through link\n'
 
     async def test_write_conflict_detection(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         # Get current hash
@@ -353,6 +517,58 @@ class TestWriteFile:
         with pytest.raises(ModelRetry, match='Conflict'):
             await toolset.write_file('hello.txt', 'bad\n', expected_hash='wrong_hash_x')
 
+    async def test_write_expected_hash_checks_swapped_target(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = fs_root / 'hash-swap.txt'
+        original = 'original\n'
+        replacement = 'replacement\n'
+        target.write_text(original)
+        original_open = os.open
+        open_calls = 0
+
+        def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            nonlocal open_calls
+            open_calls += 1
+            if open_calls == 2:
+                target.unlink()
+                target.write_text(replacement)
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(os, 'open', swap_then_open)
+        with pytest.raises(ModelRetry, match='Conflict'):
+            await toolset.write_file('hash-swap.txt', 'updated\n', expected_hash=_content_hash(original))
+
+        assert open_calls == 2
+        assert target.read_text() == replacement
+
+    @pytest.mark.skipif(os.name == 'nt', reason='O_NOFOLLOW requires POSIX.')
+    async def test_write_rejects_symlink_swapped_before_descriptor_open(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = fs_root / 'symlink-swap.txt'
+        other = fs_root / 'other.txt'
+        target.write_text('ordinary file\n')
+        other.write_text('must remain unchanged\n')
+        original_open = os.open
+        open_calls = 0
+
+        def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            nonlocal open_calls
+            open_calls += 1
+            if open_calls == 2:
+                target.unlink()
+                target.symlink_to(other)
+                assert flags & os.O_NOFOLLOW
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(os, 'open', swap_then_open)
+        with pytest.raises(ModelRetry, match="Path 'symlink-swap.txt'.*symlink"):
+            await toolset.write_file('symlink-swap.txt', 'content')
+
+        assert open_calls == 2
+        assert other.read_text() == 'must remain unchanged\n'
+
     async def test_write_protected_blocked(self, toolset: FileSystemToolset[None]) -> None:
         with pytest.raises(ModelRetry, match='protected'):
             await toolset.write_file('.env', 'HACKED=true\n')
@@ -360,6 +576,17 @@ class TestWriteFile:
     async def test_write_returns_hash(self, toolset: FileSystemToolset[None]) -> None:
         result = await toolset.write_file('hashed.txt', 'content\n')
         assert 'hash:' in result
+
+    async def test_write_open_error_propagates(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fail_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            del path, flags, mode
+            raise OSError(errno.ENOSPC, 'No space left on device')
+
+        monkeypatch.setattr(os, 'open', fail_open)
+        with pytest.raises(OSError, match='No space left on device'):
+            await toolset.write_file('new.txt', 'content')
 
 
 class TestEditFile:

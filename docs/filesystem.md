@@ -76,6 +76,10 @@ the run.
 - **Optimistic concurrency.** `write_file`/`edit_file` accept an
   `expected_hash` so an agent operating on a stale read is told to re-read
   rather than silently overwriting newer content.
+- **Regular write targets.** `write_file` rejects an existing target that is
+  not a regular file. On POSIX, it opens descriptors in non-blocking mode and
+  checks their type again before truncating, so a FIFO cannot stall the tool
+  even if it is swapped into place during the write.
 
 ## Pattern filtering
 
