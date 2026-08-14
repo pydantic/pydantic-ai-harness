@@ -48,17 +48,19 @@ print(result.output)
 
 - **Containment.** Paths resolve relative to `root_dir`; anything resolving
   outside -- via `..`, an absolute path, or a symlink -- is rejected. Symlinks
-  are resolved with `os.path.realpath` *before* the containment check, closing
-  the TOCTTOU window.
+  are resolved with `os.path.realpath` before the containment check. This
+  rejects traversal and symlinks that already resolve outside the root, but
+  containment is not transactional against concurrent ancestor mutation.
 - **Binary detection.** `read_file` returns a placeholder instead of dumping
   binary bytes into the model context.
 - **Optimistic concurrency.** `write_file`/`edit_file` accept an
   `expected_hash` so an agent operating on a stale read is told to re-read
   rather than silently overwriting newer content.
 - **Regular write targets.** `write_file` rejects an existing target that is
-  not a regular file. On POSIX, it opens descriptors in non-blocking mode and
-  checks their type again before truncating, so a FIFO cannot stall the tool
-  even if it is swapped into place during the write.
+  not a regular file. On POSIX, it opens the final target descriptor in
+  non-blocking mode and checks that descriptor's type before truncating, so a
+  FIFO at the final component cannot stall the tool even if it is swapped into
+  place during the write.
 
 ## Pattern filtering
 
