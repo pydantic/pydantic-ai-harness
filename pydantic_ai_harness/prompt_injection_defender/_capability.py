@@ -40,7 +40,7 @@ OnDetection = Callable[[RunContext[AgentDepsT], ToolCallPart, DefenseResult], No
 """Signature of the `on_detection` callback.
 
 Called for each flagged verdict. A `ToolReturn` can produce separate verdicts for its
-return value and additional content items. May be sync or async. Raising fails the run.
+return value and additional content. May be sync or async. Raising fails the run.
 """
 
 
@@ -205,11 +205,13 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
                 # `content` field when projecting this separate message part.
                 values.append({'content': result.content})
             elif result.content is not None:
-                values.extend(
-                    {'content': item if isinstance(item, str) else item.content}
+                text = '\n'.join(
+                    item if isinstance(item, str) else item.content
                     for item in result.content
                     if isinstance(item, str | TextContent)
                 )
+                if text:
+                    values.append({'content': text})
         else:
             values = [result]
         verdicts = [
