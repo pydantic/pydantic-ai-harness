@@ -564,9 +564,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 result = await tool_manager.handle_call(call_part, wrap_validation_errors=False)
             except (CallDeferred, ApprovalRequired) as e:
                 # No handler resolved the deferral. The sandbox can't round-trip to the
-                # caller, so we convert it to a UserError that propagates through
+                # caller, so keep this model-actionable failure on the retry path through
                 # Monty → MontyRuntimeError → ModelRetry.
-                raise UserError(
+                raise ModelRetry(
                     f'Tool {original_name!r} raised {type(e).__name__} inside code mode, '
                     'but no `HandleDeferredToolCalls` capability resolved it. Add a handler '
                     'capability on the agent so deferred and approval-required calls can '
@@ -643,13 +643,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             run_state.reset()
             raise ModelRetry(f'Type error in code:\n{capture.prepend_to(e.display())}') from e
         except MontyRuntimeError as e:
-            # Exceptions raised inside dispatch_tool_call (e.g. UserError from
-            # ApprovalRequired, or ModelRetry from a wrapped tool) are passed
-            # back into Monty via ExternalException. Monty re-raises them at the
-            # await site; if the sandbox code doesn't catch them, they bubble up
-            # as MontyRuntimeError. The original exception message is preserved
-            # in the display string, so the model sees a useful error. This means
-            # ModelRetry from a wrapped tool gets double-wrapped
+            # Ordinary exceptions and ModelRetry from dispatch_tool_call are passed back
+            # into Monty via ExternalException. Monty re-raises them at the await site;
+            # if the sandbox code doesn't catch them, they bubble up as MontyRuntimeError.
+            # The original exception message is preserved in the display string, so the
+            # model sees a useful error. ModelRetry from a wrapped tool gets double-wrapped
             # (ModelRetry → MontyRuntimeError → ModelRetry), but the retry
             # semantics are the same -- the model gets another chance.
             raise ModelRetry(f'Runtime error:\n{capture.prepend_to(e.display())}') from e
@@ -662,6 +660,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             raise ModelRetry(
                 'The code crashed the sandbox worker and the session was reset. Revise the code and try again.'
             ) from e
+        except UserError:
+            # Host configuration errors are not actionable by the model. The Monty feed
+            # remains suspended when one aborts dispatch, so discard it before preserving
+            # the original exception type for the caller.
+            run_state.reset()
+            raise
         except Exception as e:
             # The session may have been invalidated by a host-side binding or protocol failure.
             # Make the reset visible so the model can rebuild state on its next attempt. Include

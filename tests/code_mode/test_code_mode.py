@@ -23,7 +23,7 @@ from pydantic_ai import (
     Tool,
     ToolDefinition,
 )
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tool_manager import ParallelExecutionMode, ToolManager
@@ -386,6 +386,46 @@ class TestCodeMode:
         code = 'import asyncio\nawait asyncio.gather(add(a=1, b=2), flaky(x=3))'
         with pytest.raises(ModelRetry, match='not allowed'):
             await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
+    async def test_user_error_escapes_parallel_dispatch_and_resets_suspended_session(self) -> None:
+        """UserError unwinds sibling work and drops the Monty feed left awaiting a result."""
+        started = asyncio.Event()
+        unwound = asyncio.Event()
+
+        async def block() -> str:
+            """Block until the sibling dispatch fails."""
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                unwound.set()
+                raise
+            return 'unreachable'  # pragma: no cover
+
+        async def reject() -> str:
+            """Raise a caller-facing host error."""
+            await started.wait()
+            raise UserError('invalid host configuration')
+
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(block, reject))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, tools['run_code'])
+
+        call = asyncio.create_task(
+            wrapper.call_tool(
+                'run_code',
+                {'code': 'import asyncio\nawait asyncio.gather(block(), reject())'},
+                ctx,
+                tools['run_code'],
+            )
+        )
+        with pytest.raises(UserError, match='invalid host configuration'):
+            await asyncio.wait_for(call, timeout=1)
+        assert unwound.is_set()
+        with pytest.raises(ModelRetry, match='Type error in code'):
+            await wrapper.call_tool('run_code', {'code': 'x'}, ctx, tools['run_code'])
 
     async def test_run_code_renders_no_arg_tool_signature(self) -> None:
         """A no-argument tool renders as `async def name() -> ...` (without `(*, ...)`).
@@ -2114,6 +2154,38 @@ class TestCodeMode:
         with pytest.raises(ModelRetry, match='Runtime error'):
             await seq_wrapper.call_tool('run_code', {'code': "add(a='bad', b=3)"}, ctx, run_code)
 
+    async def test_user_error_escapes_inline_sequential_dispatch(self) -> None:
+        """A UserError raised by a per-tool sequential dispatch is not converted into a retry."""
+        from dataclasses import replace as dc_replace
+
+        def reject() -> str:
+            """Raise a caller-facing host error."""
+            raise UserError('invalid host configuration')
+
+        class _SeqToolset(AbstractToolset[object]):
+            def __init__(self) -> None:
+                self._inner = _build_function_toolset(reject)
+
+            @property
+            def id(self) -> str | None:
+                return None  # pragma: no cover
+
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
+                tools = await self._inner.get_tools(ctx)
+                return {n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) for n, t in tools.items()}
+
+            async def call_tool(
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
+            ) -> Any:
+                return await self._inner.call_tool(name, tool_args, ctx, tool)
+
+        wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        with pytest.raises(UserError, match='invalid host configuration'):
+            await wrapper.call_tool('run_code', {'code': 'reject()'}, ctx, tools['run_code'])
+
     async def test_global_sequential_mode_forces_sequential_resolution(self) -> None:
         """When the parallel execution mode is `sequential`, tool calls inside the
         sandbox are resolved sequentially via FutureSnapshot. Signatures stay `async def`."""
@@ -2139,6 +2211,22 @@ class TestCodeMode:
                 run_code,
             )
             assert result.return_value == 30
+
+    async def test_user_error_escapes_global_sequential_dispatch(self) -> None:
+        """A UserError keeps its type when global sequential mode resolves a deferred call."""
+
+        async def reject() -> str:
+            """Raise a caller-facing host error."""
+            raise UserError('invalid host configuration')
+
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(reject))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+
+        with ToolManager.parallel_execution_mode('sequential'):
+            tools = await wrapper.get_tools(ctx)
+            with pytest.raises(UserError, match='invalid host configuration'):
+                await wrapper.call_tool('run_code', {'code': 'await reject()'}, ctx, tools['run_code'])
 
     async def test_global_sequential_overrides_per_tool_sequential(self) -> None:
         """When global sequential mode is active AND a tool has `sequential=True`,
