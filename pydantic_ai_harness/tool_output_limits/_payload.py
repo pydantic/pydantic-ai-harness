@@ -46,11 +46,12 @@ def is_binary(value: object) -> bool:
     return isinstance(value, (bytes, bytearray, memoryview))
 
 
-def to_bytes(value: object) -> bytes:
+def to_bytes(value: object, *, json_indent: int | None = None) -> bytes:
     """Serialize any tool return value to the bytes that get spilled.
 
     Strings spill as UTF-8 text; byte payloads spill verbatim; everything else spills as
-    JSON so the stored payload stays valid and grep-able.
+    JSON so the stored payload stays valid and grep-able. Set `json_indent` to make structured
+    payloads readable by line.
     """
     if isinstance(value, str):
         return value.encode('utf-8')
@@ -58,10 +59,12 @@ def to_bytes(value: object) -> bytes:
         return value.tobytes()
     if isinstance(value, (bytes, bytearray)):
         return bytes(value)
+    if json_indent is not None:
+        return to_json(value, indent=json_indent)
     return to_json(value)
 
 
-def to_text(value: object) -> str:
+def to_text(value: object, *, json_indent: int | None = None) -> str:
     """Render a non-binary tool return value as the text used for measuring and truncating.
 
     Strings pass through; structured values become JSON (truncating JSON is lossy, so prefer
@@ -69,7 +72,8 @@ def to_text(value: object) -> str:
     """
     if isinstance(value, str):
         return value
-    return to_json(value).decode('utf-8', errors='replace')
+    data = to_json(value, indent=json_indent) if json_indent is not None else to_json(value)
+    return data.decode('utf-8', errors='replace')
 
 
 def measure(text: str, *, over_tokens: bool, tokenizer: Callable[[str], int] | None) -> int:

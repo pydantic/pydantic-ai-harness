@@ -144,6 +144,9 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     summary_prompt: str = _DEFAULT_SUMMARY_PROMPT
     """Prompt template for `Summarize`. Must contain `{tool_name}` and `{output}`."""
 
+    json_indent: int | None = None
+    """Indent structured JSON returns so `read_tool_result` can page them by line."""
+
     _store: OverflowStore = field(init=False, repr=False)
     _bands: list[Band] = field(init=False, repr=False)
     _per_tool: dict[str, list[Band]] = field(init=False, repr=False)
@@ -279,7 +282,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         """Pre-render a value into the text / bytes the reduction pipeline needs."""
         if is_binary(value):
             return _Unit(binary=True, text=None, data=to_bytes(value), value=value, suffix=suffix)
-        text = to_text(value)
+        text = to_text(value, json_indent=self.json_indent)
         if self.strip_ansi:
             text = strip_ansi(text)
         return _Unit(binary=False, text=text, data=text.encode('utf-8'), value=value, suffix=suffix)

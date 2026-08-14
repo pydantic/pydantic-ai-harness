@@ -149,6 +149,21 @@ estimated tokens (the same ~4-chars-per-token heuristic as [compaction](compacti
 character operation regardless of the threshold unit. Set `strip_ansi=True` to strip ANSI
 escape sequences from text returns before measuring and reducing.
 
+## Structured JSON layout
+
+Structured returns use compact JSON by default. Compact JSON is one line, so the line-based
+`read_tool_result` tool cannot page through a large list. Set `json_indent=2` to encode
+structured returns as pretty JSON:
+
+```python
+ToolOutputLimits(json_indent=2)
+```
+
+The capability encodes each structured return once. Measurement, previews, stored bytes, and
+read-back use that same representation. Strings and binary payloads do not change. A structured
+return below the size threshold still passes through as its original object, and its shape
+sketch still uses that object.
+
 ## Spill store
 
 Spilled payloads go through the narrow `OverflowStore` protocol. The default `LocalFileStore`

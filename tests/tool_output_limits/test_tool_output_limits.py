@@ -137,9 +137,16 @@ class TestPayloadHelpers:
         assert to_bytes(bytearray(b'ba')) == b'ba'
         assert to_bytes({'a': 1}) == b'{"a":1}'
 
+    def test_to_bytes_with_json_indent(self):
+        assert to_bytes({'a': 1}, json_indent=2) == b'{\n  "a": 1\n}'
+
     def test_to_text_variants(self):
         assert to_text('hi') == 'hi'
         assert to_text({'a': 1}) == '{"a":1}'
+
+    def test_to_text_with_json_indent(self):
+        assert to_text({'a': 1}, json_indent=2) == '{\n  "a": 1\n}'
+        assert to_text('hi', json_indent=2) == 'hi'
 
     def test_measure_chars_and_tokens(self):
         assert measure('x' * 100, over_tokens=False, tokenizer=None) == 100
@@ -354,6 +361,12 @@ class TestPassthrough:
         out = await _run(cap, 'small')
         assert out == 'small'
 
+    async def test_below_threshold_structured_passthrough_with_json_indent(self):
+        result = [{'record_id': 1}]
+        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=1000, action=Truncate())], json_indent=2)
+        out = await _run(cap, result)
+        assert out is result
+
     async def test_exception_result_passthrough(self):
         cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=1, action=Truncate(max_chars=2))])
         err = ValueError('boom')
@@ -427,6 +440,30 @@ class TestSpill:
         out = await _run(cap, {'rows': list(range(1000)), 'ok': True})
         assert isinstance(out, ToolReturn)
         assert 'shape:' in out.return_value  # type: ignore[operator]
+
+    async def test_spill_structured_with_json_indent_is_pageable(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        cap: ToolOutputLimits[object] = ToolOutputLimits(
+            bands=[Band(over=5, action=Spill(preview_chars=80))],
+            json_indent=2,
+            store=store,
+        )
+        records = [{'record_id': record_id, 'item': f'item-{record_id}'} for record_id in range(10)]
+
+        out = await _run(cap, records)
+
+        assert isinstance(out, ToolReturn)
+        handle = out.metadata['overflow_handle']
+        stored = await store.read(handle)
+        expected = to_bytes(records, json_indent=2)
+        assert stored == expected
+        assert b'\n' in stored
+        assert expected.decode()[:40] in out.return_value  # type: ignore[operator]
+
+        page_1 = await _read_slice(store, handle, offset=0, limit=1, from_end=False, pattern='"record_id"')
+        page_2 = await _read_slice(store, handle, offset=1, limit=1, from_end=False, pattern='"record_id"')
+        assert '"record_id": 0' in page_1
+        assert '"record_id": 1' in page_2
 
     async def test_spill_failure_falls_back_to_truncate(self):
         cap: ToolOutputLimits[object] = ToolOutputLimits(
