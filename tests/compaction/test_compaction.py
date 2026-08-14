@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -1886,6 +1887,7 @@ class TestSummarizingCompactionModel:
         assert MockAgent.call_args.args[0] is rc.model
         # Its usage is threaded into the parent run for honest accounting.
         assert mock_agent_instance.run.call_args.kwargs['usage'] is ctx.usage
+        assert mock_agent_instance.run.call_args.kwargs['event_stream_handler'] is None
 
     def test_default_prompt_has_structured_sections(self):
         from pydantic_ai_harness.compaction._summarizing_compaction import _DEFAULT_SUMMARY_PROMPT
@@ -3474,6 +3476,25 @@ def _recording_summarizer(prompts: list[str], output: str = 'THE SUMMARY') -> Fu
     return FunctionModel(model_fn)
 
 
+def _recording_streaming_summarizer(prompts: list[str]) -> FunctionModel:
+    """A stream-only summarizer that records its prompt and yields the summary in chunks."""
+
+    async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
+        prompts.append(
+            '\n'.join(
+                _part_text(part)
+                for message in messages
+                if isinstance(message, ModelRequest)
+                for part in message.parts
+                if isinstance(part, UserPromptPart)
+            )
+        )
+        yield 'STREAMED '
+        yield 'SUMMARY'
+
+    return FunctionModel(stream_function=stream_fn)
+
+
 class TestStructuralFeaturesThroughAgent:
     """The four structural features driven through `Agent(..., capabilities=[...])`.
 
@@ -3540,6 +3561,38 @@ class TestStructuralFeaturesThroughAgent:
             for part in message.parts
             if isinstance(part, UserPromptPart) and is_pinned(part)
         ] == ['DURABLE STATE']
+
+    @pytest.mark.anyio
+    async def test_stream_only_summarizer_completes_parent_run(self):
+        seen: list[list[ModelMessage]] = []
+        prompts: list[str] = []
+        agent = Agent(
+            _recording_model(seen),
+            capabilities=[
+                SummarizingCompaction(
+                    model=_recording_streaming_summarizer(prompts),
+                    max_messages=2,
+                    keep_messages=1,
+                    preserve_first_user_message=False,
+                    stream=True,
+                )
+            ],
+        )
+
+        result = await agent.run(
+            'go',
+            message_history=[_user('a'), _assistant('b'), _user('c'), _assistant('d')],
+        )
+
+        assert len(prompts) == 1
+        assert 'User: a' in prompts[0]
+        assert result.output == 'done'
+        assert any(
+            isinstance(part, SystemPromptPart) and f'{_SUMMARY_PREFIX}STREAMED SUMMARY' == part.content
+            for message in seen[0]
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
 
     @pytest.mark.anyio
     async def test_keep_user_messages_reaches_the_model_truncated(self):

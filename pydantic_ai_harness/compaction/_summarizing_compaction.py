@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -48,7 +48,7 @@ from pydantic_ai_harness.compaction._shared import (
 )
 
 if TYPE_CHECKING:
-    from pydantic_ai.messages import ModelRequestPart, UserContent
+    from pydantic_ai.messages import AgentStreamEvent, ModelRequestPart, UserContent
     from pydantic_ai.models import AbstractModel, ModelRequestContext
 
 _DEFAULT_SUMMARY_PROMPT = """\
@@ -230,6 +230,15 @@ def _is_kept_user_message(message: ModelRequest) -> bool:
     return message.metadata is not None and message.metadata.get(_KEPT_USER_MESSAGE_METADATA) is True
 
 
+async def _drain_summary_events(
+    _ctx: RunContext[object],
+    events: AsyncIterable[AgentStreamEvent],
+) -> None:
+    """Consume summary events so the nested agent can use its streaming request path."""
+    async for _ in events:
+        pass
+
+
 @dataclass
 class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """LLM-powered conversation compaction.
@@ -267,6 +276,13 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     When `None`, inherits the model the request being compacted is going to. Core starts
     that as the run's model, so the two differ only where a capability replaced
     `ModelRequestContext.model`; set this explicitly to pin the summarizer regardless.
+    """
+
+    stream: bool = field(default=False, kw_only=True)
+    """Whether to stream the internal summary request and discard its events.
+
+    `False` preserves the default non-streaming request path. Set this to `True` for a
+    summarizer model or provider that requires streaming requests.
     """
 
     max_messages: int | None = None
@@ -612,5 +628,9 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             cast('Model[Any] | str', model),
             instructions='You are a context summarization assistant. Extract the most important information from conversations.',
         )
-        result = await agent.run(prompt, usage=ctx.usage)
+        result = await agent.run(
+            prompt,
+            usage=ctx.usage,
+            event_stream_handler=_drain_summary_events if self.stream else None,
+        )
         return result.output.strip()

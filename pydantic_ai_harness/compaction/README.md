@@ -349,6 +349,20 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
 running agent's model. No token caps are imposed on the summary call.
 
+The compatibility default `stream=False` makes the nested summary request non-streaming. Set
+`stream=True` when the summary model or provider requires streaming requests:
+
+```python
+SummarizingCompaction(
+    model='provider:stream-only-summary-model',
+    max_messages=60,
+    stream=True,
+)
+```
+
+`stream=True` only changes how compaction talks to the summary model. It does not affect the outer
+`Agent.run(...)` `event_stream_handler`, which never sees the summary token deltas.
+
 By default `incremental=True` updates the newest existing summary from a prior compaction as an
 anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier
 releases; set `incremental=False` to retain the prior regeneration behavior. `preserve_first_user_message=True` keeps the original task turn even
