@@ -69,8 +69,9 @@ the run.
 
 - **Containment.** Paths resolve relative to `root_dir`; anything resolving
   outside -- via `..`, an absolute path, or a symlink -- is rejected. Symlinks
-  are resolved with `os.path.realpath` *before* the containment check, closing
-  the TOCTTOU window.
+  are resolved with `os.path.realpath` before the containment check. On POSIX,
+  `write_file` then walks the canonical target from an anchored root descriptor,
+  rejecting symlinked ancestors while it opens the target.
 - **Binary detection.** `read_file` returns a placeholder instead of dumping
   binary bytes into the model context.
 - **Optimistic concurrency.** `write_file`/`edit_file` accept an
@@ -79,7 +80,8 @@ the run.
 - **Regular write targets.** `write_file` rejects an existing target that is
   not a regular file. On POSIX, it opens descriptors in non-blocking mode and
   checks their type again before truncating, so a FIFO cannot stall the tool
-  even if it is swapped into place during the write.
+  even if it is swapped into place during the write. The descriptor walk also
+  prevents an approved ancestor from being swapped to a symlink before opening.
 
 ## Pattern filtering
 

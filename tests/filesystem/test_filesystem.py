@@ -406,27 +406,30 @@ class TestWriteFile:
         target = fs_root / 'swap.txt'
         target.write_text('ordinary file\n')
         original_open = os.open
-        open_calls = 0
+        target_open_calls = 0
 
         with ExitStack() as cleanup:
 
-            def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
-                nonlocal open_calls
-                open_calls += 1
-                if open_calls == 2:
+            def swap_then_open(path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+                nonlocal target_open_calls
+                if path == 'swap.txt':
+                    target_open_calls += 1
+                if path == 'swap.txt' and not flags & os.O_EXCL:
                     target.unlink()
                     os.mkfifo(target)
                     assert flags & os.O_NONBLOCK
                     if with_reader:
                         reader = original_open(target, os.O_RDONLY | os.O_NONBLOCK)
                         cleanup.callback(os.close, reader)
-                return original_open(path, flags, mode)
+                if dir_fd is None:
+                    return original_open(path, flags, mode)
+                return original_open(path, flags, mode, dir_fd=dir_fd)
 
             monkeypatch.setattr(os, 'open', swap_then_open)
             with pytest.raises(ModelRetry, match="Path 'swap.txt' exists and is not a regular file"):
                 await toolset.write_file('swap.txt', 'content')
 
-        assert open_calls == 2
+        assert target_open_calls == 2
 
     async def test_write_nonexistent_parent_raises(self, toolset: FileSystemToolset[None]) -> None:
         with pytest.raises(ModelRetry, match="Parent directory 'deep/nested' does not exist"):
@@ -435,6 +438,14 @@ class TestWriteFile:
     async def test_write_overwrite(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         await toolset.write_file('hello.txt', 'overwritten\n')
         assert (fs_root / 'hello.txt').read_text() == 'overwritten\n'
+
+    async def test_write_nested_path(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        nested = fs_root / 'nested' / 'deeper'
+        nested.mkdir(parents=True)
+
+        await toolset.write_file('nested/deeper/file.txt', 'nested content\n')
+
+        assert (nested / 'file.txt').read_text() == 'nested content\n'
 
     @pytest.mark.parametrize('recreated_by_peer', [False, True])
     async def test_write_reclassifies_target_deleted_before_fallback_open(
@@ -447,21 +458,24 @@ class TestWriteFile:
         target = fs_root / 'recreated.txt'
         target.write_text('original\n')
         original_open = os.open
-        open_calls = 0
+        target_open_calls = 0
 
-        def replace_during_open(path: Path, flags: int, mode: int = 0o777) -> int:
-            nonlocal open_calls
-            open_calls += 1
-            if open_calls == 2:
+        def replace_during_open(path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            nonlocal target_open_calls
+            if path == 'recreated.txt':
+                target_open_calls += 1
+            if path == 'recreated.txt' and target_open_calls == 2:
                 target.unlink()
-            elif open_calls == 3 and recreated_by_peer:
+            elif path == 'recreated.txt' and target_open_calls == 3 and recreated_by_peer:
                 target.write_text('peer content\n')
-            return original_open(path, flags, mode)
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
 
         monkeypatch.setattr(os, 'open', replace_during_open)
         result = await toolset.write_file('recreated.txt', 'final content\n')
 
-        assert open_calls == (4 if recreated_by_peer else 3)
+        assert target_open_calls == (4 if recreated_by_peer else 3)
         assert result.startswith('Wrote 14 chars')
         assert str(fs_root) not in result
         assert target.read_text() == 'final content\n'
@@ -471,12 +485,18 @@ class TestWriteFile:
     ) -> None:
         target = fs_root / 'churn.txt'
         target.write_text('original\n')
-        open_calls = 0
+        target_open_calls = 0
+        original_open = os.open
 
-        def churn_open(path: Path, flags: int, mode: int = 0o777) -> int:
-            nonlocal open_calls
-            del mode
-            open_calls += 1
+        def churn_open(  # pragma: no cover - only target opens are under test
+            path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            nonlocal target_open_calls
+            if path != 'churn.txt':
+                if dir_fd is None:
+                    return original_open(path, flags, mode)
+                return original_open(path, flags, mode, dir_fd=dir_fd)
+            target_open_calls += 1
             if flags & os.O_EXCL:
                 raise FileExistsError(errno.EEXIST, 'File exists', path)
             raise FileNotFoundError(errno.ENOENT, 'No such file', path)
@@ -486,7 +506,7 @@ class TestWriteFile:
             await toolset.write_file('churn.txt', 'content')
 
         message = str(exc_info.value)
-        assert open_calls == 6
+        assert target_open_calls == 6
         assert message == "Path 'churn.txt' changed repeatedly while opening. Retry the write."
         assert str(fs_root) not in message
 
@@ -525,21 +545,24 @@ class TestWriteFile:
         replacement = 'replacement\n'
         target.write_text(original)
         original_open = os.open
-        open_calls = 0
+        target_open_calls = 0
 
-        def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
-            nonlocal open_calls
-            open_calls += 1
-            if open_calls == 2:
+        def swap_then_open(path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            nonlocal target_open_calls
+            if path == 'hash-swap.txt':
+                target_open_calls += 1
+            if path == 'hash-swap.txt' and not flags & os.O_EXCL:
                 target.unlink()
                 target.write_text(replacement)
-            return original_open(path, flags, mode)
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
 
         monkeypatch.setattr(os, 'open', swap_then_open)
         with pytest.raises(ModelRetry, match='Conflict'):
             await toolset.write_file('hash-swap.txt', 'updated\n', expected_hash=_content_hash(original))
 
-        assert open_calls == 2
+        assert target_open_calls == 2
         assert target.read_text() == replacement
 
     @pytest.mark.skipif(os.name == 'nt', reason='O_NOFOLLOW requires POSIX.')
@@ -551,23 +574,95 @@ class TestWriteFile:
         target.write_text('ordinary file\n')
         other.write_text('must remain unchanged\n')
         original_open = os.open
-        open_calls = 0
+        target_open_calls = 0
 
-        def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
-            nonlocal open_calls
-            open_calls += 1
-            if open_calls == 2:
+        def swap_then_open(path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            nonlocal target_open_calls
+            if path == 'symlink-swap.txt':
+                target_open_calls += 1
+            if path == 'symlink-swap.txt' and not flags & os.O_EXCL:
                 target.unlink()
                 target.symlink_to(other)
                 assert flags & os.O_NOFOLLOW
-            return original_open(path, flags, mode)
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
 
         monkeypatch.setattr(os, 'open', swap_then_open)
         with pytest.raises(ModelRetry, match="Path 'symlink-swap.txt'.*symlink"):
             await toolset.write_file('symlink-swap.txt', 'content')
 
-        assert open_calls == 2
+        assert target_open_calls == 2
         assert other.read_text() == 'must remain unchanged\n'
+
+    @pytest.mark.skipif(os.name == 'nt', reason='Descriptor-relative containment requires POSIX.')
+    async def test_write_rejects_ancestor_symlink_swapped_after_resolution(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        safe = fs_root / 'safe'
+        safe.mkdir()
+        target = safe / 'file.txt'
+        target.write_text('inside root\n')
+        outside = fs_root.parent / f'{fs_root.name}-outside-root'
+        outside.mkdir()
+        outside_target = outside / 'file.txt'
+        outside_target.write_text('must remain unchanged\n')
+        original_open = os.open
+
+        def swap_ancestor(path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None) -> int:
+            if path == 'safe' and flags & os.O_DIRECTORY:
+                target.unlink()
+                safe.rmdir()
+                safe.symlink_to(outside, target_is_directory=True)
+                assert flags & os.O_NOFOLLOW
+                assert dir_fd is not None
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, 'open', swap_ancestor)
+        with pytest.raises(ModelRetry, match="Path 'safe/file.txt'.*symlink"):
+            await toolset.write_file('safe/file.txt', 'outside root\n')
+
+        assert outside_target.read_text() == 'must remain unchanged\n'
+
+    @pytest.mark.skipif(os.name == 'nt', reason='O_NOFOLLOW requires POSIX.')
+    async def test_write_retries_when_root_becomes_symlink(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        original_open = os.open
+
+        def reject_root_symlink(  # pragma: no cover - the root open always raises
+            path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            if path == toolset._real_root:
+                raise OSError(errno.ELOOP, 'Too many symbolic links', path)
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, 'open', reject_root_symlink)
+        with pytest.raises(ModelRetry, match='Filesystem root changed to a symlink'):
+            await toolset.write_file('new.txt', 'content')
+
+    @pytest.mark.skipif(os.name == 'nt', reason='O_NOFOLLOW requires POSIX.')
+    async def test_write_propagates_root_open_error(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        original_open = os.open
+
+        def fail_root_open(  # pragma: no cover - the root open always raises
+            path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            if path == toolset._real_root:
+                raise OSError(errno.ENOSPC, 'No space left on device')
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, 'open', fail_root_open)
+        with pytest.raises(OSError, match='No space left on device'):
+            await toolset.write_file('new.txt', 'content')
 
     async def test_write_protected_blocked(self, toolset: FileSystemToolset[None]) -> None:
         with pytest.raises(ModelRetry, match='protected'):
@@ -580,9 +675,16 @@ class TestWriteFile:
     async def test_write_open_error_propagates(
         self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def fail_open(path: Path, flags: int, mode: int = 0o777) -> int:
-            del path, flags, mode
-            raise OSError(errno.ENOSPC, 'No space left on device')
+        original_open = os.open
+
+        def fail_open(  # pragma: no cover - the target open always raises
+            path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            if path == 'new.txt':
+                raise OSError(errno.ENOSPC, 'No space left on device')
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
 
         monkeypatch.setattr(os, 'open', fail_open)
         with pytest.raises(OSError, match='No space left on device'):

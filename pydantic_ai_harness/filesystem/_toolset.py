@@ -203,6 +203,41 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._check_access(self._relative_to_root(resolved), write=write, check_allowed=check_allowed)
         return resolved
 
+    def _open_root_directory(self) -> int:
+        """Open the configured root without following a replacement symlink."""
+        root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            return os.open(self._real_root, root_flags)
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise ModelRetry('Filesystem root changed to a symlink. Retry the write.') from e
+            raise
+
+    def _open_beneath_root(self, root_descriptor: int, resolved: Path, flags: int, mode: int = 0o666) -> int:
+        """Open a canonical target through non-symlinked descriptors below an anchored root."""
+        relative_parts = resolved.relative_to(self._real_root).parts
+        directory_descriptor = root_descriptor
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+        try:
+            for component in relative_parts[:-1]:
+                next_descriptor = os.open(component, directory_flags, dir_fd=directory_descriptor)
+                if directory_descriptor != root_descriptor:
+                    os.close(directory_descriptor)
+                directory_descriptor = next_descriptor
+
+            target = relative_parts[-1] if relative_parts else '.'
+            return os.open(target, flags, mode, dir_fd=directory_descriptor)
+        finally:
+            if directory_descriptor != root_descriptor:
+                os.close(directory_descriptor)
+
+    def _open_write_target(self, root_descriptor: int, resolved: Path, flags: int) -> int:
+        """Open a write target with POSIX descriptor containment where available."""
+        if os.name == 'nt':  # pragma: no cover - exercised in Windows CI
+            return os.open(resolved, flags, 0o666)
+        return self._open_beneath_root(root_descriptor, resolved, flags)
+
     @_recoverable
     async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
         """Read a text file with line numbers.
@@ -248,6 +283,14 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Confirmation message with new hash.
         """
+        root_descriptor = self._open_root_directory() if os.name != 'nt' else -1
+        try:
+            return self._write_file_under_root(root_descriptor, path, content, expected_hash)
+        finally:
+            if root_descriptor >= 0:
+                os.close(root_descriptor)
+
+    def _write_file_under_root(self, root_descriptor: int, path: str, content: str, expected_hash: str | None) -> str:
         resolved = self._safe_resolve(path, write=True)
 
         if resolved.exists() and not resolved.is_file():
@@ -259,10 +302,11 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         # Opening without O_TRUNC lets us classify the descriptor and check the
         # expected hash before changing the file. POSIX non-blocking mode keeps
-        # a FIFO swapped into place from waiting for a reader; O_NOFOLLOW keeps
-        # a final-component symlink swap from redirecting the descriptor. Windows
-        # has no filesystem FIFO equivalent, and O_BINARY leaves newline handling
-        # to the text wrapper just as Path.write_text does.
+        # a FIFO swapped into place from waiting for a reader. On POSIX, walking
+        # from the root descriptor with O_NOFOLLOW protects each ancestor from a
+        # concurrent symlink replacement. Windows has no filesystem FIFO
+        # equivalent, and O_BINARY leaves newline handling to the text wrapper
+        # just as Path.write_text does.
         platform_flags = os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW
         access_flags = os.O_RDWR if expected_hash is not None else os.O_WRONLY
         created = False
@@ -273,10 +317,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             # recreates it, while bounding churn from a concurrently replaced path.
             for _ in range(3):
                 try:
-                    descriptor = os.open(resolved, access_flags | platform_flags | os.O_CREAT | os.O_EXCL, 0o666)
+                    descriptor = self._open_write_target(
+                        root_descriptor, resolved, access_flags | platform_flags | os.O_CREAT | os.O_EXCL
+                    )
                 except FileExistsError:
                     try:
-                        descriptor = os.open(resolved, access_flags | platform_flags)
+                        descriptor = self._open_write_target(root_descriptor, resolved, access_flags | platform_flags)
                     except FileNotFoundError:
                         continue
                 else:
@@ -289,6 +335,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 raise ModelRetry(
                     f'Path {path!r} encountered a symlink loop or changed to a symlink before opening.'
                 ) from e
+            if e.errno == errno.ENOTDIR:
+                raise ModelRetry(f'Path {path!r} changed to a symlink or non-directory ancestor before opening.') from e
             if e.errno in (errno.EISDIR, errno.ENODEV, errno.ENXIO):
                 raise ModelRetry(f'Path {path!r} exists and is not a regular file.') from e
             raise
