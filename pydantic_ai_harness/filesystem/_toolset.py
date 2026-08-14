@@ -203,11 +203,24 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._check_access(self._relative_to_root(resolved), write=write, check_allowed=check_allowed)
         return resolved
 
+    def _directory_open_flags(self) -> int:
+        """Return flags for searching a directory without requiring read permission."""
+        search_flag = getattr(os, 'O_SEARCH', getattr(os, 'O_PATH', getattr(os, 'O_EXEC', os.O_RDONLY)))
+        return search_flag | os.O_DIRECTORY | os.O_NOFOLLOW
+
+    def _verify_directory_descriptor(self, descriptor: int) -> None:
+        """Reject a non-directory descriptor returned by platform-specific path flags."""
+        if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
+            os.close(descriptor)
+            raise OSError(errno.ENOTDIR, 'Not a directory')
+
     def _open_root_directory(self) -> int:
         """Open the configured root without following a replacement symlink."""
-        root_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        root_flags = self._directory_open_flags()
         try:
-            return os.open(self._real_root, root_flags)
+            descriptor = os.open(self._real_root, root_flags)
+            self._verify_directory_descriptor(descriptor)
+            return descriptor
         except OSError as e:
             if e.errno == errno.ELOOP:
                 raise ModelRetry('Filesystem root changed to a symlink. Retry the write.') from e
@@ -217,11 +230,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Open a canonical target through non-symlinked descriptors below an anchored root."""
         relative_parts = resolved.relative_to(self._real_root).parts
         directory_descriptor = root_descriptor
-        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory_flags = self._directory_open_flags()
 
         try:
             for component in relative_parts[:-1]:
                 next_descriptor = os.open(component, directory_flags, dir_fd=directory_descriptor)
+                self._verify_directory_descriptor(next_descriptor)
                 if directory_descriptor != root_descriptor:
                     os.close(directory_descriptor)
                 directory_descriptor = next_descriptor

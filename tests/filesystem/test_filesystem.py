@@ -447,6 +447,28 @@ class TestWriteFile:
 
         assert (nested / 'file.txt').read_text() == 'nested content\n'
 
+    @pytest.mark.skipif(os.name == 'nt', reason='Search-only directory descriptors require POSIX.')
+    async def test_write_through_search_only_ancestor(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        ancestor = fs_root / 'search-only'
+        ancestor.mkdir()
+        ancestor.chmod(0o300)
+        try:
+            await toolset.write_file('search-only/file.txt', 'nested content\n')
+        finally:
+            ancestor.chmod(0o700)
+
+        assert (ancestor / 'file.txt').read_text() == 'nested content\n'
+
+    @pytest.mark.skipif(os.name == 'nt', reason='Search-only directory descriptors require POSIX.')
+    async def test_write_through_search_only_root(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        fs_root.chmod(0o300)
+        try:
+            await toolset.write_file('search-only-root.txt', 'root content\n')
+        finally:
+            fs_root.chmod(0o700)
+
+        assert (fs_root / 'search-only-root.txt').read_text() == 'root content\n'
+
     @pytest.mark.parametrize('recreated_by_peer', [False, True])
     async def test_write_reclassifies_target_deleted_before_fallback_open(
         self,
@@ -625,6 +647,33 @@ class TestWriteFile:
             await toolset.write_file('safe/file.txt', 'outside root\n')
 
         assert outside_target.read_text() == 'must remain unchanged\n'
+
+    @pytest.mark.skipif(os.name == 'nt', reason='Descriptor-relative containment requires POSIX.')
+    async def test_write_rejects_non_directory_ancestor_descriptor(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        safe = fs_root / 'safe'
+        safe.mkdir()
+        (safe / 'file.txt').write_text('inside root\n')
+        replacement = fs_root / 'replacement.txt'
+        replacement.write_text('must remain unchanged\n')
+        original_open = os.open
+
+        def return_regular_descriptor(  # pragma: no cover - the simulated ancestor always returns a replacement fd
+            path: str | Path, flags: int, mode: int = 0o777, *, dir_fd: int | None = None
+        ) -> int:
+            if path == 'safe' and flags & os.O_DIRECTORY:
+                assert dir_fd is not None
+                return original_open(replacement, os.O_RDONLY)
+            if dir_fd is None:
+                return original_open(path, flags, mode)
+            return original_open(path, flags, mode, dir_fd=dir_fd)
+
+        monkeypatch.setattr(os, 'open', return_regular_descriptor)
+        with pytest.raises(ModelRetry, match="Path 'safe/file.txt' changed to a symlink or non-directory ancestor"):
+            await toolset.write_file('safe/file.txt', 'outside root\n')
+
+        assert replacement.read_text() == 'must remain unchanged\n'
 
     @pytest.mark.skipif(os.name == 'nt', reason='O_NOFOLLOW requires POSIX.')
     async def test_write_retries_when_root_becomes_symlink(
