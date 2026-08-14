@@ -3698,18 +3698,18 @@ modal = [
 mongodb = [
     { name = "pymongo" },
 ]
+prompt-injection-defender = [
+    { name = "stackone-defender", marker = "python_full_version >= '3.11'" },
+]
+prompt-injection-defender-ml = [
+    { name = "stackone-defender", extra = ["onnx"], marker = "python_full_version >= '3.11'" },
+]
 skills = [
     { name = "pyyaml" },
 ]
 stackone = [
     { name = "fastmcp" },
     { name = "pydantic-ai-slim", extra = ["mcp"] },
-]
-stackone-defender = [
-    { name = "stackone-defender", marker = "python_full_version >= '3.11'" },
-]
-stackone-defender-ml = [
-    { name = "stackone-defender", extra = ["onnx"], marker = "python_full_version >= '3.11'" },
 ]
 temporal = [
     { name = "pydantic-ai-slim", extra = ["temporal"] },
@@ -3757,10 +3757,10 @@ requires-dist = [
     { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.19" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.17.0" },
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
-    { name = "stackone-defender", marker = "python_full_version >= '3.11' and extra == 'stackone-defender'", specifier = ">=0.7.3,<0.8" },
-    { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'stackone-defender-ml'", specifier = ">=0.7.3,<0.8" },
+    { name = "stackone-defender", marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender'", specifier = ">=0.7.3,<0.8" },
+    { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
 ]
-provides-extras = ["acp", "browser-use", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "skills", "stackone", "stackone-defender", "stackone-defender-ml", "temporal"]
+provides-extras = ["acp", "browser-use", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "prompt-injection-defender", "prompt-injection-defender-ml", "skills", "stackone", "temporal"]
 
 [package.metadata.requires-dev]
 dev = [

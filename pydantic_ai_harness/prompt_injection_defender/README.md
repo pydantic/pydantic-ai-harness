@@ -1,9 +1,13 @@
----
-title: Prompt Injection Defender
-description: Classify local tool results for indirect prompt injection using Defender by StackOne.
----
-
 # Prompt Injection Defender
+
+> [!NOTE]
+> Import this capability from its submodule -- there is no top-level `pydantic_ai_harness` re-export:
+>
+> ```python
+> from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
+> ```
+>
+> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
 
 `PromptInjectionDefender` checks normally returned local tool results for indirect
 prompt injection using [defender](https://github.com/StackOneHQ/defender-py) by
@@ -15,8 +19,6 @@ result that the built-in defense rejects with a short notice. Use `on_detection`
 to observe flagged verdicts.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/prompt_injection_defender/)
-
-> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
 
 ## Installation
 
@@ -68,7 +70,7 @@ replaces the rejected result before the model sees it.
 - `semantic_detection`: add local ML classification for free text, including bare
   string return values. This requires the `prompt-injection-defender-ml` extra.
 - `tool_filter`: classify all tools, selected tool names, or tools accepted by a
-  [`ToolSelector`](/ai/api/pydantic-ai/tools/#pydantic_ai.tools.ToolSelector).
+  [`ToolSelector`](https://pydantic.dev/docs/ai/api/pydantic-ai/tools/#pydantic_ai.tools.ToolSelector).
 - `on_detection`: run a sync or async callback for each flagged verdict. A
   `ToolReturn` can produce separate verdicts for its return value and additional
   content items. An exception from the callback fails the run.
@@ -141,9 +143,19 @@ load the model before the first tool result.
 
 ## Further reading
 
-- [Pydantic AI capabilities](/ai/capabilities/overview/)
+- [Pydantic AI capabilities](https://pydantic.dev/docs/ai/capabilities/overview/)
 - [defender-py](https://github.com/StackOneHQ/defender-py)
 
-## API reference
+## API
 
-::: pydantic_ai_harness.prompt_injection_defender.PromptInjectionDefender
+```python {test="skip"}
+PromptInjectionDefender(
+    defense: PromptDefense | None = None,
+    *,
+    block_high_risk: bool | None = None,
+    semantic_detection: bool = False,
+    tool_filter: ToolSelector = 'all',
+    on_detection: OnDetection | None = None,
+    blocked_message: str = ...,
+)
+```

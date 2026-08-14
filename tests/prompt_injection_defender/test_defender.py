@@ -1,4 +1,4 @@
-"""Tests for pydantic_ai_harness.stackone_prompt_defender."""
+"""Tests for pydantic_ai_harness.prompt_injection_defender."""
 
 from __future__ import annotations
 
@@ -8,15 +8,16 @@ from typing import Any
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnPart
+from pydantic_ai.messages import CachePoint, TextContent, ToolCallPart, ToolReturn, ToolReturnPart, UserContent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.usage import RunUsage
 from stackone_defender import DefenseResult, PromptDefense
 
-from pydantic_ai_harness.stackone_prompt_defender import StackOnePromptDefender
+from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
 
 pytestmark = pytest.mark.anyio
+requires_onnx = pytest.mark.skipif(importlib.util.find_spec('onnxruntime') is None, reason='requires ONNX Runtime')
 
 
 @pytest.fixture
@@ -41,7 +42,7 @@ def _call(tool_name: str = 'fetch') -> ToolCallPart:
     return ToolCallPart(tool_name=tool_name, args='{}', tool_call_id='call-1')
 
 
-async def _run(cap: StackOnePromptDefender[object], result: Any, *, tool_name: str = 'fetch') -> Any:
+async def _run(cap: PromptInjectionDefender[object], result: Any, *, tool_name: str = 'fetch') -> Any:
     return await cap.after_tool_execute(
         _make_ctx(), call=_call(tool_name), tool_def=ToolDefinition(name=tool_name), args={}, result=result
     )
@@ -61,17 +62,17 @@ def _recorder() -> tuple[list[DefenseResult], Any]:
 
 def test_invalid_blocked_message_raises() -> None:
     with pytest.raises(UserError, match='blocked_message'):
-        StackOnePromptDefender(blocked_message='{unknown}')
+        PromptInjectionDefender(blocked_message='{unknown}')
 
 
 def test_defense_with_block_high_risk_raises() -> None:
     with pytest.raises(UserError, match='block_high_risk'):
-        StackOnePromptDefender(_observe(), block_high_risk=True)
+        PromptInjectionDefender(_observe(), block_high_risk=True)
 
 
 def test_defense_with_semantic_detection_raises() -> None:
     with pytest.raises(UserError, match='semantic_detection'):
-        StackOnePromptDefender(_observe(), semantic_detection=True)
+        PromptInjectionDefender(_observe(), semantic_detection=True)
 
 
 def test_semantic_detection_without_onnx_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -80,20 +81,22 @@ def test_semantic_detection_without_onnx_raises(monkeypatch: pytest.MonkeyPatch)
 
     monkeypatch.setattr(importlib.util, 'find_spec', no_spec)
     with pytest.raises(UserError, match='ONNX Runtime'):
-        StackOnePromptDefender(semantic_detection=True)
+        PromptInjectionDefender(semantic_detection=True)
 
 
+@requires_onnx
 def test_semantic_detection_constructs_when_onnx_present() -> None:
-    StackOnePromptDefender(semantic_detection=True)
+    PromptInjectionDefender(semantic_detection=True)
 
 
 def test_ordering_is_innermost() -> None:
-    assert StackOnePromptDefender(_observe()).get_ordering().position == 'innermost'
+    assert PromptInjectionDefender(_observe()).get_ordering().position == 'innermost'
 
 
 # --- Warmup ---------------------------------------------------------------
 
 
+@requires_onnx
 async def test_before_run_warms_semantic(monkeypatch: pytest.MonkeyPatch) -> None:
     warmups: list[bool] = []
 
@@ -101,7 +104,7 @@ async def test_before_run_warms_semantic(monkeypatch: pytest.MonkeyPatch) -> Non
         warmups.append(True)
 
     monkeypatch.setattr(PromptDefense, 'warmup_tier2', record_warmup)
-    await StackOnePromptDefender(semantic_detection=True).before_run(_make_ctx())
+    await PromptInjectionDefender(semantic_detection=True).before_run(_make_ctx())
     assert warmups == [True]
 
 
@@ -110,21 +113,21 @@ async def test_before_run_skips_warmup_without_semantic(monkeypatch: pytest.Monk
         raise AssertionError('warmup must not run without semantic_detection')
 
     monkeypatch.setattr(PromptDefense, 'warmup_tier2', fail_if_called)
-    await StackOnePromptDefender(_observe()).before_run(_make_ctx())
+    await PromptInjectionDefender(_observe()).before_run(_make_ctx())
 
 
 # --- Classify / block / observe ------------------------------------------
 
 
 async def test_non_matching_tool_filter_passes_through() -> None:
-    cap = StackOnePromptDefender(block_high_risk=True, tool_filter=['other_tool'])
+    cap = PromptInjectionDefender(block_high_risk=True, tool_filter=['other_tool'])
     result = {'body': INJECTION}
     assert await _run(cap, result) is result
 
 
 async def test_clean_result_passes_through_no_callback() -> None:
     verdicts, on_detection = _recorder()
-    cap = StackOnePromptDefender(_observe(), on_detection=on_detection)
+    cap = PromptInjectionDefender(_observe(), on_detection=on_detection)
     result = {'body': 'quarterly report attached'}
     assert await _run(cap, result) is result
     assert verdicts == []
@@ -132,23 +135,26 @@ async def test_clean_result_passes_through_no_callback() -> None:
 
 async def test_flagged_result_reported_and_passed_through() -> None:
     verdicts, on_detection = _recorder()
-    cap = StackOnePromptDefender(_observe(), on_detection=on_detection)
+    cap = PromptInjectionDefender(_observe(), on_detection=on_detection)
     result = {'body': INJECTION}
     assert await _run(cap, result) is result
     assert len(verdicts) == 1
-    assert verdicts[0].detections == ['ignore_previous']
 
 
-async def test_high_risk_without_findings_reported() -> None:
+async def test_allowed_high_risk_without_findings_is_reported_and_passes_through() -> None:
     # `default_risk_level='high'` yields an escalated verdict with no detections: the report-on-risk path.
     verdicts, on_detection = _recorder()
-    cap = StackOnePromptDefender(
+    cap = PromptInjectionDefender(
         PromptDefense(enable_tier2=False, default_risk_level='high'), on_detection=on_detection
     )
     result = {'body': 'nothing suspicious'}
     assert await _run(cap, result) is result
     assert len(verdicts) == 1
-    assert verdicts[0].risk_level == 'high'
+    verdict = verdicts[0]
+    assert verdict.allowed
+    assert verdict.risk_level == 'high'
+    assert verdict.detections == []
+    assert verdict.fields_sanitized == []
 
 
 async def test_async_on_detection_awaited() -> None:
@@ -157,28 +163,29 @@ async def test_async_on_detection_awaited() -> None:
     async def on_detection(ctx: Any, call: ToolCallPart, verdict: DefenseResult) -> None:
         verdicts.append(verdict)
 
-    cap = StackOnePromptDefender(_observe(), on_detection=on_detection)
+    cap = PromptInjectionDefender(_observe(), on_detection=on_detection)
     await _run(cap, {'body': INJECTION})
     assert len(verdicts) == 1
 
 
 async def test_blocks_high_risk_result() -> None:
-    out = await _run(StackOnePromptDefender(block_high_risk=True), {'body': INJECTION})
+    out = await _run(PromptInjectionDefender(block_high_risk=True), {'body': INJECTION})
     assert isinstance(out, ToolReturn)
     assert isinstance(out.return_value, str)
-    assert '`fetch`' in out.return_value
-    assert 'high' in out.return_value
-    assert (
-        out.metadata[  # type: ignore[index]
-            'prompt_injection'
-        ]['blocked']
-        is True
-    )
+    assert 'withheld' in out.return_value
+
+
+async def test_blocked_result_includes_prompt_injection_diagnostics() -> None:
+    out = await _run(PromptInjectionDefender(block_high_risk=True), {'body': INJECTION})
+    assert isinstance(out, ToolReturn)
+    metadata: Any = out.metadata
+    assert metadata['prompt_injection']['blocked'] is True
+    assert metadata['prompt_injection']['risk_level'] == 'high'
 
 
 async def test_blocks_tool_return_result() -> None:
     result: ToolReturn[object] = ToolReturn(return_value={'body': INJECTION}, content='extra context')
-    out = await _run(StackOnePromptDefender(block_high_risk=True), result)
+    out = await _run(PromptInjectionDefender(block_high_risk=True), result)
     assert isinstance(out, ToolReturn)
     assert isinstance(out.return_value, str)
     assert 'withheld' in out.return_value
@@ -187,28 +194,28 @@ async def test_blocks_tool_return_result() -> None:
 async def test_tool_return_clean_passes_through() -> None:
     # No content exercises the single-value path.
     result: ToolReturn[object] = ToolReturn(return_value={'body': 'ok'})
-    assert await _run(StackOnePromptDefender(_observe()), result) is result
+    assert await _run(PromptInjectionDefender(_observe()), result) is result
 
 
-async def test_tool_return_content_is_classified(monkeypatch: pytest.MonkeyPatch) -> None:
-    # content is model-visible, so it must be scanned alongside return_value.
-    seen: list[object] = []
-    defense = _observe()
-    inner = defense.defend_tool_result_async
+@pytest.mark.parametrize('content', [INJECTION, [CachePoint(), INJECTION], [TextContent(INJECTION)]])
+async def test_blocks_injection_in_tool_return_content(content: str | list[UserContent]) -> None:
+    result: ToolReturn[object] = ToolReturn(return_value={'body': 'ok'}, content=content)
+    out = await _run(PromptInjectionDefender(block_high_risk=True), result)
+    assert isinstance(out, ToolReturn)
+    assert isinstance(out.return_value, str)
+    assert 'withheld' in out.return_value
 
-    async def spy(value: object, tool_name: str) -> DefenseResult:
-        seen.append(value)
-        return await inner(value, tool_name)
 
-    monkeypatch.setattr(defense, 'defend_tool_result_async', spy)
-    result: ToolReturn[object] = ToolReturn(return_value={'body': 'ok'}, content='extra context')
-    assert await _run(StackOnePromptDefender(defense), result) is result
-    assert {'body': 'ok'} in seen
-    assert 'extra context' in seen
+async def test_tool_return_content_metadata_is_not_classified() -> None:
+    result: ToolReturn[object] = ToolReturn(
+        return_value={'body': 'ok'},
+        content=[TextContent('clean', metadata={'body': INJECTION})],
+    )
+    assert await _run(PromptInjectionDefender(block_high_risk=True), result) is result
 
 
 async def test_custom_blocked_message() -> None:
-    cap = StackOnePromptDefender(block_high_risk=True, blocked_message='Blocked at {risk_level} risk.')
+    cap = PromptInjectionDefender(block_high_risk=True, blocked_message='Blocked at {risk_level} risk.')
     out = await _run(cap, {'body': INJECTION})
     assert out.return_value == 'Blocked at high risk.'
 
@@ -217,7 +224,7 @@ async def test_blocks_injection_past_large_array_threshold() -> None:
     # Defender samples arrays longer than 1000 by default; the built-in defense disables that,
     # so an injection in the tail is still classified and blocked.
     result = [{'body': 'clean'} for _ in range(1000)] + [{'body': INJECTION}]
-    out = await _run(StackOnePromptDefender(block_high_risk=True), result)
+    out = await _run(PromptInjectionDefender(block_high_risk=True), result)
     assert isinstance(out, ToolReturn)
     assert isinstance(out.return_value, str)
     assert 'withheld' in out.return_value
@@ -228,7 +235,7 @@ async def test_blocks_injection_past_large_array_threshold() -> None:
 
 async def test_agent_blocks_injected_tool_result() -> None:
     agent: Agent[None, str] = Agent(
-        TestModel(call_tools=['fetch']), capabilities=[StackOnePromptDefender(block_high_risk=True)]
+        TestModel(call_tools=['fetch']), capabilities=[PromptInjectionDefender(block_high_risk=True)]
     )
 
     @agent.tool_plain
@@ -244,7 +251,7 @@ async def test_agent_blocks_injected_tool_result() -> None:
 
 async def test_agent_passes_clean_result_through() -> None:
     agent: Agent[None, str] = Agent(
-        TestModel(call_tools=['fetch']), capabilities=[StackOnePromptDefender(block_high_risk=True)]
+        TestModel(call_tools=['fetch']), capabilities=[PromptInjectionDefender(block_high_risk=True)]
     )
 
     @agent.tool_plain
