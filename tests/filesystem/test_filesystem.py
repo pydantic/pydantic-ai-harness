@@ -5,6 +5,7 @@ from __future__ import annotations
 import errno
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic_ai import Agent
@@ -15,11 +16,13 @@ from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES, FileSystem
 from pydantic_ai_harness.filesystem._toolset import (
+    _OUTSIDE_WORKSPACE,
     FileSystemToolset,
     _content_hash,
     _format_lines,
     _is_binary,
     _recoverable,
+    _sanitize_recoverable_error,
 )
 
 
@@ -1166,9 +1169,7 @@ def _assert_no_host_root(message: str, root: Path) -> None:
 class TestModelSafeRecoverableErrors:
     """OS-raised filesystem errors must not leak absolute host paths into `ModelRetry`."""
 
-    async def test_write_through_file_hides_host_path(
-        self, toolset: FileSystemToolset[None], fs_root: Path
-    ) -> None:
+    async def test_write_through_file_hides_host_path(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         # `read_file('hello.txt/nested')` is the issue reproduction on macOS, where
         # `Path.resolve()` raises `NotADirectoryError`. On Linux and Windows, resolve
         # succeeds and `read_file` returns a tool-authored relative message instead.
@@ -1201,13 +1202,104 @@ class TestModelSafeRecoverableErrors:
         absolute = str(fs_root / 'hello.txt' / 'nested')
 
         @_recoverable
-        async def boom(self: FileSystemToolset[None]) -> str:
+        async def boom(self: FileSystemToolset[Any]) -> str:
             raise error_type(err_no, strerror, absolute)
 
         with pytest.raises(ModelRetry) as exc_info:
-            await boom(toolset)
+            await boom(toolset)  # type: ignore[arg-type]
         message = str(exc_info.value)
         _assert_no_host_root(message, fs_root)
         assert 'hello.txt/nested' in message.replace('\\', '/')
         assert strerror in message
         assert f'[Errno {err_no}]' in message
+
+    def test_filename2_is_root_relative(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        source = str(fs_root / 'src.txt')
+        destination = str(fs_root / 'dst.txt')
+        error = OSError(errno.EXDEV, 'Invalid cross-device link', source, None, destination)
+        message = _sanitize_recoverable_error(error, real_root)
+        _assert_no_host_root(message, fs_root)
+        assert 'src.txt' in message
+        assert 'dst.txt' in message
+        assert 'Invalid cross-device link' in message
+
+    def test_outside_root_path_is_redacted(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        outside = fs_root.parent / 'private' / 'secret.txt'
+        error = FileNotFoundError(errno.ENOENT, 'No such file or directory', str(outside))
+        message = _sanitize_recoverable_error(error, real_root)
+        _assert_no_host_root(message, fs_root)
+        assert str(outside) not in message
+        assert str(fs_root.parent) not in message
+        assert str(fs_root.parent).replace('\\', '\\\\') not in message
+        assert _OUTSIDE_WORKSPACE in message
+
+    def test_tool_authored_value_error_is_unchanged(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        error = ValueError('old_text not found in hello.txt.')
+        assert _sanitize_recoverable_error(error, real_root) == str(error)
+
+    def test_oserror_without_filename_is_unchanged(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        error = FileNotFoundError('File not found: hello.txt')
+        assert error.filename is None
+        assert _sanitize_recoverable_error(error, real_root) == 'File not found: hello.txt'
+
+    def test_relative_filename_is_preserved(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        error = PermissionError(errno.EACCES, 'Permission denied', 'hello.txt')
+        message = _sanitize_recoverable_error(error, real_root)
+        assert message == f"[Errno {errno.EACCES}] Permission denied: 'hello.txt'"
+
+    def test_errno_none_does_not_leak_path(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        error = OSError()
+        error.filename = str(fs_root / 'hello.txt')
+        error.errno = None
+        error.strerror = None
+        message = _sanitize_recoverable_error(error, real_root)
+        _assert_no_host_root(message, fs_root)
+        assert 'hello.txt' in message
+        assert _OUTSIDE_WORKSPACE not in message
+
+    def test_unpathlike_filename_is_redacted(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        error = OSError(errno.ENOENT, 'No such file or directory')
+        error.filename = object()
+        message = _sanitize_recoverable_error(error, real_root)
+        assert _OUTSIDE_WORKSPACE in message
+        assert str(fs_root) not in message
+
+    def test_realpath_alias_is_normalized(self, fs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        alias = fs_root.parent / 'alias-root'
+        filename = str(alias / 'hello.txt')
+
+        def fake_realpath(path: object, *args: object, **kwargs: object) -> str:
+            text = os.fsdecode(os.fspath(path))  # type: ignore[arg-type]
+            alias_text = str(alias)
+            if text == alias_text or text.startswith(alias_text + os.sep):
+                return str(real_root / Path(text).relative_to(alias))
+            return os.path.normpath(text)
+
+        monkeypatch.setattr(os.path, 'realpath', fake_realpath)
+        error = FileNotFoundError(errno.ENOENT, 'No such file or directory', filename)
+        message = _sanitize_recoverable_error(error, real_root)
+        assert str(alias) not in message
+        assert str(alias).replace('\\', '\\\\') not in message
+        assert 'hello.txt' in message
+        assert _OUTSIDE_WORKSPACE not in message
+
+    def test_realpath_oserror_redacts_outside_path(self, fs_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        outside = fs_root.parent / 'secret.txt'
+
+        def boom(path: object) -> str:
+            raise OSError('realpath failed')
+
+        monkeypatch.setattr(os.path, 'realpath', boom)
+        error = FileNotFoundError(errno.ENOENT, 'No such file or directory', str(outside))
+        message = _sanitize_recoverable_error(error, real_root)
+        assert _OUTSIDE_WORKSPACE in message
+        assert str(outside) not in message

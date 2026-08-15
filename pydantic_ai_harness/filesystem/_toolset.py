@@ -28,6 +28,47 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
 # converts these so the agent can correct itself and continue.
 _RECOVERABLE_ERRORS = (PermissionError, FileNotFoundError, NotADirectoryError, IsADirectoryError, ValueError)
 
+_OUTSIDE_WORKSPACE = '<outside-workspace>'
+"""Placeholder used when an OS path cannot be shown relative to the workspace root."""
+
+
+def _model_safe_filename(filename: str | bytes, real_root: Path) -> str:
+    """Return a workspace-relative path, or `_OUTSIDE_WORKSPACE` if that is unsafe."""
+    try:
+        raw = os.fsdecode(filename)
+    except TypeError:
+        return _OUTSIDE_WORKSPACE
+    path = Path(raw)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.relative_to(real_root).as_posix()
+    except ValueError:
+        pass
+    try:
+        return Path(os.path.realpath(path)).relative_to(real_root).as_posix()
+    except (ValueError, OSError):
+        return _OUTSIDE_WORKSPACE
+
+
+def _sanitize_recoverable_error(error: BaseException, real_root: Path) -> str:
+    """Render a recoverable error without exposing absolute host paths.
+
+    Non-`OSError` exceptions and `OSError` instances with no `filename` are
+    returned as `str(error)`, preserving tool-authored messages. OS-raised
+    errors keep `errno` and `strerror`, and rewrite `filename`/`filename2` to
+    workspace-relative paths. Paths that cannot be represented relative to
+    `real_root` become `_OUTSIDE_WORKSPACE`.
+    """
+    if not isinstance(error, OSError) or error.filename is None:
+        return str(error)
+
+    filename = _model_safe_filename(error.filename, real_root)
+    if error.filename2 is not None:
+        filename2 = _model_safe_filename(error.filename2, real_root)
+        return f'[Errno {error.errno}] {error.strerror}: {filename!r} -> {filename2!r}'
+    return f'[Errno {error.errno}] {error.strerror}: {filename!r}'
+
 
 def _recoverable(
     fn: Callable[Concatenate[FileSystemToolset, _P], Awaitable[str]],
@@ -39,7 +80,9 @@ def _recoverable(
         try:
             return await fn(self, *args, **kwargs)
         except _RECOVERABLE_ERRORS as e:
-            raise ModelRetry(str(e)) from e
+            # `_recoverable` is module-level, so `self._real_root` trips reportPrivateUsage.
+            real_root: Path = getattr(self, '_real_root')
+            raise ModelRetry(_sanitize_recoverable_error(e, real_root)) from e
 
     return wrapper
 
