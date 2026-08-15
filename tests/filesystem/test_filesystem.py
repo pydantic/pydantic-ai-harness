@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,13 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES, FileSystem
-from pydantic_ai_harness.filesystem._toolset import FileSystemToolset, _content_hash, _format_lines, _is_binary
+from pydantic_ai_harness.filesystem._toolset import (
+    FileSystemToolset,
+    _content_hash,
+    _format_lines,
+    _is_binary,
+    _recoverable,
+)
 
 
 class TestFormatLines:
@@ -1144,3 +1152,62 @@ class TestPatternCanonicalization:
         # `**/secrets*` must protect a root-level secrets file, not just nested ones.
         result = await ts.search_files('PRIVATE KEY')
         assert 'secrets.yaml' not in result
+
+
+def _assert_no_host_root(message: str, root: Path) -> None:
+    """Fail if `message` names the host workspace root in any common spelling."""
+    variants = {str(root), str(root.resolve()), os.path.realpath(root)}
+    for variant in variants:
+        assert variant not in message
+        assert variant.replace('\\', '/') not in message
+        assert variant.replace('\\', '\\\\') not in message
+
+
+class TestModelSafeRecoverableErrors:
+    """OS-raised filesystem errors must not leak absolute host paths into `ModelRetry`."""
+
+    async def test_write_through_file_hides_host_path(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        # `read_file('hello.txt/nested')` is the issue reproduction on macOS, where
+        # `Path.resolve()` raises `NotADirectoryError`. On Linux and Windows, resolve
+        # succeeds and `read_file` returns a tool-authored relative message instead.
+        # `write_file` still hits the OS (`parent` exists as a file), so it is the
+        # public operation that leaks on every supported platform.
+        with pytest.raises(ModelRetry) as exc_info:
+            await toolset.write_file('hello.txt/nested', 'x')
+        message = str(exc_info.value)
+        _assert_no_host_root(message, fs_root)
+        assert 'hello.txt/nested' in message.replace('\\', '/')
+        assert 'Errno' in message
+
+    @pytest.mark.parametrize(
+        ('error_type', 'err_no', 'strerror'),
+        [
+            (PermissionError, errno.EACCES, 'Permission denied'),
+            (FileNotFoundError, errno.ENOENT, 'No such file or directory'),
+            (NotADirectoryError, errno.ENOTDIR, 'Not a directory'),
+            (IsADirectoryError, errno.EISDIR, 'Is a directory'),
+        ],
+    )
+    async def test_os_raised_subclasses_are_root_relative(
+        self,
+        toolset: FileSystemToolset[None],
+        fs_root: Path,
+        error_type: type[OSError],
+        err_no: int,
+        strerror: str,
+    ) -> None:
+        absolute = str(fs_root / 'hello.txt' / 'nested')
+
+        @_recoverable
+        async def boom(self: FileSystemToolset[None]) -> str:
+            raise error_type(err_no, strerror, absolute)
+
+        with pytest.raises(ModelRetry) as exc_info:
+            await boom(toolset)
+        message = str(exc_info.value)
+        _assert_no_host_root(message, fs_root)
+        assert 'hello.txt/nested' in message.replace('\\', '/')
+        assert strerror in message
+        assert f'[Errno {err_no}]' in message
