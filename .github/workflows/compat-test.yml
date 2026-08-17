@@ -32,15 +32,6 @@ on:
 permissions:
   contents: read
 
-# `UV_FROZEN=1` so the lock-resolved sync + the editable-overlay of pydantic-ai-slim /
-# pydantic-graph stays put when the subsequent `uv run ruff/pyright/pytest` calls fire.
-# Without this, `uv run` auto-re-resolves against PyPI ("Ignoring existing lockfile due
-# to change in resolution mode"), silently uninstalls the overlay, and ends up testing
-# harness main against whatever `pydantic-ai-slim` is on PyPI — i.e. the compat check
-# becomes a no-op against the actual pydantic-ai checkout we wanted to validate.
-env:
-  UV_FROZEN: '1'
-
 jobs:
   compat:
     name: harness vs pydantic-ai @ ${{ inputs.pydantic-ai-ref }}
@@ -88,7 +79,16 @@ jobs:
             -e "${RUNNER_TEMP}/pydantic-ai/pydantic_ai_slim" \
             -e "${RUNNER_TEMP}/pydantic-ai/pydantic_graph"
 
-      - run: uv run ruff format --check
-      - run: uv run ruff check
-      - run: uv run pyright
-      - run: uv run pytest
+      # Keep `--no-sync`: the editable overrides are intentionally not represented in
+      # `uv.lock`, so a regular `uv run` would remove them and restore the locked wheels.
+      - run: uv run --no-sync ruff format --check
+      - run: uv run --no-sync ruff check
+      - run: uv run --no-sync pyright
+      - run: uv run --no-sync pytest
+
+      - name: Verify the requested pydantic-ai checkout remained installed
+        run: |
+          uv pip show pydantic-ai-slim \
+            | grep -Fx "Editable project location: ${RUNNER_TEMP}/pydantic-ai/pydantic_ai_slim"
+          uv pip show pydantic-graph \
+            | grep -Fx "Editable project location: ${RUNNER_TEMP}/pydantic-ai/pydantic_graph"

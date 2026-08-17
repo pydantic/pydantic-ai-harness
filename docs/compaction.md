@@ -9,9 +9,11 @@ Compaction is a menu of strategies for keeping an agent's conversation history w
 
 All strategies preserve tool-call / tool-return **pairing**. Core does not validate this, and a provider rejects an orphaned pair, so the pairing guarantee is what makes these safe to drop into an agent. The zero-LLM strategies never call a model; only `SummarizingCompaction` (and `TieredCompaction` when it escalates that far) spends tokens.
 
+On OpenAI and Anthropic, core also ships [provider-native compaction](https://pydantic.dev/docs/ai/capabilities/compaction/) — the provider summarizes history server-side. The strategies on this page are the model-agnostic alternative: they work with every model and keep the compaction logic (and its costs) under your control.
+
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/compaction/)
 
-> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
 ## The problem
 
@@ -32,7 +34,7 @@ An agent that runs for many turns accumulates history: tool outputs, file reads,
 
 ## Triggers
 
-Every size-based strategy triggers on `max_messages`, `max_tokens` (estimated), or `max_fraction`. Token counts use a ~4-chars-per-token heuristic by default; pass a `tokenizer` callable (for example `tiktoken`) for accuracy. `DeduplicateFileReads` runs on every request when no trigger is set (it is cheap and near-lossless). `TieredCompaction` triggers and stops on a single `target_tokens` / `target_fraction` budget. `ClampOversizedMessages` triggers per *part* (`max_part_tokens` / `max_part_chars`), not on the whole history -- the failure it targets is one oversized part, not a large total.
+Every size-based strategy triggers on `max_messages`, `max_tokens` (estimated), or `max_fraction`. Token counts anchor on the provider-reported usage of the most recent model response when one is available. That provider usage includes the instructions, tool definitions, and `FilePart` payloads sent in the anchored request; only the messages added since are estimated. The suffix after the anchor, or a history with no usage anchor, uses `tokenizer` or a ~4-chars-per-token heuristic and cannot see `FilePart` payloads. Pending tool schemas newly revealed for the request are conservatively estimated by the implementation. `DeduplicateFileReads` runs on every request when no trigger is set (it is cheap and near-lossless). `TieredCompaction` triggers and stops on a single `target_tokens` / `target_fraction` budget. `ClampOversizedMessages` triggers per *part* (`max_part_tokens` / `max_part_chars`), not on the whole history -- the failure it targets is one oversized part, not a large total.
 
 ### `max_fraction`: one setting for every model
 
@@ -42,7 +44,7 @@ An absolute `max_tokens` is only correct for the model it was measured against. 
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import SummarizingCompaction
+from pydantic_ai_harness import SummarizingCompaction
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -64,7 +66,7 @@ Every capability that takes a fraction takes the fallback too, so you are not st
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import SummarizingCompaction
+from pydantic_ai_harness import SummarizingCompaction
 
 agent = Agent(
     'google-gla:gemini-2.5-pro',
@@ -96,7 +98,7 @@ Resolution can also succeed and be wrong, which `fallback_context_window` cannot
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import SummarizingCompaction
+from pydantic_ai_harness import SummarizingCompaction
 
 agent = Agent(
     'openai:gpt-4o',  # served by a local endpoint with a smaller window than the registry records
@@ -106,7 +108,12 @@ agent = Agent(
 
 ### What counts toward the fraction
 
-The estimator counts every part that is sent: prompts, system prompts, tool calls and their results, retry prompts, extended-thinking blocks, provider-side tool results, and the instructions, once. It is a ~4-characters-per-token approximation, not a tokenizer; pass `tokenizer=` to any strategy to measure with the real one. `FilePart` is not counted -- its payload is binary, and its length in characters would mean nothing.
+With a usage anchor, the provider-reported usage covers everything billed for the anchored request,
+including its instructions, tool definitions, and `FilePart` payloads. For the suffix after the
+anchor, and for a whole history with no usage anchor, the estimator uses `tokenizer` when supplied
+or a ~4-characters-per-token heuristic. That estimated portion cannot see `FilePart` payloads.
+Pending tool schemas newly revealed for the request are conservatively estimated by the
+implementation, since they are not covered by the earlier anchor.
 
 **If you already set an absolute `max_tokens`, re-check it.** The estimator used to count only user and system prompts, tool returns, response text, and tool calls. `ThinkingPart` / `CompactionPart` content, `RetryPromptPart` content, `NativeToolCallPart` / `NativeToolReturnPart`, and the most recent `ModelRequest.instructions` are now counted too, so the same history measures higher and an unchanged `max_tokens` compacts earlier. How much earlier depends on how much of the history is thinking blocks, retries, and instructions; on a thinking-heavy tool-calling history it can be several times the old count. What each strategy clears is unchanged -- only when it runs.
 
@@ -116,7 +123,7 @@ A strategy knows when to act but says nothing about how close the run is to the 
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import ReportContextUsage, SummarizingCompaction
+from pydantic_ai_harness import ReportContextUsage, SummarizingCompaction
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -127,16 +134,23 @@ agent = Agent(
 )
 ```
 
-Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the fallback rather than the model's real one, so a gauge can show that the percentage is a guess. `on_usage` may be a coroutine function, so a gauge that pushes over a socket does not need a sync bridge. Order matters: register the monitor *after* a compaction capability to observe the compacted history, or before it to see what triggered the compaction.
+Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the fallback rather than the model's real one, so a gauge can show that the percentage is a guess. `on_usage` may be a coroutine function, so a gauge that pushes over a socket does not need a sync bridge. Order matters: register the monitor *after* a compaction capability to observe the corrected current history after same-cycle compaction, or before it to see what triggered the compaction.
 
-`used_tokens` counts the same way the triggers do: every message part that is sent, plus the most recent `ModelRequest.instructions` once. Tool schemas are outside that count, so the reading is lower than what the provider bills; tool-schema accounting is tracked in [#100](https://github.com/pydantic/pydantic-ai-harness/issues/100).
+`used_tokens` follows the accounting above: provider usage anchors include instructions, tool
+definitions, and `FilePart` payloads from the anchored request. The suffix after the anchor, or a
+history with no anchor, uses `tokenizer` or a ~4-characters-per-token heuristic and cannot see
+`FilePart` payloads. Pending newly revealed tool schemas are conservatively estimated by the
+implementation. When a compaction capability runs earlier in the same cycle, a monitor registered
+after it subtracts the rewrite's heuristic reclaim while retaining the anchor's fixed provider
+overhead.
 
 ## Compacting outside a run: `compact_now`
 
 A strategy's `compact` takes a `RunContext`, which an application holding a conversation *between* runs does not have -- and that is exactly when a user types `/compact`. `compact_now` builds a throwaway context so the same strategy the agent uses can be driven from a command handler:
 
 ```python {test="skip"}
-from pydantic_ai_harness.compaction import SummarizingCompaction, compact_now
+from pydantic_ai_harness import SummarizingCompaction
+from pydantic_ai_harness.compaction import compact_now
 
 strategy = SummarizingCompaction(max_fraction=0.9, keep_messages=20)
 history = await compact_now(
@@ -161,12 +175,7 @@ The field consensus (Anthropic, OpenCode, Letta) is to clear and dedupe first, a
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import (
-    ClearToolResults,
-    DeduplicateFileReads,
-    SummarizingCompaction,
-    TieredCompaction,
-)
+from pydantic_ai_harness import ClearToolResults, DeduplicateFileReads, SummarizingCompaction, TieredCompaction
 from pydantic_ai.messages import ToolCallPart
 
 
@@ -201,7 +210,7 @@ A single model response of repeated whitespace, or a single tool call with a gia
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import ClampOversizedMessages
+from pydantic_ai_harness import ClampOversizedMessages
 
 agent = Agent(
     'openai:gpt-4o',
@@ -223,11 +232,7 @@ Request-side parts (user prompts, tool *returns*, system prompts) are deliberate
 Use it as the first tier of `TieredCompaction`, before `ClearToolResults`:
 
 ```python
-from pydantic_ai_harness.compaction import (
-    ClampOversizedMessages,
-    ClearToolResults,
-    TieredCompaction,
-)
+from pydantic_ai_harness import ClampOversizedMessages, ClearToolResults, TieredCompaction
 
 TieredCompaction(
     tiers=[
@@ -246,7 +251,7 @@ Framework-typed tool results -- core's `search_tools` and `load_capability` retu
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import ClearToolResults
+from pydantic_ai_harness import ClearToolResults
 
 agent = Agent(
     'openai:gpt-4o',
@@ -265,7 +270,7 @@ There is no default `file_key`: identifying a file read is agent-specific, and a
 ```python
 from pydantic_ai import Agent
 from pydantic_ai.messages import ToolCallPart
-from pydantic_ai_harness.compaction import DeduplicateFileReads
+from pydantic_ai_harness import DeduplicateFileReads
 
 
 def file_key(call: ToolCallPart) -> str | None:
@@ -285,7 +290,7 @@ When the conversation exceeds the configured threshold, `SlidingWindowCompaction
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import SlidingWindowCompaction
+from pydantic_ai_harness import SlidingWindowCompaction
 
 agent = Agent(
     'openai:gpt-4o',
@@ -301,7 +306,7 @@ When old context still matters but must be compressed, `SummarizingCompaction` s
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import SummarizingCompaction
+from pydantic_ai_harness import SummarizingCompaction
 
 agent = Agent(
     'openai:gpt-4o',
@@ -327,7 +332,7 @@ The summary call is a real request to the model, so its full usage -- tokens **a
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.compaction import WarnNearLimits
+from pydantic_ai_harness import WarnNearLimits
 
 agent = Agent(
     'openai:gpt-4o',
@@ -368,7 +373,7 @@ The span name is the static `compact_messages`; the strategy is an attribute, no
 Compaction is a memory wipe the model cannot veto and often cannot detect, which invites *resumption drift* -- the model confabulates continuity with history it no longer has. A receipt makes the wipe legible: after a boundary-crossing strategy rewrites history it appends a short, deterministic note recording how much was compacted, warning that what survives is secondhand, and -- when a handle provider is attached -- an identifier for persisted run history.
 
 ```python
-from pydantic_ai_harness.compaction import SlidingWindowCompaction, SummarizingCompaction
+from pydantic_ai_harness import SlidingWindowCompaction, SummarizingCompaction
 
 SummarizingCompaction(max_messages=60, keep_messages=20, receipts=True)
 SlidingWindowCompaction(max_messages=80, keep_messages=40, receipts=True)
@@ -408,7 +413,7 @@ The `Planning` capability does not need pinning: its plan is re-injected ephemer
 User turns are the highest signal-per-token content in a conversation, and losing them is the main driver of resumption drift. `SummarizingCompaction(keep_user_messages=True)` preserves the newest user turns from the summarized prefix alongside the summary. They consume the existing `keep_messages` tail budget, so at most that many retained user messages and tail messages survive together; compaction therefore does not grow retained copies on each cycle. When `keep_tokens` is set, those same retained user messages and tail messages also share its token budget; a user turn that does not fit is summarized instead. Each retained turn is bounded to `keep_user_messages_max_chars` (default 20k) with an explicit truncation marker when it overruns. The character budget applies per part and is shared across the text items of a multi-part prompt; images, audio, and cache points pass through untouched. This supersedes `preserve_first_user_message`, which keeps only the first turn.
 
 ```python
-from pydantic_ai_harness.compaction import SummarizingCompaction
+from pydantic_ai_harness import SummarizingCompaction
 
 SummarizingCompaction(max_tokens=120_000, keep_messages=20, keep_user_messages=True)
 ```

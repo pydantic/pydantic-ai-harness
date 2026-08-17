@@ -6,7 +6,19 @@ repos:
       - id: check-yaml
       - id: check-toml
       - id: end-of-file-fixer
+        exclude: >-
+          (?x)^(
+              tests/.*/cassettes/.*|
+              tests/coder/test_coder_integration\.py|
+              tests/researcher/test_researcher_integration\.py
+          )$
       - id: trailing-whitespace
+        exclude: >-
+          (?x)^(
+              tests/.*/cassettes/.*|
+              tests/coder/test_coder_integration\.py|
+              tests/researcher/test_researcher_integration\.py
+          )$
       - id: check-added-large-files
         args: [--maxkb=1024]
         exclude: uv.lock
@@ -21,6 +33,7 @@ repos:
     rev: v0.21.0
     hooks:
       - id: yamlfmt
+        exclude: ^tests/.*/cassettes/.*$
 
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
     rev: v1.23.1
