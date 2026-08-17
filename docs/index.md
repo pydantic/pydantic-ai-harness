@@ -171,6 +171,7 @@ Finding and reading things on the open web.
 | [X Search](/ai/capabilities/x-search/) | Core | Search X; native on xAI, subagent fallback elsewhere |
 | [Exa Search](exa-search.md) | Harness | Web research via [Exa](https://exa.ai): excerpted search, full-page reads, opt-in cited deep search |
 | [Exa Agent](exa-search.md) | Harness | Delegate open-ended research to the Exa Agent API |
+| [Keenable Search](keenable-search.md) | Harness | Web research via [Keenable](https://keenable.ai): excerpted search and full-page reads, keyless and with no extra to install |
 | [Browser Use](browser-use.md) | Harness | Hand web tasks to an autonomous [browser-use](https://github.com/browser-use/browser-use) agent driving a real browser |
 
 ### Reasoning, planning & delegation
