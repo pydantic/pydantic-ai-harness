@@ -7,8 +7,11 @@ preservation, and in-place tool-result clearing -- anything used by more than on
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
+from json import dumps
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from weakref import ReferenceType, ref
 
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.messages import (
@@ -20,16 +23,20 @@ from pydantic_ai.messages import (
     ModelResponsePart,
     NativeToolCallPart,
     NativeToolReturnPart,
+    RetryPromptPart,
+    SpeechPart,
     SystemPromptPart,
     TextContent,
     TextPart,
     ThinkingPart,
+    ToolAvailabilityDeltaPart,
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models import AbstractModel, Model
 from pydantic_ai.tools import RunContext
-from typing_extensions import Self
+from typing_extensions import Self, assert_never
 
 from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW, resolve_context_window
 from pydantic_ai_harness.compaction._pinning import is_pinned
@@ -42,7 +49,8 @@ from pydantic_ai_harness.compaction._receipts import (
 )
 
 if TYPE_CHECKING:
-    from pydantic_ai.models import Model, ModelRequestContext
+    from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
+    from pydantic_ai.tools import ToolDefinition
 
 # ---------------------------------------------------------------------------
 # Token estimation
@@ -51,9 +59,14 @@ if TYPE_CHECKING:
 _CHARS_PER_TOKEN = 4
 """Rough approximation: ~4 characters per token on average."""
 
+_COMPACTION_RECLAIM: ContextVar[tuple[ReferenceType[object], int] | None] = ContextVar(
+    'pydantic_ai_harness.compaction.reclaim', default=None
+)
+"""Heuristic reclaim from compaction that ran earlier in this request's hook chain."""
 
-def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
-    """Collect all text segments from a sequence of messages.
+
+def _collect_message_text(messages: Sequence[ModelMessage]) -> list[str]:
+    """Collect all text segments from a sequence of messages, excluding instructions.
 
     Every part that carries text the provider is sent counts, including the ones a run only
     grows under load: a retry prompt, an extended-thinking block, the result of a
@@ -68,34 +81,82 @@ def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
     segments: list[str] = []
     for msg in messages:
         if isinstance(msg, ModelRequest):
-            for part in msg.parts:
-                if isinstance(part, UserPromptPart):
-                    segments.append(_user_prompt_text_for_counting(part))
-                elif isinstance(part, SystemPromptPart):
-                    segments.append(part.content)
-                else:
-                    # Everything else a request can carry is a retry prompt or a tool return
-                    # of some kind -- the tool-search and capability-load returns subclass
-                    # `ToolReturnPart` -- and all of them are sent.
-                    segments.append(str(part.content))
+            for request_part in msg.parts:
+                segments.extend(_request_part_text(request_part))
         else:
-            for part in msg.parts:
-                if isinstance(part, TextPart):
-                    segments.append(part.content)
-                elif isinstance(part, ToolCallPart):
-                    segments.append(part.tool_name)
-                    segments.append(str(part.args))
-                elif isinstance(part, (ThinkingPart, CompactionPart)):
-                    # A redacted thinking block carries a signature and no text.
-                    segments.append(part.content or '')
-                elif isinstance(part, NativeToolCallPart):
-                    segments.append(part.tool_name)
-                    segments.append(str(part.args))
-                elif isinstance(part, NativeToolReturnPart):
-                    segments.append(part.tool_name)
-                    segments.append(str(part.content))
+            for response_part in msg.parts:
+                segments.extend(_response_part_text(response_part))
+    return segments
+
+
+def _collect_text(messages: Sequence[ModelMessage]) -> list[str]:
+    """Collect all text segments from a sequence of messages, instructions included."""
+    segments = _collect_message_text(messages)
     segments.extend(_instructions_text(messages))
     return segments
+
+
+def _request_part_text(part: ModelRequestPart) -> list[str]:
+    """Text segments a single request part contributes to the token estimate."""
+    if isinstance(part, UserPromptPart):
+        return [_user_prompt_text_for_counting(part)]
+    elif isinstance(part, SystemPromptPart):
+        return [part.content]
+    elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
+        # Both are sent in full. The tool-search and capability-load returns subclass
+        # `ToolReturnPart`, so they arrive here too.
+        return [str(part.content)]
+    # Control bookkeeping rather than message text: it records which tools became available, and
+    # the schemas themselves travel in the request's tool definitions. Those schemas are not free
+    # -- this estimator counts no tool definitions at all, so revealing tools mid-run costs
+    # context it does not see (tracked separately); skipping the part is not a claim that the
+    # reveal was free.
+    elif isinstance(part, ToolAvailabilityDeltaPart):
+        return []
+    elif isinstance(part, SpeechPart):  # pyright: ignore[reportUnnecessaryIsInstance]
+        # A realtime turn arrives as spoken audio plus a transcript. Count the transcript -- the
+        # words the provider bills against the window -- not the binary audio, which has no
+        # character-count meaning (as with `FilePart`).
+        #
+        # `SpeechPart` is the last member of the union today, so pyright sees this `isinstance` as
+        # redundant, but it is kept explicit so the `else` stays a real branch at runtime rather
+        # than dead code -- see the `else` comment.
+        return [part.transcript or '']
+    else:
+        # A part pydantic-ai added after this was written. Skip rather than guess at its payload:
+        # this runs on every request to decide whether to compact, so an unrecognised part must
+        # not take the run down -- which is exactly what the old `str(part.content)` fallback did
+        # once a part without `content` existed (#577).
+        #
+        # `assert_never` sits under `TYPE_CHECKING` rather than in the branch body on purpose. It
+        # still makes the chain exhaustive at type-check time, so a new upstream part fails
+        # `make typecheck` and becomes a decision we make; but unlike the usual runtime form it
+        # cannot re-crash a user who upgrades pydantic-ai ahead of us, which is the failure this
+        # change exists to remove.
+        if TYPE_CHECKING:
+            assert_never(part)
+        return []  # pragma: no cover - reachable only on a pydantic-ai release newer than this one
+
+
+def _response_part_text(part: ModelResponsePart) -> list[str]:
+    """Text segments a single response part contributes to the token estimate."""
+    if isinstance(part, TextPart):
+        return [part.content]
+    elif isinstance(part, ToolCallPart):
+        return [part.tool_name, str(part.args)]
+    elif isinstance(part, (ThinkingPart, CompactionPart)):
+        # A redacted thinking block carries a signature and no text.
+        return [part.content or '']
+    elif isinstance(part, NativeToolCallPart):
+        return [part.tool_name, str(part.args)]
+    elif isinstance(part, NativeToolReturnPart):
+        return [part.tool_name, str(part.content)]
+    elif isinstance(part, SpeechPart):
+        # `SpeechPart` is in both unions; a realtime assistant turn lands here. Count its
+        # transcript for the same reason as on the request side.
+        return [part.transcript or '']
+    # Any other response part (e.g. `FilePart`) contributes no counted text, as before.
+    return []
 
 
 def _instructions_text(messages: Sequence[ModelMessage]) -> list[str]:
@@ -152,16 +213,134 @@ def estimate_token_count(
     return sum(len(s) for s in segments) // _CHARS_PER_TOKEN
 
 
+def estimate_context_tokens(
+    messages: Sequence[ModelMessage],
+    tokenizer: Callable[[str], int] | None = None,
+    *,
+    model_request_parameters: ModelRequestParameters | None = None,
+) -> int:
+    """Best-available token count for the request this history would produce.
+
+    Anchors on the most recent `ModelResponse` carrying provider-reported usage: its
+    `input_tokens` measured everything the provider was actually sent for that request --
+    instructions, tool definitions, and every prior message -- and its `output_tokens` measured
+    the response's own parts, so their sum is ground truth for the history up to and including
+    that response. Only the messages after the anchor are estimated with the character
+    heuristic (or *tokenizer*), without re-counting instructions, which the anchor already
+    covers. Tool schemas named by availability deltas after the anchor are estimated from the
+    pending request parameters. This is what makes the estimate robust where the pure heuristic
+    is not: token-dense content (minified JSON, base64, non-Latin scripts) and the tool
+    definitions the heuristic cannot see at all are both inside the provider's number.
+
+    Without provider usage, the history's message text falls back to `estimate_token_count`,
+    while schemas named by availability deltas are still estimated from the pending request
+    parameters.
+
+    A history rewritten *after* the anchor's request went out (a compaction strategy editing
+    older messages mid-cycle) is overestimated, because the anchor still describes the
+    pre-rewrite request; the next real response re-anchors it. `TieredCompaction` compensates
+    inside its escalation loop by subtracting each tier's estimated reclaim from its anchored
+    baseline. Compacting slightly early is the cheap failure mode; the heuristic's multi-x
+    underestimate on dense content, which lets the history blow the context window, is the
+    expensive one.
+    """
+    if anchor := _latest_usage_anchor(messages):
+        index, message = anchor
+        anchored = message.usage.input_tokens + message.usage.output_tokens
+        segments = _collect_message_text(messages[index + 1 :])
+        # The anchor paid for the instructions in force when its request was made. When the
+        # latest instructions differ (dynamic instructions, or a persisted history resumed
+        # under a new prompt), the new set is absent from both the anchor and the message
+        # text, so count it; when unchanged, counting it would double what the anchor holds.
+        current_instructions = _instructions_text(messages)
+        if current_instructions != _instructions_text(messages[: index + 1]):
+            segments = [*segments, *current_instructions]
+        segments.extend(_revealed_tool_schema_text(messages[index + 1 :], model_request_parameters))
+        if tokenizer is not None:
+            return anchored + sum(tokenizer(s) for s in segments)
+        return anchored + sum(len(s) for s in segments) // _CHARS_PER_TOKEN
+    segments = [*_collect_text(messages), *_revealed_tool_schema_text(messages, model_request_parameters)]
+    if tokenizer is not None:
+        return sum(tokenizer(s) for s in segments)
+    return sum(len(s) for s in segments) // _CHARS_PER_TOKEN
+
+
+def has_context_usage_anchor(messages: Sequence[ModelMessage]) -> bool:
+    """Return whether `estimate_context_tokens` uses provider-reported usage for *messages*."""
+    return _latest_usage_anchor(messages) is not None
+
+
+def _latest_usage_anchor(messages: Sequence[ModelMessage]) -> tuple[int, ModelResponse] | None:
+    """Return the most recent response with provider-reported input usage."""
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if isinstance(message, ModelResponse) and message.usage.input_tokens:
+            return index, message
+    return None
+
+
+def _revealed_tool_names(messages: Sequence[ModelMessage]) -> set[str]:
+    """Return tool names recorded as newly available in *messages*."""
+    return {
+        tool_name
+        for message in messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, ToolAvailabilityDeltaPart)
+        for tool_name in part.tools_added
+    }
+
+
+def _revealed_tool_schema_text(
+    messages: Sequence[ModelMessage], model_request_parameters: ModelRequestParameters | None
+) -> list[str]:
+    """Return schemas added to the request by availability deltas in *messages*."""
+    if model_request_parameters is None:
+        return []
+    return [
+        _tool_schema_text(tool)
+        for tool_name in _revealed_tool_names(messages)
+        if (tool := model_request_parameters.tool_defs.get(tool_name)) is not None
+    ]
+
+
+def _tool_schema_text(tool: ToolDefinition) -> str:
+    """Return the model-visible text fields of a tool definition for local estimation."""
+    return ''.join((tool.name, tool.description or '', dumps(tool.parameters_json_schema, sort_keys=True)))
+
+
+def record_compaction_reclaim(request_context: ModelRequestContext, before: int, after: int) -> None:
+    """Record a conservative correction for a later usage reporter in this hook chain."""
+    previous = _COMPACTION_RECLAIM.get()
+    reclaimed = max(before - after, 0)
+    if previous is not None and previous[0]() is request_context:
+        reclaimed += previous[1]
+    _COMPACTION_RECLAIM.set((ref(request_context), reclaimed))
+
+
+def get_compaction_reclaim(request_context: ModelRequestContext) -> int:
+    """Return the reclaim recorded for *request_context*, if it is still current."""
+    previous = _COMPACTION_RECLAIM.get()
+    if previous is None or previous[0]() is not request_context:
+        return 0
+    return previous[1]
+
+
 def exceeds(
     messages: Sequence[ModelMessage],
     max_messages: int | None,
     max_tokens: int | None,
     tokenizer: Callable[[str], int] | None,
+    *,
+    model_request_parameters: ModelRequestParameters | None = None,
 ) -> bool:
     """Return True if *messages* exceeds either configured size threshold."""
     if max_messages is not None and len(messages) > max_messages:
         return True
-    if max_tokens is not None and estimate_token_count(messages, tokenizer) > max_tokens:
+    if (
+        max_tokens is not None
+        and estimate_context_tokens(messages, tokenizer, model_request_parameters=model_request_parameters) > max_tokens
+    ):
         return True
     return False
 
@@ -217,10 +396,21 @@ def context_for_request(
     return replace(ctx, model=request_context.model)
 
 
+def is_realtime_model(model: AbstractModel | str) -> bool:
+    """Whether *model* is a realtime model: an `AbstractModel` that is not a request-response `Model`.
+
+    A realtime model has no request-response context-window/token semantics, so the token
+    triggers skip it. Written as a boolean check (rather than an inline `isinstance`) so callers
+    keep the `AbstractModel | str` type -- narrowing against the un-parameterized generic `Model`
+    would otherwise widen the value to `Model[Unknown]`. #585
+    """
+    return isinstance(model, AbstractModel) and not isinstance(model, Model)
+
+
 def resolve_token_trigger(
     max_tokens: int | None,
     max_fraction: float | None,
-    model: Model | str,
+    model: AbstractModel | str,
     fallback_context_window: int = DEFAULT_CONTEXT_WINDOW,
     context_window: int | None = None,
 ) -> int | None:
@@ -241,7 +431,16 @@ def resolve_token_trigger(
     Pass the model the request will actually be sent to. A capability may replace
     `ModelRequestContext.model` before the request leaves, so the run's model and the request's
     model are not always the same one.
+
+    `RunContext.model` is typed as the wider `AbstractModel`, but a realtime session never
+    compacts: its message history can't be modified mid-run, so the compaction hooks that call
+    this never fire, and `model` is a request-response `Model` at runtime. The realtime guard
+    below only keeps that wider type sound -- it returns `None`. #585
     """
+    if is_realtime_model(model):
+        # Unreachable at runtime (a realtime session doesn't compact, see above); the guard exists
+        # only because `RunContext.model` is now the wider `AbstractModel`. #585
+        return None
     if max_tokens is not None:
         return max_tokens
     if max_fraction is None:

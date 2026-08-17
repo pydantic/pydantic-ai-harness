@@ -20,10 +20,12 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
+    SpeechPart,
     SystemPromptPart,
     TextContent,
     TextPart,
     ThinkingPart,
+    ToolAvailabilityDeltaPart,
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
@@ -607,6 +609,33 @@ class TestSearchScope:
         assert 'Retry [readfile]: please retry' in rendered  # RetryPromptPart is searchable
         assert '...' in rendered  # truncation applied to the long tool return / args
 
+    async def test_tool_availability_delta_is_not_indexed(self) -> None:
+        """Tool-list bookkeeping is not conversation content, so it contributes no line.
+
+        Built with no arguments deliberately: the indexer rejects the part on its type and
+        never reads the names it carries, and the field holding them was renamed
+        (`added` -> `tools_added`) in pydantic-ai 2.26. Naming it here would pin the test to
+        a release later than the floor the runtime actually needs.
+        """
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    UserPromptPart(content='mango question'),
+                    ToolAvailabilityDeltaPart(),
+                ]
+            ),
+            ModelResponse(parts=[TextPart(content='mango answer')]),
+        ]
+        source = _StubSource({'r1': messages})
+
+        rendered = await _search(source, 'mango')
+
+        assert 'User: mango question' in rendered
+        assert 'Assistant: mango answer' in rendered
+        # The delta contributes nothing. Before it was recognized it fell through to the
+        # `RetryPromptPart` branch, which reads `part.tool_name` and raised `AttributeError`.
+        assert 'Retry [' not in rendered
+
     async def test_user_and_text_parts_truncate_but_stay_searchable(self) -> None:
         long_user = 'pomegranate ' * 60 + 'USERTAIL'
         long_text = 'cranberry ' * 80 + 'TEXTTAIL'
@@ -764,3 +793,51 @@ class TestConfigValidation:
         await _seed_run(store, 'r1', [_user(f'needle entry {i} filler') for i in range(5)])
         with pytest.raises(ValueError, match='max_matches must be non-negative'):
             await _search(SnapshotHistorySource(store), 'needle', max_matches=-1)
+
+
+class TestSpeechIsSearchable:
+    """A realtime `SpeechPart` carries a transcript; the index renders it so speech is recallable."""
+
+    async def test_an_assistant_speech_turn_is_indexed_and_rendered(self) -> None:
+        history: list[ModelMessage] = [
+            _user('boot up'),
+            ModelResponse(parts=[SpeechPart(speaker='assistant', transcript='the PANGOLIN protocol is ready')]),
+        ]
+        rendered = await _search(_StubSource({'r1': history}), 'PANGOLIN')
+        assert 'PANGOLIN' in rendered
+        assert 'Speech [assistant]:' in rendered
+
+    async def test_a_user_speech_turn_is_indexed_and_rendered(self) -> None:
+        history: list[ModelMessage] = [
+            ModelRequest(parts=[SpeechPart(speaker='user', transcript='remember the MARMOT codeword')]),
+        ]
+        rendered = await _search(_StubSource({'r1': history}), 'MARMOT')
+        assert 'MARMOT' in rendered
+        assert 'Speech [user]:' in rendered
+
+    async def test_audio_only_speech_contributes_no_searchable_text(self) -> None:
+        """A `SpeechPart` with no transcript renders no line, so it cannot match a query."""
+        history: list[ModelMessage] = [ModelRequest(parts=[SpeechPart(speaker='user')])]
+        assert 'No matches' in await _search(_StubSource({'r1': history}), 'anything')
+
+    async def test_a_long_assistant_transcript_truncates_but_stays_searchable(self) -> None:
+        # A spoken turn is capped in the display excerpt like `TextPart`, while the full transcript
+        # stays in the index so a term past the 500-char cutoff still matches.
+        long_transcript = 'nightingale ' * 60 + 'SPEECHTAIL'
+        source = _StubSource(
+            {'r1': [_user('go'), ModelResponse(parts=[SpeechPart(speaker='assistant', transcript=long_transcript)])]}
+        )
+        rendered = await _search(source, 'SPEECHTAIL')
+        excerpts = rendered.split(':\n\n', 1)[1]
+        assert 'Found 1 match(es)' in rendered
+        assert 'SPEECHTAIL' not in excerpts
+        assert '...' in excerpts
+
+    async def test_a_long_user_transcript_truncates_but_stays_searchable(self) -> None:
+        long_transcript = 'petrichor ' * 60 + 'USERSPEECHTAIL'
+        source = _StubSource({'r1': [ModelRequest(parts=[SpeechPart(speaker='user', transcript=long_transcript)])]})
+        rendered = await _search(source, 'USERSPEECHTAIL')
+        excerpts = rendered.split(':\n\n', 1)[1]
+        assert 'Found 1 match(es)' in rendered
+        assert 'USERSPEECHTAIL' not in excerpts
+        assert '...' in excerpts

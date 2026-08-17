@@ -99,7 +99,7 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     Example:
         ```python
         from pydantic_ai import Agent
-        from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
+        from pydantic_ai_harness import PromptInjectionDefender
 
         agent = Agent(
             capabilities=[PromptInjectionDefender(block_high_risk=True)],

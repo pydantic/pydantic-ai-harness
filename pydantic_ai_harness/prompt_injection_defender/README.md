@@ -1,14 +1,5 @@
 # Prompt Injection Defender
 
-> [!NOTE]
-> Import this capability from its submodule -- there is no top-level `pydantic_ai_harness` re-export:
->
-> ```python
-> from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
-> ```
->
-> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
-
 `PromptInjectionDefender` checks normally returned local tool results for indirect
 prompt injection using [defender](https://github.com/StackOneHQ/defender-py) by
 StackOne. Use it when tools return untrusted text such as emails, tickets,
@@ -19,6 +10,9 @@ result that the built-in defense rejects with a short notice. Use `on_detection`
 to observe flagged verdicts.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/prompt_injection_defender/)
+
+> [!NOTE]
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## Installation
 
@@ -35,7 +29,7 @@ uv add "pydantic-ai-harness[prompt-injection-defender-ml]"
 ```
 
 ```python
-from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
+from pydantic_ai_harness import PromptInjectionDefender
 
 capability = PromptInjectionDefender(semantic_detection=True)
 ```
@@ -44,7 +38,7 @@ capability = PromptInjectionDefender(semantic_detection=True)
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
+from pydantic_ai_harness import PromptInjectionDefender
 
 agent = Agent(
     capabilities=[PromptInjectionDefender(block_high_risk=True)],
@@ -93,7 +87,7 @@ from pydantic_ai.messages import ToolCallPart
 from pydantic_ai.tools import RunContext
 from stackone_defender import DefenseResult
 
-from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
+from pydantic_ai_harness import PromptInjectionDefender
 
 
 def log_detection(ctx: RunContext[None], call: ToolCallPart, verdict: DefenseResult) -> None:
@@ -114,8 +108,8 @@ application and is not sent to the model.
   classified. Tool retry and failure messages raised with `ModelRetry` or
   `ToolFailed` are also outside its scope.
 - For `ToolReturn`, both `return_value` and model-visible `content` are classified.
-  Application-only `metadata` is not. A rejected result drops the original value,
-  content, and metadata.
+  `ToolReturn.metadata` and metadata on additional content items are not. A
+  rejected result drops the original value, content, and metadata.
 - The default pattern detector checks common text fields. Bare string results and
   strings in `ToolReturn.content` are treated as content fields. Other strings not
   under recognized text fields require `semantic_detection=True`.
@@ -127,7 +121,7 @@ application and is not sent to the model.
 ```python
 from stackone_defender import create_prompt_defense
 
-from pydantic_ai_harness.prompt_injection_defender import PromptInjectionDefender
+from pydantic_ai_harness import PromptInjectionDefender
 
 defense = create_prompt_defense(
     block_high_risk=True,
