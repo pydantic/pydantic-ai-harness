@@ -891,8 +891,8 @@ class TestCodeModeInterop:
 
     Folding it into `run_code` would make the model write a Monty script whose argument is a
     shell script quoted as a Python string, running the outer script on the host and the inner
-    one in the microVM. The file tools carry no command line, so they are still more useful as
-    Monty callables and stay sandboxed.
+    one in the microVM. The file tools carry no command line, so they stay sandboxed like any
+    other tool.
     """
 
     @pytest.mark.anyio(backends=['asyncio'])

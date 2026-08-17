@@ -1197,7 +1197,7 @@ class TestCodeModeInterop:
 
     Folding them into `run_code` would make the model write a Monty script whose argument is a
     shell script quoted as a Python string. The command-id tools carry no command line, so they
-    are still more useful as Monty callables and stay sandboxed.
+    stay sandboxed like any other tool.
     """
 
     @pytest.mark.anyio(backends=['asyncio'])

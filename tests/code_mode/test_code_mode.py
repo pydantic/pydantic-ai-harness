@@ -990,7 +990,9 @@ class TestCodeMode:
 
         Folding one code-execution tool into `run_code` would make the model pass a script as a
         string argument to a function inside another script. Such a tool (e.g. DynamicWorkflow's
-        `run_workflow`) is a peer of `run_code`, exposed alongside it, not inside it.
+        `run_workflow`) is a peer of `run_code`, exposed alongside it, not inside it. The guard
+        keys off `code_arg_name` alone, whatever `code_arg_language` says, so shell surfaces
+        marked with a `command` argument stay native the same way.
         """
         td_run_workflow = ToolDefinition(
             name='run_workflow',
@@ -1012,36 +1014,6 @@ class TestCodeMode:
         # ...but the code-execution tool stays native and is not folded into run_code.
         assert 'run_workflow' not in description
         assert 'run_workflow' in tools
-
-    async def test_shell_command_tool_not_sandboxed(self) -> None:
-        """The guard keys off `code_arg_name`, not on the code being Python.
-
-        A shell surface (`Shell`, `ModalSandbox`, the ACP terminal) marks its command argument
-        the same way, so a command line is not folded into `run_code` either -- the model would
-        otherwise have to quote a shell script inside a Python string.
-        """
-        td_run_command = ToolDefinition(
-            name='run_command',
-            description='Execute a shell command.',
-            parameters_json_schema={
-                'type': 'object',
-                'properties': {'command': {'type': 'string'}},
-                'required': ['command'],
-            },
-            return_schema={'type': 'string'},
-            metadata={'code_arg_name': 'command', 'code_arg_language': 'shell'},
-        )
-        static = _StaticToolset([_make_address_tool_def('get_user', 'Get a user.', 'street'), td_run_command])
-        wrapper = CodeMode[object]().get_wrapper_toolset(static)
-        assert isinstance(wrapper, CodeModeToolset)
-
-        tools = await wrapper.get_tools(build_run_context(None))
-
-        description = tools['run_code'].tool_def.description
-        assert description is not None
-        assert 'async def get_user' in description
-        assert 'run_command' not in description
-        assert 'run_command' in tools
 
     async def test_unless_native_tool_not_sandboxed(self) -> None:
         """Tools annotated with `unless_native` stay native so `Model.prepare_request` can filter them."""
