@@ -238,9 +238,10 @@ def _is_code_execution_tool(tool_def: ToolDefinition) -> bool:
     """Whether a tool is itself a code-execution surface that takes a code string.
 
     Such tools carry `code_arg_name` metadata -- the same marker instrumentation reads to render
-    the argument as code. It covers both script sandboxes (this `run_code`, DynamicWorkflow's
-    `run_workflow`) and shell surfaces (`Shell`'s `run_command`/`start_command`, ModalSandbox's
-    `run_command`), whose argument is a command line rather than a Python script. They must not
+    the argument as code. It covers script sandboxes (this `run_code`, DynamicWorkflow's
+    `run_workflow`), shell surfaces (`Shell`'s `run_command`/`start_command`, ModalSandbox's
+    `run_command`), whose argument is a command line rather than a Python script, and other
+    tools that accept a program (`CapabilityCreation`'s `author_capability`). They must not
     be folded into `run_code`: nesting one code sandbox inside another would make the model write
     a script that passes a second script as a string literal. They stay native so the two code
     surfaces sit side by side.
