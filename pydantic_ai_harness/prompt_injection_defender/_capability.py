@@ -90,8 +90,9 @@ class PromptInjectionDefender(AbstractCapability[AgentDepsT]):
     `ToolReturn.metadata` (not visible to the model).
 
     Pass `semantic_detection=True` to add the local ML classifier, which is what catches
-    injection in free text (pattern detection alone only inspects known risky fields). Pass
-    a fully configured `defense` for anything beyond the defaults.
+    injection in text under unrecognized fields (pattern detection inspects known risky
+    fields, bare string results, and `ToolReturn` content). Pass a fully configured
+    `defense` for anything beyond the defaults.
 
     Provider-native tools (for example hosted web search) run server-side and never transit
     the client, so they are not classified here.

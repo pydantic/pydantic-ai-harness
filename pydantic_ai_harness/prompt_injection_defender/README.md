@@ -20,9 +20,10 @@ to observe flagged verdicts.
 uv add "pydantic-ai-harness[prompt-injection-defender]"
 ```
 
-The capability requires Python 3.11 or newer. The base extra provides field-based
-pattern detection. To classify free text, including bare strings, install the ML
-extra and enable `semantic_detection`:
+The capability requires Python 3.11 or newer. The base extra provides pattern
+detection over recognized text fields, bare string results, and `ToolReturn`
+content. To classify text under other fields, install the ML extra and enable
+`semantic_detection`:
 
 ```bash
 uv add "pydantic-ai-harness[prompt-injection-defender-ml]"
@@ -112,7 +113,8 @@ application and is not sent to the model.
   rejected result drops the original value, content, and metadata.
 - The default pattern detector checks common text fields. Bare string results and
   strings in `ToolReturn.content` are treated as content fields. Other strings not
-  under recognized text fields require `semantic_detection=True`.
+  under recognized text fields require `semantic_detection=True`. Strings used as
+  mapping keys are not classified, even with `semantic_detection=True`.
 - Referenced media is not fetched or decoded, so instructions inside images,
   audio, video, or documents are not inspected.
 
