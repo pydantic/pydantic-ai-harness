@@ -29,6 +29,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets._tool_search import parse_discovered_tools
 from pydantic_ai.usage import RequestUsage, RunUsage
 
@@ -36,6 +37,7 @@ from pydantic_ai_harness.compaction import (
     ClampOversizedMessages,
     ClearToolResults,
     DeduplicateFileReads,
+    FallbackCompaction,
     SlidingWindowCompaction,
     SummarizingCompaction,
     TieredCompaction,
@@ -431,6 +433,78 @@ class TestSlidingWindowCompaction:
         assert len(result.messages) < 10
 
 
+class TestFallbackCompaction:
+    def test_validation_empty_chain(self):
+        with pytest.raises(ValueError, match='fallback_chain must not be empty'):
+            FallbackCompaction(fallback_chain=[])
+
+    def test_validation_empty_fallback_on(self):
+        with pytest.raises(ValueError, match='fallback_on must not be empty'):
+            FallbackCompaction(fallback_chain=[AsyncMock()], fallback_on=())
+
+    @pytest.mark.anyio
+    async def test_returns_first_success(self):
+        first = AsyncMock()
+        first.compact.return_value = [_user('summary')]
+        second = AsyncMock()
+        fallback = FallbackCompaction(fallback_chain=[first, second])
+
+        result = await fallback.compact([_user('original')], _make_ctx())
+
+        assert result == first.compact.return_value
+        second.compact.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_fallback_receives_fresh_original_list(self):
+        class MutateThenFail:
+            async def compact(self, messages: list[ModelMessage], ctx: RunContext[None]) -> list[ModelMessage]:
+                messages.clear()
+                raise RuntimeError('summary failed')
+
+        second = AsyncMock()
+        messages: list[ModelMessage] = [_user('original')]
+        second.compact.return_value = messages
+        fallback = FallbackCompaction(fallback_chain=[MutateThenFail(), second], fallback_on=(RuntimeError,))
+
+        result = await fallback.compact(messages, _make_ctx())
+
+        assert result == messages
+        assert second.compact.call_args.args[0] == messages
+
+    @pytest.mark.anyio
+    async def test_reraises_last_failure(self):
+        first = AsyncMock()
+        first.compact.side_effect = ValueError('first')
+        second = AsyncMock()
+        second.compact.side_effect = RuntimeError('last')
+        fallback = FallbackCompaction(fallback_chain=[first, second], fallback_on=(Exception,))
+
+        with pytest.raises(RuntimeError, match='last'):
+            await fallback.compact([_user('original')], _make_ctx())
+
+    @pytest.mark.anyio
+    async def test_non_matching_error_does_not_fallback(self):
+        first = AsyncMock()
+        first.compact.side_effect = ValueError('programming error')
+        second = AsyncMock()
+        fallback = FallbackCompaction(fallback_chain=[first, second])
+
+        with pytest.raises(ValueError, match='programming error'):
+            await fallback.compact([_user('original')], _make_ctx())
+        second.compact.assert_not_called()
+
+    def test_with_focus_updates_only_supported_strategies(self):
+        summarizer = SummarizingCompaction(max_messages=1)
+        sliding = SlidingWindowCompaction(max_messages=1)
+        fallback = FallbackCompaction(fallback_chain=[summarizer, sliding])
+
+        focused = fallback.with_focus('authentication')
+
+        assert focused is not fallback
+        assert 'Give particular weight to: authentication' in focused.fallback_chain[0].summary_prompt
+        assert focused.fallback_chain[1] is sliding
+
+
 # ---------------------------------------------------------------------------
 # WarnNearLimits
 # ---------------------------------------------------------------------------
@@ -813,6 +887,7 @@ class TestExports:
             'WarnNearLimits',
             'SummarizingCompaction',
             'TieredCompaction',
+            'FallbackCompaction',
         ]
         for name in names:
             assert hasattr(compaction, name)
