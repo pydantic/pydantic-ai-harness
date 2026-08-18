@@ -238,8 +238,9 @@ record it; without one the span goes to a no-op tracer.
 
 `TieredCompaction` advances when a successful tier does not reclaim enough. `FallbackCompaction`
 advances only when a strategy raises an exception selected by `fallback_on`, which defaults to
-Pydantic AI's `ModelAPIError`. Each attempt receives a fresh list containing the original messages,
-so a failed strategy cannot leave a partial rewrite for its fallback. If every strategy fails, the
+Pydantic AI's `ModelAPIError`. Each attempt receives a fresh list containing the original message
+objects, so list-level changes by a failed strategy do not affect its fallback. Strategies must
+still avoid mutating message objects. If every strategy fails, the
 last exception is re-raised. Non-matching exceptions, cancellation, and other `BaseException`
 subclasses pass through immediately.
 

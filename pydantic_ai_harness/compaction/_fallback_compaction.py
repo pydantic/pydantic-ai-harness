@@ -18,8 +18,8 @@ from pydantic_ai_harness.compaction._shared import CompactionStrategy, SupportsF
 class FallbackCompaction(Generic[AgentDepsT]):
     """Try compaction strategies in order, falling back when one raises.
 
-    Each attempt receives the original messages. `fallback_on` defaults to model
-    API errors so programming errors pass through. The last matching exception
+    Each attempt receives a fresh list containing the original message objects.
+    `fallback_on` defaults to model API errors so programming errors pass through. The last matching exception
     is re-raised if every strategy fails. `BaseException` is never caught.
     """
 
