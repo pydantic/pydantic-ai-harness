@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 
-from pydantic_ai_harness.keenable._toolset import KeenableClient, KeenableSearchToolset
+from pydantic_ai_harness.keenable._toolset import KeenableClient, KeenableSearchToolset, validated_budget
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
@@ -62,7 +62,8 @@ class KeenableSearch(AbstractCapability[AgentDepsT]):
     """Maximum characters of page text `get_page` returns.
 
     Longer pages are truncated and marked, so the model can tell that the page
-    continued past what it was shown.
+    continued past what it was shown. The marker counts against this budget,
+    which is a ceiling on everything `get_page` returns.
     """
 
     guidance: str | None = None
@@ -81,13 +82,10 @@ class KeenableSearch(AbstractCapability[AgentDepsT]):
     """
 
     def __post_init__(self) -> None:
-        """Validate the output budgets."""
-        if self.num_results < 1:
-            raise ValueError(f'num_results must be at least 1, got {self.num_results}')
-        if self.max_snippet_chars < 1:
-            raise ValueError(f'max_snippet_chars must be at least 1, got {self.max_snippet_chars}')
-        if self.max_page_chars < 1:
-            raise ValueError(f'max_page_chars must be at least 1, got {self.max_page_chars}')
+        """Validate the output budgets, so a bad one fails here and not mid-run."""
+        validated_budget('num_results', self.num_results)
+        validated_budget('max_snippet_chars', self.max_snippet_chars)
+        validated_budget('max_page_chars', self.max_page_chars)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
         """Static research guidance: search wide, read the promising pages in full, cite URLs.

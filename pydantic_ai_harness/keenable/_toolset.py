@@ -22,6 +22,7 @@ KEENABLE_REQUEST_TIMEOUT_SECONDS = 30.0
 _API_KEY_ENV = 'KEENABLE_API_KEY'
 _BASE_URL_ENV = 'KEENABLE_API_URL'
 _CLIENT_TITLE = 'Pydantic AI Harness'
+_TRUNCATION_MARKER = '\n\n[truncated]'
 
 _P = ParamSpec('_P')
 _R = TypeVar('_R')
@@ -144,15 +145,30 @@ def _normalize_base_url(base_url: str | None) -> str:
     validated anyway so a typo fails at construction rather than producing a
     plaintext request. Plain `http` is allowed only against loopback, for local
     development against a Keenable instance.
+
+    A query or fragment is rejected too: the endpoint path is appended to this
+    string, so either one would land before it and the request would go
+    somewhere other than the endpoint it names.
     """
     base = (base_url or KEENABLE_DEFAULT_BASE_URL).rstrip('/')
     parsed = httpx.URL(base)
-    if parsed.host:
+    if parsed.host and not parsed.query and not parsed.fragment:
         if parsed.scheme == 'https':
             return base
         if parsed.scheme == 'http' and parsed.host in {'localhost', '127.0.0.1', '::1'}:
             return base
-    raise UserError(f'{_BASE_URL_ENV} must be an https:// URL with a host, got {base!r}')
+    raise UserError(f'{_BASE_URL_ENV} must be an https:// URL with a host and no query or fragment, got {base!r}')
+
+
+def validated_budget(name: str, value: int) -> int:
+    """Reject a non-positive output budget.
+
+    Negative budgets are worse than useless here: they slice from the end, so
+    they would silently return the wrong text rather than fail.
+    """
+    if value < 1:
+        raise ValueError(f'{name} must be at least 1, got {value}')
+    return value
 
 
 def _recoverable(
@@ -195,7 +211,7 @@ class KeenableSearchToolset(FunctionToolset[AgentDepsT]):
     Both budgets are applied locally: `web_search` keeps `num_results` results
     and trims each excerpt to `max_snippet_chars`, and `get_page` truncates at
     `max_page_chars` and appends a marker so the model knows the page continued.
-    Bounds are validated by `KeenableSearch` at construction.
+    All three bounds are validated here as well as by `KeenableSearch`.
     """
 
     def __init__(
@@ -207,10 +223,13 @@ class KeenableSearchToolset(FunctionToolset[AgentDepsT]):
         max_page_chars: int,
     ) -> None:
         super().__init__()
+        # `KeenableSearch` validates these at construction, but the toolset is
+        # public too, so a direct caller gets the same guarantee. Validated
+        # before the client is built, so a bad budget fails on its own terms.
+        self._num_results = validated_budget('num_results', num_results)
+        self._max_snippet_chars = validated_budget('max_snippet_chars', max_snippet_chars)
+        self._max_page_chars = validated_budget('max_page_chars', max_page_chars)
         self._client: KeenableClient = client if client is not None else HttpKeenableClient()
-        self._num_results = num_results
-        self._max_snippet_chars = max_snippet_chars
-        self._max_page_chars = max_page_chars
         self.add_function(self.web_search, name='web_search')
         self.add_function(self.get_page, name='get_page')
 
@@ -225,16 +244,18 @@ class KeenableSearchToolset(FunctionToolset[AgentDepsT]):
         Returns:
             The matching pages, each with title, URL, and an excerpt.
         """
-        results = (await self._client.search(query))[: self._num_results]
+        # A result without a URL is unusable, so it is dropped before the limit
+        # is applied rather than after; otherwise one malformed entry would cost
+        # a slot and `web_search` would return fewer results than asked for.
+        found = await self._client.search(query)
+        results = [(url, result) for result in found if (url := str(result.get('url') or ''))]
+        results = results[: self._num_results]
         if not results:
             return ToolReturn(f'No results found for {query!r}.', metadata={'sources': []})
 
         lines: list[str] = []
         sources: dict[str, str | None] = {}
-        for index, result in enumerate(results, start=1):
-            url = str(result.get('url') or '')
-            if not url:
-                continue
+        for index, (url, result) in enumerate(results, start=1):
             title = result.get('title') or None
             sources[url] = str(title) if title is not None else None
             lines.append(f'{index}. {title or url}\n   {url}')
@@ -242,8 +263,6 @@ class KeenableSearchToolset(FunctionToolset[AgentDepsT]):
             if excerpt:
                 lines.append(f'   {excerpt}')
 
-        if not lines:
-            return ToolReturn(f'No results found for {query!r}.', metadata={'sources': []})
         return ToolReturn('\n'.join(lines), metadata={'sources': _source_list(sources)})
 
     @_recoverable
@@ -264,5 +283,8 @@ class KeenableSearchToolset(FunctionToolset[AgentDepsT]):
         title = page.get('title') or None
         resolved = str(page.get('url') or url)
         if len(content) > self._max_page_chars:
-            content = f'{content[: self._max_page_chars]}\n\n[truncated]'
+            # The marker counts against the budget, so make room for it; a
+            # budget too small to hold it is truncated without one.
+            keep = self._max_page_chars - len(_TRUNCATION_MARKER)
+            content = f'{content[:keep]}{_TRUNCATION_MARKER}' if keep > 0 else content[: self._max_page_chars]
         return ToolReturn(content, metadata={'sources': _source_list({resolved: str(title) if title else None})})

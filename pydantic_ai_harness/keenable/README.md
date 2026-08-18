@@ -52,7 +52,7 @@ agent = Agent(
 |---|---|---|
 | `num_results` | `5` | How many results `web_search` returns. |
 | `max_snippet_chars` | `500` | Excerpt budget per search result. |
-| `max_page_chars` | `10_000` | Page budget for `get_page`; longer pages are truncated and marked. |
+| `max_page_chars` | `10_000` | Page budget for `get_page`; longer pages are truncated and marked, with the marker counted against the budget. |
 | `guidance` | `None` | Replaces the default research instructions; `''` contributes none. |
 | `client` | `None` | A `KeenableClient` to use instead of the default HTTP client. |
 
@@ -72,7 +72,8 @@ export KEENABLE_API_KEY='keen_...'
 ```
 
 Set `KEENABLE_API_URL` to point at a different Keenable deployment. It must be
-`https`, except against loopback for local development.
+`https`, except against loopback for local development, and carry no query or
+fragment: the endpoint path is appended to it.
 
 To configure either explicitly rather than through the environment, pass a
 client:

@@ -143,6 +143,18 @@ async def test_web_search_skips_results_without_a_url():
     assert [source['url'] for source in returned.metadata['sources']] == ['https://example.com/one']
 
 
+async def test_web_search_drops_url_less_results_before_applying_the_limit():
+    # A URL-less entry ahead of good ones must not cost a result slot.
+    client = FakeClient(results=[{'title': 'No URL'}, *(_result(f'https://example.com/{i}') for i in range(3))])
+
+    returned = await _toolset(client, num_results=2).web_search('cats')
+
+    assert [source['url'] for source in returned.metadata['sources']] == [
+        'https://example.com/0',
+        'https://example.com/1',
+    ]
+
+
 async def test_web_search_reports_no_results_when_every_result_lacks_a_url():
     client = FakeClient(results=[{'title': 'No URL', 'snippet': 'text'}])
 
@@ -180,10 +192,21 @@ async def test_get_page_returns_markdown():
 async def test_get_page_truncates_and_marks_long_pages():
     client = FakeClient(page={'content': 'x' * 100})
 
-    returned = await _toolset(client, max_page_chars=10).get_page('https://example.com/one')
+    returned = await _toolset(client, max_page_chars=23).get_page('https://example.com/one')
 
+    # The marker is part of the budget, not extra: 10 characters of page text
+    # plus the 13-character marker is exactly the 23 asked for.
     assert _text(returned) == f'{"x" * 10}\n\n[truncated]'
+    assert len(_text(returned)) == 23
     assert returned.metadata['sources'][0] == KeenableSource(url='https://example.com/one', title=None)
+
+
+async def test_get_page_drops_the_marker_when_the_budget_cannot_hold_it():
+    client = FakeClient(page={'content': 'x' * 100})
+
+    returned = await _toolset(client, max_page_chars=5).get_page('https://example.com/one')
+
+    assert _text(returned) == 'x' * 5
 
 
 async def test_get_page_retries_on_empty_content():
@@ -246,6 +269,24 @@ def test_budgets_are_validated(kwargs: dict[str, Any], message: str):
         KeenableSearch[None](**kwargs)
 
 
+@pytest.mark.parametrize(
+    ('kwargs', 'message'),
+    [
+        ({'num_results': -1}, 'num_results must be at least 1'),
+        ({'max_snippet_chars': 0}, 'max_snippet_chars must be at least 1'),
+        ({'max_page_chars': -10}, 'max_page_chars must be at least 1'),
+    ],
+)
+def test_the_toolset_validates_budgets_when_built_directly(kwargs: dict[str, Any], message: str):
+    # The toolset is exported, so it cannot rely on `KeenableSearch` having
+    # validated first: a negative budget slices from the end and would return
+    # the wrong text rather than fail.
+    budgets: dict[str, Any] = {'num_results': 5, 'max_snippet_chars': 500, 'max_page_chars': 10_000}
+
+    with pytest.raises(ValueError, match=message):
+        KeenableSearchToolset[None](client=FakeClient(), **{**budgets, **kwargs})
+
+
 def test_from_spec_builds_the_default_client():
     capability = KeenableSearch[None].from_spec(num_results=2, max_snippet_chars=10, max_page_chars=20)
 
@@ -278,8 +319,19 @@ def test_base_url_accepts_https_and_loopback_http(base_url: str):
     assert HttpKeenableClient(api_key='', base_url=base_url) is not None
 
 
-@pytest.mark.parametrize('base_url', ['http://example.com', 'https://', 'not-a-url'])
-def test_base_url_rejects_plaintext_and_hostless_urls(base_url: str):
+@pytest.mark.parametrize(
+    'base_url',
+    [
+        'http://example.com',
+        'https://',
+        'not-a-url',
+        # The endpoint path is appended to the base URL, so a query or fragment
+        # would land in front of it and the request would miss the endpoint.
+        'https://api.keenable.ai?token=x',
+        'https://api.keenable.ai#frag',
+    ],
+)
+def test_base_url_rejects_plaintext_hostless_and_query_bearing_urls(base_url: str):
     with pytest.raises(UserError, match='must be an https:// URL'):
         HttpKeenableClient(api_key='', base_url=base_url)
 
