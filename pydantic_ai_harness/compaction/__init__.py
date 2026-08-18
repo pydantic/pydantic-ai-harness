@@ -25,6 +25,7 @@ from pydantic_ai_harness.compaction._shared import (
 from pydantic_ai_harness.compaction._sliding_window_compaction import SlidingWindowCompaction
 from pydantic_ai_harness.compaction._summarizing_compaction import SummarizingCompaction
 from pydantic_ai_harness.compaction._tiered_compaction import TieredCompaction
+from pydantic_ai_harness.compaction._truncating_compaction import TruncatingCompaction
 from pydantic_ai_harness.compaction._warn_near_limits import WarningKind, WarnNearLimits
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     'SupportsFocus',
     'TieredCompaction',
     'TranscriptHandleProvider',
+    'TruncatingCompaction',
     'WarnNearLimits',
     'WarningKind',
     'compact_now',

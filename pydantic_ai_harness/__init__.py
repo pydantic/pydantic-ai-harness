@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         SlidingWindowCompaction,
         SummarizingCompaction,
         TieredCompaction,
+        TruncatingCompaction,
         WarnNearLimits,
     )
     from .conversation_search import ConversationSearch
@@ -105,6 +106,7 @@ __all__ = [
     'SystemReminders',
     'TieredCompaction',
     'ToolGuardrail',
+    'TruncatingCompaction',
     'ToolOutputLimits',
     'WarnNearLimits',
     'WarnOnCacheBusts',
@@ -146,6 +148,7 @@ _CAPABILITY_EXPORTS = {
     'SystemReminders': 'system_reminders',
     'TieredCompaction': 'compaction',
     'ToolGuardrail': 'guardrails',
+    'TruncatingCompaction': 'compaction',
     'ToolOutputLimits': 'tool_output_limits',
     'WarnNearLimits': 'compaction',
     'WarnOnCacheBusts': 'warn_on_cache_busts',

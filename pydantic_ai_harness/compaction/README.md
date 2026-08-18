@@ -20,6 +20,7 @@ alternative: they work with every model and keep the compaction logic (and its c
 |---|---|---|---|
 | `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
 | `SlidingWindowCompaction` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
+| `TruncatingCompaction` | zero-LLM | Always bounds history to a recent token tail | You want deterministic truncation without a separate trigger or model call |
 | `ClearToolResults` | zero-LLM | Blanks the content of old tool *results* in place, keeping the last `keep_pairs` | Tool outputs dominate context and can be re-fetched on demand (the cheap first tier) |
 | `DeduplicateFileReads` | zero-LLM | Blanks every file read superseded by a newer read of the same file | The agent re-reads files and only the latest version matters |
 | `SummarizingCompaction` | one LLM call | Summarizes older messages into a structured summary, keeping the recent tail | Old context still matters but must be compressed; use behind the cheap tiers |
@@ -293,6 +294,18 @@ TieredCompaction(
 `SlidingWindowCompaction` keeps the last `keep_messages` down to a tail; pass `keep_tokens` instead for a token
 budget rather than a message count. By default `preserve_first_user_message=True` keeps the first user
 turn even when it falls outside the window, so the agent does not lose the original task.
+
+`TruncatingCompaction` is the token-tail specialization of `SlidingWindowCompaction`. It has no
+separate trigger: when history exceeds `keep_tokens`, it drops the oldest whole messages while
+preserving tool pairs, pins, and the first user message by default:
+
+```python
+from pydantic_ai_harness import TruncatingCompaction
+
+truncation = TruncatingCompaction(keep_tokens=50_000)
+```
+
+Use it for manual truncation or as a deterministic final `TieredCompaction` tier.
 
 `ClearToolResults` keeps the last `keep_pairs` intact. Set `clear_tool_inputs=True` to also blank the
 arguments of the cleared calls, and `exclude_tools` to a set of tool names whose results are never

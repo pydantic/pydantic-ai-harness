@@ -40,6 +40,7 @@ from pydantic_ai_harness.compaction import (
     SummarizingCompaction,
     TieredCompaction,
     TranscriptHandleProvider,
+    TruncatingCompaction,
     WarnNearLimits,
     estimate_context_tokens,
     estimate_token_count,
@@ -431,6 +432,23 @@ class TestSlidingWindowCompaction:
         assert len(result.messages) < 10
 
 
+class TestTruncatingCompaction:
+    def test_validation_negative_keep_tokens(self):
+        with pytest.raises(ValueError, match='keep_tokens must be non-negative'):
+            TruncatingCompaction(keep_tokens=-1)
+
+    @pytest.mark.anyio
+    async def test_keeps_recent_token_tail(self):
+        truncation = TruncatingCompaction(
+            keep_tokens=10,
+            tokenizer=len,
+            preserve_first_user_message=False,
+        )
+        messages: list[ModelMessage] = [_user('x' * 5) for _ in range(5)]
+        result = await truncation.before_model_request(_make_ctx(), _make_request_context(messages))
+        assert result.messages == messages[-2:]
+
+
 # ---------------------------------------------------------------------------
 # WarnNearLimits
 # ---------------------------------------------------------------------------
@@ -813,6 +831,7 @@ class TestExports:
             'WarnNearLimits',
             'SummarizingCompaction',
             'TieredCompaction',
+            'TruncatingCompaction',
         ]
         for name in names:
             assert hasattr(compaction, name)
