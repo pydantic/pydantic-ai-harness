@@ -5,7 +5,7 @@ description: A menu of strategies -- clear, dedupe, trim, or summarize -- for ke
 
 # Compaction
 
-Compaction is a menu of strategies for keeping an agent's conversation history within a model's context window. Each strategy is a Pydantic AI `Capability` that edits the message history just before each request goes out. The edits **persist** into the run's message history, so a trim, clear, or summary carries forward to later steps -- it is not recomputed from the full history every turn.
+Compaction is a menu of strategies for keeping an agent's conversation history within a model's context window. Most are Pydantic AI `Capability` classes that edit the message history just before each request goes out. `FallbackCompaction` is instead a composing `CompactionStrategy` used through `TieredCompaction` or `compact_now`; it has no request trigger of its own. The edits **persist** into the run's message history, so a trim, clear, or summary carries forward to later steps -- it is not recomputed from the full history every turn.
 
 All strategies preserve tool-call / tool-return **pairing**. Core does not validate this, and a provider rejects an orphaned pair, so the pairing guarantee is what makes these safe to drop into an agent. The zero-LLM strategies never call a model; only `SummarizingCompaction` (and `TieredCompaction` when it escalates that far) spends tokens.
 
@@ -21,7 +21,7 @@ An agent that runs for many turns accumulates history: tool outputs, file reads,
 
 ## The menu
 
-| Capability | Cost | What it does | Reach for it when |
+| Component | Cost | What it does | Reach for it when |
 |---|---|---|---|
 | `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
 | `SlidingWindowCompaction` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
@@ -204,7 +204,7 @@ A tier inside `TieredCompaction` is driven directly by the orchestrator, which r
 
 ## `FallbackCompaction`: recover when a strategy fails
 
-`TieredCompaction` advances when a successful tier does not reclaim enough. `FallbackCompaction` advances only when a strategy raises an exception selected by `fallback_on`, which defaults to Pydantic AI's `ModelAPIError`. Each attempt receives a fresh list containing the original message objects, so list-level changes by a failed strategy do not affect its fallback. Strategies must still honor the `CompactionStrategy` contract and avoid mutating message objects. If every strategy fails, the last exception is re-raised. Non-matching exceptions, cancellation, and other `BaseException` subclasses pass through immediately.
+`TieredCompaction` advances when a successful tier does not reclaim enough. `FallbackCompaction` advances only when a strategy raises an exception selected by `fallback_on`, which defaults to Pydantic AI's `ModelAPIError` and `FallbackExceptionGroup`. The latter is raised when every model in a `FallbackModel` fails. Each attempt receives a fresh list containing the original message objects, so list-level changes by a failed strategy do not affect its fallback. Strategies must still honor the `CompactionStrategy` contract and avoid mutating message objects. If every strategy fails, the last exception is re-raised. Non-matching exceptions, cancellation, and other `BaseException` subclasses pass through immediately; `fallback_on` rejects types that do not derive from `Exception`.
 
 Use it as a tier when summarization should fall back to deterministic truncation:
 

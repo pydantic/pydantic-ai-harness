@@ -1,9 +1,11 @@
 # Compaction
 
 A menu of strategies for keeping an agent's conversation history within a model's context
-window. Each is a Pydantic AI `Capability` that edits the message history just before each
-request goes out; edits **persist** into the run's message history, so a trim/clear/summary carries forward to later
-steps (it is not recomputed from the full history every turn).
+window. Most are Pydantic AI `Capability` classes that edit the message history just before each
+request goes out. `FallbackCompaction` is instead a composing `CompactionStrategy` used through
+`TieredCompaction` or `compact_now`; it has no request trigger of its own. Edits **persist** into the
+run's message history, so a trim, clear, or summary carries forward to later steps (it is not
+recomputed from the full history every turn).
 
 All strategies preserve tool-call / tool-return **pairing** -- core does not validate this, and a
 provider rejects an orphaned pair. The zero-LLM strategies never call a model.
@@ -16,7 +18,7 @@ alternative: they work with every model and keep the compaction logic (and its c
 
 ## The menu
 
-| Capability | Cost | What it does | Reach for it when |
+| Component | Cost | What it does | Reach for it when |
 |---|---|---|---|
 | `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
 | `SlidingWindowCompaction` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
@@ -238,11 +240,13 @@ record it; without one the span goes to a no-op tracer.
 
 `TieredCompaction` advances when a successful tier does not reclaim enough. `FallbackCompaction`
 advances only when a strategy raises an exception selected by `fallback_on`, which defaults to
-Pydantic AI's `ModelAPIError`. Each attempt receives a fresh list containing the original message
+Pydantic AI's `ModelAPIError` and `FallbackExceptionGroup`. The latter is raised when every model
+in a `FallbackModel` fails. Each attempt receives a fresh list containing the original message
 objects, so list-level changes by a failed strategy do not affect its fallback. Strategies must
 still avoid mutating message objects. If every strategy fails, the
 last exception is re-raised. Non-matching exceptions, cancellation, and other `BaseException`
-subclasses pass through immediately.
+subclasses pass through immediately; `fallback_on` rejects types that do not derive from
+`Exception`.
 
 ```python
 from pydantic_ai_harness import FallbackCompaction, SlidingWindowCompaction, SummarizingCompaction
