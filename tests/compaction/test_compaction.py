@@ -501,7 +501,9 @@ class TestFallbackCompaction:
         focused = fallback.with_focus('authentication')
 
         assert focused is not fallback
-        assert 'Give particular weight to: authentication' in focused.fallback_chain[0].summary_prompt
+        focused_summarizer = focused.fallback_chain[0]
+        assert isinstance(focused_summarizer, SummarizingCompaction)
+        assert 'Give particular weight to: authentication' in focused_summarizer.summary_prompt
         assert focused.fallback_chain[1] is sliding
 
 
