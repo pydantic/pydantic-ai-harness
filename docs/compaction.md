@@ -25,7 +25,7 @@ An agent that runs for many turns accumulates history: tool outputs, file reads,
 |---|---|---|---|
 | `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
 | `SlidingWindowCompaction` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
-| `TruncatingCompaction` | zero-LLM | Always bounds history to a recent token tail | You want deterministic truncation without a separate trigger or model call |
+| `TruncatingCompaction` | zero-LLM | Bounds unprotected history to a recent token tail while preserving protected messages and required tool pairs | You want deterministic truncation without a separate trigger or model call |
 | `ClearToolResults` | zero-LLM | Blanks the content of old tool *results* in place, keeping the last `keep_pairs` | Tool outputs dominate context and can be re-fetched on demand (the cheap first tier) |
 | `DeduplicateFileReads` | zero-LLM | Blanks every file read superseded by a newer read of the same file | The agent re-reads files and only the latest version matters |
 | `SummarizingCompaction` | one LLM call | Summarizes older messages into a structured summary, keeping the recent tail | Old context still matters but must be compressed; use behind the cheap tiers |
