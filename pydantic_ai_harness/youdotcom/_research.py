@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, get_args
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ToolReturn
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
+from youdotcom import models
 
 from pydantic_ai_harness.youdotcom._toolset import (
     YouClient,
@@ -20,14 +21,6 @@ from pydantic_ai_harness.youdotcom._toolset import (
     _source_list,  # pyright: ignore[reportPrivateUsage]
     validate_freshness,
 )
-
-try:
-    from youdotcom import models
-except ImportError as _import_error:  # pragma: no cover
-    raise ImportError(
-        'youdotcom is required for the You.com capabilities. '
-        'Install it with: pip install "pydantic-ai-harness[youdotcom]"'
-    ) from _import_error
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
@@ -39,8 +32,14 @@ Deep and exhaustive research routinely take minutes, well past httpx's 5 second
 default, so the blocking calls need a generous timeout.
 """
 
-_RESEARCH_EFFORTS = ('lite', 'standard', 'deep', 'exhaustive')
-_FINANCE_EFFORTS = ('deep', 'exhaustive')
+ResearchEffortName = Literal['lite', 'standard', 'deep', 'exhaustive']
+"""How hard `research` works, from a single pass up to an exhaustive investigation."""
+
+FinanceEffortName = Literal['deep', 'exhaustive']
+"""How hard `finance_research` works."""
+
+_RESEARCH_EFFORTS = get_args(ResearchEffortName)
+_FINANCE_EFFORTS = get_args(FinanceEffortName)
 
 _INSTRUCTIONS = (
     'You can get cited, synthesized answers from the You.com research APIs. Use `answer` for a '
@@ -90,8 +89,8 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
         self,
         *,
         client: YouClient | None,
-        research_effort: str,
-        finance_effort: str,
+        research_effort: ResearchEffortName,
+        finance_effort: FinanceEffortName,
         include_domains: Sequence[str] = (),
         exclude_domains: Sequence[str] = (),
         boost_domains: Sequence[str] = (),
@@ -224,14 +223,14 @@ class YouResearch(AbstractCapability[AgentDepsT]):
     default; pass `client` to configure it explicitly.
     """
 
-    research_effort: str = 'standard'
+    research_effort: ResearchEffortName = 'standard'
     """How hard `research` works: `lite`, `standard`, `deep`, or `exhaustive`.
 
     Higher levels run more searches and take longer. `frontier`, which the API
     only runs in background mode, is not supported by this capability.
     """
 
-    finance_effort: str = 'deep'
+    finance_effort: FinanceEffortName = 'deep'
     """How hard `finance_research` works: `deep` or `exhaustive`."""
 
     include_domains: Sequence[str] = field(default_factory=list[str])
@@ -305,8 +304,8 @@ class YouResearch(AbstractCapability[AgentDepsT]):
     def from_spec(
         cls,
         *,
-        research_effort: str = 'standard',
-        finance_effort: str = 'deep',
+        research_effort: ResearchEffortName = 'standard',
+        finance_effort: FinanceEffortName = 'deep',
         include_domains: Sequence[str] = (),
         exclude_domains: Sequence[str] = (),
         boost_domains: Sequence[str] = (),

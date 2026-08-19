@@ -20,10 +20,11 @@ from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ModelRequest, ModelResponse, ToolCallPart, ToolReturn, ToolReturnPart
 from pydantic_ai.models.test import TestModel
 from youdotcom.errors import YouError
-from youdotcom.sdk import You
 
 from pydantic_ai_harness.youdotcom import (
     ExtractionModeName,
+    FinanceEffortName,
+    ResearchEffortName,
     YouResearch,
     YouResearchToolset,
     YouSearch,
@@ -285,8 +286,8 @@ def _search_toolset(
 def _research_toolset(
     client: _FakeYouClient,
     *,
-    research_effort: str = 'standard',
-    finance_effort: str = 'deep',
+    research_effort: ResearchEffortName = 'standard',
+    finance_effort: FinanceEffortName = 'deep',
     include_domains: Sequence[str] = (),
     exclude_domains: Sequence[str] = (),
     boost_domains: Sequence[str] = (),
@@ -575,13 +576,12 @@ class TestYouSearchCapability:
         monkeypatch.setenv('YDC_API_KEY', 'test-key')
         toolset = YouSearch[None]().get_toolset()
         assert isinstance(toolset, YouSearchToolset)
-        assert isinstance(toolset._client, You)  # pyright: ignore[reportPrivateUsage]
 
     def test_default_client_accepts_legacy_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('YDC_API_KEY', raising=False)
         monkeypatch.setenv('YOU_API_KEY_AUTH', 'legacy-key')
         toolset = YouSearch[None]().get_toolset()
-        assert isinstance(toolset._client, You)  # pyright: ignore[reportPrivateUsage]
+        assert isinstance(toolset, YouSearchToolset)
 
     @pytest.mark.parametrize('num_results', [0, 21])
     def test_num_results_out_of_bounds_rejected(self, num_results: int) -> None:
@@ -642,15 +642,14 @@ class TestYouResearchCapability:
         monkeypatch.setenv('YDC_API_KEY', 'test-key')
         toolset = YouResearch[None]().get_toolset()
         assert isinstance(toolset, YouResearchToolset)
-        assert isinstance(toolset._client, You)  # pyright: ignore[reportPrivateUsage]
 
     def test_invalid_research_effort_rejected(self) -> None:
         with pytest.raises(ValueError, match='research_effort must be one of'):
-            YouResearch[None](research_effort='frontier')
+            YouResearch[None](research_effort='frontier')  # pyright: ignore[reportArgumentType]
 
     def test_invalid_finance_effort_rejected(self) -> None:
         with pytest.raises(ValueError, match='finance_effort must be one of'):
-            YouResearch[None](finance_effort='lite')
+            YouResearch[None](finance_effort='lite')  # pyright: ignore[reportArgumentType]
 
     def test_include_domains_conflict(self) -> None:
         with pytest.raises(ValueError, match='include_domains cannot be combined'):
