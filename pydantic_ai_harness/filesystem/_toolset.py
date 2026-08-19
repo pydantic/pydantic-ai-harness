@@ -54,19 +54,14 @@ def _model_safe_filename(filename: str | bytes, real_root: Path) -> str:
 def _sanitize_recoverable_error(error: BaseException, real_root: Path) -> str:
     """Render a recoverable error without exposing absolute host paths.
 
-    Non-`OSError` exceptions and `OSError` instances with no `filename` are
-    returned as `str(error)`, preserving tool-authored messages. OS-raised
-    errors keep `errno` and `strerror`, and rewrite `filename`/`filename2` to
-    workspace-relative paths. Paths that cannot be represented relative to
-    `real_root` become `_OUTSIDE_WORKSPACE`.
+    Errors without an OS-supplied `filename` keep their original message.
+    OS errors keep `errno` and `strerror`, and the path is rewritten relative
+    to `real_root`, or replaced with `_OUTSIDE_WORKSPACE` when it cannot be.
     """
     if not isinstance(error, OSError) or error.filename is None:
         return str(error)
 
     filename = _model_safe_filename(error.filename, real_root)
-    if error.filename2 is not None:
-        filename2 = _model_safe_filename(error.filename2, real_root)
-        return f'[Errno {error.errno}] {error.strerror}: {filename!r} -> {filename2!r}'
     return f'[Errno {error.errno}] {error.strerror}: {filename!r}'
 
 
@@ -80,8 +75,7 @@ def _recoverable(
         try:
             return await fn(self, *args, **kwargs)
         except _RECOVERABLE_ERRORS as e:
-            # `_recoverable` is module-level, so `self._real_root` trips reportPrivateUsage.
-            real_root: Path = getattr(self, '_real_root')
+            real_root = self._real_root  # pyright: ignore[reportPrivateUsage]
             raise ModelRetry(_sanitize_recoverable_error(e, real_root)) from e
 
     return wrapper
