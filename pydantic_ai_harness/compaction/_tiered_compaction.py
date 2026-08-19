@@ -41,6 +41,11 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     Each tier's own trigger is bypassed -- `TieredCompaction` drives the tiers directly via
     their ``compact`` method and decides when to stop.
 
+    By default the gate and the stop share the one ``target_tokens`` budget. Setting
+    ``trigger_tokens`` above the target adds hysteresis: the history is left untouched (and
+    the provider's prompt cache undisturbed) until it crosses the trigger, then one event
+    escalates all the way down to the target -- see `trigger_tokens`.
+
     Example:
         ```python
         from pydantic_ai import Agent
@@ -79,6 +84,27 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     different windows. Mutually exclusive with `target_tokens`.
     """
 
+    trigger_tokens: int | None = field(default=None, kw_only=True)
+    """Compact only once the estimated context exceeds this value; ``None`` gates on the target.
+
+    A trigger separate from (above) the target gives the escalation hysteresis. Gating on the
+    one target budget compacts on every request the history sits above it, and each rewrite
+    invalidates the provider's prompt cache from the first changed message onward -- so a
+    conversation hovering at the target pays a cache bust per request. With a trigger above
+    the target, the history is left byte-identical until it crosses the trigger, then ONE
+    event escalates all the way down to the target: each cache bust buys
+    ``trigger - target`` tokens of headroom before the next. Mutually exclusive with
+    `trigger_fraction`; set it at or above the target (a trigger below the target just gates
+    like the target -- escalation still stops there).
+    """
+
+    trigger_fraction: float | None = field(default=None, kw_only=True)
+    """Trigger expressed as a fraction of the model's context window, resolved per request.
+
+    Use this instead of `trigger_tokens` when the same agent runs on models with
+    different windows. Mutually exclusive with `trigger_tokens`.
+    """
+
     context_window: int | None = field(default=None, kw_only=True)
     """Window override in tokens. `None` resolves it from the request's model.
 
@@ -113,6 +139,14 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             tokens_name='target_tokens',
             fraction_name='target_fraction',
         )
+        validate_token_trigger(
+            self.trigger_tokens,
+            self.trigger_fraction,
+            self.fallback_context_window,
+            self.context_window,
+            tokens_name='trigger_tokens',
+            fraction_name='trigger_fraction',
+        )
 
     def with_focus(self, focus: str) -> TieredCompaction[AgentDepsT]:
         """Return a copy whose focus-capable tiers prioritize `focus`.
@@ -136,6 +170,18 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         """
         return resolve_token_trigger(
             self.target_tokens, self.target_fraction, model, self.fallback_context_window, self.context_window
+        )
+
+    def _trigger(self, model: AbstractModel | str) -> int | None:
+        """Absolute gate threshold: the trigger when one is configured, else the target.
+
+        The default keeps the original single-budget behavior -- gate and stop on the same
+        target -- so setting a trigger is purely opt-in hysteresis.
+        """
+        if self.trigger_tokens is None and self.trigger_fraction is None:
+            return self._target(model)
+        return resolve_token_trigger(
+            self.trigger_tokens, self.trigger_fraction, model, self.fallback_context_window, self.context_window
         )
 
     async def _escalate(
@@ -183,7 +229,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        """Escalate through the tiers when the conversation exceeds the target."""
+        """Escalate through the tiers when the conversation exceeds the trigger (or target)."""
         messages: list[ModelMessage] = list(request_context.messages)
         # The tiers get the request's context, not the run's: a tier that resolves a model --
         # a summarizing one, or a `TieredCompaction` nested inside this one -- has to reach the
@@ -191,13 +237,20 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         request_ctx = context_for_request(ctx, request_context)
         # Resolved once, so the gate and the escalation loop cannot disagree about the target.
         target = self._target(request_ctx.model)
-        if target is None or (
-            estimate_context_tokens(
-                messages,
-                self.tokenizer,
-                model_request_parameters=request_context.model_request_parameters,
+        # The gate checks the trigger; the escalation loop still runs down to the target, so
+        # with a trigger above the target one event buys `trigger - target` of headroom.
+        trigger = self._trigger(request_ctx.model)
+        if (
+            target is None
+            or trigger is None
+            or (
+                estimate_context_tokens(
+                    messages,
+                    self.tokenizer,
+                    model_request_parameters=request_context.model_request_parameters,
+                )
+                <= trigger
             )
-            <= target
         ):
             return request_context
         compacted = await compact_with_span(

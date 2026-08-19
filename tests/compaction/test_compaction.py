@@ -1973,6 +1973,48 @@ class TestTieredCompaction:
         with pytest.raises(ValueError, match='target_tokens must be positive'):
             TieredCompaction(tiers=[ClearToolResults(max_messages=1)], target_tokens=0)
 
+    def test_validation_trigger_tokens(self):
+        with pytest.raises(ValueError, match='trigger_tokens must be positive'):
+            TieredCompaction(tiers=[ClearToolResults(max_messages=1)], target_tokens=10, trigger_tokens=0)
+
+    def test_validation_trigger_mutually_exclusive(self):
+        with pytest.raises(ValueError, match='Set at most one of trigger_tokens or trigger_fraction'):
+            TieredCompaction(
+                tiers=[ClearToolResults(max_messages=1)],
+                target_tokens=10,
+                trigger_tokens=20,
+                trigger_fraction=0.5,
+            )
+
+    @pytest.mark.anyio
+    async def test_trigger_above_target_leaves_history_alone_between_events(self):
+        # ~50 tokens of history: above the 15-token target but below the 100-token
+        # trigger. Gating on the target would compact (and bust the provider's prompt
+        # cache) on every request the history sits above it; the trigger leaves the
+        # history byte-identical until crossed.
+        calls: list[str] = []
+        t1 = _RecordingTier('t1', calls, drop=4)
+        cap = TieredCompaction(tiers=[t1], target_tokens=15, trigger_tokens=100)
+        messages: list[ModelMessage] = [_user('x' * 40) for _ in range(5)]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert result.messages == messages
+        assert calls == []
+
+    @pytest.mark.anyio
+    async def test_trigger_crossed_escalates_to_the_target_not_the_trigger(self):
+        # 12 messages (~120 tokens) cross the 100-token trigger; the one event runs the
+        # tiers down to the 15-token TARGET, so the next `trigger - target` tokens of
+        # growth cost no further rewriting (hysteresis).
+        calls: list[str] = []
+        t1 = _RecordingTier('t1', calls, drop=11)  # leaves 1 message (~10 tokens) <= 15
+        cap = TieredCompaction(tiers=[t1], target_tokens=15, trigger_tokens=100)
+        messages: list[ModelMessage] = [_user('x' * 40) for _ in range(12)]
+        rc = _make_request_context(messages)
+        result = await cap.before_model_request(_make_ctx(), rc)
+        assert calls == ['t1']
+        assert len(result.messages) == 1
+
     @pytest.mark.anyio
     async def test_noop_under_target(self):
         calls: list[str] = []
