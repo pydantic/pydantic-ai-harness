@@ -9,6 +9,8 @@ description: Wrap an agent's tools into a single sandboxed run_code tool so the 
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/code_mode/)
 
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
+
 ## The problem
 
 Standard tool calling often needs another model turn for each dependent batch of tool calls. An agent that needs to fetch 10 items and then process their results can require many model turns, increasing latency, cost, and context use. Intermediate results also grow the conversation history.
@@ -73,7 +75,7 @@ Both weather lookups run in parallel and the conversions run inside Monty, all w
 
 ## Selective tool sandboxing
 
-By default, `CodeMode(tools='all')` sandboxes every eligible regular tool. Framework control tools, undiscovered deferred tools, native fallbacks, and other code-execution tools remain native. The `tools` field is a Pydantic AI `ToolSelector`, so you can control which eligible tools go through the sandbox. Tools that match the selector become callables inside `run_code`; non-matching tools stay visible to the model as regular tool calls.
+By default, `CodeMode(tools='all')` sandboxes every eligible regular tool. Framework control tools, undiscovered deferred tools, native fallbacks, and other code-execution tools remain native. Shell surfaces count as code-execution tools: `Shell`'s `run_command` and `start_command`, and `ModalSandbox`'s `run_command`, sit beside `run_code` rather than inside it, so the model never has to quote a shell command inside a generated Python string. `CapabilityCreation`'s `author_capability` stays native for the same reason: its argument is a complete Python module. Their non-command tools (`read_file`, `check_command`, and so on) are folded into `run_code` like any other tool. The `tools` field is a Pydantic AI `ToolSelector`, so you can control which eligible tools go through the sandbox. Tools that match the selector become callables inside `run_code`; non-matching tools stay visible to the model as regular tool calls.
 
 ```python
 from pydantic_ai_harness import CodeMode

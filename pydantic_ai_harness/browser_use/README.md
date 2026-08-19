@@ -9,6 +9,14 @@ the tool returns a text result.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/browser_use/)
 
+> [!NOTE]
+> This README covers the browser-use integration: one `browse_web` tool that
+> hands a goal to an autonomous agent. To have the host model drive the browser
+> itself with typed actions -- navigate, click, type, screenshot -- see
+> [`PlaywrightBrowser`](../playwright/). Give an agent one or the other: each
+> capability runs its own browser, so a session opened by one is not visible to
+> the other.
+
 ## Installation
 
 ```bash
@@ -41,7 +49,7 @@ sub-agent does the browsing and reports back.
 ```python
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -107,7 +115,8 @@ policy. Use a custom factory to introduce uploads only with controls appropriate
 to your application.
 
 ```python
-from pydantic_ai_harness.browser_use import BrowserAgentSettings, BrowserUse
+from pydantic_ai_harness import BrowserUse
+from pydantic_ai_harness.browser_use import BrowserAgentSettings
 
 BrowserUse(
     llm='anthropic:claude-sonnet-4-6',
@@ -133,7 +142,7 @@ output:
 ```python
 from pydantic import BaseModel
 
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 
 class Product(BaseModel):
@@ -158,7 +167,7 @@ browser. Scope entries to a domain with the nested form, and combine with
 `allowed_domains` so the values cannot be typed anywhere else:
 
 ```python
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 BrowserUse(
     allowed_domains=['travel.example.com'],
@@ -241,7 +250,7 @@ origin.
 ```python
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 
 async def main():
@@ -277,7 +286,7 @@ below, or to `''` to contribute no instructions at all. (`guidance` steers the
 Every field of `BrowserUse` with its default:
 
 ```python
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 BrowserUse(
     llm=None,                    # Pydantic AI model/string or browser-use chat model; None = browser-use's default
@@ -311,7 +320,8 @@ resolved `settings`, and returns the agent to run:
 ```python
 from browser_use import Agent as BrowserUseAgent
 
-from pydantic_ai_harness.browser_use import BrowserAgent, BrowserTask, BrowserUse
+from pydantic_ai_harness import BrowserUse
+from pydantic_ai_harness.browser_use import BrowserAgent, BrowserTask
 
 
 def factory(request: BrowserTask) -> BrowserAgent:
@@ -338,21 +348,21 @@ factory, `default_browser_agent`, forwards all of `settings`). The factory
 must not start or stop the session itself; the tool owns the session
 lifecycle.
 
-## BrowserUse vs scripted browser tools
+## BrowserUse vs PlaywrightBrowser
 
-The two approaches complement each other rather than compete:
+An agent gets one of the two, so the choice is made up front:
 
-| | Scripted tools (Playwright-style) | `BrowserUse` |
+| | [`PlaywrightBrowser`](../playwright/) | `BrowserUse` |
 |---|---|---|
 | Who decides each action | the host model | the browser-use sub-agent |
-| Page addressing | CSS selectors / coordinates | indexed DOM elements |
+| Page addressing | CSS selectors, `aria-ref` handles, coordinates | indexed DOM elements |
 | Cost profile | one host-model call per action | one sub-agent call per step, plus the delegation |
 | Determinism | high | lower; self-healing LLM loop |
 | Best for | known, repeatable flows | fuzzy goals on unknown or changing pages |
 
-If your flow is fully known, scripted tools are cheaper and more predictable.
-Reach for `BrowserUse` when the task needs judgement about pages you have not
-seen.
+If your flow is fully known, `PlaywrightBrowser` is cheaper and more
+predictable. Reach for `BrowserUse` when the task needs judgement about pages
+you have not seen.
 
 ## Agent spec (YAML/JSON)
 
@@ -372,7 +382,7 @@ capabilities:
 ```python
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[BrowserUse])
 ```
@@ -382,8 +392,6 @@ The `llm`, `browser_profile`, `output_schema`, `agent_settings`, and
 browser-use's own default model selection and browser and agent configuration,
 prose output, and the default agent factory.
 
-The API may change between releases while the capability settles; breaking
-changes ship deprecation warnings where practical.
 
 ## Further reading
 

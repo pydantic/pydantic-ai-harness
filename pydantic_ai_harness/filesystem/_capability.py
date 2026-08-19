@@ -9,8 +9,9 @@ from typing import Any
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.toolsets import FilteredToolset
 
-from pydantic_ai_harness.filesystem._toolset import FileSystemToolset
+from pydantic_ai_harness.filesystem._toolset import READ_ONLY_TOOL_NAMES, FileSystemToolset
 
 _DEFAULT_PROTECTED: list[str] = [
     '.git/*',
@@ -49,17 +50,24 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     max_read_lines: int = 2000
     """Maximum number of lines returned by a single `read_file` call."""
 
+    max_list_results: int = 1000
+    """Maximum number of entries returned by `list_directory`."""
+
     max_search_results: int = 1000
     """Maximum number of matches returned by `search_files`."""
 
     max_find_results: int = 1000
     """Maximum number of matches returned by `find_files`."""
 
+    read_only: bool = False
+    """Whether to expose only the tools in `READ_ONLY_TOOL_NAMES`."""
+
     def __post_init__(self) -> None:
         # Runtime validation: dataclass field annotations are advisory, not enforced.
         # A config-driven caller could pass a string that would otherwise propagate.
         values: dict[str, Any] = {
             'max_read_lines': self.max_read_lines,
+            'max_list_results': self.max_list_results,
             'max_search_results': self.max_search_results,
             'max_find_results': self.max_find_results,
         }
@@ -67,14 +75,18 @@ class FileSystem(AbstractCapability[AgentDepsT]):
             if not isinstance(value, int) or value <= 0:
                 raise ValueError(f'{name} must be a positive integer, got {value!r}')
 
-    def get_toolset(self) -> FileSystemToolset[AgentDepsT]:
+    def get_toolset(self) -> FileSystemToolset[AgentDepsT] | FilteredToolset[AgentDepsT]:
         """Build and return the filesystem toolset."""
-        return FileSystemToolset[AgentDepsT](
+        toolset = FileSystemToolset[AgentDepsT](
             root_dir=Path(self.root_dir),
             allowed_patterns=self.allowed_patterns,
             denied_patterns=self.denied_patterns,
             protected_patterns=self.protected_patterns,
             max_read_lines=self.max_read_lines,
+            max_list_results=self.max_list_results,
             max_search_results=self.max_search_results,
             max_find_results=self.max_find_results,
         )
+        if self.read_only:
+            return FilteredToolset(toolset, lambda ctx, tool: tool.name in READ_ONLY_TOOL_NAMES)
+        return toolset
