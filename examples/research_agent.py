@@ -2,7 +2,7 @@
 
 Run the packaged equivalent without assembling the blocks:
 
-    uvx --with 'pydantic-ai-harness[researcher]' clai -a pydantic_ai_harness.researcher:researcher_agent -m openai:gpt-5.6-sol
+    uvx --with 'pydantic-ai-harness[researcher]' clai -a pydantic_ai_harness.agents.researcher:researcher_agent -m openai:gpt-5.6-sol
 """
 
 import os
@@ -15,7 +15,7 @@ from pydantic_ai_harness import SubAgent, SubAgents, ToolOutputLimits
 
 DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'openai:gpt-5.6-sol')
 
-# Keep these written-out blocks in sync with the defaults in `pydantic_ai_harness.researcher`.
+# Keep these written-out blocks in sync with the defaults in `pydantic_ai_harness.agents.researcher`.
 INSTRUCTIONS = """\
 Search broadly before drawing conclusions.
 Read the sources that support each important claim.

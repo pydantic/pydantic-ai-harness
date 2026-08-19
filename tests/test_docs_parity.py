@@ -17,9 +17,9 @@ import pytest
 _ROOT = Path(__file__).parent.parent
 _PACKAGE = _ROOT / 'pydantic_ai_harness'
 
-# The `experimental` package is a namespace/warning shim, not a capability, so it
-# has no standalone README and is not listed in the top-level tables.
-_NAMESPACE_PACKAGES = {_PACKAGE / 'experimental'}
+# `experimental` is a namespace/warning shim and `agents` groups the complete agents;
+# neither is a capability, so neither has a standalone README nor a top-level table row.
+_NAMESPACE_PACKAGES = {_PACKAGE / 'experimental', _PACKAGE / 'agents'}
 
 
 def _is_deprecation_shim(package: Path) -> bool:
@@ -41,7 +41,7 @@ _NOT_A_CAPABILITY = frozenset({'media'})
 def _capability_packages() -> list[Path]:
     """Directories that are importable packages and represent a capability's public surface."""
     candidates: list[Path] = []
-    for parent in (_PACKAGE, _PACKAGE / 'experimental'):
+    for parent in (_PACKAGE, _PACKAGE / 'agents', _PACKAGE / 'experimental'):
         for child in sorted(parent.iterdir()):
             if not child.is_dir() or child.name.startswith(('_', '.')):
                 continue
@@ -121,7 +121,7 @@ _CAPABILITY_DOC_PAGES = _capability_doc_pages()
 _CAPABILITY_PAGE_META = {
     'advisor.md': ('advisor', 'Advisor'),
     'code-mode.md': ('code_mode', 'Code Mode'),
-    'coder.md': ('coder', 'Coder'),
+    'coder.md': ('agents/coder', 'Coder'),
     'skills.md': ('skills', 'Skills'),
     'filesystem.md': ('filesystem', 'FileSystem'),
     'shell.md': ('shell', 'Shell'),
@@ -129,7 +129,7 @@ _CAPABILITY_PAGE_META = {
     'memory.md': ('memory', 'Memory'),
     'modal-sandbox.md': ('modal_sandbox', 'Modal Sandbox'),
     'repo-context.md': ('repo_context', 'Repo Context'),
-    'researcher.md': ('researcher', 'Researcher'),
+    'researcher.md': ('agents/researcher', 'Researcher'),
     'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),
     'exa-search.md': ('exa', 'Exa Search'),
     'playwright.md': ('playwright', 'Playwright Browser'),
@@ -340,7 +340,7 @@ _BLOWN_OUT_SURFACES = (
     'docs/coder.md',
     'docs/index.md',
     'README.md',
-    'pydantic_ai_harness/coder/README.md',
+    'pydantic_ai_harness/agents/coder/README.md',
 )
 
 
@@ -363,16 +363,16 @@ def test_blown_out_example_is_identical_across_surfaces(surface: str) -> None:
 
 
 def test_blown_out_example_matches_coder_defaults() -> None:
-    from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS
+    from pydantic_ai_harness.agents.coder import DEFAULT_ALLOWED_COMMANDS
 
     block = _blown_out_block(_ROOT / _BLOWN_OUT_SURFACES[0])
     listed = re.findall(r"'([a-z]+)'", block.split('allowed_commands = [', 1)[1].split(']', 1)[0])
     assert tuple(listed) == tuple(DEFAULT_ALLOWED_COMMANDS), (
-        'the written-out allowlist no longer matches pydantic_ai_harness.coder.DEFAULT_ALLOWED_COMMANDS'
+        'the written-out allowlist no longer matches pydantic_ai_harness.agents.coder.DEFAULT_ALLOWED_COMMANDS'
     )
-    agent_source = (_PACKAGE / 'coder' / '_agent.py').read_text(encoding='utf-8')
+    agent_source = (_PACKAGE / 'agents' / 'coder' / '_agent.py').read_text(encoding='utf-8')
     identity_match = re.search(r"instructions='([^']+)'", agent_source)
-    assert identity_match, 'coder/_agent.py no longer defines an identity instruction'
+    assert identity_match, 'agents/coder/_agent.py no longer defines an identity instruction'
     identity = f"instructions='{identity_match.group(1)}'"
     assert identity in block, "the blown-out example must carry coder_agent's identity instruction verbatim"
     example = (_ROOT / 'examples/coding_agent.py').read_text(encoding='utf-8')

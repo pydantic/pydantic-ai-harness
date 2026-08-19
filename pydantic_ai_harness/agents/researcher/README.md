@@ -24,7 +24,7 @@ The same agent works with every Pydantic AI interface: [`agent.to_cli_sync()`](h
 Or skip the file entirely and run the exported `researcher_agent` with [`clai`](https://pydantic.dev/docs/ai/cli/#custom-agents) (the Pydantic AI CLI), via [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
-uvx --with 'pydantic-ai-harness[researcher]' clai -a pydantic_ai_harness.researcher:researcher_agent -m openai:gpt-5.6-sol
+uvx --with 'pydantic-ai-harness[researcher]' clai -a pydantic_ai_harness.agents.researcher:researcher_agent -m openai:gpt-5.6-sol
 ```
 
 It is literally these capabilities combined, in this order:
@@ -39,7 +39,7 @@ Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries
 
 ## Blown-out equivalent
 
-<!-- Keep this in sync with pydantic_ai_harness/researcher; it intentionally shows the complete picture. -->
+<!-- Keep this in sync with pydantic_ai_harness/agents/researcher; it intentionally shows the complete picture. -->
 
 ```python
 from pydantic_ai import Agent
@@ -74,4 +74,4 @@ agent = Agent(
 )
 ```
 
-See the [source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/researcher/). While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade; see the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+See the [source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/agents/researcher/). While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade; see the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).

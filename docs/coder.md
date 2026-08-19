@@ -30,7 +30,7 @@ The same agent works with every Pydantic AI interface: [`agent.to_cli_sync()`](h
 Or skip the file entirely and run the exported [`coder_agent`](#api-reference) with [`clai`](https://pydantic.dev/docs/ai/cli/#custom-agents) (the Pydantic AI CLI), via [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
-uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.agents.coder:coder_agent -m anthropic:claude-fable-5
 ```
 
 ## What's inside
@@ -89,7 +89,7 @@ To remove or replace one of the built-in components instead, start from the blow
 
 This is the exact agent the exported `coder_agent` gives you (plus an explicit model), written out block by block:
 
-<!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
+<!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/agents/coder/README.md, and examples/coding_agent.py. -->
 
 ```python
 from pathlib import Path
@@ -146,10 +146,10 @@ agent = Agent(
 )
 ```
 
-See the [source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/coder/).
+See the [source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/agents/coder/).
 
 ## API reference
 
-::: pydantic_ai_harness.coder.Coder
+::: pydantic_ai_harness.agents.coder.Coder
 
-::: pydantic_ai_harness.coder.coder_agent
+::: pydantic_ai_harness.agents.coder.coder_agent

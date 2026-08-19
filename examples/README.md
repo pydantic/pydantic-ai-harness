@@ -7,7 +7,7 @@ code and tweak it.
 
 If you just want the assembled version, use the packaged harnesses instead
 ([`Coder`](../docs/coder.md), [`Researcher`](../docs/researcher.md)) — or run one
-with zero setup: `uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent`.
+with zero setup: `uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.agents.coder:coder_agent`.
 
 ## Setup
 

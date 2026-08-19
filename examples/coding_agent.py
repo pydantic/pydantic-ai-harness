@@ -2,7 +2,7 @@
 
 Run the packaged equivalent without assembling the blocks:
 
-    uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+    uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.agents.coder:coder_agent -m anthropic:claude-fable-5
 """
 
 import os
@@ -27,7 +27,7 @@ from pydantic_ai_harness import (
 DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'anthropic:claude-fable-5')
 
 # Keep this blown-out composition in sync across docs/coder.md, docs/index.md, README.md,
-# pydantic_ai_harness/coder/README.md, and examples/coding_agent.py.
+# pydantic_ai_harness/agents/coder/README.md, and examples/coding_agent.py.
 ALLOWED_COMMANDS = (
     'git',
     'rg',

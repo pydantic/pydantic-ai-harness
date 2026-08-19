@@ -7,7 +7,7 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import Capability
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS, Coder, coder_agent
+from pydantic_ai_harness.agents.coder import DEFAULT_ALLOWED_COMMANDS, Coder, coder_agent
 from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.planning import Planning
@@ -36,8 +36,8 @@ def test_coder_agent_export_is_lazy() -> None:
         [
             sys.executable,
             '-c',
-            'import sys; import pydantic_ai_harness.coder; '
-            "assert 'pydantic_ai_harness.coder._agent' not in sys.modules",
+            'import sys; import pydantic_ai_harness.agents.coder; '
+            "assert 'pydantic_ai_harness.agents.coder._agent' not in sys.modules",
         ],
         check=False,
         capture_output=True,
@@ -48,10 +48,10 @@ def test_coder_agent_export_is_lazy() -> None:
 
 
 def test_coder_unknown_export() -> None:
-    import pydantic_ai_harness.coder
+    import pydantic_ai_harness.agents.coder
 
     with pytest.raises(AttributeError, match='has no attribute'):
-        pydantic_ai_harness.coder.__getattr__('missing')
+        pydantic_ai_harness.agents.coder.__getattr__('missing')
 
 
 def test_coder_members_are_transparent() -> None:

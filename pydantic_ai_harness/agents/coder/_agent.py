@@ -2,7 +2,7 @@
 
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.coder._capability import Coder
+from pydantic_ai_harness.agents.coder._capability import Coder
 
 coder_agent = Agent(
     name='coder',

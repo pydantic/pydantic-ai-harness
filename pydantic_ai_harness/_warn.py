@@ -38,6 +38,21 @@ def warn_module_renamed(old: str, new: str) -> None:
     )
 
 
+def warn_moved(old: str, new: str) -> None:
+    """Emit a `HarnessDeprecationWarning` that `pydantic_ai_harness.<old>` now lives at `<new>`.
+
+    Called at import time from the shim package left at the old module path when a module moves
+    without being renamed, so existing imports keep working with a clear pointer to the new
+    location.
+    """
+    warnings.warn(
+        f'`pydantic_ai_harness.{old}` has moved to `pydantic_ai_harness.{new}`. '
+        f'Update your imports; this compatibility shim will be removed in a future release.',
+        category=HarnessDeprecationWarning,
+        stacklevel=2,
+    )
+
+
 def warn_class_renamed(old: str, new: str, module: str) -> None:
     """Emit a `HarnessDeprecationWarning` that class `<module>.<old>` is now `<module>.<new>`.
 

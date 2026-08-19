@@ -12,7 +12,7 @@
 
 **Pydantic AI Harness** is the official [capability](https://ai.pydantic.dev/capabilities/overview/) and harness library for [Pydantic AI](https://ai.pydantic.dev/). Every Pydantic AI agent already has a light harness: the typed agent loop, [any model](https://ai.pydantic.dev/models/), your own tools, structured output. For simple agents that's enough. But set an agent loose on complex, long-running work (fix a codebase, research a question, run for hours unattended) and what it needs around the model grows: a [workspace](pydantic_ai_harness/filesystem/) to act in, a [plan](pydantic_ai_harness/planning/) it keeps current, [memory](pydantic_ai_harness/memory/) that carries across sessions, [sub-agents](pydantic_ai_harness/subagents/) to hand work to, [context management](pydantic_ai_harness/compaction/) that holds up in hour ten, and [durable execution](https://ai.pydantic.dev/capabilities/durable_execution/overview/) that survives a restart. **Pydantic AI Harness** ships that harness.
 
-Everything here is one primitive: a [capability](https://ai.pydantic.dev/capabilities/), a self-contained unit of agent behavior you add to `capabilities=[...]` on any agent. There are [30+ of them](#capabilities), and complete agents like [Coder](pydantic_ai_harness/coder/) and [Researcher](pydantic_ai_harness/researcher/) are themselves capabilities combined: they come apart the way they went together. Snap on a single block, compose your own stack, or start from the whole coding agent and take it apart later.
+Everything here is one primitive: a [capability](https://ai.pydantic.dev/capabilities/), a self-contained unit of agent behavior you add to `capabilities=[...]` on any agent. There are [30+ of them](#capabilities), and complete agents like [Coder](pydantic_ai_harness/agents/coder/) and [Researcher](pydantic_ai_harness/agents/researcher/) are themselves capabilities combined: they come apart the way they went together. Snap on a single block, compose your own stack, or start from the whole coding agent and take it apart later.
 
 ## Quick start
 
@@ -33,10 +33,10 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-That's a complete [coding agent](pydantic_ai_harness/coder/): [workspace-rooted file access](pydantic_ai_harness/filesystem/), [allowlisted shell](pydantic_ai_harness/shell/), [repo orientation](pydantic_ai_harness/repo_context/), [planning](pydantic_ai_harness/planning/), a read-only [explorer sub-agent](pydantic_ai_harness/subagents/), and [context management](pydantic_ai_harness/compaction/) that survives long sessions, and it runs anywhere a Pydantic AI agent runs. [`agent.to_cli_sync()`](https://ai.pydantic.dev/cli/) opens it as a chat in your terminal, [`agent.to_web()`](https://ai.pydantic.dev/web/) in the browser, and [`Coder`](pydantic_ai_harness/coder/)'s exported `coder_agent` runs without writing a file at all, combined with [`clai`](https://ai.pydantic.dev/cli/) (the Pydantic AI CLI) and [`uvx`](https://docs.astral.sh/uv/guides/tools/):
+That's a complete [coding agent](pydantic_ai_harness/agents/coder/): [workspace-rooted file access](pydantic_ai_harness/filesystem/), [allowlisted shell](pydantic_ai_harness/shell/), [repo orientation](pydantic_ai_harness/repo_context/), [planning](pydantic_ai_harness/planning/), a read-only [explorer sub-agent](pydantic_ai_harness/subagents/), and [context management](pydantic_ai_harness/compaction/) that survives long sessions, and it runs anywhere a Pydantic AI agent runs. [`agent.to_cli_sync()`](https://ai.pydantic.dev/cli/) opens it as a chat in your terminal, [`agent.to_web()`](https://ai.pydantic.dev/web/) in the browser, and [`Coder`](pydantic_ai_harness/agents/coder/)'s exported `coder_agent` runs without writing a file at all, combined with [`clai`](https://ai.pydantic.dev/cli/) (the Pydantic AI CLI) and [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
-uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.agents.coder:coder_agent -m anthropic:claude-fable-5
 ```
 
 Every model works: swap the string for [any provider's](https://ai.pydantic.dev/models/). Need more? Add capabilities to the list; here's the same coder on `gpt-5.6-sol`, with web search and cross-session memory:
@@ -61,13 +61,13 @@ agent = Agent(
 )
 ```
 
-[Skills](pydantic_ai_harness/skills/) (your `SKILL.md` procedures, loaded on demand; point it at a `skills/` directory and add the `skills` extra), [Web Fetch](https://ai.pydantic.dev/capabilities/web-fetch/), [Guardrails](pydantic_ai_harness/guardrails/), and [Dynamic Workflow](pydantic_ai_harness/dynamic_workflow/) slot in the same way; the [Coder README](pydantic_ai_harness/coder/) lists what pairs well.
+[Skills](pydantic_ai_harness/skills/) (your `SKILL.md` procedures, loaded on demand; point it at a `skills/` directory and add the `skills` extra), [Web Fetch](https://ai.pydantic.dev/capabilities/web-fetch/), [Guardrails](pydantic_ai_harness/guardrails/), and [Dynamic Workflow](pydantic_ai_harness/dynamic_workflow/) slot in the same way; the [Coder README](pydantic_ai_harness/agents/coder/) lists what pairs well.
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is not a framework inside the framework; it's a [`CombinedCapability`](https://ai.pydantic.dev/capabilities/custom/) bundling the same blocks you can use directly. This is the exact agent the exported [`coder_agent`](pydantic_ai_harness/coder/) gives you, written out block by block:
+`Coder` is not a framework inside the framework; it's a [`CombinedCapability`](https://ai.pydantic.dev/capabilities/custom/) bundling the same blocks you can use directly. This is the exact agent the exported [`coder_agent`](pydantic_ai_harness/agents/coder/) gives you, written out block by block:
 
-<!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
+<!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/agents/coder/README.md, and examples/coding_agent.py. -->
 
 ```python
 from pathlib import Path
@@ -136,8 +136,8 @@ Complete agent stacks as regular combined capabilities: one import gives you a w
 
 | Harness | Package | What it provides |
 |---|---|---|
-| [Coder](pydantic_ai_harness/coder/) | Harness | A complete coding-agent stack: files, shell, repo context, planning, a read-only explorer sub-agent, and context controls |
-| [Researcher](pydantic_ai_harness/researcher/) | Harness | A complete web-research stack: search, page fetching, a delegated sub-researcher, and bounded tool output |
+| [Coder](pydantic_ai_harness/agents/coder/) | Harness | A complete coding-agent stack: files, shell, repo context, planning, a read-only explorer sub-agent, and context controls |
+| [Researcher](pydantic_ai_harness/agents/researcher/) | Harness | A complete web-research stack: search, page fetching, a delegated sub-researcher, and bounded tool output |
 
 ### Execution environments
 
@@ -253,7 +253,7 @@ Community packages extend the same capability system further; see [third-party c
 
 ## Composing from blocks
 
-A research agent from regular capabilities -- this is literally [`Researcher`](pydantic_ai_harness/researcher/)'s composition, minus its short default instructions:
+A research agent from regular capabilities -- this is literally [`Researcher`](pydantic_ai_harness/agents/researcher/)'s composition, minus its short default instructions:
 
 ```python
 from pydantic_ai import Agent

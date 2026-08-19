@@ -88,7 +88,7 @@ constants: the reader is meant to see the entire picture and copy-tweak it. It m
 exported agent (`coder_agent`, …) exactly, including its `name=` and identity `instructions=`.
 
 The Coder blown-out block lives on **five surfaces** that must stay identical:
-`docs/coder.md`, `docs/index.md`, `README.md`, `pydantic_ai_harness/coder/README.md`, and (as a
+`docs/coder.md`, `docs/index.md`, `README.md`, `pydantic_ai_harness/agents/coder/README.md`, and (as a
 parameterized module) `examples/coding_agent.py`. `tests/test_docs_parity.py` compares the four
 markdown copies byte-for-byte and checks the written-out allowlist against
 `DEFAULT_ALLOWED_COMMANDS`, so a change to any one of them fails CI until all move together —
