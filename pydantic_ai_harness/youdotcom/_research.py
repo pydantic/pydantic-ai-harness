@@ -91,9 +91,9 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
         client: YouClient | None,
         research_effort: ResearchEffortName,
         finance_effort: FinanceEffortName,
-        include_domains: Sequence[str] = (),
-        exclude_domains: Sequence[str] = (),
-        boost_domains: Sequence[str] = (),
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+        boost_domains: list[str] | None = None,
         freshness: str | None = None,
         country: str | None = None,
         output_schema: Mapping[str, object] | None = None,
@@ -103,9 +103,9 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
         self._client = client if client is not None else _default_client(timeout_ms)
         self._effort = models.ResearchEffort(research_effort)
         self._finance_effort = models.FinanceResearchEffort(finance_effort)
-        self._include_domains = list(include_domains) or None
-        self._exclude_domains = list(exclude_domains) or None
-        self._boost_domains = list(boost_domains) or None
+        self._include_domains = list(include_domains) if include_domains else None
+        self._exclude_domains = list(exclude_domains) if exclude_domains else None
+        self._boost_domains = list(boost_domains) if boost_domains else None
         self._freshness = freshness
         self._country = country
         self._output_schema = output_schema
@@ -233,16 +233,16 @@ class YouResearch(AbstractCapability[AgentDepsT]):
     finance_effort: FinanceEffortName = 'deep'
     """How hard `finance_research` works: `deep` or `exhaustive`."""
 
-    include_domains: Sequence[str] = field(default_factory=list[str])
+    include_domains: list[str] = field(default_factory=list[str])
     """If non-empty, `answer` and `research` only draw from these domains (allowlist).
 
     Mutually exclusive with `exclude_domains` and `boost_domains`.
     """
 
-    exclude_domains: Sequence[str] = field(default_factory=list[str])
+    exclude_domains: list[str] = field(default_factory=list[str])
     """`answer` and `research` never draw from these domains (denylist)."""
 
-    boost_domains: Sequence[str] = field(default_factory=list[str])
+    boost_domains: list[str] = field(default_factory=list[str])
     """Results from these domains are re-ranked higher for `answer` and `research`."""
 
     freshness: str | None = None
@@ -306,9 +306,9 @@ class YouResearch(AbstractCapability[AgentDepsT]):
         *,
         research_effort: ResearchEffortName = 'standard',
         finance_effort: FinanceEffortName = 'deep',
-        include_domains: Sequence[str] = (),
-        exclude_domains: Sequence[str] = (),
-        boost_domains: Sequence[str] = (),
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+        boost_domains: list[str] | None = None,
         freshness: str | None = None,
         country: str | None = None,
         output_schema: Mapping[str, object] | None = None,
@@ -323,9 +323,9 @@ class YouResearch(AbstractCapability[AgentDepsT]):
         return cls(
             research_effort=research_effort,
             finance_effort=finance_effort,
-            include_domains=list(include_domains),
-            exclude_domains=list(exclude_domains),
-            boost_domains=list(boost_domains),
+            include_domains=include_domains or [],
+            exclude_domains=exclude_domains or [],
+            boost_domains=boost_domains or [],
             freshness=freshness,
             country=country,
             output_schema=output_schema,

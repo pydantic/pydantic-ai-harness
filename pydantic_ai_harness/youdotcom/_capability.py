@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -63,17 +62,17 @@ class YouSearch(AbstractCapability[AgentDepsT]):
     max_text_chars: int = 10_000
     """Maximum characters of page text `get_page` and full-page `web_search` return."""
 
-    include_domains: Sequence[str] = field(default_factory=list[str])
+    include_domains: list[str] = field(default_factory=list[str])
     """If non-empty, results only come from these domains (allowlist).
 
     Mutually exclusive with `exclude_domains` and `boost_domains`; the You.com
     API rejects combining an allowlist with either.
     """
 
-    exclude_domains: Sequence[str] = field(default_factory=list[str])
+    exclude_domains: list[str] = field(default_factory=list[str])
     """Results never come from these domains (denylist)."""
 
-    boost_domains: Sequence[str] = field(default_factory=list[str])
+    boost_domains: list[str] = field(default_factory=list[str])
     """Results from these domains are re-ranked higher without excluding others."""
 
     freshness: str | None = None
@@ -143,9 +142,9 @@ class YouSearch(AbstractCapability[AgentDepsT]):
         num_results: int = 10,
         extraction_mode: ExtractionModeName = 'highlights',
         max_text_chars: int = 10_000,
-        include_domains: Sequence[str] = (),
-        exclude_domains: Sequence[str] = (),
-        boost_domains: Sequence[str] = (),
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+        boost_domains: list[str] | None = None,
         freshness: str | None = None,
         country: str | None = None,
         guidance: str | None = None,
@@ -160,9 +159,9 @@ class YouSearch(AbstractCapability[AgentDepsT]):
             num_results=num_results,
             extraction_mode=extraction_mode,
             max_text_chars=max_text_chars,
-            include_domains=list(include_domains),
-            exclude_domains=list(exclude_domains),
-            boost_domains=list(boost_domains),
+            include_domains=include_domains or [],
+            exclude_domains=exclude_domains or [],
+            boost_domains=boost_domains or [],
             freshness=freshness,
             country=country,
             guidance=guidance,

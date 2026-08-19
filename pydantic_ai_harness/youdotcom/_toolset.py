@@ -268,9 +268,9 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
         num_results: int,
         extraction_mode: ExtractionModeName,
         max_text_chars: int,
-        include_domains: Sequence[str] = (),
-        exclude_domains: Sequence[str] = (),
-        boost_domains: Sequence[str] = (),
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+        boost_domains: list[str] | None = None,
         freshness: str | None = None,
         country: str | None = None,
         timeout_ms: int = DEFAULT_SEARCH_TIMEOUT_MS,
@@ -280,9 +280,9 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
         self._num_results = num_results
         self._extraction_mode: ExtractionModeName = extraction_mode
         self._max_text_chars = max_text_chars
-        self._include_domains = list(include_domains) or None
-        self._exclude_domains = list(exclude_domains) or None
-        self._boost_domains = list(boost_domains) or None
+        self._include_domains = list(include_domains) if include_domains else None
+        self._exclude_domains = list(exclude_domains) if exclude_domains else None
+        self._boost_domains = list(boost_domains) if boost_domains else None
         self._freshness = freshness
         self._country = country
         self.add_function(self.web_search, name='web_search')
