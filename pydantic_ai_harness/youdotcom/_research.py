@@ -16,9 +16,9 @@ from youdotcom import models
 
 from pydantic_ai_harness.youdotcom._toolset import (
     YouClient,
-    _default_client,  # pyright: ignore[reportPrivateUsage]
-    _recoverable,  # pyright: ignore[reportPrivateUsage]
-    _source_list,  # pyright: ignore[reportPrivateUsage]
+    default_client,
+    recoverable,
+    source_list,
     validate_freshness,
 )
 
@@ -101,7 +101,7 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
         timeout_ms: int = DEFAULT_RESEARCH_TIMEOUT_MS,
     ) -> None:
         super().__init__()
-        self._client = client if client is not None else _default_client(timeout_ms)
+        self._client = client if client is not None else default_client(timeout_ms)
         self._effort = models.ResearchEffort(research_effort)
         self._finance_effort = models.FinanceResearchEffort(finance_effort)
         self._include_domains = list(include_domains) if include_domains else None
@@ -126,7 +126,7 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
             country=self._country,
         )
 
-    @_recoverable
+    @recoverable
     async def answer(self, query: str) -> ToolReturn[str]:
         """Get a synthesized answer with citations, grounded in live web results.
 
@@ -147,9 +147,9 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
         if not response.answer:
             raise ModelRetry(f'Answer returned no content for {query!r}. Rephrase the question.')
         sources = _answer_sources(response)
-        return ToolReturn(_with_sources(response.answer, sources), metadata={'sources': _source_list(sources)})
+        return ToolReturn(_with_sources(response.answer, sources), metadata={'sources': source_list(sources)})
 
-    @_recoverable
+    @recoverable
     async def research(self, input: str) -> ToolReturn[str]:
         """Run multi-step research and return a thorough, cited answer.
 
@@ -176,9 +176,9 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
             raise ModelRetry(f'Research returned no answer for {input!r}. Rephrase, or narrow the question.')
         sources = {source.url: source.title for source in result.output.sources}
         text = _with_sources(_prefix_warnings(body, result.warnings), sources)
-        return ToolReturn(text, metadata={'sources': _source_list(sources)})
+        return ToolReturn(text, metadata={'sources': source_list(sources)})
 
-    @_recoverable
+    @recoverable
     async def finance_research(self, input: str) -> ToolReturn[str]:
         """Run finance-tuned research on companies, markets, and instruments.
 
@@ -193,7 +193,7 @@ class YouResearchToolset(FunctionToolset[AgentDepsT]):
         if not body:
             raise ModelRetry(f'Finance research returned no answer for {input!r}. Rephrase the question.')
         sources = {source.url: source.title for source in response.output.sources}
-        return ToolReturn(_with_sources(body, sources), metadata={'sources': _source_list(sources)})
+        return ToolReturn(_with_sources(body, sources), metadata={'sources': source_list(sources)})
 
 
 def _answer_sources(response: models.AnswerResponse) -> dict[str, str | None]:

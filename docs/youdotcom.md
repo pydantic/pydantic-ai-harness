@@ -6,12 +6,10 @@ description: Give a Pydantic AI agent web research tools backed by the You.com A
 # You.com
 
 `YouSearch` and `YouResearch` give an agent web research tools backed by the
-[You.com](https://you.com) APIs. `YouSearch` adds `web_search` (results with
-query-relevant excerpts, or full-page markdown) and `get_page` (read one URL in
-full). `YouResearch` adds `answer` (a synthesized, cited answer in one call),
-`research` (multi-step research across many sources), and `finance_research`
-(the finance-tuned counterpart). Compose them in one agent: cheap surveying
-with search, synthesized citation-grounded answers with research.
+[You.com](https://you.com) APIs. `YouSearch` adds `web_search` and `get_page`,
+for surveying the web and reading one page in full. `YouResearch` adds
+`answer`, `research`, and `finance_research`, for cited answers to questions a
+single lookup cannot settle.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/youdotcom/)
 
@@ -19,18 +17,16 @@ with search, synthesized citation-grounded answers with research.
 
 ## The problem
 
-Search tools that return only titles and snippets force a second round of
-fetching before the agent can judge a source, while search tools that return
-full page text flood the context with pages the agent will discard. And some
-questions are not a lookup at all: they need many searches, reading across the
-results, and a synthesized answer with citations. Wiring the search, page
-fetch, and research APIs together, budgeting what each returns, and prompting
-the agent to research methodically is boilerplate every research agent
-reinvents.
+Some search tools return only a title and a snippet, so the agent has to fetch
+the page before it can judge the source. Others return the whole page, which
+fills the context with text the agent throws away. And some questions are not a
+lookup at all: answering them takes many searches, reading across the results,
+and writing up an answer with citations.
 
-`YouSearch` and `YouResearch` bundle that plumbing into two
-[capabilities](/ai/core-concepts/capabilities/): the research tools, per-tool
-output budgets, and short research guidance in the system prompt.
+`YouSearch` and `YouResearch` wrap the You.com search, page, and research APIs
+as two [capabilities](/ai/core-concepts/capabilities/). Each brings its tools,
+a limit on how much text those tools return, and short research guidance for
+the system prompt.
 
 ## Usage
 
@@ -55,13 +51,9 @@ result = agent.run_sync('What changed in the latest stable Python release?')
 print(result.output)
 ```
 
-Use `YouSearch` alone when you only need search and page reads, and add
-`YouResearch` when the agent needs synthesized, cited answers for questions a
-single search cannot settle.
+Use `YouSearch` on its own if you only need search and page reads.
 
 ## Tools
-
-The capabilities contribute these tools to the agent:
 
 | Tool | Capability | Purpose |
 |---|---|---|
@@ -71,40 +63,39 @@ The capabilities contribute these tools to the agent:
 | `research` | `YouResearch` | Run multi-step research that reads across many sources and returns a thorough, cited answer. |
 | `finance_research` | `YouResearch` | The finance-tuned counterpart of `research`, for companies, markets, and instruments. |
 
-`web_search` returns short query-relevant excerpts per result rather than full
-page text, so surveying several sources stays cheap; the agent reads a chosen
-page with `get_page`. Set `extraction_mode='full_page'` to attach each result's
-full markdown instead (capped at `max_text_chars`).
+`web_search` returns short excerpts from each page rather than the whole page,
+so looking over several sources stays cheap. The agent then reads a page it
+picks with `get_page`. Set `extraction_mode='full_page'` to get each result's
+full markdown instead.
 
 `get_page` and full-page `web_search` text are capped at `max_text_chars`
 characters, keeping the **head** (a page's lead carries the substance); when a
 page exceeds the cap the output ends with a
-`[... page text truncated at N characters]` marker. The result count is bounded
-the same way: `num_results` is requested from You.com and re-applied to the
-response.
+`[... page text truncated at N characters]` marker. The number of results is
+limited the same way: `num_results` is sent to You.com, and applied again to
+the response that comes back.
 
-A `web_search` query with no matches is a valid answer, not an error: the tool
-returns `No results found for {query!r}.`. Everywhere else, a URL or question
-that returns no content, a rate limit, a rejected parameter (422), or a
-transient API or network failure surfaces to the model as a
-[`ModelRetry`](/ai/tools-toolsets/tools-advanced/#tool-retries) -- the run
-continues and the model can correct the URL, rephrase, or try again -- rather
-than a hard error. Authentication, billing, and authorization failures
-(401/402/403) are configuration states and propagate.
+A `web_search` query that matches nothing is a valid answer, not an error: the
+tool returns `No results found for {query!r}.`. Other failures reach the model
+as a [`ModelRetry`](/ai/tools-toolsets/tools-advanced/#tool-retries): a URL or
+question that comes back empty, a rate limit, a parameter You.com rejected
+(422), or a temporary API or network problem. The run keeps going, and the
+model can fix the URL, reword the question, or try again. Authentication,
+billing, and permission failures (401/402/403) are things you have to fix in
+your own setup, so they stop the run.
 
 ## Research
 
-`answer` returns a synthesized answer with citations in a single call -- reach
-for it for a direct question. `research` runs a multi-step investigation:
-You.com expands the question, runs many searches, reads the sources, and
-synthesizes a verifiable answer with the sources listed under it.
-`finance_research` is the same, tuned for financial analysis.
+Use `answer` for a direct question you expect one call to settle. Use
+`research` when the question needs many searches and a write-up across the
+sources. `finance_research` is `research` tuned for financial analysis.
 
-`research` runs as a blocking call bounded by `timeout_ms` (default 10
-minutes, since deep and exhaustive research routinely take minutes). Its effort
-scales with `research_effort` -- `lite`, `standard`, `deep`, or `exhaustive`;
-the API's background-only `frontier` level is not supported by this capability.
-`finance_research` scales with `finance_effort` -- `deep` or `exhaustive`.
+`research` waits for its result rather than handing back a job to poll, and
+deep and exhaustive research routinely take minutes, so `timeout_ms` defaults
+to 10 minutes. How hard it works is set by `research_effort`: `lite`,
+`standard`, `deep`, or `exhaustive`. You.com also has a `frontier` level, but
+it only runs as a background job, so this capability does not offer it.
+`finance_research` has its own `finance_effort`: `deep` or `exhaustive`.
 
 ```python
 from pydantic_ai_harness import YouResearch
@@ -113,21 +104,20 @@ YouResearch(research_effort='deep')
 ```
 
 Set `output_schema` to a JSON schema to have `research` return structured
-output (rendered as JSON) instead of prose; the You.com API rejects an
-`output_schema` with `research_effort='lite'`, so that combination raises at
-construction.
+output (written out as JSON) instead of prose. You.com rejects an
+`output_schema` when `research_effort` is `'lite'`, so asking for both raises
+an error when you create the capability.
 
 ## Structured citations
 
 Every tool returns a
-[`ToolReturn`](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#advanced-tool-returns):
-`return_value` carries the readable text the model sees (with a `Sources:`
-block appended where the tool has citations), and `metadata` carries the
-sources as structured `YouSource` records (`{'url': ..., 'title': ...}`) under
-the `'sources'` key. `web_search` additionally carries the response
-`search_uuid` and `latency` in metadata for tracing. Metadata is never sent to
-the model; the application reads it from the `ToolReturnPart` in the message
-history, so rendering citations needs no text parsing:
+[`ToolReturn`](https://pydantic.dev/docs/ai/tools-toolsets/tools-advanced/#advanced-tool-returns).
+Its `return_value` is the text the model sees, with a `Sources:` block added
+when the tool has citations. Its `metadata['sources']` holds the same sources
+as `YouSource` records (`{'url': ..., 'title': ...}`). `web_search` also puts
+the response's `search_uuid` and `latency` in metadata, for tracing. The model
+does not see metadata: your application reads it from the `ToolReturnPart` in
+the message history, so you can show citations without parsing any text:
 
 ```python
 from pydantic_ai.messages import ModelRequest, ToolReturnPart
@@ -142,14 +132,13 @@ for message in result.all_messages():
 
 ## Instructions
 
-`YouSearch` contributes short research guidance to the system prompt: search
-wide with `web_search` first, read the most promising pages in full with
-`get_page` before drawing conclusions, prefer primary sources, cite the URLs
-relied on, and treat fetched web content as untrusted data. `YouResearch`
-contributes guidance on when to reach for `answer`, `research`, and
-`finance_research`, and on treating fetched web content as untrusted data. On
-either capability, set `guidance` to replace the default text, or to `''` to
-contribute no instructions at all.
+`YouSearch` adds short research guidance to the system prompt: search wide
+with `web_search` first, read the most promising pages in full with `get_page`
+before drawing conclusions, prefer primary sources, and cite the URLs you used.
+`YouResearch` adds guidance on when to use `answer`, `research`, and
+`finance_research`. Both tell the model to treat the web content it fetches as
+untrusted data, not as instructions to follow. On either capability, set
+`guidance` to your own text to replace the default, or to `''` to add nothing.
 
 ## Configuration
 
@@ -193,19 +182,18 @@ YouResearch(
 )
 ```
 
-`include_domains` is an allowlist and is mutually exclusive with
-`exclude_domains` and `boost_domains` -- combining them raises at construction,
-as do out-of-range limits and an invalid `freshness`. The domain, `freshness`,
-and `country` controls apply to `web_search` (and to `answer` and `research`);
-`finance_research` takes only its input and `finance_effort`.
+`include_domains` is an allowlist, and cannot be combined with
+`exclude_domains` or `boost_domains`. Combining them raises an error when you
+create the capability, as do out-of-range limits and an invalid `freshness`.
+The domain, `freshness`, and `country` settings apply to `web_search`, `answer`
+and `research`. `finance_research` takes only its input and `finance_effort`.
 
 ## Multiple instances
 
 Two instances of the same capability register the same tool names, which is an
-error. To run several differently configured instances in one agent (for
-example one open-web `YouSearch` and one pinned to specific domains), wrap the
-extra instances in core's `PrefixTools` capability, which prefixes their tool
-names:
+error. To run more than one setup in a single agent -- say one `YouSearch` over
+the open web and one limited to a few domains -- wrap the extra ones in core's
+`PrefixTools` capability. It puts a prefix in front of their tool names:
 
 ```python
 from pydantic_ai import Agent
@@ -231,11 +219,11 @@ contributes the same default research guidance.
 
 ## Custom client
 
-The default client is `youdotcom.You`, configured from the `YDC_API_KEY`
-environment variable; when the variable is missing, construction fails with a
-setup hint. Pass any object satisfying the `YouClient` protocol -- the subset of
-`You`'s async methods the toolsets call -- to configure authentication
-explicitly, point at a different host, or substitute a fake in tests:
+The default client is `youdotcom.You`, built from the `YDC_API_KEY`
+environment variable. When that variable is not set, creating the capability
+fails with a message telling you how to fix it. To set the API key yourself,
+point at a different host, or use a fake in tests, pass any object with the
+methods listed in the `YouClient` protocol:
 
 ```python
 from youdotcom import You
@@ -247,23 +235,23 @@ YouSearch(client=You(api_key_auth='...'))
 
 ## YouSearch vs core WebSearch
 
-Pydantic AI core ships a provider-adaptive
-[`WebSearch`](/ai/core-concepts/capabilities/#provider-adaptive-tools)
-capability: on models with a native search tool it uses the provider's own
-search, executed server-side; elsewhere it falls back to a local DuckDuckGo
-tool. Reach for it when you want search that follows the model.
+Core ships a [`WebSearch`](/ai/core-concepts/capabilities/#provider-adaptive-tools)
+capability that adapts to the model: it uses the provider's own search where
+the model has one, and a local DuckDuckGo tool everywhere else. Use it when you
+want search that follows whichever model you run. Use `YouSearch` when you want
+the same search on every model: one vendor, excerpts with every result, page
+reads you ask for, domain filters, and freshness controls.
 
-Reach for `YouSearch` when you want the same search behavior on every model:
-one vendor, excerpts with every hit, explicit page retrieval, domain filters,
-and freshness controls -- with `YouResearch` alongside it for questions that
-need synthesized, cited research rather than a lookup.
-
-One caveat when combining them: on Anthropic models the provider-native search
-tool is also named `web_search` on the wire, so
-`capabilities=[WebSearch(), YouSearch()]` puts two tools with the same name in
-the request. Use one search capability per agent on native-search models, or
-force the local fallback with `WebSearch(native=False)` (its DuckDuckGo tool is
-named `duckduckgo_search`, which does not collide).
+Give an agent one web search capability: core `WebSearch`, harness
+`ExaSearch`, or `YouSearch`. They all name their tools the same way --
+`web_search`, plus `get_page` for the two harness ones -- and an agent cannot
+have two tools with the same name, so it fails when you create it. If you want
+two of them anyway, wrap one in `PrefixTools` to rename its tools, as shown in
+[Multiple instances](#multiple-instances). There is one extra case: on
+Anthropic models the built-in search is also called `web_search`, so
+`WebSearch` clashes there even though the search runs on Anthropic's side. Pass
+`WebSearch(native=False)` to switch it to the DuckDuckGo tool, which is called
+`duckduckgo_search` and does not clash.
 
 ## Agent spec (YAML/JSON)
 

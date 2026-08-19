@@ -63,7 +63,7 @@ class YouSource(TypedDict):
     title: str | None
 
 
-def _source_list(sources: Mapping[str, str | None]) -> list[YouSource]:
+def source_list(sources: Mapping[str, str | None]) -> list[YouSource]:
     """Convert a `url -> title` mapping into the metadata `sources` list."""
     return [{'url': url, 'title': title} for url, title in sources.items()]
 
@@ -165,7 +165,7 @@ class YouClient(Protocol):
         ...  # pragma: no cover
 
 
-def _default_client(timeout_ms: int) -> YouClient:
+def default_client(timeout_ms: int) -> YouClient:
     """Build a `youdotcom.You` client from the `YDC_API_KEY` environment variable."""
     if not (os.environ.get('YDC_API_KEY') or os.environ.get('YOU_API_KEY_AUTH')):
         raise UserError(
@@ -175,7 +175,7 @@ def _default_client(timeout_ms: int) -> YouClient:
     return You(api_key_auth=None, timeout_ms=timeout_ms)
 
 
-def _recoverable(
+def recoverable(
     fn: Callable[Concatenate[_SelfT, _P], Awaitable[_R]],
 ) -> Callable[Concatenate[_SelfT, _P], Awaitable[_R]]:
     """Convert transient You.com API failures into `ModelRetry`.
@@ -272,7 +272,7 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
         timeout_ms: int = DEFAULT_SEARCH_TIMEOUT_MS,
     ) -> None:
         super().__init__()
-        self._client = client if client is not None else _default_client(timeout_ms)
+        self._client = client if client is not None else default_client(timeout_ms)
         self._num_results = num_results
         self._extraction_mode: ExtractionModeName = extraction_mode
         self._max_text_chars = max_text_chars
@@ -293,7 +293,7 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
             )
         return models.Extraction(extraction_mode=models.ExtractionMode.HIGHLIGHTS)
 
-    @_recoverable
+    @recoverable
     async def web_search(self, query: str) -> ToolReturn[str]:
         """Search the web and return matching pages, each with its most relevant excerpts.
 
@@ -326,7 +326,7 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
         metadata = self._search_metadata(response)
         if not rows:
             return ToolReturn(f'No results found for {query!r}.', metadata={'sources': [], **metadata})
-        sources = _source_list({url: title for url, title, _, _ in rows})
+        sources = source_list({url: title for url, title, _, _ in rows})
         sections = [_format_result(title, url, page_age, body) for url, title, page_age, body in rows]
         plural = 's' if len(sections) != 1 else ''
         joined = '\n\n---\n\n'.join(sections)
@@ -341,7 +341,7 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
             return {'search_uuid': None, 'latency': None}
         return {'search_uuid': meta.search_uuid, 'latency': meta.latency}
 
-    @_recoverable
+    @recoverable
     async def get_page(self, url: str) -> ToolReturn[str]:
         """Retrieve the markdown of a specific URL.
 
@@ -369,5 +369,5 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
             title = metadata.site_name
         return ToolReturn(
             _format_result(title, page_url, None, truncate_head(markdown, self._max_text_chars)),
-            metadata={'sources': _source_list({page_url: title})},
+            metadata={'sources': source_list({page_url: title})},
         )
