@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
-from typing import Literal, Protocol, overload
+from typing import Literal, Protocol, TypeAlias, overload
 from urllib.parse import urlsplit
 
 import anyio
@@ -22,7 +22,9 @@ from pydantic_ai_harness.browser_use._settings import BrowserAgentSettings
 try:
     from browser_use import Agent as _BrowserUseAgent
     from browser_use import Tools
+    from browser_use.agent.views import AgentOutput
     from browser_use.browser import BrowserProfile, BrowserSession
+    from browser_use.browser.views import BrowserStateSummary
     from browser_use.llm.base import BaseChatModel
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -118,6 +120,31 @@ async def _kill(session: BrowserSession) -> bool:
     return succeeded
 
 
+StepCallback: TypeAlias = (
+    Callable[[BrowserStateSummary, AgentOutput, int], None]
+    | Callable[[BrowserStateSummary, AgentOutput, int], Awaitable[None]]
+)
+"""A per-step observer, in the shape browser-use's `register_new_step_callback` accepts.
+
+The union mirrors browser-use's own annotation, so either a sync or an async
+callback satisfies it.
+"""
+
+
+def _narrator(sink: Callable[[str], None]) -> StepCallback:
+    """Report each step's stated goal to `sink`, for `BrowserUse.progress`."""
+
+    def narrate(browser_state_summary: BrowserStateSummary, output: AgentOutput, step_number: int) -> None:
+        # Stripped before the fallback, not after: a whitespace-only `next_goal` is truthy, so
+        # choosing first and stripping second would let it beat a real `evaluation_previous_goal`
+        # and then narrate nothing.
+        goal = (output.next_goal or '').strip() or (output.evaluation_previous_goal or '').strip()
+        if goal:
+            sink(f'  - {goal}')
+
+    return narrate
+
+
 class BrowserAgentHistory(Protocol):
     """The subset of browser-use's `AgentHistoryList` that the `browse_web` tool reads.
 
@@ -203,6 +230,14 @@ class BrowserTask:
     can forward them verbatim.
     """
 
+    on_step: StepCallback | None = None
+    """The per-step observer to forward as browser-use's `register_new_step_callback`.
+
+    Set from `BrowserUse.progress`, which narrates each step's goal; `None` when
+    no progress sink is configured. A custom factory that wants its own
+    per-step behavior can pass a different callback instead of this one.
+    """
+
 
 class BrowserAgentFactory(Protocol):
     """Builds the browser agent that `browse_web` runs for one task.
@@ -261,6 +296,7 @@ def default_browser_agent(request: BrowserTask) -> BrowserAgent:
         sensitive_data=request.sensitive_data,
         extend_system_message=request.extend_system_message,
         enable_signal_handler=False,
+        register_new_step_callback=request.on_step,
         tools=_safe_tools(settings),
         override_system_message=settings.override_system_message,
         max_failures=settings.max_failures,
@@ -325,6 +361,8 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         settings: BrowserAgentSettings,
         session_scope: Literal['call', 'agent'],
         cdp_url: str | None,
+        use_cloud: bool | None = None,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__()
         self._browser_agent = browser_agent
@@ -348,6 +386,9 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         )
         self._session_scope: Literal['call', 'agent'] = session_scope
         self._cdp_url = cdp_url
+        self._use_cloud = use_cloud
+        self._progress = progress
+        self._on_step = _narrator(progress) if progress is not None else None
         self._shared_session: BrowserSession | None = None
         self._pending_cleanup: list[BrowserSession] = []
         self._session_closed = False
@@ -364,9 +405,11 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         `BrowserSession` itself merges a provided `browser_profile` with directly
         passed fields, letting the non-`None` direct fields win, so the
         capability's `headless`, `allowed_domains`, and `cdp_url` override the
-        profile exactly like they would on a hand-built session. `headless`
-        defaults to on only when no profile is given; a profile keeps its own
-        setting.
+        profile exactly like they would on a hand-built session. `use_cloud`
+        overrides it too, but through the profile rather than alongside it.
+        `headless` defaults to on only when no profile is given and the session
+        is not a cloud one; a profile keeps its own setting, and a cloud browser
+        has no local window for the default to mean anything.
 
         In `'agent'` scope the session is created with `keep_alive=True`:
         without it, `browser_use.Agent` kills the session at the end of each
@@ -375,7 +418,7 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
         the browser regardless.
         """
         headless = self._headless
-        if headless is None and self._browser_profile is None:
+        if headless is None and self._browser_profile is None and not self._use_cloud:
             headless = True
         browser_profile = self._browser_profile
         allowed_domains = self._allowed_domains
@@ -409,6 +452,14 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
                 )
         elif browser_profile is not None:
             browser_profile = browser_profile.model_copy(update={'block_ip_addresses': False})
+        if self._use_cloud is not None:
+            # Folded into the profile rather than passed alongside it: `BrowserSession`'s
+            # overloads split cloud and local keyword arguments, so `use_cloud` and
+            # `browser_profile` cannot be passed in the same call.
+            if browser_profile is None:
+                browser_profile = BrowserProfile(use_cloud=self._use_cloud)
+            else:
+                browser_profile = browser_profile.model_copy(update={'use_cloud': self._use_cloud})
         return BrowserSession(
             cdp_url=self._cdp_url,
             browser_profile=browser_profile,
@@ -429,6 +480,7 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
                 sensitive_data=self._sensitive_data,
                 extend_system_message=self._extend_system_message,
                 settings=self._settings,
+                on_step=self._on_step,
             )
         )
         return await agent.run(max_steps=self._max_steps)
@@ -475,6 +527,8 @@ class BrowserUseToolset(FunctionToolset[AgentDepsT]):
             The browser agent's final text result, or JSON conforming to the
             configured output schema when one is set.
         """
+        if self._progress is not None:
+            self._progress(f'* {task}')
         if self._session_scope == 'call':
             history = await self._run_in_fresh_session(task)
         else:

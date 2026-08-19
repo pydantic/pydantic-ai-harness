@@ -241,6 +241,15 @@ origin.
   Ending a call disconnects from an attached browser rather than terminating
   it -- browser-use only kills a browser process it launched itself -- so a
   browser you manage survives `'call'` scope.
+- **Cloud browsers.** `use_cloud=True` runs each session in a
+  [Browser Use Cloud](https://cloud.browser-use.com) browser instead of a local
+  Chromium: for sites that block automated traffic, or to keep the browser off
+  the machine running the agent and fan out many in parallel. It needs a
+  `BROWSER_USE_API_KEY`, and bills for as long as the browser is alive. The
+  browser is provisioned when a session starts and released when it stops, so it
+  follows `session_scope` like a local one, and the same teardown that kills a
+  local browser on a failed or cancelled run stops a billed cloud one. The local
+  `headless` default does not apply -- a cloud browser has no local window.
 - **Telemetry.** browser-use collects anonymized telemetry by default; set
   `ANONYMIZED_TELEMETRY=false` to disable it.
 
@@ -281,6 +290,24 @@ durable execution, use the default `'call'` scope so each tool invocation owns
 its browser, and validate that composition for the durability integration you
 use; the capability does not currently include durability integration tests.
 
+## Live progress
+
+A `browse_web` call runs the sub-agent's whole loop and can take minutes with
+nothing to show for it until it returns. Set `progress` to a string sink to
+watch it work:
+
+```python
+from pydantic_ai_harness.browser_use import BrowserUse
+
+browser = BrowserUse(llm='anthropic:claude-sonnet-4-6', progress=print)
+```
+
+It reports the task when the call starts, then each step's stated goal.
+The sink is called from the sub-agent's step loop, so keep it quick and
+non-blocking. A `browser_agent` factory can set `BrowserTask.on_step` to
+something other than the narrator for anything richer, including an async
+callback.
+
 ## Instructions
 
 The capability contributes short delegation guidance to the system prompt:
@@ -312,6 +339,8 @@ BrowserUse(
     session_scope='call',        # 'call' = fresh browser per call; 'agent' = one shared session
     cdp_url=None,                # attach to a remote Chromium over CDP; overrides the profile
     guidance=None,               # host-model instructions: None = default, '' = none, str = custom
+    use_cloud=None,              # True = a Browser Use Cloud browser (needs BROWSER_USE_API_KEY)
+    progress=None,               # string sink narrating the task and each step, e.g. progress=print
     browser_agent=None,          # BrowserAgentFactory; None builds a real browser_use.Agent
 )
 ```
@@ -396,10 +425,10 @@ from pydantic_ai_harness import BrowserUse
 agent = Agent.from_file('agent.yaml', custom_capability_types=[BrowserUse])
 ```
 
-The `llm`, `browser_profile`, `output_schema`, `agent_settings`, and
-`browser_agent` fields are not spec-serializable; spec-loaded instances use
+The `llm`, `browser_profile`, `output_schema`, `agent_settings`, `progress`,
+and `browser_agent` fields are not spec-serializable; spec-loaded instances use
 browser-use's own default model selection and browser and agent configuration,
-prose output, and the default agent factory.
+prose output, no progress reporting, and the default agent factory.
 
 
 ## Further reading

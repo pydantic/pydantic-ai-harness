@@ -18,7 +18,12 @@ import pytest
 # tests execution environment, while submodule imports resolve correctly.
 from browser_use.agent.service import Agent as BrowserUseAgent
 from browser_use.agent.service import Tools  # pyright: ignore[reportPrivateImportUsage]
+from browser_use.agent.views import AgentOutput
 from browser_use.browser import BrowserProfile, BrowserSession
+from browser_use.browser.views import (
+    BrowserStateSummary,
+    SerializedDOMState,  # pyright: ignore[reportPrivateImportUsage]
+)
 from browser_use.llm.messages import BaseMessage
 from browser_use.llm.views import ChatInvokeCompletion
 from pydantic import BaseModel, ValidationError
@@ -1237,6 +1242,156 @@ class TestBrowserUse:
         assert [part.content for part in parts] == ['The answer is 42.']
 
 
+class TestCloudBrowser:
+    """`use_cloud` reaches the session through the profile, and suspends the local headless default."""
+
+    async def test_cloud_session_skips_the_local_headless_default(self, kill_calls: list[BrowserSession]) -> None:
+        factory = _success_factory()
+
+        await BrowserUse[None](use_cloud=True, browser_agent=factory).get_toolset().browse_web('task')
+
+        session_profile = factory.requests[0].browser_session.browser_profile
+        assert session_profile.use_cloud is True
+        # A cloud browser has no local window, so the profile keeps browser-use's own default.
+        assert session_profile.headless is BrowserProfile().headless
+        assert session_profile.block_ip_addresses is True
+
+    async def test_cloud_session_without_a_derived_profile(self, kill_calls: list[BrowserSession]) -> None:
+        """`use_cloud` builds the profile itself when nothing else has already built one."""
+        factory = _success_factory()
+        capability = BrowserUse[None](use_cloud=True, block_ip_addresses=False, browser_agent=factory)
+
+        await capability.get_toolset().browse_web('task')
+
+        session_profile = factory.requests[0].browser_session.browser_profile
+        assert session_profile.use_cloud is True
+        assert session_profile.headless is BrowserProfile().headless
+
+    async def test_cloud_overrides_the_profiles_own_setting(self, kill_calls: list[BrowserSession]) -> None:
+        profile = BrowserProfile(use_cloud=False, user_agent='harness-test')
+        factory = _success_factory()
+        capability = BrowserUse[None](browser_profile=profile, use_cloud=True, browser_agent=factory)
+
+        await capability.get_toolset().browse_web('task')
+
+        session_profile = factory.requests[0].browser_session.browser_profile
+        assert session_profile.use_cloud is True
+        assert session_profile.user_agent == 'harness-test'
+        assert profile.use_cloud is False, 'the caller-owned profile must not be mutated'
+
+    async def test_unset_use_cloud_leaves_the_profile_alone(self, kill_calls: list[BrowserSession]) -> None:
+        factory = _success_factory()
+        capability = BrowserUse[None](browser_profile=BrowserProfile(use_cloud=True), browser_agent=factory)
+
+        await capability.get_toolset().browse_web('task')
+
+        assert factory.requests[0].browser_session.browser_profile.use_cloud is True
+
+
+def _step(
+    next_goal: str = '', evaluation_previous_goal: str = '', step_number: int = 1
+) -> tuple[BrowserStateSummary, AgentOutput, int]:
+    """The arguments a `StepCallback` receives, with only the narrated fields set."""
+    state = BrowserStateSummary(
+        dom_state=SerializedDOMState(_root=None, selector_map={}),
+        url='https://example.com',
+        title='Example',
+        tabs=[],
+    )
+    output = AgentOutput(action=[], next_goal=next_goal, evaluation_previous_goal=evaluation_previous_goal)
+    return state, output, step_number
+
+
+class TestProgress:
+    """`progress` narrates the task and each step's stated goal while a call runs."""
+
+    async def test_reports_the_task_then_each_step(self, kill_calls: list[BrowserSession]) -> None:
+        reported: list[str] = []
+        factory = _success_factory()
+        capability = BrowserUse[None](progress=reported.append, browser_agent=factory)
+
+        await capability.get_toolset().browse_web('find the price of the Pro plan')
+
+        on_step = factory.requests[0].on_step
+        assert on_step is not None
+        assert on_step(*_step(next_goal='Open the pricing page')) is None
+        assert reported == ['* find the price of the Pro plan', '  - Open the pricing page']
+
+    async def test_falls_back_to_the_previous_goal_evaluation(self, kill_calls: list[BrowserSession]) -> None:
+        reported: list[str] = []
+        factory = _success_factory()
+
+        await BrowserUse[None](progress=reported.append, browser_agent=factory).get_toolset().browse_web('task')
+        on_step = factory.requests[0].on_step
+        assert on_step is not None
+        on_step(*_step(evaluation_previous_goal='Read the plan table'))
+
+        assert reported == ['* task', '  - Read the plan table']
+
+    async def test_a_blank_next_goal_does_not_beat_the_evaluation(self, kill_calls: list[BrowserSession]) -> None:
+        """A whitespace-only `next_goal` is truthy, so it must not swallow the fallback."""
+        reported: list[str] = []
+        factory = _success_factory()
+
+        await BrowserUse[None](progress=reported.append, browser_agent=factory).get_toolset().browse_web('task')
+        on_step = factory.requests[0].on_step
+        assert on_step is not None
+        on_step(*_step(next_goal='   ', evaluation_previous_goal='Read the plan table'))
+
+        assert reported == ['* task', '  - Read the plan table']
+
+    async def test_a_step_that_states_no_goal_reports_nothing(self, kill_calls: list[BrowserSession]) -> None:
+        reported: list[str] = []
+        factory = _success_factory()
+
+        await BrowserUse[None](progress=reported.append, browser_agent=factory).get_toolset().browse_web('task')
+        on_step = factory.requests[0].on_step
+        assert on_step is not None
+        on_step(*_step(next_goal='   '))
+
+        assert reported == ['* task']
+
+    async def test_no_sink_narrates_nothing(self, kill_calls: list[BrowserSession]) -> None:
+        factory = _success_factory()
+
+        await BrowserUse[None](browser_agent=factory).get_toolset().browse_web('task')
+
+        assert factory.requests[0].on_step is None
+
+    async def test_the_callback_reaches_the_browser_agent(
+        self, monkeypatch: pytest.MonkeyPatch, kill_calls: list[BrowserSession]
+    ) -> None:
+        """The default factory forwards `on_step` as browser-use's own step callback."""
+        reported: list[str] = []
+        recording_factory = _success_factory()
+        capability = BrowserUse[None](progress=reported.append, browser_agent=recording_factory)
+        await capability.get_toolset().browse_web('task')
+        on_step = recording_factory.requests[0].on_step
+        assert on_step is not None
+
+        seen: dict[str, object] = {}
+
+        def record_init(self: object, **kwargs: object) -> None:
+            seen.update(kwargs)
+
+        monkeypatch.setattr(BrowserUseAgent, '__init__', record_init)
+        default_browser_agent(
+            BrowserTask(
+                task='task',
+                llm=None,
+                browser_session=BrowserSession(),
+                use_vision=True,
+                output_schema=None,
+                sensitive_data=None,
+                extend_system_message=None,
+                settings=BrowserAgentSettings(),
+                on_step=on_step,
+            )
+        )
+
+        assert seen['register_new_step_callback'] is on_step
+
+
 class TestAgentSpec:
     def test_spec_schema_includes_browser_use(self) -> None:
         schema = AgentSpec.model_json_schema_with_capabilities([BrowserUse])
@@ -1253,6 +1408,7 @@ class TestAgentSpec:
             extend_system_message='Stay on the English site.',
             session_scope='agent',
             cdp_url='http://localhost:9222',
+            use_cloud=True,
             guidance='Delegate.',
         )
         assert capability.allowed_domains == ['example.com']
@@ -1264,11 +1420,13 @@ class TestAgentSpec:
         assert capability.extend_system_message == 'Stay on the English site.'
         assert capability.session_scope == 'agent'
         assert capability.cdp_url == 'http://localhost:9222'
+        assert capability.use_cloud is True
         assert capability.guidance == 'Delegate.'
         assert capability.llm is None
         assert capability.browser_profile is None
         assert capability.output_schema is None
         assert capability.agent_settings is None
+        assert capability.progress is None
         assert capability.browser_agent is None
 
     def test_agent_loads_from_spec_file(self, tmp_path: Path) -> None:

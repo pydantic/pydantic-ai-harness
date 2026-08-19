@@ -9,6 +9,7 @@ from pydantic_ai_harness.browser_use._toolset import (
     BrowserAgentHistory,
     BrowserTask,
     BrowserUseToolset,
+    StepCallback,
     default_browser_agent,
 )
 
@@ -22,6 +23,7 @@ __all__ = [
     'BrowserUseToolset',
     'ChatModelInput',
     'PydanticAIChatModel',
+    'StepCallback',
     'default_browser_agent',
     'resolve_chat_model',
 ]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
@@ -260,6 +261,31 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     tests.
     """
 
+    use_cloud: bool | None = None
+    """Run each session in a [Browser Use Cloud](https://cloud.browser-use.com) browser.
+
+    For sites that block automated traffic, or to keep the browser off the
+    machine running the agent and fan out many in parallel. Needs a
+    `BROWSER_USE_API_KEY`, and bills for as long as the browser is alive. The
+    browser is provisioned when a session starts and released when it stops, so
+    it follows `session_scope` like a local one. When set, it overrides the
+    `browser_profile`'s own `use_cloud`.
+
+    The local `headless` default does not apply to a cloud session, which has no
+    local window.
+    """
+
+    progress: Callable[[str], None] | None = None
+    """Report the task and each step's stated goal as the call runs, e.g. `progress=print`.
+
+    A `browse_web` call runs the sub-agent's whole loop and can take minutes with
+    nothing to show for it until it returns. `None` reports nothing.
+
+    The sink is called from the browser agent's step loop, so keep it quick and
+    non-blocking. For anything richer than narration, a `browser_agent` factory
+    can set its own `BrowserTask.on_step`.
+    """
+
     _toolset: BrowserUseToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
     """The cached toolset, so `'agent'`-scoped session state has one owner."""
 
@@ -329,6 +355,8 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
                 settings=self.agent_settings if self.agent_settings is not None else BrowserAgentSettings(),
                 session_scope=self.session_scope,
                 cdp_url=self.cdp_url,
+                use_cloud=self.use_cloud,
+                progress=self.progress,
             )
         return self._toolset
 
@@ -372,14 +400,16 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
         extend_system_message: str | None = None,
         session_scope: Literal['call', 'agent'] = 'call',
         cdp_url: str | None = None,
+        use_cloud: bool | None = None,
         guidance: str | None = None,
     ) -> BrowserUse[AgentDepsT]:
         """Construct the capability from serializable spec options.
 
-        The `llm`, `browser_profile`, `output_schema`, `agent_settings`, and
-        `browser_agent` fields are not spec-serializable: spec-loaded instances
-        use browser-use's own default model selection, default browser and
-        agent configuration, prose output, and the default agent factory.
+        The `llm`, `browser_profile`, `output_schema`, `agent_settings`,
+        `progress`, and `browser_agent` fields are not spec-serializable:
+        spec-loaded instances use browser-use's own default model selection,
+        default browser and agent configuration, prose output, no progress
+        reporting, and the default agent factory.
         """
         return cls(
             allowed_domains=allowed_domains,
@@ -391,5 +421,6 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
             extend_system_message=extend_system_message,
             session_scope=session_scope,
             cdp_url=cdp_url,
+            use_cloud=use_cloud,
             guidance=guidance,
         )
