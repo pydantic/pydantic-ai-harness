@@ -579,6 +579,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 parts.append(f'hash: {_content_hash(text)}')
 
         if is_link:
-            parts.append(f'symlink_target: {os.readlink(original)}')
+            target = _model_safe_filename(os.readlink(original), self._real_root)
+            parts.append(f'symlink_target: {target}')
 
         return '\n'.join(parts)

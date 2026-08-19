@@ -978,11 +978,14 @@ class TestFileInfo:
             await toolset.file_info('nonexistent')
 
     async def test_info_symlink(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        # The link target is stored as an absolute path; the tool must report
+        # it relative to the root, never as the absolute host path.
         link = fs_root / 'link.txt'
         link.symlink_to(fs_root / 'hello.txt')
         result = await toolset.file_info('link.txt')
         assert 'type: file' in result
-        assert 'symlink_target:' in result
+        assert 'symlink_target: hello.txt' in result
+        _assert_no_host_root(result, fs_root)
 
 
 class TestMutationKillers:
