@@ -36,7 +36,9 @@ covers full-page extraction.
 """
 
 _FRESHNESS_KEYWORDS = frozenset({'day', 'week', 'month', 'year'})
-_FRESHNESS_RANGE = re.compile(r'^\d{4}-\d{2}-\d{2}to\d{4}-\d{2}-\d{2}$')
+# ASCII digits only, and `fullmatch` (below) anchors the whole string so a trailing
+# newline or extra characters do not slip through.
+_FRESHNESS_RANGE = re.compile(r'([0-9]{4}-[0-9]{2}-[0-9]{2})to([0-9]{4}-[0-9]{2}-[0-9]{2})')
 
 # 401/402/403 are authentication, billing, or authorization states the model
 # cannot correct, so they propagate and abort the run. Everything else the SDK
@@ -65,19 +67,40 @@ def _source_list(sources: Mapping[str, str | None]) -> list[YouSource]:
 
 
 def _truncate(text: str, max_chars: int) -> str:
-    """Cap page text at `max_chars`, keeping the head where a page's substance sits."""
+    """Cap page text at `max_chars`, keeping the head where a page's substance sits.
+
+    The truncation marker counts against `max_chars`, so the returned text stays
+    within the bound (except when `max_chars` is smaller than the marker itself,
+    where the marker alone is returned rather than slicing off the head).
+    """
     if len(text) <= max_chars:
         return text
-    return f'{text[:max_chars]}\n[... page text truncated at {max_chars} characters]'
+    marker = f'\n[... page text truncated at {max_chars} characters]'
+    return f'{text[: max(max_chars - len(marker), 0)]}{marker}'
+
+
+def _is_valid_freshness_range(freshness: str) -> bool:
+    """True when `freshness` is a well-formed, correctly ordered `YYYY-MM-DDtoYYYY-MM-DD` range."""
+    match = _FRESHNESS_RANGE.fullmatch(freshness)
+    if match is None:
+        return False
+    try:
+        start = datetime.strptime(match.group(1), '%Y-%m-%d')
+        end = datetime.strptime(match.group(2), '%Y-%m-%d')
+    except ValueError:
+        return False
+    return start <= end
 
 
 def validate_freshness(freshness: str | None) -> None:
     """Reject a freshness value the You.com API would not accept.
 
     Accepts `None`, one of `day`/`week`/`month`/`year`, or a
-    `YYYY-MM-DDtoYYYY-MM-DD` date range.
+    `YYYY-MM-DDtoYYYY-MM-DD` date range whose endpoints are real dates in
+    order. Malformed ranges (non-ASCII digits, impossible or reversed dates,
+    trailing characters) are rejected here rather than forwarded to You.com.
     """
-    if freshness is None or freshness in _FRESHNESS_KEYWORDS or _FRESHNESS_RANGE.match(freshness):
+    if freshness is None or freshness in _FRESHNESS_KEYWORDS or _is_valid_freshness_range(freshness):
         return
     raise ValueError(
         f'freshness must be one of {sorted(_FRESHNESS_KEYWORDS)} or a YYYY-MM-DDtoYYYY-MM-DD range, got {freshness!r}'
@@ -173,13 +196,20 @@ def _recoverable(
     subclasses that carry a `status_code`, plus `NoResponseError` and
     `httpx.HTTPError` for transport failures. Rate limits, transient 5xx, and
     rejected parameters are recoverable, so they become retries; 401/402/403
-    (auth, billing, authorization) are configuration states that propagate.
+    (auth, billing, authorization) are configuration states that propagate,
+    whether they surface as a `YouError` or a raw `httpx.HTTPStatusError`.
     """
 
     @functools.wraps(fn)
     async def wrapper(self: _SelfT, *args: _P.args, **kwargs: _P.kwargs) -> _R:
         try:
             return await fn(self, *args, **kwargs)
+        except httpx.HTTPStatusError as error:
+            # A response-bearing status error may carry an auth/billing/authorization status,
+            # so inspect it before the broad `httpx.HTTPError` handler wraps it as a retry.
+            if error.response.status_code in _PROPAGATE_STATUS:
+                raise
+            raise ModelRetry(f'You.com request failed: {error}') from error
         except (httpx.HTTPError, NoResponseError) as error:
             raise ModelRetry(f'You.com request failed: {error}') from error
         except YouError as error:

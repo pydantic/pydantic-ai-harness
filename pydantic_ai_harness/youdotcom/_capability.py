@@ -101,6 +101,8 @@ class YouSearch(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         """Validate configuration against the You.com API's documented bounds."""
+        if self.extraction_mode not in ('highlights', 'full_page'):
+            raise ValueError(f"extraction_mode must be 'highlights' or 'full_page', got {self.extraction_mode!r}")
         if not 1 <= self.num_results <= YOU_MAX_NUM_RESULTS:
             raise ValueError(f'num_results must be between 1 and {YOU_MAX_NUM_RESULTS}, got {self.num_results}')
         if self.max_text_chars < 1:

@@ -50,6 +50,13 @@ def _you_error(status: int) -> YouError:
     return YouError('You.com error', httpx.Response(status_code=status, request=request, text='boom'))
 
 
+def _http_status_error(status: int) -> httpx.HTTPStatusError:
+    """A raw `httpx.HTTPStatusError` carrying `status`, as a transport layer might raise it."""
+    request = httpx.Request('POST', 'https://api.you.com/v1/search')
+    response = httpx.Response(status_code=status, request=request, text='boom')
+    return httpx.HTTPStatusError('status error', request=request, response=response)
+
+
 class _NoStatusYouError(YouError):
     """A `YouError` with no `status_code` attribute, to exercise the non-int branch."""
 
@@ -334,15 +341,18 @@ class TestWebSearch:
         assert extraction.extraction_mode == models.ExtractionMode.HIGHLIGHTS
 
     async def test_full_page_extraction_uses_markdown_body(self) -> None:
-        client = _FakeYouClient(search_response=_search(_web('https://a.dev', title='A', markdown='x' * 20)))
-        toolset = _search_toolset(client, extraction_mode='full_page', max_text_chars=10)
+        client = _FakeYouClient(search_response=_search(_web('https://a.dev', title='A', markdown='x' * 500)))
+        toolset = _search_toolset(client, extraction_mode='full_page', max_text_chars=100)
         output = await toolset.web_search('q')
         extraction = client.search_calls[0]['extraction']
         assert isinstance(extraction, models.Extraction)
         assert extraction.extraction_mode == models.ExtractionMode.FULL_PAGE
         assert extraction.full_page is not None
         assert extraction.full_page.extraction_formats == [models.ExtractionFormat.MARKDOWN]
-        assert _text(output).endswith('x' * 10 + '\n[... page text truncated at 10 characters]')
+        marker = '\n[... page text truncated at 100 characters]'
+        page_text = _text(output).split('\n\n')[-1]
+        # The marker counts against the cap, so the whole truncated body stays within max_text_chars.
+        assert page_text.startswith('x') and page_text.endswith(marker) and len(page_text) == 100
 
     async def test_snippets_then_description_fallback(self) -> None:
         client = _FakeYouClient(search_response=_search(_web('https://a.dev', title='A', snippets=['snip'])))
@@ -414,9 +424,17 @@ class TestGetPage:
         assert _text(output) == 'Title: (untitled)\nURL: https://a.dev\n\nbody'
 
     async def test_truncates_over_cap(self) -> None:
-        client = _FakeYouClient(contents_response=_contents(markdown='y' * 12))
+        client = _FakeYouClient(contents_response=_contents(markdown='y' * 500))
+        output = await _search_toolset(client, max_text_chars=100).get_page('https://a.dev')
+        marker = '\n[... page text truncated at 100 characters]'
+        page_text = _text(output).split('\n\n')[-1]
+        assert page_text.startswith('y') and page_text.endswith(marker) and len(page_text) == 100
+
+    async def test_truncation_marker_only_when_cap_below_marker(self) -> None:
+        # A cap smaller than the marker leaves no room for head text; the marker alone is returned.
+        client = _FakeYouClient(contents_response=_contents(markdown='y' * 200))
         output = await _search_toolset(client, max_text_chars=5).get_page('https://a.dev')
-        assert _text(output).endswith('yyyyy\n[... page text truncated at 5 characters]')
+        assert _text(output) == 'Title: A\nURL: https://a.dev\n\n\n[... page text truncated at 5 characters]'
 
     async def test_no_content_raises_model_retry(self) -> None:
         with pytest.raises(ModelRetry, match='No content could be retrieved'):
@@ -447,6 +465,17 @@ class TestRecoverableErrors:
 
     async def test_you_error_without_status_becomes_model_retry(self) -> None:
         client = _FakeYouClient(error=_NoStatusYouError())
+        with pytest.raises(ModelRetry, match='You.com request failed'):
+            await _search_toolset(client).web_search('q')
+
+    @pytest.mark.parametrize('status', [401, 402, 403])
+    async def test_http_status_error_auth_propagates(self, status: int) -> None:
+        client = _FakeYouClient(error=_http_status_error(status))
+        with pytest.raises(httpx.HTTPStatusError):
+            await _search_toolset(client).web_search('q')
+
+    async def test_http_status_error_server_error_becomes_model_retry(self) -> None:
+        client = _FakeYouClient(error=_http_status_error(500))
         with pytest.raises(ModelRetry, match='You.com request failed'):
             await _search_toolset(client).web_search('q')
 
@@ -568,12 +597,31 @@ class TestYouSearchCapability:
         with pytest.raises(ValueError, match='include_domains cannot be combined'):
             YouSearch[None](include_domains=['a.dev'], exclude_domains=exclude, boost_domains=boost)
 
+    def test_invalid_extraction_mode_rejected(self) -> None:
+        with pytest.raises(ValueError, match="extraction_mode must be 'highlights' or 'full_page'"):
+            YouSearch[None](extraction_mode='full-page')  # pyright: ignore[reportArgumentType]
+
     def test_invalid_freshness_rejected(self) -> None:
         with pytest.raises(ValueError, match='freshness must be one of'):
             YouSearch[None](freshness='fortnight')
 
+    @pytest.mark.parametrize(
+        'freshness',
+        [
+            '2026-99-99to2026-02-31',  # impossible month/day
+            '2026-02-01to2026-01-01',  # reversed range
+            '2026-01-01to2026-02-01\n',  # trailing newline
+            '２０２６-０１-０１to２０２６-０２-０１',  # full-width (non-ASCII) digits
+            '2026-01-01to2026-02-01to2026-03-01',  # trailing characters
+        ],
+    )
+    def test_malformed_freshness_range_rejected(self, freshness: str) -> None:
+        with pytest.raises(ValueError, match='freshness must be one of'):
+            YouSearch[None](freshness=freshness)
+
     def test_valid_freshness_range_and_keyword(self) -> None:
         assert YouSearch[None](freshness='2026-01-01to2026-02-01').freshness == '2026-01-01to2026-02-01'
+        assert YouSearch[None](freshness='2026-01-01to2026-01-01').freshness == '2026-01-01to2026-01-01'
         assert YouSearch[None](freshness='month').freshness == 'month'
 
     def test_instructions_default_custom_and_empty(self) -> None:

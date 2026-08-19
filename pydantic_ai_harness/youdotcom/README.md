@@ -11,8 +11,11 @@ finance-tuned counterpart).
 
 ## Installation
 
+The examples below use an Anthropic model and `Agent.from_file`, so they also
+pull in the `anthropic` provider and the `spec` YAML support:
+
 ```bash
-uv add "pydantic-ai-harness[youdotcom]"
+uv add "pydantic-ai-harness[youdotcom,anthropic]" "pydantic-ai-slim[spec]"
 ```
 
 Set the `YDC_API_KEY` environment variable (create a key at
