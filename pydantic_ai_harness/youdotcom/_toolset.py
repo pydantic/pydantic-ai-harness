@@ -220,14 +220,21 @@ def _format_result(title: str | None, url: str, page_age: datetime | None, body:
     return '\n'.join(lines)
 
 
-def _web_result_body(result: models.WebResult, max_text_chars: int) -> str | None:
-    """Pick the most useful body for a web result: highlights, full markdown, then snippets."""
+def _web_result_body(result: models.WebResult, max_text_chars: int, extraction_mode: ExtractionModeName) -> str | None:
+    """Pick the most useful body for a web result.
+
+    The configured extraction mode picks the preferred body -- full markdown in
+    `'full_page'` mode, query-relevant highlights otherwise -- and the other
+    field serves as the fallback when a response carries both. Results without
+    contents fall back to snippets, then the description.
+    """
     contents = result.contents
     if contents is not None:
+        prefer_markdown = extraction_mode == 'full_page'
+        if contents.markdown and (prefer_markdown or not contents.highlights):
+            return truncate_head(contents.markdown, max_text_chars)
         if contents.highlights:
             return '\n'.join(f'- {highlight}' for highlight in contents.highlights)
-        if contents.markdown:
-            return truncate_head(contents.markdown, max_text_chars)
     if result.snippets:
         return '\n'.join(f'- {snippet}' for snippet in result.snippets)
     return result.description or None
@@ -312,7 +319,8 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
         for result in web or []:
             if not result.url:
                 continue
-            rows.append((result.url, result.title, result.page_age, _web_result_body(result, self._max_text_chars)))
+            body = _web_result_body(result, self._max_text_chars, self._extraction_mode)
+            rows.append((result.url, result.title, result.page_age, body))
             if len(rows) >= self._num_results:
                 break
         metadata = self._search_metadata(response)

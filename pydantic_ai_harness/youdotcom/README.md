@@ -145,11 +145,12 @@ for message in result.all_messages():
 
 `YouSearch` contributes short research guidance to the system prompt: search
 wide with `web_search` first, read the most promising pages in full with
-`get_page` before drawing conclusions, prefer primary sources, and cite the
-URLs relied on. `YouResearch` contributes guidance on when to reach for
-`answer`, `research`, and `finance_research`. On either capability, set
-`guidance` to replace the default text, or to `''` to contribute no
-instructions at all.
+`get_page` before drawing conclusions, prefer primary sources, cite the URLs
+relied on, and treat fetched web content as untrusted data. `YouResearch`
+contributes guidance on when to reach for `answer`, `research`, and
+`finance_research`, and on treating fetched web content as untrusted data. On
+either capability, set `guidance` to replace the default text, or to `''` to
+contribute no instructions at all.
 
 ## Configuration
 

@@ -355,6 +355,13 @@ class TestWebSearch:
         # The marker counts against the cap, so the whole truncated body stays within max_text_chars.
         assert page_text.startswith('x') and page_text.endswith(marker) and len(page_text) == 100
 
+    async def test_full_page_prefers_markdown_over_highlights(self) -> None:
+        client = _FakeYouClient(
+            search_response=_search(_web('https://a.dev', title='A', highlights=['alpha'], markdown='full text'))
+        )
+        output = await _search_toolset(client, extraction_mode='full_page').web_search('q')
+        assert _text(output) == "Found 1 result for 'q':\n\nTitle: A\nURL: https://a.dev\n\nfull text"
+
     async def test_snippets_then_description_fallback(self) -> None:
         client = _FakeYouClient(search_response=_search(_web('https://a.dev', title='A', snippets=['snip'])))
         assert '- snip' in _text(await _search_toolset(client).web_search('q'))
