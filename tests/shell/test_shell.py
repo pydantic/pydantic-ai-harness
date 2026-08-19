@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import shlex
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -14,7 +14,7 @@ import anyio
 import pytest
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -32,7 +32,7 @@ def _env_toolset(
     shell_dir: Path,
     *,
     env: Mapping[str, str] | None = None,
-    denied_env_patterns: Sequence[str] = (),
+    denied_env_patterns: list[str] | None = None,
 ) -> ShellToolset[None]:
     """Build a ShellToolset wired for env-control tests, with safe defaults."""
     return ShellToolset(
@@ -1174,6 +1174,52 @@ class TestShellCapability:
         agent: Agent[None, str] = Agent(model, capabilities=[Shell(cwd=tmp_path)])
         result = await agent.run('run echo hello')
         assert result.output == 'done'
+
+
+_BARE_STRING_FIELDS = [
+    ('allowed_commands', 'rm', 'command names'),
+    ('denied_commands', 'rm', 'command names'),
+    ('denied_operators', '|', 'shell operators'),
+    ('denied_env_patterns', 'OPENAI_*', 'glob patterns'),
+]
+
+
+class TestBareStringRejected:
+    """A bare string is a collection of one-character entries, so each list would stop matching."""
+
+    @pytest.mark.parametrize(('field_name', 'value', 'noun'), _BARE_STRING_FIELDS)
+    def test_capability_rejects_bare_string(self, field_name: str, value: str, noun: str) -> None:
+        with pytest.raises(UserError) as exc_info:
+            Shell(**{field_name: value})  # type: ignore[arg-type]
+
+        assert str(exc_info.value) == (
+            f'Shell.{field_name} takes a collection of {noun}, not a single string. '
+            f'Pass [{value!r}] rather than {value!r}.'
+        )
+
+    @pytest.mark.parametrize(('field_name', 'value', 'noun'), _BARE_STRING_FIELDS)
+    def test_toolset_rejects_bare_string(self, tmp_path: Path, field_name: str, value: str, noun: str) -> None:
+        lists: dict[str, object] = {
+            'allowed_commands': [],
+            'denied_commands': [],
+            'denied_operators': [],
+            'denied_env_patterns': [],
+            field_name: value,
+        }
+        with pytest.raises(UserError) as exc_info:
+            ShellToolset(
+                cwd=tmp_path,
+                default_timeout=10.0,
+                max_output_chars=50_000,
+                persist_cwd=False,
+                allow_interactive=False,
+                **lists,  # type: ignore[arg-type]
+            )
+
+        assert str(exc_info.value) == (
+            f'ShellToolset.{field_name} takes a collection of {noun}, not a single string. '
+            f'Pass [{value!r}] rather than {value!r}.'
+        )
 
 
 async def _tools_offered_to_model(cwd: Path, *, shell_first: bool) -> dict[str, str | None]:

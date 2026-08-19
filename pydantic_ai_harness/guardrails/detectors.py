@@ -44,7 +44,7 @@ not as the answer.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Literal, TypeGuard
 
@@ -205,7 +205,7 @@ _VALIDATORS: Mapping[str, Callable[[str], bool]] = {'credit_card': _luhn, 'iban'
 
 
 def _compile(
-    patterns: Mapping[str, str], only: Iterable[str] | None, extra: Mapping[str, str] | None
+    patterns: Mapping[str, str], only: list[str] | None, extra: Mapping[str, str] | None
 ) -> tuple[tuple[str, re.Pattern[str], Callable[[str], bool] | None], ...]:
     """The patterns a detector will run, as `(name, compiled, validator)` triples.
 
@@ -285,7 +285,7 @@ def _redactor(
 
 def secret_data(
     *,
-    only: Iterable[str] | None = None,
+    only: list[str] | None = None,
     extra: Mapping[str, str] | None = None,
     placeholder: str = _REDACTED,
 ) -> TextDetector:
@@ -306,7 +306,7 @@ def secret_data(
 
 def personal_data(
     *,
-    only: Iterable[str] | None = None,
+    only: list[str] | None = None,
     extra: Mapping[str, str] | None = None,
     placeholder: str = _REDACTED,
 ) -> TextDetector:
@@ -331,7 +331,7 @@ redact_personal_data = personal_data()
 
 
 def blocked_keywords(
-    keywords: Iterable[str],
+    keywords: list[str],
     *,
     case_sensitive: bool = False,
     whole_words: bool = False,

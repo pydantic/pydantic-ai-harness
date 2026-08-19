@@ -6,7 +6,6 @@ import os
 import shutil
 import signal
 import subprocess
-from collections.abc import Iterable
 from pathlib import Path
 
 import anyio
@@ -82,7 +81,7 @@ def _parse_issue(payload: str) -> MacroscopeIssue | None:
         return None
 
 
-def parse_macroscope_stream(lines: Iterable[str]) -> MacroscopeReview:
+def parse_macroscope_stream(lines: list[str]) -> MacroscopeReview:
     """Parse `macroscope codereview` output lines into a `MacroscopeReview`.
 
     The CLI interleaves a `review_id=` line, one `issue_event=<json>` line per

@@ -471,8 +471,8 @@ OutputGuardrail(
 ToolGuardrail(
     guard=None,         # inspects a ToolCallInfo before the tool runs
     result_guard=None,  # inspects a ToolResultInfo after it runs
-    tools=None,         # Sequence[str] | None -- restrict both guards to these tool names
-    hidden=(),          # Sequence[str] -- withhold these tools from the model entirely
+    tools=None,         # list[str] | None -- restrict both guards to these tool names
+    hidden=[],          # list[str] -- withhold these tools from the model entirely
 )
 ```
 

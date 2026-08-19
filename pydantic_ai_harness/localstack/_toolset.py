@@ -19,6 +19,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
 from typing_extensions import Self
 
 from pydantic_ai_harness._output import truncate_tail
+from pydantic_ai_harness._validate import reject_bare_str
 from pydantic_ai_harness.localstack._container import LocalStackContainer
 
 _HEALTH_PATH = '/_localstack/health'
@@ -61,8 +62,8 @@ class LocalStackToolset(FunctionToolset[AgentDepsT]):
         region: str,
         access_key_id: str,
         secret_access_key: str,
-        allowed_services: Sequence[str],
-        denied_services: Sequence[str],
+        allowed_services: list[str],
+        denied_services: list[str],
         default_timeout: float,
         max_output_chars: int,
         aws_cli_path: str,
@@ -77,6 +78,13 @@ class LocalStackToolset(FunctionToolset[AgentDepsT]):
         startup_timeout: float = 120.0,
     ) -> None:
         super().__init__()
+        reject_bare_str(
+            'LocalStackToolset',
+            (
+                ('allowed_services', allowed_services, 'AWS service names'),
+                ('denied_services', denied_services, 'AWS service names'),
+            ),
+        )
         if allowed_services and denied_services:
             raise ValueError('Specify allowed_services or denied_services, not both.')
         if max_output_chars <= 0:

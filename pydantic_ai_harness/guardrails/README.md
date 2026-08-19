@@ -475,8 +475,8 @@ OutputGuardrail(
 ToolGuardrail(
     guard: Callable[..., bool | GuardrailResult | Awaitable[bool | GuardrailResult]] | None = None,
     result_guard: Callable[..., bool | GuardrailResult | Awaitable[bool | GuardrailResult]] | None = None,
-    tools: Sequence[str] | None = None,
-    hidden: Sequence[str] = (),
+    tools: list[str] | None = None,
+    hidden: list[str] = [],
 )
 
 

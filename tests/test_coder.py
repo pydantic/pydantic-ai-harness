@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import Capability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS, Coder, coder_agent
@@ -117,6 +118,18 @@ def test_coder_default_commands_and_empty_allowlist() -> None:
 
     assert default_shell.allowed_commands == DEFAULT_ALLOWED_COMMANDS
     assert empty_shell.allowed_commands == []
+
+
+def test_coder_rejects_bare_string_allowlist() -> None:
+    # A bare string is a collection of one-character command names, so the
+    # allowlist would refuse everything the model tries.
+    with pytest.raises(UserError) as exc_info:
+        Coder(allowed_commands='git')  # type: ignore[arg-type]
+
+    assert str(exc_info.value) == (
+        'Coder.allowed_commands takes a collection of command names, not a single string. '
+        "Pass ['git'] rather than 'git'."
+    )
 
 
 def test_coder_for_agent_preserves_subclass(tmp_path: Path) -> None:

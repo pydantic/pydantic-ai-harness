@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import posixpath
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -428,7 +428,7 @@ class ModalSandboxSession:
         return posixpath.join(self._cwd, path)
 
     async def exec(
-        self, argv: Sequence[str], *, timeout: float | None = None, max_output_bytes: int | None = None
+        self, argv: list[str], *, timeout: float | None = None, max_output_bytes: int | None = None
     ) -> ModalSandboxExecResult:
         """Run an argument vector in the sandbox (without a shell) and return its result.
 
@@ -453,9 +453,9 @@ class ModalSandboxSession:
         import modal
 
         if isinstance(argv, str):
-            # A str is a Sequence[str] of characters, so 'ls -la' would splat into
-            # one-character arguments; catch the mistake instead of running garbage.
-            raise TypeError(f'argv must be a sequence of arguments, not a string; got {argv!r}.')
+            # The annotation rules a string out, but an untyped caller can still pass one, and
+            # 'ls -la' iterates into one-character arguments; catch it instead of running garbage.
+            raise TypeError(f'argv must be a list of arguments, not a string; got {argv!r}.')
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         if max_output_bytes is not None and (type(max_output_bytes) is not int or max_output_bytes <= 0):

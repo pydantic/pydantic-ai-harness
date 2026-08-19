@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -86,14 +85,14 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
     than the default.
     """
 
-    include_domains: Sequence[str] = field(default_factory=list[str])
+    include_domains: list[str] = field(default_factory=list[str])
     """If non-empty, search results only come from these domains (allowlist).
 
     Applies to `web_search` and `deep_search`. Mutually exclusive with
     `exclude_domains`.
     """
 
-    exclude_domains: Sequence[str] = field(default_factory=list[str])
+    exclude_domains: list[str] = field(default_factory=list[str])
     """Search results never come from these domains (denylist).
 
     Applies to `web_search` and `deep_search`. Mutually exclusive with
@@ -159,8 +158,8 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
         max_text_chars: int = 10_000,
         text_summary: bool | str = False,
         include_deep_search: bool = False,
-        include_domains: Sequence[str] = (),
-        exclude_domains: Sequence[str] = (),
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
         guidance: str | None = None,
     ) -> ExaSearch[AgentDepsT]:
         """Construct the capability from serializable spec options.
@@ -173,7 +172,7 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
             max_text_chars=max_text_chars,
             text_summary=text_summary,
             include_deep_search=include_deep_search,
-            include_domains=list(include_domains),
-            exclude_domains=list(exclude_domains),
+            include_domains=list(include_domains or []),
+            exclude_domains=list(exclude_domains or []),
             guidance=guidance,
         )

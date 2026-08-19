@@ -346,11 +346,11 @@ class TestExec:
         assert result.timed_out is False
 
     async def test_string_argv_rejected(self, fake_modal: FakeModal) -> None:
-        # A str is a Sequence[str] of characters; 'ls -la' would splat into one-character
-        # arguments, so the mistake is caught up front.
+        # An untyped caller can still reach `exec` with a string; 'ls -la' would iterate
+        # into one-character arguments, so the mistake is caught up front.
         async with ModalSandboxSession() as session:
-            with pytest.raises(TypeError, match='argv must be a sequence of arguments'):
-                await session.exec('ls -la')
+            with pytest.raises(TypeError, match='argv must be a list of arguments'):
+                await session.exec('ls -la')  # type: ignore[arg-type]
 
     async def test_non_modal_stream_error_becomes_sandbox_error(self, fake_modal: FakeModal) -> None:
         # Transport failures during stream iteration are not modal.exception.Error; they

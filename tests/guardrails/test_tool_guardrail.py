@@ -569,7 +569,7 @@ class TestResultGuardOnAFailedTool:
 
 
 class TestConfigurationShape:
-    """A bare string satisfies `Sequence[str]`, and both fields misbehave on one."""
+    """A bare string reaches the runtime guard from untyped callers, and both fields misbehave on one."""
 
     def test_a_bare_string_for_hidden_is_refused(self):
         """`set('danger')` holds six letters, so the tool it names would stay on the wire."""

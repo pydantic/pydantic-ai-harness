@@ -47,7 +47,7 @@ def _walk_dirs(workspace_dir: Path, home_dir: Path | None) -> list[Path]:
 def discover_instruction_files(
     workspace_dir: Path,
     home_dir: Path | None,
-    filenames: Sequence[str],
+    filenames: list[str],
 ) -> list[ContextFile]:
     """Collect instruction files from `home_dir` down to `workspace_dir`.
 
@@ -80,7 +80,7 @@ def discover_instruction_files(
     return found
 
 
-def find_dir_context_file(directory: Path, filenames: Sequence[str]) -> ContextFile | None:
+def find_dir_context_file(directory: Path, filenames: list[str]) -> ContextFile | None:
     """Return the first existing instruction file in `directory`, or `None`."""
     for filename in filenames:
         candidate = directory / filename

@@ -9,6 +9,7 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
 from pydantic_ai.tools import AgentDepsT
 
+from pydantic_ai_harness._validate import reject_bare_str
 from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.planning import Planning
@@ -17,7 +18,7 @@ from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
 from pydantic_ai_harness.tool_output_limits import ToolOutputLimits
 
-DEFAULT_ALLOWED_COMMANDS: tuple[str, ...] = (
+DEFAULT_ALLOWED_COMMANDS: list[str] = [
     'git',
     'rg',
     'grep',
@@ -32,7 +33,7 @@ DEFAULT_ALLOWED_COMMANDS: tuple[str, ...] = (
     'pytest',
     'ruff',
     'make',
-)
+]
 """Commands available to `Coder` unless an explicit allowlist is supplied."""
 
 
@@ -66,10 +67,12 @@ class Coder(CombinedCapability[AgentDepsT]):
         self,
         workspace: str | Path = '.',
         *,
-        allowed_commands: Sequence[str] | None = None,
+        allowed_commands: list[str] | None = None,
         subagents: Sequence[SubAgent[AgentDepsT]] | None = None,
         instructions: str | None = None,
     ) -> None:
+        if allowed_commands is not None:
+            reject_bare_str('Coder', (('allowed_commands', allowed_commands, 'command names'),))
         delegates = [_explorer(workspace)] if subagents is None else subagents
         capabilities: list[AbstractCapability[AgentDepsT]] = []
         if instructions is not None:
@@ -79,8 +82,8 @@ class Coder(CombinedCapability[AgentDepsT]):
                 FileSystem[AgentDepsT](workspace),
                 Shell[AgentDepsT](
                     cwd=workspace,
-                    allowed_commands=DEFAULT_ALLOWED_COMMANDS if allowed_commands is None else allowed_commands,
-                    denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
+                    allowed_commands=list(DEFAULT_ALLOWED_COMMANDS if allowed_commands is None else allowed_commands),
+                    denied_env_patterns=list(LLM_API_KEY_ENV_PATTERNS),
                 ),
                 RepoContext[AgentDepsT](workspace_dir=Path(workspace)),
                 Planning[AgentDepsT](),

@@ -94,6 +94,15 @@ solves.
 - docstrings use single backticks (markdown), not RST double backticks
 - no typecasting (`as` in TypeScript, `cast()` in Python) -- use type narrowing instead
 - prefer the most generic input types possible (reduce dependency chains)
+- exception to the above: public parameters that take a collection of strings
+  are annotated `list[str]`, not `Sequence[str]` or `Iterable[str]` -- `str`
+  satisfies both, so a bare `'name'` type-checks and then splats into
+  one-character items. When the parameter configures a security control (an
+  allow/deny/protect list over commands, services, env vars, or file paths),
+  also reject a bare `str` at runtime via `reject_bare_str` in
+  `pydantic_ai_harness/_validate.py`; a string denylist would otherwise stop
+  matching anything while looking configured. Content filters such as search
+  domain lists rely on the annotation alone.
 - don't add comments that restate what the code does
 
 ## Writing style

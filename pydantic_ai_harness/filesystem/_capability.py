@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FilteredToolset
 
+from pydantic_ai_harness._validate import reject_bare_str
 from pydantic_ai_harness.filesystem._toolset import READ_ONLY_TOOL_NAMES, FileSystemToolset
 
 _DEFAULT_PROTECTED: list[str] = [
@@ -34,13 +34,13 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     root_dir: str | Path = '.'
     """Root directory for all file operations. Defaults to the current directory."""
 
-    allowed_patterns: Sequence[str] = field(default_factory=list[str])
+    allowed_patterns: list[str] = field(default_factory=list[str])
     """If non-empty, only paths matching at least one glob pattern are accessible."""
 
-    denied_patterns: Sequence[str] = field(default_factory=list[str])
+    denied_patterns: list[str] = field(default_factory=list[str])
     """Paths matching any of these glob patterns are rejected."""
 
-    protected_patterns: Sequence[str] = field(default_factory=lambda: list(_DEFAULT_PROTECTED))
+    protected_patterns: list[str] = field(default_factory=lambda: list(_DEFAULT_PROTECTED))
     """Paths matching these patterns are read-only (writes are rejected).
 
     Defaults to protecting `.git/`, `.env`, key files, and secrets.
@@ -65,6 +65,15 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         # Runtime validation: dataclass field annotations are advisory, not enforced.
         # A config-driven caller could pass a string that would otherwise propagate.
+        reject_bare_str(
+            'FileSystem',
+            (
+                ('allowed_patterns', self.allowed_patterns, 'glob patterns'),
+                ('denied_patterns', self.denied_patterns, 'glob patterns'),
+                ('protected_patterns', self.protected_patterns, 'glob patterns'),
+            ),
+        )
+
         values: dict[str, Any] = {
             'max_read_lines': self.max_read_lines,
             'max_list_results': self.max_list_results,

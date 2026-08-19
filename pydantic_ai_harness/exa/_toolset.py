@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Concatenate, Literal, ParamSpec, Protocol, TypedDict, TypeVar
 
 import httpx
@@ -159,8 +159,8 @@ class ExaSearchToolset(FunctionToolset[AgentDepsT]):
         num_results: int,
         max_text_chars: int,
         include_deep_search: bool,
-        include_domains: Sequence[str] = (),
-        exclude_domains: Sequence[str] = (),
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
         text_summary: bool | str = False,
     ) -> None:
         super().__init__()

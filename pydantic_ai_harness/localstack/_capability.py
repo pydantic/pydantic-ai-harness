@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AgentToolset
 
+from pydantic_ai_harness._validate import reject_bare_str
 from pydantic_ai_harness.localstack._toolset import LocalStackToolset
 
 _INSTRUCTIONS = (
@@ -56,10 +57,10 @@ class LocalStack(AbstractCapability[AgentDepsT]):
     secret_access_key: str = 'test'
     """AWS secret access key. LocalStack accepts any value; defaults to its `test` convention."""
 
-    allowed_services: Sequence[str] = field(default_factory=list[str])
+    allowed_services: list[str] = field(default_factory=list[str])
     """If non-empty, only these AWS services may be used (allowlist), e.g. `['s3', 'dynamodb']`."""
 
-    denied_services: Sequence[str] = field(default_factory=list[str])
+    denied_services: list[str] = field(default_factory=list[str])
     """These AWS services are always rejected (denylist)."""
 
     default_timeout: float = 60.0
@@ -104,6 +105,16 @@ class LocalStack(AbstractCapability[AgentDepsT]):
 
     include_instructions: bool = True
     """If True, add instructions telling the model how to use the emulated environment."""
+
+    def __post_init__(self) -> None:
+        """Reject a bare string where a collection of service names is meant."""
+        reject_bare_str(
+            'LocalStack',
+            (
+                ('allowed_services', self.allowed_services, 'AWS service names'),
+                ('denied_services', self.denied_services, 'AWS service names'),
+            ),
+        )
 
     def get_instructions(self) -> str | None:
         """Explain the emulated environment to the model, unless disabled."""

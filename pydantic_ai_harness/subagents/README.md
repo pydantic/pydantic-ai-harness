@@ -234,7 +234,7 @@ SubAgent(
     agent,                 # AbstractAgent[AgentDepsT, Any] -- the child agent to run
     name=None,             # delegate name; defaults to the agent's own `name`
     description=None,      # prompt-listing description; defaults to the agent's own `description`
-    models=None,           # Sequence[str] -- menu keys this delegate may run on; the first is its default
+    models=None,           # list[str] -- menu keys this delegate may run on; the first is its default
     usage_limits=None,     # per-delegation request/token budget (isolated accounting)
     timeout_seconds=None,  # per-delegation wall-clock budget
     max_calls=None,        # max delegations to this sub-agent per parent run

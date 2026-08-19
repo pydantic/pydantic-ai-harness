@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -37,7 +36,7 @@ def _relposix(path: Path, workspace: Path) -> str:
         return path.as_posix()
 
 
-def scan_assets(workspace_dir: Path, asset_roots: Sequence[str]) -> AgentContextInventory:
+def scan_assets(workspace_dir: Path, asset_roots: list[str]) -> AgentContextInventory:
     """Scan `asset_roots` under `workspace_dir`, locating skills, agents, and hooks.
 
     This locates assets only; it does not open or parse SKILL.md, agent `.md`, or

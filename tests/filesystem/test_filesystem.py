@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
@@ -1340,6 +1340,19 @@ class TestFileSystemCapability:
         with pytest.raises(ValueError, match='max_read_lines must be a positive integer'):
             FileSystem(max_read_lines='1000')  # type: ignore[arg-type]
 
+    @pytest.mark.parametrize('field_name', ['allowed_patterns', 'denied_patterns', 'protected_patterns'])
+    def test_bare_string_pattern_rejected(self, field_name: str) -> None:
+        # A bare string is a collection of one-character patterns, which would
+        # leave the allow/deny/protect gate looking configured but not matching.
+        patterns: dict[str, object] = {field_name: '.env'}
+        with pytest.raises(UserError) as exc_info:
+            FileSystem(**patterns)  # type: ignore[arg-type]
+
+        assert str(exc_info.value) == (
+            f'FileSystem.{field_name} takes a collection of glob patterns, not a single string. '
+            "Pass ['.env'] rather than '.env'."
+        )
+
     @pytest.mark.anyio(backends=['asyncio'])
     async def test_agent_integration(self, tmp_path: Path, anyio_backend: object) -> None:
         if str(anyio_backend) != 'asyncio':
@@ -1349,6 +1362,31 @@ class TestFileSystemCapability:
         agent: Agent[None, str] = Agent(model, capabilities=[FileSystem(root_dir=tmp_path)])
         result = await agent.run('read test.txt')
         assert result.output == 'done'
+
+
+class TestToolsetPatternValidation:
+    @pytest.mark.parametrize('field_name', ['allowed_patterns', 'denied_patterns', 'protected_patterns'])
+    def test_bare_string_pattern_rejected(self, fs_root: Path, field_name: str) -> None:
+        patterns: dict[str, object] = {
+            'allowed_patterns': [],
+            'denied_patterns': [],
+            'protected_patterns': [],
+            field_name: '.env',
+        }
+        with pytest.raises(UserError) as exc_info:
+            FileSystemToolset(
+                root_dir=fs_root,
+                max_read_lines=2000,
+                max_list_results=1000,
+                max_search_results=1000,
+                max_find_results=1000,
+                **patterns,  # type: ignore[arg-type]
+            )
+
+        assert str(exc_info.value) == (
+            f'FileSystemToolset.{field_name} takes a collection of glob patterns, not a single string. '
+            "Pass ['.env'] rather than '.env'."
+        )
 
 
 class TestPatternCanonicalization:

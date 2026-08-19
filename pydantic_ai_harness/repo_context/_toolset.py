@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic_ai.tools import AgentDepsT
@@ -14,7 +13,7 @@ from pydantic_ai_harness.repo_context._inventory import AgentContextInventory, s
 class RepoContextToolset(FunctionToolset[AgentDepsT]):
     """Exposes a single tool that reports where the repo's CE assets live."""
 
-    def __init__(self, workspace_dir: Path, asset_roots: Sequence[str], tool_name: str) -> None:
+    def __init__(self, workspace_dir: Path, asset_roots: list[str], tool_name: str) -> None:
         super().__init__()
         self._workspace_dir = workspace_dir
         self._asset_roots = asset_roots

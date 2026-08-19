@@ -59,19 +59,19 @@ class TestDiscoverInstructionFiles:
         _write(tmp_path / 'CLAUDE.md', 'root')
         workspace = tmp_path / 'a' / 'b'
         _write(workspace / 'CLAUDE.md', 'leaf')
-        files = discover_instruction_files(workspace, tmp_path, ('CLAUDE.md',))
+        files = discover_instruction_files(workspace, tmp_path, ['CLAUDE.md'])
         assert [f.content for f in files] == ['root', 'leaf']
 
     def test_home_none_only_workspace(self, tmp_path: Path) -> None:
         _write(tmp_path / 'CLAUDE.md', 'root')
         workspace = tmp_path / 'a'
         _write(workspace / 'CLAUDE.md', 'leaf')
-        files = discover_instruction_files(workspace, None, ('CLAUDE.md',))
+        files = discover_instruction_files(workspace, None, ['CLAUDE.md'])
         assert [f.content for f in files] == ['leaf']
 
     def test_home_equals_workspace(self, tmp_path: Path) -> None:
         _write(tmp_path / 'CLAUDE.md', 'only')
-        files = discover_instruction_files(tmp_path, tmp_path, ('CLAUDE.md',))
+        files = discover_instruction_files(tmp_path, tmp_path, ['CLAUDE.md'])
         assert [f.content for f in files] == ['only']
 
     def test_home_not_ancestor_falls_back_to_workspace(self, tmp_path: Path) -> None:
@@ -79,36 +79,36 @@ class TestDiscoverInstructionFiles:
         _write(workspace / 'CLAUDE.md', 'leaf')
         unrelated = tmp_path / 'other'
         unrelated.mkdir()
-        files = discover_instruction_files(workspace, unrelated, ('CLAUDE.md',))
+        files = discover_instruction_files(workspace, unrelated, ['CLAUDE.md'])
         assert [f.content for f in files] == ['leaf']
 
     def test_both_filenames_within_dir_order(self, tmp_path: Path) -> None:
         _write(tmp_path / 'CLAUDE.md', 'claude')
         _write(tmp_path / 'AGENTS.md', 'agents')
-        files = discover_instruction_files(tmp_path, None, ('CLAUDE.md', 'AGENTS.md'))
+        files = discover_instruction_files(tmp_path, None, ['CLAUDE.md', 'AGENTS.md'])
         assert [f.content for f in files] == ['claude', 'agents']
 
     @pytest.mark.skipif(sys.platform == 'win32', reason='symlinks need privileges on Windows')
     def test_symlink_deduped_by_realpath(self, tmp_path: Path) -> None:
         _write(tmp_path / 'CLAUDE.md', 'shared')
         (tmp_path / 'AGENTS.md').symlink_to(tmp_path / 'CLAUDE.md')
-        files = discover_instruction_files(tmp_path, None, ('CLAUDE.md', 'AGENTS.md'))
+        files = discover_instruction_files(tmp_path, None, ['CLAUDE.md', 'AGENTS.md'])
         assert len(files) == 1
 
     def test_identical_content_deduped_by_hash(self, tmp_path: Path) -> None:
         _write(tmp_path / 'CLAUDE.md', 'same')
         workspace = tmp_path / 'a'
         _write(workspace / 'CLAUDE.md', 'same')
-        files = discover_instruction_files(workspace, tmp_path, ('CLAUDE.md',))
+        files = discover_instruction_files(workspace, tmp_path, ['CLAUDE.md'])
         assert [f.content for f in files] == ['same']
 
     def test_missing_files_skipped(self, tmp_path: Path) -> None:
-        files = discover_instruction_files(tmp_path, None, ('CLAUDE.md',))
+        files = discover_instruction_files(tmp_path, None, ['CLAUDE.md'])
         assert files == []
 
     def test_non_utf8_file_does_not_crash(self, tmp_path: Path) -> None:
         (tmp_path / 'CLAUDE.md').write_bytes(b'caf\xe9 instructions')
-        files = discover_instruction_files(tmp_path, None, ('CLAUDE.md',))
+        files = discover_instruction_files(tmp_path, None, ['CLAUDE.md'])
         assert len(files) == 1
         assert 'instructions' in files[0].content
 
@@ -116,16 +116,16 @@ class TestDiscoverInstructionFiles:
 class TestFindDirContextFile:
     def test_first_existing_wins(self, tmp_path: Path) -> None:
         _write(tmp_path / 'AGENTS.md', 'agents')
-        found = find_dir_context_file(tmp_path, ('CLAUDE.md', 'AGENTS.md'))
+        found = find_dir_context_file(tmp_path, ['CLAUDE.md', 'AGENTS.md'])
         assert found is not None
         assert found.content == 'agents'
 
     def test_none_when_absent(self, tmp_path: Path) -> None:
-        assert find_dir_context_file(tmp_path, ('CLAUDE.md',)) is None
+        assert find_dir_context_file(tmp_path, ['CLAUDE.md']) is None
 
     def test_non_utf8_file_does_not_crash(self, tmp_path: Path) -> None:
         (tmp_path / 'CLAUDE.md').write_bytes(b'caf\xe9 instructions')
-        found = find_dir_context_file(tmp_path, ('CLAUDE.md',))
+        found = find_dir_context_file(tmp_path, ['CLAUDE.md'])
         assert found is not None
         assert 'instructions' in found.content
 
@@ -194,7 +194,7 @@ class TestScanAssets:
         _write(tmp_path / '.claude' / 'skills' / 'foo' / 'SKILL.md', 's')
         _write(tmp_path / '.claude' / 'agents' / 'bar.md', 'a')
         _write(tmp_path / '.claude' / 'settings.json', '{}')
-        inv = scan_assets(tmp_path, ('.claude', '.agents', '.codex', '.grok'))
+        inv = scan_assets(tmp_path, ['.claude', '.agents', '.codex', '.grok'])
         by_root = {r.root: r for r in inv.roots}
         claude = by_root['.claude']
         assert claude.exists
@@ -207,12 +207,12 @@ class TestScanAssets:
 
     def test_existing_root_without_settings(self, tmp_path: Path) -> None:
         _write(tmp_path / '.claude' / 'skills' / 'foo' / 'SKILL.md', 's')
-        inv = scan_assets(tmp_path, ('.claude',))
+        inv = scan_assets(tmp_path, ['.claude'])
         assert inv.roots[0].settings is None
         assert inv.roots[0].notes is None
 
     def test_returns_model(self, tmp_path: Path) -> None:
-        assert isinstance(scan_assets(tmp_path, ()), AgentContextInventory)
+        assert isinstance(scan_assets(tmp_path, []), AgentContextInventory)
 
     @pytest.mark.skipif(sys.platform == 'win32', reason='symlinks need privileges on Windows')
     def test_symlinked_asset_escaping_workspace(self, tmp_path: Path) -> None:
@@ -221,7 +221,7 @@ class TestScanAssets:
         link = workspace / '.claude' / 'skills' / 'foo' / 'SKILL.md'
         link.parent.mkdir(parents=True)
         link.symlink_to(outside)
-        inv = scan_assets(workspace, ('.claude',))
+        inv = scan_assets(workspace, ['.claude'])
         claude = inv.roots[0]
         assert claude.exists
         assert len(claude.skills) == 1

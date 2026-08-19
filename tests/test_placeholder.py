@@ -66,7 +66,7 @@ def test_lazy_import_presets():
 def test_lazy_import_llm_api_key_env_patterns():
     from pydantic_ai_harness import LLM_API_KEY_ENV_PATTERNS
 
-    assert isinstance(LLM_API_KEY_ENV_PATTERNS, tuple)
+    assert isinstance(LLM_API_KEY_ENV_PATTERNS, list)
     assert 'OPENAI_*' in LLM_API_KEY_ENV_PATTERNS
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 
 from pydantic_ai.models import KnownModelName, Model
@@ -62,7 +62,7 @@ def model_label(model: Model | KnownModelName | str) -> str:
     return model
 
 
-def validate_restriction(agent_name: str, allowed: Sequence[str] | None, menu: Mapping[str, ModelOption]) -> None:
+def validate_restriction(agent_name: str, allowed: list[str] | None, menu: Mapping[str, ModelOption]) -> None:
     """Check one delegate's `SubAgent.models` restriction against the configured menu.
 
     Raises:

@@ -13,7 +13,7 @@ from typing import Any
 
 import pytest
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
@@ -94,6 +94,40 @@ class TestConstruction:
     def test_non_positive_max_output_chars_rejected(self) -> None:
         with pytest.raises(ValueError, match='max_output_chars must be a positive integer.'):
             _toolset(max_output_chars=0)
+
+
+class TestBareStringRejected:
+    """A bare string is a collection of one-character service names, so the gate would stop matching."""
+
+    @pytest.mark.parametrize('field_name', ['allowed_services', 'denied_services'])
+    def test_capability_rejects_bare_string(self, field_name: str) -> None:
+        with pytest.raises(UserError) as exc_info:
+            LocalStack(**{field_name: 's3'})  # type: ignore[arg-type]
+
+        assert str(exc_info.value) == (
+            f'LocalStack.{field_name} takes a collection of AWS service names, not a single string. '
+            "Pass ['s3'] rather than 's3'."
+        )
+
+    @pytest.mark.parametrize('field_name', ['allowed_services', 'denied_services'])
+    def test_toolset_rejects_bare_string(self, field_name: str) -> None:
+        services: dict[str, object] = {'allowed_services': [], 'denied_services': [], field_name: 's3'}
+        with pytest.raises(UserError) as exc_info:
+            LocalStackToolset[None](
+                endpoint_url='http://localhost:4566',
+                region='us-east-1',
+                access_key_id='test',
+                secret_access_key='test',
+                default_timeout=10.0,
+                max_output_chars=50_000,
+                aws_cli_path='aws',
+                **services,  # type: ignore[arg-type]
+            )
+
+        assert str(exc_info.value) == (
+            f'LocalStackToolset.{field_name} takes a collection of AWS service names, not a single string. '
+            "Pass ['s3'] rather than 's3'."
+        )
 
 
 class TestOutputCap:

@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 
+from pydantic_ai_harness._validate import reject_bare_str
 from pydantic_ai_harness.shell._toolset import ShellToolset
 
-_DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
+_DEFAULT_DENIED_COMMANDS: list[str] = [
     'rm',
     'rmdir',
     'mkfs',
@@ -22,10 +23,10 @@ _DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
     'halt',
     'poweroff',
     'init',
-)
+]
 
 
-LLM_API_KEY_ENV_PATTERNS: tuple[str, ...] = (
+LLM_API_KEY_ENV_PATTERNS: list[str] = [
     'ANTHROPIC_*',
     'GATEWAY_*',
     'GEMINI_*',
@@ -33,7 +34,7 @@ LLM_API_KEY_ENV_PATTERNS: tuple[str, ...] = (
     'OPENAI_*',
     'OPENROUTER_*',
     'PYDANTIC_AI_GATEWAY_API_KEY',
-)
+]
 """Glob patterns for common LLM provider credentials, for `denied_env_patterns`.
 
 Pass these when an agent runs untrusted commands that must not read the host's
@@ -55,17 +56,17 @@ class Shell(AbstractCapability[AgentDepsT]):
     cwd: str | Path = '.'
     """Working directory for command execution."""
 
-    allowed_commands: Sequence[str] = field(default_factory=list[str])
+    allowed_commands: list[str] = field(default_factory=list[str])
     """If non-empty, only these command names may be executed (allowlist)."""
 
-    denied_commands: Sequence[str] = _DEFAULT_DENIED_COMMANDS
+    denied_commands: list[str] = field(default_factory=lambda: _DEFAULT_DENIED_COMMANDS)
     """These command names are always rejected (denylist).
 
     Defaults to blocking destructive commands (rm, dd, shutdown, etc.).
     Set to an empty list to disable.
     """
 
-    denied_operators: Sequence[str] = field(default_factory=list[str])
+    denied_operators: list[str] = field(default_factory=list[str])
     """Shell operators that are blocked (e.g. '>', '>>', '|' for restrictive mode)."""
 
     default_timeout: float = 30.0
@@ -89,7 +90,7 @@ class Shell(AbstractCapability[AgentDepsT]):
     tokens) out of commands the agent runs.
     """
 
-    denied_env_patterns: Sequence[str] = field(default_factory=list[str])
+    denied_env_patterns: list[str] = field(default_factory=list[str])
     """Glob patterns for environment variable names to strip before spawning.
 
     Follows the `denied_*` naming convention but matches by glob (`fnmatch`,
@@ -101,7 +102,16 @@ class Shell(AbstractCapability[AgentDepsT]):
     """
 
     def __post_init__(self) -> None:
-        """Resolve the built-in denylist according to the selected policy."""
+        """Reject bare strings, then resolve the built-in denylist according to the selected policy."""
+        reject_bare_str(
+            'Shell',
+            (
+                ('allowed_commands', self.allowed_commands, 'command names'),
+                ('denied_commands', self.denied_commands, 'command names'),
+                ('denied_operators', self.denied_operators, 'shell operators'),
+                ('denied_env_patterns', self.denied_env_patterns, 'glob patterns'),
+            ),
+        )
         if self.denied_commands is _DEFAULT_DENIED_COMMANDS:
             self.denied_commands = [] if self.allowed_commands else list(_DEFAULT_DENIED_COMMANDS)
 

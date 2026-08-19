@@ -25,7 +25,7 @@ the run's deferred approval flow.
 from __future__ import annotations
 
 import warnings
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -206,10 +206,10 @@ class ToolGuardrail(AbstractCapability[AgentDepsT]):
     result_guard: ToolResultGuardrailFunc[AgentDepsT] | None = None
     """Callable that decides what to do with a tool result before the model sees it."""
 
-    tools: Sequence[str] | None = None
+    tools: list[str] | None = None
     """Restrict both guards to these tool names. `None` guards every tool.
 
-    An empty sequence guards nothing, which is the same as configuring no guard at all --
+    An empty list guards nothing, which is the same as configuring no guard at all --
     write `None` when you mean every tool.
 
     A configured name that no offered tool matches warns after a successful run when
@@ -217,7 +217,7 @@ class ToolGuardrail(AbstractCapability[AgentDepsT]):
     from one step is not enough to diagnose a typo.
     """
 
-    hidden: Sequence[str] = field(default_factory=tuple)
+    hidden: list[str] = field(default_factory=list[str])
     """Tool names to withhold from the model entirely.
 
     Hiding differs from blocking: a hidden tool is dropped from the tool
@@ -243,11 +243,11 @@ class ToolGuardrail(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         """Reject a bare string where a collection of tool names is meant.
 
-        `str` satisfies `Sequence[str]`, so pyright accepts `hidden='danger'`
-        and the set built from it holds the six letters of the word. The tool
-        stays on the wire and nothing reports it -- a safety control failing
-        open. `tools='delete_all'` fails the other way, matching any tool whose
-        name is a substring of it.
+        The `list[str]` annotations cover typed call sites; untyped and
+        config-driven ones reach here unchecked. `hidden='danger'` builds a set
+        holding the six letters of the word, so the tool stays on the wire and
+        nothing reports it -- a safety control failing open. `tools='delete_all'`
+        fails the other way, matching any tool whose name is a substring of it.
         """
         for field_name, value in (('tools', self.tools), ('hidden', self.hidden)):
             if isinstance(value, str):

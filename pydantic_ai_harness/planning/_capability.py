@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
@@ -100,7 +100,7 @@ class Planning(AbstractCapability[AgentDepsT]):
     inject: bool = True
     """Surface the current plan as a cache-safe tail reminder each turn."""
 
-    tools: Sequence[str] | None = None
+    tools: list[str] | None = None
     """Optional allowlist of tool names to register; `None` registers all of them.
 
     The full surface is `write_plan`, `read_plan`, `add_task`, `update_task_status`,

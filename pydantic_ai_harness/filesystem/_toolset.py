@@ -15,6 +15,8 @@ from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness._validate import reject_bare_str
+
 _P = ParamSpec('_P')
 
 READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
@@ -109,14 +111,23 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self,
         *,
         root_dir: Path,
-        allowed_patterns: Sequence[str],
-        denied_patterns: Sequence[str],
-        protected_patterns: Sequence[str],
+        allowed_patterns: list[str],
+        denied_patterns: list[str],
+        protected_patterns: list[str],
         max_read_lines: int,
         max_list_results: int,
         max_search_results: int,
         max_find_results: int,
     ) -> None:
+        reject_bare_str(
+            'FileSystemToolset',
+            (
+                ('allowed_patterns', allowed_patterns, 'glob patterns'),
+                ('denied_patterns', denied_patterns, 'glob patterns'),
+                ('protected_patterns', protected_patterns, 'glob patterns'),
+            ),
+        )
+
         super().__init__()
         self._root = root_dir.resolve()
         self._real_root = Path(os.path.realpath(self._root))

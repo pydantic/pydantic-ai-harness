@@ -253,8 +253,8 @@ for code-defined capabilities.
 Skills(
     directories: str | Path | Sequence[str | Path],
     *,
-    include: Collection[str] | None = None,
-    exclude: Collection[str] | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
 )
 ```
 

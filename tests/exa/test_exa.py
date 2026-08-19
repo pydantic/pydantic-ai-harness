@@ -148,16 +148,16 @@ def _toolset(
     max_text_chars: int = 10_000,
     text_summary: bool | str = False,
     include_deep_search: bool = False,
-    include_domains: Sequence[str] = (),
-    exclude_domains: Sequence[str] = (),
+    include_domains: list[str] | None = None,
+    exclude_domains: list[str] | None = None,
 ) -> ExaSearchToolset[None]:
     return ExaSearch[None](
         num_results=num_results,
         max_text_chars=max_text_chars,
         text_summary=text_summary,
         include_deep_search=include_deep_search,
-        include_domains=include_domains,
-        exclude_domains=exclude_domains,
+        include_domains=include_domains or [],
+        exclude_domains=exclude_domains or [],
         client=client,
     ).get_toolset()
 

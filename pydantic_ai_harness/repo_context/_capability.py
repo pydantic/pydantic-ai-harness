@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -79,7 +78,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     """The shallowest directory to stop the walk-up at, inclusive. `None` (the
     default) scans only `workspace_dir` -- no walk-up."""
 
-    filenames: Sequence[str] = ('CLAUDE.md', 'AGENTS.md')
+    filenames: list[str] = field(default_factory=lambda: ['CLAUDE.md', 'AGENTS.md'])
     """Instruction filenames to look for, in within-directory precedence order."""
 
     autoload_instructions: bool = True
@@ -105,7 +104,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     traversal_path_arg: str = 'path'
     """The tool argument key holding the listed/read path."""
 
-    asset_roots: Sequence[str] = ('.claude', '.agents', '.codex', '.grok')
+    asset_roots: list[str] = field(default_factory=lambda: ['.claude', '.agents', '.codex', '.grok'])
     """Root directories the inventory tool scans, relative to `workspace_dir`."""
 
     _context_files: list[ContextFile] | None = field(default=None, init=False, repr=False, compare=False)

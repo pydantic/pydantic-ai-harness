@@ -413,9 +413,9 @@ class TestBlockedKeywords:
         assert detector(f'{keyword}x').action == 'allow'
 
     def test_a_bare_string_is_refused(self):
-        """`str` is an `Iterable[str]`, so it would be one keyword per character."""
+        """An untyped caller reaching the runtime guard gets one keyword per character."""
         with pytest.raises(UserError, match='single string'):
-            blocked_keywords('internal-only')
+            blocked_keywords('internal-only')  # pyright: ignore[reportArgumentType]
 
     def test_an_empty_keyword_is_refused(self):
         """An empty pattern matches at position 0 of anything, so it would block every input."""

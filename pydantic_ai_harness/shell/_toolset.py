@@ -11,7 +11,7 @@ import signal
 import subprocess
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Concatenate, ParamSpec
 
@@ -23,6 +23,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
 
 from pydantic_ai_harness._output import truncate_tail
+from pydantic_ai_harness._validate import reject_bare_str
 
 _IO_DRAIN_TIMEOUT: float = 2.0
 _KILL_GRACE_PERIOD: float = 2.0
@@ -96,17 +97,27 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         self,
         *,
         cwd: Path,
-        allowed_commands: Sequence[str],
-        denied_commands: Sequence[str],
-        denied_operators: Sequence[str],
+        allowed_commands: list[str],
+        denied_commands: list[str],
+        denied_operators: list[str],
         default_timeout: float,
         max_output_chars: int,
         persist_cwd: bool,
         allow_interactive: bool,
         env: Mapping[str, str] | None = None,
-        denied_env_patterns: Sequence[str] = (),
+        denied_env_patterns: list[str] | None = None,
     ) -> None:
         super().__init__()
+        denied_env_patterns = denied_env_patterns if denied_env_patterns is not None else []
+        reject_bare_str(
+            'ShellToolset',
+            (
+                ('allowed_commands', allowed_commands, 'command names'),
+                ('denied_commands', denied_commands, 'command names'),
+                ('denied_operators', denied_operators, 'shell operators'),
+                ('denied_env_patterns', denied_env_patterns, 'glob patterns'),
+            ),
+        )
         self._cwd = cwd.resolve()
         # The configured starting directory, never mutated by persist_cwd, so
         # `for_run` can hand each run a fresh instance rooted back here.

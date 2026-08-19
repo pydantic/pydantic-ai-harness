@@ -79,7 +79,7 @@ class SubAgent(Generic[AgentDepsT]):
     """Description for the system-prompt listing. Defaults to the agent's own
     `description` when unset; a delegate with neither is listed by name alone."""
 
-    models: Sequence[str] | None = None
+    models: list[str] | None = None
     """Which of `SubAgents.models` this delegate may run on, as menu keys, and
     which one it runs on by default: the first key listed. Leave it unset to let
     the parent pick any configured option and to fall back to the delegate's own

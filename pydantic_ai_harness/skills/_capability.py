@@ -44,7 +44,7 @@ class Skills(AbstractCapability[AgentDepsT]):
         self,
         directories: str | Path | Sequence[str | Path],
         *,
-        include: Collection[str],
+        include: list[str],
         exclude: None = None,
     ) -> None: ...
 
@@ -54,15 +54,15 @@ class Skills(AbstractCapability[AgentDepsT]):
         directories: str | Path | Sequence[str | Path],
         *,
         include: None = None,
-        exclude: Collection[str] | None = None,
+        exclude: list[str] | None = None,
     ) -> None: ...
 
     def __init__(
         self,
         directories: str | Path | Sequence[str | Path],
         *,
-        include: Collection[str] | None = None,
-        exclude: Collection[str] | None = None,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
     ) -> None:
         """Build a snapshot of the selected Agent Skills.
 

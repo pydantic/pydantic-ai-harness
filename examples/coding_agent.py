@@ -28,7 +28,7 @@ DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'anthropic:claude-fable-5')
 
 # Keep this blown-out composition in sync across docs/coder.md, docs/index.md, README.md,
 # pydantic_ai_harness/coder/README.md, and examples/coding_agent.py.
-ALLOWED_COMMANDS = (
+ALLOWED_COMMANDS = [
     'git',
     'rg',
     'grep',
@@ -43,7 +43,7 @@ ALLOWED_COMMANDS = (
     'pytest',
     'ruff',
     'make',
-)
+]
 
 
 def build_agent(model: Model | str = DEFAULT_MODEL, workspace: Path | None = None) -> Agent:

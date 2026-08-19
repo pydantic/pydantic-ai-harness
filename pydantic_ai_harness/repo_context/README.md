@@ -99,7 +99,7 @@ cache-relevant paths separate:
 RepoContext(
     workspace_dir,                  # Path -- the deepest dir the agent works in (required)
     home_dir=None,                  # Path | None -- shallowest dir to stop walk-up at, inclusive
-    filenames=('CLAUDE.md', 'AGENTS.md'),
+    filenames=['CLAUDE.md', 'AGENTS.md'],
     autoload_instructions=True,     # Strategy 1
     expose_inventory_tool=True,     # Strategy 2
     inventory_tool_name='inventory_agent_context',
@@ -107,7 +107,7 @@ RepoContext(
     nested_inject='pointer',        # 'pointer' | 'contents'
     traversal_tool_names=frozenset({'list_directory', 'read_file'}),
     traversal_path_arg='path',
-    asset_roots=('.claude', '.agents', '.codex', '.grok'),
+    asset_roots=['.claude', '.agents', '.codex', '.grok'],
 )
 ```
 
