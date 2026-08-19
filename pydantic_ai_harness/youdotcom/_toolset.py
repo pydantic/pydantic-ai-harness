@@ -15,6 +15,8 @@ from pydantic_ai.messages import ToolReturn
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness._output import truncate_head
+
 try:
     from youdotcom import You, models
     from youdotcom.errors import NoResponseError, YouError
@@ -64,19 +66,6 @@ class YouSource(TypedDict):
 def _source_list(sources: Mapping[str, str | None]) -> list[YouSource]:
     """Convert a `url -> title` mapping into the metadata `sources` list."""
     return [{'url': url, 'title': title} for url, title in sources.items()]
-
-
-def _truncate(text: str, max_chars: int) -> str:
-    """Cap page text at `max_chars`, keeping the head where a page's substance sits.
-
-    The truncation marker counts against `max_chars`, so the returned text stays
-    within the bound (except when `max_chars` is smaller than the marker itself,
-    where the marker alone is returned rather than slicing off the head).
-    """
-    if len(text) <= max_chars:
-        return text
-    marker = f'\n[... page text truncated at {max_chars} characters]'
-    return f'{text[: max(max_chars - len(marker), 0)]}{marker}'
 
 
 def _is_valid_freshness_range(freshness: str) -> bool:
@@ -238,7 +227,7 @@ def _web_result_body(result: models.WebResult, max_text_chars: int) -> str | Non
         if contents.highlights:
             return '\n'.join(f'- {highlight}' for highlight in contents.highlights)
         if contents.markdown:
-            return _truncate(contents.markdown, max_text_chars)
+            return truncate_head(contents.markdown, max_text_chars)
     if result.snippets:
         return '\n'.join(f'- {snippet}' for snippet in result.snippets)
     return result.description or None
@@ -371,6 +360,6 @@ class YouSearchToolset(FunctionToolset[AgentDepsT]):
         if not title and isinstance(metadata, models.ContentsMetadata) and isinstance(metadata.site_name, str):
             title = metadata.site_name
         return ToolReturn(
-            _format_result(title, page_url, None, _truncate(markdown, self._max_text_chars)),
+            _format_result(title, page_url, None, truncate_head(markdown, self._max_text_chars)),
             metadata={'sources': _source_list({page_url: title})},
         )

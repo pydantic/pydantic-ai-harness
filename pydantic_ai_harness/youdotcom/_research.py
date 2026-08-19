@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from typing import TYPE_CHECKING, Literal, get_args
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -222,6 +222,8 @@ class YouResearch(AbstractCapability[AgentDepsT]):
     Authentication comes from the `YDC_API_KEY` environment variable by
     default; pass `client` to configure it explicitly.
     """
+
+    _: KW_ONLY
 
     research_effort: ResearchEffortName = 'standard'
     """How hard `research` works: `lite`, `standard`, `deep`, or `exhaustive`.

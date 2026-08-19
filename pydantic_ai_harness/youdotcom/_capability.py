@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass, field
 from typing import TYPE_CHECKING
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -47,6 +47,8 @@ class YouSearch(AbstractCapability[AgentDepsT]):
     Authentication comes from the `YDC_API_KEY` environment variable by
     default; pass `client` to configure it explicitly.
     """
+
+    _: KW_ONLY
 
     num_results: int = 10
     """Number of results `web_search` returns per query (1 to 20)."""
