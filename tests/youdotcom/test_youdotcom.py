@@ -362,6 +362,13 @@ class TestWebSearch:
         output = await _search_toolset(client, extraction_mode='full_page').web_search('q')
         assert _text(output) == "Found 1 result for 'q':\n\nTitle: A\nURL: https://a.dev\n\nfull text"
 
+    async def test_highlights_mode_prefers_highlights_over_markdown(self) -> None:
+        client = _FakeYouClient(
+            search_response=_search(_web('https://a.dev', title='A', highlights=['alpha'], markdown='full text'))
+        )
+        output = await _search_toolset(client, extraction_mode='highlights').web_search('q')
+        assert _text(output) == "Found 1 result for 'q':\n\nTitle: A\nURL: https://a.dev\n\n- alpha"
+
     async def test_snippets_then_description_fallback(self) -> None:
         client = _FakeYouClient(search_response=_search(_web('https://a.dev', title='A', snippets=['snip'])))
         assert '- snip' in _text(await _search_toolset(client).web_search('q'))
