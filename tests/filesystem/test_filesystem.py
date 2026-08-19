@@ -15,6 +15,7 @@ from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES, FileSystem
 from pydantic_ai_harness.filesystem._toolset import (
+    _NOT_A_PATH,
     _OUTSIDE_WORKSPACE,
     FileSystemToolset,
     _content_hash,
@@ -1434,12 +1435,12 @@ class TestModelSafeRecoverableErrors:
         message = _sanitize_recoverable_error(error, real_root)
         assert message == f"[Errno {errno.EACCES}] Permission denied: 'hello.txt'"
 
-    def test_unpathlike_filename_is_redacted(self, fs_root: Path) -> None:
+    def test_non_path_filename_is_labeled(self, fs_root: Path) -> None:
         real_root = Path(os.path.realpath(fs_root))
         error = OSError(errno.ENOENT, 'No such file or directory')
         error.filename = object()
         message = _sanitize_recoverable_error(error, real_root)
-        assert _OUTSIDE_WORKSPACE in message
+        assert _NOT_A_PATH in message
 
     def test_symlink_alias_is_normalized(self, fs_root: Path) -> None:
         # macOS reports tmp paths through a symlink alias (`/var` vs `/private/var`);

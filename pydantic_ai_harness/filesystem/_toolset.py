@@ -29,15 +29,22 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
 _RECOVERABLE_ERRORS = (PermissionError, FileNotFoundError, NotADirectoryError, IsADirectoryError, ValueError)
 
 _OUTSIDE_WORKSPACE = '<outside-workspace>'
-"""Placeholder used when an OS path cannot be shown relative to the workspace root."""
+"""Shown instead of an absolute path that is not inside the workspace root."""
+
+_NOT_A_PATH = '<not-a-path>'
+"""Shown when an error's `filename` is not a path value at all."""
 
 
 def _model_safe_filename(filename: str | bytes, real_root: Path) -> str:
-    """Return a workspace-relative path, or `_OUTSIDE_WORKSPACE` if that is unsafe."""
+    """Return the path relative to the workspace root.
+
+    Paths not inside the root become `_OUTSIDE_WORKSPACE`; values that are
+    not paths at all become `_NOT_A_PATH`.
+    """
     try:
         raw = os.fsdecode(filename)
     except TypeError:
-        return _OUTSIDE_WORKSPACE
+        return _NOT_A_PATH
     path = Path(raw)
     if not path.is_absolute():
         return path.as_posix()
@@ -55,8 +62,8 @@ def _sanitize_recoverable_error(error: BaseException, real_root: Path) -> str:
     """Render a recoverable error without exposing absolute host paths.
 
     Errors without an OS-supplied `filename` keep their original message.
-    OS errors keep `errno` and `strerror`, and the path is rewritten relative
-    to `real_root`, or replaced with `_OUTSIDE_WORKSPACE` when it cannot be.
+    OS errors keep `errno` and `strerror`, with the path rewritten relative
+    to `real_root` (see `_model_safe_filename` for the fallback placeholders).
     """
     if not isinstance(error, OSError) or error.filename is None:
         return str(error)
