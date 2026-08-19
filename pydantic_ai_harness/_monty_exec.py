@@ -22,6 +22,8 @@ from collections.abc import Callable, Container, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic_ai.exceptions import UserError
+
 try:
     from pydantic_monty import (
         CollectString,
@@ -45,8 +47,10 @@ DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
 
 MontyState = FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete
 
-# A coroutine not yet scheduled on the event loop, or its running Task.
-PendingCall = asyncio.Task[Any] | Coroutine[Any, Any, Any]
+# A dispatch coroutine kept unscheduled for global-sequential execution, or a
+# running parallel task whose ordinary outcome is already wrapped for Monty.
+DispatchCall = Coroutine[Any, Any, Any]
+PendingCall = asyncio.Task[ExternalSettledResult] | DispatchCall
 
 
 def is_sandbox_panic(exc: BaseException) -> bool:
@@ -158,7 +162,7 @@ class MontyExecutor:
             # `_pending`, so if it existed while the barrier awaits and we were cancelled
             # there, `run`'s cleanup would never close it.
             for cid in list(self._pending):
-                self._pre_resolved[cid] = await _await_external(self._pending.pop(cid))
+                self._pre_resolved[cid] = await _resolve_pending(self._pending.pop(cid))
             # The wrapped outcome (`{'return_value': ...}` / `{'exception': ...}`) is already
             # exactly the payload `resume` expects.
             return snapshot.resume(await _await_external(self.dispatch(name, snapshot.kwargs)))
@@ -170,7 +174,8 @@ class MontyExecutor:
             self._pending[snapshot.call_id] = call
         else:
             # Schedule now as a Task so concurrently-deferred calls actually run in parallel.
-            self._pending[snapshot.call_id] = asyncio.ensure_future(call)
+            # Ordinary failures settle as Monty values; UserError remains a host-side failure.
+            self._pending[snapshot.call_id] = asyncio.ensure_future(_await_external(call))
         return snapshot.resume({'future': ...})
 
     async def _resolve_futures(self, snapshot: FutureSnapshot) -> MontyState:
@@ -181,33 +186,33 @@ class MontyExecutor:
             if cid in self._pre_resolved:
                 results[cid] = self._pre_resolved.pop(cid)
             elif self.global_sequential:
-                results[cid] = await _await_external(self._pending.pop(cid))
+                results[cid] = await _resolve_pending(self._pending.pop(cid))
 
         # Gather any remaining parallel tasks concurrently. They stay in `_pending` until
         # gather returns, so the cleanup in `run` can still cancel them if this is cancelled.
         gather_ids = [cid for cid in pending_ids if cid not in results]
         if gather_ids:
-            settled = await asyncio.gather(*(self._pending[cid] for cid in gather_ids), return_exceptions=True)
+            settled = await asyncio.gather(*(self._pending[cid] for cid in gather_ids))
             for cid, outcome in zip(gather_ids, settled):
                 del self._pending[cid]
-                results[cid] = _wrap_gathered(outcome)
+                results[cid] = outcome
 
         return snapshot.resume(results)
 
 
-async def _await_external(call: PendingCall) -> ExternalReturnValue | ExternalException:
+async def _await_external(call: DispatchCall) -> ExternalReturnValue | ExternalException:
     """Await a single deferred call and wrap its outcome for Monty."""
     try:
         result = await call
+    except UserError:
+        raise
     except Exception as exc:
         return ExternalException(exception=exc)
     return ExternalReturnValue(return_value=result)
 
 
-def _wrap_gathered(outcome: Any) -> ExternalReturnValue | ExternalException:
-    """Wrap an `asyncio.gather(return_exceptions=True)` outcome for Monty."""
-    if isinstance(outcome, Exception):
-        return ExternalException(exception=outcome)
-    if isinstance(outcome, BaseException):  # pragma: no cover
-        raise outcome
-    return ExternalReturnValue(return_value=outcome)
+async def _resolve_pending(call: PendingCall) -> ExternalSettledResult:
+    """Resolve either a wrapped parallel task or a raw global-sequential coroutine."""
+    if isinstance(call, asyncio.Task):
+        return await call
+    return await _await_external(call)
