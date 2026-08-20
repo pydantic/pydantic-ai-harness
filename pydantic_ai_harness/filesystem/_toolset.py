@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import functools
 import hashlib
 import os
 import re
+import stat
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Concatenate, ParamSpec
@@ -28,6 +30,66 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
 # converts these so the agent can correct itself and continue.
 _RECOVERABLE_ERRORS = (PermissionError, FileNotFoundError, NotADirectoryError, IsADirectoryError, ValueError)
 
+# The same idea one level down, for failures Python raises as a bare `OSError`
+# with no dedicated subclass for `_RECOVERABLE_ERRORS` to name. Entries are
+# explicit so other errors keep aborting the run; for example, retrying cannot
+# fix `ENOSPC` or `EROFS`.
+#
+# Which operations reach these depends on the Python version. `Path.is_file`
+# and friends stopped propagating `ENAMETOOLONG` in 3.14, so on 3.10 through
+# 3.13 the read operations surface it too, not just the write path.
+#
+# Keyed by `OSError.errno`, which the stdlib types as `int | None`.
+_RECOVERABLE_ERRNOS: dict[int | None, str] = {
+    errno.ENAMETOOLONG: 'The path name is too long.',
+    errno.ELOOP: 'The path resolves through a symlink loop.',
+    errno.EILSEQ: 'The path name contains a byte sequence the filesystem cannot represent.',
+}
+_WINDOWS_ERROR_INVALID_NAME = 123
+
+_OUTSIDE_WORKSPACE = '<outside-workspace>'
+"""Shown instead of an absolute path that is not inside the workspace root."""
+
+_NOT_A_PATH = '<not-a-path>'
+"""Shown when an error's `filename` is not a path value at all."""
+
+
+def _model_safe_filename(filename: str | bytes, real_root: Path) -> str:
+    """Return the path relative to the workspace root.
+
+    Paths not inside the root become `_OUTSIDE_WORKSPACE`; values that are
+    not paths at all become `_NOT_A_PATH`.
+    """
+    try:
+        raw = os.fsdecode(filename)
+    except TypeError:
+        return _NOT_A_PATH
+    path = Path(raw)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.relative_to(real_root).as_posix()
+    except ValueError:
+        pass
+    try:
+        return Path(os.path.realpath(path)).relative_to(real_root).as_posix()
+    except (ValueError, OSError):
+        return _OUTSIDE_WORKSPACE
+
+
+def _sanitize_recoverable_error(error: BaseException, real_root: Path) -> str:
+    """Render a recoverable error without exposing absolute host paths.
+
+    Errors without an OS-supplied `filename` keep their original message.
+    OS errors keep `errno` and `strerror`, with the path rewritten relative
+    to `real_root` (see `_model_safe_filename` for the fallback placeholders).
+    """
+    if not isinstance(error, OSError) or error.filename is None:
+        return str(error)
+
+    filename = _model_safe_filename(error.filename, real_root)
+    return f'[Errno {error.errno}] {error.strerror}: {filename!r}'
+
 
 def _recoverable(
     fn: Callable[Concatenate[FileSystemToolset, _P], Awaitable[str]],
@@ -39,7 +101,16 @@ def _recoverable(
         try:
             return await fn(self, *args, **kwargs)
         except _RECOVERABLE_ERRORS as e:
-            raise ModelRetry(str(e)) from e
+            real_root = self._real_root  # pyright: ignore[reportPrivateUsage]
+            raise ModelRetry(_sanitize_recoverable_error(e, real_root)) from e
+        except OSError as e:
+            reason = _RECOVERABLE_ERRNOS.get(e.errno)
+            if reason is None and getattr(e, 'winerror', None) == _WINDOWS_ERROR_INVALID_NAME:
+                reason = 'The path name is invalid.'
+            if reason is None:
+                raise
+            # The full error may embed the absolute host path; the reason is path-free.
+            raise ModelRetry(reason) from e
 
     return wrapper
 
@@ -159,7 +230,20 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Uses os.path.realpath for symlink resolution before checking containment.
         """
-        candidate = (self._root / path).resolve()
+        try:
+            candidate = (self._root / path).resolve()
+        except RuntimeError as e:
+            # Python 3.10-3.12 signal a symlink loop this way.
+            raise ModelRetry(f'Path {path!r} resolves through a symlink loop.') from e
+
+        if not candidate.exists():
+            try:
+                candidate.stat()
+            except OSError as e:
+                # Python 3.13+ suppresses `ELOOP` in `resolve` and `exists`, so
+                # probe the path before treating it as missing.
+                if e.errno == errno.ELOOP:
+                    raise ModelRetry(f'Path {path!r} resolves through a symlink loop.') from e
         real = Path(os.path.realpath(candidate))
         if not real.is_relative_to(self._real_root):
             raise PermissionError(f'Path {path!r} resolves outside the root directory.')
@@ -282,20 +366,72 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         resolved = self._safe_resolve(path, write=True)
 
-        # Optimistic concurrency: reject stale writes
-        if expected_hash is not None and resolved.is_file():
-            current = resolved.read_text(encoding='utf-8')
-            current_hash = _content_hash(current)
-            if current_hash != expected_hash:
-                raise ValueError(
-                    f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
-                    f'got hash:{current_hash}). Re-read the file and retry.'
-                )
+        if resolved.exists() and not resolved.is_file():
+            raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
 
         if not resolved.parent.exists():
             parent_rel = str(resolved.parent.relative_to(self._root))
             raise FileNotFoundError(f"Parent directory '{parent_rel}' does not exist. Use create_directory first.")
-        resolved.write_text(content, encoding='utf-8')
+
+        # Opening without O_TRUNC lets us classify the descriptor and check the
+        # expected hash before changing the file. POSIX non-blocking mode keeps
+        # a FIFO swapped into place from waiting for a reader; O_NOFOLLOW keeps
+        # a final-component symlink swap from redirecting the descriptor. Windows
+        # has no filesystem FIFO equivalent, and O_BINARY leaves newline handling
+        # to the text wrapper just as Path.write_text does.
+        platform_flags = os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW
+        access_flags = os.O_RDWR if expected_hash is not None else os.O_WRONLY
+        created = False
+        descriptor = -1
+        try:
+            # The target can disappear after O_EXCL reports that it exists. Retry
+            # the complete atomic classification so an ordinary write still
+            # recreates it, while bounding churn from a concurrently replaced path.
+            for _ in range(3):
+                try:
+                    descriptor = os.open(resolved, access_flags | platform_flags | os.O_CREAT | os.O_EXCL, 0o666)
+                except FileExistsError:
+                    try:
+                        descriptor = os.open(resolved, access_flags | platform_flags)
+                    except FileNotFoundError:
+                        continue
+                else:
+                    created = True
+                break
+            else:
+                raise ModelRetry(f'Path {path!r} changed repeatedly while opening. Retry the write.')
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise ModelRetry(
+                    f'Path {path!r} encountered a symlink loop or changed to a symlink before opening.'
+                ) from e
+            if e.errno in (errno.EISDIR, errno.ENODEV, errno.ENXIO):
+                raise ModelRetry(f'Path {path!r} exists and is not a regular file.') from e
+            raise
+
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
+
+            mode = 'r+' if expected_hash is not None else 'w'
+            text_file = os.fdopen(descriptor, mode, encoding='utf-8', newline=None)
+            descriptor = -1
+            with text_file:
+                if expected_hash is not None and not created:
+                    current_hash = _content_hash(text_file.read())
+                    if current_hash != expected_hash:
+                        raise ValueError(
+                            f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
+                            f'got hash:{current_hash}). Re-read the file and retry.'
+                        )
+
+                text_file.seek(0)
+                text_file.truncate(0)
+                text_file.write(content)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
         new_hash = _content_hash(content)
         lines = len(content.splitlines())
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
@@ -471,8 +607,24 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if not resolved.is_dir():
             raise NotADirectoryError(f'Not a directory: {path}')
 
+        try:
+            found = sorted(resolved.glob(pattern))
+        except NotImplementedError as e:
+            # The `isabs` guard above takes a rooted pattern first on POSIX. On
+            # Windows it does not: since 3.13 `os.path.isabs` reports a single
+            # leading slash as relative, so `/etc/*.conf` reaches `glob`, which
+            # rejects any rooted pattern. `NotImplementedError` is not an
+            # `OSError`, so neither the recoverable tuple nor the errno table
+            # can reach it.
+            raise ModelRetry(f'Pattern {pattern!r} must be relative to {path!r}, not an absolute path.') from e
+        except IndexError as e:
+            # Python 3.10 through 3.12 raise this for a pattern whose last
+            # component is a bare `.`. On 3.13+ the same pattern raises
+            # `ValueError`, which the recoverable tuple already covers.
+            raise ModelRetry(f'Pattern {pattern!r} is not a valid glob pattern.') from e
+
         matches: list[str] = []
-        for match in sorted(resolved.glob(pattern)):
+        for match in found:
             try:
                 rel_path = match.relative_to(self._real_root)
             except ValueError:  # pragma: no cover
@@ -505,7 +657,15 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             Confirmation message.
         """
         resolved = self._safe_resolve(path, write=True)
-        resolved.mkdir(parents=True, exist_ok=True)
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+        except FileExistsError as e:
+            # `exist_ok` only suppresses the error when the existing path is a
+            # directory; name the conflicting model-supplied path directly.
+            raise ModelRetry(f'Path {path!r} exists and is not a directory.') from e
+        except NotADirectoryError as e:
+            # Distinguish a parent collision from a collision at the leaf.
+            raise ModelRetry(f'Path {path!r} has a parent that is not a directory.') from e
         return f'Created directory: {path}'
 
     @_recoverable
@@ -542,6 +702,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 parts.append(f'hash: {_content_hash(text)}')
 
         if is_link:
-            parts.append(f'symlink_target: {os.readlink(original)}')
+            target = _model_safe_filename(os.readlink(original), self._real_root)
+            parts.append(f'symlink_target: {target}')
 
         return '\n'.join(parts)

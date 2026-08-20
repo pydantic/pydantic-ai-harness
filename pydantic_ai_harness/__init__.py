@@ -14,6 +14,7 @@ if TYPE_CHECKING:
         ClampOversizedMessages,
         ClearToolResults,
         DeduplicateFileReads,
+        FallbackCompaction,
         ReportContextUsage,
         SlidingWindowCompaction,
         SummarizingCompaction,
@@ -55,6 +56,7 @@ if TYPE_CHECKING:
     from .system_reminders import SystemReminders
     from .tool_output_limits import ToolOutputLimits
     from .warn_on_cache_busts import WarnOnCacheBusts
+    from .youdotcom import YouResearch, YouSearch
 
 __all__ = [
     'Advisor',
@@ -71,6 +73,7 @@ __all__ = [
     'DynamicWorkflow',
     'ExaAgent',
     'ExaSearch',
+    'FallbackCompaction',
     'FileSystem',
     'GuardrailError',
     'GuardrailResult',
@@ -110,6 +113,8 @@ __all__ = [
     'ToolOutputLimits',
     'WarnNearLimits',
     'WarnOnCacheBusts',
+    'YouResearch',
+    'YouSearch',
 ]
 
 _CAPABILITY_EXPORTS = {
@@ -125,6 +130,7 @@ _CAPABILITY_EXPORTS = {
     'DynamicWorkflow': 'dynamic_workflow',
     'ExaAgent': 'exa',
     'ExaSearch': 'exa',
+    'FallbackCompaction': 'compaction',
     'FileSystem': 'filesystem',
     'KeenableSearch': 'keenable',
     'LocalStack': 'localstack',
@@ -152,6 +158,8 @@ _CAPABILITY_EXPORTS = {
     'ToolOutputLimits': 'tool_output_limits',
     'WarnNearLimits': 'compaction',
     'WarnOnCacheBusts': 'warn_on_cache_busts',
+    'YouResearch': 'youdotcom',
+    'YouSearch': 'youdotcom',
 }
 
 _CONSTANT_EXPORTS = {

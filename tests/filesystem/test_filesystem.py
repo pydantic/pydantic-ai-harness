@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import errno
+import os
+import signal
+import stat
+from contextlib import ExitStack
 from pathlib import Path
+from types import FrameType
 
 import pytest
 from pydantic_ai import Agent
@@ -12,7 +18,15 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES, FileSystem
-from pydantic_ai_harness.filesystem._toolset import FileSystemToolset, _content_hash, _format_lines, _is_binary
+from pydantic_ai_harness.filesystem._toolset import (
+    _NOT_A_PATH,
+    _OUTSIDE_WORKSPACE,
+    FileSystemToolset,
+    _content_hash,
+    _format_lines,
+    _is_binary,
+    _sanitize_recoverable_error,
+)
 
 
 class TestFormatLines:
@@ -342,9 +356,71 @@ class TestReadFile:
 
 class TestWriteFile:
     async def test_write_new_file(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        result = await toolset.write_file('new.txt', 'new content\n')
+        content = 'h\N{LATIN SMALL LETTER E WITH ACUTE}llo\r\nnew content\n'
+        control = fs_root / 'control.txt'
+        control.write_text(content, encoding='utf-8')
+
+        result = await toolset.write_file('new.txt', content)
         assert 'Wrote' in result
-        assert (fs_root / 'new.txt').read_text() == 'new content\n'
+        target = fs_root / 'new.txt'
+        assert target.read_bytes() == control.read_bytes()
+        assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(control.stat().st_mode)
+
+    @pytest.mark.skipif(os.name == 'nt', reason='FIFOs require POSIX.')
+    async def test_write_existing_fifo_retries_without_blocking(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        os.mkfifo(fs_root / 'fifo')
+
+        def fail_if_write_blocks(_: int, __: FrameType | None) -> None:
+            raise TimeoutError('write_file blocked on a FIFO')  # pragma: no cover
+
+        previous_handler = signal.signal(signal.SIGALRM, fail_if_write_blocks)
+        signal.alarm(3)
+        try:
+            with pytest.raises(ModelRetry, match="Path 'fifo' exists and is not a regular file"):
+                await toolset.write_file('fifo', 'content')
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous_handler)
+
+    async def test_write_existing_directory_retries(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match="Path 'subdir' exists and is not a regular file"):
+            await toolset.write_file('subdir', 'content')
+
+    @pytest.mark.skipif(os.name == 'nt', reason='FIFOs require POSIX.')
+    @pytest.mark.parametrize('with_reader', [False, True])
+    async def test_write_rejects_fifo_swapped_before_descriptor_open(
+        self,
+        toolset: FileSystemToolset[None],
+        fs_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        with_reader: bool,
+    ) -> None:
+        target = fs_root / 'swap.txt'
+        target.write_text('ordinary file\n')
+        original_open = os.open
+        open_calls = 0
+
+        with ExitStack() as cleanup:
+
+            def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
+                nonlocal open_calls
+                open_calls += 1
+                if open_calls == 2:
+                    target.unlink()
+                    os.mkfifo(target)
+                    assert flags & os.O_NONBLOCK
+                    if with_reader:
+                        reader = original_open(target, os.O_RDONLY | os.O_NONBLOCK)
+                        cleanup.callback(os.close, reader)
+                return original_open(path, flags, mode)
+
+            monkeypatch.setattr(os, 'open', swap_then_open)
+            with pytest.raises(ModelRetry, match="Path 'swap.txt' exists and is not a regular file"):
+                await toolset.write_file('swap.txt', 'content')
+
+        assert open_calls == 2
 
     async def test_write_nonexistent_parent_raises(self, toolset: FileSystemToolset[None]) -> None:
         with pytest.raises(ModelRetry, match="Parent directory 'deep/nested' does not exist"):
@@ -353,6 +429,74 @@ class TestWriteFile:
     async def test_write_overwrite(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         await toolset.write_file('hello.txt', 'overwritten\n')
         assert (fs_root / 'hello.txt').read_text() == 'overwritten\n'
+
+    @pytest.mark.parametrize('recreated_by_peer', [False, True])
+    async def test_write_reclassifies_target_deleted_before_fallback_open(
+        self,
+        toolset: FileSystemToolset[None],
+        fs_root: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        recreated_by_peer: bool,
+    ) -> None:
+        target = fs_root / 'recreated.txt'
+        target.write_text('original\n')
+        original_open = os.open
+        open_calls = 0
+
+        def replace_during_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            nonlocal open_calls
+            open_calls += 1
+            if open_calls == 2:
+                target.unlink()
+            elif open_calls == 3 and recreated_by_peer:
+                target.write_text('peer content\n')
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(os, 'open', replace_during_open)
+        result = await toolset.write_file('recreated.txt', 'final content\n')
+
+        assert open_calls == (4 if recreated_by_peer else 3)
+        assert result.startswith('Wrote 14 chars')
+        assert str(fs_root) not in result
+        assert target.read_text() == 'final content\n'
+
+    async def test_write_reclassification_churn_is_private_and_bounded(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = fs_root / 'churn.txt'
+        target.write_text('original\n')
+        open_calls = 0
+
+        def churn_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            nonlocal open_calls
+            del mode
+            open_calls += 1
+            if flags & os.O_EXCL:
+                raise FileExistsError(errno.EEXIST, 'File exists', path)
+            raise FileNotFoundError(errno.ENOENT, 'No such file', path)
+
+        monkeypatch.setattr(os, 'open', churn_open)
+        with pytest.raises(ModelRetry) as exc_info:
+            await toolset.write_file('churn.txt', 'content')
+
+        message = str(exc_info.value)
+        assert open_calls == 6
+        assert message == "Path 'churn.txt' changed repeatedly while opening. Retry the write."
+        assert str(fs_root) not in message
+
+    @pytest.mark.skipif(os.name == 'nt', reason='POSIX mode bits are required.')
+    async def test_write_overwrite_preserves_permissions(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        target = fs_root / 'hello.txt'
+        target.chmod(0o640)
+        await toolset.write_file('hello.txt', 'overwritten\n')
+        assert stat.S_IMODE(target.stat().st_mode) == 0o640
+
+    async def test_write_through_internal_symlink(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        link = fs_root / 'link.txt'
+        link.symlink_to('hello.txt')
+        await toolset.write_file('link.txt', 'through link\n')
+        assert link.is_symlink()
+        assert (fs_root / 'hello.txt').read_text() == 'through link\n'
 
     async def test_write_conflict_detection(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         # Get current hash
@@ -366,6 +510,58 @@ class TestWriteFile:
     async def test_write_conflict_rejection(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         with pytest.raises(ModelRetry, match='Conflict'):
             await toolset.write_file('hello.txt', 'bad\n', expected_hash='wrong_hash_x')
+
+    async def test_write_expected_hash_checks_swapped_target(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = fs_root / 'hash-swap.txt'
+        original = 'original\n'
+        replacement = 'replacement\n'
+        target.write_text(original)
+        original_open = os.open
+        open_calls = 0
+
+        def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            nonlocal open_calls
+            open_calls += 1
+            if open_calls == 2:
+                target.unlink()
+                target.write_text(replacement)
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(os, 'open', swap_then_open)
+        with pytest.raises(ModelRetry, match='Conflict'):
+            await toolset.write_file('hash-swap.txt', 'updated\n', expected_hash=_content_hash(original))
+
+        assert open_calls == 2
+        assert target.read_text() == replacement
+
+    @pytest.mark.skipif(os.name == 'nt', reason='O_NOFOLLOW requires POSIX.')
+    async def test_write_rejects_symlink_swapped_before_descriptor_open(
+        self, toolset: FileSystemToolset[None], fs_root: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        target = fs_root / 'symlink-swap.txt'
+        other = fs_root / 'other.txt'
+        target.write_text('ordinary file\n')
+        other.write_text('must remain unchanged\n')
+        original_open = os.open
+        open_calls = 0
+
+        def swap_then_open(path: Path, flags: int, mode: int = 0o777) -> int:
+            nonlocal open_calls
+            open_calls += 1
+            if open_calls == 2:
+                target.unlink()
+                target.symlink_to(other)
+                assert flags & os.O_NOFOLLOW
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(os, 'open', swap_then_open)
+        with pytest.raises(ModelRetry, match="Path 'symlink-swap.txt'.*symlink"):
+            await toolset.write_file('symlink-swap.txt', 'content')
+
+        assert open_calls == 2
+        assert other.read_text() == 'must remain unchanged\n'
 
     async def test_write_protected_blocked(self, toolset: FileSystemToolset[None]) -> None:
         with pytest.raises(ModelRetry, match='protected'):
@@ -869,6 +1065,121 @@ class TestFindFiles:
         assert 'skip.md' not in result
 
 
+class TestResolveSymlinkLoop:
+    async def test_symlink_loop_is_recoverable(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `Path.resolve` only raises this on Python 3.10-3.12, so drive it
+        # directly to pin the behavior on every supported version.
+        def raise_loop(*args: object, **kwargs: object) -> None:
+            raise RuntimeError('Symlink loop from ...')
+
+        monkeypatch.setattr(Path, 'resolve', raise_loop)
+        with pytest.raises(ModelRetry, match='symlink loop'):
+            await toolset.read_file('hello.txt')
+
+    @pytest.mark.parametrize('op', ['read_file', 'list_directory', 'search_files', 'find_files', 'file_info'])
+    async def test_real_symlink_loop_is_reported(
+        self, toolset: FileSystemToolset[None], fs_root: Path, op: str
+    ) -> None:
+        (fs_root / 'loop').symlink_to(fs_root / 'loop')
+        calls = {
+            'read_file': lambda: toolset.read_file('loop'),
+            'list_directory': lambda: toolset.list_directory('loop'),
+            'search_files': lambda: toolset.search_files('text', path='loop'),
+            'find_files': lambda: toolset.find_files('*', path='loop'),
+            'file_info': lambda: toolset.file_info('loop'),
+        }
+
+        with pytest.raises(ModelRetry, match="Path 'loop' resolves through a symlink loop"):
+            await calls[op]()
+
+
+class TestReadSideOSErrors:
+    # `Path.is_file`/`exists` propagate ENAMETOOLONG on 3.10 through 3.13 and
+    # swallow it on 3.14, so the message differs by version. What must hold
+    # everywhere is that the run survives.
+    @pytest.mark.parametrize('op', ['read_file', 'edit_file', 'list_directory', 'file_info'])
+    async def test_long_name_is_recoverable(self, toolset: FileSystemToolset[None], op: str) -> None:
+        long = 'x' * 300
+        calls = {
+            'read_file': lambda: toolset.read_file(long),
+            'edit_file': lambda: toolset.edit_file(long, 'a', 'b'),
+            'list_directory': lambda: toolset.list_directory(long),
+            'file_info': lambda: toolset.file_info(long),
+        }
+        with pytest.raises(ModelRetry):
+            await calls[op]()
+
+    async def test_walker_long_path_is_recoverable(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The walkers reach the syscall only on 3.10 through 3.13; on 3.14 a
+        # long path yields no matches instead. Inject so the conversion is
+        # pinned on every version.
+        def raise_name_too_long(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.ENAMETOOLONG, 'File name too long')
+
+        monkeypatch.setattr(Path, 'is_file', raise_name_too_long)
+        with pytest.raises(ModelRetry, match='name is too long'):
+            await toolset.search_files('hello', path='x' * 300)
+
+
+class TestWriteFileOSErrors:
+    async def test_write_name_too_long(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match='name is too long'):
+            await toolset.write_file('x' * 300, 'content')
+
+    async def test_write_through_symlink_loop(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        (fs_root / 'loop').symlink_to(fs_root / 'loop')
+        # Python 3.10-3.12 raise at `Path.resolve`, 3.13+ at the write syscall.
+        with pytest.raises(ModelRetry, match='symlink loop'):
+            await toolset.write_file('loop', 'content')
+
+    async def test_write_non_recoverable_errno_propagates(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_enospc(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.ENOSPC, 'No space left on device')
+
+        monkeypatch.setattr(os, 'open', raise_enospc)
+        with pytest.raises(OSError, match='No space left on device'):
+            await toolset.write_file('new.txt', 'content')
+
+    async def test_write_windows_invalid_name_is_recoverable(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class WindowsInvalidNameError(OSError):
+            winerror = 123
+
+        def raise_invalid_name(*args: object, **kwargs: object) -> None:
+            raise WindowsInvalidNameError(errno.EINVAL, 'The filename, directory name, or volume label is incorrect')
+
+        monkeypatch.setattr(os, 'open', raise_invalid_name)
+        with pytest.raises(ModelRetry, match='path name is invalid'):
+            await toolset.write_file('bad<name', 'content')
+
+    async def test_write_einval_without_windows_invalid_name_propagates(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_einval(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.EINVAL, 'Invalid argument')
+
+        monkeypatch.setattr(os, 'open', raise_einval)
+        with pytest.raises(OSError, match='Invalid argument'):
+            await toolset.write_file('new.txt', 'content')
+
+    async def test_write_illegal_byte_sequence_is_recoverable(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_illegal_byte_sequence(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.EILSEQ, 'Illegal byte sequence')
+
+        monkeypatch.setattr(os, 'open', raise_illegal_byte_sequence)
+        with pytest.raises(ModelRetry, match='filesystem cannot represent'):
+            await toolset.write_file('bad-name', 'content')
+
+
 class TestWalkerEntryResolution:
     """Walkers authorize the entry's resolved target, matching `read_file`."""
 
@@ -945,6 +1256,38 @@ class TestCreateDirectory:
         with pytest.raises(ModelRetry, match='protected'):
             await toolset.create_directory('.git/hooks')
 
+    async def test_create_name_too_long(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match='name is too long'):
+            await toolset.create_directory('x' * 300)
+
+    async def test_create_illegal_byte_sequence_is_recoverable(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_illegal_byte_sequence(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.EILSEQ, 'Illegal byte sequence')
+
+        monkeypatch.setattr(Path, 'mkdir', raise_illegal_byte_sequence)
+        with pytest.raises(ModelRetry, match='filesystem cannot represent'):
+            await toolset.create_directory('bad-name')
+
+    async def test_create_non_recoverable_errno_propagates(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def raise_erofs(*args: object, **kwargs: object) -> None:
+            raise OSError(errno.EROFS, 'Read-only file system')
+
+        monkeypatch.setattr(Path, 'mkdir', raise_erofs)
+        with pytest.raises(OSError, match='Read-only file system'):
+            await toolset.create_directory('newdir')
+
+    async def test_create_over_existing_file(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match="'hello.txt' exists and is not a directory"):
+            await toolset.create_directory('hello.txt')
+
+    async def test_create_under_existing_file(self, toolset: FileSystemToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match="'hello.txt/nested' has a parent that is not a directory"):
+            await toolset.create_directory('hello.txt/nested')
+
 
 class TestFileInfo:
     async def test_info_file(self, toolset: FileSystemToolset[None]) -> None:
@@ -969,11 +1312,14 @@ class TestFileInfo:
             await toolset.file_info('nonexistent')
 
     async def test_info_symlink(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        # The link target is stored as an absolute path; the tool must report
+        # it relative to the root, never as the absolute host path.
         link = fs_root / 'link.txt'
         link.symlink_to(fs_root / 'hello.txt')
         result = await toolset.file_info('link.txt')
         assert 'type: file' in result
-        assert 'symlink_target:' in result
+        assert 'symlink_target: hello.txt' in result
+        _assert_no_host_root(result, fs_root)
 
 
 class TestMutationKillers:
@@ -1224,6 +1570,32 @@ class TestMutationKillers:
         with pytest.raises(ModelRetry, match='Not a directory'):
             await toolset.find_files('*.txt', path='hello.txt')
 
+    async def test_find_files_rooted_pattern_rejected_by_glob(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # `find_files` rejects an absolute pattern up front, so on POSIX nothing
+        # rooted reaches `glob`. On Windows since 3.13 `os.path.isabs` calls a
+        # single leading slash relative, and `glob` is what refuses it; drive
+        # that directly to pin the conversion on every platform.
+        def raise_not_implemented(*args: object, **kwargs: object) -> None:
+            raise NotImplementedError('Non-relative patterns are unsupported')
+
+        monkeypatch.setattr(Path, 'glob', raise_not_implemented)
+        with pytest.raises(ModelRetry, match='must be relative'):
+            await toolset.find_files('*.conf')
+
+    async def test_find_files_invalid_pattern(
+        self, toolset: FileSystemToolset[None], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Only Python 3.10 through 3.12 raise this, for a pattern ending in a
+        # bare `.`, so drive it directly to pin it on every supported version.
+        def raise_index_error(*args: object, **kwargs: object) -> None:
+            raise IndexError('tuple index out of range')
+
+        monkeypatch.setattr(Path, 'glob', raise_index_error)
+        with pytest.raises(ModelRetry, match='not a valid glob pattern'):
+            await toolset.find_files('.')
+
     async def test_find_files_no_suffix_on_files(self, toolset: FileSystemToolset[None]) -> None:
         result = await toolset.find_files('*')
         for line in result.splitlines():
@@ -1387,3 +1759,55 @@ class TestPatternCanonicalization:
         assert 'secrets.yaml:1:api: PRIVATE KEY material' in await ts.search_files('PRIVATE KEY')
         with pytest.raises(ModelRetry, match='protected'):
             await ts.write_file('secrets.yaml', 'changed\n')
+
+
+def _assert_no_host_root(message: str, root: Path) -> None:
+    """Fail if `message` contains the absolute workspace root."""
+    assert str(root) not in message
+    assert str(root.resolve()) not in message
+
+
+class TestModelSafeRecoverableErrors:
+    """OS-raised filesystem errors must not leak absolute host paths into `ModelRetry`."""
+
+    async def test_write_through_file_hides_host_path(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        # The parent path 'hello.txt' exists as a file, so the OS itself raises
+        # the error, with the absolute host path as its filename.
+        with pytest.raises(ModelRetry) as exc_info:
+            await toolset.write_file('hello.txt/nested', 'x')
+        message = str(exc_info.value)
+        _assert_no_host_root(message, fs_root)
+        assert "'hello.txt/nested'" in message
+        assert 'Errno' in message
+
+    def test_outside_root_path_is_redacted(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        outside = fs_root.parent / 'private' / 'secret.txt'
+        error = FileNotFoundError(errno.ENOENT, 'No such file or directory', str(outside))
+        message = _sanitize_recoverable_error(error, real_root)
+        assert str(outside) not in message
+        assert _OUTSIDE_WORKSPACE in message
+
+    def test_relative_filename_is_preserved(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        error = PermissionError(errno.EACCES, 'Permission denied', 'hello.txt')
+        message = _sanitize_recoverable_error(error, real_root)
+        assert message == f"[Errno {errno.EACCES}] Permission denied: 'hello.txt'"
+
+    def test_non_path_filename_is_labeled(self, fs_root: Path) -> None:
+        real_root = Path(os.path.realpath(fs_root))
+        error = OSError(errno.ENOENT, 'No such file or directory')
+        error.filename = object()
+        message = _sanitize_recoverable_error(error, real_root)
+        assert _NOT_A_PATH in message
+
+    def test_symlink_alias_is_normalized(self, fs_root: Path) -> None:
+        # macOS reports tmp paths through a symlink alias (`/var` vs `/private/var`);
+        # `realpath` maps such an alias back under the real root.
+        real_root = Path(os.path.realpath(fs_root))
+        alias = fs_root.parent / 'alias-root'
+        alias.symlink_to(fs_root)
+        error = FileNotFoundError(errno.ENOENT, 'No such file or directory', str(alias / 'hello.txt'))
+        message = _sanitize_recoverable_error(error, real_root)
+        assert str(alias) not in message
+        assert "'hello.txt'" in message

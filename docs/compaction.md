@@ -5,7 +5,7 @@ description: A menu of strategies -- clear, dedupe, trim, or summarize -- for ke
 
 # Compaction
 
-Compaction is a menu of strategies for keeping an agent's conversation history within a model's context window. Each strategy is a Pydantic AI `Capability` that edits the message history just before each request goes out. The edits **persist** into the run's message history, so a trim, clear, or summary carries forward to later steps -- it is not recomputed from the full history every turn.
+Compaction is a menu of strategies for keeping an agent's conversation history within a model's context window. Most are Pydantic AI `Capability` classes that edit the message history just before each request goes out. `FallbackCompaction` is instead a composing `CompactionStrategy` used through `TieredCompaction` or `compact_now`; it has no request trigger of its own. The edits **persist** into the run's message history, so a trim, clear, or summary carries forward to later steps -- it is not recomputed from the full history every turn.
 
 All strategies preserve tool-call / tool-return **pairing**. Core does not validate this, and a provider rejects an orphaned pair, so the pairing guarantee is what makes these safe to drop into an agent. The zero-LLM strategies never call a model; only `SummarizingCompaction` (and `TieredCompaction` when it escalates that far) spends tokens.
 
@@ -21,7 +21,7 @@ An agent that runs for many turns accumulates history: tool outputs, file reads,
 
 ## The menu
 
-| Capability | Cost | What it does | Reach for it when |
+| Component | Cost | What it does | Reach for it when |
 |---|---|---|---|
 | `ClampOversizedMessages` | zero-LLM | Head/tail-truncates a single oversized part (response text, tool-call args) | One runaway generation blew past the context cap and no other strategy can reach it |
 | `SlidingWindowCompaction` | zero-LLM | Drops the oldest whole messages down to a tail | You only need the recent turns and can discard old context entirely |
@@ -29,6 +29,7 @@ An agent that runs for many turns accumulates history: tool outputs, file reads,
 | `DeduplicateFileReads` | zero-LLM | Blanks every file read superseded by a newer read of the same file | The agent re-reads files and only the latest version matters |
 | `SummarizingCompaction` | one LLM call | Summarizes older messages into a structured summary, keeping the recent tail | Old context still matters but must be compressed; use behind the cheap tiers |
 | `TieredCompaction` | escalates | Runs cheap passes first, summarizes only if still over `target_tokens` | You want a sensible default: spend the expensive summary only when needed |
+| `FallbackCompaction` | depends on chain | Tries the next strategy when one raises | Summarization can fail and deterministic truncation must keep the run alive |
 | `WarnNearLimits` | zero-LLM | Injects an URGENT/CRITICAL warning as limits approach | You want the agent to wrap up rather than have its history rewritten |
 | `ReportContextUsage` | zero-LLM | Reports context usage to your application; never edits history | You want a live context gauge in a UI |
 
@@ -47,7 +48,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import SummarizingCompaction
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[SummarizingCompaction(max_fraction=0.9, keep_messages=20)],
 )
 ```
@@ -60,7 +61,7 @@ The model consulted is `ModelRequestContext.model`, the one the request will be 
 
 ### When the window does not resolve
 
-Not every model is in the registry. A local endpoint, a bespoke deployment, a Bedrock-prefixed reference such as `bedrock:us.anthropic.claude-sonnet-4-5`, a model the registry knows without a recorded window (`google-gla:gemini-2.5-pro` today), and any `FallbackModel` (its `model_id` is a composite `fallback:...`) all resolve to nothing. The fraction is then taken of `fallback_context_window`, which defaults to a conservative 200K (`DEFAULT_CONTEXT_WINDOW`): compacting earlier than necessary costs one summary, overestimating costs the whole request.
+Not every model is in the registry. A local endpoint, a bespoke deployment, a Bedrock-prefixed reference such as `bedrock:us.anthropic.claude-sonnet-5`, a model the registry knows without a recorded window, and any `FallbackModel` (its `model_id` is a composite `fallback:...`) all resolve to nothing. The fraction is then taken of `fallback_context_window`, which defaults to a conservative 200K (`DEFAULT_CONTEXT_WINDOW`): compacting earlier than necessary costs one summary, overestimating costs the whole request.
 
 Every capability that takes a fraction takes the fallback too, so you are not stuck with 200K on a model you know the size of:
 
@@ -69,7 +70,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import SummarizingCompaction
 
 agent = Agent(
-    'google-gla:gemini-2.5-pro',
+    'bedrock:us.anthropic.claude-sonnet-5',
     capabilities=[SummarizingCompaction(max_fraction=0.9, fallback_context_window=1_000_000)],
 )
 ```
@@ -82,15 +83,14 @@ It is only consulted when resolution fails, so it costs nothing on a model the r
 
 Resolution can also succeed and be wrong, which `fallback_context_window` cannot help with -- it applies only when resolution fails. Three cases:
 
-- **The registry entry itself is wrong.** Harness reads `genai-prices` and cannot validate it. Measured against `genai-prices` 0.0.71:
+- **The registry entry itself is wrong.** Harness reads `genai-prices` and cannot validate it. Measured against `genai-prices` 0.1.3:
 
   | model id | registry records | real window |
   |---|---|---|
   | `anthropic:claude-sonnet-4-5` | 1,000,000 | 200,000 |
   | `anthropic:claude-opus-4-6` | 200,000 | 1,000,000 |
-  | `google:gemini-2.5-pro` (also the `google-gla:` and `google-vertex:` forms) | no window recorded | 1,000,000 |
 
-  An over-recorded window is the direction that breaks a run. On `anthropic:claude-sonnet-4-5`, `max_fraction=0.9` resolves to a 900,000-token trigger against a 200,000-token window: compaction never fires, and the provider rejects the request instead. **Pass `context_window=200_000` explicitly on Anthropic Sonnet-class models** (`claude-sonnet-4-5` today; check any Sonnet id you use against the provider's own documentation before relying on the resolved number). An under-recorded window is safe but wasteful -- it compacts earlier than it has to.
+  An over-recorded window is the direction that breaks a run. On `anthropic:claude-sonnet-4-5`, `max_fraction=0.9` resolves to a 900,000-token trigger against a 200,000-token window: compaction never fires, and the provider rejects the request instead. **Pass `context_window=200_000` explicitly on `claude-sonnet-4-5`.** `claude-sonnet-5`'s recorded 1,000,000 matches Anthropic's model documentation, so it needs no override; check any other Sonnet id you use against the provider's own documentation before relying on the resolved number. An under-recorded window is safe but wasteful -- it compacts earlier than it has to.
 - The registry records the maximum a model can be made to accept. Where that maximum is gated -- a beta header, a pricing tier -- an ordinary request gets less, and a fraction of the recorded number never triggers before the provider rejects the request.
 - A self-hosted or proxied endpoint reports a model id whose registry entry describes someone else's deployment.
 
@@ -101,7 +101,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import SummarizingCompaction
 
 agent = Agent(
-    'openai:gpt-4o',  # served by a local endpoint with a smaller window than the registry records
+    'openai:gpt-5.6-luna',  # served by a local endpoint with a smaller window than the registry records
     capabilities=[SummarizingCompaction(max_fraction=0.9, context_window=32_000)],
 )
 ```
@@ -126,7 +126,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import ReportContextUsage, SummarizingCompaction
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[
         SummarizingCompaction(max_fraction=0.9, keep_messages=20),
         ReportContextUsage(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
@@ -156,7 +156,7 @@ strategy = SummarizingCompaction(max_fraction=0.9, keep_messages=20)
 history = await compact_now(
     strategy,
     history,
-    model='anthropic:claude-sonnet-4-6',
+    model='anthropic:claude-sonnet-5',
     focus='the auth refactor, not the earlier CSS work',
 )
 ```
@@ -186,7 +186,7 @@ def my_file_key(call: ToolCallPart) -> str | None:
 
 
 agent = Agent(
-    'openai:gpt-4o',
+    'openai:gpt-5.6-luna',
     capabilities=[
         TieredCompaction(
             tiers=[
@@ -202,6 +202,25 @@ agent = Agent(
 
 A tier inside `TieredCompaction` is driven directly by the orchestrator, which re-measures after each tier and stops once under `target_tokens`. A tier's own `max_*` trigger is therefore irrelevant when it runs inside `TieredCompaction` -- set it to anything valid (for example `ClearToolResults(max_tokens=1)`). Any object with `async def compact(messages, ctx) -> list[ModelMessage]` (the `CompactionStrategy` protocol) can be a tier, so you can plug in your own.
 
+## `FallbackCompaction`: recover when a strategy fails
+
+`TieredCompaction` advances when a successful tier does not reclaim enough. `FallbackCompaction` advances only when a strategy raises an exception selected by `fallback_on`, which defaults to Pydantic AI's `ModelAPIError` and `FallbackExceptionGroup`. The latter is raised when every model in a `FallbackModel` fails. Each attempt receives a fresh list containing the original message objects, so list-level changes by a failed strategy do not affect its fallback. Strategies must still honor the `CompactionStrategy` contract and avoid mutating message objects. If every strategy fails, the last exception is re-raised. Non-matching exceptions, cancellation, and other `BaseException` subclasses pass through immediately; `fallback_on` rejects types that do not derive from `Exception`.
+
+Use it as a tier when summarization should fall back to deterministic truncation:
+
+```python
+from pydantic_ai_harness import FallbackCompaction, SlidingWindowCompaction, SummarizingCompaction
+
+fallback = FallbackCompaction(
+    fallback_chain=[
+        SummarizingCompaction(max_messages=1, keep_tokens=20_000),
+        SlidingWindowCompaction(max_messages=1, keep_tokens=20_000),
+    ]
+)
+```
+
+The strategies' trigger fields are not consulted when a composing strategy calls `compact` directly. Put `fallback` inside `TieredCompaction` to give the chain a context trigger, or pass it to `compact_now` for manual compaction.
+
 ## `ClampOversizedMessages`: surviving a runaway generation
 
 A single model response of repeated whitespace, or a single tool call with a giant payload, can produce one part so large the *next* request exceeds the provider's context cap. None of the other strategies can reach it: `SlidingWindowCompaction` drops the oldest messages but the offender is the newest; `ClearToolResults` only touches tool *results*; `WarnNearLimits` never edits history; and feeding the history to `SummarizingCompaction` hits the same cap.
@@ -213,7 +232,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import ClampOversizedMessages
 
 agent = Agent(
-    'openai:gpt-4o',
+    'openai:gpt-5.6-terra',
     capabilities=[
         ClampOversizedMessages(max_part_tokens=50_000, keep_head_chars=2_000, keep_tail_chars=2_000)
     ],
@@ -254,7 +273,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import ClearToolResults
 
 agent = Agent(
-    'openai:gpt-4o',
+    'openai:gpt-5.6-luna',
     capabilities=[ClearToolResults(max_tokens=100_000, keep_pairs=3)],
 )
 ```
@@ -279,7 +298,7 @@ def file_key(call: ToolCallPart) -> str | None:
     return call.args_as_dict().get('path')
 
 
-agent = Agent('openai:gpt-4o', capabilities=[DeduplicateFileReads(file_key=file_key)])
+agent = Agent('openai:gpt-5.6-terra', capabilities=[DeduplicateFileReads(file_key=file_key)])
 ```
 
 With no `max_messages` or `max_tokens` trigger set, `DeduplicateFileReads` runs on every request. It is cheap and near-lossless, so that default is usually what you want.
@@ -293,7 +312,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import SlidingWindowCompaction
 
 agent = Agent(
-    'openai:gpt-4o',
+    'openai:gpt-5.6-terra',
     capabilities=[SlidingWindowCompaction(max_messages=80, keep_messages=40)],
 )
 ```
@@ -309,10 +328,10 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import SummarizingCompaction
 
 agent = Agent(
-    'openai:gpt-4o',
+    'anthropic:claude-opus-5',
     capabilities=[
         SummarizingCompaction(
-            model='openai:gpt-4o-mini',
+            model='anthropic:claude-sonnet-5',
             max_messages=60,
             keep_messages=20,
         )
@@ -335,7 +354,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import WarnNearLimits
 
 agent = Agent(
-    'openai:gpt-4o',
+    'google:gemini-3.6-flash',
     capabilities=[
         WarnNearLimits(
             max_iterations=40,
@@ -429,7 +448,7 @@ With `incremental=True` (the default), a prior summary is not re-summarized -- s
 
 `bridge_prefix=True` prepends a one-line note to the summary only when the summarizer's model family differs from the family that produced the history, derived from the history's `model_name` and the summarizer config. It marks the summary as a cross-model handoff so the resuming model builds on it rather than confabulating that it did the work itself. It never fires in the common same-model case, so it is cheap. It defaults to `False` because the note is prompt content.
 
-The family token is a coarse approximation: drop any `provider:` prefix, then take the leading token before the first `-` or `/`. It separates `gpt` from `claude` on ordinary references (`openai:gpt-4o` -> `gpt`, `google-gla:gemini-2.5-pro` -> `gemini`) and misreads several real ones -- `us.anthropic.claude-sonnet-4-5-v1:0` reduces to `0`, `ollama/llama3` to `ollama`, and a `fallback:` model *string* to its last listed model rather than its first. A `FallbackModel` object is read correctly, from its first model. So bridge and receipt attribution are best-effort: a misread family can suppress a bridge note or fire one between two same-family models. Neither outcome changes what compaction keeps or drops.
+The family token is a coarse approximation: drop any `provider:` prefix, then take the leading token before the first `-` or `/`. It separates `gpt` from `claude` on ordinary references (`openai:gpt-5.6-luna` -> `gpt`, `google:gemini-3.6-flash` -> `gemini`) and misreads several real ones -- `us.anthropic.claude-sonnet-4-5-v1:0` reduces to `0`, `ollama/llama3` to `ollama`, and a `fallback:` model *string* to its last listed model rather than its first. A `FallbackModel` object is read correctly, from its first model. So bridge and receipt attribution are best-effort: a misread family can suppress a bridge note or fire one between two same-family models. Neither outcome changes what compaction keeps or drops.
 
 As with receipts, the update instruction and the bridge-prefix wording are content, shipped minimal and neutral pending the eval-rig pass; the anchoring and family-gating mechanisms are structural.
 
