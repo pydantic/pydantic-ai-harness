@@ -377,7 +377,9 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 ## Model inheritance
 
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
-running agent's model. No token caps are imposed on the summary call.
+running agent's model. No token caps are imposed on the summary call. Pass `model_settings` to give
+the dedicated summary call settings that differ from defaults carried by that model. The supplied
+settings merge over the model defaults without mutating the model or the settings dictionary.
 
 By default `incremental=True` updates the newest existing summary from a prior compaction as an
 anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier

@@ -339,7 +339,7 @@ agent = Agent(
 )
 ```
 
-`model` accepts a model name or a `Model`; when left `None` it inherits the running agent's model. No token caps are imposed on the summary call. By default `incremental=True` updates the newest existing summary as an anchor. This changes the summary-call prompt from earlier releases; set `incremental=False` to retain the prior regeneration behavior.
+`model` accepts a model name or a `Model`; when left `None` it inherits the running agent's model. No token caps are imposed on the summary call. Pass `model_settings` to give the dedicated summary call settings that differ from defaults carried by that model. The supplied settings merge over the model defaults without mutating the model or the settings dictionary. By default `incremental=True` updates the newest existing summary as an anchor. This changes the summary-call prompt from earlier releases; set `incremental=False` to retain the prior regeneration behavior.
 
 ### Usage accounting
 
