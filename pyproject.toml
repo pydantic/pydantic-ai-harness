@@ -77,6 +77,9 @@ modal = [
 dynamic-workflow = [
     "pydantic-monty>=0.0.19",
 ]
+absurd = [
+    "pydantic-ai-absurd>=0.8.0,<0.9.0",
+]
 acp = [
     # The SDK breaks across minors, so cap per minor.
     "agent-client-protocol>=0.11,<0.12",
@@ -152,13 +155,17 @@ style = 'pep440'
 bump = true
 
 [tool.uv]
-# `browser-use` pins provider SDKs to exact versions far below the floors `pydantic-ai-slim`
-# declares (`anthropic==0.76.0`, `openai==2.16.0`), so they only resolve together under an
+# `browser-use` pins provider SDKs to exact versions far below the floors
+# `pydantic-ai-slim` declares (`anthropic==0.76.0`, `google-genai==1.65.0`,
+# `openai==2.16.0`). They only resolve together under an
 # override -- browser-use then runs against SDKs newer than it pins. That is deliberate and
 # one-way: keeping pydantic-ai's floors current outranks tracking browser-use, whose exact-pin
 # policy has open, unaddressed resolution conflicts upstream (browser-use/browser-use#4824 and
 # #4877). When a floor can no longer be overridden without breaking browser-use, the extra
 # yields, not the floor.
+# The `google-genai` and `google-auth` overrides are also required when the
+# optional Absurd integration pulls in full `pydantic-ai`, whose Google extra
+# conflicts with browser-use's exact pins.
 #
 # An override *replaces* every requirement on the package it names, so it erases upper bounds
 # too, and `lowest-direct` resolves `pydantic-ai-slim` to its floor while taking provider SDKs
@@ -166,7 +173,12 @@ bump = true
 # floor predates: `anthropic>=1` is built on HTTPX2, and slim hands it an `httpx2.AsyncClient`
 # only from the release that raises its own floor to match. Move this bound together with the
 # `pydantic-ai-slim` floor below.
-override-dependencies = ['anthropic>=0.108.0,<1', 'openai>=2.45.0']
+override-dependencies = [
+    'anthropic>=0.108.0,<1',
+    'google-auth>=2.56.0',
+    'google-genai>=2.18.0',
+    'openai>=2.45.0',
+]
 
 
 [tool.hatch.build.targets.wheel]

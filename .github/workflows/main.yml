@@ -241,12 +241,13 @@ jobs:
       # newer pydantic-ai exists this step would fail rather than test it.
       - run: |
           env -u UV_LOCKED uv lock \
+            --upgrade-package pydantic-ai \
             --upgrade-package pydantic-ai-slim \
             --upgrade-package pydantic-graph
       - run: uv sync --locked --group dev --all-extras
       - run: uv run --no-sync pytest
 
-  # Guard the pymongo-free import path. The `test` matrix's slim job installs the
+  # Guard the optional-dependency-free import path. The `test` matrix's slim job installs the
   # `dev` group, which carries `mongomock-motor` -- and that pulls Motor/PyMongo
   # in transitively, so even "slim" has pymongo present. This job installs the
   # base package alone (no groups, no extras), so a capability that imports
@@ -267,12 +268,13 @@ jobs:
 
       - run: uv sync --locked --no-default-groups
 
-      # `find_spec` assertion keeps the smoke test honest: if a base dependency
-      # ever pulls pymongo back in, this fails loudly rather than passing while
-      # testing nothing.
+      # `find_spec` assertions keep the smoke test honest: if a base dependency
+      # ever pulls an optional package back in, this fails loudly rather than
+      # passing while testing nothing.
       - run: >
           uv run --no-sync python -c "import importlib.util;
           assert importlib.util.find_spec('pymongo') is None, 'base install must not have pymongo, or this smoke test no longer guards the lazy-import path';
+          assert importlib.util.find_spec('pydantic_ai_absurd') is None, 'base install must not have pydantic-ai-absurd';
           import pydantic_ai_harness;
           import pydantic_ai_harness.step_persistence;
           import pydantic_ai_harness.media"

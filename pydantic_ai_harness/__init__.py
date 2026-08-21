@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from ._warn import HarnessDeprecationWarning
 
 if TYPE_CHECKING:
+    from .absurd import AbsurdDurability
     from .advisor import Advisor
     from .browser_use import BrowserUse
     from .capability_creation import CapabilityCreation
@@ -58,6 +59,7 @@ if TYPE_CHECKING:
     from .youdotcom import YouResearch, YouSearch
 
 __all__ = [
+    'AbsurdDurability',
     'Advisor',
     'BrowserUse',
     'CapabilityCreation',
@@ -116,6 +118,7 @@ __all__ = [
 ]
 
 _CAPABILITY_EXPORTS = {
+    'AbsurdDurability': 'absurd',
     'Advisor': 'advisor',
     'BrowserUse': 'browser_use',
     'CapabilityCreation': 'capability_creation',
