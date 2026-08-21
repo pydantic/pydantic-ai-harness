@@ -29,6 +29,9 @@ Use this before opening a PR or reviewing a capability change.
   with a secret, a large system binary, live network calls) scopes its expensive
   job to its own paths and keeps the aggregate check green when that job is
   skipped. See `capability-authoring.md` "CI And Dependency Footprint".
+- Deprecations name a replacement and a planned removal release, emit
+  `HarnessDeprecationWarning`, repeat the migration guidance in docs and release
+  notes, and test compatibility adapters and persisted-data fallbacks.
 
 ## Executable Boundaries
 

@@ -113,6 +113,23 @@ re-exports.
 APIs are subject to change between releases; breaking changes ship deprecation
 warnings where practical.
 
+### Deprecating A Released API
+
+Treat a released API as a compatibility commitment. Before deprecating it,
+choose and document the replacement and the first release that will remove the
+old surface. Keep the old name or signature working until then where practical,
+and emit `HarnessDeprecationWarning` with both the replacement and the planned
+removal version. For protocols, add a new method when runtime dispatch needs to
+distinguish old implementations rather than changing an existing signature in
+place. The warning, the affected docstrings, and the release note should all
+carry the same migration instructions.
+
+If a compatibility adapter cannot preserve an important behavior, say so in the
+warning and migration docs instead of implying that the change is cosmetic. For
+persisted data, keep a read fallback for the old representation and document
+when it stops being accepted. Add tests for the warning, the old and new paths,
+and any persisted-data fallback before removing the old surface.
+
 ## API Design
 
 - Prefer a small dataclass capability with typed fields.
