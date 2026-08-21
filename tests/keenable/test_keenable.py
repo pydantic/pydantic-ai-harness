@@ -249,6 +249,7 @@ def test_default_instructions_mention_both_tools():
     assert isinstance(instructions, str)
     assert '`web_search`' in instructions
     assert '`get_page`' in instructions
+    assert 'untrusted' in instructions
 
 
 def test_guidance_overrides_and_disables_instructions():
