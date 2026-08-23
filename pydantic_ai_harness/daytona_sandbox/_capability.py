@@ -58,6 +58,9 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     env: Mapping[str, str] | None = None
     """Environment variables for a fresh sandbox and its commands."""
 
+    network_block_all: bool = False
+    """Block outbound network traffic from a fresh sandbox."""
+
     default_command_timeout: int = 60
     """Default command timeout in seconds."""
 
@@ -91,6 +94,10 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             raise ValueError('default_command_timeout cannot exceed max_command_timeout.')
         if self.sandbox_id is not None and self.snapshot is not None:
             raise ValueError('snapshot cannot be combined with sandbox_id.')
+        if type(self.network_block_all) is not bool:
+            raise ValueError(f'network_block_all must be a boolean, got {self.network_block_all!r}.')
+        if self.sandbox_id is not None and self.network_block_all:
+            raise ValueError('network_block_all cannot configure an attached sandbox.')
         if self.session is not None:
             conflicts = [
                 name
@@ -100,6 +107,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
                     ('auto_stop_minutes', self.auto_stop_minutes, DEFAULT_AUTO_STOP_MINUTES),
                     ('workdir', self.workdir, None),
                     ('env', self.env, None),
+                    ('network_block_all', self.network_block_all, False),
                 )
                 if value != default
             ]
@@ -145,6 +153,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             auto_stop_minutes=self.auto_stop_minutes,
             workdir=self.workdir,
             env=self.env,
+            network_block_all=self.network_block_all,
             default_command_timeout=self.default_command_timeout,
             max_command_timeout=self.max_command_timeout,
             max_output_bytes=self.max_output_bytes,

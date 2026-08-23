@@ -69,6 +69,7 @@ async def _tools(
     snapshot: str | None = None,
     workdir: str | None = None,
     env: Mapping[str, str] | None = None,
+    network_block_all: bool = False,
     max_output_bytes: int = 50 * 1024,
     max_output_lines: int = 2000,
     max_read_bytes: int = 5 * 1024 * 1024,
@@ -79,6 +80,7 @@ async def _tools(
         snapshot=snapshot,
         workdir=workdir,
         env=env,
+        network_block_all=network_block_all,
         max_output_bytes=max_output_bytes,
         max_output_lines=max_output_lines,
         max_read_bytes=max_read_bytes,
@@ -177,13 +179,14 @@ async def test_session_cannot_be_entered_twice(fake_daytona: FakeDaytona) -> Non
 
 
 async def test_creation_configuration_reaches_daytona(fake_daytona: FakeDaytona) -> None:
-    async with _tools(snapshot='snap-python', workdir='/workspace', env={'A': 'b'}) as tools:
+    async with _tools(snapshot='snap-python', workdir='/workspace', env={'A': 'b'}, network_block_all=True) as tools:
         await tools.write_file('src/main.py', 'print(1)')
     params = fake_daytona.create_params[0]
     assert params.snapshot == 'snap-python'
     assert params.auto_stop_interval == 60
     assert params.auto_delete_interval == 0
     assert params.env_vars == {'A': 'b'}
+    assert params.network_block_all is True
     sandbox = fake_daytona.sandboxes[0]
     assert sandbox.files['/workspace/src/main.py'] == b'print(1)'
     assert sandbox.exec_calls[0].command == 'mkdir -p -- /workspace/src'
@@ -384,6 +387,10 @@ def test_configuration_conflicts_and_instructions() -> None:
         DaytonaSandbox(sandbox_id='sb', snapshot='snap')
     with pytest.raises(ValueError, match='instructions must'):
         DaytonaSandbox(instructions=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match='network_block_all must be a boolean'):
+        DaytonaSandbox(network_block_all=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match='network_block_all cannot configure an attached'):
+        DaytonaSandbox(sandbox_id='sb', network_block_all=True)
     with pytest.raises(ValueError, match='sandbox_id.*cannot be combined with `session`'):
         DaytonaSandbox(sandbox_id='sb', session=DaytonaSandboxSession())
     with pytest.raises(ValueError, match='snapshot.*cannot be combined with `session`'):
@@ -392,11 +399,17 @@ def test_configuration_conflicts_and_instructions() -> None:
         DaytonaSandbox(workdir='/work', env={'A': 'b'}, session=DaytonaSandboxSession())
     with pytest.raises(ValueError, match='auto_stop_minutes.*cannot be combined with `session`'):
         DaytonaSandbox(auto_stop_minutes=30, session=DaytonaSandboxSession())
+    with pytest.raises(ValueError, match='network_block_all.*cannot be combined with `session`'):
+        DaytonaSandbox(network_block_all=True, session=DaytonaSandboxSession())
     for value in (0, True, 1.5):
         with pytest.raises(ValueError, match='auto_stop_minutes must be a positive integer'):
             DaytonaSandboxSession(auto_stop_minutes=value)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match='snapshot cannot'):
         DaytonaSandboxSession(sandbox_id='sb', snapshot='snap')
+    with pytest.raises(ValueError, match='network_block_all must be a boolean'):
+        DaytonaSandboxSession(network_block_all=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match='network_block_all cannot configure an attached'):
+        DaytonaSandboxSession(sandbox_id='sb', network_block_all=True)
     assert DaytonaSandbox(instructions='').get_instructions() is None
     assert DaytonaSandbox(instructions='custom').get_instructions() == 'custom'
     assert 'is deleted after this run' in (DaytonaSandbox().get_instructions() or '')

@@ -5,11 +5,13 @@ External assumptions, verified 2026-08-23 against Daytona Python SDK 0.198.0:
 - `AsyncDaytona.create`, `get`, `delete(wait=True)`, and `close` own sandbox lifecycle.
 - `sandbox.process.exec` returns `exit_code` and text in `result`.
 - `sandbox.fs` provides metadata, byte upload/download, and directory listing.
+- `CreateSandboxFromSnapshotParams.network_block_all=True` blocks outbound traffic.
 
 Sources:
 https://www.daytona.io/docs/en/python-sdk/async/async-daytona/
 https://www.daytona.io/docs/en/python-sdk/async/async-process/
 https://www.daytona.io/docs/en/python-sdk/async/async-file-system/
+https://www.daytona.io/docs/en/network-limits/
 
 Re-check those signatures against the lowest supported SDK before raising the
 dependency ceiling.
@@ -90,16 +92,22 @@ class DaytonaSandboxSession:
         auto_stop_minutes: int = DEFAULT_AUTO_STOP_MINUTES,
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
+        network_block_all: bool = False,
     ) -> None:
         if type(auto_stop_minutes) is not int or auto_stop_minutes <= 0:
             raise ValueError(f'auto_stop_minutes must be a positive integer, got {auto_stop_minutes!r}.')
         if sandbox_id is not None and snapshot is not None:
             raise ValueError('snapshot cannot be combined with sandbox_id.')
+        if type(network_block_all) is not bool:
+            raise ValueError(f'network_block_all must be a boolean, got {network_block_all!r}.')
+        if sandbox_id is not None and network_block_all:
+            raise ValueError('network_block_all cannot configure an attached sandbox.')
         self._requested_id = sandbox_id
         self._snapshot = snapshot
         self._auto_stop_minutes = auto_stop_minutes
         self._workdir = workdir
         self._env = dict(env) if env is not None else None
+        self._network_block_all = network_block_all
         self._client: AsyncDaytona | None = None
         self._sandbox: AsyncSandbox | None = None
 
@@ -131,6 +139,7 @@ class DaytonaSandboxSession:
                     env_vars=self._env,
                     auto_stop_interval=self._auto_stop_minutes,
                     auto_delete_interval=0,
+                    network_block_all=self._network_block_all,
                 )
                 sandbox = await client.create(params)
         except Exception as error:

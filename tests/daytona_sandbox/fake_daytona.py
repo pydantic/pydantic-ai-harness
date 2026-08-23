@@ -15,6 +15,7 @@ class CreateParams(Protocol):
     auto_stop_interval: int | None
     auto_delete_interval: int | None
     env_vars: dict[str, str] | None
+    network_block_all: bool | None
 
 
 @dataclass

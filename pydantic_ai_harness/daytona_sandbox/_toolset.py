@@ -35,6 +35,7 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
         auto_stop_minutes: int,
         workdir: str | None,
         env: Mapping[str, str] | None,
+        network_block_all: bool,
         default_command_timeout: int,
         max_command_timeout: int,
         max_output_bytes: int,
@@ -49,6 +50,7 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
         self._auto_stop_minutes = auto_stop_minutes
         self._workdir = workdir
         self._env = dict(env) if env is not None else None
+        self._network_block_all = network_block_all
         self._default_command_timeout = default_command_timeout
         self._max_command_timeout = max_command_timeout
         self._max_output_bytes = max_output_bytes
@@ -75,6 +77,7 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
             auto_stop_minutes=self._auto_stop_minutes,
             workdir=self._workdir,
             env=self._env,
+            network_block_all=self._network_block_all,
             default_command_timeout=self._default_command_timeout,
             max_command_timeout=self._max_command_timeout,
             max_output_bytes=self._max_output_bytes,
@@ -101,6 +104,7 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
             auto_stop_minutes=self._auto_stop_minutes,
             workdir=self._workdir,
             env=self._env,
+            network_block_all=self._network_block_all,
         )
         await session.__aenter__()
         self._session = session

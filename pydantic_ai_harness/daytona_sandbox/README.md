@@ -62,7 +62,12 @@ DaytonaSandbox(sandbox_id='sandbox-id')
 ```
 
 `workdir` applies to commands and relative file paths. `env` is passed when the
-sandbox is created and on every command.
+sandbox is created and on every command. Set `network_block_all=True` on a fresh
+sandbox or session to block outbound traffic:
+
+```python
+DaytonaSandbox(network_block_all=True)
+```
 
 To reuse one sandbox across sequential runs while controlling its lifetime,
 open a `DaytonaSandboxSession` and pass it to the capability:
@@ -94,8 +99,9 @@ running when the session closes. Do not share one session between overlapping
 runs that need isolated files or processes.
 
 `session=` cannot be combined with `sandbox_id`, `snapshot`, a non-default
-`auto_stop_minutes`, `workdir`, or `env` on the capability. Configure those on
-`DaytonaSandboxSession`, which owns the sandbox.
+`auto_stop_minutes`, `workdir`, `env`, or `network_block_all` on the capability.
+Configure those on `DaytonaSandboxSession`, which owns the sandbox. Attached
+sandboxes retain their existing network settings.
 
 `DaytonaSandboxSession.exec` returns a `DaytonaSandboxExecResult` for
 applications that need command access outside an agent run. Daytona's direct
@@ -128,7 +134,8 @@ PrefixTools(wrapped=DaytonaSandbox(instructions=''), prefix='daytona')
 ```
 
 Daytona sandboxes isolate processes and files from the application host. Network
-access and credentials inside the sandbox remain separate trust boundaries.
+access and credentials inside the sandbox remain separate trust boundaries. Use
+`network_block_all=True` when tools do not require outbound access.
 The Daytona SDK is asyncio-native, so this capability does not support trio.
 Durable execution is rejected because a live sandbox session cannot survive
 activity replay or worker restart.
