@@ -78,6 +78,8 @@ full = await restore_media(lean, media_store=store)
 
 The current reader restores binary markers written before text externalization. That compatibility is upgrade-only: a release that predates text externalization treats every marker as binary, so it cannot validate a snapshot containing an externalized text marker. Keep a current reader for persisted snapshots that contain those markers.
 
+If a payload uses the same namespaced keys as the marker format, the writer moves those values into a versioned reserved mapping and the current reader restores them. Readers remain compatible with markers written before this escaping format was added.
+
 ## Public URLs
 
 When a store is fronted by a CDN, a local HTTP server, or a signed-URL service, pass a `public_url=` resolver (or use `make_static_public_url`) to turn a stored `media+sha256://` URI into a URL the model can fetch directly. Without a resolver, `public_url(...)` returns `None`.
@@ -167,3 +169,4 @@ Source: [`pydantic_ai_harness/media/`](https://github.com/pydantic/pydantic-ai-h
 ## Related
 
 - [Step Persistence](step-persistence.md) -- the first consumer of these stores, externalizing large `BinaryContent` and text parts in run snapshots.
+
