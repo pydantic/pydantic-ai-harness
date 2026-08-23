@@ -311,4 +311,3 @@ async def _restore_external(node: dict[str, object], media_store: MediaStore) ->
     else:
         restored['data'] = base64.b64encode(raw).decode('ascii')
     return restored
-
