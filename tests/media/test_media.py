@@ -1269,4 +1269,3 @@ def test_concrete_stores_satisfy_protocol(tmp_path: Path) -> None:
             secret_access_key='s',
         )
     )
-
