@@ -48,6 +48,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.usage import RunUsage, UsageLimits
 
+from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW, resolve_context_window
 from pydantic_ai_harness.experimental.acp._content import PromptContentBlock, prompt_blocks_to_user_content
 from pydantic_ai_harness.experimental.acp._permission import (
     PermissionPolicy,
@@ -683,6 +684,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     'persisting ACP session %s was cancelled; durable state is now behind', state.session_id
                 )
                 stop_reason = 'cancelled'
+
+        # Send usage_update notification to inform the client about context usage
+        await self._send_usage_update(turn.session_id, usage)
+
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
 
     async def _fail_outstanding_tool_calls(self, turn: _TurnState) -> None:
@@ -703,6 +708,37 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         """Send one `session/update` to the client, recording it for the transcript."""
         turn.updates.append(update)
         await turn.conn.session_update(session_id=turn.session_id, update=update)
+
+    async def _send_usage_update(self, session_id: str, usage: RunUsage) -> None:
+        """Send a `usage_update` session notification with current context usage.
+
+        Informs ACP clients (Zed, etc.) of the context token count and maximum window size so they can
+        render a usage percentage. Skipped when no connection is available. The notification is not
+        recorded in the transcript (fire-and-forget).
+        """
+        conn = self._conn
+        if conn is None:
+            return
+        with contextlib.suppress(Exception):
+            await conn.session_update(
+                session_id=session_id,
+                update=schema.UsageUpdate(
+                    session_update='usage_update',
+                    used=usage.total_tokens or 0,
+                    size=self._get_max_context_tokens(),
+                ),
+            )
+
+    def _get_max_context_tokens(self) -> int:
+        """Return the maximum context window size for the current model.
+
+        Uses DEFAULT_CONTEXT_WINDOW (200k) as fallback when the model cannot be resolved.
+        """
+        model = self._agent.model
+        if model is None:
+            return DEFAULT_CONTEXT_WINDOW
+        window = resolve_context_window(model)
+        return window if window is not None else DEFAULT_CONTEXT_WINDOW
 
     async def _emit_text(self, turn: _TurnState, text: str, *, thought: bool) -> None:
         """Stream text to the client as one or more chunked `session/update` notifications."""
