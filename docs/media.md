@@ -169,4 +169,3 @@ Source: [`pydantic_ai_harness/media/`](https://github.com/pydantic/pydantic-ai-h
 ## Related
 
 - [Step Persistence](step-persistence.md) -- the first consumer of these stores, externalizing large `BinaryContent` and text parts in run snapshots.
-
