@@ -685,8 +685,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 )
                 stop_reason = 'cancelled'
 
-        # Send usage_update notification to inform the client about context usage
-        await self._send_usage_update(turn.session_id, usage)
+        # Send usage_update notification to inform the client about context usage.
+        # Use the resolved run model (state.model via model_resolver) rather than the agent's
+        # default model, since set_config_option can switch to a different model per session.
+        run_model = self._resolve_run_model(state.model)
+        await self._send_usage_update(turn.session_id, usage, run_model)
 
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
 
@@ -709,12 +712,18 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         turn.updates.append(update)
         await turn.conn.session_update(session_id=turn.session_id, update=update)
 
-    async def _send_usage_update(self, session_id: str, usage: RunUsage) -> None:
+    async def _send_usage_update(self, session_id: str, usage: RunUsage, run_model: Model | str | None) -> None:
         """Send a `usage_update` session notification with current context usage.
 
         Informs ACP clients (Zed, etc.) of the context token count and maximum window size so they can
         render a usage percentage. Skipped when no connection is available. The notification is not
         recorded in the transcript (fire-and-forget).
+
+        Args:
+            session_id: The session identifier.
+            usage: Token usage from the completed run.
+            run_model: The actual model used for this run (from state.model via model_resolver),
+                which may differ from self._agent.model when set_config_option switches models.
         """
         conn = self._conn
         if conn is None:
@@ -725,16 +734,19 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                 update=schema.UsageUpdate(
                     session_update='usage_update',
                     used=usage.total_tokens or 0,
-                    size=self._get_max_context_tokens(),
+                    size=self._get_max_context_tokens(run_model),
                 ),
             )
 
-    def _get_max_context_tokens(self) -> int:
-        """Return the maximum context window size for the current model.
+    def _get_max_context_tokens(self, run_model: Model | str | None) -> int:
+        """Return the maximum context window size for the given model.
 
         Uses DEFAULT_CONTEXT_WINDOW (200k) as fallback when the model cannot be resolved.
+
+        Args:
+            run_model: The model used for the run. None falls back to the agent's default model.
         """
-        model = self._agent.model
+        model = run_model if run_model is not None else self._agent.model
         if model is None:
             return DEFAULT_CONTEXT_WINDOW
         window = resolve_context_window(model)
