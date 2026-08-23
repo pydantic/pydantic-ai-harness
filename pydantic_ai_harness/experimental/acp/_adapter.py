@@ -730,7 +730,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
         Informs ACP clients (Zed, etc.) of the context token count and maximum window size so they can
         render a usage percentage. Skipped when no connection is available. The notification is not
-        recorded in the transcript (fire-and-forget).
+        recorded in the transcript (fire-and-forget). Failures, including cancellation after the
+        turn has committed, are ignored.
 
         Args:
             session_id: The session identifier.
@@ -745,7 +746,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         # Total tokens = input + output (ignoring cache tokens for the usage percentage, since
         # they don't contribute to the context window size that matters for model limits).
         total_tokens = request_usage.input_tokens + request_usage.output_tokens
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             await conn.session_update(
                 session_id=session_id,
                 update=schema.UsageUpdate(
