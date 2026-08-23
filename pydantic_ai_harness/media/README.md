@@ -73,4 +73,3 @@ If a payload uses the same namespaced keys as the marker format, the writer move
 | `PublicUrlResolver`, `make_static_public_url` | Resolve a stored URI to a public URL |
 | `externalize_media`, `restore_media` | Walk a message node to externalize / rehydrate large binary and text payloads |
 | `media_uri_for`, `parse_media_uri` | Compute and parse a `media+sha256://` URI |
-
