@@ -25,6 +25,7 @@ from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 
+from pydantic_ai_harness._usage import reserved_usage_limits
 from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW
 from pydantic_ai_harness.compaction._pinning import is_pinned, reinject_pinned
 from pydantic_ai_harness.compaction._receipts import (
@@ -634,5 +635,5 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             instructions='You are a context summarization assistant. Extract the most important information from conversations.',
             model_settings=self.model_settings,
         )
-        result = await agent.run(prompt, usage=ctx.usage)
+        result = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
         return result.output.strip()
