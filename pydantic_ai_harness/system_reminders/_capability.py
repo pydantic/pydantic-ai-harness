@@ -25,6 +25,24 @@ from pydantic_ai.tools import AgentDepsT, RunContext
 
 from pydantic_ai_harness._usage import reserved_usage_limits
 
+_COMPACTION_SUMMARY_METADATA = {'pydantic-ai-harness.compaction.summary.v1': True}
+"""Mirror of the model-invisible marker `SummarizingCompaction` stamps its summaries with.
+
+Kept as a local literal rather than an import so this capability does not couple to compaction
+internals (the same decoupling `conversation_search` practices). A compacted history opens
+with the summary as a marked user turn, and the goal and recent-activity lookups must skip it
+to anchor on the user's actual text instead of the derived summary of it; user text alone
+cannot carry the marker, so a turn that merely opens with the same sentence still counts.
+"""
+
+
+def _is_summary_part(part: UserPromptPart) -> bool:
+    """Whether a user part is compaction's marked summary artifact."""
+    return not isinstance(part.content, str) and any(
+        isinstance(item, TextContent) and item.metadata == _COMPACTION_SUMMARY_METADATA for item in part.content
+    )
+
+
 if TYPE_CHECKING:
     from pydantic_ai.capabilities.abstract import WrapModelRequestHandler
     from pydantic_ai.models import ModelRequestContext
@@ -348,7 +366,7 @@ def _first_user_text(messages: Sequence[ModelMessage]) -> str | None:
     for msg in messages:
         if isinstance(msg, ModelRequest):
             for part in msg.parts:
-                if isinstance(part, UserPromptPart):
+                if isinstance(part, UserPromptPart) and not _is_summary_part(part):
                     text = _prompt_text(part.content)
                     if text:
                         return text
@@ -382,7 +400,7 @@ def _recent_texts(messages: Sequence[ModelMessage], max_messages: int) -> list[s
     fragments: list[str] = []
     for msg in messages:
         for part in msg.parts:
-            if isinstance(part, UserPromptPart):
+            if isinstance(part, UserPromptPart) and not _is_summary_part(part):
                 text = _prompt_text(part.content)
                 if text:
                     fragments.append(f'user: {text}')

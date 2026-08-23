@@ -47,6 +47,7 @@ from pydantic_ai_harness.compaction._receipts import (
     open_receipt_scope,
     reset_receipt_scope,
 )
+from pydantic_ai_harness.compaction._summary import is_summary_part
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -672,7 +673,7 @@ def find_token_cutoff(
 
 def _is_harness_marker_part(part: ModelRequestPart) -> bool:
     """Return whether a user-role part is harness bookkeeping rather than a user turn."""
-    return is_pinned(part) or is_receipt_part(part)
+    return is_pinned(part) or is_receipt_part(part) or is_summary_part(part)
 
 
 def find_first_user_message(messages: list[ModelMessage]) -> ModelRequest | None:

@@ -736,6 +736,18 @@ class TestSearchScope:
                 ]
             ),
             ModelRequest(parts=[SystemPromptPart(content='Summary of previous conversation:\n\nolder kiwi context')]),
+            ModelRequest(
+                parts=[
+                    UserPromptPart(
+                        content=[
+                            TextContent(
+                                content='Summary of previous conversation:\n\nnewer MARKED kiwi context',
+                                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+                            )
+                        ]
+                    )
+                ]
+            ),
         ]
         source = _StubSource({'r1': messages})
 
@@ -744,10 +756,23 @@ class TestSearchScope:
         rendered = await _search(source, 'mango', context_lines=5, max_matches=10)
         assert 'Assistant: assistant reply about mango' in rendered
         assert '[Compaction summary]' in rendered
+        assert 'newer MARKED kiwi context' not in rendered  # marked summaries collapse too
         assert 'Tool Call [search]' in rendered
         assert 'Tool [readfile]' in rendered
         assert 'Retry [readfile]: please retry' in rendered  # RetryPromptPart is searchable
         assert '...' in rendered  # truncation applied to the long tool return / args
+
+    async def test_user_text_opening_with_the_summary_prefix_stays_indexed(self) -> None:
+        # Identity rides the model-invisible marker, not the text: a genuine user turn that
+        # opens with the literal sentence is corpus content, never a dropped artifact.
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart('Summary of previous conversation:\n\nthe ZEBRA passphrase mango')]),
+        ]
+        source = _StubSource({'r1': messages})
+
+        rendered = await _search(source, 'mango')
+        assert 'the ZEBRA passphrase mango' in rendered
+        assert '[Compaction summary]' not in rendered
 
     async def test_tool_availability_delta_is_not_indexed(self) -> None:
         """Tool-list bookkeeping is not conversation content, so it contributes no line.

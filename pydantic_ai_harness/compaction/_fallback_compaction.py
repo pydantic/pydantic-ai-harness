@@ -12,6 +12,7 @@ from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext
 
 from pydantic_ai_harness.compaction._shared import CompactionStrategy, SupportsFocus
+from pydantic_ai_harness.compaction._summary import normalize_legacy_summaries
 
 
 @dataclass
@@ -51,7 +52,13 @@ class FallbackCompaction(Generic[AgentDepsT]):
         messages: list[ModelMessage],
         ctx: RunContext[AgentDepsT],
     ) -> list[ModelMessage]:
-        """Return the first successful compaction result."""
+        """Return the first successful compaction result.
+
+        Summaries persisted in the older system-voice shape are rewritten to the user turn
+        before any tier runs, so a chain whose summarizer fails and falls through to a
+        strategy that never writes summaries still returns a sendable history.
+        """
+        messages = normalize_legacy_summaries(messages)
         last_error: Exception | None = None
         for strategy in self.fallback_chain:
             try:

@@ -37,7 +37,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from typing_extensions import assert_never
 
 from pydantic_ai_harness._warn import warn_default_changed
-from pydantic_ai_harness.conversation_search._source import SUMMARY_PREFIX, HistorySource
+from pydantic_ai_harness.conversation_search._source import SUMMARY_METADATA, SUMMARY_PREFIX, HistorySource
 
 SEARCH_HISTORY_DESCRIPTION = """\
 Search persisted conversation history: earlier turns of this conversation \
@@ -181,6 +181,12 @@ def _user_prompt_text(part: UserPromptPart) -> str:
 def _format_request_part(part: ModelRequestPart, *, truncate: bool) -> str | None:
     """Render one request part to a searchable line, or `None` for non-content parts."""
     if isinstance(part, UserPromptPart):
+        # Same defensive artifact guard as the system branch below, on the marked shape
+        # only: a user turn is user-controlled text, so its text is never matched.
+        if not isinstance(part.content, str) and any(
+            isinstance(item, TextContent) and item.metadata == SUMMARY_METADATA for item in part.content
+        ):
+            return '[Compaction summary]'
         content = _user_prompt_text(part)
         if truncate and len(content) > 500:
             content = content[:500] + '...'

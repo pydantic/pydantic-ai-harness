@@ -386,6 +386,29 @@ releases; set `incremental=False` to retain the prior regeneration behavior. `pr
 when it falls outside the window. Pass `keep_tokens` to trim the retained tail to a token budget instead
 of `keep_messages`.
 
+## Summary shape
+
+The summary message is written as a user turn, not a system prompt. The adapter already sends the
+run's instructions as one leading `system` message, and a second one from the summary makes
+single-system backends (SGLang, some vLLM deployments) reject the whole request. This holds when
+the summary is the only system-voice content in the history; a history carrying its own
+`SystemPromptPart`s (dynamic system prompts) can still map to several leading system messages,
+which is core's profile-flag territory (`openai_chat_supports_multiple_system_messages`).
+
+Summary identity rides a model-invisible `TextContent.metadata` marker (the same convention
+pinning uses), not the text: a user turn that happens to open with `Summary of previous
+conversation:` is an ordinary user turn everywhere -- rendered, searched, and goal-anchored like
+any other. Only the legacy `SystemPromptPart` shape, which users cannot author, is identified by
+that prefix.
+
+Histories persisted by earlier releases carry the old system-voice shape and are rewritten to
+the marked user turn on the way through -- in `SummarizingCompaction`, in `TieredCompaction`
+(whose under-target path runs no tier at all), and in `FallbackCompaction` -- so they become
+sendable without waiting for the next compaction to fire. A part carrying a `dynamic_ref` is
+left alone: rewriting it would freeze an instruction core re-evaluates every turn.
+`system_reminders` goal anchoring skips marked summaries and still anchors on the user's first
+request.
+
 ## Usage accounting
 
 The summary call is a real request to the model, so its full usage -- tokens **and** the request

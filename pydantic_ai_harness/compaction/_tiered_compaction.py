@@ -24,6 +24,7 @@ from pydantic_ai_harness.compaction._shared import (
     resolve_token_trigger,
     validate_token_trigger,
 )
+from pydantic_ai_harness.compaction._summary import normalize_legacy_summaries
 
 if TYPE_CHECKING:
     from pydantic_ai.models import AbstractModel, ModelRequestContext, ModelRequestParameters
@@ -172,6 +173,10 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
     ) -> list[ModelMessage]:
         """Apply tiers in order until the history fits the target or tiers run out."""
+        # Runs before the target check: an under-target history -- including a realtime one
+        # with no target at all -- still gets its legacy-shape summaries rewritten, so the
+        # nothing-to-do path returns a sendable history too.
+        messages = normalize_legacy_summaries(messages)
         target = self._target(ctx.model)
         if target is None:
             # A realtime model has no token target to escalate toward; leave the history as-is.
@@ -185,6 +190,9 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Escalate through the tiers when the conversation exceeds the target."""
         messages: list[ModelMessage] = list(request_context.messages)
+        # Same under-target rewrite as `compact`: the gate below returns early exactly when no
+        # tier would run, and that is the resume path a legacy-shape summary rides in on.
+        request_context.messages = messages = normalize_legacy_summaries(messages)
         # The tiers get the request's context, not the run's: a tier that resolves a model --
         # a summarizing one, or a `TieredCompaction` nested inside this one -- has to reach the
         # same conclusion this gate did.
