@@ -42,6 +42,19 @@ _TEXT_MARKER = '__harness_external_text__'
 # `part_kind`/`content`/`uri`, and a plain `uri` key alone would drop the
 # original. See `_write_reference` for the backward-compatible `uri` mirror.
 _URI_KEY = '__harness_external_uri__'
+# A marker can overwrite fields with the same names as its own metadata. New
+# markers move those caller-owned values into a versioned mapping before writing
+# the metadata, and the reader puts them back after rehydrating the payload.
+_ESCAPED_KEYS = '__harness_external_escaped_keys__'
+_MARKER_FORMAT = '__harness_external_marker_format__'
+_ESCAPED_KEYS_FORMAT = 'escaped-keys-v1'
+_MARKER_METADATA_KEYS = (
+    _EXTERNAL_MARKER,
+    _TEXT_MARKER,
+    _URI_KEY,
+    _ESCAPED_KEYS,
+    _MARKER_FORMAT,
+)
 # `TextContent.kind` (`pydantic_ai.messages.TextContent`). Unlike a message
 # part it carries no `part_kind`, so it needs its own discriminator match.
 _TEXT_CONTENT_KIND = 'text-content'
@@ -146,6 +159,7 @@ async def _maybe_externalize_binary(
     # survives new `BinaryContent` fields added by pydantic_ai upstream. Fields
     # are recursively walked so any nested externalizable payload still goes out.
     marker = await _preserve_fields(node, 'data', media_store, threshold_bytes)
+    _escape_marker_metadata(marker)
     marker[_EXTERNAL_MARKER] = True
     _write_reference(marker, node, uri)
     return marker
@@ -172,6 +186,7 @@ async def _maybe_externalize_text(
     # `_TEXT_MARKER` tells `restore_media` to decode UTF-8 back into `content`
     # rather than base64 into `data`.
     marker = await _preserve_fields(node, 'content', media_store, threshold_bytes)
+    _escape_marker_metadata(marker)
     marker[_EXTERNAL_MARKER] = True
     marker[_TEXT_MARKER] = True
     _write_reference(marker, node, uri)
@@ -195,6 +210,17 @@ def _write_reference(marker: dict[str, object], node: dict[str, object], uri: st
     marker[_URI_KEY] = uri
     if 'uri' not in node:
         marker['uri'] = uri
+
+
+def _escape_marker_metadata(marker: dict[str, object]) -> None:
+    """Move caller-owned marker metadata keys aside before writing our values."""
+    escaped: dict[str, object] = {}
+    for key in _MARKER_METADATA_KEYS:
+        if key in marker:
+            escaped[key] = marker.pop(key)
+    if escaped:
+        marker[_MARKER_FORMAT] = _ESCAPED_KEYS_FORMAT
+        marker[_ESCAPED_KEYS] = escaped
 
 
 async def _preserve_fields(
@@ -236,6 +262,13 @@ async def restore_media(node: object, *, media_store: MediaStore) -> object:
 
 async def _restore_external(node: dict[str, object], media_store: MediaStore) -> dict[str, object]:
     dropped = {_EXTERNAL_MARKER, _TEXT_MARKER}
+    escaped: dict[str, object] | None = None
+    if node.get(_MARKER_FORMAT) == _ESCAPED_KEYS_FORMAT:
+        escaped_value = node.get(_ESCAPED_KEYS)
+        if not _is_json_dict(escaped_value):
+            raise ValueError(f'externalized media marker has invalid escaped keys: {node!r}')
+        escaped = escaped_value
+        dropped.update({_MARKER_FORMAT, _ESCAPED_KEYS})
     if _URI_KEY in node:
         uri_value = node[_URI_KEY]
         dropped.add(_URI_KEY)
@@ -270,8 +303,12 @@ async def _restore_external(node: dict[str, object], media_store: MediaStore) ->
         if key in dropped:
             continue
         restored[key] = await restore_media(value, media_store=media_store)
+    if escaped is not None:
+        for key, value in escaped.items():
+            restored[key] = await restore_media(value, media_store=media_store)
     if is_text:
         restored['content'] = raw.decode('utf-8', errors='surrogatepass')
     else:
         restored['data'] = base64.b64encode(raw).decode('ascii')
     return restored
+
