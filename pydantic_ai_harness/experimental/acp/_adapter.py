@@ -597,6 +597,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         deferred_results: DeferredToolResults | None = None
         run_input: list[UserContent] | None = user_content
         output_type = [self._agent.output_type, DeferredToolRequests]
+        final_result = None  # Track the final run result for context usage reporting
         turn = _TurnState(
             conn=conn, session_id=state.session_id, cwd=state.cwd, approval_names=self._approval_tool_names(config)
         )
@@ -631,6 +632,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                             await self._emit_event(turn, event)
 
                 assert result is not None, 'run_stream_events always yields a final result event'
+                final_result = result  # Save the final result for context usage reporting
                 history = result.all_messages()
                 usage += result.usage  # pydantic-ai 2.0: `usage` is a property, not a method
                 output = result.output
@@ -688,8 +690,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         # Send usage_update notification to inform the client about context usage.
         # Use the resolved run model (state.model via model_resolver) rather than the agent's
         # default model, since set_config_option can switch to a different model per session.
+        # Use final_result.usage (the last run's context usage) rather than the turn-wide billing
+        # total, which double-counts repeated context across approval/resume passes.
         run_model = self._resolve_run_model(state.model)
-        await self._send_usage_update(turn.session_id, usage, run_model)
+        if final_result is not None:
+            await self._send_usage_update(turn.session_id, final_result.usage, run_model)
 
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
 
