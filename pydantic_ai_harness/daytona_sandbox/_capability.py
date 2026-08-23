@@ -12,6 +12,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AgentToolset
 
+from pydantic_ai_harness.daytona_sandbox._session import DEFAULT_AUTO_STOP_MINUTES, DaytonaSandboxSession
 from pydantic_ai_harness.daytona_sandbox._toolset import DaytonaSandboxToolset
 from pydantic_ai_harness.modal_sandbox._tool_output import DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES
 
@@ -38,10 +39,17 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     sandbox_id: str | None = None
     """Existing sandbox ID or name to attach to instead of creating one."""
 
+    session: DaytonaSandboxSession | None = None
+    """An open caller-owned session to reuse across runs.
+
+    The capability uses the session but does not open or close it. Cannot be
+    combined with `sandbox_id` or fresh-sandbox provisioning settings.
+    """
+
     snapshot: str | None = None
     """Daytona snapshot used for a fresh sandbox. None uses Daytona's default."""
 
-    auto_stop_minutes: int = 60
+    auto_stop_minutes: int = DEFAULT_AUTO_STOP_MINUTES
     """Idle minutes before Daytona stops a fresh sandbox; stopped sandboxes auto-delete."""
 
     workdir: str | None = None
@@ -83,6 +91,23 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             raise ValueError('default_command_timeout cannot exceed max_command_timeout.')
         if self.sandbox_id is not None and self.snapshot is not None:
             raise ValueError('snapshot cannot be combined with sandbox_id.')
+        if self.session is not None:
+            conflicts = [
+                name
+                for name, value, default in (
+                    ('sandbox_id', self.sandbox_id, None),
+                    ('snapshot', self.snapshot, None),
+                    ('auto_stop_minutes', self.auto_stop_minutes, DEFAULT_AUTO_STOP_MINUTES),
+                    ('workdir', self.workdir, None),
+                    ('env', self.env, None),
+                )
+                if value != default
+            ]
+            if conflicts:
+                raise ValueError(
+                    f'{", ".join(conflicts)} cannot be combined with `session`, which already owns '
+                    'the sandbox and its configuration.'
+                )
         if self.instructions is not None and type(self.instructions) is not str:
             raise ValueError(f'instructions must be a string or None, got {self.instructions!r}.')
         if self.env is not None:
@@ -91,7 +116,8 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     def get_instructions(self) -> str | None:
         if self.instructions is not None:
             return self.instructions or None
-        lifetime = 'persists after this run' if self.sandbox_id is not None else 'is deleted after this run'
+        reused = self.sandbox_id is not None or self.session is not None
+        lifetime = 'persists after this run' if reused else 'is deleted after this run'
         return (
             'You have an isolated Daytona cloud sandbox. Use `run_command` for shell commands and '
             '`read_file`, `write_file`, and `list_directory` for files. '
@@ -114,6 +140,7 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
         return DaytonaSandboxToolset[AgentDepsT](
             id=self.id or _DEFAULT_ID,
             sandbox_id=self.sandbox_id,
+            session=self.session,
             snapshot=self.snapshot,
             auto_stop_minutes=self.auto_stop_minutes,
             workdir=self.workdir,

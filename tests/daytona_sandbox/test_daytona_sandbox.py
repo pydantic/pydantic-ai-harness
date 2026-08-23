@@ -19,6 +19,8 @@ from pydantic_ai_harness.daytona_sandbox import (
     DaytonaSandbox,
     DaytonaSandboxAuthError,
     DaytonaSandboxError,
+    DaytonaSandboxExecResult,
+    DaytonaSandboxSession,
     DaytonaSandboxUnavailableError,
 )
 
@@ -63,6 +65,7 @@ def _context() -> RunContext[None]:
 async def _tools(
     *,
     sandbox_id: str | None = None,
+    session: DaytonaSandboxSession | None = None,
     snapshot: str | None = None,
     workdir: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -72,6 +75,7 @@ async def _tools(
 ) -> AsyncGenerator[_Tools]:
     base = DaytonaSandbox[None](
         sandbox_id=sandbox_id,
+        session=session,
         snapshot=snapshot,
         workdir=workdir,
         env=env,
@@ -110,6 +114,66 @@ async def test_attached_sandbox_is_left_running(fake_daytona: FakeDaytona) -> No
         assert await tools.run_command('echo hello') == 'hello'
     assert sandbox.deleted is False
     assert fake_daytona.delete_calls == []
+
+
+async def test_caller_owned_session_is_reused_across_agent_runs(fake_daytona: FakeDaytona) -> None:
+    def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
+            return ModelResponse(parts=[ToolCallPart('write_file', {'path': 'state.txt', 'content': 'ready'})])
+        return ModelResponse(parts=[TextPart('done')])
+
+    async with DaytonaSandboxSession() as session:
+        agent: Agent[None, str] = Agent(FunctionModel(call_then_finish), capabilities=[DaytonaSandbox(session=session)])
+        assert (await agent.run('first')).output == 'done'
+        assert (await agent.run('second')).output == 'done'
+        assert len(fake_daytona.sandboxes) == 1
+        assert fake_daytona.sandboxes[0].files['state.txt'] == b'ready'
+        assert fake_daytona.sandboxes[0].deleted is False
+    assert fake_daytona.sandboxes[0].deleted is True
+    assert fake_daytona.delete_calls == [('sb-1', 60, True)]
+
+
+async def test_session_exposes_command_result_and_open_sandbox_id(fake_daytona: FakeDaytona) -> None:
+    session = DaytonaSandboxSession(workdir='/workspace', env={'A': 'b'})
+    assert session.sandbox_id is None
+    async with session:
+        fake_daytona.sandboxes[0].responder = lambda command, timeout: ('hello\n', 3)
+        result = await session.exec('example', timeout=7)
+        assert result == DaytonaSandboxExecResult(output='hello\n', returncode=3)
+        assert session.sandbox_id == 'sb-1'
+    assert session.sandbox_id is None
+
+
+async def test_attached_session_is_left_running(fake_daytona: FakeDaytona) -> None:
+    sandbox = fake_daytona.sandbox()
+    async with DaytonaSandboxSession(sandbox_id=sandbox.id) as session:
+        assert session.sandbox_id == sandbox.id
+    assert sandbox.deleted is False
+    assert fake_daytona.delete_calls == []
+
+
+async def test_session_exit_without_enter_is_safe() -> None:
+    await DaytonaSandboxSession().__aexit__(None, None, None)
+
+
+@pytest.mark.parametrize('timeout', [0, True, 1.5])
+async def test_session_rejects_invalid_exec_timeout(fake_daytona: FakeDaytona, timeout: object) -> None:
+    async with DaytonaSandboxSession() as session:
+        with pytest.raises(ValueError, match='timeout must be a positive integer'):
+            await session.exec('example', timeout=timeout)  # type: ignore[arg-type]
+
+
+async def test_injected_session_must_be_open(fake_daytona: FakeDaytona) -> None:
+    with pytest.raises(DaytonaSandboxError, match='injected session is not open'):
+        async with _tools(session=DaytonaSandboxSession()):
+            pass  # pragma: no cover
+
+
+async def test_session_cannot_be_entered_twice(fake_daytona: FakeDaytona) -> None:
+    async with DaytonaSandboxSession() as session:
+        with pytest.raises(DaytonaSandboxError, match='already open'):
+            await session.__aenter__()
+    assert len(fake_daytona.sandboxes) == 1
 
 
 async def test_creation_configuration_reaches_daytona(fake_daytona: FakeDaytona) -> None:
@@ -320,10 +384,24 @@ def test_configuration_conflicts_and_instructions() -> None:
         DaytonaSandbox(sandbox_id='sb', snapshot='snap')
     with pytest.raises(ValueError, match='instructions must'):
         DaytonaSandbox(instructions=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match='sandbox_id.*cannot be combined with `session`'):
+        DaytonaSandbox(sandbox_id='sb', session=DaytonaSandboxSession())
+    with pytest.raises(ValueError, match='snapshot.*cannot be combined with `session`'):
+        DaytonaSandbox(snapshot='snap', session=DaytonaSandboxSession())
+    with pytest.raises(ValueError, match='workdir.*env.*cannot be combined with `session`'):
+        DaytonaSandbox(workdir='/work', env={'A': 'b'}, session=DaytonaSandboxSession())
+    with pytest.raises(ValueError, match='auto_stop_minutes.*cannot be combined with `session`'):
+        DaytonaSandbox(auto_stop_minutes=30, session=DaytonaSandboxSession())
+    for value in (0, True, 1.5):
+        with pytest.raises(ValueError, match='auto_stop_minutes must be a positive integer'):
+            DaytonaSandboxSession(auto_stop_minutes=value)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match='snapshot cannot'):
+        DaytonaSandboxSession(sandbox_id='sb', snapshot='snap')
     assert DaytonaSandbox(instructions='').get_instructions() is None
     assert DaytonaSandbox(instructions='custom').get_instructions() == 'custom'
     assert 'is deleted after this run' in (DaytonaSandbox().get_instructions() or '')
     assert 'persists after this run' in (DaytonaSandbox(sandbox_id='sb').get_instructions() or '')
+    assert 'persists after this run' in (DaytonaSandbox(session=DaytonaSandboxSession()).get_instructions() or '')
     toolset = DaytonaSandbox[None](id=None).get_toolset()
     if not isinstance(toolset, _Tools):  # pragma: no cover - capability contract
         raise AssertionError('DaytonaSandbox is missing its tools')
@@ -361,6 +439,8 @@ def test_public_exports() -> None:
         'DaytonaSandbox',
         'DaytonaSandboxAuthError',
         'DaytonaSandboxError',
+        'DaytonaSandboxExecResult',
+        'DaytonaSandboxSession',
         'DaytonaSandboxUnavailableError',
     )
 

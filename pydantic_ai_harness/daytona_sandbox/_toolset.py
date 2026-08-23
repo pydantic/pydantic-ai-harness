@@ -30,6 +30,7 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
         *,
         id: str,
         sandbox_id: str | None,
+        session: DaytonaSandboxSession | None,
         snapshot: str | None,
         auto_stop_minutes: int,
         workdir: str | None,
@@ -43,6 +44,7 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
     ) -> None:
         super().__init__(id=id)
         self._sandbox_id = sandbox_id
+        self._external_session = session
         self._snapshot = snapshot
         self._auto_stop_minutes = auto_stop_minutes
         self._workdir = workdir
@@ -68,6 +70,7 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
         return DaytonaSandboxToolset[AgentDepsT](
             id=self.id or 'daytona_sandbox',
             sandbox_id=self._sandbox_id,
+            session=self._external_session,
             snapshot=self._snapshot,
             auto_stop_minutes=self._auto_stop_minutes,
             workdir=self._workdir,
@@ -85,6 +88,13 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
             return self
         if self._session is not None:
             raise DaytonaSandboxError('The Daytona sandbox session is already open.')
+        if self._external_session is not None:
+            if self._external_session.sandbox_id is None:
+                raise DaytonaSandboxError(
+                    'The injected session is not open. Enter it with `async with session:` before running the agent.'
+                )
+            self._session = self._external_session
+            return self
         session = DaytonaSandboxSession(
             sandbox_id=self._sandbox_id,
             snapshot=self._snapshot,
@@ -99,7 +109,7 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
     async def __aexit__(self, *args: object) -> None:
         session = self._session
         self._session = None
-        if session is not None:
+        if session is not None and self._external_session is None:
             await session.__aexit__(*args)
 
     def _require_session(self) -> DaytonaSandboxSession:

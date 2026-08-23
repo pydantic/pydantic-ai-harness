@@ -28,6 +28,9 @@ if TYPE_CHECKING:
     from daytona._async.sandbox import AsyncSandbox
 
 
+DEFAULT_AUTO_STOP_MINUTES = 60
+
+
 class DaytonaSandboxError(RuntimeError):
     """A Daytona sandbox operation failed."""
 
@@ -41,24 +44,57 @@ class DaytonaSandboxUnavailableError(DaytonaSandboxError):
 
 
 @dataclass(frozen=True, kw_only=True)
-class _ExecResult:
+class DaytonaSandboxExecResult:
+    """The outcome of running a command in a Daytona sandbox."""
+
     output: str
+    """The command result text returned by Daytona's direct execution API."""
+
     returncode: int
+    """The command exit status, or `-1` when the SDK reports a timeout."""
+
     timed_out: bool = False
+    """Whether the Daytona SDK stopped waiting at the command deadline."""
 
 
 class DaytonaSandboxSession:
-    """Own or attach to one Daytona sandbox for one agent run."""
+    """Async context manager that owns or attaches to one Daytona sandbox.
+
+    A session without `sandbox_id` creates a sandbox from `snapshot` and deletes
+    it on exit. A session with `sandbox_id` attaches to that sandbox and leaves it
+    running. Pass an already-open session to `DaytonaSandbox(session=...)` to
+    reuse one sandbox across several agent runs while retaining lifecycle
+    ownership in the caller.
+
+    ```python
+    import asyncio
+
+    from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxSession
+
+
+    async def main() -> None:
+        async with DaytonaSandboxSession() as session:
+            result = await session.exec('python --version', timeout=30)
+            print(result.output)
+
+
+    asyncio.run(main())
+    ```
+    """
 
     def __init__(
         self,
         *,
-        sandbox_id: str | None,
-        snapshot: str | None,
-        auto_stop_minutes: int,
-        workdir: str | None,
-        env: Mapping[str, str] | None,
+        sandbox_id: str | None = None,
+        snapshot: str | None = None,
+        auto_stop_minutes: int = DEFAULT_AUTO_STOP_MINUTES,
+        workdir: str | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> None:
+        if type(auto_stop_minutes) is not int or auto_stop_minutes <= 0:
+            raise ValueError(f'auto_stop_minutes must be a positive integer, got {auto_stop_minutes!r}.')
+        if sandbox_id is not None and snapshot is not None:
+            raise ValueError('snapshot cannot be combined with sandbox_id.')
         self._requested_id = sandbox_id
         self._snapshot = snapshot
         self._auto_stop_minutes = auto_stop_minutes
@@ -66,9 +102,18 @@ class DaytonaSandboxSession:
         self._env = dict(env) if env is not None else None
         self._client: AsyncDaytona | None = None
         self._sandbox: AsyncSandbox | None = None
-        self.sandbox_id: str | None = sandbox_id
+
+    @property
+    def sandbox_id(self) -> str | None:
+        """The ID of the open sandbox, or `None` outside the session context."""
+        return self._sandbox.id if self._sandbox is not None else None
 
     async def __aenter__(self) -> DaytonaSandboxSession:
+        if self._sandbox is not None:
+            raise DaytonaSandboxError(
+                'The session is already open; exit it before entering again. '
+                'Use a separate session per concurrent context.'
+            )
         try:
             from daytona import AsyncDaytona, CreateSandboxFromSnapshotParams
         except ImportError as error:
@@ -94,7 +139,6 @@ class DaytonaSandboxSession:
 
         self._client = client
         self._sandbox = sandbox
-        self.sandbox_id = sandbox.id
         return self
 
     async def __aexit__(self, *_: object) -> None:
@@ -123,7 +167,13 @@ class DaytonaSandboxSession:
             return path
         return posixpath.join(self._workdir, path)
 
-    async def exec(self, command: str, *, timeout: int) -> _ExecResult:
+    async def exec(self, command: str, *, timeout: int) -> DaytonaSandboxExecResult:
+        """Run a command with a finite whole-second timeout and return the raw SDK result.
+
+        This lower-level method does not apply the capability's output limits.
+        """
+        if type(timeout) is not int or timeout <= 0:
+            raise ValueError(f'timeout must be a positive integer, got {timeout!r}.')
         sandbox = self._require_sandbox()
         try:
             response = await sandbox.process.exec(
@@ -138,9 +188,9 @@ class DaytonaSandboxSession:
             except ImportError:  # pragma: no cover - the session already imported Daytona
                 raise DaytonaSandboxError('The Daytona SDK became unavailable.') from error
             if isinstance(error, DaytonaTimeoutError):
-                return _ExecResult(output='', returncode=-1, timed_out=True)
+                return DaytonaSandboxExecResult(output='', returncode=-1, timed_out=True)
             raise _translate_error(error, unavailable=True) from error
-        return _ExecResult(output=response.result, returncode=response.exit_code)
+        return DaytonaSandboxExecResult(output=response.result, returncode=response.exit_code)
 
     async def file_size(self, path: str) -> int:
         try:

@@ -64,6 +64,45 @@ DaytonaSandbox(sandbox_id='sandbox-id')
 `workdir` applies to commands and relative file paths. `env` is passed when the
 sandbox is created and on every command.
 
+To reuse one sandbox across sequential runs while controlling its lifetime,
+open a `DaytonaSandboxSession` and pass it to the capability:
+
+```python
+import asyncio
+
+from pydantic_ai import Agent
+from pydantic_ai_harness import DaytonaSandbox
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxSession
+
+
+async def main() -> None:
+    async with DaytonaSandboxSession() as session:
+        agent = Agent(
+            'openai:gpt-5.6-sol',
+            capabilities=[DaytonaSandbox(session=session)],
+        )
+        await agent.run('Install the project dependencies.')
+        await agent.run('Run the tests in the same sandbox.')
+
+
+asyncio.run(main())
+```
+
+The caller opens and closes an injected session. The capability does neither.
+An attached session (`DaytonaSandboxSession(sandbox_id=...)`) is also left
+running when the session closes. Do not share one session between overlapping
+runs that need isolated files or processes.
+
+`session=` cannot be combined with `sandbox_id`, `snapshot`, a non-default
+`auto_stop_minutes`, `workdir`, or `env` on the capability. Configure those on
+`DaytonaSandboxSession`, which owns the sandbox.
+
+`DaytonaSandboxSession.exec` returns a `DaytonaSandboxExecResult` for
+applications that need command access outside an agent run. Daytona's direct
+execution response exposes one result string and does not separate stderr. The
+caller must provide a positive whole-second timeout. This lower-level method
+returns raw SDK output without the capability's byte or line limits.
+
 ## Limits
 
 Commands default to `default_command_timeout=60` seconds. Model-requested
