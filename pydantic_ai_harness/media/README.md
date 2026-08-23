@@ -60,6 +60,8 @@ full = await restore_media(lean, media_store=store)
 
 The current reader restores binary markers written before text externalization. That compatibility is upgrade-only: a release that predates text externalization treats every marker as binary, so it cannot validate a snapshot containing an externalized text marker. Keep a current reader for persisted snapshots that contain those markers.
 
+If a payload uses the same namespaced keys as the marker format, the writer moves those values into a versioned reserved mapping and the current reader restores them. Readers remain compatible with markers written before this escaping format was added.
+
 ## API
 
 | Symbol | Purpose |
@@ -71,3 +73,4 @@ The current reader restores binary markers written before text externalization. 
 | `PublicUrlResolver`, `make_static_public_url` | Resolve a stored URI to a public URL |
 | `externalize_media`, `restore_media` | Walk a message node to externalize / rehydrate large binary and text payloads |
 | `media_uri_for`, `parse_media_uri` | Compute and parse a `media+sha256://` URI |
+
