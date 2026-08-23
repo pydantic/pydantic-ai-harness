@@ -698,7 +698,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         # model_resolver may be impure and return different results across calls).
         # Use final_result.response.usage (the final request's token counts) rather than result.usage
         # (which aggregates all model requests in the run, including tool-call passes that re-send context).
-        if final_result is not None and final_resolved_model is not None:
+        # final_resolved_model may be None when using the agent's default model, which _get_max_context_tokens handles.
+        if final_result is not None:
             await self._send_usage_update(turn.session_id, final_result.response.usage, final_resolved_model)
 
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
