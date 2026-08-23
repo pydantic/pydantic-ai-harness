@@ -146,6 +146,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 |---|---|---|
 | [FileSystem](filesystem.md) | Harness | Read, write, edit, search files under a root; path-traversal and symlink safe, secrets read-only |
 | [Shell](shell.md) | Harness | Command execution with allowlists, denylists, timeouts, and credential-stripping |
+| [Daytona Sandbox](daytona-sandbox.md) | Harness | Commands and files in an isolated [Daytona](https://www.daytona.io) cloud sandbox |
 | [Modal Sandbox](modal-sandbox.md) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
 
 ### Tools & native abilities
