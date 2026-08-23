@@ -743,8 +743,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         conn = self._conn
         if conn is None:
             return
-        # Total tokens = input + output (ignoring cache tokens for the usage percentage, since
-        # they don't contribute to the context window size that matters for model limits).
+        # Total tokens = input + output; input_tokens already includes cache read/write tokens.
         total_tokens = request_usage.input_tokens + request_usage.output_tokens
         with contextlib.suppress(asyncio.CancelledError, Exception):
             await conn.session_update(
