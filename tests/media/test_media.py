@@ -525,6 +525,59 @@ class TestExternalizeRestoreWalker:
         restored = await restore_media(externalized, media_store=store)
         assert restored == node  # original uri survives, content re-inlined
 
+    async def test_namespaced_marker_fields_round_trip(self, tmp_path: Path) -> None:
+        """Caller-owned marker metadata is escaped before the marker writes its values."""
+        import base64
+
+        store = DiskMediaStore(tmp_path)
+        node = {
+            'kind': 'binary',
+            'data': base64.b64encode(b'\x01' * 70_000).decode('ascii'),
+            '__harness_external_media__': 'caller-media-marker',
+            '__harness_external_text__': True,
+            '__harness_external_uri__': 'caller-uri',
+            '__harness_external_escaped_keys__': {'caller': 'escaped-keys'},
+            '__harness_external_marker_format__': 'caller-format',
+            '__harness_external_field__': 'caller-field',
+        }
+
+        externalized = await externalize_media(node, media_store=store, threshold_bytes=64 * 1024)
+        assert _is_marker_dict(externalized)
+        assert externalized['__harness_external_media__'] is True
+        assert externalized['__harness_external_marker_format__'] == 'escaped-keys-v1'
+        assert externalized['__harness_external_uri__'] != 'caller-uri'
+
+        assert await restore_media(externalized, media_store=store) == node
+
+    async def test_text_marker_field_round_trips(self, tmp_path: Path) -> None:
+        """A text part can use the text marker key without losing its value."""
+        store = DiskMediaStore(tmp_path)
+        node = {
+            'part_kind': 'tool-return',
+            'content': 'x' * 70_000,
+            '__harness_external_text__': 'caller-text-marker',
+        }
+
+        externalized = await externalize_media(node, media_store=store, threshold_bytes=64 * 1024)
+        assert _is_marker_dict(externalized)
+        assert externalized['__harness_external_text__'] is True
+        assert await restore_media(externalized, media_store=store) == node
+
+    async def test_invalid_escaped_marker_fields_raise(self, tmp_path: Path) -> None:
+        """A versioned marker with a malformed escaped-key mapping fails loudly."""
+        store = DiskMediaStore(tmp_path)
+        uri = await store.put(b'payload')
+        marker = {
+            '__harness_external_media__': True,
+            '__harness_external_uri__': uri,
+            '__harness_external_marker_format__': 'escaped-keys-v1',
+            '__harness_external_escaped_keys__': ['not', 'a', 'mapping'],
+            'kind': 'binary',
+        }
+
+        with pytest.raises(ValueError, match='invalid escaped keys'):
+            await restore_media(marker, media_store=store)
+
     async def test_legacy_uri_marker_restores(self, tmp_path: Path) -> None:
         """A marker in the pre-`_URI_KEY` format (blob ref under plain `uri`) restores.
 
@@ -632,6 +685,8 @@ class TestExternalizeRestoreWalker:
         marker = await externalize_media(node, media_store=store, threshold_bytes=64 * 1024)
         assert _is_marker_dict(marker)
         assert marker['uri'] == marker['__harness_external_uri__']
+        assert '__harness_external_marker_format__' not in marker
+        assert '__harness_external_escaped_keys__' not in marker
 
         rolled_back = await _restore_as_pre_pr_reader(marker, store)
         # The old reader keeps keys it does not know; pydantic ignores the extra
@@ -1214,3 +1269,4 @@ def test_concrete_stores_satisfy_protocol(tmp_path: Path) -> None:
             secret_access_key='s',
         )
     )
+
