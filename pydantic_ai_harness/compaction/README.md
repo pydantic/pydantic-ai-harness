@@ -391,6 +391,10 @@ must contain a `{messages}` placeholder), and `instructions` sets the internal a
 which Pydantic AI sends in the request's system prompt. Override `instructions` when the summarizer
 endpoint requires a fixed leading instruction.
 
+If the summary endpoint only accepts streaming requests, set `stream_summary=True`. Only the nested
+summary request is streamed; its events are consumed internally and the parent run still receives one
+completed summary. The default remains non-streaming.
+
 ## Usage accounting
 
 The summary call is a real request to the model, so its full usage -- tokens **and** the request

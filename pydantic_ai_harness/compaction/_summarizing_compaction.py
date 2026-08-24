@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
@@ -10,6 +10,7 @@ from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
+    AgentStreamEvent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
@@ -236,6 +237,12 @@ def _is_kept_user_message(message: ModelRequest) -> bool:
     return message.metadata is not None and message.metadata.get(_KEPT_USER_MESSAGE_METADATA) is True
 
 
+async def _drain_summary_events(_ctx: RunContext[Any], events: AsyncIterable[AgentStreamEvent]) -> None:
+    """Drain nested summary events; supplying this handler selects the streaming request path."""
+    async for _ in events:
+        pass
+
+
 @dataclass
 class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """LLM-powered conversation compaction.
@@ -322,6 +329,13 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     `summary_prompt` shapes the user turn of the summary request; this sets the internal
     agent's static instructions, which Pydantic AI sends in the request's system prompt.
     Override it when the summarizer endpoint requires a fixed leading instruction.
+    """
+
+    stream_summary: bool = field(default=False, kw_only=True)
+    """Use streaming for the nested model request that writes the summary.
+
+    Enable this for providers that reject non-streaming requests. The nested stream is
+    consumed internally and only its completed summary is returned to the parent run.
     """
 
     tokenizer: Callable[[str], int] | None = None
@@ -638,5 +652,10 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             cast('Model[Any] | str', model),
             instructions=self.instructions,
         )
-        result = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
+        result = await agent.run(
+            prompt,
+            usage=ctx.usage,
+            usage_limits=reserved_usage_limits(ctx.usage_limits),
+            event_stream_handler=_drain_summary_events if self.stream_summary else None,
+        )
         return result.output.strip()
