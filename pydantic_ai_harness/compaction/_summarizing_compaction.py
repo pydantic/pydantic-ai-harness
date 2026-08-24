@@ -237,7 +237,7 @@ def _is_kept_user_message(message: ModelRequest) -> bool:
     return message.metadata is not None and message.metadata.get(_KEPT_USER_MESSAGE_METADATA) is True
 
 
-async def _drain_summary_events(_ctx: RunContext[None], events: AsyncIterable[AgentStreamEvent]) -> None:
+async def _drain_summary_events(_ctx: RunContext[object], events: AsyncIterable[AgentStreamEvent]) -> None:
     """Drain nested summary events; supplying this handler selects the streaming request path."""
     async for _ in events:
         pass
