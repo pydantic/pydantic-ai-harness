@@ -301,7 +301,7 @@ class PlanningToolset(FunctionToolset[AgentDepsT]):
     """
 
     def __init__(self, capability: Planning[AgentDepsT]) -> None:
-        super().__init__(id='planning')
+        super().__init__(id=capability.id or 'planning')
         self._capability = capability
         self._subtasks = capability.enable_subtasks
         descriptions = capability.descriptions or {}

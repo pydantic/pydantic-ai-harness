@@ -68,6 +68,9 @@ class Planning(AbstractCapability[AgentDepsT]):
     ```
     """
 
+    id: str | None = field(default='planning', kw_only=True)
+    """Stable capability and toolset ID."""
+
     guidance: str | None = None
     """Static planning guidance for the system prompt. Cache-stable.
 
