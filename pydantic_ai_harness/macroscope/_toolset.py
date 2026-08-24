@@ -121,8 +121,8 @@ class MacroscopeToolset(FunctionToolset[AgentDepsT]):
     fixing the findings is left to the agent's other tools.
     """
 
-    def __init__(self, *, command: str, cwd: Path, base: str | None, timeout: float) -> None:
-        super().__init__()
+    def __init__(self, *, id: str | None = None, command: str, cwd: Path, base: str | None, timeout: float) -> None:
+        super().__init__(id=id)
         self._command = command
         self._cwd = cwd.resolve()
         self._base = base
