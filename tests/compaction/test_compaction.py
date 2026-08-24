@@ -3832,6 +3832,8 @@ class TestSummaryWireShape:
             _user('later'),
             _assistant('reply'),
         ]
+        # Pre-state: the helper sees both artifacts through the legacy system-voice branch.
+        assert len(_summary_texts(messages)) == 2
         rc = _make_request_context(messages)
         result = await comp.before_model_request(_make_ctx(), rc)
 
