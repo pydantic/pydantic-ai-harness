@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import Field
 from pydantic_ai import RunContext
@@ -112,9 +112,9 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
 
     async def __aexit__(self, *args: object) -> None:
         session = self._session
-        self._session = None
         if session is not None and self._external_session is None:
             await session.__aexit__(*args)
+        self._session = None
 
     def _require_session(self) -> DaytonaSandboxSession:
         if self._session is None:
@@ -134,26 +134,18 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
         timeout = min(math.ceil(requested), self._max_command_timeout)
         session = self._require_session()
         try:
-            result = await session.exec(command, timeout=timeout)
+            result = await session.exec(command, timeout=timeout, max_output_bytes=self._max_output_bytes)
         except (DaytonaSandboxAuthError, DaytonaSandboxUnavailableError):
             raise
         except DaytonaSandboxError as error:
             raise ModelRetry(str(error))
 
-        output = (
-            truncate_output(
-                result.output,
-                max_lines=self._max_output_lines,
-                max_bytes=self._max_output_bytes,
-                direction='tail',
-            )
-            or '(no output)'
-        )
+        output = result.output.rstrip('\n') or '(no output)'
         if result.timed_out:
-            return f'{output}\n[timed out after {timeout}s]'
-        if result.returncode:
-            return f'{output}\n[exit code: {result.returncode}]'
-        return output
+            output = f'{output}\n[timed out after {timeout}s]'
+        elif result.returncode:
+            output = f'{output}\n[exit code: {result.returncode}]'
+        return self._bound_output(output, direction='tail', already_truncated=result.output_truncated)
 
     async def read_file(
         self,
@@ -220,9 +212,49 @@ class DaytonaSandboxToolset(FunctionToolset[AgentDepsT]):
         if not entries:
             return '(empty)'
         names = [f'{name}/' if is_dir else name for name, is_dir in sorted(entries)]
-        return truncate_output(
+        return self._bound_output(
             '\n'.join(names),
-            max_lines=self._max_output_lines,
-            max_bytes=self._max_output_bytes,
             direction='head',
         )
+
+    def _bound_output(
+        self,
+        text: str,
+        *,
+        direction: Literal['head', 'tail'],
+        already_truncated: bool = False,
+    ) -> str:
+        rendered = truncate_output(
+            text,
+            max_lines=self._max_output_lines,
+            max_bytes=self._max_output_bytes,
+            direction=direction,
+            already_truncated=already_truncated,
+        )
+        lines = rendered.split('\n')
+        if len(lines) > self._max_output_lines:
+            if direction == 'tail' and lines[0].startswith('[... output truncated'):
+                kept = self._max_output_lines - 1
+                unit = 'line' if kept == 1 else 'lines'
+                marker = (
+                    f'[... output truncated to the last {kept} {unit} ...]'
+                    if kept
+                    else '[... output omitted by the 1-line limit ...]'
+                )
+                lines = [marker, *lines[-kept:]] if kept else [marker]
+            elif direction == 'head' and lines[-1].startswith('[... output truncated'):
+                kept = self._max_output_lines - 1
+                unit = 'line' if kept == 1 else 'lines'
+                marker = (
+                    f'[... output truncated to the first {kept} {unit} ...]'
+                    if kept
+                    else '[... output omitted by the 1-line limit ...]'
+                )
+                lines = [*lines[:kept], marker] if kept else [marker]
+            else:
+                lines = lines[-self._max_output_lines :] if direction == 'tail' else lines[: self._max_output_lines]
+        data = '\n'.join(lines).encode('utf-8')
+        if len(data) <= self._max_output_bytes:
+            return data.decode('utf-8')
+        data = data[-self._max_output_bytes :] if direction == 'tail' else data[: self._max_output_bytes]
+        return data.decode('utf-8', errors='ignore')

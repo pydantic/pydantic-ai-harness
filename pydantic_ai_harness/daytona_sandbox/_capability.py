@@ -94,6 +94,8 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
             raise ValueError('default_command_timeout cannot exceed max_command_timeout.')
         if self.sandbox_id is not None and self.snapshot is not None:
             raise ValueError('snapshot cannot be combined with sandbox_id.')
+        if self.sandbox_id is not None and self.auto_stop_minutes != DEFAULT_AUTO_STOP_MINUTES:
+            raise ValueError('auto_stop_minutes cannot be combined with sandbox_id.')
         if type(self.network_block_all) is not bool:
             raise ValueError(f'network_block_all must be a boolean, got {self.network_block_all!r}.')
         if self.sandbox_id is not None and self.network_block_all:

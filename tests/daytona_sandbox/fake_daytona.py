@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Protocol
@@ -44,6 +46,83 @@ class FakeProcess:
             return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
         output, exit_code = self.owner.responder(command, timeout)
         return SimpleNamespace(result=output, exit_code=exit_code)
+
+    async def create_session(self, session_id: str, request_timeout: float | None = None) -> None:
+        self.owner.process_calls.append(('create', session_id, request_timeout))
+        self.owner.process_create_started.set()
+        if self.owner.process_create_gate is not None:
+            await self.owner.process_create_gate.wait()
+        self.owner.process_sessions.add(session_id)
+
+    async def execute_session_command(
+        self,
+        session_id: str,
+        request: object,
+        timeout: int | None = None,
+    ) -> SimpleNamespace:
+        self.owner.process_calls.append(('execute', session_id, timeout))
+        if self.owner.exec_error is not None:
+            raise self.owner.exec_error
+        self.owner.process_command = getattr(request, 'command')
+        self.owner.process_run_async = getattr(request, 'run_async')
+        self.owner.process_suppress_input_echo = getattr(request, 'suppress_input_echo')
+        if not self.owner.process_stdout and not self.owner.process_stderr and not self.owner.process_waits_for_input:
+            output, self.owner.process_exit_code = self.owner.responder(self.owner.process_command, timeout)
+            self.owner.process_stdout = [output]
+        return SimpleNamespace(cmd_id='cmd-1')
+
+    async def get_session_command_logs_async(
+        self,
+        session_id: str,
+        command_id: str,
+        on_stdout: Callable[[str], Awaitable[None] | None],
+        on_stderr: Callable[[str], Awaitable[None] | None],
+    ) -> None:
+        self.owner.process_calls.append(('logs', session_id, command_id))
+        for handler, chunks in (
+            (on_stdout, self.owner.process_stdout),
+            (on_stderr, self.owner.process_stderr),
+        ):
+            for chunk in chunks:
+                result = handler(chunk)
+                if inspect.isawaitable(result):
+                    await result
+        if self.owner.process_waits_for_input:
+            await self.owner.process_input_event.wait()
+        for handler, chunks in (
+            (on_stdout, self.owner.process_stdout_after_input),
+            (on_stderr, self.owner.process_stderr_after_input),
+        ):
+            for chunk in chunks:
+                result = handler(chunk)
+                if inspect.isawaitable(result):
+                    await result
+
+    async def send_session_command_input(
+        self,
+        session_id: str,
+        command_id: str,
+        data: str,
+        request_timeout: float | None = None,
+    ) -> None:
+        self.owner.process_calls.append(('input', session_id, command_id, data, request_timeout))
+        self.owner.process_input_event.set()
+
+    async def get_session_command(
+        self,
+        session_id: str,
+        command_id: str,
+        request_timeout: float | None = None,
+    ) -> SimpleNamespace:
+        self.owner.process_calls.append(('status', session_id, command_id, request_timeout))
+        return SimpleNamespace(exit_code=self.owner.process_exit_code)
+
+    async def delete_session(self, session_id: str, request_timeout: float | None = None) -> None:
+        self.owner.process_calls.append(('delete', session_id, request_timeout))
+        if self.owner.process_delete_error is not None:
+            raise self.owner.process_delete_error
+        self.owner.process_sessions.discard(session_id)
+        self.owner.process_input_event.set()
 
 
 class FakeFileSystem:
@@ -98,6 +177,21 @@ class FakeSandbox:
         self.fs_error: Exception | None = None
         self.mkdir_exit_code = 0
         self.responder: Callable[[str, int | None], tuple[str, int]] = lambda command, timeout: ('', 0)
+        self.process_calls: list[tuple[object, ...]] = []
+        self.process_sessions: set[str] = set()
+        self.process_command = ''
+        self.process_run_async: bool | None = None
+        self.process_suppress_input_echo: bool | None = None
+        self.process_stdout: list[str] = []
+        self.process_stderr: list[str] = []
+        self.process_stdout_after_input: list[str] = []
+        self.process_stderr_after_input: list[str] = []
+        self.process_waits_for_input = False
+        self.process_input_event = asyncio.Event()
+        self.process_exit_code: int | None = 0
+        self.process_delete_error: Exception | None = None
+        self.process_create_gate: asyncio.Event | None = None
+        self.process_create_started = asyncio.Event()
         self.process = FakeProcess(self)
         self.fs = FakeFileSystem(self)
 
@@ -108,6 +202,9 @@ class FakeClient:
         self.closed = False
 
     async def create(self, params: CreateParams) -> FakeSandbox:
+        self.owner.create_started.set()
+        if self.owner.create_gate is not None:
+            await self.owner.create_gate.wait()
         if self.owner.create_error is not None:
             raise self.owner.create_error
         sandbox = FakeSandbox(f'sb-{len(self.owner.sandboxes) + 1}')
@@ -143,6 +240,8 @@ class FakeDaytona:
         self.create_error: Exception | None = None
         self.get_error: Exception | None = None
         self.delete_error: Exception | None = None
+        self.create_gate: asyncio.Event | None = None
+        self.create_started = asyncio.Event()
 
     def client(self) -> FakeClient:
         return FakeClient(self)

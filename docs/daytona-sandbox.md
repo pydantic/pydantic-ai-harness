@@ -109,10 +109,30 @@ Configure those on `DaytonaSandboxSession`, which owns the sandbox. Attached
 sandboxes retain their existing network settings.
 
 `DaytonaSandboxSession.exec` returns a `DaytonaSandboxExecResult` for
-applications that need command access outside an agent run. Daytona's direct
-execution response exposes one result string and does not separate stderr. The
-caller must provide a positive whole-second timeout. This lower-level method
-returns raw SDK output without the capability's byte or line limits.
+applications that need command access outside an agent run. It streams command
+output from Daytona and retains only the last `max_output_bytes`. The caller
+must provide a positive whole-second timeout.
+
+Use `DaytonaSandboxSession.process` when an application needs to exchange input
+with a long-running command or handle stdout and stderr separately:
+
+```python
+async with DaytonaSandboxSession(network_block_all=True) as session:
+    async with session.process(
+        'worker',
+        'python worker.py',
+        on_stdout=print,
+        on_stderr=print,
+        max_input_bytes=64 * 1024,
+    ) as process:
+        await process.send('{"task":"run"}\n')
+        returncode = await process.wait(timeout=60)
+```
+
+The caller supplies the process identity, input bound, and every wait. Starting,
+input, output streaming, and deletion use Daytona's process-session API. Context
+exit terminates the remote process session, including after a timeout or
+cancellation. Input echo is disabled so protocol input cannot appear on stdout.
 
 ## Limits
 
@@ -154,6 +174,8 @@ activity replay or worker restart.
 ::: pydantic_ai_harness.daytona_sandbox.DaytonaSandbox
 
 ::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxSession
+
+::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxProcess
 
 ::: pydantic_ai_harness.daytona_sandbox.DaytonaSandboxExecResult
 

@@ -5,6 +5,7 @@ from ._session import (
     DaytonaSandboxAuthError,
     DaytonaSandboxError,
     DaytonaSandboxExecResult,
+    DaytonaSandboxProcess,
     DaytonaSandboxSession,
     DaytonaSandboxUnavailableError,
 )
@@ -14,6 +15,7 @@ __all__ = (
     'DaytonaSandboxAuthError',
     'DaytonaSandboxError',
     'DaytonaSandboxExecResult',
+    'DaytonaSandboxProcess',
     'DaytonaSandboxSession',
     'DaytonaSandboxUnavailableError',
 )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Mapping
 from contextlib import asynccontextmanager
 from typing import Protocol, TypeGuard, runtime_checkable
@@ -20,6 +21,7 @@ from pydantic_ai_harness.daytona_sandbox import (
     DaytonaSandboxAuthError,
     DaytonaSandboxError,
     DaytonaSandboxExecResult,
+    DaytonaSandboxProcess,
     DaytonaSandboxSession,
     DaytonaSandboxUnavailableError,
 )
@@ -146,6 +148,109 @@ async def test_session_exposes_command_result_and_open_sandbox_id(fake_daytona: 
     assert session.sandbox_id is None
 
 
+async def test_session_manages_bidirectional_process(fake_daytona: FakeDaytona) -> None:
+    stdout: list[str] = []
+    stderr: list[str] = []
+    async with DaytonaSandboxSession(workdir='/workspace', env={'A': 'b'}) as session:
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_stdout = ['ready\n']
+        sandbox.process_stderr = ['warning\n']
+        sandbox.process_stdout_after_input = ['done\n']
+        sandbox.process_waits_for_input = True
+        sandbox.process_exit_code = 3
+        async with session.process(
+            'broker',
+            'python -m child',
+            on_stdout=stdout.append,
+            on_stderr=stderr.append,
+            max_input_bytes=8,
+            io_timeout=7,
+        ) as process:
+            await process.send('go\n', timeout=5)
+            assert await process.wait(timeout=6) == 3
+        assert process.process_id == 'broker'
+        assert sandbox.process_command == "cd -- /workspace && env -- A=b sh -c 'python -m child'"
+        assert sandbox.process_run_async is True
+        assert sandbox.process_suppress_input_echo is True
+        assert sandbox.process_sessions == set()
+    assert stdout == ['ready\n', 'done\n']
+    assert stderr == ['warning\n']
+
+
+async def test_process_rejects_oversized_input_and_times_out(fake_daytona: FakeDaytona) -> None:
+    async with DaytonaSandboxSession() as session:
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_waits_for_input = True
+        async with session.process(
+            'broker',
+            'python -m child',
+            on_stdout=lambda chunk: None,
+            on_stderr=lambda chunk: None,
+            max_input_bytes=2,
+        ) as process:
+            with pytest.raises(ValueError, match='over the 2-byte limit'):
+                await process.send('abc')
+            with pytest.raises(TimeoutError):
+                await process.wait(timeout=1)
+        assert sandbox.process_sessions == set()
+
+
+async def test_cancelled_process_start_deletes_remote_session(fake_daytona: FakeDaytona) -> None:
+    async with DaytonaSandboxSession() as session:
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_create_gate = asyncio.Event()
+        process = session.process(
+            'broker',
+            'python -m child',
+            on_stdout=lambda chunk: None,
+            on_stderr=lambda chunk: None,
+            max_input_bytes=2,
+        )
+        entering = asyncio.create_task(process.__aenter__())
+        await sandbox.process_create_started.wait()
+        entering.cancel()
+        sandbox.process_create_gate.set()
+        with pytest.raises(asyncio.CancelledError):
+            await entering
+        assert sandbox.process_sessions == set()
+
+
+async def test_process_cleanup_can_be_retried(fake_daytona: FakeDaytona) -> None:
+    from daytona import DaytonaConnectionError
+
+    async with DaytonaSandboxSession() as session:
+        sandbox = fake_daytona.sandboxes[0]
+        process = session.process(
+            'broker',
+            'python -m child',
+            on_stdout=lambda chunk: None,
+            on_stderr=lambda chunk: None,
+            max_input_bytes=2,
+        )
+        await process.__aenter__()
+        sandbox.process_delete_error = DaytonaConnectionError('offline')
+        with pytest.raises(DaytonaSandboxError, match='offline'):
+            await process.__aexit__(None, None, None)
+        assert sandbox.process_sessions == {'broker'}
+        sandbox.process_delete_error = None
+        await process.__aexit__(None, None, None)
+        assert sandbox.process_sessions == set()
+
+
+async def test_cancelled_creation_deletes_created_sandbox(fake_daytona: FakeDaytona) -> None:
+    fake_daytona.create_gate = asyncio.Event()
+    session = DaytonaSandboxSession()
+    entering = asyncio.create_task(session.__aenter__())
+    await fake_daytona.create_started.wait()
+    entering.cancel()
+    fake_daytona.create_gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await entering
+    assert fake_daytona.sandboxes[0].deleted is True
+    assert fake_daytona.closed_clients == 1
+    assert session.sandbox_id is None
+
+
 async def test_attached_session_is_left_running(fake_daytona: FakeDaytona) -> None:
     sandbox = fake_daytona.sandbox()
     async with DaytonaSandboxSession(sandbox_id=sandbox.id) as session:
@@ -197,7 +302,7 @@ async def test_creation_configuration_reaches_daytona(fake_daytona: FakeDaytona)
     [
         ('', 0, '(no output)'),
         ('bad\n', 2, 'bad\n[exit code: 2]'),
-        ('one\ntwo\nthree', 0, '[... output truncated to the last 2 lines ...]\ntwo\nthree'),
+        ('one\ntwo\nthree', 0, '[... output truncated to the last 1 line ...]\nthree'),
     ],
 )
 async def test_command_output(fake_daytona: FakeDaytona, output: str, exit_code: int, expected: str) -> None:
@@ -206,18 +311,31 @@ async def test_command_output(fake_daytona: FakeDaytona, output: str, exit_code:
         assert await tools.run_command('example') == expected
 
 
-async def test_command_timeout_is_clamped(fake_daytona: FakeDaytona) -> None:
+async def test_complete_command_result_obeys_output_bounds(fake_daytona: FakeDaytona) -> None:
+    async with _tools(max_output_bytes=12, max_output_lines=1) as tools:
+        fake_daytona.sandboxes[0].responder = lambda command, timeout: ('x' * 100, 2)
+        result = await tools.run_command('example')
+    assert len(result.encode('utf-8')) <= 12
+    assert len(result.splitlines()) <= 1
+
+
+async def test_command_timeout_is_clamped(fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch) -> None:
+    waits: list[int] = []
+
+    async def wait(process: DaytonaSandboxProcess, *, timeout: int) -> int:
+        waits.append(timeout)
+        return 0
+
+    monkeypatch.setattr(DaytonaSandboxProcess, 'wait', wait)
     async with _tools() as tools:
         await tools.run_command('slow', timeout_seconds=999)
-    assert fake_daytona.sandboxes[0].exec_calls[0].timeout == 300
+    assert waits == [300]
 
 
 async def test_command_timeout_is_reported(fake_daytona: FakeDaytona) -> None:
-    from daytona import DaytonaTimeoutError
-
     async with _tools() as tools:
-        fake_daytona.sandboxes[0].exec_error = DaytonaTimeoutError('late')
-        assert await tools.run_command('slow', timeout_seconds=2) == '(no output)\n[timed out after 2s]'
+        fake_daytona.sandboxes[0].process_waits_for_input = True
+        assert await tools.run_command('slow', timeout_seconds=1) == '(no output)\n[timed out after 1s]'
 
 
 async def test_command_sdk_failures(fake_daytona: FakeDaytona) -> None:
@@ -358,9 +476,15 @@ async def test_cleanup_failure_is_reported(fake_daytona: FakeDaytona) -> None:
     from daytona import DaytonaConnectionError
 
     fake_daytona.delete_error = DaytonaConnectionError('offline')
+    session = DaytonaSandboxSession()
+    await session.__aenter__()
     with pytest.raises(DaytonaSandboxError, match='offline'):
-        async with _tools():
-            pass
+        await session.__aexit__(None, None, None)
+    assert session.sandbox_id == 'sb-1'
+    assert fake_daytona.closed_clients == 0
+    fake_daytona.delete_error = None
+    await session.__aexit__(None, None, None)
+    assert session.sandbox_id is None
     assert fake_daytona.closed_clients == 1
 
 
@@ -385,6 +509,8 @@ def test_configuration_conflicts_and_instructions() -> None:
         DaytonaSandbox(default_command_timeout=2, max_command_timeout=1)
     with pytest.raises(ValueError, match='snapshot cannot'):
         DaytonaSandbox(sandbox_id='sb', snapshot='snap')
+    with pytest.raises(ValueError, match='auto_stop_minutes cannot'):
+        DaytonaSandbox(sandbox_id='sb', auto_stop_minutes=5)
     with pytest.raises(ValueError, match='instructions must'):
         DaytonaSandbox(instructions=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match='network_block_all must be a boolean'):
@@ -406,6 +532,8 @@ def test_configuration_conflicts_and_instructions() -> None:
             DaytonaSandboxSession(auto_stop_minutes=value)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match='snapshot cannot'):
         DaytonaSandboxSession(sandbox_id='sb', snapshot='snap')
+    with pytest.raises(ValueError, match='auto_stop_minutes cannot'):
+        DaytonaSandboxSession(sandbox_id='sb', auto_stop_minutes=5)
     with pytest.raises(ValueError, match='network_block_all must be a boolean'):
         DaytonaSandboxSession(network_block_all=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match='network_block_all cannot configure an attached'):
@@ -453,6 +581,7 @@ def test_public_exports() -> None:
         'DaytonaSandboxAuthError',
         'DaytonaSandboxError',
         'DaytonaSandboxExecResult',
+        'DaytonaSandboxProcess',
         'DaytonaSandboxSession',
         'DaytonaSandboxUnavailableError',
     )
