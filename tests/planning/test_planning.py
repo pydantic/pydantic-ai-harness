@@ -6,7 +6,7 @@ from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, AgentSpec
 from pydantic_ai.messages import (
     CachePoint,
     ModelMessage,
@@ -836,11 +836,26 @@ class TestCapability:
         assert stores == [first.resolve_store(_ctx()), second.resolve_store(_ctx())]
 
     def test_from_spec(self, tmp_path: str) -> None:
-        assert Planning.from_spec().store is None
+        capability = Planning.from_spec(
+            id='planning',
+            description='Use for multi-step work.',
+            defer_loading=True,
+        )
+        assert capability.store is None
+        assert (capability.id, capability.description, capability.defer_loading) == (
+            'planning',
+            'Use for multi-step work.',
+            True,
+        )
         sqlite_cap = Planning.from_spec(backend='sqlite', database=str(tmp_path))
         assert isinstance(sqlite_cap.store, SqlitePlanStore)
         with pytest.raises(ValueError, match='database is only valid'):
             Planning.from_spec(backend='memory', database='custom.db')
+
+    def test_spec_schema_includes_base_fields(self) -> None:
+        schema = AgentSpec.model_json_schema_with_capabilities([Planning])
+        params = schema['$defs']['spec_params_Planning']
+        assert {'id', 'description', 'defer_loading'} <= params['properties'].keys()
 
     def test_from_spec_rejects_an_unknown_backend(self) -> None:
         """`backend` is a `Literal`, but a spec is deserialized text; nothing has checked it yet."""
