@@ -179,6 +179,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
+        id: str | None = None,
         root_dir: Path,
         allowed_patterns: Sequence[str],
         denied_patterns: Sequence[str],
@@ -188,7 +189,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         max_search_results: int,
         max_find_results: int,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         self._root = root_dir.resolve()
         self._real_root = Path(os.path.realpath(self._root))
         self._allowed_patterns = list(allowed_patterns)
