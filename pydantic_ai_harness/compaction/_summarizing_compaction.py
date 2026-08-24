@@ -237,7 +237,7 @@ def _is_kept_user_message(message: ModelRequest) -> bool:
     return message.metadata is not None and message.metadata.get(_KEPT_USER_MESSAGE_METADATA) is True
 
 
-async def _drain_summary_events(_ctx: RunContext[Any], events: AsyncIterable[AgentStreamEvent]) -> None:
+async def _drain_summary_events(_ctx: RunContext[None], events: AsyncIterable[AgentStreamEvent]) -> None:
     """Drain nested summary events; supplying this handler selects the streaming request path."""
     async for _ in events:
         pass
@@ -372,13 +372,13 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """
 
     keep_user_messages_max_chars: int = 20_000
-    """Per-message character cap for ``keep_user_messages``; oversized messages are truncated
+    """Per-message character cap for `keep_user_messages`; oversized messages are truncated
     with an explicit marker (the shared truncation-marker convention)."""
 
     receipts: bool = False
     """When ``True``, append a deterministic compaction receipt after the summary noting how
     much history was summarized, that the summary is secondhand, and -- when a
-    ``TranscriptHandleProvider`` capability is attached -- a persisted-run handle.
+    `TranscriptHandleProvider` capability is attached -- a persisted-run handle.
 
     Opt-in for now: the receipt text is content, so defaulting it on is deferred to the
     benchmark eval-rig pass.  The mechanism itself is structural.
