@@ -40,6 +40,9 @@ class LocalStack(AbstractCapability[AgentDepsT]):
     ```
     """
 
+    id: str | None = field(default='local_stack', kw_only=True)
+    """Stable capability and toolset ID."""
+
     endpoint_url: str = 'http://localhost.localstack.cloud:4566'
     """Base URL of the running LocalStack instance.
 
@@ -114,6 +117,7 @@ class LocalStack(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> AgentToolset[AgentDepsT]:
         """Build and return the LocalStack toolset."""
         return LocalStackToolset[AgentDepsT](
+            id=self.id,
             endpoint_url=self.endpoint_url,
             region=self.region,
             access_key_id=self.access_key_id,
