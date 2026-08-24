@@ -87,6 +87,9 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
     Tracked in <https://github.com/pydantic/pydantic-ai-harness/issues/531>.
     """
 
+    id: str | None = field(default='spend', kw_only=True)
+    """Stable capability and toolset ID."""
+
     budgets: Sequence[Budget[AgentDepsT]] = ()
     """Windows to accumulate against, and which of them can refuse a request."""
 
