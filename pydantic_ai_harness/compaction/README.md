@@ -380,19 +380,26 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 running agent's model. Its nested summary run inherits the parent usage limits and reserves one request from a
 finite request limit for the pending parent request.
 
-The compatibility default `stream=False` makes the nested summary request non-streaming. Set
-`stream=True` when the summary model or provider requires streaming requests:
+The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch
+the summary as it is written, or pass `drain_events` to take the streaming request path without
+handling the events -- which is what a summarizer endpoint that rejects non-streaming requests needs:
 
 ```python
-SummarizingCompaction(
-    model='provider:stream-only-summary-model',
-    max_messages=60,
-    stream=True,
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction, drain_events
+
+agent = Agent(
+    'openai:gpt-5.6-terra',
+    capabilities=[
+        SummarizingCompaction(max_messages=60, event_stream_handler=drain_events),
+    ],
 )
 ```
 
-`stream=True` only changes how compaction talks to the summary model. It does not affect the outer
-`Agent.run(...)` `event_stream_handler`, which never sees the summary token deltas.
+Neither transport works everywhere, which is why this is a choice rather than a default: some
+endpoints reject non-streaming requests and others reject streaming ones. The handler receives the
+summary run's own `RunContext` and event stream; the outer `Agent.run(...)` handler is not inherited
+and never sees the summary token deltas.
 
 By default `incremental=True` updates the newest existing summary from a prior compaction as an
 anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier

@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_ai._run_context import AgentDepsT
+from pydantic_ai.agent import EventStreamHandler
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
@@ -236,11 +237,16 @@ def _is_kept_user_message(message: ModelRequest) -> bool:
     return message.metadata is not None and message.metadata.get(_KEPT_USER_MESSAGE_METADATA) is True
 
 
-async def _drain_summary_events(
+async def drain_events(
     _ctx: RunContext[object],
     events: AsyncIterable[AgentStreamEvent],
 ) -> None:
-    """Consume summary events so the nested agent can use its streaming request path."""
+    """An `event_stream_handler` that consumes summary events and yields nothing to the caller.
+
+    Pass this as `SummarizingCompaction(event_stream_handler=drain_events)` when the summary
+    endpoint requires a streaming request but the events themselves are not wanted. Supplying
+    any handler selects the streaming request path; this one just discards what it receives.
+    """
     async for _ in events:
         pass
 
@@ -284,11 +290,15 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     `ModelRequestContext.model`; set this explicitly to pin the summarizer regardless.
     """
 
-    stream: bool = field(default=False, kw_only=True)
-    """Whether to stream the internal summary request and discard its events.
+    event_stream_handler: EventStreamHandler[object] | None = field(default=None, kw_only=True)
+    """If set, this handler is passed to the nested summary run, so the summarizer's own
+    model-streaming events surface to the caller.
 
-    `False` preserves the default non-streaming request path. Set this to `True` for a
-    summarizer model or provider that requires streaming requests.
+    Setting it also selects the streaming request path, which is what a summarizer endpoint
+    that rejects non-streaming requests needs; pass `drain_events` to take that path without
+    handling the events. Left `None`, the summary request is non-streaming, which is what an
+    endpoint that rejects streaming requests needs. The handler receives the summary run's own
+    `RunContext`, never the outer run's, and the outer `Agent.run(...)` handler is not inherited.
     """
 
     max_messages: int | None = None
@@ -658,6 +668,6 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             prompt,
             usage=ctx.usage,
             usage_limits=reserved_usage_limits(ctx.usage_limits),
-            event_stream_handler=_drain_summary_events if self.stream else None,
+            event_stream_handler=self.event_stream_handler,
         )
         return result.output.strip()

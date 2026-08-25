@@ -343,17 +343,21 @@ agent = Agent(
 
 Both prompt surfaces of the summary request are fields: `summary_prompt` is the user-turn template (it must contain a `{messages}` placeholder), and `instructions` sets the internal agent's static instructions, which Pydantic AI sends in the request's system prompt. Override `instructions` when the summarizer endpoint requires a fixed leading instruction.
 
-The compatibility default `stream=False` makes the nested summary request non-streaming. Set `stream=True` when the summary model or provider requires streaming requests:
+The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch the summary as it is written, or pass `drain_events` to take the streaming request path without handling the events -- which is what a summarizer endpoint that rejects non-streaming requests needs:
 
 ```python
-SummarizingCompaction(
-    model='provider:stream-only-summary-model',
-    max_messages=60,
-    stream=True,
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction, drain_events
+
+agent = Agent(
+    'openai:gpt-5.6-terra',
+    capabilities=[
+        SummarizingCompaction(max_messages=60, event_stream_handler=drain_events),
+    ],
 )
 ```
 
-`stream=True` only changes how compaction talks to the summary model. It does not affect the outer `Agent.run(...)` `event_stream_handler`, which never sees the summary token deltas.
+Neither transport works everywhere, which is why this is a choice rather than a default: some endpoints reject non-streaming requests and others reject streaming ones. The handler receives the summary run's own `RunContext` and event stream; the outer `Agent.run(...)` handler is not inherited and never sees the summary token deltas.
 
 ### Usage accounting
 

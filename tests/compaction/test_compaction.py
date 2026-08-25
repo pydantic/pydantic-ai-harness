@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -14,14 +14,18 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import (
+    AgentStreamEvent,
     LoadCapabilityCallPart,
     ModelMessage,
     ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
+    PartDeltaEvent,
+    PartStartEvent,
     SystemPromptPart,
     TextContent,
     TextPart,
+    TextPartDelta,
     ToolCallPart,
     ToolReturnPart,
     ToolSearchCallPart,
@@ -47,6 +51,7 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
     TranscriptHandleProvider,
     WarnNearLimits,
+    drain_events,
     estimate_context_tokens,
     estimate_token_count,
     is_pinned,
@@ -3865,7 +3870,7 @@ class TestStructuralFeaturesThroughAgent:
                     max_messages=2,
                     keep_messages=1,
                     preserve_first_user_message=False,
-                    stream=True,
+                    event_stream_handler=drain_events,
                 )
             ],
         )
@@ -3878,6 +3883,48 @@ class TestStructuralFeaturesThroughAgent:
         assert len(prompts) == 1
         assert 'User: a' in prompts[0]
         assert result.output == 'done'
+        assert any(
+            isinstance(part, SystemPromptPart) and f'{_SUMMARY_PREFIX}STREAMED SUMMARY' == part.content
+            for message in seen[0]
+            if isinstance(message, ModelRequest)
+            for part in message.parts
+        )
+
+    @pytest.mark.anyio
+    async def test_summary_events_reach_a_caller_supplied_handler(self):
+        seen: list[list[ModelMessage]] = []
+        prompts: list[str] = []
+        deltas: list[str] = []
+
+        async def collect(ctx: RunContext[object], events: AsyncIterable[AgentStreamEvent]) -> None:
+            # The opening chunk of a part arrives as `PartStartEvent`; only the rest are deltas.
+            async for event in events:
+                if isinstance(event, PartStartEvent) and isinstance(event.part, TextPart):
+                    deltas.append(event.part.content)
+                elif isinstance(event, PartDeltaEvent) and isinstance(event.delta, TextPartDelta):
+                    deltas.append(event.delta.content_delta)
+
+        agent = Agent(
+            _recording_model(seen),
+            capabilities=[
+                SummarizingCompaction(
+                    model=_recording_streaming_summarizer(prompts),
+                    max_messages=2,
+                    keep_messages=1,
+                    preserve_first_user_message=False,
+                    event_stream_handler=collect,
+                )
+            ],
+        )
+
+        result = await agent.run(
+            'go',
+            message_history=[_user('a'), _assistant('b'), _user('c'), _assistant('d')],
+        )
+
+        assert result.output == 'done'
+        # The handler sees the summary as it is produced; the parent run still gets one summary.
+        assert ''.join(deltas) == 'STREAMED SUMMARY'
         assert any(
             isinstance(part, SystemPromptPart) and f'{_SUMMARY_PREFIX}STREAMED SUMMARY' == part.content
             for message in seen[0]
