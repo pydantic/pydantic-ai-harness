@@ -25,7 +25,8 @@ from pydantic_ai.messages import (
 from pydantic_ai.models import AbstractModel, Model, ModelRequestContext, ModelRequestParameters
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.tools import ToolDefinition
+from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 
 from pydantic_ai_harness.compaction import (
     DEFAULT_CONTEXT_WINDOW,
@@ -39,6 +40,7 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
     WarnNearLimits,
     compact_now,
+    estimate_context_tokens,
     estimate_token_count,
     resolve_context_window,
 )
@@ -85,6 +87,7 @@ def _ctx(model: Any = None) -> Any:
     @dataclasses.dataclass
     class _FakeCtx:
         usage: RunUsage = dataclasses.field(default_factory=RunUsage)
+        usage_limits: UsageLimits | None = None
         model: Model = dataclasses.field(default_factory=TestModel)
         deps: None = None
         tracer: Tracer = dataclasses.field(default_factory=NoOpTracer)
@@ -92,12 +95,16 @@ def _ctx(model: Any = None) -> Any:
     return _FakeCtx(model=model) if model is not None else _FakeCtx()
 
 
-def _request_context(messages: list[ModelMessage], model: _FakeModel | None = None) -> ModelRequestContext:
+def _request_context(
+    messages: list[ModelMessage],
+    model: _FakeModel | None = None,
+    model_request_parameters: ModelRequestParameters | None = None,
+) -> ModelRequestContext:
     return ModelRequestContext(
         model=model if model is not None else _FakeModel(),  # type: ignore[arg-type]
         messages=messages,
         model_settings=None,
-        model_request_parameters=ModelRequestParameters(),
+        model_request_parameters=model_request_parameters or ModelRequestParameters(),
     )
 
 
@@ -684,6 +691,45 @@ def test_tool_availability_delta_adds_nothing_to_the_estimate():
     assert estimate_token_count(augmented) == estimate_token_count(messages)
 
 
+class TestProgressiveToolSchemas:
+    async def test_first_request_after_a_tool_reveal_counts_the_new_schema(self):
+        tool = ToolDefinition(
+            name='read_workspace',
+            description='x' * 1_000,
+            parameters_json_schema={'type': 'object', 'properties': {'path': {'type': 'string'}}},
+            defer_loading=True,
+        )
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='start')]),
+            ModelResponse(parts=[TextPart(content='done')], usage=RequestUsage(input_tokens=100, output_tokens=10)),
+            ModelRequest(parts=[ToolAvailabilityDeltaPart(tools_added=['read_workspace'])]),
+        ]
+        parameters = ModelRequestParameters(function_tools=[tool])
+        capability: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_tokens=200, keep_messages=1, preserve_first_user_message=False
+        )
+        request_context = _request_context(messages, model_request_parameters=parameters)
+
+        await capability.before_model_request(_ctx(), request_context)
+
+        assert len(request_context.messages) == 1
+
+    def test_a_tool_reveal_without_usage_counts_the_new_schema(self):
+        tool = ToolDefinition(
+            name='read_workspace',
+            description='x' * 1_000,
+            parameters_json_schema={'type': 'object', 'properties': {'path': {'type': 'string'}}},
+            defer_loading=True,
+        )
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='start')]),
+            ModelRequest(parts=[ToolAvailabilityDeltaPart(tools_added=['read_workspace'])]),
+        ]
+        parameters = ModelRequestParameters(function_tools=[tool])
+
+        assert estimate_context_tokens(messages, model_request_parameters=parameters) > estimate_token_count(messages)
+
+
 class TestStrategyWindowOverride:
     """A window the registry resolves *wrongly* is the caller's to correct.
 
@@ -837,6 +883,106 @@ class TestReportContextUsage:
         await monitor.before_model_request(_ctx(), request_context)
 
         assert request_context.messages == messages
+
+    async def test_after_a_compactor_reports_the_rewritten_anchored_history(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, 1_000)
+        seen: list[ContextUsage] = []
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='x' * 4_000)]),
+            ModelResponse(parts=[TextPart(content='done')], usage=RequestUsage(input_tokens=10_000, output_tokens=0)),
+            ModelRequest(parts=[UserPromptPart(content='continue')]),
+        ]
+        request_context = _request_context(messages)
+        compactor: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_messages=2, keep_messages=2, preserve_first_user_message=False
+        )
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
+        second_monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
+        before = estimate_token_count(messages)
+
+        await compactor.before_model_request(_ctx(), request_context)
+        await monitor.before_model_request(_ctx(), request_context)
+        await second_monitor.before_model_request(_ctx(), request_context)
+
+        expected = estimate_context_tokens(messages) - (before - estimate_token_count(request_context.messages))
+        assert [usage.used_tokens for usage in seen] == [expected, expected]
+
+    async def test_accumulates_reclaim_from_multiple_compactors(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, 1_000)
+        seen: list[ContextUsage] = []
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='x' * 4_000)]),
+            ModelResponse(parts=[TextPart(content='old reply ' + 'x' * 4_000)]),
+            ModelRequest(parts=[UserPromptPart(content='before anchor ' + 'x' * 4_000)]),
+            ModelResponse(parts=[TextPart(content='done')], usage=RequestUsage(input_tokens=10_000, output_tokens=0)),
+            ModelRequest(parts=[UserPromptPart(content='after anchor ' + 'x' * 4_000)]),
+            ModelResponse(parts=[TextPart(content='new reply ' + 'x' * 4_000)]),
+            ModelRequest(parts=[UserPromptPart(content='continue')]),
+        ]
+        request_context = _request_context(messages)
+        first_compactor: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_messages=6, keep_messages=6, preserve_first_user_message=False
+        )
+        second_compactor: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_messages=4, keep_messages=4, preserve_first_user_message=False
+        )
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
+        before = estimate_token_count(messages)
+
+        await first_compactor.before_model_request(_ctx(), request_context)
+        await second_compactor.before_model_request(_ctx(), request_context)
+        await monitor.before_model_request(_ctx(), request_context)
+
+        expected = estimate_context_tokens(messages) - (before - estimate_token_count(request_context.messages))
+        assert [usage.used_tokens for usage in seen] == [expected]
+
+    async def test_ignores_reclaim_from_a_different_request_context(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, 1_000)
+        compacted_context = _request_context(
+            [
+                ModelRequest(parts=[UserPromptPart(content='x' * 4_000)]),
+                ModelResponse(
+                    parts=[TextPart(content='done')], usage=RequestUsage(input_tokens=10_000, output_tokens=0)
+                ),
+                ModelRequest(parts=[UserPromptPart(content='continue')]),
+            ]
+        )
+        compactor: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_messages=2, keep_messages=2, preserve_first_user_message=False
+        )
+        seen: list[ContextUsage] = []
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
+        unrelated_context = _request_context(
+            [
+                ModelRequest(parts=[UserPromptPart(content='different request')]),
+                ModelResponse(parts=[TextPart(content='done')], usage=RequestUsage(input_tokens=500, output_tokens=0)),
+                ModelRequest(parts=[UserPromptPart(content='continue')]),
+            ]
+        )
+
+        await compactor.before_model_request(_ctx(), compacted_context)
+        await monitor.before_model_request(_ctx(), unrelated_context)
+
+        assert [usage.used_tokens for usage in seen] == [estimate_context_tokens(unrelated_context.messages)]
+
+    async def test_after_a_compactor_reports_the_rewritten_unanchored_history(self, monkeypatch: pytest.MonkeyPatch):
+        _fixed_window(monkeypatch, 1_000)
+        seen: list[ContextUsage] = []
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='x' * 4_000)]),
+            ModelResponse(parts=[TextPart(content='done')]),
+            ModelRequest(parts=[UserPromptPart(content='continue')]),
+        ]
+        request_context = _request_context(messages)
+        compactor: SlidingWindowCompaction[None] = SlidingWindowCompaction(
+            max_messages=2, keep_messages=2, preserve_first_user_message=False
+        )
+        monitor: ReportContextUsage[None] = ReportContextUsage(on_usage=seen.append)
+
+        await compactor.before_model_request(_ctx(), request_context)
+        await monitor.before_model_request(_ctx(), request_context)
+
+        assert seen[0].used_tokens == estimate_context_tokens(request_context.messages)
 
     async def test_an_async_callback_is_awaited(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, 1_000)
@@ -1083,13 +1229,11 @@ class TestWithFocus:
 
 
 class TestNewExports:
-    def test_exposed_under_the_submodule_only(self):
+    def test_capability_exposed_at_top_level(self):
         import pydantic_ai_harness
         import pydantic_ai_harness.compaction as compaction
 
-        for name in ('ContextUsage', 'ReportContextUsage', 'compact_now', 'resolve_context_window'):
-            assert hasattr(compaction, name)
-            assert not hasattr(pydantic_ai_harness, name)
+        assert pydantic_ai_harness.ReportContextUsage is compaction.ReportContextUsage
 
 
 class TestPositionalCompatibility:
@@ -1103,7 +1247,9 @@ class TestPositionalCompatibility:
         assert SlidingWindowCompaction(None, 1_000, 40).keep_messages == 40
 
     def test_summarizing_compaction(self):
-        assert SummarizingCompaction('openai:gpt-4o', None, 1_000, 15).keep_messages == 15
+        strategy = SummarizingCompaction('openai:gpt-4o', None, 1_000, 15, None, '{messages}', len)
+        assert strategy.keep_messages == 15
+        assert strategy.tokenizer is len
 
     def test_clear_tool_results(self):
         assert ClearToolResults(None, 1_000, 5).keep_pairs == 5
@@ -1125,6 +1271,7 @@ class TestPositionalCompatibility:
         cases = [
             (SlidingWindowCompaction, 'max_fraction'),
             (SummarizingCompaction, 'max_fraction'),
+            (SummarizingCompaction, 'instructions'),
             (ClearToolResults, 'max_fraction'),
             (DeduplicateFileReads, 'max_fraction'),
             (TieredCompaction, 'target_fraction'),

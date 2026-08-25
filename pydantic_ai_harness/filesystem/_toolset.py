@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import fnmatch
 import functools
 import hashlib
 import os
 import re
+import stat
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Concatenate, ParamSpec
@@ -17,11 +19,76 @@ from pydantic_ai.toolsets import FunctionToolset
 
 _P = ParamSpec('_P')
 
+READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {'read_file', 'list_directory', 'search_files', 'find_files', 'file_info'}
+)
+"""Names of filesystem tools that do not modify the workspace."""
+
 # Errors that mean "the model asked for something the tool couldn't do" -- a
 # missing file, a denied path, a stale edit. pyai only feeds `ModelRetry` back
 # to the model; any other exception aborts the whole run. `_recoverable`
 # converts these so the agent can correct itself and continue.
 _RECOVERABLE_ERRORS = (PermissionError, FileNotFoundError, NotADirectoryError, IsADirectoryError, ValueError)
+
+# The same idea one level down, for failures Python raises as a bare `OSError`
+# with no dedicated subclass for `_RECOVERABLE_ERRORS` to name. Entries are
+# explicit so other errors keep aborting the run; for example, retrying cannot
+# fix `ENOSPC` or `EROFS`.
+#
+# Which operations reach these depends on the Python version. `Path.is_file`
+# and friends stopped propagating `ENAMETOOLONG` in 3.14, so on 3.10 through
+# 3.13 the read operations surface it too, not just the write path.
+#
+# Keyed by `OSError.errno`, which the stdlib types as `int | None`.
+_RECOVERABLE_ERRNOS: dict[int | None, str] = {
+    errno.ENAMETOOLONG: 'The path name is too long.',
+    errno.ELOOP: 'The path resolves through a symlink loop.',
+    errno.EILSEQ: 'The path name contains a byte sequence the filesystem cannot represent.',
+}
+_WINDOWS_ERROR_INVALID_NAME = 123
+
+_OUTSIDE_WORKSPACE = '<outside-workspace>'
+"""Shown instead of an absolute path that is not inside the workspace root."""
+
+_NOT_A_PATH = '<not-a-path>'
+"""Shown when an error's `filename` is not a path value at all."""
+
+
+def _model_safe_filename(filename: str | bytes, real_root: Path) -> str:
+    """Return the path relative to the workspace root.
+
+    Paths not inside the root become `_OUTSIDE_WORKSPACE`; values that are
+    not paths at all become `_NOT_A_PATH`.
+    """
+    try:
+        raw = os.fsdecode(filename)
+    except TypeError:
+        return _NOT_A_PATH
+    path = Path(raw)
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.relative_to(real_root).as_posix()
+    except ValueError:
+        pass
+    try:
+        return Path(os.path.realpath(path)).relative_to(real_root).as_posix()
+    except (ValueError, OSError):
+        return _OUTSIDE_WORKSPACE
+
+
+def _sanitize_recoverable_error(error: BaseException, real_root: Path) -> str:
+    """Render a recoverable error without exposing absolute host paths.
+
+    Errors without an OS-supplied `filename` keep their original message.
+    OS errors keep `errno` and `strerror`, with the path rewritten relative
+    to `real_root` (see `_model_safe_filename` for the fallback placeholders).
+    """
+    if not isinstance(error, OSError) or error.filename is None:
+        return str(error)
+
+    filename = _model_safe_filename(error.filename, real_root)
+    return f'[Errno {error.errno}] {error.strerror}: {filename!r}'
 
 
 def _recoverable(
@@ -34,7 +101,16 @@ def _recoverable(
         try:
             return await fn(self, *args, **kwargs)
         except _RECOVERABLE_ERRORS as e:
-            raise ModelRetry(str(e)) from e
+            real_root = self._real_root  # pyright: ignore[reportPrivateUsage]
+            raise ModelRetry(_sanitize_recoverable_error(e, real_root)) from e
+        except OSError as e:
+            reason = _RECOVERABLE_ERRNOS.get(e.errno)
+            if reason is None and getattr(e, 'winerror', None) == _WINDOWS_ERROR_INVALID_NAME:
+                reason = 'The path name is invalid.'
+            if reason is None:
+                raise
+            # The full error may embed the absolute host path; the reason is path-free.
+            raise ModelRetry(reason) from e
 
     return wrapper
 
@@ -68,6 +144,22 @@ def _is_binary(data: bytes, sample_size: int = 8192) -> bool:
     return b'\x00' in data[:sample_size]
 
 
+def _matching_lines(text: str, compiled: re.Pattern[str], rel_str: str, limit: int) -> tuple[list[str], bool]:
+    """Match one file's lines, keeping at most `limit` of them.
+
+    Returns the formatted matches and whether a further match had to be
+    dropped, so the caller reports truncation only when output was cut. A
+    `limit` of zero or less keeps nothing.
+    """
+    matches: list[str] = []
+    for line_num, line in enumerate(text.splitlines(), start=1):
+        if compiled.search(line):
+            if len(matches) >= limit:
+                return matches, True
+            matches.append(f'{rel_str}:{line_num}:{line}')
+    return matches, False
+
+
 def _content_hash(content: str) -> str:
     """Compute a short content hash for conflict detection."""
     return hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]
@@ -92,6 +184,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         denied_patterns: Sequence[str],
         protected_patterns: Sequence[str],
         max_read_lines: int,
+        max_list_results: int,
         max_search_results: int,
         max_find_results: int,
     ) -> None:
@@ -102,6 +195,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._denied_patterns = list(denied_patterns)
         self._protected_patterns = list(protected_patterns)
         self._max_read_lines = max_read_lines
+        self._max_list_results = max_list_results
         self._max_search_results = max_search_results
         self._max_find_results = max_find_results
 
@@ -136,7 +230,20 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Uses os.path.realpath for symlink resolution before checking containment.
         """
-        candidate = (self._root / path).resolve()
+        try:
+            candidate = (self._root / path).resolve()
+        except RuntimeError as e:
+            # Python 3.10-3.12 signal a symlink loop this way.
+            raise ModelRetry(f'Path {path!r} resolves through a symlink loop.') from e
+
+        if not candidate.exists():
+            try:
+                candidate.stat()
+            except OSError as e:
+                # Python 3.13+ suppresses `ELOOP` in `resolve` and `exists`, so
+                # probe the path before treating it as missing.
+                if e.errno == errno.ELOOP:
+                    raise ModelRetry(f'Path {path!r} resolves through a symlink loop.') from e
         real = Path(os.path.realpath(candidate))
         if not real.is_relative_to(self._real_root):
             raise PermissionError(f'Path {path!r} resolves outside the root directory.')
@@ -151,8 +258,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         directory isn't required to match `allowed_patterns` itself -- `.` or
         `src` would never match a file pattern like `src/*.py`. The walk's
         entries are still filtered against `allowed_patterns` per-entry via
-        `_is_accessible`. Denied and protected patterns continue to gate the
-        root.
+        `_resolve_walk_entry`. Denied patterns continue to gate the root.
         """
         if write and self._protected_patterns:
             matched = self._first_matching_pattern(path, self._protected_patterns)
@@ -168,22 +274,34 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if not any(self._matches(path, p) for p in self._allowed_patterns):
                 raise PermissionError(f'Path {path!r} does not match any allowed pattern.')
 
-    def _is_accessible(self, path: str, *, write: bool = False) -> bool:
-        """Predicate form of `_check_access` for filtering recursive walkers.
+    def _is_accessible(self, path: str) -> bool:
+        """Predicate form of the read-level `_check_access` checks.
 
-        Used by `list_directory`, `search_files`, and `find_files` to skip
-        children that would be rejected if accessed directly. Note this only
-        checks the relative path against patterns; it does not resolve symlinks.
+        Protected patterns are not consulted: they gate writes, and the walkers
+        only read.
         """
-        if write and self._protected_patterns:
-            if self._first_matching_pattern(path, self._protected_patterns) is not None:
-                return False
         if self._denied_patterns:
             if self._first_matching_pattern(path, self._denied_patterns) is not None:
                 return False
         if self._allowed_patterns and not any(self._matches(path, p) for p in self._allowed_patterns):
             return False
         return True
+
+    def _resolve_walk_entry(self, entry: Path) -> Path | None:
+        """Authorize one entry of a directory walk, or return `None` to skip it.
+
+        Callers must do their I/O on the returned path. Resolving once means the
+        path that was authorized is the path that gets read, and matching the
+        patterns against the resolved location keeps the walkers in step with
+        direct access: a symlink can neither escape the root nor alias a file
+        past a rule its own name would trip.
+        """
+        target = Path(os.path.realpath(entry))
+        if not target.is_relative_to(self._real_root):
+            return None
+        if not self._is_accessible(self._relative_to_root(target)):
+            return None
+        return target
 
     def _relative_to_root(self, resolved: Path) -> str:
         """Canonical path of a resolved location relative to the real root."""
@@ -248,20 +366,72 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """
         resolved = self._safe_resolve(path, write=True)
 
-        # Optimistic concurrency: reject stale writes
-        if expected_hash is not None and resolved.is_file():
-            current = resolved.read_text(encoding='utf-8')
-            current_hash = _content_hash(current)
-            if current_hash != expected_hash:
-                raise ValueError(
-                    f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
-                    f'got hash:{current_hash}). Re-read the file and retry.'
-                )
+        if resolved.exists() and not resolved.is_file():
+            raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
 
         if not resolved.parent.exists():
             parent_rel = str(resolved.parent.relative_to(self._root))
             raise FileNotFoundError(f"Parent directory '{parent_rel}' does not exist. Use create_directory first.")
-        resolved.write_text(content, encoding='utf-8')
+
+        # Opening without O_TRUNC lets us classify the descriptor and check the
+        # expected hash before changing the file. POSIX non-blocking mode keeps
+        # a FIFO swapped into place from waiting for a reader; O_NOFOLLOW keeps
+        # a final-component symlink swap from redirecting the descriptor. Windows
+        # has no filesystem FIFO equivalent, and O_BINARY leaves newline handling
+        # to the text wrapper just as Path.write_text does.
+        platform_flags = os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW
+        access_flags = os.O_RDWR if expected_hash is not None else os.O_WRONLY
+        created = False
+        descriptor = -1
+        try:
+            # The target can disappear after O_EXCL reports that it exists. Retry
+            # the complete atomic classification so an ordinary write still
+            # recreates it, while bounding churn from a concurrently replaced path.
+            for _ in range(3):
+                try:
+                    descriptor = os.open(resolved, access_flags | platform_flags | os.O_CREAT | os.O_EXCL, 0o666)
+                except FileExistsError:
+                    try:
+                        descriptor = os.open(resolved, access_flags | platform_flags)
+                    except FileNotFoundError:
+                        continue
+                else:
+                    created = True
+                break
+            else:
+                raise ModelRetry(f'Path {path!r} changed repeatedly while opening. Retry the write.')
+        except OSError as e:
+            if e.errno == errno.ELOOP:
+                raise ModelRetry(
+                    f'Path {path!r} encountered a symlink loop or changed to a symlink before opening.'
+                ) from e
+            if e.errno in (errno.EISDIR, errno.ENODEV, errno.ENXIO):
+                raise ModelRetry(f'Path {path!r} exists and is not a regular file.') from e
+            raise
+
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
+
+            mode = 'r+' if expected_hash is not None else 'w'
+            text_file = os.fdopen(descriptor, mode, encoding='utf-8', newline=None)
+            descriptor = -1
+            with text_file:
+                if expected_hash is not None and not created:
+                    current_hash = _content_hash(text_file.read())
+                    if current_hash != expected_hash:
+                        raise ValueError(
+                            f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
+                            f'got hash:{current_hash}). Re-read the file and retry.'
+                        )
+
+                text_file.seek(0)
+                text_file.truncate(0)
+                text_file.write(content)
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
         new_hash = _content_hash(content)
         lines = len(content.splitlines())
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
@@ -320,7 +490,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             A newline-separated listing with type indicators and sizes.
         """
-        # The listing root is gated by denied/protected patterns but not by
+        # The listing root is gated by denied patterns but not by
         # allowed_patterns: a directory like '.' never matches a file pattern.
         # Entries are filtered per-entry against allowed_patterns below.
         resolved = self._safe_resolve(path, check_allowed=False)
@@ -337,20 +507,26 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             # find_files so the three walkers agree on what exists.
             if any(part.startswith('.') for part in rel_path.parts):
                 continue
-            rel = str(rel_path)
-            # Apply the same allow/deny/protected filtering used for direct
-            # access so a directory listing can't leak patterns the agent
-            # couldn't otherwise read or write.
-            if not self._is_accessible(rel, write=True):
+            target = self._resolve_walk_entry(entry)
+            if target is None:
                 continue
-            if entry.is_dir():
-                entries.append(f'{rel}/')
+            rel = str(rel_path)
+            if target.is_dir():
+                line = f'{rel}/'
             else:
                 try:
-                    size = entry.stat().st_size
-                except OSError:  # pragma: no cover  # file deleted between iterdir and stat
-                    size = 0
-                entries.append(f'{rel}  ({size} bytes)')
+                    size = target.stat().st_size
+                except OSError:
+                    # A dangling symlink, or an entry deleted mid-walk: it has
+                    # no size to report, so leave it out of the listing.
+                    continue
+                line = f'{rel}  ({size} bytes)'
+            # Only a listing that actually dropped an entry is marked truncated,
+            # so one that merely fills the cap reads as complete.
+            if len(entries) >= self._max_list_results:
+                entries.append(f'[... truncated at {self._max_list_results} entries]')
+                break
+            entries.append(line)
         return '\n'.join(entries) if entries else '(empty directory)'
 
     @_recoverable
@@ -380,35 +556,31 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         else:
             files = sorted(resolved.rglob('*'))
 
-        real_root = Path(os.path.realpath(self._root))
         for file_path in files:
-            if not file_path.is_file():
-                continue
             try:
-                rel_parts = file_path.relative_to(real_root).parts
+                rel_path = file_path.relative_to(self._real_root)
             except ValueError:  # pragma: no cover
                 continue
-            if any(part.startswith('.') for part in rel_parts):
+            if any(part.startswith('.') for part in rel_path.parts):
                 continue
-            rel_str = str(file_path.relative_to(real_root))
-            # Apply the same allow/deny/protected filtering used for direct
-            # access so a recursive search can't read patterns the agent
-            # couldn't otherwise read.
-            if not self._is_accessible(rel_str, write=True):
-                continue
+            rel_str = str(rel_path)
             if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
                 continue
+            target = self._resolve_walk_entry(file_path)
+            if target is None:
+                continue
+            if not target.is_file():
+                continue
             try:
-                raw = file_path.read_bytes()
+                raw = target.read_bytes()
             except OSError:  # pragma: no cover
                 continue
             if _is_binary(raw):
                 continue
             text = raw.decode('utf-8', errors='replace')
-            for line_num, line in enumerate(text.splitlines(), start=1):
-                if compiled.search(line):
-                    results.append(f'{rel_str}:{line_num}:{line}')
-            if len(results) >= self._max_search_results:
+            matches, truncated = _matching_lines(text, compiled, rel_str, self._max_search_results - len(results))
+            results.extend(matches)
+            if truncated:
                 results.append(f'[... truncated at {self._max_search_results} matches]')
                 break
 
@@ -419,38 +591,58 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Find files by glob pattern (name matching, not content search).
 
         Args:
-            pattern: Glob pattern to match (e.g. '*.py', '**/*.json').
+            pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
+                '**/*.json'). Absolute patterns are rejected.
             path: Directory to search in, relative to the root directory.
 
         Returns:
             Newline-separated list of matching file paths relative to root.
         """
+        if os.path.isabs(pattern):
+            raise ValueError(f'Pattern {pattern!r} must be relative to the search path, not absolute.')
+
         # See list_directory: the find root isn't gated by allowed_patterns;
         # matched entries are filtered per-entry below.
         resolved = self._safe_resolve(path, check_allowed=False)
         if not resolved.is_dir():
             raise NotADirectoryError(f'Not a directory: {path}')
 
+        try:
+            found = sorted(resolved.glob(pattern))
+        except NotImplementedError as e:
+            # The `isabs` guard above takes a rooted pattern first on POSIX. On
+            # Windows it does not: since 3.13 `os.path.isabs` reports a single
+            # leading slash as relative, so `/etc/*.conf` reaches `glob`, which
+            # rejects any rooted pattern. `NotImplementedError` is not an
+            # `OSError`, so neither the recoverable tuple nor the errno table
+            # can reach it.
+            raise ModelRetry(f'Pattern {pattern!r} must be relative to {path!r}, not an absolute path.') from e
+        except IndexError as e:
+            # Python 3.10 through 3.12 raise this for a pattern whose last
+            # component is a bare `.`. On 3.13+ the same pattern raises
+            # `ValueError`, which the recoverable tuple already covers.
+            raise ModelRetry(f'Pattern {pattern!r} is not a valid glob pattern.') from e
+
         matches: list[str] = []
-        real_root = Path(os.path.realpath(self._root))
-        for match in sorted(resolved.glob(pattern)):
+        for match in found:
             try:
-                rel_parts = match.relative_to(real_root).parts
+                rel_path = match.relative_to(self._real_root)
             except ValueError:  # pragma: no cover
                 continue
-            if any(part.startswith('.') for part in rel_parts):
+            if any(part.startswith('.') for part in rel_path.parts):
                 continue
-            rel = str(match.relative_to(real_root))
-            # Apply the same allow/deny/protected filtering used for direct
-            # access so a glob find can't surface patterns the agent
-            # couldn't otherwise see.
-            if not self._is_accessible(rel, write=True):
+            target = self._resolve_walk_entry(match)
+            if target is None:
                 continue
-            suffix = '/' if match.is_dir() else ''
-            matches.append(f'{rel}{suffix}')
+            if not target.exists():
+                # A dangling symlink resolves inside the root but names nothing.
+                continue
             if len(matches) >= self._max_find_results:
                 matches.append(f'[... truncated at {self._max_find_results} matches]')
                 break
+            rel = str(rel_path)
+            suffix = '/' if target.is_dir() else ''
+            matches.append(f'{rel}{suffix}')
 
         return '\n'.join(matches) if matches else 'No matches found.'
 
@@ -465,7 +657,15 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             Confirmation message.
         """
         resolved = self._safe_resolve(path, write=True)
-        resolved.mkdir(parents=True, exist_ok=True)
+        try:
+            resolved.mkdir(parents=True, exist_ok=True)
+        except FileExistsError as e:
+            # `exist_ok` only suppresses the error when the existing path is a
+            # directory; name the conflicting model-supplied path directly.
+            raise ModelRetry(f'Path {path!r} exists and is not a directory.') from e
+        except NotADirectoryError as e:
+            # Distinguish a parent collision from a collision at the leaf.
+            raise ModelRetry(f'Path {path!r} has a parent that is not a directory.') from e
         return f'Created directory: {path}'
 
     @_recoverable
@@ -502,6 +702,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 parts.append(f'hash: {_content_hash(text)}')
 
         if is_link:
-            parts.append(f'symlink_target: {os.readlink(original)}')
+            target = _model_safe_filename(os.readlink(original), self._real_root)
+            parts.append(f'symlink_target: {target}')
 
         return '\n'.join(parts)
