@@ -4,8 +4,9 @@ The ranking and rendering core is ported from VStorm's `pydantic-deepagents`
 (`pydantic_deep/features/history_archive/toolset.py`). BM25 tuning is dependency-free
 (`math` + `re`) and takes its parameters from the owning capability instead of module
 constants, so a caller can tune ranking without editing the port. The corpus comes
-from a `HistorySource` (one document per persisted message, across all runs); ranking
-is global, while context windows around a match stay within the match's run.
+from a `HistorySource` (one document per persisted message, across the runs selected
+by the configured scope); ranking is global within that scope, while context windows
+around a match stay within the match's run.
 """
 
 from __future__ import annotations
@@ -14,28 +15,34 @@ import json
 import math
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic_ai import RunContext
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
+    ModelRequestPart,
+    RetryPromptPart,
+    SpeechPart,
     SystemPromptPart,
     TextContent,
     TextPart,
+    ToolAvailabilityDeltaPart,
     ToolCallPart,
     ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
+from typing_extensions import assert_never
 
+from pydantic_ai_harness._warn import warn_default_changed
 from pydantic_ai_harness.conversation_search._source import SUMMARY_PREFIX, HistorySource
 
 SEARCH_HISTORY_DESCRIPTION = """\
-Search all persisted conversation history: earlier turns of this conversation \
+Search persisted conversation history: earlier turns of this conversation \
 (including messages that context compaction dropped from the live context) and \
-past runs persisted in the same store.
+past runs reachable under the configured scope.
 
 When the conversation is compacted, older messages are replaced by a summary in \
 the active context, but the persisted step history keeps the originals. Use this \
@@ -63,12 +70,17 @@ _CONVERSATION_SCOPE_NOTE = (
 SearchScope = Literal['all', 'conversation']
 """How much of the store one search may reach.
 
-`all` searches every run the source enumerates -- the shape pydantic-ai-harness#124
-asks for, and correct when the store holds a single principal's history. `conversation`
-restricts the corpus to runs whose `conversation_id` matches the calling run's, which is
-what a store shared across users or tenants needs: without it, any run reading that store
-can retrieve verbatim excerpts from every other conversation in it.
+`conversation` restricts the corpus to runs whose `conversation_id` matches the calling
+run's. `all` searches every run the source enumerates and must only be used when the store
+is already isolated to one principal; otherwise, a run can retrieve verbatim excerpts
+from other conversations in the store.
 """
+
+SCOPE_DEFAULT_CHANGE_IMPACT = (
+    "Searches are now limited to the calling run's conversation instead of every run in the store, "
+    'so a caller relying on the old default silently stops seeing other conversations rather than erroring.'
+)
+"""Why the `scope` default change matters, for the deprecation warning both public entry points emit."""
 
 _TOKENIZE_RE = re.compile(r'\w+')
 """Tokenizer regex: word runs (unicode letters, digits, underscore)."""
@@ -166,6 +178,54 @@ def _user_prompt_text(part: UserPromptPart) -> str:
     return ' '.join(texts)
 
 
+def _format_request_part(part: ModelRequestPart, *, truncate: bool) -> str | None:
+    """Render one request part to a searchable line, or `None` for non-content parts."""
+    if isinstance(part, UserPromptPart):
+        content = _user_prompt_text(part)
+        if truncate and len(content) > 500:
+            content = content[:500] + '...'
+        return f'User: {content}'
+    if isinstance(part, SystemPromptPart):
+        content = part.content
+        # Defensive for sources that do not filter compaction artifacts;
+        # `SnapshotHistorySource` already excludes them from the corpus.
+        if content.startswith(SUMMARY_PREFIX):
+            return '[Compaction summary]'
+        if truncate:
+            content = content[:200]
+        return f'System: {content}'
+    if isinstance(part, ToolReturnPart):
+        content = str(part.content)
+        if truncate and len(content) > 500:
+            content = content[:500] + '...'
+        return f'Tool [{part.tool_name}]: {content}'
+    if isinstance(part, RetryPromptPart):
+        # A retry or validation-error prompt is worth recalling, so index it in full.
+        return f'Retry [{part.tool_name}]: {part.content}'
+    if isinstance(part, SpeechPart):
+        # A realtime user turn: index the spoken transcript so speech is searchable, not the
+        # raw audio. `transcript` is optional, so an audio-only part contributes no text.
+        if not part.transcript:
+            return None
+        transcript = part.transcript
+        if truncate and len(transcript) > 500:  # cap the display excerpt like `UserPromptPart`
+            transcript = transcript[:500] + '...'
+        return f'Speech [{part.speaker}]: {transcript}'
+    # Tool-list bookkeeping rather than conversation, so there is no line to contribute.
+    # Redundant against the union as it stands today, but kept explicit so the fallthrough
+    # below stays a real branch at runtime rather than dead code.
+    if isinstance(part, ToolAvailabilityDeltaPart):  # pyright: ignore[reportUnnecessaryIsInstance]
+        return None
+    # A part pydantic-ai added after this was written. Indexing it would mean guessing which
+    # of its fields read as conversation, and a search index is not worth failing a run over,
+    # so it contributes nothing. `assert_never` under `TYPE_CHECKING` keeps the chain
+    # exhaustive at type-check time -- a new upstream part fails `make typecheck` -- without
+    # crashing a user who upgrades pydantic-ai ahead of us.
+    if TYPE_CHECKING:
+        assert_never(part)
+    return None  # pragma: no cover - reachable only on a pydantic-ai release newer than this one
+
+
 def _format_message(message: ModelMessage, *, truncate: bool) -> str:
     """Render one message to text.
 
@@ -176,31 +236,9 @@ def _format_message(message: ModelMessage, *, truncate: bool) -> str:
 
     if isinstance(message, ModelRequest):
         for part in message.parts:
-            if isinstance(part, UserPromptPart):
-                content = _user_prompt_text(part)
-                if truncate and len(content) > 500:
-                    content = content[:500] + '...'
-                lines.append(f'User: {content}')
-            elif isinstance(part, SystemPromptPart):
-                content = part.content
-                # Defensive for sources that do not filter compaction artifacts;
-                # `SnapshotHistorySource` already excludes them from the corpus.
-                if content.startswith(SUMMARY_PREFIX):
-                    lines.append('[Compaction summary]')
-                else:
-                    if truncate:
-                        content = content[:200]
-                    lines.append(f'System: {content}')
-            elif isinstance(part, ToolReturnPart):
-                content = str(part.content)
-                if truncate and len(content) > 500:
-                    content = content[:500] + '...'
-                lines.append(f'Tool [{part.tool_name}]: {content}')
-            else:
-                # The only remaining `ModelRequestPart` is `RetryPromptPart`
-                # (`ToolSearchReturnPart`/`LoadCapabilityReturnPart` subclass `ToolReturnPart`).
-                # A retry or validation-error prompt is worth recalling, so index it in full.
-                lines.append(f'Retry [{part.tool_name}]: {part.content}')
+            line = _format_request_part(part, truncate=truncate)
+            if line is not None:
+                lines.append(line)
     else:
         for part in message.parts:
             if isinstance(part, TextPart):
@@ -213,6 +251,15 @@ def _format_message(message: ModelMessage, *, truncate: bool) -> str:
                 if truncate and len(args) > 200:
                     args = args[:200] + '...'
                 lines.append(f'Tool Call [{part.tool_name}]: {args}')
+            elif isinstance(part, SpeechPart) and part.transcript:
+                # `SpeechPart` is in the response union too: a realtime assistant turn. Index the
+                # transcript so spoken replies are searchable. Any other response part (thinking,
+                # file, native-tool bookkeeping) is deliberately skipped rather than misrendered,
+                # so a new upstream part degrades to "not indexed" instead of crashing the run.
+                transcript = part.transcript
+                if truncate and len(transcript) > 500:  # cap like the `TextPart` branch above
+                    transcript = transcript[:500] + '...'
+                lines.append(f'Speech [{part.speaker}]: {transcript}')
 
     return '\n'.join(lines)
 
@@ -256,8 +303,22 @@ class ConversationSearchToolset(FunctionToolset[AgentDepsT]):
         context_lines: int,
         bm25_k1: float,
         bm25_b: float,
-        scope: SearchScope = 'all',
+        scope: SearchScope | None = None,
     ) -> None:
+        # `None` means the caller did not choose. It resolves to `conversation` and warns once
+        # here, for the same reason `ConversationSearch` does: this default was `all`, and the
+        # change is invisible to a store-wide caller who keeps working with a narrower corpus.
+        # `ConversationSearch` always passes a resolved scope, so it never double-warns.
+        if scope is None:
+            warn_default_changed(
+                owner='ConversationSearchToolset',
+                option='scope',
+                old='all',
+                new='conversation',
+                impact=SCOPE_DEFAULT_CHANGE_IMPACT,
+                stacklevel=3,
+            )
+            scope = 'conversation'
         super().__init__(id=tool_id)
         if max_matches < 0:
             raise ValueError(f'max_matches must be non-negative, got {max_matches!r}.')
@@ -320,6 +381,17 @@ class ConversationSearchToolset(FunctionToolset[AgentDepsT]):
             return f"No persisted history for run '{run_id}'."
         total_messages = sum(len(section.display_lines) for section in sections)
         if total_messages == 0:
+            if conversation_id is not None:
+                # Naming the scope keeps the "pair with `StepPersistence`" advice below from
+                # misdirecting a caller who already did: under conversation scope an empty
+                # corpus usually means the earlier runs carry a different conversation id.
+                # It reveals nothing about whether other conversations exist in the store.
+                return (
+                    'No persisted history in this conversation yet. Search covers only runs '
+                    "sharing this run's conversation id, which comes from an explicit "
+                    '`conversation_id=` argument or is inherited from `message_history`; runs '
+                    'started with neither belong to other conversations.'
+                )
             return (
                 'No persisted conversation history to search yet. History accumulates '
                 'as runs persist their steps (pair this capability with `StepPersistence` '

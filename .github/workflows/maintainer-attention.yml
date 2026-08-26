@@ -1,0 +1,64 @@
+name: Maintainer attention
+
+on:
+  issues:
+    types: [opened, reopened]
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    # zizmor: ignore[dangerous-triggers] -- this caller runs the base repository's pinned reusable workflow and never checks out contributor code
+    types: [opened, reopened, ready_for_review]
+  schedule:
+    - cron: '10 */6 * * *'
+    - cron: '47 6 * * *'
+    - cron: '23 14 * * 1'
+  workflow_dispatch: {}
+
+permissions: {}
+
+jobs:
+  owner-routing:
+    if: >-
+      github.event_name == 'issues' ||
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' &&
+      (github.event.comment.user.login == 'adtyavrdhn' ||
+      github.event.comment.user.login == 'dsfaccini' ||
+      github.event.comment.user.login == 'DouweM')) ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '10 */6 * * *'
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    # Pin merged upstream history: GitHub cannot resolve a reusable workflow from a deleted PR-head ref.
+    uses: pydantic/pydantic-ai/.github/workflows/pydantic-ai-owner-routing.yml@252922e206ba0064eb8a96ab1e37616ba016b06a
+    secrets:
+      PYDANTIC_AI_TRIAGE_SLACK_WEBHOOK_URL: ${{ secrets.PYDANTIC_AI_TRIAGE_SLACK_WEBHOOK_URL }}
+
+  operations:
+    needs: owner-routing
+    # Existing attention requests still need reminders when owner routing is
+    # skipped or fails, so only cancellation prevents reconciliation.
+    if: >-
+      always() && !cancelled() &&
+      (github.event_name == 'workflow_dispatch' ||
+      github.event.schedule == '10 */6 * * *' ||
+      github.event.schedule == '47 6 * * *')
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    uses: pydantic/pydantic-ai/.github/workflows/issue-pr-attention-monitor.yml@252922e206ba0064eb8a96ab1e37616ba016b06a
+    secrets:
+      PYDANTIC_AI_TRIAGE_SLACK_WEBHOOK_URL: ${{ secrets.PYDANTIC_AI_TRIAGE_SLACK_WEBHOOK_URL }}
+
+  weekly-digest:
+    if: github.event.schedule == '23 14 * * 1' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    uses: pydantic/pydantic-ai/.github/workflows/weekly-maintainer-digest.yml@252922e206ba0064eb8a96ab1e37616ba016b06a
+    secrets:
+      PYDANTIC_AI_TRIAGE_SLACK_WEBHOOK_URL: ${{ secrets.PYDANTIC_AI_TRIAGE_SLACK_WEBHOOK_URL }}

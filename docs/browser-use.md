@@ -14,6 +14,16 @@ self-healing), and the tool returns a text result.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/browser_use/)
 
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
+
+!!! note "Which browser capability?"
+    This page covers the browser-use integration: one `browse_web` tool that
+    hands a goal to an autonomous agent. To have the host model drive the
+    browser itself with typed actions -- navigate, click, type, screenshot --
+    see [Playwright Browser](playwright.md). Give an agent one or the other:
+    each capability runs its own browser, so a session opened by one is not
+    visible to the other.
+
 ## The problem
 
 Low-level browser tools (goto, click a selector, extract text) work well when
@@ -48,7 +58,7 @@ model for the sub-agent:
 ```python
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -114,7 +124,8 @@ policy. Use a custom factory to introduce uploads only with controls appropriate
 to your application.
 
 ```python
-from pydantic_ai_harness.browser_use import BrowserAgentSettings, BrowserUse
+from pydantic_ai_harness import BrowserUse
+from pydantic_ai_harness.browser_use import BrowserAgentSettings
 
 BrowserUse(
     llm='anthropic:claude-sonnet-4-6',
@@ -140,7 +151,7 @@ output:
 ```python
 from pydantic import BaseModel
 
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 
 class Product(BaseModel):
@@ -165,7 +176,7 @@ browser. Scope entries to a domain with the nested form, and combine with
 `allowed_domains` so the values cannot be typed anywhere else:
 
 ```python
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 BrowserUse(
     allowed_domains=['travel.example.com'],
@@ -198,10 +209,18 @@ origin.
   `'*.example.com'` work for navigation, but not with flat `sensitive_data`.
   A bare scheme-qualified host such as
   `'https://example.com'` is given a path boundary before browser-use matches
-  it, so it does not match `https://example.com.attacker.test`.
+  it, so it does not match `https://example.com.attacker.test`. A host-only
+  entry (`'example.com'`, `'localhost'`, `'*'`) is qualified to `http`/`https`
+  first, so an allowlist cannot re-admit `file://` (see **File actions**). An
+  entry whose scheme is a glob keeps only the schemes it already matched, so
+  narrowing it never admits one the caller had excluded. The same normalization
+  runs in `BrowserUseToolset`, so constructing the toolset directly gets it too.
 - **Private networks.** `block_ip_addresses=True` by default blocks direct IP
   addresses and common localhost hostnames, including when a profile has an
-  allowlist. Set it to `False` only when a task must reach an internal service.
+  allowlist. Names that resolve to loopback without being spelled `localhost`
+  count as localhost too: a terminal DNS dot (`localhost.`) is dropped before
+  matching, and any `<label>.localhost` name is treated as loopback per RFC 6761.
+  Set it to `False` only when a task must reach an internal service.
   browser-use does not resolve arbitrary hostnames before navigation, so use an
   explicit domain allowlist for sensitive browsing.
 - **Untrusted page content.** Browser results contain text from web pages.
@@ -209,9 +228,14 @@ origin.
   inside it. Non-empty custom `guidance` retains this rule automatically;
   `guidance=''` is the explicit opt-out.
 - **File actions.** The default factory disables browser-use's `read_file` and
-  `upload_file` actions. Downloaded PDFs stay out of browser-use's PDF parser,
-  and uploads need an application-specific approval or destination policy. A
-  custom factory that re-enables either action needs to provide those controls.
+  `upload_file` actions and prohibits `file://` navigation. browser-use consults
+  `allowed_domains` or `prohibited_domains`, never both, so a permissive
+  allowlist entry would otherwise override that prohibition; host-only entries
+  are qualified to `http`/`https` to close that path, and an allowlist
+  permitting only `file://` URLs is rejected. Downloaded PDFs stay
+  out of browser-use's PDF parser, and uploads need an application-specific
+  approval or destination policy. A custom factory that re-enables either
+  action needs to provide those controls.
 - **Full browser control.** `browser_profile` accepts a complete browser-use
   `BrowserProfile` for everything the convenience fields do not cover: proxy,
   a persistent `user_data_dir` (staying logged in across calls),
@@ -248,7 +272,7 @@ origin.
 ```python
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 
 async def main():
@@ -284,7 +308,7 @@ below, or to `''` to contribute no instructions at all. (`guidance` steers the
 Every field of `BrowserUse` with its default:
 
 ```python
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 BrowserUse(
     llm=None,                    # Pydantic AI model/string or browser-use chat model; None = browser-use's default
@@ -318,7 +342,8 @@ resolved `settings`, and returns the agent to run:
 ```python
 from browser_use import Agent as BrowserUseAgent
 
-from pydantic_ai_harness.browser_use import BrowserAgent, BrowserTask, BrowserUse
+from pydantic_ai_harness import BrowserUse
+from pydantic_ai_harness.browser_use import BrowserAgent, BrowserTask
 
 
 def factory(request: BrowserTask) -> BrowserAgent:
@@ -345,21 +370,21 @@ factory, `default_browser_agent`, forwards all of `settings`). The factory
 must not start or stop the session itself; the tool owns the session
 lifecycle.
 
-## BrowserUse vs scripted browser tools
+## BrowserUse vs PlaywrightBrowser
 
-The two approaches complement each other rather than compete:
+An agent gets one of the two, so the choice is made up front:
 
-| | Scripted tools (Playwright-style) | `BrowserUse` |
+| | [`PlaywrightBrowser`](playwright.md) | `BrowserUse` |
 |---|---|---|
 | Who decides each action | the host model | the browser-use sub-agent |
-| Page addressing | CSS selectors / coordinates | indexed DOM elements |
+| Page addressing | CSS selectors, `aria-ref` handles, coordinates | indexed DOM elements |
 | Cost profile | one host-model call per action | one sub-agent call per step, plus the delegation |
 | Determinism | high | lower; self-healing LLM loop |
 | Best for | known, repeatable flows | fuzzy goals on unknown or changing pages |
 
-If your flow is fully known, scripted tools are cheaper and more predictable.
-Reach for `BrowserUse` when the task needs judgement about pages you have not
-seen.
+If your flow is fully known, `PlaywrightBrowser` is cheaper and more
+predictable. Reach for `BrowserUse` when the task needs judgement about pages
+you have not seen.
 
 ## Agent spec (YAML/JSON)
 
@@ -379,7 +404,7 @@ capabilities:
 ```python
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.browser_use import BrowserUse
+from pydantic_ai_harness import BrowserUse
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[BrowserUse])
 ```
@@ -389,8 +414,6 @@ The `llm`, `browser_profile`, `output_schema`, `agent_settings`, and
 browser-use's own default model selection and browser and agent configuration,
 prose output, and the default agent factory.
 
-The API may change between releases while the capability settles; breaking
-changes ship deprecation warnings where practical.
 
 ## Further reading
 

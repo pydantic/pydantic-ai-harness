@@ -11,6 +11,8 @@ from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext
 
 from pydantic_ai_harness.nimble._toolset import (
+    _VALID_SEARCH_DEPTHS,  # pyright: ignore[reportPrivateUsage]
+    _VALID_TIME_RANGES,  # pyright: ignore[reportPrivateUsage]
     NIMBLE_MAX_NUM_RESULTS,
     NIMBLE_MAX_PAGE_TEXT_CHARS,
     NimbleClient,
@@ -18,8 +20,6 @@ from pydantic_ai_harness.nimble._toolset import (
     SearchDepth,
     TimeRange,
     _OwnedClientLifecycle,  # pyright: ignore[reportPrivateUsage]
-    _VALID_SEARCH_DEPTHS,  # pyright: ignore[reportPrivateUsage]
-    _VALID_TIME_RANGES,  # pyright: ignore[reportPrivateUsage]
 )
 
 if TYPE_CHECKING:

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_ai._run_context import AgentDepsT
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -19,9 +20,11 @@ from pydantic_ai.messages import (
     ToolReturnPart,
     UserPromptPart,
 )
+from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.tools import RunContext
 
+from pydantic_ai_harness._usage import reserved_usage_limits
 from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW
 from pydantic_ai_harness.compaction._pinning import is_pinned, reinject_pinned
 from pydantic_ai_harness.compaction._receipts import (
@@ -40,13 +43,15 @@ from pydantic_ai_harness.compaction._shared import (
     find_first_user_message,
     find_safe_cutoff,
     find_token_cutoff,
+    is_realtime_model,
+    record_compaction_reclaim,
     resolve_token_trigger,
     validate_token_trigger,
 )
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelRequestPart, UserContent
-    from pydantic_ai.models import Model, ModelRequestContext
+    from pydantic_ai.models import AbstractModel, ModelRequestContext
 
 _DEFAULT_SUMMARY_PROMPT = """\
 You are a context summarization assistant.  The conversation below will be replaced by \
@@ -81,6 +86,10 @@ preamble, no markdown fences.
 </messages>\
 """
 
+_DEFAULT_INSTRUCTIONS = (
+    'You are a context summarization assistant. Extract the most important information from conversations.'
+)
+
 _SUMMARY_PREFIX = 'Summary of previous conversation:\n\n'
 
 # Anchored-incremental update instruction (opencode mechanism): the previous summary is fed
@@ -101,8 +110,12 @@ _KEPT_USER_MESSAGE_METADATA = 'pydantic-ai-harness.compaction.kept-user-message.
 """Model-request metadata marking a user turn retained by `keep_user_messages`."""
 
 
-def _model_name(model: str | Model | None) -> str | None:
-    """Best-effort model-name string from a model spec or object."""
+def _model_name(model: str | AbstractModel | None) -> str | None:
+    """Best-effort model-name string from a model spec or object.
+
+    Accepts any `AbstractModel` (a realtime model included), not just a request-response
+    `Model`: the family heuristic only reads `model_name`, which every model carries.
+    """
     if model is None:  # pragma: no cover - Pydantic AI always supplies the running model
         return None
     if isinstance(model, str):
@@ -123,7 +136,7 @@ def _is_receipt_message(msg: ModelMessage) -> bool:
     return isinstance(msg, ModelRequest) and bool(msg.parts) and all(is_receipt_part(p) for p in msg.parts)
 
 
-def _model_family(model: str | Model | None) -> str | None:
+def _model_family(model: str | AbstractModel | None) -> str | None:
     """Reduce a model name to a coarse family token (e.g. ``openai:gpt-4o`` -> ``gpt``).
 
     A neutral structural heuristic: drop any ``provider:`` prefix, then take the leading token
@@ -301,6 +314,14 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """Prompt template for generating summaries.
 
     Must contain a ``{messages}`` placeholder.
+    """
+
+    instructions: str = field(default=_DEFAULT_INSTRUCTIONS, kw_only=True)
+    """Instructions for the internal agent that writes the summary.
+
+    `summary_prompt` shapes the user turn of the summary request; this sets the internal
+    agent's static instructions, which Pydantic AI sends in the request's system prompt.
+    Override it when the summarizer endpoint requires a fixed leading instruction.
     """
 
     tokenizer: Callable[[str], int] | None = None
@@ -559,15 +580,27 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         token_trigger = resolve_token_trigger(
             self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window, self.context_window
         )
-        if not exceeds(messages, self.max_messages, token_trigger, self.tokenizer):
+        if not exceeds(
+            messages,
+            self.max_messages,
+            token_trigger,
+            self.tokenizer,
+            model_request_parameters=request_context.model_request_parameters,
+        ):
             return request_context
-        request_context.messages = await compact_with_span(
+        compacted = await compact_with_span(
             request_ctx,
             strategy='SummarizingCompaction',
             messages=messages,
             compact=lambda: self.compact(messages, request_ctx),
             tokenizer=self.tokenizer,
         )
+        record_compaction_reclaim(
+            request_context,
+            estimate_token_count(messages, self.tokenizer),
+            estimate_token_count(compacted, self.tokenizer),
+        )
+        request_context.messages = compacted
         return request_context
 
     async def _summarize(
@@ -590,9 +623,20 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             )
 
         model = self.model if self.model is not None else ctx.model
+        # `ctx.model` is an `AbstractModel`; summarization needs a request-response model. A
+        # realtime run reaches here only when no summarizer `model=` was configured, so ask for
+        # one explicitly rather than handing `Agent` a model it cannot run with.
+        if is_realtime_model(model):
+            raise UserError(
+                'SummarizingCompaction needs a request-response model to write the summary, but '
+                f'the run uses {type(model).__name__}, which is not one. Set `model=` on '
+                'SummarizingCompaction to the model to summarize with when the run uses a realtime model.'
+            )
+        # `isinstance` narrows the generic `Model` to `Model[Unknown]`; `cast` recovers
+        # `Model[Any]`, mirroring core's own `reinject_system_prompt` idiom.
         agent: Agent[None, str] = Agent(
-            model,
-            instructions='You are a context summarization assistant. Extract the most important information from conversations.',
+            cast('Model[Any] | str', model),
+            instructions=self.instructions,
         )
-        result = await agent.run(prompt, usage=ctx.usage)
+        result = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
         return result.output.strip()

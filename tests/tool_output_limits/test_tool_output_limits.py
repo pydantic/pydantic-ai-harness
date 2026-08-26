@@ -8,10 +8,11 @@ import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -21,10 +22,12 @@ from pydantic_ai.messages import (
     ToolReturn,
     ToolReturnPart,
 )
+from pydantic_ai.models import AbstractModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import ToolDefinition
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RunUsage, UsageLimits
+from pydantic_core import to_json
 
 from pydantic_ai_harness.tool_output_limits import (
     Band,
@@ -35,6 +38,8 @@ from pydantic_ai_harness.tool_output_limits import (
     ToolOutputLimits,
     Truncate,
     TruncationStrategy,
+    indented_json,
+    json_lines,
 )
 from pydantic_ai_harness.tool_output_limits._capability import (
     READ_TOOL_NAME,
@@ -62,7 +67,9 @@ from pydantic_ai_harness.tool_output_limits._store import _safe_segment
 # ---------------------------------------------------------------------------
 
 
-def _make_ctx(*, run_id: str | None = 'run-1', retry: int = 0, model: Any = None) -> Any:
+def _make_ctx(
+    *, run_id: str | None = 'run-1', retry: int = 0, model: Any = None, usage_limits: UsageLimits | None = None
+) -> Any:
     """Build a minimal RunContext-like object for testing the hook directly."""
 
     @dataclasses.dataclass
@@ -74,11 +81,12 @@ def _make_ctx(*, run_id: str | None = 'run-1', retry: int = 0, model: Any = None
         usage: RunUsage
         run_id: str | None
         retry: int
+        usage_limits: UsageLimits | None = None
         tool_call_id: str | None = 'call-1'
         model: Any = dataclasses.field(default_factory=_FakeModel)
         deps: None = None
 
-    ctx = _FakeCtx(usage=RunUsage(), run_id=run_id, retry=retry)
+    ctx = _FakeCtx(usage=RunUsage(), run_id=run_id, retry=retry, usage_limits=usage_limits)
     if model is not None:
         ctx.model = model
     return ctx
@@ -139,6 +147,27 @@ class TestPayloadHelpers:
     def test_to_text_variants(self):
         assert to_text('hi') == 'hi'
         assert to_text({'a': 1}) == '{"a":1}'
+
+    def test_indented_json(self):
+        assert indented_json({'a': 1}) == '{\n  "a": 1\n}'
+
+    def test_json_lines_list(self):
+        assert json_lines([{'a': 1}, {'b': 2}]) == '{"a":1}\n{"b":2}'
+
+    def test_json_lines_non_sequence_falls_back_to_indented(self):
+        assert json_lines({'a': 1}) == '{\n  "a": 1\n}'
+
+    def test_json_lines_tuple_is_a_sequence(self):
+        assert json_lines(({'a': 1}, {'b': 2})) == '{"a":1}\n{"b":2}'
+
+    def test_json_lines_empty_list(self):
+        assert json_lines([]) == ''
+
+    def test_presets_escape_line_separator_chars(self):
+        rendered = json_lines([{'text': 'a\N{LINE SEPARATOR}b'}, {'ok': True}])
+        assert rendered.splitlines() == ['{"text":"a\\u2028b"}', '{"ok":true}']
+        indented = indented_json({'text': 'a\N{PARAGRAPH SEPARATOR}b\x85c'})
+        assert indented.splitlines() == ['{', '  "text": "a\\u2029b\\u0085c"', '}']
 
     def test_measure_chars_and_tokens(self):
         assert measure('x' * 100, over_tokens=False, tokenizer=None) == 100
@@ -353,6 +382,13 @@ class TestPassthrough:
         out = await _run(cap, 'small')
         assert out == 'small'
 
+    async def test_below_threshold_structured_passthrough_with_serializer(self):
+        records = [{'record_id': 1}]
+        cap: ToolOutputLimits[object] = ToolOutputLimits(
+            bands=[Band(over=1000, action=Truncate())], serializer=indented_json
+        )
+        assert await _run(cap, records) is records
+
     async def test_exception_result_passthrough(self):
         cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=1, action=Truncate(max_chars=2))])
         err = ValueError('boom')
@@ -426,6 +462,74 @@ class TestSpill:
         out = await _run(cap, {'rows': list(range(1000)), 'ok': True})
         assert isinstance(out, ToolReturn)
         assert 'shape:' in out.return_value  # type: ignore[operator]
+
+    async def test_spill_serializer_json_lines_is_pageable(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        cap: ToolOutputLimits[object] = ToolOutputLimits(
+            bands=[Band(over=5, action=Spill(preview_chars=80))], serializer=json_lines, store=store
+        )
+        records = [{'record_id': record_id, 'item': f'item-{record_id}'} for record_id in range(10)]
+        out = await _run(cap, records)
+        assert isinstance(out, ToolReturn)
+        handle = out.metadata['overflow_handle']
+        assert await store.read(handle) == json_lines(records).encode('utf-8')
+        toolset = cap.get_toolset()
+        assert toolset is not None
+        read = toolset.tools[READ_TOOL_NAME].function  # type: ignore[union-attr]
+        page_1 = await read(_make_ctx(), handle, offset=0, limit=1)  # type: ignore[attr-defined]
+        page_2 = await read(_make_ctx(), handle, offset=1, limit=1)  # type: ignore[attr-defined]
+        assert '"record_id":0' in page_1 and '"record_id":1' not in page_1
+        assert '"record_id":1' in page_2 and '"record_id":0' not in page_2
+
+    async def test_spill_serializer_inside_tool_return_envelope(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        cap: ToolOutputLimits[object] = ToolOutputLimits(
+            bands=[Band(over=5, action=Spill())], serializer=json_lines, store=store
+        )
+        out = await _run(cap, ToolReturn(return_value=[{'record_id': 1}, {'record_id': 2}], metadata={'orig': True}))
+        assert isinstance(out, ToolReturn)
+        assert out.metadata['orig'] is True
+        assert await store.read(out.metadata['overflow_handle']) == b'{"record_id":1}\n{"record_id":2}'
+
+    async def test_serializer_layout_reaches_band_compact_would_not(self):
+        value = {'a': 1, 'b': 2, 'c': 3}
+        bands = [Band(over=25, action=Truncate(max_chars=10, strategy=TruncationStrategy.head))]
+        plain: ToolOutputLimits[object] = ToolOutputLimits(bands=bands)
+        assert await _run(plain, value) is value
+        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=bands, serializer=indented_json)
+        out = await _run(cap, value)
+        assert isinstance(out, str) and out.startswith('{\n  "a": 1')
+
+    async def test_serializer_error_warns_and_falls_back_to_compact(self):
+        def broken(value: object) -> str:
+            raise RuntimeError('boom')
+
+        cap: ToolOutputLimits[object] = ToolOutputLimits(
+            bands=[Band(over=10, action=Truncate(max_chars=20, strategy=TruncationStrategy.head))],
+            serializer=broken,
+        )
+        with pytest.warns(UserWarning, match='serializer raised'):
+            out = await _run(cap, {'rows': list(range(100))})
+        assert isinstance(out, str) and out.startswith('{"rows":[0,1,')
+
+    async def test_serializer_non_text_return_warns_and_falls_back_to_compact(self):
+        cap: ToolOutputLimits[object] = ToolOutputLimits(
+            bands=[Band(over=10, action=Truncate(max_chars=20, strategy=TruncationStrategy.head))],
+            serializer=lambda value: to_json(value, indent=2),  # type: ignore[arg-type,return-value]
+        )
+        with pytest.warns(UserWarning, match='non-text'):
+            out = await _run(cap, {'rows': list(range(100))})
+        assert isinstance(out, str) and out.startswith('{"rows":[0,1,')
+
+    async def test_spill_serializer_skips_strings(self, tmp_path: Path):
+        store = LocalFileStore(base_dir=tmp_path)
+        cap: ToolOutputLimits[object] = ToolOutputLimits(
+            bands=[Band(over=5, action=Spill())], serializer=indented_json, store=store
+        )
+        text = 'line\n' * 100
+        out = await _run(cap, text)
+        assert isinstance(out, ToolReturn)
+        assert await store.read(out.metadata['overflow_handle']) == text.encode('utf-8')
 
     async def test_spill_failure_falls_back_to_truncate(self):
         cap: ToolOutputLimits[object] = ToolOutputLimits(
@@ -548,6 +652,22 @@ class TestSummarize:
         assert out == 'THE SUMMARY'
         assert ctx.usage.requests == 1
 
+    async def test_inherited_model_reserves_parent_usage_limits(self):
+        ctx = _make_ctx(
+            model=_fixed_model('THE SUMMARY'), usage_limits=UsageLimits(request_limit=5, tool_calls_limit=2)
+        )
+        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=5, action=Summarize())])
+        mock_result = AsyncMock()
+        mock_result.output = 'THE SUMMARY'
+        mock_agent = AsyncMock()
+        mock_agent.run.return_value = mock_result
+
+        with patch('pydantic_ai.Agent', return_value=mock_agent):
+            out = await _run(cap, 'x' * 100, ctx=ctx)
+
+        assert out == 'THE SUMMARY'
+        assert mock_agent.run.call_args.kwargs['usage_limits'] == UsageLimits(request_limit=4, tool_calls_limit=2)
+
     async def test_explicit_model_overrides_ctx(self):
         ctx = _make_ctx(model=_fixed_model('FROM CTX MODEL'))
         cap: ToolOutputLimits[object] = ToolOutputLimits(
@@ -556,6 +676,27 @@ class TestSummarize:
         out = await _run(cap, 'x' * 100, ctx=ctx)
         assert out == 'FROM EXPLICIT MODEL'
         assert ctx.usage.requests == 1
+
+    async def test_realtime_run_without_a_model_raises(self):
+        """A realtime run has no request-response model to summarize with; ask for one (#585)."""
+
+        class _RealtimeModel(AbstractModel):
+            @property
+            def model_name(self) -> str:
+                return 'gpt-4o-realtime-preview'
+
+            @property
+            def system(self) -> str:
+                return 'openai'
+
+        model = _RealtimeModel()
+        # A genuine `AbstractModel` identity, not a mock: it is rejected for being a non-`Model`.
+        assert model.model_id == 'openai:gpt-4o-realtime-preview'
+        ctx = _make_ctx(model=model)
+        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=5, action=Summarize())])
+
+        with pytest.raises(UserError, match='needs a request-response model'):
+            await _run(cap, 'x' * 100, ctx=ctx)
 
     async def test_binary_summarize_falls_back(self):
         cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=1, action=Summarize(then=Passthrough()))])

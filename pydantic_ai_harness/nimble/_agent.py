@@ -70,9 +70,9 @@ class NimbleAgentToolset(FunctionToolset[AgentDepsT]):
     across turns (resumable start / status / result).
 
     **Mode choice (stateless host default = Mode 1):**
-   - Mode 1: `agent_name` create-or-reuse via `POST /v2/agents/runs`
-   - Mode 2: explicit `agent_id` (`wsa_...`) via `POST /v2/agents/{id}/runs`
-   - Mode 3: omit both for an anonymous one-shot (still returns `wsa_...`)
+    - Mode 1: `agent_name` create-or-reuse via `POST /v2/agents/runs`
+    - Mode 2: explicit `agent_id` (`wsa_...`) via `POST /v2/agents/{id}/runs`
+    - Mode 3: omit both for an anonymous one-shot (still returns `wsa_...`)
     """
 
     def __init__(self, *, get_client: Callable[[], NimbleClient]) -> None:

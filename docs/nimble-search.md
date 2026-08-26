@@ -14,6 +14,8 @@ resumable start/status/result tools.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/nimble/)
 
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
+
 ## The problem
 
 Research agents need more than titles and snippets, but dumping full pages into
@@ -40,7 +42,7 @@ Then pass `NimbleSearch` to an `Agent` via the `capabilities` parameter:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.nimble import NimbleSearch
+from pydantic_ai_harness import NimbleSearch
 
 agent = Agent('openai:gpt-5.2', capabilities=[NimbleSearch()])
 
@@ -55,7 +57,7 @@ builds its own factory client):
 ```python
 from nimble_python import AsyncNimble
 from pydantic_ai import Agent
-from pydantic_ai_harness.nimble import NimbleAgent, NimbleSearch
+from pydantic_ai_harness import NimbleAgent, NimbleSearch
 
 client = AsyncNimble()  # or AsyncNimble(api_key=...)
 agent = Agent(
@@ -94,7 +96,7 @@ failure or cancellation.
 ## Opt-in map and crawl
 
 ```python
-from pydantic_ai_harness.nimble import NimbleSearch
+from pydantic_ai_harness import NimbleSearch
 
 NimbleSearch(
     include_map=True,
@@ -113,7 +115,7 @@ result - unlike Exa's deferred single-tool polling.
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.nimble import NimbleAgent
+from pydantic_ai_harness import NimbleAgent
 
 agent = Agent('openai:gpt-5.2', capabilities=[NimbleAgent()])
 ```
@@ -201,7 +203,7 @@ expose an events subscription tool or `previous_interaction_id` - use
 start/status/result across turns.
 
 ```python
-from pydantic_ai_harness.nimble import NimbleAgent
+from pydantic_ai_harness import NimbleAgent
 
 NimbleAgent(
     guidance=None,  # None = default instructions; '' = none
@@ -231,7 +233,7 @@ capabilities:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.nimble import NimbleAgent, NimbleSearch
+from pydantic_ai_harness import NimbleAgent, NimbleSearch
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[NimbleSearch, NimbleAgent])
 ```
@@ -245,7 +247,7 @@ collide (`web_search` also overlaps with core `WebSearch` if both are present).
 ## Configuration
 
 ```python
-from pydantic_ai_harness.nimble import NimbleSearch
+from pydantic_ai_harness import NimbleSearch
 
 NimbleSearch(
     num_results=5,

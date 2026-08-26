@@ -13,10 +13,14 @@ from unittest.mock import MagicMock, patch
 import anyio
 import pytest
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
+from pydantic_ai_harness.code_mode import CodeMode
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 from pydantic_ai_harness.shell._toolset import (
     ShellToolset,
@@ -1172,6 +1176,63 @@ class TestShellCapability:
         assert result.output == 'done'
 
 
+async def _tools_offered_to_model(cwd: Path, *, shell_first: bool) -> dict[str, str | None]:
+    """Run an agent with Shell and CodeMode and return the tools the model was offered."""
+    offered: dict[str, str | None] = {}
+
+    def capture(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        offered.update({tool.name: tool.description for tool in info.function_tools})
+        return ModelResponse(parts=[TextPart('done')])
+
+    shell = Shell[object](cwd=cwd)
+    code_mode = CodeMode[object]()
+    capabilities: list[AbstractCapability[object]] = [shell, code_mode] if shell_first else [code_mode, shell]
+    agent: Agent[None, str] = Agent(FunctionModel(capture), capabilities=capabilities)
+    await agent.run('go')
+    return offered
+
+
+class TestCodeModeInterop:
+    """`run_command` and `start_command` take a command line, so CodeMode leaves them native.
+
+    Folding them into `run_code` would make the model write a Monty script whose argument is a
+    shell script quoted as a Python string. The command-id tools carry no command line, so they
+    stay sandboxed like any other tool.
+    """
+
+    @pytest.mark.anyio(backends=['asyncio'])
+    @pytest.mark.parametrize('shell_first', [True, False], ids=['shell-first', 'code-mode-first'])
+    async def test_command_tools_stay_native(self, tmp_path: Path, shell_first: bool) -> None:
+        import sniffio
+
+        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
+            pytest.skip('Agent.run() requires asyncio')
+        tools = await _tools_offered_to_model(tmp_path, shell_first=shell_first)
+
+        assert 'run_command' in tools
+        assert 'start_command' in tools
+        run_code_description = tools['run_code']
+        assert run_code_description is not None
+        assert 'async def run_command' not in run_code_description
+        assert 'async def start_command' not in run_code_description
+
+    @pytest.mark.anyio(backends=['asyncio'])
+    @pytest.mark.parametrize('shell_first', [True, False], ids=['shell-first', 'code-mode-first'])
+    async def test_command_id_tools_are_still_sandboxed(self, tmp_path: Path, shell_first: bool) -> None:
+        import sniffio
+
+        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
+            pytest.skip('Agent.run() requires asyncio')
+        tools = await _tools_offered_to_model(tmp_path, shell_first=shell_first)
+
+        assert 'check_command' not in tools
+        assert 'stop_command' not in tools
+        run_code_description = tools['run_code']
+        assert run_code_description is not None
+        assert 'async def check_command' in run_code_description
+        assert 'async def stop_command' in run_code_description
+
+
 class TestKillProcessGroupEdgeCases:
     async def test_sigterm_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGTERM raises ProcessLookupError, method returns without SIGKILL."""
@@ -1454,7 +1515,7 @@ class TestResolveEnv:
         assert resolved == {'FOO': 'bar'}
 
     def test_explicit_empty_env_is_not_inheritance(self, shell_dir: Path) -> None:
-        # {} is a hard boundary (no vars), distinct from None (inherit all).
+        # {} produces no child environment vars, distinct from None (inherit all).
         assert _env_toolset(shell_dir, env={})._resolve_env() == {}
 
     def test_patterns_strip_from_inherited(self, shell_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:

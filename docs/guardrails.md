@@ -7,7 +7,7 @@ description: Validate the user prompt before it reaches the model, the tool call
 
 Guardrails put a validation layer on the three edges of an agent run: the prompt on its way *in* to the model, the tool calls the model makes along the way, and the output on its way *out* to the caller. Reach for them when unstructured input or output must be screened before it is acted on -- a prompt-injection attempt you never want to send, PII you must redact, an off-topic request you want to refuse cheaply, or an answer that must cite its sources before you show it. Without a guardrail the framework sends whatever the user typed and returns whatever the model produced, verbatim; a guardrail interposes a callable you control that gets the final say.
 
-> The API may change between releases. Where practical, breaking changes ship with a deprecation warning.
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
 ## The problem
 
@@ -142,21 +142,46 @@ OutputGuardrail(guard=for_text(redact_secrets, on_other='allow'))  # skips it de
 ```
 
 A tool result guard receives `ToolResultInfo`, not just a value. Use
-`for_tool_result_text` to adapt a detector for a bare string result or a
-`ToolReturn.return_value` string:
+`for_tool_result_text` to adapt a detector for a bare string result or the text
+channels of a `ToolReturn`:
 
 ```python
-from pydantic_ai_harness.guardrails import ToolGuardrail
+from pydantic_ai_harness import ToolGuardrail
 from pydantic_ai_harness.guardrails.detectors import for_tool_result_text, redact_secrets
 
 ToolGuardrail(result_guard=for_tool_result_text(redact_secrets))
 ```
 
-When it redacts a `ToolReturn`, the adapter replaces `return_value` and
-preserves its `content`, `metadata`, and `kind`. `ToolReturn.content` is sent
-as a separate user-prompt part, so the adapter does not inspect it. As with
-`for_text`, a non-text result raises by default; pass `on_other='allow'` to
-skip one deliberately.
+The adapter checks a string `return_value` and all text in `content`, which core
+sends as a separate user-prompt part. Text parts the model reads as one span are
+sanitized as one string, so `content=[a, b]` gets the same treatment as
+`content=a + b` and a secret split across the two is still caught. A part
+carrying no model content does not end a span: a `CachePoint` between two texts
+is dropped by providers without caching, so the text either side of it is joined,
+while an image or document between them is not, since joining across real content
+would invent adjacency.
+
+The span keeps its parts, and each part its own metadata, when sanitizing them one
+by one already produces what sanitizing the whole span produces. Parts that run
+into one another are the case where the two differ: a key at the end of one part
+and a word at the start of the next are one token to the model, so that span
+collapses into a single part carrying the whole-span result. A `CachePoint` in a
+collapsed span is kept, not dropped. One before the first text or after the last
+keeps its side; one between two merged texts has lost the split it marked and
+moves ahead of the merged text, narrowing the cached prefix rather than widening
+it. When it redacts either channel, it preserves the `ToolReturn` metadata, kind,
+and non-text content.
+
+As with `for_text`, a non-text result raises by default. `on_other='allow'`
+skips the whole result rather than part of it: neither `return_value` nor
+`content` is scanned. A `ToolReturn` whose `return_value` is structured counts
+as a non-text result, so sensitive text in its `content` is not scanned under
+that option. The opt-out is the caller taking responsibility for the result;
+scanning `content` there would return a redaction from the branch documented as
+allowing the result, and it would still be uneven, since a structured result
+that is not a `ToolReturn` has no separate text channel to scan. When a result
+may carry sensitive `content`, leave `on_other` at its default and apply the
+detector to a field of the output instead.
 
 A detector on the input side needs a text prompt. A multimodal prompt reaches
 the guard rendered as text, so a detector that matches one returns `replace`,
@@ -290,7 +315,8 @@ from pathlib import Path
 
 import httpx
 from pydantic_ai import Agent
-from pydantic_ai_harness.guardrails import GuardrailResult, ToolCallInfo, ToolGuardrail, ToolResultInfo
+from pydantic_ai_harness import GuardrailResult, ToolGuardrail
+from pydantic_ai_harness.guardrails import ToolCallInfo, ToolResultInfo
 
 WORKSPACE = Path('/workspace')
 
@@ -350,7 +376,8 @@ Pydantic AI already owns the approval round trip: a call raising `ApprovalRequir
 
 ```python
 from pydantic_ai import Agent, DeferredToolRequests, DeferredToolResults, ToolDenied
-from pydantic_ai_harness.guardrails import GuardrailResult, ToolCallInfo, ToolGuardrail
+from pydantic_ai_harness import GuardrailResult, ToolGuardrail
+from pydantic_ai_harness.guardrails import ToolCallInfo
 
 
 def confirm_production(call: ToolCallInfo) -> GuardrailResult:

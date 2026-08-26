@@ -21,7 +21,7 @@ configuration below).
 ```python
 from nimble_python import AsyncNimble
 from pydantic_ai import Agent
-from pydantic_ai_harness.nimble import NimbleAgent, NimbleSearch
+from pydantic_ai_harness import NimbleAgent, NimbleSearch
 
 client = AsyncNimble()
 agent = Agent(
@@ -44,7 +44,7 @@ print(result.output)
 | `agents_list` / `agent_templates_list` / `agent_run_start` / `agent_run_status` / `agent_run_result` | Web Search Agents lifecycle via `NimbleAgent`. |
 
 ```python
-from pydantic_ai_harness.nimble import NimbleSearch
+from pydantic_ai_harness import NimbleSearch
 
 NimbleSearch(
     include_map=True,
@@ -71,7 +71,7 @@ mode examples, override vs persist rules, and the `sources` shape.
 ## Configuration
 
 ```python
-from pydantic_ai_harness.nimble import NimbleAgent, NimbleSearch
+from pydantic_ai_harness import NimbleAgent, NimbleSearch
 
 NimbleSearch(
     num_results=5,              # web_search result count (1-100)

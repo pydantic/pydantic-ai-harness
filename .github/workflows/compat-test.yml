@@ -28,18 +28,14 @@ on:
         type: string
         required: false
         default: pydantic/pydantic-ai
+      harness-ref:
+        description: 'SHA, branch, or tag of pydantic-ai-harness to test. Release gates pass the latest published tag.'
+        type: string
+        required: false
+        default: main
 
 permissions:
   contents: read
-
-# `UV_FROZEN=1` so the lock-resolved sync + the editable-overlay of pydantic-ai-slim /
-# pydantic-graph stays put when the subsequent `uv run ruff/pyright/pytest` calls fire.
-# Without this, `uv run` auto-re-resolves against PyPI ("Ignoring existing lockfile due
-# to change in resolution mode"), silently uninstalls the overlay, and ends up testing
-# harness main against whatever `pydantic-ai-slim` is on PyPI — i.e. the compat check
-# becomes a no-op against the actual pydantic-ai checkout we wanted to validate.
-env:
-  UV_FROZEN: '1'
 
 jobs:
   compat:
@@ -47,11 +43,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout harness (main)
+      - name: Checkout harness @ ${{ inputs.harness-ref }}
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           repository: pydantic/pydantic-ai-harness
-          ref: main
+          ref: ${{ inputs.harness-ref }}
           persist-credentials: false
 
       # Check out pydantic-ai into a workspace subdir, then move it OUTSIDE the
@@ -67,6 +63,11 @@ jobs:
           repository: ${{ inputs.pydantic-ai-repo }}
           ref: ${{ inputs.pydantic-ai-ref }}
           path: _pydantic-ai-checkout
+          # Full history, so the tags `uv-dynamic-versioning` reads are present: a
+          # shallow checkout builds the packages as `0.0.1.dev1+<sha>`, which fails the
+          # harness's own `pydantic-ai-slim` floor once they're resolved
+          # rather than force-installed.
+          fetch-depth: 0
           persist-credentials: false
       - name: Move pydantic-ai outside the harness tree
         run: mv _pydantic-ai-checkout "${RUNNER_TEMP}/pydantic-ai"
@@ -77,18 +78,123 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job has no write permissions and no secrets
           cache-suffix: compat
 
-      # Install lock-resolved deps first, then override `pydantic-ai-slim` AND
-      # `pydantic-graph` with the local checkouts via `--no-deps`. Both are sibling
-      # packages in the pydantic-ai repo and version-track together; testing slim
-      # from-source against a stale graph from PyPI would mask cross-package issues
-      # (e.g. a slim PR depending on an unreleased graph change).
-      - run: uv sync --frozen --all-extras --group lint --group dev
-      - run: |
-          uv pip install --no-deps \
-            -e "${RUNNER_TEMP}/pydantic-ai/pydantic_ai_slim" \
-            -e "${RUNNER_TEMP}/pydantic-ai/pydantic_graph"
+      # Resolve `pydantic-ai-slim` and `pydantic-graph` from the checkout instead of
+      # from PyPI, so the candidate's declared *requirements* are tested alongside its
+      # code: a PR that raises a dependency floor (say `anthropic>=1.0.0`) would
+      # otherwise run against whatever the harness lock pinned, and fail on a
+      # combination the candidate itself declares unsupported. Both are sibling
+      # packages in the pydantic-ai repo and version-track together, so taking slim
+      # from source against a released graph would mask cross-package issues.
+      # `[tool.uv.sources]` redirects every harness requirement on either package,
+      # extras (`pydantic-ai-slim[anthropic]`) included.
+      - name: Resolve pydantic-ai from the checkout
+        run: |
+          cat >> pyproject.toml <<EOF
 
-      - run: uv run ruff format --check
-      - run: uv run ruff check
-      - run: uv run pyright
-      - run: uv run pytest
+          [tool.uv.sources]
+          pydantic-ai-slim = { path = "${RUNNER_TEMP}/pydantic-ai/pydantic_ai_slim", editable = true }
+          pydantic-graph = { path = "${RUNNER_TEMP}/pydantic-ai/pydantic_graph", editable = true }
+          EOF
+
+      # `override-dependencies` *replaces* what any dependent declares for the packages it
+      # names — it exists because `browser-use` pins provider SDKs to exact versions. Its
+      # upper bounds describe what the *released* pydantic-ai supports, so leaving them in
+      # place would let them veto a floor the candidate raises. Drop the upper bounds here
+      # and keep the lower ones: the candidate's own floors then decide, and `browser-use`
+      # stays overridden. Nothing else moves, which is what keeps this a compat test rather
+      # than a latest-everything run.
+      - name: Let the candidate's floors outrank the harness's upper bounds
+        run: |
+          uv run --no-project --with packaging python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          from packaging.requirements import Requirement
+
+          harness = Path('pyproject.toml')
+          text = harness.read_text()
+          for entry in tomllib.loads(text)['tool']['uv']['override-dependencies']:
+              override = Requirement(entry)
+              floors = ','.join(
+                  str(clause) for clause in override.specifier if clause.operator in ('>=', '>')
+              )
+              marker = f'; {override.marker}' if override.marker else ''
+              floors_only = f'{override.name}{floors}{marker}'
+              if floors_only != entry:
+                  print(f'{entry} -> {floors_only}')
+                  text = text.replace(f"'{entry}'", f"'{floors_only}'")
+          harness.write_text(text)
+          PY
+
+      # `--upgrade-package`: an overridden package keeps its locked version even when the
+      # candidate raises that floor, because the lock predates the candidate. Upgrade exactly
+      # the overridden packages, derived from `pyproject.toml` so the list cannot drift.
+      - name: Install the harness against the candidate
+        run: |
+          upgrade_overridden=$(python3 - <<'PY'
+          import re
+          import tomllib
+
+          with open('pyproject.toml', 'rb') as f:
+              specs = tomllib.load(f)['tool']['uv'].get('override-dependencies', [])
+          print(' '.join(f'--upgrade-package {re.match(r"[A-Za-z0-9._-]+", spec).group()}' for spec in specs))
+          PY
+          )
+          uv sync --all-extras --group lint --group dev ${upgrade_overridden}
+
+      # The invariant this workflow exists for: every overridden package resolved to something
+      # the candidate declares it supports. Without this, an override that quietly vetoes a
+      # raised floor surfaces as a confusing failure deep inside the harness's own tests
+      # instead. The candidate's requirements are dynamic, so they are read from the installed
+      # metadata, not from its `pyproject.toml`.
+      - name: Verify the candidate's declared floors survived the resolution
+        run: |
+          uv run --no-sync python - <<'PY'
+          import tomllib
+          from importlib.metadata import metadata, requires, version
+
+          from packaging.requirements import Requirement
+
+          with open('pyproject.toml', 'rb') as f:
+              overridden = {
+                  Requirement(spec).name for spec in tomllib.load(f)['tool']['uv']['override-dependencies']
+              }
+
+          for distribution in ('pydantic-ai-slim', 'pydantic-graph'):
+              extras = metadata(distribution).get_all('Provides-Extra') or []
+              for entry in requires(distribution) or []:
+                  requirement = Requirement(entry)
+                  if requirement.name not in overridden:
+                      continue
+                  # Markers gate on `extra` (how optional dependencies appear in installed
+                  # metadata -- where the provider SDK floors live) or on the environment
+                  # (`python_version < '3.14'`). Grant every extra the distribution provides,
+                  # so extra-gated floors stay checked and only requirements inactive on this
+                  # interpreter are skipped. A bare `marker.evaluate()` would return False for
+                  # every extra-gated entry and quietly skip them all.
+                  if requirement.marker is not None and not any(
+                      requirement.marker.evaluate({'extra': extra}) for extra in ('', *extras)
+                  ):
+                      print(f'{distribution}: {entry} inactive in this environment, skipped')
+                      continue
+                  installed = version(requirement.name)
+                  assert requirement.specifier.contains(installed, prereleases=True), (
+                      f'{distribution} declares {entry!r}, but the harness resolved '
+                      f'{requirement.name}=={installed}'
+                  )
+                  print(f'{distribution}: {entry} satisfied by {requirement.name}=={installed}')
+          PY
+
+      # Keep `--no-sync`: a bare `uv run` re-resolves, which would drop the targeted
+      # upgrades above and restore the locked provider SDKs.
+      - run: uv run --no-sync ruff format --check
+      - run: uv run --no-sync ruff check
+      - run: uv run --no-sync pyright
+      - run: uv run --no-sync pytest
+
+      - name: Verify the requested pydantic-ai checkout remained installed
+        run: |
+          uv pip show pydantic-ai-slim \
+            | grep -Fx "Editable project location: ${RUNNER_TEMP}/pydantic-ai/pydantic_ai_slim"
+          uv pip show pydantic-graph \
+            | grep -Fx "Editable project location: ${RUNNER_TEMP}/pydantic-ai/pydantic_graph"
