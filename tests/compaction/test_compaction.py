@@ -3900,6 +3900,30 @@ class TestSummaryWireShape:
         assert kept[0].dynamic_ref == 'sys-odd-1'
 
     @pytest.mark.anyio
+    async def test_triggered_compaction_preserves_dynamic_system_prompt_with_the_prefix(self):
+        comp = SummarizingCompaction(model='test:m', max_messages=3, keep_messages=1, preserve_first_user_message=False)
+        dynamic = SystemPromptPart(content=f'{_SUMMARY_PREFIX}live instruction', dynamic_ref='sys-live-1')
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[dynamic]),
+            _user('first'),
+            _assistant('reply'),
+            _user('second'),
+            _assistant('tail'),
+        ]
+        rc = _make_request_context(messages)
+        summary_agent = _patched_summary_agent('COMPACTED')
+
+        with patch('pydantic_ai.Agent', return_value=summary_agent):
+            result = await comp.before_model_request(_make_ctx(), rc)
+
+        prompt = summary_agent.run.call_args.args[0]
+        assert 'System: Summary of previous conversation:\n\nlive instruction' in prompt
+        assert '<previous-summary>' not in prompt
+        first = result.messages[0]
+        assert isinstance(first, ModelRequest)
+        assert [part for part in first.parts if isinstance(part, SystemPromptPart)] == [dynamic]
+
+    @pytest.mark.anyio
     async def test_legacy_summary_history_maps_to_one_leading_system_message(self):
         # A history an older release persisted, still under the trigger: the normalization
         # alone must keep the request sendable on a single-system backend.

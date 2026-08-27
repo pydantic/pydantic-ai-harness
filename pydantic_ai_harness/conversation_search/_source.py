@@ -58,7 +58,7 @@ def _is_summary_part(part: ModelRequestPart) -> bool:
         return not isinstance(part.content, str) and any(
             isinstance(item, TextContent) and item.metadata == SUMMARY_METADATA for item in part.content
         )
-    return isinstance(part, SystemPromptPart) and part.content.startswith(SUMMARY_PREFIX)
+    return isinstance(part, SystemPromptPart) and part.dynamic_ref is None and part.content.startswith(SUMMARY_PREFIX)
 
 
 @runtime_checkable

@@ -195,7 +195,7 @@ def _format_request_part(part: ModelRequestPart, *, truncate: bool) -> str | Non
         content = part.content
         # Defensive for sources that do not filter compaction artifacts;
         # `SnapshotHistorySource` already excludes them from the corpus.
-        if content.startswith(SUMMARY_PREFIX):
+        if part.dynamic_ref is None and content.startswith(SUMMARY_PREFIX):
             return '[Compaction summary]'
         if truncate:
             content = content[:200]

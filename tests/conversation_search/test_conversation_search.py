@@ -185,6 +185,25 @@ class TestSnapshotHistorySource:
         assert history[0] == lookalike
         assert 'ONYX' in await _search(SnapshotHistorySource(store), 'ONYX')
 
+    async def test_dynamic_system_prompt_with_summary_prefix_stays_in_the_corpus(self) -> None:
+        store = InMemoryStepStore()
+        dynamic = ModelRequest(
+            parts=[
+                SystemPromptPart(
+                    content='Summary of previous conversation:\n\nlive ZEBRA instruction',
+                    dynamic_ref='sys-live-1',
+                )
+            ]
+        )
+        await _seed_run(store, 'r1', [dynamic, _user('carry on')])
+
+        source = SnapshotHistorySource(store)
+        history = await source.run_history(run_id='r1')
+        rendered = await _search(source, 'ZEBRA')
+        assert history[0] == dynamic
+        assert 'live ZEBRA instruction' in rendered
+        assert '[Compaction summary]' not in rendered
+
     async def test_interrupted_snapshots_stay_out_of_the_corpus(self) -> None:
         store = InMemoryStepStore()
         await store.register_run(RunRecord(run_id='r1'))

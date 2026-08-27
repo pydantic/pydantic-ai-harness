@@ -175,9 +175,7 @@ def _format_messages(messages: Sequence[ModelMessage], *, skip_previous_summary:
                     if skip_previous_summary and is_summary_part(part):
                         continue
                     lines.append(f'User: {_user_prompt_text(part)}')
-                elif isinstance(part, SystemPromptPart) and not (
-                    skip_previous_summary and part.content.startswith(_SUMMARY_PREFIX)
-                ):
+                elif isinstance(part, SystemPromptPart) and not (skip_previous_summary and is_summary_part(part)):
                     lines.append(f'System: {part.content}')
                 elif isinstance(part, ToolReturnPart):
                     content_str = str(part.content)[:500]
@@ -213,7 +211,7 @@ def _extract_system_prompts(messages: list[ModelMessage]) -> list[SystemPromptPa
         if not isinstance(msg, ModelRequest):
             break
         for part in msg.parts:
-            if isinstance(part, SystemPromptPart) and not part.content.startswith(_SUMMARY_PREFIX):
+            if isinstance(part, SystemPromptPart) and not is_summary_part(part):
                 parts.append(part)
             elif is_pinned(part) or is_receipt_part(part):
                 continue

@@ -89,7 +89,7 @@ def summary_text(part: ModelRequestPart) -> str | None:
     """
     if isinstance(part, UserPromptPart):
         return _marked_summary_text(part)
-    if isinstance(part, SystemPromptPart) and part.content.startswith(SUMMARY_PREFIX):
+    if isinstance(part, SystemPromptPart) and part.dynamic_ref is None and part.content.startswith(SUMMARY_PREFIX):
         return part.content[len(SUMMARY_PREFIX) :]
     return None
 
