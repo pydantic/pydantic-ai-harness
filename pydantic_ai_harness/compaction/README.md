@@ -378,7 +378,9 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
 running agent's model. Its nested summary run inherits the parent usage limits and reserves one request from a
-finite request limit for the pending parent request.
+finite request limit for the pending parent request. Pass `model_settings` to give the dedicated summary call
+settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
+without mutating the model or the settings dictionary.
 
 The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch
 the summary as it is written, or pass `drain_summary_events` to take the streaming request path
