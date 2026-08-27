@@ -237,13 +237,13 @@ def _is_kept_user_message(message: ModelRequest) -> bool:
     return message.metadata is not None and message.metadata.get(_KEPT_USER_MESSAGE_METADATA) is True
 
 
-async def drain_events(
+async def drain_summary_events(
     _ctx: RunContext[object],
     events: AsyncIterable[AgentStreamEvent],
 ) -> None:
     """An `event_stream_handler` that consumes summary events and yields nothing to the caller.
 
-    Pass this as `SummarizingCompaction(event_stream_handler=drain_events)` when the summary
+    Pass this as `SummarizingCompaction(event_stream_handler=drain_summary_events)` when the summary
     endpoint requires a streaming request but the events themselves are not wanted. Supplying
     any handler selects the streaming request path; this one just discards what it receives.
     """
@@ -295,7 +295,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     model-streaming events surface to the caller.
 
     Setting it also selects the streaming request path, which is what a summarizer endpoint
-    that rejects non-streaming requests needs; pass `drain_events` to take that path without
+    that rejects non-streaming requests needs; pass `drain_summary_events` to take that path without
     handling the events. Left `None`, the summary request is non-streaming, which is what an
     endpoint that rejects streaming requests needs. The handler receives the summary run's own
     `RunContext`, never the outer run's, and the outer `Agent.run(...)` handler is not inherited.

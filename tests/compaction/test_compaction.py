@@ -51,7 +51,7 @@ from pydantic_ai_harness.compaction import (
     TieredCompaction,
     TranscriptHandleProvider,
     WarnNearLimits,
-    drain_events,
+    drain_summary_events,
     estimate_context_tokens,
     estimate_token_count,
     is_pinned,
@@ -3870,7 +3870,7 @@ class TestStructuralFeaturesThroughAgent:
                     max_messages=2,
                     keep_messages=1,
                     preserve_first_user_message=False,
-                    event_stream_handler=drain_events,
+                    event_stream_handler=drain_summary_events,
                 )
             ],
         )
