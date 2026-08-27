@@ -9,15 +9,16 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer
-from pydantic_ai import Agent
+from pydantic_ai import Agent, ToolDefinition, capture_run_messages
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelAPIError
+from pydantic_ai.exceptions import ModelAPIError, ModelRetry
 from pydantic_ai.messages import (
     LoadCapabilityCallPart,
     ModelMessage,
     ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
+    RetryPromptPart,
     SystemPromptPart,
     TextContent,
     TextPart,
@@ -46,6 +47,7 @@ from pydantic_ai_harness.compaction import (
     SummarizingCompaction,
     TieredCompaction,
     TranscriptHandleProvider,
+    TrimRetryHistory,
     WarnNearLimits,
     estimate_context_tokens,
     estimate_token_count,
@@ -113,7 +115,9 @@ def _make_ctx(
     return _FakeCtx(usage=usage, usage_limits=usage_limits)
 
 
-def _make_request_context(messages: list[ModelMessage], model: Model | None = None) -> ModelRequestContext:
+def _make_request_context(
+    messages: list[ModelMessage], model: Model | None = None, output_tool_name: str | None = None
+) -> ModelRequestContext:
     """Build a ModelRequestContext wrapping the given messages.
 
     *model* is the model the request would be sent to. Pass the context's own model to
@@ -129,7 +133,9 @@ def _make_request_context(messages: list[ModelMessage], model: Model | None = No
         model=model if model is not None else _FakeModel(),  # type: ignore[arg-type]
         messages=messages,
         model_settings=None,
-        model_request_parameters=ModelRequestParameters(),
+        model_request_parameters=ModelRequestParameters(
+            output_tools=[] if output_tool_name is None else [ToolDefinition(name=output_tool_name)]
+        ),
     )
 
 
@@ -147,6 +153,214 @@ def _tool_call(tool_name: str, call_id: str) -> ModelResponse:
 
 def _tool_return(tool_name: str, call_id: str, content: str = 'ok') -> ModelRequest:
     return ModelRequest(parts=[ToolReturnPart(tool_name=tool_name, content=content, tool_call_id=call_id)])
+
+
+def _output_retry(feedback: str) -> ModelRequest:
+    return ModelRequest(parts=[RetryPromptPart(content=feedback)])
+
+
+async def _run_trim_retry_history(
+    capability: TrimRetryHistory[Any], request_context: ModelRequestContext
+) -> tuple[list[ModelMessage], ModelResponse]:
+    """Run the model wrapper and return the messages received by its handler."""
+    seen_messages: list[ModelMessage] | None = None
+
+    async def handler(context: ModelRequestContext) -> ModelResponse:
+        nonlocal seen_messages
+        seen_messages = context.messages
+        return ModelResponse(parts=[TextPart(content='ok')])
+
+    response = await capability.wrap_model_request(_make_ctx(), request_context=request_context, handler=handler)
+    assert seen_messages is not None
+    return seen_messages, response
+
+
+def _text_and_retry_contents(messages: list[ModelMessage]) -> list[str]:
+    """Return assistant text and string retry feedback in history order."""
+    contents: list[str] = []
+    for message in messages:
+        for part in message.parts:
+            if isinstance(part, TextPart):
+                contents.append(part.content)
+            elif isinstance(part, RetryPromptPart) and isinstance(part.content, str):
+                contents.append(part.content)
+    return contents
+
+
+class TestTrimRetryHistory:
+    @pytest.mark.anyio
+    async def test_keeps_original_context_and_newest_retry_pair(self):
+        task = ModelRequest(parts=[SystemPromptPart(content='system'), UserPromptPart(content='task')])
+        invalid_one = _assistant('invalid-one')
+        retry_one = _output_retry('feedback-one')
+        invalid_two = _assistant('invalid-two')
+        retry_two = _output_retry('feedback-two')
+        invalid_three = _assistant('invalid-three')
+        retry_three = _output_retry('feedback-three')
+        messages: list[ModelMessage] = [
+            task,
+            invalid_one,
+            retry_one,
+            invalid_two,
+            retry_two,
+            invalid_three,
+            retry_three,
+        ]
+        request_context = _make_request_context(messages)
+
+        sent_messages, response = await _run_trim_retry_history(TrimRetryHistory(), request_context)
+
+        assert response.parts == [TextPart(content='ok')]
+        assert sent_messages == [task, invalid_three, retry_three]
+        assert request_context.messages is messages
+        assert sent_messages is not messages
+        assert messages == [task, invalid_one, retry_one, invalid_two, retry_two, invalid_three, retry_three]
+
+    @pytest.mark.anyio
+    async def test_compacts_configured_output_tool_retries(self):
+        task = _user('task')
+        old_response = ModelResponse(parts=[ToolCallPart('result', {'value': 'old'}, tool_call_id='old-call')])
+        old_retry = ModelRequest(
+            parts=[RetryPromptPart(content='old feedback', tool_name='result', tool_call_id='old-call')]
+        )
+        newest_response = ModelResponse(parts=[ToolCallPart('result', {'value': 'new'}, tool_call_id='new-call')])
+        newest_retry = ModelRequest(
+            parts=[RetryPromptPart(content='new feedback', tool_name='result', tool_call_id='new-call')]
+        )
+        messages: list[ModelMessage] = [task, old_response, old_retry, newest_response, newest_retry]
+        request_context = _make_request_context(messages, output_tool_name='result')
+
+        sent_messages, _ = await _run_trim_retry_history(TrimRetryHistory(), request_context)
+
+        assert sent_messages == [task, newest_response, newest_retry]
+        assert sent_messages[1] is newest_response
+        assert sent_messages[2] is newest_retry
+        assert request_context.messages is messages
+        assert sent_messages is not messages
+        assert messages == [task, old_response, old_retry, newest_response, newest_retry]
+
+    @pytest.mark.anyio
+    async def test_leaves_tool_retry_request_unchanged(self):
+        messages: list[ModelMessage] = [
+            _user('task'),
+            _tool_call('lookup', 'tool-call'),
+            ModelRequest(parts=[RetryPromptPart(content='retry tool', tool_name='lookup')]),
+        ]
+        request_context = _make_request_context(messages, output_tool_name='result')
+
+        sent_messages, _ = await _run_trim_retry_history(TrimRetryHistory(), request_context)
+
+        assert sent_messages is messages
+        assert request_context.messages is messages
+
+    @pytest.mark.anyio
+    async def test_leaves_single_output_retry_pair_unchanged(self):
+        messages: list[ModelMessage] = [_user('task'), _assistant('invalid'), _output_retry('feedback')]
+        request_context = _make_request_context(messages)
+
+        sent_messages, _ = await _run_trim_retry_history(TrimRetryHistory(), request_context)
+
+        assert sent_messages is messages
+        assert request_context.messages is messages
+
+    @pytest.mark.anyio
+    async def test_keeps_legitimate_history_before_retry_sequence(self):
+        task = _user('task')
+        prior_response = _assistant('prior-response')
+        follow_up = _user('follow-up')
+        newest_response = _assistant('newest-invalid')
+        newest_retry = _output_retry('newest-feedback')
+        messages: list[ModelMessage] = [
+            task,
+            prior_response,
+            follow_up,
+            _assistant('old-invalid'),
+            _output_retry('old-feedback'),
+            newest_response,
+            newest_retry,
+        ]
+        request_context = _make_request_context(messages)
+
+        sent_messages, _ = await _run_trim_retry_history(TrimRetryHistory(), request_context)
+
+        assert sent_messages == [task, prior_response, follow_up, newest_response, newest_retry]
+
+    @pytest.mark.anyio
+    async def test_leaves_ordinary_follow_up_request_unchanged(self):
+        messages: list[ModelMessage] = [_assistant('prior-response'), _user('follow-up')]
+        request_context = _make_request_context(messages)
+
+        sent_messages, _ = await _run_trim_retry_history(TrimRetryHistory(), request_context)
+
+        assert sent_messages is messages
+        assert request_context.messages is messages
+
+    @pytest.mark.anyio
+    async def test_same_instance_is_stateless_across_requests(self):
+        capability = TrimRetryHistory()
+        task = _user('task')
+
+        for label in ('first', 'second'):
+            newest = _assistant(f'{label}-newest')
+            messages: list[ModelMessage] = [
+                task,
+                _assistant(f'{label}-old'),
+                _output_retry(f'{label}-old-feedback'),
+                newest,
+                _output_retry(f'{label}-newest-feedback'),
+            ]
+            sent_messages, _ = await _run_trim_retry_history(capability, _make_request_context(messages))
+            assert sent_messages == [task, newest, messages[-1]]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize('anyio_backend', ['asyncio'])
+    async def test_agent_trims_requests_without_losing_run_history(self, anyio_backend: str):
+        assert anyio_backend == 'asyncio'
+        model_requests: list[list[ModelMessage]] = []
+
+        def model_function(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            model_requests.append(list(messages))
+            attempt = len(model_requests)
+            content = 'valid' if attempt == 3 else f'invalid-{attempt}'
+            return ModelResponse(parts=[TextPart(content=content)])
+
+        agent: Agent[None, str] = Agent(
+            FunctionModel(model_function),
+            capabilities=[TrimRetryHistory()],
+            output_type=str,
+            retries=2,
+        )
+        validation_attempt = 0
+
+        @agent.output_validator
+        def require_valid(value: str) -> str:
+            nonlocal validation_attempt
+            validation_attempt += 1
+            if validation_attempt < 3:
+                raise ModelRetry(f'feedback-{validation_attempt}')
+            return value
+
+        with capture_run_messages() as captured_messages:
+            result = await agent.run('task')
+
+        assert result.output == 'valid'
+        assert [len(messages) for messages in model_requests] == [1, 3, 3]
+        assert [_text_and_retry_contents(messages) for messages in model_requests] == [
+            [],
+            ['invalid-1', 'feedback-1'],
+            ['invalid-2', 'feedback-2'],
+        ]
+
+        complete_history = result.all_messages()
+        assert captured_messages == complete_history
+        assert len(complete_history) == 6
+        assert _text_and_retry_contents(complete_history) == [
+            'invalid-1',
+            'feedback-1',
+            'invalid-2',
+            'feedback-2',
+            'valid',
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -969,6 +1183,7 @@ class TestExports:
             'SummarizingCompaction',
             'TieredCompaction',
             'FallbackCompaction',
+            'TrimRetryHistory',
         ]
         for name in names:
             assert hasattr(compaction, name)
