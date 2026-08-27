@@ -46,8 +46,9 @@ from pydantic_ai.output import OutputDataT
 from pydantic_ai.run import AgentRunResultEvent
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
-from pydantic_ai.usage import RunUsage, UsageLimits
+from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 
+from pydantic_ai_harness.compaction._context_window import DEFAULT_CONTEXT_WINDOW, resolve_context_window
 from pydantic_ai_harness.experimental.acp._content import PromptContentBlock, prompt_blocks_to_user_content
 from pydantic_ai_harness.experimental.acp._permission import (
     PermissionPolicy,
@@ -596,6 +597,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         deferred_results: DeferredToolResults | None = None
         run_input: list[UserContent] | None = user_content
         output_type = [self._agent.output_type, DeferredToolRequests]
+        final_result = None  # Track the final run result for context usage reporting
+        final_resolved_model = None  # Track the resolved model used in the final run pass
         turn = _TurnState(
             conn=conn, session_id=state.session_id, cwd=state.cwd, approval_names=self._approval_tool_names(config)
         )
@@ -608,6 +611,10 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         try:
             while True:
                 result = None
+                # Resolve the model once per run pass to ensure consistency between the run and usage reporting.
+                # model_resolver is caller-supplied and not required to be pure (may rotate endpoints/models),
+                # so we must use the exact same resolved model for both run_stream_events and _get_max_context_tokens.
+                resolved_model = self._resolve_run_model(state.model)
                 async with self._agent.run_stream_events(
                     run_input,
                     message_history=history,
@@ -619,7 +626,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     # agent's own model, never mutating the shared agent. A `model_resolver` (if
                     # given) maps the advertised id to a pre-built `Model` for ids `infer_model`
                     # can't parse.
-                    model=self._resolve_run_model(state.model),
+                    model=resolved_model,
                     usage_limits=self._usage_limits,
                 ) as stream:
                     event: AgentStreamEvent | AgentRunResultEvent[object]
@@ -630,6 +637,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                             await self._emit_event(turn, event)
 
                 assert result is not None, 'run_stream_events always yields a final result event'
+                final_result = result  # Save the final result for context usage reporting
+                final_resolved_model = resolved_model  # Save the model used in the final run pass
                 history = result.all_messages()
                 usage += result.usage  # pydantic-ai 2.0: `usage` is a property, not a method
                 output = result.output
@@ -683,6 +692,16 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     'persisting ACP session %s was cancelled; durable state is now behind', state.session_id
                 )
                 stop_reason = 'cancelled'
+
+        # Send usage_update notification to inform the client about context usage.
+        # Use the exact resolved model from the final run pass (not re-resolving state.model, since
+        # model_resolver may be impure and return different results across calls).
+        # Use final_result.response.usage (the final request's token counts) rather than result.usage
+        # (which aggregates all model requests in the run, including tool-call passes that re-send context).
+        # final_resolved_model may be None when using the agent's default model, which _get_max_context_tokens handles.
+        if final_result is not None:
+            await self._send_usage_update(turn.session_id, final_result.response.usage, final_resolved_model)
+
         return schema.PromptResponse(stop_reason=stop_reason, usage=_to_acp_usage(usage))
 
     async def _fail_outstanding_tool_calls(self, turn: _TurnState) -> None:
@@ -703,6 +722,52 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         """Send one `session/update` to the client, recording it for the transcript."""
         turn.updates.append(update)
         await turn.conn.session_update(session_id=turn.session_id, update=update)
+
+    async def _send_usage_update(
+        self, session_id: str, request_usage: RequestUsage, run_model: Model | str | None
+    ) -> None:
+        """Send a `usage_update` session notification with current context usage.
+
+        Informs ACP clients (Zed, etc.) of the context token count and maximum window size so they can
+        render a usage percentage. Skipped when no connection is available. The notification is not
+        recorded in the transcript (fire-and-forget). Failures, including cancellation after the
+        turn has committed, are ignored.
+
+        Args:
+            session_id: The session identifier.
+            request_usage: Token usage from the final model request (result.response.usage), not the
+                run-wide aggregate which double-counts context across multiple requests.
+            run_model: The actual model used for the final run pass (pre-resolved to avoid impure
+                model_resolver returning different results across calls).
+        """
+        conn = self._conn
+        if conn is None:
+            return
+        # Total tokens = input + output; input_tokens already includes cache read/write tokens.
+        total_tokens = request_usage.input_tokens + request_usage.output_tokens
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await conn.session_update(
+                session_id=session_id,
+                update=schema.UsageUpdate(
+                    session_update='usage_update',
+                    used=total_tokens,
+                    size=self._get_max_context_tokens(run_model),
+                ),
+            )
+
+    def _get_max_context_tokens(self, run_model: Model | str | None) -> int:
+        """Return the maximum context window size for the given model.
+
+        Uses DEFAULT_CONTEXT_WINDOW (200k) as fallback when the model cannot be resolved.
+
+        Args:
+            run_model: The model used for the run. None falls back to the agent's default model.
+        """
+        model = run_model if run_model is not None else self._agent.model
+        if model is None:
+            return DEFAULT_CONTEXT_WINDOW
+        window = resolve_context_window(model)
+        return window if window is not None else DEFAULT_CONTEXT_WINDOW
 
     async def _emit_text(self, turn: _TurnState, text: str, *, thought: bool) -> None:
         """Stream text to the client as one or more chunked `session/update` notifications."""
