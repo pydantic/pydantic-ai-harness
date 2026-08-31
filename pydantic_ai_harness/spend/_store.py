@@ -274,6 +274,11 @@ class InMemorySpendStore:
 
     async def get(self, key: str) -> Spent:
         """What `key` has accumulated. Deprecated in favour of `get_many`, removed in 0.28.0."""
+        warnings.warn(
+            '`InMemorySpendStore.get` is deprecated in favour of `get_many`; the single-key pair is removed in 0.28.0.',
+            HarnessDeprecationWarning,
+            stacklevel=2,
+        )
         return (await self.get_many([key]))[key]
 
     async def add(
@@ -287,6 +292,11 @@ class InMemorySpendStore:
         ttl: timedelta | None,
     ) -> Spent:
         """Add to `key` and return the result. Deprecated in favour of `add_many`, removed in 0.28.0."""
+        warnings.warn(
+            '`InMemorySpendStore.add` is deprecated in favour of `add_many`; the single-key pair is removed in 0.28.0.',
+            HarnessDeprecationWarning,
+            stacklevel=2,
+        )
         entry = SpendEntry(key=key, usd=usd, tokens=tokens, requests=requests, unpriced=unpriced, ttl=ttl)
         return (await self.add_many([entry]))[key]
 
