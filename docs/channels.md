@@ -16,8 +16,8 @@ Channels are useful for:
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
-This quickstart uses Anthropic. Install the provider extra and set
-`ANTHROPIC_API_KEY` before running it:
+These examples use Anthropic. Install the provider extra and set
+`ANTHROPIC_API_KEY` before running them:
 
 ```bash
 uv add "pydantic-ai-harness[anthropic]" starlette uvicorn
@@ -89,6 +89,73 @@ The lifespan and route must use the same process and async event-loop thread.
 Route each Slack app installation to exactly one live host process. Terminate TLS and limit
 request body size in the ASGI server or reverse proxy.
 
+## WhatsApp: messages to a business number
+
+Use WhatsApp when customers or teammates should reach the agent through a
+WhatsApp Business phone number.
+
+Create a Meta app and WhatsApp Business phone number, then set a System User
+access token, phone number id, app secret, and a private webhook verification
+token. The access token needs `whatsapp_business_messaging` for the phone number.
+Replace `15551234567` below with the sender's international phone number
+without `+`, matching the webhook `from` value.
+
+```python
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import anyio
+from pydantic_ai import Agent
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
+
+from pydantic_ai_harness.channels import ChannelHost, WebhookRequest
+from pydantic_ai_harness.channels.whatsapp import WhatsAppChannel
+
+agent = Agent('anthropic:claude-fable-5')
+whatsapp = WhatsAppChannel(
+    os.environ['WHATSAPP_ACCESS_TOKEN'],
+    os.environ['WHATSAPP_PHONE_NUMBER_ID'],
+    os.environ['META_APP_SECRET'],
+    os.environ['WHATSAPP_VERIFY_TOKEN'],
+)
+whatsapp_host = ChannelHost(agent, whatsapp, allowed_senders={'15551234567'})
+
+
+async def receive_whatsapp(request: Request) -> PlainTextResponse:
+    result = await whatsapp.handle_webhook(
+        WebhookRequest(request.method, request.headers, request.query_params, await request.body())
+    )
+    return PlainTextResponse(result.body, status_code=result.status_code)
+
+
+@asynccontextmanager
+async def whatsapp_lifespan(_app: Starlette) -> AsyncIterator[None]:
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(whatsapp_host.serve)
+        yield
+        tasks.cancel_scope.cancel()
+
+
+app = Starlette(
+    routes=[Route('/whatsapp/webhook', receive_whatsapp, methods=['GET', 'POST'])],
+    lifespan=whatsapp_lifespan,
+)
+```
+
+Save this as `app.py`, run `uvicorn app:app`, and register `/whatsapp/webhook`
+and the verification token in Meta. Subscribe the route to `messages`.
+
+The task group owns the channel service and waits for cancellation and cleanup during shutdown.
+The lifespan and route must use the same process and async event-loop thread.
+Route each WhatsApp phone number to exactly one live host process. Terminate TLS and limit
+request body size in the ASGI server or reverse proxy.
+The default Graph API version is `v26.0`; pass `api_version` for another
+supported version.
+
 ## How channels fit Pydantic AI
 
 Each inbound message starts an ordinary `Agent.run()`. The agent keeps its
@@ -132,18 +199,24 @@ chat. If sending a reply fails, the host logs the failure and continues serving.
 History remains saved after a successful run even when delivery cannot be
 confirmed.
 
+For message-bearing requests, both webhook adapters authenticate and enqueue
+before returning HTTP 200. They return HTTP 503 when not open or when their
+bounded queue is full, so the provider can retry. Each queue and its 10,000-id
+duplicate window are process-local. A restart can reprocess a redelivery or lose
+an acknowledged message that was still queued.
+
 `SlackChannel` retries one `chat.postMessage` call after an HTTP 429 with a
 valid non-negative `Retry-After` of at most 60 seconds. Longer delays fail the
 delivery instead of holding that conversation's turn slot. It does not retry
 timeouts or other ambiguous failures because Slack may already have accepted
 the message. If a later text chunk fails, earlier chunks remain visible.
 
-The webhook handler verifies and enqueues a request before returning HTTP 200.
-It returns HTTP 503 while the channel is opening or when its bounded queue is
-full, allowing Slack to retry the event. Duplicate suppression covers the
-10,000 most recently accepted `event_id` values. The queue and duplicate window
-are process-local. A restart can reprocess a redelivered event, and can lose an
-acknowledged event that was still waiting in the queue.
+WhatsApp Cloud API limits outbound free-form text to the 24-hour customer
+service window. It surfaces error 131047 when that window is closed; it does not
+substitute an approved template. It retries one response carrying an explicit
+Cloud API throttling code after `retry_delay`, but does not retry network
+timeouts. If a later text chunk fails, earlier chunks remain visible. Meta may
+batch messages and retry failed webhook deliveries for up to seven days.
 
 `serve()` runs until it is cancelled or the adapter ends. It owns every turn in
 an AnyIO task group, so no turn task outlives it. Cancellation closes the
@@ -163,6 +236,11 @@ Slack direct messages are enabled by default. App mentions are accepted only
 from `allowed_channel_ids`. The adapter also drops events from other workspaces,
 bot-authored messages, edits, messages with a subtype (including file shares),
 and unaddressed channel messages.
+
+WhatsApp POST signatures are checked over the exact request bytes with the Meta
+app secret. The GET handshake uses the separate verification token. The adapter
+accepts text for its configured phone number and drops delivery statuses,
+non-text messages, and updates for other numbers.
 
 ## Adapters and stores
 
@@ -185,6 +263,10 @@ multiple live hosts safe without external per-conversation serialization.
 The Slack adapter does not include Socket Mode, multi-workspace OAuth routing,
 files, reactions, message edits, or messages in channels that do not mention
 the bot. Socket Mode requires a WebSocket client and can be added separately.
+
+The WhatsApp adapter uses the official Cloud API. It does not include media,
+message templates, delivery-status callbacks, embedded signup, or the unofficial
+browser automation used by `whatsapp-web.js`.
 
 The host does not define media, reactions, typing indicators, streaming edits,
 tool approvals, or provider authentication. Adapters add only the provider
@@ -209,3 +291,5 @@ behavior they document.
 ::: pydantic_ai_harness.channels.WebhookResponse
 
 ::: pydantic_ai_harness.channels.slack.SlackChannel
+
+::: pydantic_ai_harness.channels.whatsapp.WhatsAppChannel
