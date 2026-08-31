@@ -33,11 +33,13 @@ dependencies = [
     # 2.33.0 is the release whose Anthropic provider is built on HTTPX2 and raises its own
     # `anthropic` floor to 1.0.0 to match. Below it, slim hands the SDK a client of the other
     # kind, and the pair only type-checks when both halves come from the same generation.
+    # 2.36.0 adds the declarative `@durable_operation` API and the public durable-operation
+    # backends the Absurd capability is built on.
     # Earlier floors are subsumed by it: the compaction estimator and the conversation-search
     # indexer have to recognise `ToolAvailabilityDeltaPart` (2.23.0), the one `ModelRequestPart`
     # carrying no `content`, so code walking request parts raises `AttributeError` rather than
     # ignoring it (#577); `CodeMode` reads `ModelRequestParameters.revealed_tool_names` (2.22.0).
-    "pydantic-ai-slim>=2.33.0",
+    "pydantic-ai-slim>=2.36.0",
 ]
 
 [project.optional-dependencies]
@@ -111,6 +113,9 @@ prompt-injection-defender = [
 prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
+absurd = [
+    "absurd-sdk>=0.4.0",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'
@@ -131,13 +136,15 @@ dev = [
     'logfire[httpx]>=4.31.0',
     'dirty-equals>=0.9.0',
     'inline-snapshot>=0.32.5',
-    "pydantic-ai-slim[anthropic]",
-    "pydantic-ai-slim[openai]",
-    "pydantic-ai-slim[spec]>=2.18.0",
     "pytest-examples>=0.0.18",
     "pytest-recording>=0.13.4",
     "mongomock-motor>=0.0.36",
     "redis>=6.0.0",
+    "testcontainers[postgres]>=4.15",
+    "pydantic-ai-slim[anthropic]",
+    "pydantic-ai-slim[mcp]>=2.28.0",
+    "pydantic-ai-slim[openai]",
+    "pydantic-ai-slim[spec]>=2.18.0",
 ]
 lint = [
     'ruff>=0.14',
@@ -206,6 +213,9 @@ convention = 'google'
 # don't format python in docstrings, pytest-examples takes care of it
 docstring-code-format = false
 quote-style = 'single'
+
+[tool.codespell]
+skip = 'tests/absurd/fixtures/absurd.sql'
 
 [tool.pyright]
 pythonVersion = '3.10'
