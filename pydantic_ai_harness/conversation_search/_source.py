@@ -21,6 +21,7 @@ search layer.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 from pydantic_ai.messages import (
@@ -48,15 +49,22 @@ snapshots taken after compaction must contribute only what the earlier snapshots
 already carry.
 """
 
-SUMMARY_METADATA = {'pydantic-ai-harness.compaction.summary.v1': True}
+SUMMARY_METADATA_KEY = 'pydantic-ai-harness.compaction.summary.v1'
+"""Request-level copy of the marker used when a UI adapter flattens `TextContent`."""
+
+SUMMARY_METADATA = {SUMMARY_METADATA_KEY: True}
 """Mirror of the model-invisible marker compaction stamps its user-turn summaries with."""
 
 
-def _is_summary_part(part: ModelRequestPart) -> bool:
+def _is_summary_part(part: ModelRequestPart, *, message_metadata: Mapping[str, object] | None = None) -> bool:
     """Mirror of compaction's summary identity for the shapes this source can see."""
     if isinstance(part, UserPromptPart):
-        return not isinstance(part.content, str) and any(
-            isinstance(item, TextContent) and item.metadata == SUMMARY_METADATA for item in part.content
+        if not isinstance(part.content, str):
+            return any(isinstance(item, TextContent) and item.metadata == SUMMARY_METADATA for item in part.content)
+        return (
+            message_metadata is not None
+            and message_metadata.get(SUMMARY_METADATA_KEY) is True
+            and part.content.startswith(SUMMARY_PREFIX)
         )
     return isinstance(part, SystemPromptPart) and part.dynamic_ref is None and part.content.startswith(SUMMARY_PREFIX)
 
@@ -129,7 +137,7 @@ def is_summary_artifact(message: ModelMessage) -> bool:
     """Return whether a message is a compaction summary artifact (never indexed)."""
     if not isinstance(message, ModelRequest):
         return False
-    return any(_is_summary_part(part) for part in message.parts)
+    return any(_is_summary_part(part, message_metadata=message.metadata) for part in message.parts)
 
 
 class SnapshotHistorySource:

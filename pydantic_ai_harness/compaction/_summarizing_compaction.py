@@ -52,7 +52,7 @@ from pydantic_ai_harness.compaction._shared import (
 from pydantic_ai_harness.compaction._summary import (
     SUMMARY_PREFIX,
     is_summary_part,
-    make_summary_part,
+    make_summary_message,
     normalize_legacy_summaries,
     summary_text,
 )
@@ -172,10 +172,12 @@ def _format_messages(messages: Sequence[ModelMessage], *, skip_previous_summary:
                 continue
             for part in msg.parts:
                 if isinstance(part, UserPromptPart):
-                    if skip_previous_summary and is_summary_part(part):
+                    if skip_previous_summary and is_summary_part(part, message_metadata=msg.metadata):
                         continue
                     lines.append(f'User: {_user_prompt_text(part)}')
-                elif isinstance(part, SystemPromptPart) and not (skip_previous_summary and is_summary_part(part)):
+                elif isinstance(part, SystemPromptPart) and not (
+                    skip_previous_summary and is_summary_part(part, message_metadata=msg.metadata)
+                ):
                     lines.append(f'System: {part.content}')
                 elif isinstance(part, ToolReturnPart):
                     content_str = str(part.content)[:500]
@@ -211,7 +213,7 @@ def _extract_system_prompts(messages: list[ModelMessage]) -> list[SystemPromptPa
         if not isinstance(msg, ModelRequest):
             break
         for part in msg.parts:
-            if isinstance(part, SystemPromptPart) and not is_summary_part(part):
+            if isinstance(part, SystemPromptPart) and not is_summary_part(part, message_metadata=msg.metadata):
                 parts.append(part)
             elif is_pinned(part) or is_receipt_part(part):
                 continue
@@ -231,7 +233,7 @@ def _extract_previous_summary(messages: list[ModelMessage]) -> str | None:
         if not isinstance(msg, ModelRequest):
             continue
         for part in reversed(msg.parts):
-            if (text := summary_text(part)) is not None:
+            if (text := summary_text(part, message_metadata=msg.metadata)) is not None:
                 return _without_bridge_prefix(text)
     return None
 
@@ -449,8 +451,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         summary = await self._summarize(to_summarize, ctx, previous_summary=previous_summary)
         summary = self._maybe_bridge_prefix(summary, messages, ctx)
 
-        summary_part = make_summary_part(summary)
-        summary_message = ModelRequest(parts=[*system_parts, summary_part])
+        summary_message = make_summary_message(summary, system_parts)
 
         extra: list[ModelMessage] = []
         if self.keep_user_messages:
@@ -506,7 +507,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
                 if isinstance(part, UserPromptPart)
                 and not is_pinned(part)
                 and not is_receipt_part(part)
-                and not is_summary_part(part)
+                and not is_summary_part(part, message_metadata=msg.metadata)
             ]
             if not user_parts:
                 continue

@@ -572,6 +572,21 @@ class TestGoalReanchor:
         assert 'migrate the legacy schemas' in text
         assert 'Summary of previous conversation' not in text
 
+    def test_skips_summary_flattened_by_ui_adapter(self) -> None:
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[UserPromptPart('Summary of previous conversation:\n\nflattened artifact')],
+                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+            ),
+            ModelRequest(parts=[UserPromptPart('the surviving first request')]),
+        ]
+
+        text = GoalReanchor()(_ctx(messages=messages))
+
+        assert text is not None
+        assert 'the surviving first request' in text
+        assert 'flattened artifact' not in text
+
     def test_anchors_on_user_text_that_opens_with_the_summary_prefix(self) -> None:
         # Identity rides the marker, so a genuine first turn starting with the literal
         # sentence is the goal, not an artifact to skip.

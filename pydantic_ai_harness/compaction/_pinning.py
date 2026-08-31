@@ -61,7 +61,9 @@ def _leading_context_len(messages: Sequence[ModelMessage]) -> int:
         if (
             isinstance(msg, ModelRequest)
             and msg.parts
-            and all(isinstance(p, SystemPromptPart) or is_summary_part(p) for p in msg.parts)
+            and all(
+                isinstance(p, SystemPromptPart) or is_summary_part(p, message_metadata=msg.metadata) for p in msg.parts
+            )
         ):
             count += 1
         else:

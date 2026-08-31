@@ -352,11 +352,12 @@ the summary is the only system-voice content in the history; a history carrying 
 `SystemPromptPart`s (dynamic system prompts) can still map to several leading system messages,
 which is core's profile-flag territory (`openai_chat_supports_multiple_system_messages`).
 
-Summary identity rides a model-invisible `TextContent.metadata` marker (the same convention
-pinning uses), not the text: a user turn that happens to open with `Summary of previous
-conversation:` is an ordinary user turn everywhere -- rendered, searched, and goal-anchored like
-any other. Only the legacy `SystemPromptPart` shape, which users cannot author, is identified by
-that prefix.
+Summary identity rides model-invisible metadata, not the text. The marker is carried on both the
+`TextContent` and its containing `ModelRequest`, so UI adapters such as Vercel AI can preserve it
+when they flatten structured text to a string. A user turn that happens to open with `Summary of
+previous conversation:` is an ordinary user turn everywhere -- rendered, searched, and
+goal-anchored like any other. Only the legacy `SystemPromptPart` shape, which users cannot author,
+is identified by that prefix.
 
 Histories persisted by earlier releases carry the old system-voice shape and are rewritten to
 the marked user turn on the way through -- in `SummarizingCompaction`, in `TieredCompaction`

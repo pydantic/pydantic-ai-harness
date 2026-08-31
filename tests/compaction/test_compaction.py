@@ -49,6 +49,7 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets._tool_search import parse_discovered_tools
+from pydantic_ai.ui.vercel_ai import VercelAIAdapter
 from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 
 import pydantic_ai_harness
@@ -89,7 +90,7 @@ from pydantic_ai_harness.compaction._summarizing_compaction import (
     _extract_system_prompts,
     _format_messages,
 )
-from pydantic_ai_harness.compaction._summary import make_summary_part
+from pydantic_ai_harness.compaction._summary import make_summary_message, make_summary_part
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
 
 try:
@@ -3922,6 +3923,21 @@ class TestSummaryWireShape:
         roles = await self._wire_roles([*result.messages, _user('continue')])
         assert roles[0] == 'system'
         assert 'system' not in roles[1:], roles
+
+    def test_summary_identity_survives_vercel_ai_round_trip(self):
+        original: list[ModelMessage] = [make_summary_message('Persist this summary.', [])]
+
+        loaded = VercelAIAdapter.load_messages(VercelAIAdapter.dump_messages(original))
+
+        first = loaded[0]
+        assert isinstance(first, ModelRequest)
+        part = first.parts[0]
+        assert isinstance(part, UserPromptPart)
+        assert isinstance(part.content, str)  # Vercel AI flattens `TextContent`.
+        assert _extract_previous_summary(loaded) == 'Persist this summary.'
+        assert 'Summary of previous conversation:' not in _format_messages(loaded, skip_previous_summary=True)
+        actual_user = _user('the actual first request')
+        assert find_first_user_message([*loaded, actual_user]) == actual_user
 
 
 # ---------------------------------------------------------------------------

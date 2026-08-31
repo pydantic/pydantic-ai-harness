@@ -171,6 +171,18 @@ class TestSnapshotHistorySource:
         history = await SnapshotHistorySource(store).run_history(run_id='r1')
         assert history == [original]
 
+    async def test_flattened_summary_uses_request_marker(self) -> None:
+        store = InMemoryStepStore()
+        artifact = ModelRequest(
+            parts=[UserPromptPart(content=f'{_SUMMARY_PREFIX}flattened summary')],
+            metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+        )
+        original = _user('KEEPME original detail')
+        await _seed_run(store, 'r1', [artifact, original])
+
+        history = await SnapshotHistorySource(store).run_history(run_id='r1')
+        assert history == [original]
+
     async def test_user_authored_summary_lookalike_stays_in_the_corpus(self) -> None:
         # The artifact marker is compaction's full literal, blank line included. A
         # developer's own system prompt that merely opens with the same sentence is
@@ -767,6 +779,10 @@ class TestSearchScope:
                     )
                 ]
             ),
+            ModelRequest(
+                parts=[UserPromptPart(content='Summary of previous conversation:\n\nflattened MARKED kiwi context')],
+                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+            ),
         ]
         source = _StubSource({'r1': messages})
 
@@ -776,6 +792,7 @@ class TestSearchScope:
         assert 'Assistant: assistant reply about mango' in rendered
         assert '[Compaction summary]' in rendered
         assert 'newer MARKED kiwi context' not in rendered  # marked summaries collapse too
+        assert 'flattened MARKED kiwi context' not in rendered
         assert 'Tool Call [search]' in rendered
         assert 'Tool [readfile]' in rendered
         assert 'Retry [readfile]: please retry' in rendered  # RetryPromptPart is searchable
