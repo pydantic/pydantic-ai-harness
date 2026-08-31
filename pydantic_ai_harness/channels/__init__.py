@@ -12,6 +12,8 @@ from pydantic_ai_harness.channels._types import (
     ConversationStore,
     InboundMessage,
     InMemoryConversationStore,
+    WebhookRequest,
+    WebhookResponse,
 )
 
 __all__ = [
@@ -21,4 +23,6 @@ __all__ = [
     'ConversationStore',
     'InboundMessage',
     'InMemoryConversationStore',
+    'WebhookRequest',
+    'WebhookResponse',
 ]

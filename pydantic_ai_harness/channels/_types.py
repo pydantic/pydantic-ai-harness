@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Protocol
@@ -27,6 +27,29 @@ class InboundMessage:
     sender_id: str
     message_id: str
     text: str
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookRequest:
+    """A framework-neutral HTTP request passed to a webhook adapter.
+
+    `body` must contain the exact request bytes used for signature verification.
+    `query` carries verification parameters for providers that use a GET
+    handshake.
+    """
+
+    method: str
+    headers: Mapping[str, str]
+    query: Mapping[str, str]
+    body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookResponse:
+    """An HTTP response returned by a webhook adapter."""
+
+    status_code: int
+    body: str = ''
 
 
 class ChannelAdapter(Protocol):

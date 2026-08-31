@@ -7,26 +7,82 @@ Channels are useful for:
 - a support agent in team messages
 - an internal agent that can use the same tools and capabilities as your app
 
-The agent-side integration is the same for every provider:
-
-```python
-from pydantic_ai import Agent
-
-from pydantic_ai_harness.channels import ChannelAdapter, ChannelHost
-
-
-async def serve(channel: ChannelAdapter) -> None:
-    agent = Agent('anthropic:claude-fable-5', instructions='Be concise and helpful.')
-    host = ChannelHost(agent, channel, allowed_senders={'provider-user-id'})
-    await host.serve()
-```
-
-The provider adapter supplies real sender ids and delivers each reply. Replace
-`provider-user-id` with an id from that provider.
-
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](../../docs/index.md#version-policy).
+
+This quickstart uses Anthropic. Install the provider extra and set
+`ANTHROPIC_API_KEY` before running it:
+
+```bash
+uv add "pydantic-ai-harness[anthropic]" starlette uvicorn
+```
+
+## Slack: DMs and app mentions
+
+Use Slack to answer direct messages or respond when somebody mentions the agent
+in a channel.
+
+Create a Slack app with `chat:write`, `app_mentions:read`, and `im:history` bot
+scopes. Subscribe it to `app_mention` and `message.im`. Set `SLACK_BOT_TOKEN`
+and `SLACK_SIGNING_SECRET` from the app settings, keeping both outside source
+control. Replace `U0123456789` below with your Slack member id from
+**Profile > Copy member ID**, and `C0123456789` with a channel where the bot may
+answer mentions.
+
+```python
+import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
+import anyio
+from pydantic_ai import Agent
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+from starlette.routing import Route
+
+from pydantic_ai_harness.channels import ChannelHost, WebhookRequest
+from pydantic_ai_harness.channels.slack import SlackChannel
+
+agent = Agent('anthropic:claude-fable-5')
+channel = SlackChannel(
+    os.environ['SLACK_BOT_TOKEN'],
+    os.environ['SLACK_SIGNING_SECRET'],
+    allowed_channel_ids={'C0123456789'},
+)
+host = ChannelHost(agent, channel, allowed_senders={'U0123456789'})
+
+
+async def receive_slack(request: Request) -> PlainTextResponse:
+    result = await channel.handle_webhook(
+        WebhookRequest(request.method, request.headers, request.query_params, await request.body())
+    )
+    return PlainTextResponse(result.body, status_code=result.status_code)
+
+
+@asynccontextmanager
+async def channel_lifespan(_app: Starlette) -> AsyncIterator[None]:
+    async with anyio.create_task_group() as tasks:
+        tasks.start_soon(host.serve)
+        yield
+        tasks.cancel_scope.cancel()
+
+
+app = Starlette(
+    routes=[Route('/slack/events', receive_slack, methods=['POST'])],
+    lifespan=channel_lifespan,
+)
+```
+
+Save this as `app.py`, run `uvicorn app:app`, and point Slack's Events API URL
+at `/slack/events`.
+For GovSlack, pass `api_base_url='https://slack-gov.com/api'` to `SlackChannel`.
+
+The task group owns the channel service and waits for cancellation and cleanup during shutdown.
+The lifespan and route must use the same process and async event-loop thread.
+Route each Slack app installation to exactly one live host process. Terminate TLS and limit
+request body size in the ASGI server or reverse proxy.
 
 ## How channels fit Pydantic AI
 
@@ -44,8 +100,9 @@ an integration, not an `AbstractCapability`.
   ids are dropped before the history store or agent is called.
 - Turns in one conversation run in arrival order. Different conversations may
   run concurrently.
-- At most 100 accepted turns may be running or waiting by default. Set
-  `max_pending_turns` to tune this backpressure limit.
+- At most 100 turns may be running or waiting inside the host by default. Set
+  `max_pending_turns` to tune this limit. Webhook adapters separately buffer up
+  to `max_queued_messages` verified messages before the host accepts them.
 - `/new` waits for earlier turns in the conversation, then deletes its stored
   Pydantic AI message history. It does not cancel an active turn.
 - `InMemoryConversationStore` is the default. It keeps history only for the
@@ -70,6 +127,19 @@ chat. If sending a reply fails, the host logs the failure and continues serving.
 History remains saved after a successful run even when delivery cannot be
 confirmed.
 
+`SlackChannel` retries one `chat.postMessage` call after an HTTP 429 with a
+valid non-negative `Retry-After` of at most 60 seconds. Longer delays fail the
+delivery instead of holding that conversation's turn slot. It does not retry
+timeouts or other ambiguous failures because Slack may already have accepted
+the message. If a later text chunk fails, earlier chunks remain visible.
+
+The webhook handler verifies and enqueues a request before returning HTTP 200.
+It returns HTTP 503 while the channel is opening or when its bounded queue is
+full, allowing Slack to retry the event. Duplicate suppression covers the
+10,000 most recently accepted `event_id` values. The queue and duplicate window
+are process-local. A restart can reprocess a redelivered event, and can lose an
+acknowledged event that was still waiting in the queue.
+
 `serve()` runs until it is cancelled or the adapter ends. It owns every turn in
 an AnyIO task group, so no turn task outlives it. Cancellation closes the
 message iterator, cancels in-flight turns, and then closes the adapter.
@@ -79,6 +149,15 @@ message iterator, cancels in-flight turns, and then closes the adapter.
 Anyone allowed to message the agent can supply model input to an agent that may
 have access to tools, credentials, files, and network services. Use a narrow
 sender allowlist and apply normal Pydantic AI guardrails to the connected agent.
+
+Slack signatures are checked over the exact request bytes with the app signing
+secret. Requests more than five minutes from the local clock are rejected.
+Replies disable link and media unfurling so Slack does not fetch URLs generated
+by the agent.
+Slack direct messages are enabled by default. App mentions are accepted only
+from `allowed_channel_ids`. The adapter also drops events from other workspaces,
+bot-authored messages, edits, messages with a subtype (including file shares),
+and unaddressed channel messages.
 
 ## Adapters and stores
 
@@ -98,6 +177,10 @@ multiple live hosts safe without external per-conversation serialization.
 
 ## Not included
 
+The Slack adapter does not include Socket Mode, multi-workspace OAuth routing,
+files, reactions, message edits, or messages in channels that do not mention
+the bot. Socket Mode requires a WebSocket client and can be added separately.
+
 The host does not define media, reactions, typing indicators, streaming edits,
 tool approvals, or provider authentication. Adapters add only the provider
 behavior they document.
@@ -110,3 +193,6 @@ behavior they document.
 - [`InboundMessage`][pydantic_ai_harness.channels.InboundMessage]
 - [`ConversationStore`][pydantic_ai_harness.channels.ConversationStore]
 - [`InMemoryConversationStore`][pydantic_ai_harness.channels.InMemoryConversationStore]
+- [`WebhookRequest`][pydantic_ai_harness.channels.WebhookRequest]
+- [`WebhookResponse`][pydantic_ai_harness.channels.WebhookResponse]
+- [`SlackChannel`][pydantic_ai_harness.channels.slack.SlackChannel]
