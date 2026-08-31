@@ -8,6 +8,7 @@ nothing extra.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
@@ -16,6 +17,7 @@ from typing import Protocol, runtime_checkable
 
 from pydantic_ai.exceptions import UserError
 
+from pydantic_ai_harness._warn import HarnessDeprecationWarning
 from pydantic_ai_harness.spend._budget import SEPARATOR, delimited
 from pydantic_ai_harness.spend._snapshot import Spent, money_precision
 from pydantic_ai_harness.spend._store import DEFAULT_DEDUP_RETAIN, SpendEntry, warn_unreachable_overrides
@@ -288,6 +290,11 @@ class RedisSpendStore:
 
     async def get(self, key: str) -> Spent:
         """What `key` has accumulated. Deprecated in favour of `get_many`, removed in 0.28.0."""
+        warnings.warn(
+            '`RedisSpendStore.get` is deprecated in favour of `get_many`; the single-key pair is removed in 0.28.0.',
+            HarnessDeprecationWarning,
+            stacklevel=2,
+        )
         return (await self.get_many([key]))[key]
 
     async def add(
@@ -306,6 +313,11 @@ class RedisSpendStore:
         two calls and a failure between them leaves the day counted and the month not.
         `add_many` is one script over every window, which is what closes that.
         """
+        warnings.warn(
+            '`RedisSpendStore.add` is deprecated in favour of `add_many`; the single-key pair is removed in 0.28.0.',
+            HarnessDeprecationWarning,
+            stacklevel=2,
+        )
         entry = SpendEntry(key=key, usd=usd, tokens=tokens, requests=requests, unpriced=unpriced, ttl=ttl)
         return (await self.add_many([entry]))[key]
 
