@@ -12,26 +12,49 @@ Channels are useful for:
 - a support agent in team messages
 - an internal agent that can use the same tools and capabilities as your app
 
-The agent-side integration is the same for every provider:
-
-```python
-from pydantic_ai import Agent
-
-from pydantic_ai_harness.channels import ChannelAdapter, ChannelHost
-
-
-async def serve(channel: ChannelAdapter) -> None:
-    agent = Agent('anthropic:claude-fable-5', instructions='Be concise and helpful.')
-    host = ChannelHost(agent, channel, allowed_senders={'provider-user-id'})
-    await host.serve()
-```
-
-The provider adapter supplies real sender ids and delivers each reply. Replace
-`provider-user-id` with an id from that provider.
-
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
+
+This quickstart uses Anthropic. Install the provider extra and set
+`ANTHROPIC_API_KEY` before running it:
+
+```bash
+uv add "pydantic-ai-harness[anthropic]"
+```
+
+## Telegram: a personal assistant
+
+Telegram uses long polling, so you can run this example without a web server.
+
+Create a bot with [BotFather](https://core.telegram.org/bots/features#botfather),
+send it one message, then read `from.id` from a Bot API `getUpdates` response.
+Set `TELEGRAM_BOT_TOKEN` to the bot token and keep it outside source control.
+Replace `123456789` below with the `from.id` value.
+
+```python
+import os
+
+import anyio
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.channels import ChannelHost
+from pydantic_ai_harness.channels.telegram import TelegramChannel
+
+agent = Agent(
+    'anthropic:claude-fable-5',
+    instructions='You are a personal assistant reachable over Telegram.',
+)
+
+
+async def main() -> None:
+    channel = TelegramChannel(os.environ['TELEGRAM_BOT_TOKEN'])
+    host = ChannelHost(agent, channel, allowed_senders={'123456789'})
+    await host.serve()
+
+
+anyio.run(main)
+```
 
 ## How channels fit Pydantic AI
 
@@ -75,6 +98,15 @@ chat. If sending a reply fails, the host logs the failure and continues serving.
 History remains saved after a successful run even when delivery cannot be
 confirmed.
 
+The Telegram adapter retries one send when the Bot API returns an explicit
+`retry_after` of at most 60 seconds. Longer send delays fail the delivery instead
+of holding that conversation's turn slot. Its poll loop honors provider delays
+while retrying transient transport and response failures.
+Bot API errors 401, 404, and 409 stop polling because they indicate invalid
+credentials, a missing bot, or a conflicting webhook. After a week without a
+valid update, the adapter clears its offset because Telegram may randomize the
+next update id.
+
 `serve()` runs until it is cancelled or the adapter ends. It owns every turn in
 an AnyIO task group, so no turn task outlives it. Cancellation closes the
 message iterator, cancels in-flight turns, and then closes the adapter.
@@ -84,6 +116,11 @@ message iterator, cancels in-flight turns, and then closes the adapter.
 Anyone allowed to message the agent can supply model input to an agent that may
 have access to tools, credentials, files, and network services. Use a narrow
 sender allowlist and apply normal Pydantic AI guardrails to the connected agent.
+
+`TelegramChannel` accepts private text chats only. It drops group messages and
+non-text updates. Transport errors suppress their httpx exception chain because
+Telegram embeds the bot token in request URLs. The adapter also redacts those
+tokens from HTTPX completed-request logs.
 
 ## Adapters and stores
 
@@ -103,9 +140,13 @@ multiple live hosts safe without external per-conversation serialization.
 
 ## Not included
 
-The host does not define media, reactions, typing indicators, streaming edits,
-tool approvals, or provider authentication. Adapters add only the provider
-behavior they document.
+The Telegram adapter does not include media, group chats, reactions, typing
+indicators, streaming edits, tool approvals, or durable update offsets. Its
+offset and the default history store are process-local, so a process failure can
+redeliver or lose an in-flight update.
+
+The host does not define provider authentication or provider-specific message
+features. Adapters add only the behavior they document.
 
 ## API reference
 
@@ -120,3 +161,5 @@ behavior they document.
 ::: pydantic_ai_harness.channels.ConversationStore
 
 ::: pydantic_ai_harness.channels.InMemoryConversationStore
+
+::: pydantic_ai_harness.channels.telegram.TelegramChannel
