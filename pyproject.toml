@@ -30,13 +30,18 @@ classifiers = [
 dependencies = [
     "genai-prices>=0.0.71",
     "httpx>=0.28.1",
-    # The compaction estimator and the conversation-search indexer both have to recognise
-    # `ToolAvailabilityDeltaPart`, which lands in 2.23.0 — it is the one `ModelRequestPart`
-    # that carries no `content`, so code that walks request parts raises `AttributeError`
-    # on it rather than merely ignoring it (#577). Handling it needs the class to import,
-    # so the floor is the version that introduced it, not merely the one we lock.
-    # (`CodeMode` separately reads `ModelRequestParameters.revealed_tool_names`, from 2.22.0.)
-    "pydantic-ai-slim>=2.28.0",
+    # 2.36.0 is the release that attributes each instruction to the source that contributed it, so the
+    # parts this package's capabilities contribute are separated by a blank line instead of running
+    # together into one paragraph (pydantic-ai#7595), and each carries an `InstructionId` an
+    # application can address to override it.
+    # Earlier floors are subsumed by it: 2.33.0's Anthropic provider is built on HTTPX2 and raises its
+    # own `anthropic` floor to 1.0.0 to match, and below it slim hands the SDK a client of the other
+    # kind, where the pair only type-checks when both halves come from the same generation; the
+    # compaction estimator and the conversation-search indexer have to recognise
+    # `ToolAvailabilityDeltaPart` (2.23.0), the one `ModelRequestPart` carrying no `content`, so code
+    # walking request parts raises `AttributeError` rather than ignoring it (#577); `CodeMode` reads
+    # `ModelRequestParameters.revealed_tool_names` (2.22.0).
+    "pydantic-ai-slim>=2.36.0",
 ]
 
 [project.optional-dependencies]
@@ -44,22 +49,22 @@ dependencies = [
 # without separately naming pydantic-ai-slim. (No openai/google pass-throughs: browser-use pins
 # provider SDKs that conflict with slim's floors when the workspace resolves all extras together.)
 anthropic = [
-    "pydantic-ai-slim[anthropic]>=2.28.0",
+    "pydantic-ai-slim[anthropic]>=2.36.0",
 ]
 cli = [
-    "pydantic-ai-slim[cli]>=2.28.0",
+    "pydantic-ai-slim[cli]>=2.36.0",
 ]
 code-mode = [
-    "pydantic-ai-slim[duckduckgo]>=2.28.0",
+    "pydantic-ai-slim[duckduckgo]>=2.36.0",
     "pydantic-monty>=0.0.19",
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 codemode = [
-    "pydantic-ai-slim[duckduckgo]>=2.28.0",
+    "pydantic-ai-slim[duckduckgo]>=2.36.0",
     "pydantic-monty>=0.0.19",
 ]
 researcher = [
-    "pydantic-ai-slim[duckduckgo,web-fetch]>=2.28.0",
+    "pydantic-ai-slim[duckduckgo,web-fetch]>=2.36.0",
 ]
 temporal = [
     'pydantic-ai-slim[temporal]',
@@ -160,13 +165,18 @@ bump = true
 # #4877). When a floor can no longer be overridden without breaking browser-use, the extra
 # yields, not the floor.
 #
-# An override *replaces* every requirement on the package it names, so it erases upper bounds
-# too, and `lowest-direct` resolves `pydantic-ai-slim` to its floor while taking provider SDKs
-# to the newest release this range admits. `anthropic` is therefore closed at the major that
-# floor predates: `anthropic>=1` is built on HTTPX2, and slim hands it an `httpx2.AsyncClient`
-# only from the release that raises its own floor to match. Move this bound together with the
-# `pydantic-ai-slim` floor below.
-override-dependencies = ['anthropic>=0.108.0,<1', 'openai>=2.45.0']
+# An override *replaces* every requirement on the package it names, so it erases the floors slim
+# declares as well as browser-use's pins, and `lowest-direct` resolves `pydantic-ai-slim` to its
+# floor while taking provider SDKs to the newest release the range admits. `anthropic` therefore
+# repeats the floor slim declares: `anthropic>=1` is the HTTPX2 generation, and the
+# `pydantic-ai-slim` floor above is the release built on it, so both halves of that pair resolve
+# together under every resolution mode. Move this floor whenever that one moves.
+#
+# This has to stay here, under `[tool.uv]`, even though uv warns on every invocation that `uv.toml`
+# shadows it: uv 0.12.1 reads `override-dependencies` only from the workspace root's `pyproject.toml`.
+# Moved into `uv.toml` it silences the warning and stops applying, and resolution then fails outright
+# on browser-use's exact pins.
+override-dependencies = ['anthropic>=1.0.0', 'openai>=2.45.0']
 
 
 [tool.hatch.build.targets.wheel]
@@ -178,10 +188,19 @@ target-version = 'py310'
 exclude = ['template']
 
 [tool.ruff.lint]
-extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251']
+extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251', 'PLC0415']
 
 [tool.ruff.lint.per-file-ignores]
 'tests/**/*.py' = ['D']
+# Deferred imports in the package are architectural, not convenience: `__getattr__`
+# lazy exports keep optional extras (pymongo, modal, ...) out of the base install,
+# some break an import cycle, and some defer a heavy data snapshot. PLC0415 cannot
+# tell those from an accidental function-scoped import, so it is off for the package
+# and enforced in tests, where every occurrence was accidental.
+'pydantic_ai_harness/**/*.py' = ['PLC0415']
+# `mcp` and `fastmcp` ship only with the `stackone` extra, so slim CI cannot import
+# them at module scope; these tests defer the import on purpose.
+'tests/stackone/**/*.py' = ['PLC0415']
 
 [tool.ruff.lint.flake8-quotes]
 inline-quotes = 'single'
@@ -200,7 +219,7 @@ quote-style = 'single'
 [tool.pyright]
 pythonVersion = '3.10'
 typeCheckingMode = 'strict'
-exclude = ['template', '.venv', 'mutants', '.agents', '.claude']
+exclude = ['template', '.venv*', 'local-notes', 'mutants', '.agents', '.claude']
 # `reportUnusedFunction` is disabled for tests because fixtures and `@agent.tool_plain`
 # helpers are registered via decorators and never referenced by name (matches pydantic-ai).
 executionEnvironments = [

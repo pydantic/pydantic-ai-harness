@@ -65,7 +65,7 @@ jobs:
           path: _pydantic-ai-checkout
           # Full history, so the tags `uv-dynamic-versioning` reads are present: a
           # shallow checkout builds the packages as `0.0.1.dev1+<sha>`, which fails the
-          # harness's own `pydantic-ai-slim>=2.28.0` requirement once they're resolved
+          # harness's own `pydantic-ai-slim` floor once they're resolved
           # rather than force-installed.
           fetch-depth: 0
           persist-credentials: false
