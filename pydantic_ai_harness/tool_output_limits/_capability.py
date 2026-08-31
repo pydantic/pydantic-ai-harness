@@ -458,8 +458,13 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         agent: Agent[None, str] = Agent(
             cast('Model[Any] | str', model), instructions='You summarize oversized tool output.'
         )
-        run = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
-        return run.output.strip()
+        result = await agent.run(
+            prompt,
+            usage=ctx.usage,
+            usage_limits=reserved_usage_limits(ctx.usage_limits),
+            event_stream_handler=action.event_stream_handler,
+        )
+        return result.output.strip()
 
 
 def _ensure_text(rendered: object) -> str:
