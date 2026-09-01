@@ -13,7 +13,7 @@ except ImportError:  # pragma: lax no cover
     pytest.skip('dbos not installed', allow_module_level=True)
 
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, SystemPromptPart, TextPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextContent, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from pydantic_ai_harness.compaction import SummarizingCompaction
@@ -81,8 +81,11 @@ async def _workflow() -> tuple[str, int]:
     first = result.all_messages()[0]
     assert isinstance(first, ModelRequest)
     summary_part = first.parts[-1]
-    assert isinstance(summary_part, SystemPromptPart)
-    return summary_part.content, result.usage.requests
+    assert isinstance(summary_part, UserPromptPart)
+    assert isinstance(summary_part.content, list)
+    summary_content = summary_part.content[0]
+    assert isinstance(summary_content, TextContent)
+    return summary_content.content, result.usage.requests
 
 
 _custom_compaction: SummarizingCompaction[None] = SummarizingCompaction(
