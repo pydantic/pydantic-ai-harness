@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import keyword
 import re
+import time
 import warnings
 from collections.abc import Callable, Coroutine, Sequence
 from contextlib import ExitStack
@@ -53,6 +54,12 @@ except ImportError as _import_error:  # pragma: no cover
     ) from _import_error
 from pydantic_ai_harness._monty_exec import MontyExecutor, PrintCapture, is_sandbox_panic
 from pydantic_ai_harness.code_mode._eager import EagerState, _EagerPart  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.code_mode._events import (
+    EagerPrefixCommittedEvent,
+    SpeculativeCallClaimedEvent,
+    SpeculativeCallMissedEvent,
+)
+from pydantic_ai_harness.code_mode._speculation import SpeculationState, SpeculativeCall
 
 # A raw OS callback. Return `pydantic_monty.NOT_HANDLED` to defer the call to the
 # sandbox's default, which leaves it unavailable.
@@ -590,6 +597,17 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     so Tool Search discoveries don't bust the tool-definitions cache prefix.
     """
 
+    speculation: SpeculationState | None = field(default=None, kw_only=True)
+
+    eager: EagerState | None = field(default=None, kw_only=True)
+    """Eager streamed execution state, bound back to this toolset for statement feeds."""
+    """Per-run speculation store, set by `CodeMode` when `speculate` is enabled.
+
+    The capability's stream watcher launches calls into it; the dispatch path below claims
+    them. Carried by reference through `for_run`/`for_run_step` `replace` copies, so the
+    watcher and the executing toolset always see the same store.
+    """
+
     eager: EagerState | None = field(default=None, kw_only=True)
     """Eager streamed execution state, set by `CodeMode` when `eager` is enabled.
 
@@ -709,6 +727,17 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
 
         callable_defs, sanitized_to_original = self._partition_callable_tools(sandboxed_tools)
 
+        if self.speculation is not None:
+            # Hand the stream watcher this step's dispatch ingredients. `wrapped_tools` (not just
+            # the sandboxed subset) mirrors the nested `ToolManager` the cold dispatch builds.
+            self.speculation.stash_step(
+                wrapped=self.wrapped,
+                wrapped_tools=wrapped_tools,
+                sanitized_to_original=sanitized_to_original,
+                callable_defs=callable_defs,
+                serialize=_TOOL_RETURN_CONTENT_TA.dump_python,
+            )
+
         # `dynamic_catalog` keeps the catalog out of `run_code.description` (cache-stable
         # tool-defs block) and surfaces it via `get_instructions` instead. Stash it for the
         # `get_instructions` call later this step; empty string means "nothing to surface".
@@ -766,7 +795,41 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         """Execute Python code in the sandbox, or pass through to a native tool."""
         if isinstance(tool, _RunCodeTool) and self.eager is not None:
             return await self._call_tool_eager(name, tool_args, ctx, tool)
-        return await self._call_tool_impl(name, tool_args, ctx, tool)
+        if self.speculation is None or not isinstance(tool, _RunCodeTool):
+            return await self._call_tool_impl(name, tool_args, ctx, tool)
+        code = tool_args.get('code')
+        if isinstance(code, str) and not _in_temporal_workflow(ctx):
+            # Execution prefetch: the code is complete here, so every literal eligible
+            # call not already in flight launches now. Sequential awaits then collect
+            # from concurrently-running tasks instead of blocking one another.
+            self.speculation.prelaunch_for_execution(ctx.tool_call_id or 'pyd_ai_code_mode', code, ctx)
+        result = await self._call_tool_impl(name, tool_args, ctx, tool)
+        # Eviction only on success: launches the executed snippet never claimed were
+        # wrong-branch or rewritten-line garbage. A snippet that failed into a retry keeps
+        # its launches instead -- syntax and type errors fail before any dispatch, the
+        # retry usually re-issues the same literal calls, and the cross-watch claim
+        # fallback lets it adopt them under its fresh tool call id. Run-end `close`
+        # bounds whatever a run abandons.
+        await self.speculation.evict_part(ctx.tool_call_id or 'pyd_ai_code_mode')
+        self._annotate_savings(result, ctx)
+        return result
+
+    def _annotate_savings(self, result: Any, ctx: RunContext[AgentDepsT], eager: dict[str, Any] | None = None) -> None:
+        """Record what streaming bought on the `ToolReturn`'s history-only metadata.
+
+        The model already saw the latency it did or did not pay; repeating the telemetry in
+        the visible content would spend tokens on it every turn. Metadata persists in message
+        history instead, where UIs and traces can read it after the run.
+        """
+        assert isinstance(result, ToolReturn), 'a successful `run_code` dispatch returns a `ToolReturn`'
+        metadata: dict[str, Any] | None = result.metadata
+        assert metadata is not None, '`run_code` always attaches metadata'
+        if eager is not None:
+            metadata['eager'] = eager
+        if self.speculation is not None:
+            summary = self.speculation.part_summary(ctx.tool_call_id or 'pyd_ai_code_mode')
+            if summary is not None:
+                metadata['speculation'] = summary
 
     async def _call_tool_eager(
         self, name: str, tool_args: dict[str, Any], ctx: RunContext[AgentDepsT], tool: _RunCodeTool[AgentDepsT]
@@ -778,6 +841,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         is never fed early (the stream scanner keeps the last parsed statement provisional),
         so the snippet's result always comes from the tail feed. Prints and nested tool-call
         records from the pumped prefix are merged into the returned `ToolReturn`.
+
+        With `speculate` also enabled, both the pumped fragments and the tail dispatch
+        through the claim store, so launches made while the code streamed are adopted
+        wherever the program actually asks for them; the tail gets an execution prefetch
+        and the part's unclaimed launches are evicted after success, exactly as on the
+        speculation-only path.
         """
         assert self.eager is not None
         code = tool_args.get('code')
@@ -785,8 +854,11 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         part = None
         if isinstance(code, str) and not _in_durable_execution(ctx):
             part = self.eager.pop_watch(ctx.tool_call_id or 'pyd_ai_code_mode', code)
+        waited_seconds = 0.0
         if part is not None:
+            drain_started = time.perf_counter()
             await self.eager.drain(part)
+            waited_seconds = time.perf_counter() - drain_started
         if part is None:
             # Nothing streamed for this part (non-streaming run, Temporal, or a part the
             # watcher never saw): the normal path handles it.
@@ -818,10 +890,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 'so the session was restarted. Send the snippet again.'
             )
         tail = '\n'.join(lines[part.fed_line_count :])
+        if self.speculation is not None:
+            self.speculation.prelaunch_for_execution(ctx.tool_call_id or 'pyd_ai_code_mode', tail, ctx)
         # The same lock the pump holds per fragment: a later part's pump must not interleave
         # with this part's completion against the one live session.
         async with self.eager.feed_lock:
-            return await self._call_tool_impl(
+            result = await self._call_tool_impl(
                 name,
                 {'code': tail},
                 ctx,
@@ -830,6 +904,29 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                 prior_nested=(part.nested_calls, part.nested_returns),
                 prior_calls=len(part.nested_calls),
             )
+        if self.speculation is not None:
+            # Same contract as the speculation-only path: eviction only on success, so a
+            # failed tail keeps its launches for the retry to adopt.
+            await self.speculation.evict_part(ctx.tool_call_id or 'pyd_ai_code_mode')
+        eager_summary = None
+        if part.feed_count:
+            # Buffered rather than emitted: capability-event attribution requires a hook
+            # context, and `CodeMode.after_tool_execute` is the next one after this dispatch.
+            self.eager.pending_events.append(
+                EagerPrefixCommittedEvent(
+                    tool_call_id=ctx.tool_call_id,
+                    statements=part.feed_count,
+                    executed_ms=part.busy_seconds * 1000,
+                    waited_ms=waited_seconds * 1000,
+                ),
+            )
+            eager_summary = {
+                'statements': part.feed_count,
+                'executed_ms': round(part.busy_seconds * 1000, 3),
+                'waited_ms': round(waited_seconds * 1000, 3),
+            }
+        self._annotate_savings(result, ctx, eager=eager_summary)
+        return result
 
     async def feed_eager_fragment(self, part: _EagerPart, source: str, ctx: RunContext[AgentDepsT]) -> None:
         """Feed one closed statement into the session, accumulating its observable effects.
@@ -960,7 +1057,75 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             call_counter += 1
             parent_id = ctx.tool_call_id or 'pyd_ai_code_mode'
             original_name = sanitized_to_original.get(sandbox_name, sandbox_name)
+            speculation = self.speculation
+            if speculation is not None:
+                claimed = speculation.claim(parent_id, sandbox_name, kwargs)
+                if claimed is not None:
+                    speculation.stats.adopted += 1
+                    return adopt_speculative_call(claimed, f'{parent_id}__{call_counter}')
+                if speculation.eligible(sandbox_name):
+                    return miss_then_run(sandbox_name, original_name, f'{parent_id}__{call_counter}', kwargs)
             return run_tool_call(original_name, f'{parent_id}__{call_counter}', kwargs)
+
+        async def miss_then_run(
+            sandbox_name: str, original_name: str, tool_call_id: str, kwargs: dict[str, Any]
+        ) -> Any:
+            """Record a speculation-eligible dispatch that found no launch, then run it cold.
+
+            Buffered rather than emitted: capability-event attribution requires a capability
+            hook context, so `CodeMode` flushes after the snippet finishes.
+            """
+            assert self.speculation is not None
+            self.speculation.pending_events.append(
+                SpeculativeCallMissedEvent(
+                    tool_call_id=ctx.tool_call_id,
+                    sandbox_function=sandbox_name,
+                    wrapped_tool_name=original_name,
+                    nested_tool_call_id=tool_call_id,
+                )
+            )
+            return await run_tool_call(original_name, tool_call_id, kwargs)
+
+        async def adopt_speculative_call(claimed: SpeculativeCall, tool_call_id: str) -> Any:
+            """Resolve a dispatch from a call launched while the snippet was still streaming.
+
+            Budget accounting already happened in `dispatch_tool_call`, exactly as for a cold
+            call. The launch ran under a provisional tool call id, so the message-history parts
+            are recorded here instead, under the real nested id. Awaiting the task does not
+            propagate this coroutine's cancellation into it; an abandoned task is cancelled by
+            `evict_part` when the snippet finishes.
+            """
+            call_part = ToolCallPart(tool_name=claimed.original_name, args=claimed.kwargs, tool_call_id=tool_call_id)
+            nested_calls[tool_call_id] = call_part
+            ready_at_claim = claimed.task.done()
+            outcome = await claimed.task
+            assert self.speculation is not None
+            self.speculation.pending_events.append(
+                SpeculativeCallClaimedEvent(
+                    tool_call_id=ctx.tool_call_id,
+                    launch_id=claimed.launch_id,
+                    nested_tool_call_id=tool_call_id,
+                    wrapped_tool_name=claimed.original_name,
+                    ready_at_claim=ready_at_claim,
+                    elapsed_ms=claimed.elapsed_ms(),
+                )
+            )
+            if outcome.denied_message is not None:
+                nested_returns[tool_call_id] = ToolReturnPart(
+                    tool_name=claimed.original_name,
+                    content=outcome.denied_message,
+                    tool_call_id=tool_call_id,
+                    outcome='denied',
+                )
+            if outcome.error is not None:
+                raise outcome.error
+            nested_returns[tool_call_id] = ToolReturnPart(
+                tool_name=claimed.original_name,
+                content=outcome.content,
+                tool_call_id=tool_call_id,
+                metadata=outcome.metadata,
+            )
+            return outcome.serialized
 
         async def run_tool_call(original_name: str, tool_call_id: str, kwargs: dict[str, Any]) -> Any:
             """Run a single tool call dispatched from inside the sandbox.

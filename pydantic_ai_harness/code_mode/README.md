@@ -284,6 +284,91 @@ other async backends (Trio) the watcher stays inactive and `run_code` executes n
 at dispatch. Under durable execution (Temporal, DBOS) the option is likewise inactive:
 statements only run when the completed tool call executes.
 
+## Speculative execution (experimental)
+
+`speculate` names tools that may start executing while the model is still streaming the
+`run_code` call. The streamed `code` argument is scanned as it arrives; a call to a named
+tool whose arguments are all keyword literals launches as soon as its closing paren streams,
+even while its enclosing statement (an `if` arm, a `with` body) is still being generated.
+When the completed snippet executes, matching dispatches claim the in-flight results instead
+of starting the tool cold. Extraction is textual, so a call spelled inside a string literal
+or comment can launch too; such launches waste a pure call and are evicted at commit.
+This overlaps tool latency with model generation (speculative programmatic tool calling,
+<https://alexzhang13.github.io/blog/2026/spec-ptc/>).
+
+```python
+agent = Agent(
+    'openai:gpt-5',
+    capabilities=[CodeMode(speculate=['search', 'fetch'])],
+)
+```
+
+Name only tools without observable side effects: a speculated call can run for a branch the
+snippet never takes, so early execution must be harmless to repeat or discard. Launches that
+the snippet never claims are cancelled when it finishes. `sequential` tools are never
+speculated, tool hooks fire at launch time rather than at claim time, and enabling `speculate`
+puts runs in streaming mode. Under durable execution (Temporal, DBOS) the option is inactive.
+Aggregate counters are exposed on `CodeMode.speculation_stats` (`launched`, `adopted`,
+`evicted`).
+
+Instead of naming tools, pass `speculate='declared'` to trust evidence the tools carry
+themselves: first-party tools marked `Tool(..., metadata={'read_only': True})` (or
+`'idempotent'`), and MCP tools whose server publishes the `readOnlyHint` or `idempotentHint`
+tool annotation. A declaration is the tool author's claim, not a proof; `'declared'` extends
+the same trust to authors that an explicit list places in you.
+
+```python
+agent = Agent(
+    'openai:gpt-5',
+    capabilities=[CodeMode(speculate='declared')],
+    tools=[Tool(search, metadata={'read_only': True})],
+)
+```
+
+Speculation looks past program order: a call inside an `if`/`else` launches for both arms as
+soon as the conditional has streamed, even while an earlier blocking statement is still
+executing. The taken arm claims its result; the untaken arm's launch is discarded and counted
+as wasted. Wasted launches are the cost of hiding branch latency, which is why eligibility
+demands side-effect freedom.
+
+The tiers compose: with both `eager=True` and `speculate` set, eager execution advances
+the program frontier through the live REPL while speculation launches eligible calls the
+frontier has not reached (branch arms, calls behind a blocking statement), and the eager
+feeds' dispatches claim those launches. In a snippet that starts with a blocking shell
+command and then branches on its result, the command runs while the model is still
+generating and both arms' reads are in flight before it returns.
+
+
+### Speculation events
+
+Each speculation transition is emitted as a typed
+[capability event](https://pydantic.dev/docs/ai/core-concepts/hooks/) in the `code_mode`
+namespace, so UIs and other capabilities can observe the lifecycle live from the run's event
+stream: `SpeculativeCodeUpdateEvent` (the decoded snippet so far, with its closed-statement
+boundary), `SpeculativeCallLaunchedEvent` (with the launching statement's line span),
+`SpeculativeCallSettledEvent`, and -- once the snippet executes -- `SpeculativeCallClaimedEvent`,
+`SpeculativeCallMissedEvent`, and `SpeculativeCallEvictedEvent`. Launches carry a `phase`
+field: `streaming` launches overlap the model's own generation, while `execution` launches
+are the prefetch that runs when the snippet starts executing -- the complete code is parsed
+and every literal eligible call not already in flight starts at once, so the snippet's
+sequential awaits collect from concurrently-running tasks instead of blocking one another.
+With `eager` also enabled, each committed prefix reports an `EagerPrefixCommittedEvent`:
+how many statements the pump executed during generation (`executed_ms`) and how long the
+dispatch still waited for it (`waited_ms`); the difference is the generation overlap eager
+bought for that snippet. The same numbers persist in message history: a `run_code`
+return's history-only metadata gains `eager` (`statements`, `executed_ms`, `waited_ms`)
+and `speculation` (`hits`, `hidden_ms`, `misses`, `wasted`) entries when the tiers did
+work, alongside the existing nested `tool_calls`/`tool_returns` records. The model's
+visible content stays `{'output': ..., 'result': ...}`; telemetry does not spend tokens.
+Delivery differs by phase:
+stream-phase events (updates, launches, settles) are yielded directly into the wrapped event
+stream, interleaved live with the argument deltas that produced them -- so they reach stream
+consumers (`event_stream_handler`, UI adapters) but bypass `@on_event` listener dispatch.
+Execution-phase events (claims, misses, evictions) are emitted as capability events when the
+snippet finishes, and reach listeners as well. Emission is best-effort: contexts without a
+live event stream drop events rather than failing the work they describe. Requires a
+pydantic-ai release carrying capability events.
+
 ## Temporal durability
 
 Install both integrations:

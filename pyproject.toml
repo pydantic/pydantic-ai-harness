@@ -152,6 +152,15 @@ vcs = 'git'
 style = 'pep440'
 bump = true
 
+# POC branch only: capability events (pydantic/pydantic-ai#7794) are merged into
+# the `emit-custom-events` stack but unreleased; this SHA is the stack head
+# (#7794 plus its review-hardening commits, rebased past v2.36.0), matching the
+# Code Puppy capability-events integration branch. Remove when a release carries
+# `CapabilityEvent`.
+[tool.uv.sources]
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai", subdirectory = "pydantic_ai_slim", rev = "8e7c6a4a01372c9efb31f81cef6a9d545a5df004" }
+pydantic-graph = { git = "https://github.com/pydantic/pydantic-ai", subdirectory = "pydantic_graph", rev = "8e7c6a4a01372c9efb31f81cef6a9d545a5df004" }
+
 [tool.uv]
 # `browser-use` pins provider SDKs to exact versions far below the floors `pydantic-ai-slim`
 # declares (`anthropic==0.76.0`, `openai==2.16.0`), so they only resolve together under an

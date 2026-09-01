@@ -13,6 +13,7 @@ assignments made before the failing line persist and the error surfaces to the m
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
@@ -20,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 from pydantic_ai import RunContext
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    CapabilityEvent,
     PartDeltaEvent,
     PartStartEvent,
     ToolCallPart,
@@ -27,6 +29,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 
+from ._events import emit_best_effort
 from ._streaming import MAX_SCAN_CHARS, closed_statements, decode_partial_code
 
 if TYPE_CHECKING:
@@ -71,6 +74,9 @@ class _EagerPart:
     pump: asyncio.Task[None] | None = None
     error: BaseException | None = None
     feed_count: int = 0
+    busy_seconds: float = 0.0
+    """Wall-clock the pump spent executing fragments, for the commit event's overlap math."""
+
     output: str = ''
     """Concatenated print output from completed fragment feeds."""
 
@@ -114,6 +120,15 @@ class EagerState:
     when the run is configured for sequential tool execution. The eager dispatch's tail
     feed holds it too, so a later part's pump cannot overlap an earlier part's completion.
     """
+
+    pending_events: list[CapabilityEvent] = field(default_factory=list[CapabilityEvent], init=False)
+    """Commit events buffered until the next capability hook, where emission is permitted."""
+
+    async def flush_events(self, ctx: RunContext[Any]) -> None:
+        """Emit buffered events; called from `CodeMode`'s hook dispatches."""
+        events, self.pending_events = self.pending_events, []
+        for event in events:
+            await emit_best_effort(ctx, event)
 
     def bind(self, toolset: CodeModeToolset[Any]) -> None:
         """Attach the owning toolset; feeds go through its `run_code` pipeline."""
@@ -229,12 +244,15 @@ class EagerState:
             source = watch.queue.popleft()
             watch.feed_count += 1
             feed_ctx = replace(ctx, tool_call_id=f'{watch.tool_call_id}~e{watch.feed_count}', tool_name='run_code')
+            fed_at = time.perf_counter()
             try:
                 async with self.feed_lock:
                     await toolset.feed_eager_fragment(watch, source, feed_ctx)
             except Exception as e:  # cancellation propagates; everything else is held for the dispatch
                 watch.error = e
                 watch.queue.clear()
+            finally:
+                watch.busy_seconds += time.perf_counter() - fed_at
 
     # -- execution side ---------------------------------------------------------------------
 

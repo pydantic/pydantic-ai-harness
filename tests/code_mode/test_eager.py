@@ -11,8 +11,9 @@ import asyncio
 import dataclasses
 import json
 import types
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Sequence
 from itertools import zip_longest
+from typing import Any
 
 import pytest
 from pydantic_ai import Agent, RunContext, Tool
@@ -20,6 +21,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import (
     AgentStreamEvent,
+    CapabilityEvent,
     ModelMessage,
     ModelResponse,
     PartDeltaEvent,
@@ -35,7 +37,7 @@ from pydantic_ai.tool_manager import ToolManager
 from pydantic_ai.toolsets.function import FunctionToolset
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.code_mode import CodeMode, CodeModeToolset
+from pydantic_ai_harness.code_mode import CodeMode, CodeModeToolset, EagerPrefixCommittedEvent
 
 pytestmark = pytest.mark.anyio
 
@@ -102,6 +104,18 @@ def _run_code_return_content(messages: list[ModelMessage]) -> object:
     return contents[-1]
 
 
+def _run_code_return_metadata(messages: list[ModelMessage]) -> dict[str, Any]:
+    parts = [
+        p
+        for m in messages
+        for p in getattr(m, 'parts', [])
+        if isinstance(p, ToolReturnPart) and p.tool_name == 'run_code'
+    ]
+    assert parts, 'no run_code ToolReturnPart in history'
+    metadata: dict[str, Any] = parts[-1].metadata
+    return metadata
+
+
 class TestEagerExecution:
     async def test_statements_execute_while_the_model_is_still_streaming(self):
         """The stream stalls until the first statement's tool call has run.
@@ -140,12 +154,29 @@ class TestEagerExecution:
         )
         agent.tool_plain(search)
 
-        result = await agent.run('go')
+        events: list[CapabilityEvent] = []
+
+        async def collect(ctx: RunContext[None], stream: AsyncIterable[AgentStreamEvent]) -> None:
+            async for event in stream:
+                if isinstance(event, CapabilityEvent):
+                    events.append(event)
+
+        result = await agent.run('go', event_stream_handler=collect)
 
         assert result.output == 'done'
         assert calls == ['alpha', 'beta']
         content = _run_code_return_content(result.all_messages())
         assert content == {'output': 'result:alpha\nresult:beta\n', 'result': 'ok'}
+        commits = [event for event in events if isinstance(event, EagerPrefixCommittedEvent)]
+        assert len(commits) == 1
+        # The first three statements closed and fed before the held-back final chunk;
+        # `print(b)` and the provisional `"ok"` ran as the dispatch tail.
+        assert commits[0].statements == 3
+        assert commits[0].executed_ms > 0
+        assert commits[0].waited_ms >= 0
+        eager_meta: dict[str, Any] = _run_code_return_metadata(result.all_messages())['eager']
+        assert eager_meta['statements'] == 3
+        assert eager_meta['executed_ms'] > 0
 
     async def test_failed_statement_surfaces_and_earlier_state_persists(self):
         """A statement that fails mid-stream stops the pump; the retry sees prior assignments.
