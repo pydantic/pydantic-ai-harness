@@ -241,6 +241,7 @@ Outside the loop: how runs persist, survive failures, and get observed and confi
 | [Durable execution](/ai/capabilities/durable_execution/overview/) | Core | Runs that survive restarts and failures on [Temporal](/ai/capabilities/durable_execution/temporal/), [DBOS](/ai/capabilities/durable_execution/dbos/), or [Prefect](/ai/capabilities/durable_execution/prefect/), with [Restate](/ai/capabilities/durable_execution/restate/), [Kitaru](/ai/capabilities/durable_execution/kitaru/), and [Airflow](/ai/capabilities/durable_execution/airflow/) integrations |
 | [Step Persistence](step-persistence.md) | Harness | Save, restore, resume (`continue_run`), and fork (`fork_run`) runs; file/SQLite/Mongo backends |
 | [Instrumentation](/ai/capabilities/instrumentation/) | Core | OpenTelemetry GenAI spans for every model and tool call; the raw material for [Logfire](https://pydantic.dev/logfire) traces |
+| [Agent Control](agent-control.md) | Harness | Drive instructions, model, model settings, and tool definitions from one [Logfire](https://pydantic.dev/logfire)-managed variable; version and roll back the whole agent config as one unit |
 | [Managed Prompt](managed-prompt.md) | Harness | Back instructions with a [Logfire](https://pydantic.dev/logfire)-managed prompt; version and roll out without redeploying |
 | [Thread Executor](/ai/capabilities/thread-executor/) | Core | Run sync tools on a shared thread pool |
 

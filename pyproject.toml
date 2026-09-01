@@ -74,7 +74,9 @@ dbos = [
 ]
 logfire = [
     'logfire>=4.31.0',
-    "pydantic-ai-slim[spec]>=2.18.0",
+    # `AgentControl` reads `InstructionPart.id` to apply instruction overrides by key, which landed in
+    # pydantic-ai 2.36.0 (pydantic-ai#6887). Only this extra needs it; the base dependency stays put.
+    "pydantic-ai-slim[spec]>=2.36.0",
 ]
 modal = [
     "modal>=1.5.0",
@@ -242,6 +244,11 @@ filterwarnings = [
     # browser-use's observability decorators call asyncio.iscoroutinefunction at
     # import time, which Python 3.14+ deprecates — not our code.
     "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning",
+    # `google-genai` builds `Union[UnionType, typing._UnionGenericAlias]` at import time, which
+    # Python 3.14+ deprecates. Logfire's AWS Lambda probe reaches it by way of `getattr` on a
+    # third-party module whose `__getattr__` imports eagerly, so it surfaces under whichever test
+    # configures Logfire first rather than under any one test's own code — not our code either way.
+    "ignore:'_UnionGenericAlias' is deprecated:DeprecationWarning",
     # Experimental capabilities warn on import by design; assert it explicitly where it matters.
     'ignore::pydantic_ai_harness.experimental.HarnessExperimentalWarning',
 ]
