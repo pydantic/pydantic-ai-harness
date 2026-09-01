@@ -33,7 +33,8 @@ dependencies = [
     # 2.36.0 is the release that attributes each instruction to the source that contributed it, so the
     # parts this package's capabilities contribute are separated by a blank line instead of running
     # together into one paragraph (pydantic-ai#7595), and each carries an `InstructionId` an
-    # application can address to override it.
+    # application can address to override it. It also adds the declarative `@durable_operation` API
+    # and the public durable-operation backends the Restate capability is built on.
     # Earlier floors are subsumed by it: 2.33.0's Anthropic provider is built on HTTPX2 and raises its
     # own `anthropic` floor to 1.0.0 to match, and below it slim hands the SDK a client of the other
     # kind, where the pair only type-checks when both halves come from the same generation; the
@@ -92,6 +93,10 @@ exa = [
 youdotcom = [
     "youdotcom>=3.1.1,<4",
 ]
+restate = [
+    "pydantic-ai-slim>=2.36.0",
+    "restate-sdk>=1.0.2",
+]
 mongodb = [
     "pymongo>=4.17.0",
 ]
@@ -137,7 +142,7 @@ dev = [
     'inline-snapshot>=0.32.5',
     "pydantic-ai-slim[anthropic]",
     "pydantic-ai-slim[openai]",
-    "pydantic-ai-slim[spec]>=2.18.0",
+    "pydantic-ai-slim[mcp,spec]>=2.18.0",
     "pytest-examples>=0.0.18",
     "pytest-recording>=0.13.4",
     "mongomock-motor>=0.0.36",
