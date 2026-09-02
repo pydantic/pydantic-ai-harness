@@ -344,15 +344,15 @@ configured retention can delete older snapshots.
   threshold if that is a risk for your workload.
 
 - `RedisStepStore(client)` -- one set of keys per run under a configurable
-  `prefix`, plus the `runs` / `runs:conversation:<id>` / `runs:parent:<id>` sets
+  `prefix`, plus the `runs:all` / `runs:conversation:<id>` / `runs:parent:<id>` sets
   serving `list_runs` (see
   [What `RedisStepStore` writes](#what-redisstepstore-writes)).
   `SET ... NX` on the run key enforces the single-shot `run_id` contract.
   No extra to install: pass any `redis.asyncio`-compatible client, which the
   store reaches through the `RedisClient` protocol, so the harness carries no
   Redis driver dependency of its own.
-  Pass `expire_seconds=` to give a run's keys a TTL, refreshed on every write to
-  that run. Unlike the three stores above, `media_store` defaults to `None`:
+  Pass `expire_seconds=` to give a run's keys a TTL that later writes to the run
+  refresh (details below). Unlike the three stores above, `media_store` defaults to `None`:
   payloads stay inline, because moving large binary or text parts into an
   in-memory database is a decision to make deliberately. Pass a
   `DiskMediaStore` or `S3MediaStore` to externalize them.
@@ -397,7 +397,7 @@ Keys under the configured `prefix` (default `pydantic-ai-harness:step`). A
 | Key                                  | Type   | Holds                                     |
 | ------------------------------------ | ------ | ----------------------------------------- |
 | `<prefix>:run:{<run_id>}`            | string | `RunRecord` JSON                          |
-| `<prefix>:runs`                      | set    | every run id                              |
+| `<prefix>:runs:all`                  | set    | every run id                              |
 | `<prefix>:runs:conversation:<cid>`   | set    | run ids in one conversation               |
 | `<prefix>:runs:parent:<pid>`         | set    | run ids spawned by one run                |
 | `<prefix>:events:{<run_id>}`         | list   | one `StepEvent` JSON per `RPUSH`          |
@@ -410,12 +410,15 @@ The snapshot index carries the state in the member rather than only in the
 payload, so picking the snapshot to read and the ones to prune costs one
 `ZRANGE` and no payload fetches.
 
-`expire_seconds` covers the six run-scoped keys and is refreshed on every write
-to that run. Each snapshot payload carries the TTL from its own write, so older
-snapshots of a long run expire on their own horizon while the newest keeps the
-full window. The three index sets carry no TTL, since they hold other runs too;
-instead `list_runs` drops a member whose run key is gone, so they self-heal
-rather than growing forever.
+`expire_seconds` covers the six run-scoped keys. A write refreshes the key it
+touched and the run key, so the run key follows the newest write to the run
+while the events, snapshot, and tool-effect keys each follow their own. Each
+snapshot payload carries the TTL from its own write, so older snapshots of a
+long run expire on their own horizon while the newest keeps the full window.
+The three index sets carry no TTL, since they hold other runs too;
+instead `list_runs` drops a member whose run key is gone. That repairs only the
+set a given query reads, and a run with both a conversation and a parent is a
+member of three, so an index nobody queries keeps its stale ids.
 
 One write spans several keys and Redis runs each command on its own, so a worker
 that dies mid-`save_snapshot` can leave a payload no index member points at. The

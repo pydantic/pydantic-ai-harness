@@ -188,7 +188,7 @@ class TestLiveRedisStepStore:
         shared = {key: ttl for key, ttl in ttls.items() if '{r1}' not in key}
         assert len(run_scoped) == 6
         assert all(0 < ttl <= 60 for ttl in run_scoped.values()), run_scoped
-        assert set(shared) == {f'{prefix}:runs', f'{prefix}:runs:conversation:c1'}
+        assert set(shared) == {f'{prefix}:runs:all', f'{prefix}:runs:conversation:c1'}
         assert all(ttl == -1 for ttl in shared.values()), shared
 
     async def test_a_later_write_refreshes_the_window(self, redis_client: Redis, prefix: str) -> None:

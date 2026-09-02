@@ -9,7 +9,7 @@ land on a single Redis Cluster slot:
 
 ```text
 <prefix>:run:{<run_id>}              string  RunRecord JSON
-<prefix>:runs                        set     every run id
+<prefix>:runs:all                    set     every run id
 <prefix>:runs:conversation:<cid>     set     run ids in one conversation
 <prefix>:runs:parent:<pid>           set     run ids spawned by one run
 <prefix>:events:{<run_id>}           list    one StepEvent JSON per RPUSH
@@ -34,6 +34,7 @@ from collections.abc import Awaitable, Iterable, Mapping, Sequence
 from datetime import datetime
 from typing import Protocol, runtime_checkable
 
+from pydantic import BaseModel, ConfigDict
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
 from pydantic_ai_harness.media import MediaStore, externalize_media, restore_media
@@ -42,7 +43,6 @@ from pydantic_ai_harness.step_persistence._store import (
     _event_from_dict,  # pyright: ignore[reportPrivateUsage]
     _event_to_dict,  # pyright: ignore[reportPrivateUsage]
     _load_json_object,  # pyright: ignore[reportPrivateUsage]
-    _opt_str,  # pyright: ignore[reportPrivateUsage]
     _retained_seqs,  # pyright: ignore[reportPrivateUsage]
     _run_from_dict,  # pyright: ignore[reportPrivateUsage]
     _run_to_dict,  # pyright: ignore[reportPrivateUsage]
@@ -133,6 +133,17 @@ def _as_text(value: object) -> str:
     raise ValueError(f'expected a string reply, got {type(value).__name__}')
 
 
+def _tag(run_id: str) -> str:
+    """Wrap `run_id` as a Redis Cluster hash tag.
+
+    Only the substring between the first `{` and the following `}` decides a key's
+    slot, so tagging every key of one run co-locates them on one node and the
+    multi-key `DEL` in `_prune_snapshots` cannot fail with `CROSSSLOT`. On a
+    standalone server the braces are inert. See the Redis cluster spec, "Hash tags".
+    """
+    return '{' + run_id + '}'
+
+
 def _validate_expire_seconds(value: object) -> None:
     """Reject a TTL Redis would read as an immediate delete.
 
@@ -161,6 +172,30 @@ def _parse_member(member: str) -> tuple[int, SnapshotState] | None:
         return None
 
 
+class _SnapshotPayload(BaseModel):
+    """The JSON one `<prefix>:snapshot:{<run_id>}:<seq>` key holds, written and read.
+
+    `strict=True` because the payload is data on the wire, not a user argument:
+    a `step_index` of `"0"` is a payload written by something that is not this
+    store, and coercing it would hide that. Unknown keys are ignored, and the
+    defaults mirror `ContinuableSnapshot`'s own.
+
+    `messages` is `object` because that is what the media walker returns;
+    `ModelMessagesTypeAdapter` validates it after any external parts are restored.
+    """
+
+    model_config = ConfigDict(strict=True)
+
+    run_id: str
+    step_index: int
+    timestamp: datetime
+    messages: object
+    conversation_id: str | None = None
+    parent_run_id: str | None = None
+    agent_name: str | None = None
+    state: SnapshotState = 'complete'
+
+
 class RedisStepStore:
     """Redis-backed store shared by every worker pointed at the same server.
 
@@ -174,11 +209,15 @@ class RedisStepStore:
 
     `prefix` namespaces every key, so one server can hold several deployments.
 
-    `expire_seconds` (default `None`) gives a run's keys a TTL, refreshed on
-    every write to that run. Each snapshot payload carries the TTL of its own
-    write, so older snapshots expire ahead of the newest. The index sets hold
+    `expire_seconds` (default `None`) gives a run's keys a TTL. A write refreshes
+    the key it touched and the run key, so the run key follows the newest write
+    to the run while each other key follows its own. Each snapshot payload
+    carries the TTL of its own write, so older snapshots expire ahead of the
+    newest. The index sets hold
     other runs and never expire; `list_runs` drops a member whose run key is
-    gone, so they self-heal rather than growing forever.
+    gone, so each set is repaired by the queries that read it. A run registered
+    with both a conversation and a parent sits in three sets, and one query
+    repairs only the one it read.
 
     `media_store` defaults to `None`, unlike the file, sqlite, and Mongo stores:
     payloads stay inline, because moving large binary or text parts into an
@@ -214,11 +253,16 @@ class RedisStepStore:
         self._max_snapshots_per_run = max_snapshots_per_run
 
     def _run_key(self, run_id: str) -> str:
-        return f'{self._prefix}:run:{{{run_id}}}'
+        return f'{self._prefix}:run:{_tag(run_id)}'
 
+    # The three below are the only keys not scoped to one run: no hash tag, and no
+    # TTL, because they hold ids belonging to other runs too. `list_runs` repairs
+    # whichever one it reads; an index nobody queries keeps its stale ids.
+    # All three sit under `runs:` as siblings, so none is a prefix of another and a
+    # `SCAN` for one does not sweep up the rest.
     @property
     def _runs_key(self) -> str:
-        return f'{self._prefix}:runs'
+        return f'{self._prefix}:runs:all'
 
     def _conversation_key(self, conversation_id: str) -> str:
         return f'{self._prefix}:runs:conversation:{conversation_id}'
@@ -227,19 +271,19 @@ class RedisStepStore:
         return f'{self._prefix}:runs:parent:{parent_run_id}'
 
     def _events_key(self, run_id: str) -> str:
-        return f'{self._prefix}:events:{{{run_id}}}'
+        return f'{self._prefix}:events:{_tag(run_id)}'
 
     def _seq_key(self, run_id: str) -> str:
-        return f'{self._prefix}:snapshots:seq:{{{run_id}}}'
+        return f'{self._prefix}:snapshots:seq:{_tag(run_id)}'
 
     def _snapshot_index_key(self, run_id: str) -> str:
-        return f'{self._prefix}:snapshots:{{{run_id}}}'
+        return f'{self._prefix}:snapshots:{_tag(run_id)}'
 
     def _snapshot_key(self, run_id: str, seq: int) -> str:
-        return f'{self._prefix}:snapshot:{{{run_id}}}:{seq}'
+        return f'{self._prefix}:snapshot:{_tag(run_id)}:{seq}'
 
     def _tool_effects_key(self, run_id: str) -> str:
-        return f'{self._prefix}:tool_effects:{{{run_id}}}'
+        return f'{self._prefix}:tool_effects:{_tag(run_id)}'
 
     async def _touch(self, *names: str) -> None:
         """Refresh the expiry on the keys a write just touched."""
@@ -334,17 +378,17 @@ class RedisStepStore:
             )
         run_id = snapshot.run_id
         seq = await self._client.incr(self._seq_key(run_id))
-        payload: dict[str, object] = {
-            'run_id': run_id,
-            'step_index': snapshot.step_index,
-            'conversation_id': snapshot.conversation_id,
-            'parent_run_id': snapshot.parent_run_id,
-            'agent_name': snapshot.agent_name,
-            'timestamp': snapshot.timestamp.isoformat(),
-            'state': snapshot.state,
-            'messages': messages_json,
-        }
-        await self._client.set(self._snapshot_key(run_id, seq), json.dumps(payload), ex=self._expire_seconds)
+        payload = _SnapshotPayload(
+            run_id=run_id,
+            step_index=snapshot.step_index,
+            timestamp=snapshot.timestamp,
+            messages=messages_json,
+            conversation_id=snapshot.conversation_id,
+            parent_run_id=snapshot.parent_run_id,
+            agent_name=snapshot.agent_name,
+            state=snapshot.state,
+        )
+        await self._client.set(self._snapshot_key(run_id, seq), payload.model_dump_json(), ex=self._expire_seconds)
         await self._client.zadd(self._snapshot_index_key(run_id), {f'{seq}:{snapshot.state}': float(seq)})
         await self._touch(self._snapshot_index_key(run_id), self._seq_key(run_id), self._run_key(run_id))
         await self._prune_snapshots(run_id)
@@ -380,24 +424,26 @@ class RedisStepStore:
         await self._client.zrem(self._snapshot_index_key(run_id), *[f'{seq}:{state}' for seq, state in dropped])
 
     async def _snapshot_from_payload(self, run_id: str, text: str) -> ContinuableSnapshot:
-        data = _load_json_object(text)
-        step_index = data['step_index']
-        timestamp_raw = data['timestamp']
-        if not (isinstance(step_index, int) and isinstance(timestamp_raw, str)):
-            raise ValueError('snapshot payload has wrong types')
-        messages_json = data['messages']
+        """Validate one stored payload and rebuild the snapshot it describes.
+
+        `run_id` comes from the key rather than the payload: the key is what the
+        caller asked for, so a payload naming a different run is a corrupt write
+        rather than a snapshot of that other run.
+        """
+        payload = _SnapshotPayload.model_validate_json(text)
+        messages_json: object = payload.messages
         if self._media_store is not None:
             messages_json = await restore_media(messages_json, media_store=self._media_store)
         messages: list[ModelMessage] = ModelMessagesTypeAdapter.validate_python(messages_json)
         return ContinuableSnapshot(
             run_id=run_id,
-            step_index=step_index,
+            step_index=payload.step_index,
             messages=messages,
-            conversation_id=_opt_str(data.get('conversation_id')),
-            parent_run_id=_opt_str(data.get('parent_run_id')),
-            agent_name=_opt_str(data.get('agent_name')),
-            timestamp=datetime.fromisoformat(timestamp_raw),
-            state=_snapshot_state(data.get('state')),
+            conversation_id=payload.conversation_id,
+            parent_run_id=payload.parent_run_id,
+            agent_name=payload.agent_name,
+            timestamp=payload.timestamp,
+            state=payload.state,
         )
 
     async def latest_snapshot(self, *, run_id: str, include_interrupted: bool = False) -> ContinuableSnapshot | None:
@@ -409,11 +455,8 @@ class RedisStepStore:
         reaches the right snapshot, as in `FileStepStore`.
         """
         entries = await self._snapshot_entries(run_id)
-        candidates = sorted(
-            (seq for seq, state in entries if include_interrupted or state == 'complete'),
-            reverse=True,
-        )
-        for seq in candidates:
+        candidates = [seq for seq, state in entries if include_interrupted or state == 'complete']
+        for seq in reversed(candidates):
             raw = await self._client.get(self._snapshot_key(run_id, seq))
             if raw is None:
                 continue

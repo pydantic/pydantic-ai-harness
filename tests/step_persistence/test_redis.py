@@ -8,6 +8,7 @@ the real server accepts these commands, and that `EXPIRE` actually removes a key
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -165,9 +166,15 @@ class TestRedisStepStoreConstruction:
     def test_store_satisfies_the_step_store_protocol(self) -> None:
         assert isinstance(RedisStepStore(FakeRedis()), StepStore)
 
-    def test_media_is_inline_by_default(self) -> None:
-        store = RedisStepStore(FakeRedis())
-        assert store._media_store is None  # pyright: ignore[reportPrivateUsage]
+    async def test_media_is_inline_by_default(self) -> None:
+        """With no `media_store`, a part above the threshold stays in the snapshot value."""
+        client = FakeRedis()
+        store = RedisStepStore(client)
+        big_text = 'Z' * 100_000
+        messages: list[ModelMessage] = [ModelResponse(parts=[TextPart(content=big_text)])]
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=0, messages=messages))
+
+        assert big_text in client.strings['pydantic-ai-harness:step:snapshot:{r1}:1']
 
     def test_rejects_invalid_max_snapshots_per_run(self) -> None:
         with pytest.raises(ValueError, match='max_snapshots_per_run must be'):
@@ -191,7 +198,7 @@ class TestRedisStepStoreConstruction:
         touched = {*client.strings, *client.lists, *client.sets, *client.hashes, *client.zsets}
         assert touched == {
             'tenant-a:run:{r1}',
-            'tenant-a:runs',
+            'tenant-a:runs:all',
             'tenant-a:events:{r1}',
             'tenant-a:snapshots:seq:{r1}',
             'tenant-a:snapshots:{r1}',
@@ -404,7 +411,17 @@ class TestRedisStepStoreProtocol:
         key = 'pydantic-ai-harness:step:snapshot:{r1}:1'
         client.strings[key] = client.strings[key].replace('"timestamp"', '"step_index": "x", "timestamp"', 1)
 
-        with pytest.raises(ValueError, match='snapshot payload has wrong types'):
+        # `ValidationError` subclasses `ValueError`, so the store's rejection contract holds.
+        with pytest.raises(ValueError, match='step_index'):
+            await store.latest_snapshot(run_id='r1')
+
+    async def test_payload_missing_required_fields_raises(self) -> None:
+        client = FakeRedis()
+        store = RedisStepStore(client)
+        await store.save_snapshot(ContinuableSnapshot(run_id='r1', step_index=0, messages=_messages()))
+        client.strings['pydantic-ai-harness:step:snapshot:{r1}:1'] = json.dumps({'state': 'complete'})
+
+        with pytest.raises(ValueError, match='Field required'):
             await store.latest_snapshot(run_id='r1')
 
     async def test_non_ascii_metadata_round_trips(self) -> None:
@@ -554,7 +571,7 @@ class TestRedisStepStoreExpiry:
         store = RedisStepStore(client, expire_seconds=120)
         await store.register_run(RunRecord(run_id='r1', conversation_id='c1', parent_run_id='p1'))
 
-        assert 'pydantic-ai-harness:step:runs' not in client.expiries
+        assert 'pydantic-ai-harness:step:runs:all' not in client.expiries
         assert 'pydantic-ai-harness:step:runs:conversation:c1' not in client.expiries
         assert 'pydantic-ai-harness:step:runs:parent:p1' not in client.expiries
 
