@@ -185,6 +185,12 @@ class TestRedisStepStoreConstruction:
         with pytest.raises(ValueError, match='expire_seconds must be an int >= 1 or None'):
             RedisStepStore(FakeRedis(), expire_seconds=value)  # pyright: ignore[reportArgumentType]
 
+    async def test_rejects_an_empty_run_id(self) -> None:
+        """`{}` is not a hash tag, so an empty id would spread a run's keys across slots."""
+        store = RedisStepStore(FakeRedis())
+        with pytest.raises(ValueError, match='run_id must be non-empty'):
+            await store.get_run(run_id='')
+
     async def test_prefix_namespaces_every_key(self) -> None:
         client = FakeRedis()
         store = RedisStepStore(client, prefix='tenant-a')
@@ -558,6 +564,7 @@ class TestRedisStepStoreExpiry:
         )
 
         assert client.expiries == {
+            'pydantic-ai-harness:step:runs:all': 120,
             'pydantic-ai-harness:step:run:{r1}': 120,
             'pydantic-ai-harness:step:events:{r1}': 120,
             'pydantic-ai-harness:step:snapshots:seq:{r1}': 120,
@@ -566,14 +573,39 @@ class TestRedisStepStoreExpiry:
             'pydantic-ai-harness:step:tool_effects:{r1}': 120,
         }
 
-    async def test_index_sets_never_expire(self) -> None:
+    async def test_index_sets_take_the_ttl_from_the_writes_that_carry_their_ids(self) -> None:
+        """A set expires with the last run it holds, so it cannot grow without bound."""
         client = FakeRedis()
         store = RedisStepStore(client, expire_seconds=120)
+        all_runs = 'pydantic-ai-harness:step:runs:all'
+        index_keys = {
+            all_runs,
+            'pydantic-ai-harness:step:runs:conversation:c1',
+            'pydantic-ai-harness:step:runs:parent:p1',
+        }
         await store.register_run(RunRecord(run_id='r1', conversation_id='c1', parent_run_id='p1'))
+        assert all(client.expiries[key] == 120 for key in index_keys)
 
-        assert 'pydantic-ai-harness:step:runs:all' not in client.expiries
-        assert 'pydantic-ai-harness:step:runs:conversation:c1' not in client.expiries
-        assert 'pydantic-ai-harness:step:runs:parent:p1' not in client.expiries
+        client.expiries.clear()
+        await store.append_event(
+            StepEvent(run_id='r1', kind='run_started', step_index=0, conversation_id='c1', parent_run_id='p1')
+        )
+        assert index_keys <= set(client.expiries)
+
+        client.expiries.clear()
+        await store.save_snapshot(
+            ContinuableSnapshot(
+                run_id='r1', step_index=0, messages=_messages(), conversation_id='c1', parent_run_id='p1'
+            )
+        )
+        assert index_keys <= set(client.expiries)
+
+        # `ToolEffectRecord` carries no lineage ids, so only `runs:all` is refreshed.
+        client.expiries.clear()
+        await store.record_tool_effect(
+            ToolEffectRecord(tool_call_id='t1', tool_name='x', run_id='r1', status='started')
+        )
+        assert set(client.expiries) & index_keys == {all_runs}
 
 
 class TestRedisStepStoreMedia:

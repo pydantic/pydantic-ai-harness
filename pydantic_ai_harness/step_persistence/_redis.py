@@ -140,7 +140,12 @@ def _tag(run_id: str) -> str:
     slot, so tagging every key of one run co-locates them on one node and the
     multi-key `DEL` in `_prune_snapshots` cannot fail with `CROSSSLOT`. On a
     standalone server the braces are inert. See the Redis cluster spec, "Hash tags".
+
+    An empty `run_id` is refused: `{}` is not a hash tag, so the run's keys would
+    spread across slots and that `DEL` would fail.
     """
+    if not run_id:
+        raise ValueError('run_id must be non-empty')
     return '{' + run_id + '}'
 
 
@@ -214,11 +219,12 @@ class RedisStepStore:
     long after the run's last write of any kind, while the events, snapshot
     index, and tool-effect keys each expire that long after their own last
     write. Each snapshot payload carries the TTL of its own write, so older
-    snapshots expire ahead of the newest. The index sets hold other runs and
-    never expire; `list_runs` drops a member whose run key is gone, so each set
-    is repaired by the queries that read it. A run registered with both a
-    conversation and a parent sits in three sets, and one query repairs only
-    the one it read.
+    snapshots expire ahead of the newest. The index sets take the TTL too:
+    `runs:all` is refreshed by every write, and a conversation or parent set by
+    `register_run`, `append_event`, and `save_snapshot`, which carry those ids.
+    A set busier than the runs in it still holds ids whose run key has gone;
+    `list_runs` drops those as it reads, and a `runs:all` that never goes idle
+    is repaired only by an unfiltered `list_runs`.
 
     `media_store` defaults to `None`, unlike the file, sqlite, and Mongo stores:
     payloads stay inline, because moving large binary or text parts into an
@@ -229,9 +235,11 @@ class RedisStepStore:
     after each write (see `_prune_snapshots`).
 
     A write spans several keys, so a crash mid-`save_snapshot` can leave a
-    payload no index member points at, and under `expire_seconds` a payload can
-    expire ahead of its index member. Reads skip an index member whose payload is
-    gone, the tolerance `FileStepStore` has for a snapshot file that vanishes.
+    payload no index member points at: under `expire_seconds` its own TTL
+    collects it, and without one it stays. Under `expire_seconds` a payload can
+    also expire ahead of its index member. Reads skip an index member whose
+    payload is gone, the tolerance `FileStepStore` has for a snapshot file that
+    vanishes.
     """
 
     def __init__(
@@ -256,9 +264,10 @@ class RedisStepStore:
     def _run_key(self, run_id: str) -> str:
         return f'{self._prefix}:run:{_tag(run_id)}'
 
-    # The three below are the only keys not scoped to one run: no hash tag, and no
-    # TTL, because they hold ids belonging to other runs too. `list_runs` repairs
-    # whichever one it reads; an index nobody queries keeps its stale ids.
+    # The three below are the only keys not scoped to one run, so they carry no
+    # hash tag. They do take `expire_seconds`, refreshed by the writes that carry
+    # the ids they index (see `_index_keys`), so a set expires with the last run
+    # it holds rather than outliving every run and growing without bound.
     # All three sit under `runs:` as siblings, so none is a prefix of another and a
     # `SCAN` for one does not sweep up the rest.
     @property
@@ -286,6 +295,15 @@ class RedisStepStore:
     def _tool_effects_key(self, run_id: str) -> str:
         return f'{self._prefix}:tool_effects:{_tag(run_id)}'
 
+    def _index_keys(self, conversation_id: str | None, parent_run_id: str | None) -> list[str]:
+        """The index sets a write carrying these ids belongs to; `runs:all` always does."""
+        keys = [self._runs_key]
+        if conversation_id is not None:
+            keys.append(self._conversation_key(conversation_id))
+        if parent_run_id is not None:
+            keys.append(self._parent_key(parent_run_id))
+        return keys
+
     async def _touch(self, *names: str) -> None:
         """Refresh the expiry on the keys a write just touched."""
         if self._expire_seconds is None:
@@ -309,11 +327,10 @@ class RedisStepStore:
         )
         if not created:
             raise ValueError(f'run_id {record.run_id!r} is already registered in this store')
-        await self._client.sadd(self._runs_key, record.run_id)
-        if record.conversation_id is not None:
-            await self._client.sadd(self._conversation_key(record.conversation_id), record.run_id)
-        if record.parent_run_id is not None:
-            await self._client.sadd(self._parent_key(record.parent_run_id), record.run_id)
+        index_keys = self._index_keys(record.conversation_id, record.parent_run_id)
+        for key in index_keys:
+            await self._client.sadd(key, record.run_id)
+        await self._touch(*index_keys)
 
     async def get_run(self, *, run_id: str) -> RunRecord | None:
         raw = await self._client.get(self._run_key(run_id))
@@ -346,8 +363,8 @@ class RedisStepStore:
             raw = await self._client.get(self._run_key(run_id))
             if raw is None:
                 # The run key expired under `expire_seconds` while the index set,
-                # which has no TTL, kept pointing at it. Drop the member so the
-                # index does not accumulate ids that resolve to nothing.
+                # kept alive by other runs' writes, still pointed at it. Drop the
+                # member so the set does not accumulate ids that resolve to nothing.
                 await self._client.srem(index_key, run_id)
                 continue
             records.append(_run_from_dict(_load_json_object(_as_text(raw))))
@@ -357,7 +374,11 @@ class RedisStepStore:
 
     async def append_event(self, event: StepEvent) -> None:
         await self._client.rpush(self._events_key(event.run_id), json.dumps(_event_to_dict(event)))
-        await self._touch(self._events_key(event.run_id), self._run_key(event.run_id))
+        await self._touch(
+            self._events_key(event.run_id),
+            self._run_key(event.run_id),
+            *self._index_keys(event.conversation_id, event.parent_run_id),
+        )
 
     async def list_events(self, *, run_id: str) -> list[StepEvent]:
         raw_events = await self._client.lrange(self._events_key(run_id), 0, -1)
@@ -391,7 +412,12 @@ class RedisStepStore:
         )
         await self._client.set(self._snapshot_key(run_id, seq), payload.model_dump_json(), ex=self._expire_seconds)
         await self._client.zadd(self._snapshot_index_key(run_id), {f'{seq}:{snapshot.state}': float(seq)})
-        await self._touch(self._snapshot_index_key(run_id), self._seq_key(run_id), self._run_key(run_id))
+        await self._touch(
+            self._snapshot_index_key(run_id),
+            self._seq_key(run_id),
+            self._run_key(run_id),
+            *self._index_keys(snapshot.conversation_id, snapshot.parent_run_id),
+        )
         await self._prune_snapshots(run_id)
 
     async def _snapshot_entries(self, run_id: str) -> list[tuple[int, SnapshotState]]:
@@ -491,7 +517,9 @@ class RedisStepStore:
             record.tool_call_id,
             json.dumps(_tool_effect_to_dict(record)),
         )
-        await self._touch(self._tool_effects_key(record.run_id), self._run_key(record.run_id))
+        # `ToolEffectRecord` carries no lineage ids, so only `runs:all` is refreshed
+        # here; `StepPersistence` follows each tool-effect write with an event.
+        await self._touch(self._tool_effects_key(record.run_id), self._run_key(record.run_id), self._runs_key)
 
     async def get_tool_effect(self, *, run_id: str, tool_call_id: str) -> ToolEffectRecord | None:
         raw = await self._client.hget(self._tool_effects_key(run_id), tool_call_id)

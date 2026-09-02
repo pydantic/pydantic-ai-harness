@@ -321,7 +321,7 @@ The store issues `createIndex` on its first write, for eight indexes: `conversat
 
 ### What `RedisStepStore` writes
 
-Keys under the configured `prefix` (default `pydantic-ai-harness:step`). A `{run_id}` hash tag keeps one run's keys on a single Redis Cluster slot:
+Keys under the configured `prefix` (default `pydantic-ai-harness:step`). A `{run_id}` hash tag keeps one run's keys on a single Redis Cluster slot, so `run_id` must be non-empty (`{}` is not a hash tag; the store raises `ValueError`):
 
 | Key                                  | Type   | Holds                                     |
 | ------------------------------------ | ------ | ----------------------------------------- |
@@ -337,9 +337,9 @@ Keys under the configured `prefix` (default `pydantic-ai-harness:step`). A `{run
 
 The snapshot index carries the state in the member rather than only in the payload, so picking the snapshot to read and the ones to prune costs one `ZRANGE` and no payload fetches.
 
-`expire_seconds` covers the six run-scoped keys. Each write refreshes the run key and the key it wrote, so the run key expires that long after the run's last write of any kind, while the events, snapshot index, and tool-effect keys each expire that long after their own last write. Each snapshot payload carries the TTL from its own write, so older snapshots of a long run expire on their own horizon while the newest keeps the full window. The three index sets carry no TTL, since they hold other runs too; instead `list_runs` drops a member whose run key is gone. That repairs only the set a given query reads, and a run with both a conversation and a parent is a member of three, so an index nobody queries keeps its stale ids.
+`expire_seconds` covers every key the store writes. Each write refreshes the run key and the key it wrote, so the run key expires that long after the run's last write of any kind, while the events, snapshot index, and tool-effect keys each expire that long after their own last write. Each snapshot payload carries the TTL from its own write, so older snapshots of a long run expire on their own horizon while the newest keeps the full window. The three index sets take the TTL too: `runs:all` is refreshed by every write, and a conversation or parent set by `register_run`, `append_event`, and `save_snapshot`, which carry those ids. A set busier than the runs in it still holds ids whose run key has gone; `list_runs` drops those as it reads, and a `runs:all` that never goes idle is repaired only by an unfiltered `list_runs()`.
 
-One write spans several keys and Redis runs each command on its own, so a worker that dies mid-`save_snapshot` can leave a payload no index member points at. The payload is unreachable rather than wrong, and its own TTL collects it; reads also skip an index member whose payload is missing, which is the tolerance `FileStepStore` has for a snapshot file that vanishes under it.
+One write spans several keys and Redis runs each command on its own, so a worker that dies mid-`save_snapshot` can leave a payload no index member points at. The payload is unreachable rather than wrong; under `expire_seconds` its own TTL collects it, and without one it stays. Reads also skip an index member whose payload is missing, which is the tolerance `FileStepStore` has for a snapshot file that vanishes under it.
 
 ## Bounding snapshot growth
 

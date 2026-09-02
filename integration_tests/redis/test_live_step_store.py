@@ -8,9 +8,9 @@ cannot answer is everything that depends on the server itself:
   as the single-shot `run_id` guard;
 - that `ZRANGE` orders the snapshot index by score, so `seq` 10 follows `seq` 2
   rather than preceding it as the member text would sort;
-- that `EXPIRE` reaches every key kind the store writes (string, list, zset,
-  hash), that a later write refreshes the window, and that an elapsed TTL really
-  removes the key -- the state the index self-heal exists for;
+- that `EXPIRE` reaches every key kind the store writes (string, list, set,
+  zset, hash), that a later write refreshes the window, and that an elapsed TTL
+  really removes the key -- the state the index self-heal exists for;
 - that `INCR` allocates `seq` on the server, so two processes sharing a run
   cannot hand out the same snapshot slot;
 - that a client left on redis-py's default `bytes` replies reads back what a
@@ -174,7 +174,7 @@ class TestLiveRedisStepStore:
         assert latest is not None and latest.step_index == 10
 
     async def test_expire_seconds_reaches_every_key_kind(self, redis_client: Redis, prefix: str) -> None:
-        """String, list, zset, and hash all take the TTL; the shared index sets do not."""
+        """String, list, set, zset, and hash all take the TTL, the shared index sets included."""
         store = RedisStepStore(redis_client, prefix=prefix, expire_seconds=60)
         await store.register_run(RunRecord(run_id='r1', conversation_id='c1'))
         await store.append_event(StepEvent(run_id='r1', kind='run_started', step_index=0))
@@ -189,7 +189,7 @@ class TestLiveRedisStepStore:
         assert len(run_scoped) == 6
         assert all(0 < ttl <= 60 for ttl in run_scoped.values()), run_scoped
         assert set(shared) == {f'{prefix}:runs:all', f'{prefix}:runs:conversation:c1'}
-        assert all(ttl == -1 for ttl in shared.values()), shared
+        assert all(0 < ttl <= 60 for ttl in shared.values()), shared
 
     async def test_a_later_write_refreshes_the_window(self, redis_client: Redis, prefix: str) -> None:
         """An active run keeps its window; only a run nothing writes to falls out of it."""
@@ -204,16 +204,18 @@ class TestLiveRedisStepStore:
         assert await redis_client.ttl(run_key) == 2
 
     async def test_an_elapsed_ttl_leaves_a_stale_index_the_read_heals(self, redis_client: Redis, prefix: str) -> None:
-        """The index sets carry no TTL, so an expired run would linger in them forever."""
-        store = RedisStepStore(redis_client, prefix=prefix, expire_seconds=1)
+        """A newer run's registration keeps the set alive past an older run's key; the read drops the stale id."""
+        store = RedisStepStore(redis_client, prefix=prefix, expire_seconds=2)
         await store.register_run(RunRecord(run_id='r1', conversation_id='c1'))
-        await anyio.sleep(1.3)
+        await anyio.sleep(1.2)
+        await store.register_run(RunRecord(run_id='r2', conversation_id='c1'))
+        await anyio.sleep(1.1)
         assert await redis_client.ttl(f'{prefix}:run:{{r1}}') == -2
-        assert await redis_client.smembers(f'{prefix}:runs:conversation:c1') == {'r1'}
+        assert await redis_client.smembers(f'{prefix}:runs:conversation:c1') == {'r1', 'r2'}
 
-        assert await store.list_runs(conversation_id='c1') == []
+        assert [r.run_id for r in await store.list_runs(conversation_id='c1')] == ['r2']
 
-        assert await redis_client.smembers(f'{prefix}:runs:conversation:c1') == set()
+        assert await redis_client.smembers(f'{prefix}:runs:conversation:c1') == {'r2'}
 
     async def test_seq_is_allocated_by_the_server(self, redis_client: Redis, prefix: str) -> None:
         """Two store instances on one run must not hand out the same snapshot slot."""
