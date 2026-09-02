@@ -178,7 +178,7 @@ class _SnapshotPayload(BaseModel):
     `strict=True` because the payload is data on the wire, not a user argument:
     a `step_index` of `"0"` is a payload written by something that is not this
     store, and coercing it would hide that. Unknown keys are ignored, and the
-    defaults mirror `ContinuableSnapshot`'s own.
+    optional fields default as they do on `ContinuableSnapshot`.
 
     `messages` is `object` because that is what the media walker returns;
     `ModelMessagesTypeAdapter` validates it after any external parts are restored.
@@ -209,15 +209,16 @@ class RedisStepStore:
 
     `prefix` namespaces every key, so one server can hold several deployments.
 
-    `expire_seconds` (default `None`) gives a run's keys a TTL. A write refreshes
-    the key it touched and the run key, so the run key follows the newest write
-    to the run while each other key follows its own. Each snapshot payload
-    carries the TTL of its own write, so older snapshots expire ahead of the
-    newest. The index sets hold
-    other runs and never expire; `list_runs` drops a member whose run key is
-    gone, so each set is repaired by the queries that read it. A run registered
-    with both a conversation and a parent sits in three sets, and one query
-    repairs only the one it read.
+    `expire_seconds` (default `None`) gives a run's keys a TTL. Each write
+    refreshes the run key and the key it wrote, so the run key expires that
+    long after the run's last write of any kind, while the events, snapshot
+    index, and tool-effect keys each expire that long after their own last
+    write. Each snapshot payload carries the TTL of its own write, so older
+    snapshots expire ahead of the newest. The index sets hold other runs and
+    never expire; `list_runs` drops a member whose run key is gone, so each set
+    is repaired by the queries that read it. A run registered with both a
+    conversation and a parent sits in three sets, and one query repairs only
+    the one it read.
 
     `media_store` defaults to `None`, unlike the file, sqlite, and Mongo stores:
     payloads stay inline, because moving large binary or text parts into an
