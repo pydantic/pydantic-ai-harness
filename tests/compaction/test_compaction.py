@@ -87,6 +87,7 @@ from pydantic_ai_harness.compaction._summarizing_compaction import (
     _format_messages,
 )
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
+from tests.conftest import agent_run_names  # pyright: ignore[reportMissingTypeStubs]
 
 try:
     from logfire.testing import CaptureLogfire
@@ -2693,6 +2694,18 @@ class TestCompactionSpan:
         spans = _compact_spans(capfire)
         assert len(spans) == 1
         assert spans[0]['attributes']['compaction.strategy'] == 'SummarizingCompaction'
+
+    @pytest.mark.anyio
+    @pytest.mark.usefixtures('instrument_all_agents')
+    async def test_summarizer_run_is_named_after_the_capability(self, capfire: CaptureLogfire) -> None:
+        agent = Agent(
+            TestModel(),
+            name='outer',
+            capabilities=[SummarizingCompaction(model=_recording_summarizer([]), max_messages=2, keep_messages=1)],
+        )
+        await agent.run('go', message_history=[_user('a'), _assistant('b'), _user('c'), _assistant('d')])
+
+        assert 'summarizing_compaction' in agent_run_names(capfire)
 
     @pytest.mark.anyio
     async def test_clamp_emits_span_only_when_a_part_is_clamped(self, capfire: CaptureLogfire) -> None:
