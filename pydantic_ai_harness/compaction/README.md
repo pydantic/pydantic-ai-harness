@@ -378,13 +378,20 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
 running agent's model. Its nested summary run inherits the parent usage limits and reserves one request from a
-finite request limit for the pending parent request.
+finite request limit for the pending parent request. Pass `model_settings` to give the dedicated summary call
+settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
+without mutating the model or the settings dictionary.
 
 By default `incremental=True` updates the newest existing summary from a prior compaction as an
 anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier
 releases; set `incremental=False` to retain the prior regeneration behavior. `preserve_first_user_message=True` keeps the original task turn even
 when it falls outside the window. Pass `keep_tokens` to trim the retained tail to a token budget instead
 of `keep_messages`.
+
+Both prompt surfaces of the summary request are fields: `summary_prompt` is the user-turn template (it
+must contain a `{messages}` placeholder), and `instructions` sets the internal agent's static instructions,
+which Pydantic AI sends in the request's system prompt. Override `instructions` when the summarizer
+endpoint requires a fixed leading instruction.
 
 ## Usage accounting
 
@@ -394,6 +401,12 @@ request count consistent (a model request that didn't count as one would be the 
 `UsageLimits` request limit catch a runaway compaction. The nested run receives the other parent limits unchanged;
 the finite request limit is reduced by one so it cannot spend the slot already approved for the parent request.
 A run-request / iteration limiter will therefore see compaction calls among its requests.
+
+With a durable-execution capability attached, the summary call runs as a contributed durable
+operation, so replay uses the recorded summary instead of calling the model again. When `model` is
+not set, the operation uses the run's model. The capability carries a stable default `id`, which
+durable execution uses to recover the operation by the same identity. Overriding it with a custom
+value orphans recorded operations for in-flight workflows, so keep it fixed once a workflow is live.
 
 ## `DeduplicateFileReads.file_key`
 

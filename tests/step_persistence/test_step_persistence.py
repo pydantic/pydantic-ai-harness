@@ -10,13 +10,16 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
+from uuid import UUID
 
 import pytest
 from pydantic_ai import Agent, CallToolsNode, ModelRequestNode, ModelRetry, RunContext
 from pydantic_ai._agent_graph import GraphAgentState  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities.abstract import AgentNode, NodeResult
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -44,10 +47,12 @@ from pydantic_ai_harness.step_persistence import (
     StepPersistence,
     StepStore,
     ToolEffectRecord,
+    annotate_tool_effect,
     continue_run,
     fork_run,
     is_provider_valid,
 )
+from pydantic_ai_harness.step_persistence._context import current_run_id
 from pydantic_ai_harness.step_persistence._store import _validate_id  # pyright: ignore[reportPrivateUsage]
 
 pytestmark = pytest.mark.anyio
@@ -337,6 +342,42 @@ class TestInMemoryStepStore:
 
 
 class TestFileStepStore:
+    async def test_keyed_writes_are_idempotent_after_snapshot_pruning(self, tmp_path: Path) -> None:
+        store = FileStepStore(tmp_path, max_snapshots_per_run=1)
+        event = StepEvent(run_id='r1', kind='run_started', step_index=0, idempotency_key='event:0')
+        older = ContinuableSnapshot(run_id='r1', step_index=1, messages=[], idempotency_key='0:1:complete')
+        newer = ContinuableSnapshot(run_id='r1', step_index=2, messages=[], idempotency_key='1:2:complete')
+
+        await store.append_event(event)
+        await store.append_event(event)
+        await store.save_snapshot(older)
+        await store.save_snapshot(newer)
+        await store.save_snapshot(older)
+
+        assert await store.list_events(run_id='r1') == [event]
+        assert await store.latest_snapshot(run_id='r1') == newer
+
+    async def test_snapshot_record_suppresses_retry_if_key_ledger_write_was_interrupted(self, tmp_path: Path) -> None:
+        store = FileStepStore(tmp_path)
+        snapshot = ContinuableSnapshot(run_id='r1', step_index=1, messages=[], idempotency_key='0:1:complete')
+        await store.save_snapshot(snapshot)
+        (tmp_path / 'r1' / 'snapshot-keys.jsonl').unlink()
+        (tmp_path / 'r1' / 'snapshots' / 'broken.json').write_text('{', encoding='utf-8')
+
+        await store.save_snapshot(snapshot)
+
+        assert await store.list_snapshots(run_id='r1') == [snapshot]
+
+    async def test_snapshot_key_line_separator_does_not_suppress_distinct_key(self, tmp_path: Path) -> None:
+        store = FileStepStore(tmp_path)
+        first = ContinuableSnapshot(run_id='r1', step_index=1, messages=[], idempotency_key='first\nsecond')
+        second = ContinuableSnapshot(run_id='r1', step_index=2, messages=[], idempotency_key='second')
+
+        await store.save_snapshot(first)
+        await store.save_snapshot(second)
+
+        assert await store.list_snapshots(run_id='r1') == [first, second]
+
     async def test_runs_round_trip(self, tmp_path: Path) -> None:
         store = FileStepStore(tmp_path)
         await store.register_run(RunRecord(run_id='r1', parent_run_id='p1', agent_name='a', metadata={'k': 'v'}))
@@ -683,6 +724,14 @@ class TestFileStepStore:
 
 
 class TestStepPersistenceCapability:
+    def test_store_remains_positional(self) -> None:
+        store = InMemoryStepStore()
+
+        persistence: StepPersistence[object] = StepPersistence(store)
+
+        assert persistence.store is store
+        assert persistence.id == 'step_persistence'
+
     async def test_interrupted_run_resumes_from_completed_tool_boundary(self) -> None:
         store = InMemoryStepStore()
         interrupt = InterruptBeforeSecondModelRequest()
@@ -782,17 +831,29 @@ class TestStepPersistenceCapability:
         for prior_msg, replayed in zip(history, msgs[: len(history)]):
             assert type(prior_msg) is type(replayed)
 
-    async def test_agent_name_derived_run_id_prefix(self) -> None:
-        """No explicit run_id + agent_name -> `{agent_name}-{8-hex}`."""
-        store = InMemoryStepStore()
-        agent = make_simple_agent([StepPersistence(store=store, agent_name='librarian')])
-        await agent.run('add 1 and 2')
+    async def test_agent_name_derived_run_id_uses_whole_context_id_deterministically(self, tmp_path: Path) -> None:
+        """The same context run id derives the same untruncated store id on replay."""
+        capability: StepPersistence[object] = StepPersistence(agent_name='librarian')
+        context_run_id = 'tenant/caller-chosen-run-id-with-a-shared-suffix'
 
-        runs = await store.list_runs()
-        assert len(runs) == 1
-        assert runs[0].run_id.startswith('librarian-')
-        # 'librarian-' + 8 hex chars.
-        assert len(runs[0].run_id) == len('librarian-') + 8
+        first = await capability.for_run(build_run_context(run_id=context_run_id))
+        replay = await capability.for_run(build_run_context(run_id=context_run_id))
+
+        assert isinstance(first, StepPersistence)
+        assert isinstance(replay, StepPersistence)
+        assert first.run_id is not None
+        assert first.run_id.startswith('sp-')
+        assert replay.run_id == first.run_id
+
+        distinct = await capability.for_run(build_run_context(run_id='different/' + context_run_id))
+        assert isinstance(distinct, StepPersistence)
+        assert distinct.run_id != first.run_id
+        file_store = FileStepStore(tmp_path)
+        await file_store.register_run(RunRecord(run_id=first.run_id))
+        assert await file_store.get_run(run_id=first.run_id) is not None
+
+        with pytest.raises(ValueError, match='200-character limit'):
+            await StepPersistence[object](agent_name='librarian').for_run(build_run_context(run_id='x' * 200))
 
     async def test_single_capability_instance_reused_gets_fresh_ids(self) -> None:
         """One `StepPersistence(agent_name=...)` reused for two runs -> two distinct ids."""
@@ -813,7 +874,7 @@ class TestStepPersistenceCapability:
         rids = {r.run_id for r in runs}
         assert len(rids) == 2
         for rid in rids:
-            assert rid.startswith('librarian-')
+            assert rid.startswith('sp-')
 
     async def test_parent_run_id_inferred_via_contextvar(self) -> None:
         """Orchestrator tool calls a delegate `Agent.run` -> delegate's `parent_run_id`
@@ -1417,14 +1478,16 @@ class TestCapabilityHookBranches:
         assert events[0].error is not None and 'nope' in events[0].error
         assert await store.latest_snapshot(run_id='r1') is None
 
-    async def test_for_run_returns_self_when_resolution_is_no_op(self) -> None:
-        """When `run_id` is explicit and no contextvar is set, `for_run` returns `self`."""
+    async def test_for_run_creates_fresh_counter_owner_when_resolution_is_no_op(self) -> None:
+        """Each run gets a capability instance whose deterministic sequences start at zero."""
         store = InMemoryStepStore()
         cap: StepPersistence[object] = StepPersistence(store=store, run_id='fixed')
         ctx = build_run_context(deps=None, run_id='ignored')
 
         result = await cap.for_run(ctx)
-        assert result is cap
+        assert isinstance(result, StepPersistence)
+        assert result is not cap
+        assert result.run_id == 'fixed'
 
     async def test_run_record_load_with_missing_metadata(self, tmp_path: Path) -> None:
         """`_str_str_dict(None)` returns `{}` when metadata is absent in storage."""
@@ -1468,7 +1531,6 @@ class TestNonToolRetryPrompt:
 class TestListRunsChronologicalOrdering:
     async def test_in_memory_returns_started_at_order(self) -> None:
         """`InMemoryStepStore.list_runs` sorts by `started_at`, not insertion order."""
-        from datetime import datetime, timezone
 
         store = InMemoryStepStore()
         await store.register_run(RunRecord(run_id='z-newer', started_at=datetime(2026, 5, 24, 12, tzinfo=timezone.utc)))
@@ -1478,7 +1540,6 @@ class TestListRunsChronologicalOrdering:
 
     async def test_file_store_returns_started_at_order(self, tmp_path: Path) -> None:
         """`FileStepStore.list_runs` sorts by `started_at`, not by directory name."""
-        from datetime import datetime, timezone
 
         store = FileStepStore(tmp_path)
         # `a-new` is lexicographically first but chronologically last.
@@ -1491,7 +1552,6 @@ class TestListRunsChronologicalOrdering:
 class TestToolEffectMetadataPreservation:
     async def test_completed_preserves_idempotency_key_and_effect_summary(self) -> None:
         """Metadata written during the tool call survives the terminal `completed` record."""
-        from pydantic_ai_harness.step_persistence import annotate_tool_effect
 
         store = InMemoryStepStore()
         agent: Agent[object, str] = Agent(TestModel(), capabilities=[StepPersistence(store=store, run_id='r1')])
@@ -1516,7 +1576,6 @@ class TestToolEffectMetadataPreservation:
 
     async def test_failed_preserves_idempotency_key(self) -> None:
         """Metadata written before a tool raises still appears on the `failed` record."""
-        from pydantic_ai_harness.step_persistence import annotate_tool_effect
 
         store = InMemoryStepStore()
         agent: Agent[object, str] = Agent(TestModel(), capabilities=[StepPersistence(store=store, run_id='r1')])
@@ -1538,7 +1597,6 @@ class TestToolEffectMetadataPreservation:
 
     async def test_annotate_tool_effect_outside_step_persistence_is_a_noop(self) -> None:
         """No `current_run_id` → `annotate_tool_effect` returns without writing."""
-        from pydantic_ai_harness.step_persistence import annotate_tool_effect
 
         store = InMemoryStepStore()
         ctx = build_run_context(deps=None, run_id='r1')
@@ -1548,8 +1606,6 @@ class TestToolEffectMetadataPreservation:
 
     async def test_annotate_tool_effect_noop_when_prior_record_missing(self) -> None:
         """`current_run_id` set + ctx tool fields set, but no prior record → no-op."""
-        from pydantic_ai_harness.step_persistence import annotate_tool_effect
-        from pydantic_ai_harness.step_persistence._context import current_run_id
 
         store = InMemoryStepStore()
         ctx = RunContext[Any](
@@ -1609,7 +1665,7 @@ class TestRunIdIsPerCall:
         # All distinct ids, all carrying the same conversation_id.
         assert len({r.run_id for r in records}) == 3
         assert all(r.conversation_id == 'orch-conv' for r in records)
-        assert all(r.run_id.startswith('orchestrator-') for r in records)
+        assert all(r.run_id.startswith('sp-') for r in records)
 
     async def test_explicit_run_id_reuse_raises(self) -> None:
         """Reusing an explicit `run_id` across `.run()` calls raises ValueError.
@@ -1622,10 +1678,10 @@ class TestRunIdIsPerCall:
         store = InMemoryStepStore()
         agent = make_simple_agent([StepPersistence(store=store, run_id='shared')])
 
-        await agent.run('first')
+        await agent.run('first', run_id='shared')
 
         with pytest.raises(ValueError, match=r"run_id 'shared' is already in the store"):
-            await agent.run('second')
+            await agent.run('second', run_id='shared')
 
         # First run's records remain untouched.
         record = await store.get_run(run_id='shared')
@@ -1633,6 +1689,18 @@ class TestRunIdIsPerCall:
         effect = await store.get_tool_effect(run_id='shared', tool_call_id='pyd_ai_tool_call_id__add')
         assert effect is not None
         assert effect.status == 'completed'
+
+    async def test_same_registration_identity_is_an_idempotent_retry(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        registration_id = UUID('00000000-0000-0000-0000-000000000001')
+        monkeypatch.setattr('pydantic_ai_harness.step_persistence._capability.uuid4', lambda: registration_id)
+        store = InMemoryStepStore()
+        original = RunRecord(run_id='shared', registration_id=str(registration_id))
+        await store.register_run(original)
+        agent = make_simple_agent([StepPersistence(store=store, run_id='shared')])
+
+        await agent.run('retry')
+
+        assert await store.get_run(run_id='shared') == original
 
 
 # ---------------------------------------------------------------------------
@@ -1999,8 +2067,6 @@ class TestLiveHistoryInvariant:
 
     async def test_node_boundary_messages_are_one_live_list(self) -> None:
         """All post-`UserPromptNode` boundaries expose the same list object, and it tracks the run."""
-        from pydantic_ai.capabilities import AbstractCapability
-        from pydantic_ai.capabilities.abstract import AgentNode, NodeResult
 
         seen: list[list[ModelMessage]] = []
 

@@ -29,6 +29,19 @@ identifiers.
 
 _ANY_SCOPE = '*'
 
+
+def delimited(*parts: str) -> str:
+    """Join parts so that no two different sequences of them produce the same string.
+
+    Each part is prefixed with its length, so a `SEPARATOR` inside one cannot be read as
+    the boundary between two. Plain joining is enough where every part is checked for the
+    separator first, as `store_key`'s are; it is not enough for a provider's response id
+    or a caller's run id, where a collision would let one response be mistaken for another
+    and silently dropped as a replay.
+    """
+    return SEPARATOR.join(f'{len(part)}:{part}' for part in parts)
+
+
 WINDOWS: frozenset[str] = frozenset({'run', 'conversation', 'day', 'month', 'total'})
 """The accepted `window` values, for validating one that arrived as plain data."""
 
@@ -84,7 +97,11 @@ class Budget(Generic[AgentDepsT]):
     """The period the ceiling applies to."""
 
     scope: Callable[[RunContext[AgentDepsT]], str] | None = None
-    """Partitions the counter -- per tenant, per user, per agent. `None` counts globally."""
+    """Partitions the counter -- per tenant, per user, per agent. `None` counts globally.
+
+    Under durable execution this callable must return the same value when replayed
+    with the same run context, because its result is part of the store key.
+    """
 
     warn_at: float | None = None
     """Fraction of the ceiling past which `BudgetStatus.warning` is set. Never blocks."""
