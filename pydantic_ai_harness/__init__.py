@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
     from .skills import Skills
     from .spend import SpendLimits
+    from .sprites import SpriteSandbox
     from .stackone import StackOne
     from .step_persistence import StepPersistence
     from .subagents import SubAgent, SubAgents
@@ -98,6 +99,7 @@ __all__ = [
     'Researcher',
     'Shell',
     'Skills',
+    'SpriteSandbox',
     'SlidingWindowCompaction',
     'SpendLimits',
     'StackOne',
@@ -143,6 +145,7 @@ _CAPABILITY_EXPORTS = {
     'Researcher': 'researcher',
     'Shell': 'shell',
     'Skills': 'skills',
+    'SpriteSandbox': 'sprites',
     'SlidingWindowCompaction': 'compaction',
     'SpendLimits': 'spend',
     'StackOne': 'stackone',

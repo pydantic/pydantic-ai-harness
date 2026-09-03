@@ -68,6 +68,9 @@ logfire = [
 modal = [
     "modal>=1.5.0",
 ]
+sprites = [
+    "sprites-py>=0.6.0,<1",
+]
 dynamic-workflow = [
     "pydantic-monty>=0.0.19",
 ]
@@ -222,7 +225,10 @@ executionEnvironments = [
 [tool.pytest.ini_options]
 testpaths = ['tests']
 xfail_strict = true
-markers = ['modal_live: runs against a real Modal control plane; needs credentials']
+markers = [
+    'modal_live: runs against a real Modal control plane; needs credentials',
+    'sprites_live: runs against the real Sprites API; needs SPRITE_TOKEN',
+]
 filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
@@ -238,7 +244,7 @@ anyio_mode = 'auto'
 [tool.coverage.run]
 branch = true
 source = ['pydantic_ai_harness', 'tests']
-omit = ['tests/**/test_modal_live.py']
+omit = ['tests/**/test_modal_live.py', 'tests/**/test_sprites_live.py']
 
 [tool.coverage.paths]
 source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']
