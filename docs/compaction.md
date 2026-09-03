@@ -343,6 +343,30 @@ agent = Agent(
 
 Both prompt surfaces of the summary request are fields: `summary_prompt` is the user-turn template (it must contain a `{messages}` placeholder), and `instructions` sets the internal agent's static instructions, which Pydantic AI sends in the request's system prompt. Override `instructions` when the summarizer endpoint requires a fixed leading instruction.
 
+### Summary shape
+
+The summary message is written as a user turn, not a system prompt. The adapter already sends the
+run's instructions as one leading `system` message, and a second one from the summary makes
+single-system backends (SGLang, some vLLM deployments) reject the whole request. This holds when
+the summary is the only system-voice content in the history; a history carrying its own
+`SystemPromptPart`s (dynamic system prompts) can still map to several leading system messages,
+which is core's profile-flag territory (`openai_chat_supports_multiple_system_messages`).
+
+Summary identity rides model-invisible metadata, not the text. The marker is carried on both the
+`TextContent` and its containing `ModelRequest`, so UI adapters such as Vercel AI can preserve it
+when they flatten structured text to a string. A user turn that happens to open with `Summary of
+previous conversation:` is an ordinary user turn everywhere -- rendered, searched, and
+goal-anchored like any other. Only the legacy `SystemPromptPart` shape, which users cannot author,
+is identified by that prefix.
+
+Histories persisted by earlier releases carry the old system-voice shape and are rewritten to
+the marked user turn on the way through -- in `SummarizingCompaction`, in `TieredCompaction`
+(whose under-target path runs no tier at all), and in `FallbackCompaction` -- so they become
+sendable without waiting for the next compaction to fire. A part carrying a `dynamic_ref` is
+left alone: rewriting it would freeze an instruction core re-evaluates every turn.
+`system_reminders` goal anchoring skips marked summaries and still anchors on the user's first
+request.
+
 ### Usage accounting
 
 The summary call is a real request to the model, so its full usage -- tokens **and** the request itself -- is folded into the run's `ctx.usage`. This is deliberate: it keeps cost honest, keeps the request count consistent (a model request that did not count as one would be the surprise), and lets a `UsageLimits` request limit catch a runaway compaction. The nested run receives the other parent limits unchanged; the finite request limit is reduced by one so it cannot spend the slot already approved for the parent request. A run-request or iteration limiter will therefore see compaction calls among its requests.

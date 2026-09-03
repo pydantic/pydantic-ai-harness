@@ -49,6 +49,13 @@ from pydantic_ai_harness.compaction._shared import (
     resolve_token_trigger,
     validate_token_trigger,
 )
+from pydantic_ai_harness.compaction._summary import (
+    SUMMARY_PREFIX,
+    is_summary_part,
+    make_summary_message,
+    normalize_legacy_summaries,
+    summary_text,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelRequestPart, UserContent
@@ -91,7 +98,8 @@ _DEFAULT_INSTRUCTIONS = (
     'You are a context summarization assistant. Extract the most important information from conversations.'
 )
 
-_SUMMARY_PREFIX = 'Summary of previous conversation:\n\n'
+_SUMMARY_PREFIX = SUMMARY_PREFIX
+"""Backward-import alias for the canonical `SUMMARY_PREFIX` in `_summary`."""
 
 # Anchored-incremental update instruction (opencode mechanism): the previous summary is fed
 # back as an anchor to update in place rather than a summary to re-summarize, which avoids
@@ -164,9 +172,11 @@ def _format_messages(messages: Sequence[ModelMessage], *, skip_previous_summary:
                 continue
             for part in msg.parts:
                 if isinstance(part, UserPromptPart):
+                    if skip_previous_summary and is_summary_part(part, message_metadata=msg.metadata):
+                        continue
                     lines.append(f'User: {_user_prompt_text(part)}')
                 elif isinstance(part, SystemPromptPart) and not (
-                    skip_previous_summary and part.content.startswith(_SUMMARY_PREFIX)
+                    skip_previous_summary and is_summary_part(part, message_metadata=msg.metadata)
                 ):
                     lines.append(f'System: {part.content}')
                 elif isinstance(part, ToolReturnPart):
@@ -203,7 +213,7 @@ def _extract_system_prompts(messages: list[ModelMessage]) -> list[SystemPromptPa
         if not isinstance(msg, ModelRequest):
             break
         for part in msg.parts:
-            if isinstance(part, SystemPromptPart) and not part.content.startswith(_SUMMARY_PREFIX):
+            if isinstance(part, SystemPromptPart) and not is_summary_part(part, message_metadata=msg.metadata):
                 parts.append(part)
             elif is_pinned(part) or is_receipt_part(part):
                 continue
@@ -215,15 +225,16 @@ def _extract_system_prompts(messages: list[ModelMessage]) -> list[SystemPromptPa
 def _extract_previous_summary(messages: list[ModelMessage]) -> str | None:
     """Extract the most recent compaction summary from the message history.
 
-    Looks for a ``SystemPromptPart`` whose content starts with the summary prefix,
-    which indicates it was produced by a prior compaction pass.
+    Matches the summary part in either written shape: the user-turn shape and
+    the `SystemPromptPart` shape earlier releases wrote, so persisted histories
+    keep reading as summarized.
     """
     for msg in reversed(messages):
         if not isinstance(msg, ModelRequest):
             continue
         for part in reversed(msg.parts):
-            if isinstance(part, SystemPromptPart) and part.content.startswith(_SUMMARY_PREFIX):
-                return _without_bridge_prefix(part.content[len(_SUMMARY_PREFIX) :])
+            if (text := summary_text(part, message_metadata=msg.metadata)) is not None:
+                return _without_bridge_prefix(text)
     return None
 
 
@@ -244,6 +255,19 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     When the conversation exceeds a configurable threshold, older messages are
     summarized using a dedicated model call and replaced with a compact, structured
     summary message, preserving recent context and tool-call integrity.
+
+    The summary is written as a user-turn part, not a `SystemPromptPart`: the
+    adapter already sends the run's instructions as one leading `system`
+    message, and a summary in system voice would make two. OpenAI-compatible
+    backends that accept a single leading system message (SGLang, some vLLM
+    deployments) reject that shape, so the user turn keeps the compacted
+    history sendable when the summary is the only system-voice content in it.
+    A history that carries its own `SystemPromptPart`s (for example from
+    dynamic system prompts) can still map to several leading system messages;
+    that is core's profile-flag territory (`openai_chat_supports_multiple_system_messages`),
+    not something a part-type choice here can fix. Histories summarized by
+    earlier releases carry the old shape and are still recognized, and are
+    rewritten to the user turn on the way through.
 
     This is the expensive tier -- summarization turns input tokens into (pricier) output
     tokens -- so it is best used behind cheaper passes (see `TieredCompaction`).
@@ -411,6 +435,10 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
     ) -> list[ModelMessage]:
         """Summarize older messages, replacing them with a single summary message."""
+        # Direct and manual callers (compact_now, a FallbackCompaction chain) do not pass
+        # through before_model_request, so the legacy rewrite runs here too -- including
+        # on the nothing-to-compact path, where the old shape would otherwise persist.
+        messages = normalize_legacy_summaries(messages)
         if self.keep_tokens is not None:
             cutoff = find_token_cutoff(messages, self.keep_tokens, self.tokenizer)
         else:
@@ -427,8 +455,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         summary = await self._summarize(to_summarize, ctx, previous_summary=previous_summary)
         summary = self._maybe_bridge_prefix(summary, messages, ctx)
 
-        summary_part = SystemPromptPart(content=f'{_SUMMARY_PREFIX}{summary}')
-        summary_message = ModelRequest(parts=[*system_parts, summary_part])
+        summary_message = make_summary_message(summary, system_parts)
 
         extra: list[ModelMessage] = []
         if self.keep_user_messages:
@@ -481,7 +508,10 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             user_parts = [
                 part
                 for part in msg.parts
-                if isinstance(part, UserPromptPart) and not is_pinned(part) and not is_receipt_part(part)
+                if isinstance(part, UserPromptPart)
+                and not is_pinned(part)
+                and not is_receipt_part(part)
+                and not is_summary_part(part, message_metadata=msg.metadata)
             ]
             if not user_parts:
                 continue
@@ -588,6 +618,10 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     ) -> ModelRequestContext:
         """Summarize older messages when the threshold is exceeded."""
         messages: list[ModelMessage] = list(request_context.messages)
+        # Rewrite summaries an older release persisted in system voice before the trigger
+        # check: an under-threshold history carrying one would otherwise keep mapping to
+        # two leading system messages on single-system backends until it re-compacted.
+        request_context.messages = messages = normalize_legacy_summaries(messages)
         request_ctx = context_for_request(ctx, request_context)
         token_trigger = resolve_token_trigger(
             self.max_tokens, self.max_fraction, request_ctx.model, self.fallback_context_window, self.context_window

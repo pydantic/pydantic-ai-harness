@@ -70,7 +70,8 @@ async def compact_now(
     runs whatever the history size. A strategy that defines its own stop condition still honours
     it: `TieredCompaction` escalates only until the history fits its target, so a history already
     under target comes back unchanged -- by that strategy's own definition there is nothing left
-    to reclaim. Pass the tier directly if you need it to run regardless.
+    to reclaim, apart from the summary rewrite the summarizing, tiered, and fallback strategies
+    apply on the way through. Pass the tier directly if you need it to run regardless.
 
     A compaction that changes the history emits the same `compact_messages` span the in-run
     path emits, so an instrumented application sees one shape however compaction was

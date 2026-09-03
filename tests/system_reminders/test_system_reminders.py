@@ -553,6 +553,117 @@ class TestGoalReanchor:
         assert text is not None
         assert 'real goal' in text
 
+    def test_skips_compaction_summary_artifacts(self) -> None:
+        # A compacted history opens with the summary as a marked user turn; the goal must
+        # anchor on the user's actual first request, not on the derived summary of it.
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    UserPromptPart(
+                        content=[
+                            TextContent(
+                                content='Summary of previous conversation:\n\n## Intent\nThe user wants a migration done.',
+                                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+                            )
+                        ]
+                    )
+                ]
+            ),
+            ModelRequest(parts=[UserPromptPart('migrate the legacy schemas')]),
+            ModelResponse(parts=[TextPart('on it')]),
+        ]
+        text = GoalReanchor()(_ctx(messages=messages))
+        assert text is not None
+        assert 'migrate the legacy schemas' in text
+        assert 'Summary of previous conversation' not in text
+
+    def test_skips_summary_flattened_by_ui_adapter(self) -> None:
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[UserPromptPart('Summary of previous conversation:\n\nflattened artifact')],
+                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+            ),
+            ModelRequest(parts=[UserPromptPart('the surviving first request')]),
+        ]
+
+        text = GoalReanchor()(_ctx(messages=messages))
+
+        assert text is not None
+        assert 'the surviving first request' in text
+        assert 'flattened artifact' not in text
+
+    def test_anchors_on_user_text_that_opens_with_the_summary_prefix(self) -> None:
+        # Identity rides the marker, so a genuine first turn starting with the literal
+        # sentence is the goal, not an artifact to skip.
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart('Summary of previous conversation:\n\nthe ZEBRA passphrase')]),
+            ModelResponse(parts=[TextPart('on it')]),
+        ]
+        text = GoalReanchor()(_ctx(messages=messages))
+        assert text is not None
+        assert 'the ZEBRA passphrase' in text
+
+    def test_skips_legacy_system_voice_summary_and_anchors_on_next_user_turn(self) -> None:
+        # After the compaction-side rewrite, a legacy history's summary arrives here in the
+        # marked user-turn shape, so this is the same scan as above over a rewritten legacy
+        # history whose body mentions an earlier request that must not win.
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    UserPromptPart(
+                        content=[
+                            TextContent(
+                                content='Summary of previous conversation:\n\nlegacy-shaped artifact',
+                                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+                            )
+                        ]
+                    )
+                ]
+            ),
+            ModelRequest(parts=[UserPromptPart('the surviving first request')]),
+        ]
+        text = GoalReanchor()(_ctx(messages=messages))
+        assert text is not None
+        assert 'the surviving first request' in text
+
+    async def test_reminder_transcript_skips_summary_artifacts(self) -> None:
+        # Both transcript sections skip marked artifacts, symmetric with the goal lookup:
+        # a summary is derived text, not the goal and not recent activity.
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    UserPromptPart(
+                        content=[
+                            TextContent(
+                                content='Summary of previous conversation:\n\nolder context',
+                                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+                            )
+                        ]
+                    )
+                ]
+            ),
+            ModelRequest(parts=[UserPromptPart('the actual request')]),
+            ModelResponse(parts=[TextPart('working on it')]),
+        ]
+        store: dict[str, str] = {}
+        reminder = LLMReminder(model=_capture_model(store))
+        await reminder(_ctx(messages=messages))
+        assert 'Original goal: the actual request' in store['prompt']
+        assert 'user: the actual request' in store['prompt']
+        assert 'assistant: working on it' in store['prompt']
+        assert 'Summary of previous conversation' not in store['prompt']
+
+    async def test_reminder_transcript_keeps_user_text_opening_with_the_prefix(self) -> None:
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart('Summary of previous conversation:\n\nthe ZEBRA passphrase')]),
+            ModelResponse(parts=[TextPart('working on it')]),
+        ]
+        store: dict[str, str] = {}
+        reminder = LLMReminder(model=_capture_model(store))
+        await reminder(_ctx(messages=messages))
+        assert 'Original goal: Summary of previous conversation:' in store['prompt']
+        assert 'the ZEBRA passphrase' in store['prompt']
+
     def test_list_content_joins_text_parts(self) -> None:
         img = BinaryContent(data=b'\x00', media_type='image/png')
         messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart(content=['find bugs', img])])]

@@ -6,7 +6,7 @@ preservation, and in-place tool-result clearing -- anything used by more than on
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from json import dumps
@@ -47,6 +47,7 @@ from pydantic_ai_harness.compaction._receipts import (
     open_receipt_scope,
     reset_receipt_scope,
 )
+from pydantic_ai_harness.compaction._summary import is_summary_part
 
 if TYPE_CHECKING:
     from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -670,16 +671,17 @@ def find_token_cutoff(
 # ---------------------------------------------------------------------------
 
 
-def _is_harness_marker_part(part: ModelRequestPart) -> bool:
+def _is_harness_marker_part(part: ModelRequestPart, *, message_metadata: Mapping[str, object] | None = None) -> bool:
     """Return whether a user-role part is harness bookkeeping rather than a user turn."""
-    return is_pinned(part) or is_receipt_part(part)
+    return is_pinned(part) or is_receipt_part(part) or is_summary_part(part, message_metadata=message_metadata)
 
 
 def find_first_user_message(messages: list[ModelMessage]) -> ModelRequest | None:
     """Return the first ``ModelRequest`` that contains a ``UserPromptPart``, or ``None``."""
     for msg in messages:
         if isinstance(msg, ModelRequest) and any(
-            isinstance(part, UserPromptPart) and not _is_harness_marker_part(part) for part in msg.parts
+            isinstance(part, UserPromptPart) and not _is_harness_marker_part(part, message_metadata=msg.metadata)
+            for part in msg.parts
         ):
             return msg
     return None

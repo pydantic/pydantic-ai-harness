@@ -17,6 +17,7 @@ from pydantic_ai.messages import (
     CachePoint,
     FilePart,
     ImageUrl,
+    InstructionPart,
     LoadCapabilityCallPart,
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -42,10 +43,13 @@ from pydantic_ai.models import Model, ModelRequestContext, ModelRequestParameter
 from pydantic_ai.models.fallback import FallbackModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.instrumented import InstrumentationSettings
+from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets._tool_search import parse_discovered_tools
+from pydantic_ai.ui.vercel_ai import VercelAIAdapter
 from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 
 import pydantic_ai_harness
@@ -86,6 +90,7 @@ from pydantic_ai_harness.compaction._summarizing_compaction import (
     _extract_system_prompts,
     _format_messages,
 )
+from pydantic_ai_harness.compaction._summary import make_summary_message, make_summary_part
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
 
 try:
@@ -488,6 +493,31 @@ class TestFallbackCompaction:
         second.compact.assert_not_called()
 
     @pytest.mark.anyio
+    async def test_falling_through_to_a_summary_free_tier_still_rewrites_legacy_summaries(self):
+        # The summarizer tier raises, the sliding window takes over and keeps everything: the
+        # legacy system-voice summary an older release persisted must not ride through unrewritten.
+        failing = SummarizingCompaction(model='test:m', max_messages=1, keep_messages=1)
+        sliding = SlidingWindowCompaction(max_messages=3, keep_messages=4, preserve_first_user_message=False)
+        fallback = FallbackCompaction(fallback_chain=[failing, sliding], fallback_on=(RuntimeError,))
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content=f'{_SUMMARY_PREFIX}Persisted by an older release.')]),
+            _user('later'),
+            _assistant('reply'),
+            _user('tail'),
+        ]
+        with patch('pydantic_ai.Agent', side_effect=RuntimeError('summarizer down')):
+            result = await fallback.compact(messages, _make_ctx())
+
+        assert len(result) == len(messages)
+        assert _summary_texts(result)
+        assert not any(
+            isinstance(p, SystemPromptPart) and isinstance(p.content, str) and p.content.startswith(_SUMMARY_PREFIX)
+            for m in result
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+        )
+
+    @pytest.mark.anyio
     async def test_fallback_receives_fresh_original_list(self):
         class MutateThenFail:
             async def compact(self, messages: list[ModelMessage], ctx: RunContext[None]) -> list[ModelMessage]:
@@ -799,10 +829,10 @@ class TestCompaction:
         assert len(result.messages) == 2
         first_msg = result.messages[0]
         assert isinstance(first_msg, ModelRequest)
-        # The summary should be in a SystemPromptPart.
-        sys_parts = [p for p in first_msg.parts if isinstance(p, SystemPromptPart)]
-        assert len(sys_parts) >= 1
-        assert 'Summary of conversation.' in sys_parts[-1].content
+        # The summary is a user-turn part; see the class docstring for the wire-shape reason.
+        summaries = _summary_texts([first_msg])
+        assert len(summaries) == 1
+        assert 'Summary of conversation.' in summaries[0]
 
     @pytest.mark.anyio
     async def test_compaction_preserves_system_prompts(self):
@@ -832,6 +862,9 @@ class TestCompaction:
         # Should have the original system prompt preserved.
         sys_contents = [p.content for p in first_msg.parts if isinstance(p, SystemPromptPart)]
         assert 'You are a helpful assistant.' in sys_contents
+        # The summary rides in the same leading message, as a user-turn part.
+        assert any(isinstance(p, UserPromptPart) for p in first_msg.parts)
+        assert _summary_texts([first_msg])
 
     @pytest.mark.anyio
     async def test_compaction_preserves_tool_pairs(self):
@@ -917,6 +950,28 @@ class TestFormatMessages:
         msgs: list[ModelMessage] = [ModelRequest(parts=[SystemPromptPart(content='be helpful')])]
         text = _format_messages(msgs)
         assert 'System: be helpful' in text
+
+    def test_summary_rendered_by_its_part_voice(self):
+        # A marked summary renders as a User line and the skip path (incremental) suppresses it;
+        # a legacy system-voice summary renders as a System line and is skipped the same way.
+        marked: list[ModelMessage] = [_summary_msg('prior context'), _user('next')]
+        assert 'User: Summary of previous conversation:' in _format_messages(marked)
+        assert 'prior context' in _format_messages(marked)
+        assert 'Summary of previous conversation:' not in _format_messages(marked, skip_previous_summary=True)
+        legacy: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content=f'{_SUMMARY_PREFIX}prior context')]),
+            _user('next'),
+        ]
+        assert 'System: Summary of previous conversation:' in _format_messages(legacy)
+        assert 'Summary of previous conversation:' not in _format_messages(legacy, skip_previous_summary=True)
+
+    def test_user_text_opening_with_the_prefix_is_not_a_summary(self):
+        # Identity rides the marker, not the text: a genuine user turn that happens to open
+        # with the same sentence renders and re-summarizes like any other turn.
+        forged: list[ModelMessage] = [_user(f'{_SUMMARY_PREFIX}my actual instruction'), _user('next')]
+        assert 'User: Summary of previous conversation:' in _format_messages(forged)
+        assert 'my actual instruction' in _format_messages(forged)
+        assert 'my actual instruction' in _format_messages(forged, skip_previous_summary=True)
 
     def test_tool_call_and_return(self):
         msgs: list[ModelMessage] = [
@@ -1319,8 +1374,7 @@ class TestTokenizerParameter:
         assert len(result.messages) >= 1
         first_msg = result.messages[0]
         assert isinstance(first_msg, ModelRequest)
-        sys_parts = [p for p in first_msg.parts if isinstance(p, SystemPromptPart)]
-        assert any('Token summary.' in p.content for p in sys_parts)
+        assert any('Token summary.' in text for text in _summary_texts([first_msg]))
 
     def testfind_token_cutoff_with_tokenizer(self):
         """find_token_cutoff should use the tokenizer."""
@@ -1433,8 +1487,7 @@ class TestPreserveFirstUserMessage:
         assert len(result.messages) == 3
         # First message is the summary (with system prompts).
         assert isinstance(result.messages[0], ModelRequest)
-        sys_parts = [p for p in result.messages[0].parts if isinstance(p, SystemPromptPart)]
-        assert any('Summary.' in p.content for p in sys_parts)
+        assert any('Summary.' in text for text in _summary_texts(result.messages[:1]))
         # Second message is the preserved first user message.
         assert isinstance(result.messages[1], ModelRequest)
         user_parts = [p for p in result.messages[1].parts if isinstance(p, UserPromptPart)]
@@ -1640,8 +1693,7 @@ class TestIncrementalSummarization:
 
         first_msg = result.messages[0]
         assert isinstance(first_msg, ModelRequest)
-        sys_parts = [p for p in first_msg.parts if isinstance(p, SystemPromptPart)]
-        assert any('Extended context summary.' in p.content for p in sys_parts)
+        assert any('Extended context summary.' in text for text in _summary_texts([first_msg]))
 
 
 # ---------------------------------------------------------------------------
@@ -1678,7 +1730,33 @@ def _user_texts(messages: list[ModelMessage]) -> list[str]:
     for m in messages:
         if isinstance(m, ModelRequest):
             for p in m.parts:
-                if isinstance(p, UserPromptPart) and isinstance(p.content, str):
+                if isinstance(p, UserPromptPart) and not _is_marked_summary(p) and isinstance(p.content, str):
+                    out.append(p.content)
+    return out
+
+
+def _is_marked_summary(part: UserPromptPart) -> bool:
+    """Test-side mirror of the marker identity for user-turn summaries."""
+    return not isinstance(part.content, str) and any(
+        isinstance(item, TextContent) and item.metadata == {'pydantic-ai-harness.compaction.summary.v1': True}
+        for item in part.content
+    )
+
+
+def _summary_msg(body: str) -> ModelMessage:
+    """A message carrying a real (marked) summary artifact."""
+    return ModelRequest(parts=[make_summary_part(body)])
+
+
+def _summary_texts(messages: list[ModelMessage]) -> list[str]:
+    """Full rendered texts (prefix included) of the summary parts, either shape."""
+    out: list[str] = []
+    for m in messages:
+        if isinstance(m, ModelRequest):
+            for p in m.parts:
+                if isinstance(p, UserPromptPart) and _is_marked_summary(p):
+                    out.append(next(item.content for item in p.content if isinstance(item, TextContent)))
+                elif isinstance(p, SystemPromptPart) and p.content.startswith(_SUMMARY_PREFIX):
                     out.append(p.content)
     return out
 
@@ -2132,8 +2210,47 @@ class TestTieredCompaction:
 
         first_msg = result.messages[0]
         assert isinstance(first_msg, ModelRequest)
-        sys_parts = [p for p in first_msg.parts if isinstance(p, SystemPromptPart)]
-        assert any('Tiered summary.' in p.content for p in sys_parts)
+        assert any('Tiered summary.' in text for text in _summary_texts([first_msg]))
+
+
+class TestTieredCompactionLegacySummaries:
+    """The under-target paths rewrite legacy summaries even though no tier runs."""
+
+    @staticmethod
+    def _legacy_history() -> list[ModelMessage]:
+        return [
+            ModelRequest(parts=[SystemPromptPart(content=f'{_SUMMARY_PREFIX}Persisted by an older release.')]),
+            _user('later'),
+            _assistant('reply'),
+        ]
+
+    @pytest.mark.anyio
+    async def test_under_target_hook_path_rewrites(self):
+        tiered = TieredCompaction(tiers=[SlidingWindowCompaction(max_messages=50)], target_tokens=100_000)
+        rc = _make_request_context(self._legacy_history())
+        result = await tiered.before_model_request(_make_ctx(), rc)
+
+        assert _summary_texts(result.messages)
+        assert not any(
+            isinstance(p, SystemPromptPart) and isinstance(p.content, str) and p.content.startswith(_SUMMARY_PREFIX)
+            for m in result.messages
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+        )
+
+    @pytest.mark.anyio
+    async def test_under_target_compact_path_rewrites(self):
+        # compact_now and direct callers take this path; the gate breaks before the first tier.
+        tiered = TieredCompaction(tiers=[SlidingWindowCompaction(max_messages=50)], target_tokens=100_000)
+        result = await tiered.compact(self._legacy_history(), _make_ctx())
+
+        assert _summary_texts(result)
+        assert not any(
+            isinstance(p, SystemPromptPart) and isinstance(p.content, str) and p.content.startswith(_SUMMARY_PREFIX)
+            for m in result
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -2581,7 +2698,7 @@ class TestSummarizingCompactionPreserveBranches:
         # Summary message + preserved tail, no first-user message prepended.
         first_msg = result.messages[0]
         assert isinstance(first_msg, ModelRequest)
-        assert any(isinstance(p, SystemPromptPart) and 'No-user summary.' in p.content for p in first_msg.parts)
+        assert any('No-user summary.' in text for text in _summary_texts([first_msg]))
 
     @pytest.mark.anyio
     async def test_preserve_when_first_user_already_in_tail(self):
@@ -2601,10 +2718,8 @@ class TestSummarizingCompactionPreserveBranches:
             result = await comp.before_model_request(ctx, rc)
 
         # The only user message is within the kept tail, so it is not duplicated.
-        user_count = sum(
-            1 for m in result.messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, UserPromptPart)
-        )
-        assert user_count == 1
+        # The summary rides as a user-turn part, so only genuine user turns count here.
+        assert len(_user_texts(result.messages)) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -2987,7 +3102,7 @@ class TestPinning:
 
     @pytest.mark.anyio
     async def test_reinjected_pin_lands_after_leading_context(self):
-        # The summary message is system-only, so pins are placed after it, not above it.
+        # The summary message is leading context, so pins are placed after it, not above it.
         comp = SummarizingCompaction(
             model='test:m', max_messages=3, keep_messages=1, bridge_prefix=False, preserve_first_user_message=False
         )
@@ -2996,7 +3111,7 @@ class TestPinning:
             result = await comp.compact(messages, _make_ctx())
         first, second = result[0], result[1]
         assert isinstance(first, ModelRequest)
-        assert any(isinstance(p, SystemPromptPart) and p.content.startswith(_SUMMARY_PREFIX) for p in first.parts)
+        assert _summary_texts([first])
         assert isinstance(second, ModelRequest)
         assert is_pinned(second.parts[0])
 
@@ -3373,7 +3488,11 @@ class TestKeepUserMessages:
             result = await comp.before_model_request(_make_ctx(), rc)
         # Exactly one user part survives the summarized prefix, and content that fits is untouched.
         kept = [
-            p for m in result.messages if isinstance(m, ModelRequest) for p in m.parts if isinstance(p, UserPromptPart)
+            p
+            for m in result.messages
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+            if isinstance(p, UserPromptPart) and not _is_marked_summary(p)
         ]
         assert len(kept) == 1
         assert kept[0].content == [TextContent(content='multimodal')]
@@ -3405,7 +3524,7 @@ class TestKeepUserMessages:
             for m in result.messages
             if isinstance(m, ModelRequest)
             for p in m.parts
-            if isinstance(p, UserPromptPart) and not isinstance(p.content, str)
+            if isinstance(p, UserPromptPart) and not isinstance(p.content, str) and not _is_marked_summary(p)
         )
         first, passthrough = bounded.content
         assert isinstance(first, str)
@@ -3586,7 +3705,7 @@ class TestAnchoredIncremental:
         # The updated anchor lands in the new summary message.
         first = result.messages[0]
         assert isinstance(first, ModelRequest)
-        assert any('UPDATED SUMMARY' in p.content for p in first.parts if isinstance(p, SystemPromptPart))
+        assert any('UPDATED SUMMARY' in text for text in _summary_texts([first]))
 
 
 # ---------------------------------------------------------------------------
@@ -3627,9 +3746,7 @@ class TestBridgePrefix:
             result = await comp.before_model_request(run_ctx, rc)
         first = result.messages[0]
         assert isinstance(first, ModelRequest)
-        return next(
-            p.content for p in first.parts if isinstance(p, SystemPromptPart) and p.content.startswith(_SUMMARY_PREFIX)
-        )
+        return _summary_texts([first])[0]
 
     @pytest.mark.anyio
     async def test_prefix_added_on_family_mismatch(self):
@@ -3655,14 +3772,7 @@ class TestBridgePrefix:
         ]
         with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('BASE')):
             result = await comp.compact(messages, _make_ctx())
-        summary = next(
-            part.content
-            for message in result
-            if isinstance(message, ModelRequest)
-            for part in message.parts
-            if isinstance(part, SystemPromptPart) and part.content.startswith(_SUMMARY_PREFIX)
-        )
-        assert _BRIDGE_ANCHOR not in summary
+        assert _BRIDGE_ANCHOR not in _summary_texts(result)[0]
 
     @pytest.mark.anyio
     async def test_same_fallback_model_does_not_add_a_bridge(self):
@@ -3676,6 +3786,158 @@ class TestBridgePrefix:
     async def test_run_family_falls_back_to_the_running_model(self):
         # `TestModel.model_name` is `test`, which differs from the summarizer's family.
         assert _BRIDGE_ANCHOR in await self._compact_with(run_model=None)
+
+
+class TestSummaryWireShape:
+    """The compacted history must map to a wire shape single-system backends accept.
+
+    OpenAI-compatible servers such as SGLang and some vLLM deployments reject a request
+    whose second message is also `system` ("System message must be at the beginning"). The
+    adapter inserts the run's instructions as one leading system message, so a summary in
+    system voice would make two; these tests pin the user-turn shape that keeps it at one.
+    """
+
+    @staticmethod
+    async def _wire_roles(history: list[ModelMessage]) -> list[str]:
+        # Core's `_map_messages` is the only surface that asserts wire roles without a live
+        # request; harness pins core tightly, so a core rename breaks here loudly, which is
+        # the accepted tradeoff for asserting the contract backends actually enforce.
+        model = OpenAIChatModel(
+            model_name='strict-backend',
+            provider=OpenAIProvider(api_key='test', base_url='http://127.0.0.1:9'),
+        )
+        parameters = ModelRequestParameters(
+            function_tools=[],
+            output_mode='text',
+            output_object=None,
+            output_tools=[],
+            instruction_parts=[InstructionPart(content='You are a helpful assistant.')],
+        )
+        wire = await model._map_messages(history, parameters)
+        return [m.get('role') for m in wire]
+
+    @pytest.mark.anyio
+    async def test_fresh_compaction_maps_to_one_leading_system_message(self):
+        comp = SummarizingCompaction(
+            model='test:m', max_messages=3, keep_messages=1, preserve_first_user_message=False, bridge_prefix=False
+        )
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d'), _user('e')]
+        rc = _make_request_context(messages)
+        with patch('pydantic_ai.Agent', return_value=_patched_summary_agent('WIRE SUMMARY')):
+            result = await comp.before_model_request(_make_ctx(), rc)
+
+        # The next turn rides on top of the compacted history, instructions and all.
+        roles = await self._wire_roles([*result.messages, _user('continue')])
+        assert roles[0] == 'system'
+        assert 'system' not in roles[1:], roles
+        assert 'user' in roles
+
+    @pytest.mark.anyio
+    async def test_legacy_summary_shape_is_normalized_under_threshold(self):
+        comp = SummarizingCompaction(model='test:m', max_messages=100)
+        # The second message is the mixed shape every legacy history from a run with system
+        # prompts carries: extracted system parts plus the summary in one request.
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    SystemPromptPart(content='You are a helpful assistant.'),
+                    SystemPromptPart(content=f'{_SUMMARY_PREFIX}Persisted by an older release.'),
+                ]
+            ),
+            ModelRequest(parts=[SystemPromptPart(content=f'{_SUMMARY_PREFIX}A second artifact.')]),
+            _user('later'),
+            _assistant('reply'),
+        ]
+        # Pre-state: the helper sees both artifacts through the legacy system-voice branch.
+        assert len(_summary_texts(messages)) == 2
+        rc = _make_request_context(messages)
+        result = await comp.before_model_request(_make_ctx(), rc)
+
+        summaries = _summary_texts(result.messages)
+        assert len(summaries) == 2
+        assert not any(
+            isinstance(p, SystemPromptPart) and isinstance(p.content, str) and p.content.startswith(_SUMMARY_PREFIX)
+            for m in result.messages
+            if isinstance(m, ModelRequest)
+            for p in m.parts
+        )
+        # The real system prompt rides along untouched in the same rewritten message.
+        first = result.messages[0]
+        assert isinstance(first, ModelRequest)
+        assert [p.content for p in first.parts if isinstance(p, SystemPromptPart)] == ['You are a helpful assistant.']
+
+    @pytest.mark.anyio
+    async def test_dynamic_system_prompt_with_the_prefix_is_left_alone(self):
+        # A dynamic_ref part is core's to re-evaluate every turn; rewriting it would drop
+        # the ref and freeze the instruction in the wrong role, so the rewrite skips it.
+        comp = SummarizingCompaction(model='test:m', max_messages=100)
+        dynamic = SystemPromptPart(content=f'{_SUMMARY_PREFIX}oddly worded instruction', dynamic_ref='sys-odd-1')
+        messages: list[ModelMessage] = [ModelRequest(parts=[dynamic]), _user('later')]
+        rc = _make_request_context(messages)
+
+        result = await comp.before_model_request(_make_ctx(), rc)
+
+        first = result.messages[0]
+        assert isinstance(first, ModelRequest)
+        kept = [p for p in first.parts if isinstance(p, SystemPromptPart)]
+        assert kept == [dynamic]
+        assert kept[0].dynamic_ref == 'sys-odd-1'
+
+    @pytest.mark.anyio
+    async def test_triggered_compaction_preserves_dynamic_system_prompt_with_the_prefix(self):
+        comp = SummarizingCompaction(model='test:m', max_messages=3, keep_messages=1, preserve_first_user_message=False)
+        dynamic = SystemPromptPart(content=f'{_SUMMARY_PREFIX}live instruction', dynamic_ref='sys-live-1')
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[dynamic]),
+            _user('first'),
+            _assistant('reply'),
+            _user('second'),
+            _assistant('tail'),
+        ]
+        rc = _make_request_context(messages)
+        summary_agent = _patched_summary_agent('COMPACTED')
+
+        with patch('pydantic_ai.Agent', return_value=summary_agent):
+            result = await comp.before_model_request(_make_ctx(), rc)
+
+        prompt = summary_agent.run.call_args.args[0]
+        assert 'System: Summary of previous conversation:\n\nlive instruction' in prompt
+        assert '<previous-summary>' not in prompt
+        first = result.messages[0]
+        assert isinstance(first, ModelRequest)
+        assert [part for part in first.parts if isinstance(part, SystemPromptPart)] == [dynamic]
+
+    @pytest.mark.anyio
+    async def test_legacy_summary_history_maps_to_one_leading_system_message(self):
+        # A history an older release persisted, still under the trigger: the normalization
+        # alone must keep the request sendable on a single-system backend.
+        comp = SummarizingCompaction(model='test:m', max_messages=100)
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[SystemPromptPart(content=f'{_SUMMARY_PREFIX}Persisted by an older release.')]),
+            _user('later'),
+            _assistant('reply'),
+        ]
+        rc = _make_request_context(messages)
+        result = await comp.before_model_request(_make_ctx(), rc)
+
+        roles = await self._wire_roles([*result.messages, _user('continue')])
+        assert roles[0] == 'system'
+        assert 'system' not in roles[1:], roles
+
+    def test_summary_identity_survives_vercel_ai_round_trip(self):
+        original: list[ModelMessage] = [make_summary_message('Persist this summary.', [])]
+
+        loaded = VercelAIAdapter.load_messages(VercelAIAdapter.dump_messages(original))
+
+        first = loaded[0]
+        assert isinstance(first, ModelRequest)
+        part = first.parts[0]
+        assert isinstance(part, UserPromptPart)
+        assert isinstance(part.content, str)  # Vercel AI flattens `TextContent`.
+        assert _extract_previous_summary(loaded) == 'Persist this summary.'
+        assert 'Summary of previous conversation:' not in _format_messages(loaded, skip_previous_summary=True)
+        actual_user = _user('the actual first request')
+        assert find_first_user_message([*loaded, actual_user]) == actual_user
 
 
 # ---------------------------------------------------------------------------

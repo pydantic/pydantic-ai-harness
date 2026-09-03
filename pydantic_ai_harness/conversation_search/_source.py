@@ -21,31 +21,52 @@ search layer.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Mapping
 from typing import Protocol, runtime_checkable
 
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
     ModelRequest,
+    ModelRequestPart,
     SystemPromptPart,
+    TextContent,
+    UserPromptPart,
 )
 
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, RunRecord
 
 SUMMARY_PREFIX = 'Summary of previous conversation:\n\n'
-"""The exact prefix a `SummarizingCompaction` writes into the summary artifact it inserts.
+"""The exact prefix a `SummarizingCompaction` summary carries in its rendered text.
 
-Byte-for-byte mirror of `pydantic_ai_harness.compaction._summarizing_compaction._SUMMARY_PREFIX`,
-including the blank line: that is the marker compaction itself matches on to recognize its own
-prior summaries (`_extract_previous_summary`), and `SystemPromptPart` carries no metadata field
-to mark artifacts with instead. Matching the full literal keeps a user-authored system prompt
-that merely opens with the same sentence inside the corpus.
+Byte-for-byte mirror of `pydantic_ai_harness.compaction._summary.SUMMARY_PREFIX`. Only the
+legacy `SystemPromptPart` shape is identified by this prefix, and users cannot author system
+parts, so a user turn that opens with the same sentence stays inside the corpus.
 
 Kept as a local literal rather than an import so this capability does not couple to compaction
 internals: the corpus holds the originals a summary replaced, never the derived summary, so
 snapshots taken after compaction must contribute only what the earlier snapshots did not
 already carry.
 """
+
+SUMMARY_METADATA_KEY = 'pydantic-ai-harness.compaction.summary.v1'
+"""Request-level copy of the marker used when a UI adapter flattens `TextContent`."""
+
+SUMMARY_METADATA = {SUMMARY_METADATA_KEY: True}
+"""Mirror of the model-invisible marker compaction stamps its user-turn summaries with."""
+
+
+def _is_summary_part(part: ModelRequestPart, *, message_metadata: Mapping[str, object] | None = None) -> bool:
+    """Mirror of compaction's summary identity for the shapes this source can see."""
+    if isinstance(part, UserPromptPart):
+        if not isinstance(part.content, str):
+            return any(isinstance(item, TextContent) and item.metadata == SUMMARY_METADATA for item in part.content)
+        return (
+            message_metadata is not None
+            and message_metadata.get(SUMMARY_METADATA_KEY) is True
+            and part.content.startswith(SUMMARY_PREFIX)
+        )
+    return isinstance(part, SystemPromptPart) and part.dynamic_ref is None and part.content.startswith(SUMMARY_PREFIX)
 
 
 @runtime_checkable
@@ -116,7 +137,7 @@ def is_summary_artifact(message: ModelMessage) -> bool:
     """Return whether a message is a compaction summary artifact (never indexed)."""
     if not isinstance(message, ModelRequest):
         return False
-    return any(isinstance(part, SystemPromptPart) and part.content.startswith(SUMMARY_PREFIX) for part in message.parts)
+    return any(_is_summary_part(part, message_metadata=message.metadata) for part in message.parts)
 
 
 class SnapshotHistorySource:

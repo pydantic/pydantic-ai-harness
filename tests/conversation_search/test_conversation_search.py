@@ -171,6 +171,18 @@ class TestSnapshotHistorySource:
         history = await SnapshotHistorySource(store).run_history(run_id='r1')
         assert history == [original]
 
+    async def test_flattened_summary_uses_request_marker(self) -> None:
+        store = InMemoryStepStore()
+        artifact = ModelRequest(
+            parts=[UserPromptPart(content=f'{_SUMMARY_PREFIX}flattened summary')],
+            metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+        )
+        original = _user('KEEPME original detail')
+        await _seed_run(store, 'r1', [artifact, original])
+
+        history = await SnapshotHistorySource(store).run_history(run_id='r1')
+        assert history == [original]
+
     async def test_user_authored_summary_lookalike_stays_in_the_corpus(self) -> None:
         # The artifact marker is compaction's full literal, blank line included. A
         # developer's own system prompt that merely opens with the same sentence is
@@ -184,6 +196,25 @@ class TestSnapshotHistorySource:
         history = await SnapshotHistorySource(store).run_history(run_id='r1')
         assert history[0] == lookalike
         assert 'ONYX' in await _search(SnapshotHistorySource(store), 'ONYX')
+
+    async def test_dynamic_system_prompt_with_summary_prefix_stays_in_the_corpus(self) -> None:
+        store = InMemoryStepStore()
+        dynamic = ModelRequest(
+            parts=[
+                SystemPromptPart(
+                    content='Summary of previous conversation:\n\nlive ZEBRA instruction',
+                    dynamic_ref='sys-live-1',
+                )
+            ]
+        )
+        await _seed_run(store, 'r1', [dynamic, _user('carry on')])
+
+        source = SnapshotHistorySource(store)
+        history = await source.run_history(run_id='r1')
+        rendered = await _search(source, 'ZEBRA')
+        assert history[0] == dynamic
+        assert 'live ZEBRA instruction' in rendered
+        assert '[Compaction summary]' not in rendered
 
     async def test_interrupted_snapshots_stay_out_of_the_corpus(self) -> None:
         store = InMemoryStepStore()
@@ -736,6 +767,22 @@ class TestSearchScope:
                 ]
             ),
             ModelRequest(parts=[SystemPromptPart(content='Summary of previous conversation:\n\nolder kiwi context')]),
+            ModelRequest(
+                parts=[
+                    UserPromptPart(
+                        content=[
+                            TextContent(
+                                content='Summary of previous conversation:\n\nnewer MARKED kiwi context',
+                                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+                            )
+                        ]
+                    )
+                ]
+            ),
+            ModelRequest(
+                parts=[UserPromptPart(content='Summary of previous conversation:\n\nflattened MARKED kiwi context')],
+                metadata={'pydantic-ai-harness.compaction.summary.v1': True},
+            ),
         ]
         source = _StubSource({'r1': messages})
 
@@ -744,10 +791,24 @@ class TestSearchScope:
         rendered = await _search(source, 'mango', context_lines=5, max_matches=10)
         assert 'Assistant: assistant reply about mango' in rendered
         assert '[Compaction summary]' in rendered
+        assert 'newer MARKED kiwi context' not in rendered  # marked summaries collapse too
+        assert 'flattened MARKED kiwi context' not in rendered
         assert 'Tool Call [search]' in rendered
         assert 'Tool [readfile]' in rendered
         assert 'Retry [readfile]: please retry' in rendered  # RetryPromptPart is searchable
         assert '...' in rendered  # truncation applied to the long tool return / args
+
+    async def test_user_text_opening_with_the_summary_prefix_stays_indexed(self) -> None:
+        # Identity rides the model-invisible marker, not the text: a genuine user turn that
+        # opens with the literal sentence is corpus content, never a dropped artifact.
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart('Summary of previous conversation:\n\nthe ZEBRA passphrase mango')]),
+        ]
+        source = _StubSource({'r1': messages})
+
+        rendered = await _search(source, 'mango')
+        assert 'the ZEBRA passphrase mango' in rendered
+        assert '[Compaction summary]' not in rendered
 
     async def test_tool_availability_delta_is_not_indexed(self) -> None:
         """Tool-list bookkeeping is not conversation content, so it contributes no line.

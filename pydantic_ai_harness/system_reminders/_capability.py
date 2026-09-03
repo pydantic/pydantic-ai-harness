@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import copy
 from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Generic, Literal, TypeGuard
@@ -25,6 +25,32 @@ from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.tools import AgentDepsT, RunContext
 
 from pydantic_ai_harness._usage import reserved_usage_limits
+
+_COMPACTION_SUMMARY_METADATA_KEY = 'pydantic-ai-harness.compaction.summary.v1'
+
+_COMPACTION_SUMMARY_METADATA = {_COMPACTION_SUMMARY_METADATA_KEY: True}
+"""Mirror of the model-invisible marker `SummarizingCompaction` stamps its summaries with.
+
+Kept as a local literal rather than an import so this capability does not couple to compaction
+internals (the same decoupling `conversation_search` practices). A compacted history opens
+with the summary as a marked user turn, and the goal and recent-activity lookups must skip it
+to anchor on the user's actual text instead of the derived summary of it. A turn that merely
+opens with the same sentence still counts unless its request carries the marker too.
+"""
+
+
+def _is_summary_part(part: UserPromptPart, *, message_metadata: Mapping[str, object] | None = None) -> bool:
+    """Whether a user part is compaction's marked summary artifact."""
+    if not isinstance(part.content, str):
+        return any(
+            isinstance(item, TextContent) and item.metadata == _COMPACTION_SUMMARY_METADATA for item in part.content
+        )
+    return (
+        message_metadata is not None
+        and message_metadata.get(_COMPACTION_SUMMARY_METADATA_KEY) is True
+        and part.content.startswith('Summary of previous conversation:\n\n')
+    )
+
 
 if TYPE_CHECKING:
     from pydantic_ai.capabilities.abstract import WrapModelRequestHandler
@@ -397,7 +423,7 @@ def _first_user_text(messages: Sequence[ModelMessage]) -> str | None:
     for msg in messages:
         if isinstance(msg, ModelRequest):
             for part in msg.parts:
-                if isinstance(part, UserPromptPart):
+                if isinstance(part, UserPromptPart) and not _is_summary_part(part, message_metadata=msg.metadata):
                     text = _prompt_text(part.content)
                     if text:
                         return text
@@ -431,7 +457,7 @@ def _recent_texts(messages: Sequence[ModelMessage], max_messages: int) -> list[s
     fragments: list[str] = []
     for msg in messages:
         for part in msg.parts:
-            if isinstance(part, UserPromptPart):
+            if isinstance(part, UserPromptPart) and not _is_summary_part(part, message_metadata=msg.metadata):
                 text = _prompt_text(part.content)
                 if text:
                     fragments.append(f'user: {text}')
