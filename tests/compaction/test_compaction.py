@@ -24,6 +24,7 @@ from pydantic_ai.messages import (
     ModelResponse,
     NativeToolCallPart,
     NativeToolReturnPart,
+    RetryFeedbackPart,
     RetryPromptPart,
     SystemPromptPart,
     TextContent,
@@ -2512,6 +2513,25 @@ class TestHelperBranchCoverage:
         # `_format_messages` renders history for a summarizer prompt, which is a different
         # question from what the request costs; a retry and a thinking block stay out of it.
         assert _format_messages(msgs) == ''
+
+    def test_retry_feedback_costs_what_its_feedback_text_costs_as_a_system_prompt(self):
+        """It reaches the model as a mid-conversation system message, so it occupies the window.
+
+        `content` is a list of error details here, which is why the estimate follows
+        `model_response()` rather than `str(content)`: the model is shown the rendered text.
+
+        The per-cause sentence framing it as the harness speaking is added when the model renders
+        the part, so it is outside this equivalence -- a fixed ~10-token undercount, in an
+        estimator that counts no tool definitions at all.
+        """
+        part = RetryFeedbackPart(
+            content=[{'type': 'missing', 'loc': ('name',), 'msg': 'Field required', 'input': {}}],
+            cause='validation_error',
+        )
+        feedback: list[ModelMessage] = [ModelRequest(parts=[part])]
+        rendered: list[ModelMessage] = [ModelRequest(parts=[SystemPromptPart(content=part.model_response())])]
+
+        assert estimate_token_count(feedback) == estimate_token_count(rendered) > 0
 
     def test_a_provider_side_tool_call_and_its_result_are_counted(self):
         """A web search runs on the provider's side and its result still lands in the context."""

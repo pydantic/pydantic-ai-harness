@@ -20,6 +20,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    RetryFeedbackPart,
     RetryPromptPart,
     SpeechPart,
     SystemPromptPart,
@@ -35,6 +36,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
+from pydantic_core import ErrorDetails
 
 from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.compaction import SlidingWindowCompaction, SummarizingCompaction
@@ -748,6 +750,55 @@ class TestSearchScope:
         assert 'Tool [readfile]' in rendered
         assert 'Retry [readfile]: please retry' in rendered  # RetryPromptPart is searchable
         assert '...' in rendered  # truncation applied to the long tool return / args
+
+    async def test_retry_feedback_is_indexed(self) -> None:
+        """A retry that named no tool is recalled like one that did.
+
+        Why a run changed course is the same thing worth finding whether or not the retry
+        answered a particular call, so indexing only the tool-bound half would make recall
+        depend on which part type pydantic-ai reached for.
+        """
+        messages: list[ModelMessage] = [
+            ModelRequest(
+                parts=[
+                    UserPromptPart(content='mango question'),
+                    RetryFeedbackPart(
+                        content=[{'type': 'missing', 'loc': ('mango',), 'msg': 'Field required', 'input': {}}],
+                        cause='validation_error',
+                    ),
+                ]
+            ),
+            ModelResponse(parts=[TextPart(content='mango answer')]),
+        ]
+        source = _StubSource({'r1': messages})
+
+        rendered = await _search(source, 'mango')
+
+        # `model_response()`, not `str(part.content)`: the latter would index a Python repr of the
+        # error list rather than the rendering the model was shown.
+        assert 'Retry: ' in rendered
+        assert 'mango' in rendered
+        assert "{'type': 'missing'" not in rendered
+
+    async def test_retry_feedback_truncates_but_stays_searchable(self) -> None:
+        """A validation failure renders one fenced JSON block per error, so it can run long.
+
+        The display excerpt is capped like the other content branches while the index keeps the
+        full text, so a term past the cutoff still matches.
+        """
+        errors: list[ErrorDetails] = [
+            {'type': 'missing', 'loc': (f'field_{i}',), 'msg': 'Field required', 'input': {}} for i in range(40)
+        ]
+        errors.append({'type': 'missing', 'loc': ('rambutan',), 'msg': 'Field required', 'input': {}})
+        messages: list[ModelMessage] = [
+            ModelRequest(parts=[RetryFeedbackPart(content=errors, cause='validation_error')]),
+        ]
+        source = _StubSource({'r1': messages})
+
+        rendered = await _search(source, 'rambutan')
+
+        assert 'Retry: ' in rendered
+        assert '...' in rendered
 
     async def test_tool_availability_delta_is_not_indexed(self) -> None:
         """Tool-list bookkeeping is not conversation content, so it contributes no line.

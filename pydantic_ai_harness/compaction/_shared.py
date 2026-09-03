@@ -23,6 +23,7 @@ from pydantic_ai.messages import (
     ModelResponsePart,
     NativeToolCallPart,
     NativeToolReturnPart,
+    RetryFeedbackPart,
     RetryPromptPart,
     SpeechPart,
     SystemPromptPart,
@@ -106,6 +107,16 @@ def _request_part_text(part: ModelRequestPart) -> list[str]:
         # Both are sent in full. The tool-search and capability-load returns subclass
         # `ToolReturnPart`, so they arrive here too.
         return [str(part.content)]
+    elif isinstance(part, RetryFeedbackPart):
+        # Retry feedback that answers no tool call. It is stored model-neutral and rendered at
+        # request time as a mid-conversation system message (or `<system>`-tagged user text where
+        # the provider takes none), so it occupies the window exactly like the `SystemPromptPart`
+        # above. `model_response()` rather than `str(part.content)`: the content is a list of
+        # `ErrorDetails` for a validation failure, and this renders it the way the model sees it.
+        # The per-cause sentence framing it as the harness speaking is chosen during rendering and
+        # so is not counted -- a small fixed undercount, in an estimator that already counts no
+        # tool definitions at all.
+        return [part.model_response()]
     # Control bookkeeping rather than message text: it records which tools became available, and
     # the schemas themselves travel in the request's tool definitions. Those schemas are not free
     # -- this estimator counts no tool definitions at all, so revealing tools mid-run costs
