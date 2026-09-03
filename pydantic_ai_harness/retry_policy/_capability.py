@@ -44,6 +44,29 @@ def _is_retryable_http_error(exc: Exception, status_codes: tuple[int, ...]) -> b
     return False
 
 
+def _validate_tool_overrides(tool_overrides: dict[str, dict[str, Any]]) -> None:
+    """Validate per-tool override values."""
+    for tool_name, config in tool_overrides.items():
+        if 'max_retries' in config:
+            val = config['max_retries']
+            if not isinstance(val, int) or val < 0:
+                raise ValueError(
+                    f"tool_overrides['{tool_name}']['max_retries'] must be >= 0, got {val!r}"
+                )
+        if 'backoff_factor' in config:
+            val = config['backoff_factor']
+            if not isinstance(val, (int, float)) or val <= 0:
+                raise ValueError(
+                    f"tool_overrides['{tool_name}']['backoff_factor'] must be > 0, got {val!r}"
+                )
+        if 'max_backoff' in config:
+            val = config['max_backoff']
+            if not isinstance(val, (int, float)) or val <= 0:
+                raise ValueError(
+                    f"tool_overrides['{tool_name}']['max_backoff'] must be > 0, got {val!r}"
+                )
+
+
 @dataclass
 class RetryPolicy(AbstractCapability[AgentDepsT]):
     """Configurable retry logic with exponential backoff for tool calls.
@@ -67,7 +90,7 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
     )
     ```
 
-    By default, retries are only attempted when the handler has not yet been called
+    By default, retries are only attempted when the handler has not yet been entered
     (i.e. the failure happened before any side effect). Set `allow_idempotent_retries=True`
     to retry after the handler has run, but only for tools listed in `idempotent_tools`.
     """
@@ -132,6 +155,7 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
             raise ValueError(f'backoff_factor must be > 0, got {self.backoff_factor}')
         if self.max_backoff <= 0:
             raise ValueError(f'max_backoff must be > 0, got {self.max_backoff}')
+        _validate_tool_overrides(self.tool_overrides)
 
     def get_tool_config(self, tool_name: str) -> dict[str, Any]:
         """Get retry config for a specific tool, falling back to defaults."""
@@ -213,22 +237,23 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
 
         Retries are only attempted when:
         1. The exception is retryable (per `should_retry`)
-        2. Either the handler has not yet been called, OR the tool is idempotent
+        2. Either the handler has not yet been entered, OR the tool is idempotent
 
-        This prevents duplicating side effects for non-idempotent tools.
+        The `handler_entered` flag tracks whether `await handler(args)` was invoked,
+        regardless of whether it raised. This prevents duplicating side effects for
+        non-idempotent tools even when the handler succeeds then raises on cleanup.
         """
         tool_name = call.tool_name
         max_retries = self.get_max_retries(tool_name)
         on_retry = self._get_on_retry(tool_name)
         on_failure = self._get_on_failure(tool_name)
         last_exception: Exception | None = None
-        handler_called = False
+        handler_entered = False
 
         for attempt in range(max_retries + 1):
+            handler_entered = True
             try:
-                result = await handler(args)
-                handler_called = True
-                return result
+                return await handler(args)
             except Exception as exc:
                 last_exception = exc
 
@@ -236,7 +261,7 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
                     raise
 
                 # Don't retry if handler already ran and tool is not idempotent
-                if handler_called and not self._is_idempotent(tool_name):
+                if handler_entered and not self._is_idempotent(tool_name):
                     if on_failure:
                         on_failure(tool_name, exc)
                     raise

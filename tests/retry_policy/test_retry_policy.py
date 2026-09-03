@@ -66,6 +66,18 @@ class TestRetryPolicyValidation:
         with pytest.raises(ValueError, match='max_backoff must be > 0'):
             RetryPolicy(max_backoff=-1)
 
+    def test_tool_override_negative_max_retries_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"tool_overrides\['bad'\]\['max_retries'\] must be >= 0"):
+            RetryPolicy(tool_overrides={'bad': {'max_retries': -1}})
+
+    def test_tool_override_zero_backoff_factor_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"tool_overrides\['bad'\]\['backoff_factor'\] must be > 0"):
+            RetryPolicy(tool_overrides={'bad': {'backoff_factor': 0}})
+
+    def test_tool_override_negative_max_backoff_raises(self) -> None:
+        with pytest.raises(ValueError, match=r"tool_overrides\['bad'\]\['max_backoff'\] must be > 0"):
+            RetryPolicy(tool_overrides={'bad': {'max_backoff': -5}})
+
 
 # --- Retry logic ---
 
