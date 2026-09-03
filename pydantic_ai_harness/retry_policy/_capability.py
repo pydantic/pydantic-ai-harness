@@ -66,6 +66,10 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
         ],
     )
     ```
+
+    By default, retries are only attempted when the handler has not yet been called
+    (i.e. the failure happened before any side effect). Set `allow_idempotent_retries=True`
+    to retry after the handler has run, but only for tools listed in `idempotent_tools`.
     """
 
     max_retries: int = 3
@@ -94,6 +98,21 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
     Example: {'web_search': {'max_retries': 2, 'backoff_factor': 1.0}}
     """
 
+    allow_idempotent_retries: bool = False
+    """When False (default), retries are only attempted before the handler first succeeds.
+
+    Set to True to allow retries after a successful handler call, but only for tools
+    listed in `idempotent_tools`. This is unsafe for tools with side effects (writes,
+    charges, messages) unless you can guarantee idempotency.
+    """
+
+    idempotent_tools: frozenset[str] = frozenset()
+    """Tool names that are safe to retry after a successful handler call.
+
+    Only used when `allow_idempotent_retries=True`. Tools not in this set will not
+    be retried after the handler has returned successfully.
+    """
+
     on_retry: Callable[[str, int, Exception], None] | None = None
     """Optional callback invoked on each retry attempt.
 
@@ -105,6 +124,14 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
 
     Arguments: (tool_name, final_exception)
     """
+
+    def __post_init__(self) -> None:
+        if self.max_retries < 0:
+            raise ValueError(f'max_retries must be >= 0, got {self.max_retries}')
+        if self.backoff_factor <= 0:
+            raise ValueError(f'backoff_factor must be > 0, got {self.backoff_factor}')
+        if self.max_backoff <= 0:
+            raise ValueError(f'max_backoff must be > 0, got {self.max_backoff}')
 
     def get_tool_config(self, tool_name: str) -> dict[str, Any]:
         """Get retry config for a specific tool, falling back to defaults."""
@@ -119,6 +146,24 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
         """Get retryable exceptions for a specific tool."""
         config = self.get_tool_config(tool_name)
         return config.get('retryable_exceptions', self.retryable_exceptions)
+
+    def _get_on_retry(self, tool_name: str) -> Callable[[str, int, Exception], None] | None:
+        """Get on_retry callback, preferring tool-specific override."""
+        config = self.get_tool_config(tool_name)
+        return config.get('on_retry', self.on_retry)
+
+    def _get_on_failure(self, tool_name: str) -> Callable[[str, Exception], None] | None:
+        """Get on_failure callback, preferring tool-specific override."""
+        config = self.get_tool_config(tool_name)
+        return config.get('on_failure', self.on_failure)
+
+    def _is_idempotent(self, tool_name: str) -> bool:
+        """Check if a tool is safe to retry after a successful handler call."""
+        if not self.allow_idempotent_retries:
+            return False
+        config = self.get_tool_config(tool_name)
+        idempotent = config.get('idempotent', tool_name in self.idempotent_tools)
+        return bool(idempotent)
 
     def should_retry(self, exc: Exception, tool_name: str) -> bool:
         """Determine if an exception is retryable."""
@@ -164,32 +209,50 @@ class RetryPolicy(AbstractCapability[AgentDepsT]):
         args: Any,
         handler: WrapToolExecuteHandler,
     ) -> Any:
-        """Wrap tool execution with retry logic."""
+        """Wrap tool execution with retry logic.
+
+        Retries are only attempted when:
+        1. The exception is retryable (per `should_retry`)
+        2. Either the handler has not yet been called, OR the tool is idempotent
+
+        This prevents duplicating side effects for non-idempotent tools.
+        """
         tool_name = call.tool_name
         max_retries = self.get_max_retries(tool_name)
+        on_retry = self._get_on_retry(tool_name)
+        on_failure = self._get_on_failure(tool_name)
         last_exception: Exception | None = None
+        handler_called = False
 
         for attempt in range(max_retries + 1):
             try:
-                return await handler(args)
+                result = await handler(args)
+                handler_called = True
+                return result
             except Exception as exc:
                 last_exception = exc
 
                 if not self.should_retry(exc, tool_name):
                     raise
 
+                # Don't retry if handler already ran and tool is not idempotent
+                if handler_called and not self._is_idempotent(tool_name):
+                    if on_failure:
+                        on_failure(tool_name, exc)
+                    raise
+
                 if attempt < max_retries:
                     delay = self.calculate_delay(attempt, tool_name)
-                    if self.on_retry:
-                        self.on_retry(tool_name, attempt + 1, exc)
+                    if on_retry:
+                        on_retry(tool_name, attempt + 1, exc)
                     logger.warning(
                         f"Retry {attempt + 1}/{max_retries} for tool '{tool_name}' "
                         f"after {delay:.2f}s: {exc}"
                     )
                     await asyncio.sleep(delay)
                 else:
-                    if self.on_failure:
-                        self.on_failure(tool_name, exc)
+                    if on_failure:
+                        on_failure(tool_name, exc)
                     raise
 
         raise last_exception  # type: ignore[misc]

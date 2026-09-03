@@ -54,6 +54,18 @@ class TestRetryPolicyValidation:
         assert policy.tool_overrides['web_search']['max_retries'] == 2
         assert policy.tool_overrides['shell']['max_retries'] == 1
 
+    def test_negative_max_retries_raises(self) -> None:
+        with pytest.raises(ValueError, match='max_retries must be >= 0'):
+            RetryPolicy(max_retries=-1)
+
+    def test_zero_backoff_factor_raises(self) -> None:
+        with pytest.raises(ValueError, match='backoff_factor must be > 0'):
+            RetryPolicy(backoff_factor=0)
+
+    def test_negative_max_backoff_raises(self) -> None:
+        with pytest.raises(ValueError, match='max_backoff must be > 0'):
+            RetryPolicy(max_backoff=-1)
+
 
 # --- Retry logic ---
 
@@ -98,28 +110,29 @@ class TestRetryLogic:
         assert policy.should_retry(MyError('custom'), 'tool') is True
         assert policy.should_retry(TimeoutError('timeout'), 'tool') is False
 
+    def test_should_retry_per_tool_override(self) -> None:
+        policy = RetryPolicy(
+            tool_overrides={'safe_tool': {'retryable_exceptions': ()}}
+        )
+        assert policy.should_retry(TimeoutError('timeout'), 'tool') is True
+        assert policy.should_retry(TimeoutError('timeout'), 'safe_tool') is False
+
     def test_calculate_delay_base(self) -> None:
         policy = RetryPolicy(backoff_factor=1.0)
-        # First attempt (attempt=0) should be around 1.0 * 2^0 = 1.0
         delay = policy.calculate_delay(0, 'tool')
-        assert 0.75 <= delay <= 1.25  # With ±25% jitter
+        assert 0.75 <= delay <= 1.25
 
     def test_calculate_delay_exponential(self) -> None:
         policy = RetryPolicy(backoff_factor=1.0, max_backoff=100.0)
-        # Run multiple times to account for jitter randomness
         for _ in range(10):
             delays = [policy.calculate_delay(i, 'tool') for i in range(3)]
-            # Each delay should roughly double (with ±25% jitter)
-            # With jitter, delays[1] should be around 2x delays[0]
-            # But we need to account for worst-case jitter
-            assert delays[1] > delays[0] * 0.8  # Allow for jitter
+            assert delays[1] > delays[0] * 0.8
             assert delays[2] > delays[1] * 0.8
 
     def test_calculate_delay_max_cap(self) -> None:
         policy = RetryPolicy(backoff_factor=1.0, max_backoff=5.0)
-        # High attempt should be capped at max_backoff
         delay = policy.calculate_delay(10, 'tool')
-        assert delay <= 6.25  # max_backoff * 1.25 jitter
+        assert delay <= 6.25
 
     def test_calculate_delay_tool_override(self) -> None:
         policy = RetryPolicy(
@@ -143,6 +156,51 @@ class TestCallbacks:
         policy = RetryPolicy(on_failure=lambda tool, exc: None)
         assert policy.on_failure is not None
 
+    def test_per_tool_on_retry_override(self) -> None:
+        calls: list[str] = []
+        policy = RetryPolicy(
+            on_retry=lambda tool, attempt, exc: calls.append('default'),
+            tool_overrides={'special': {'on_retry': lambda tool, attempt, exc: calls.append('special')}},
+        )
+        policy._get_on_retry('default_tool')('default_tool', 1, Exception())
+        policy._get_on_retry('special')('special', 1, Exception())
+        assert calls == ['default', 'special']
+
+    def test_per_tool_on_failure_override(self) -> None:
+        calls: list[str] = []
+        policy = RetryPolicy(
+            on_failure=lambda tool, exc: calls.append('default'),
+            tool_overrides={'special': {'on_failure': lambda tool, exc: calls.append('special')}},
+        )
+        policy._get_on_failure('default_tool')('default_tool', Exception())
+        policy._get_on_failure('special')('special', Exception())
+        assert calls == ['default', 'special']
+
+
+# --- Idempotency ---
+
+
+class TestIdempotency:
+    def test_default_not_idempotent(self) -> None:
+        policy = RetryPolicy()
+        assert policy._is_idempotent('any_tool') is False
+
+    def test_allow_idempotent_retries(self) -> None:
+        policy = RetryPolicy(
+            allow_idempotent_retries=True,
+            idempotent_tools=frozenset({'safe_read'}),
+        )
+        assert policy._is_idempotent('safe_read') is True
+        assert policy._is_idempotent('unsafe_write') is False
+
+    def test_per_tool_idempotent_override(self) -> None:
+        policy = RetryPolicy(
+            allow_idempotent_retries=True,
+            tool_overrides={'custom': {'idempotent': True}},
+        )
+        assert policy._is_idempotent('custom') is True
+        assert policy._is_idempotent('other') is False
+
 
 # --- Integration with Agent (mocked) ---
 
@@ -154,6 +212,5 @@ class TestAgentIntegration:
 
     def test_retry_policy_with_agent(self) -> None:
         policy = RetryPolicy(max_retries=1)
-        # Just verify it can be passed as a capability
         agent = Agent(TestModel(), capabilities=[policy])
         assert agent is not None
