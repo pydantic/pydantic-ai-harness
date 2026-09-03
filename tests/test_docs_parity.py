@@ -122,6 +122,7 @@ _CAPABILITY_DOC_PAGES = _capability_doc_pages()
 # or empty heading, fails instead of passing on a substring match.
 _CAPABILITY_PAGE_META = {
     'advisor.md': ('advisor', 'Advisor'),
+    'channels.md': ('channels', 'Channels'),
     'code-mode.md': ('code_mode', 'Code Mode'),
     'coder.md': ('coder', 'Coder'),
     'skills.md': ('skills', 'Skills'),

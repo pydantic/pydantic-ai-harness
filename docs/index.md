@@ -11,7 +11,9 @@ description: "Your agent's favorite harness, built on Pydantic AI: 30+ capabilit
 
 **Pydantic AI Harness** is the official [capability](/ai/capabilities/overview/) and harness library for [Pydantic AI](/ai/). Every Pydantic AI agent already has a light harness: the typed agent loop, [any model](/ai/models/overview/), your own tools, structured output. For simple agents that's enough. But set an agent loose on complex, long-running work (fix a codebase, research a question, run for hours unattended) and what it needs around the model grows: a [workspace](filesystem.md) to act in, a [plan](planning.md) it keeps current, [memory](memory.md) that carries across sessions, [sub-agents](subagents.md) to hand work to, [context management](compaction.md) that holds up in hour ten, and [durable execution](/ai/capabilities/durable_execution/overview/) that survives a restart. **Pydantic AI Harness** ships that harness.
 
-Everything here is one primitive: a [capability](/ai/capabilities/overview/), a self-contained unit of agent behavior you add to `capabilities=[...]` on any agent. There are [30+ of them](#capabilities), and complete agents like [Coder](coder.md) and [Researcher](researcher.md) are themselves capabilities combined: they come apart the way they went together. Snap on a single block, compose your own stack, or start from the whole coding agent and take it apart later.
+Most of the library uses one primitive: a [capability](/ai/capabilities/overview/), a self-contained unit of agent behavior you add to `capabilities=[...]` on any agent. There are [30+ of them](#capabilities), and complete agents like [Coder](coder.md) and [Researcher](researcher.md) are themselves capabilities combined: they come apart the way they went together. Snap on a single block, compose your own stack, or start from the whole coding agent and take it apart later.
+
+Integrations that must initiate runs sit outside the agent loop. [Channels](channels.md) and [ACP](acp.md) drive the public Agent API, while capabilities configured on the agent continue to compose inside each run.
 
 ## Quick start
 
@@ -246,7 +248,7 @@ Outside the loop: how runs persist, survive failures, and get observed and confi
 
 Core also ships loop-customization capabilities for production servers: [Select Model](/ai/capabilities/select-model/), [Resolve Model ID](/ai/capabilities/resolve-model-id/), [Prepare Tools / Prepare Output Tools](/ai/capabilities/prepare-tools/), [Prefix Tools](/ai/capabilities/prefix-tools/), [Set Tool Metadata](/ai/capabilities/set-tool-metadata/), [Include Tool Return Schemas](/ai/capabilities/include-tool-return-schemas/), [Process History](/ai/capabilities/process-history/), [Process Event Stream](/ai/capabilities/process-event-stream/), [Reinject System Prompt](/ai/capabilities/reinject-system-prompt/), and [Raise Content Filter Error](/ai/capabilities/raise-content-filter-error/).
 
-And the agent plugs into any interface: [ACP](acp.md) *(experimental, Harness)* serves it to editors like Zed over the [Agent Client Protocol](https://agentclientprotocol.com), and core ships the [web chat UI](/ai/web/), [CLI](/ai/cli/), [frontend adapters](/ai/ui/overview/) (AG-UI, Vercel AI), and [realtime voice](/ai/realtime/overview/).
+And the agent plugs into any interface: [Channels](channels.md) connects it to messaging services, [ACP](acp.md) *(experimental, Harness)* serves it to editors like Zed over the [Agent Client Protocol](https://agentclientprotocol.com), and core ships the [web chat UI](/ai/web/), [CLI](/ai/cli/), [frontend adapters](/ai/ui/overview/) (AG-UI, Vercel AI), and [realtime voice](/ai/realtime/overview/).
 
 Community packages extend the same capability system further; see [third-party capabilities](/ai/capabilities/third-party/).
 
