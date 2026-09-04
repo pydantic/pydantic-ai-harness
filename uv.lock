@@ -4033,17 +4033,17 @@ requires-dist = [
     { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.0" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.61.0" },
-    { name = "pydantic-ai-slim", specifier = ">=2.38.0" },
-    { name = "pydantic-ai-slim", marker = "extra == 'aws-lambda'", specifier = ">=2.38.0" },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", specifier = ">=2.38.0" },
-    { name = "pydantic-ai-slim", extras = ["cli"], marker = "extra == 'cli'", specifier = ">=2.38.0" },
-    { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", specifier = ">=2.38.0" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", specifier = ">=2.38.0" },
-    { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", specifier = ">=2.38.0" },
-    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", specifier = ">=2.18.0" },
-    { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", specifier = ">=2.18.0" },
-    { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'" },
+    { name = "pydantic-ai-slim", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", marker = "extra == 'aws-lambda'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["cli"], marker = "extra == 'cli'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'", git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
     { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.19" },
     { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.19" },
     { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.19" },
@@ -4064,9 +4064,9 @@ dev = [
     { name = "logfire", extras = ["httpx"], specifier = ">=4.31.0" },
     { name = "mongomock-motor", specifier = ">=0.0.36" },
     { name = "pydantic-ai-harness", extras = ["code-mode"] },
-    { name = "pydantic-ai-slim", extras = ["anthropic"] },
-    { name = "pydantic-ai-slim", extras = ["mcp", "spec"], specifier = ">=2.18.0" },
-    { name = "pydantic-ai-slim", extras = ["openai"] },
+    { name = "pydantic-ai-slim", extras = ["anthropic"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["mcp", "spec"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
+    { name = "pydantic-ai-slim", extras = ["openai"], git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82" },
     { name = "pytest", specifier = ">=9.0.0" },
     { name = "pytest-anyio" },
     { name = "pytest-examples", specifier = ">=0.0.18" },
@@ -4080,8 +4080,8 @@ lint = [
 
 [[package]]
 name = "pydantic-ai-slim"
-version = "2.38.0"
-source = { registry = "https://pypi.org/simple" }
+version = "2.39.1.dev10+a8d25715"
+source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_ai_slim&rev=a8d25715130840b9e74595608c060d2d0a1eaa82#a8d25715130840b9e74595608c060d2d0a1eaa82" }
 dependencies = [
     { name = "anyio", version = "4.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "anyio", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -4094,10 +4094,6 @@ dependencies = [
     { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pydantic-graph" },
     { name = "typing-inspection" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b1/1e/9baa25614062be6fe05c3691816bbd1bcf538a5828bcd9fc7732ca89a2b3/pydantic_ai_slim-2.38.0.tar.gz", hash = "sha256:2e486a8558e9075ca37d545b0e90e241a9d7e2c8b4b5f8255ac9c527dca96a05", size = 1371724, upload-time = "2026-09-03T07:57:29.165Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/cc/db/794b281a4314666f726de4c713e77190945d087065b1bd361c1a5086cef8/pydantic_ai_slim-2.38.0-py3-none-any.whl", hash = "sha256:58bcb7d574eca0f69831855b550236844172bb393d21f7c477faa1bb7d368822", size = 1615570, upload-time = "2026-09-03T07:57:21.89Z" },
 ]
 
 [package.optional-dependencies]
@@ -4381,8 +4377,8 @@ wheels = [
 
 [[package]]
 name = "pydantic-graph"
-version = "2.38.0"
-source = { registry = "https://pypi.org/simple" }
+version = "2.39.1.dev10+a8d25715"
+source = { git = "https://github.com/pydantic/pydantic-ai.git?subdirectory=pydantic_graph&rev=a8d25715130840b9e74595608c060d2d0a1eaa82#a8d25715130840b9e74595608c060d2d0a1eaa82" }
 dependencies = [
     { name = "anyio", version = "4.12.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "anyio", version = "4.13.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -4390,10 +4386,6 @@ dependencies = [
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "typing-inspection" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/cc/0c/140ffa7f0a92267b71cb4ef6a9340e36d341420e18fe537a98c9968bfa14/pydantic_graph-2.38.0.tar.gz", hash = "sha256:3ecab71ba43b754c016ee0d84eeb472089cfaebbfca9116a77596c4f350f9920", size = 45189, upload-time = "2026-09-03T07:57:31.302Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f3/33/52cf89abe3180beea7f6a921a8f43260f827e1e48181464d344812bc9188/pydantic_graph-2.38.0-py3-none-any.whl", hash = "sha256:00f5f0e6cb7b3126a394fe4c64f175f1c0d587acea075238c3678d9464bd5f58", size = 52700, upload-time = "2026-09-03T07:57:24.999Z" },
 ]
 
 [[package]]
