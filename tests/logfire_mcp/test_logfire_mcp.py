@@ -421,6 +421,7 @@ class TestLogfireMCP:
             ('SELECT * FROM records /* bounded */ LIMIT 1', 'comments or multiple statements'),
             ('SELECT * FROM records; SELECT 1 LIMIT 1', 'comments or multiple statements'),
             (r"SELECT E'a\''; DELETE FROM records; SELECT 'b' LIMIT 1", 'comments or multiple statements'),
+            (r"SELECT 'a\'; DELETE FROM records; SELECT 'b' LIMIT 1", 'comments or multiple statements'),
             ("SELECT 'LIMIT 1' FROM records", 'final numeric `LIMIT`'),
             ('CREATE TABLE copied AS SELECT * FROM records LIMIT 1', 'only one `SELECT`'),
             (f'SELECT * FROM records LIMIT {"9" * 5000}', 'too large to parse'),
