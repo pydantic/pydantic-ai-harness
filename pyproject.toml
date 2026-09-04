@@ -171,7 +171,7 @@ bump = true
 override-dependencies = ['anthropic>=1.3.0', 'openai>=2.45.0']
 
 [tool.uv.sources]
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "b8e5fbd5a4eaf6089f54b98a7fbb92bf5ec49a18" }
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "a8d25715130840b9e74595608c060d2d0a1eaa82" }
 
 
 [tool.hatch.build.targets.wheel]
