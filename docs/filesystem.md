@@ -74,7 +74,8 @@ the root you give it.
 Event paths are normalized, authorization-checked, relative to `root_dir`, and
 never absolute host paths. A denied or failed operation emits no event.
 
-Other capabilities can subscribe with `@on_event`. A host with its own file
+Other capabilities can subscribe with `@on_event`, and application code with
+`@agent.on_event`. A host with its own file
 tools can emit the same event types by importing them from
 `pydantic_ai_harness.filesystem`, which lets subscribers such as `RepoContext`
 react without depending on tool names or raw model arguments.
