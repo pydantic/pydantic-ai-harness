@@ -144,7 +144,8 @@ class SystemReminders(AbstractCapability[AgentDepsT]):
         self.dynamic_reminders = tuple(self.dynamic_reminders)
         if self.on_fire is not None:
             warnings.warn(
-                '`SystemReminders.on_fire` is deprecated; subscribe to `ReminderFiredEvent` with `@on_event` instead.',
+                '`SystemReminders.on_fire` is deprecated; subscribe to `ReminderFiredEvent` with `@agent.on_event` '
+                'instead, or with `@on_event` on a capability of your own.',
                 HarnessDeprecationWarning,
                 stacklevel=2,
             )

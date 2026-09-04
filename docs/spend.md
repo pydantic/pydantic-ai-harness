@@ -89,20 +89,19 @@ Not: that spend stays under the ceiling. The request that crosses the line compl
 ```python
 from decimal import Decimal
 
-from pydantic_ai.capabilities import Hooks
+from pydantic_ai import Agent
 from pydantic_ai_harness import SpendLimits
 from pydantic_ai_harness.spend import Budget, SpendRecordedEvent
 
-reporting = Hooks()
+limits = SpendLimits(budgets=[Budget(usd=Decimal('100'))])
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[limits])
 
-@reporting.on.event(SpendRecordedEvent)
+@agent.on_event(SpendRecordedEvent)
 async def show(ctx, event):
     print(f'{event.model} cost ${event.usd}')
-
-limits = SpendLimits(budgets=[Budget(usd=Decimal('100'))])
 ```
 
-Add both `limits` and `reporting` to the agent's capabilities. `SpendRecordedEvent` is emitted after every response, including one that `on_unpriced='raise'` is about to reject. Its flat payload carries the response usage and serializable budget readings. Under durable execution, orchestration can deliver it again even though the journaled accrual ran only once, so keep a listener that writes an audit record or emits a billing event idempotent.
+`SpendRecordedEvent` is emitted after every response, including one that `on_unpriced='raise'` is about to reject. Its flat payload carries the response usage and serializable budget readings. Under durable execution, orchestration can deliver it again even though the journaled accrual ran only once, so keep a listener that writes an audit record or emits a billing event idempotent.
 
 Migration: `on_spend` remains supported but is deprecated. Move its callback body to a `SpendRecordedEvent` subscription; the same idempotency requirement applies to it.
 

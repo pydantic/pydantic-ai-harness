@@ -123,24 +123,20 @@ A strategy knows when to act but says nothing about how close the run is to the 
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import Hooks
 from pydantic_ai_harness import ReportContextUsage, SummarizingCompaction
 from pydantic_ai_harness.compaction import ContextUsageEvent
-
-reporting = Hooks()
-
-@reporting.on.event(ContextUsageEvent)
-async def show(ctx, event):
-    print(f'{event.fraction:.0%}')
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
         SummarizingCompaction(max_fraction=0.9, keep_messages=20),
         ReportContextUsage(),
-        reporting,
     ],
 )
+
+@agent.on_event(ContextUsageEvent)
+async def show(ctx, event):
+    print(f'{event.fraction:.0%}')
 ```
 
 Each reading carries `used_tokens`, `window_tokens`, `fraction`, and `resolved` -- `False` when the window is the fallback rather than the model's real one, so a gauge can show that the percentage is a guess. Migration: `on_usage` remains supported but is deprecated. Move its callback body to a `ContextUsageEvent` subscription. Order matters: register the monitor *after* a compaction capability to observe the corrected current history after same-cycle compaction, or before it to see what triggered the compaction.

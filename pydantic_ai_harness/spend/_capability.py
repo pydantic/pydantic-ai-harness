@@ -184,7 +184,8 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         """
         if self.on_spend is not None:
             warnings.warn(
-                '`SpendLimits.on_spend` is deprecated; subscribe to `SpendRecordedEvent` with `@on_event` instead.',
+                '`SpendLimits.on_spend` is deprecated; subscribe to `SpendRecordedEvent` with `@agent.on_event` '
+                'instead, or with `@on_event` on a capability of your own.',
                 HarnessDeprecationWarning,
                 stacklevel=2,
             )

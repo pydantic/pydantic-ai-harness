@@ -105,7 +105,8 @@ class ReportContextUsage(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         if self.on_usage is not None:
             warnings.warn(
-                '`ReportContextUsage.on_usage` is deprecated; subscribe to `ContextUsageEvent` with `@on_event` instead.',
+                '`ReportContextUsage.on_usage` is deprecated; subscribe to `ContextUsageEvent` with '
+                '`@agent.on_event` instead, or with `@on_event` on a capability of your own.',
                 HarnessDeprecationWarning,
                 stacklevel=2,
             )

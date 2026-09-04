@@ -130,18 +130,22 @@ Without a durability engine, generation runs directly in all three cases, with t
 Subscribe to `ReminderFiredEvent` to observe reminders after they are appended:
 
 ```python
-from pydantic_ai.capabilities import Hooks
-from pydantic_ai_harness.system_reminders import ReminderFiredEvent
+from pydantic_ai import Agent
+from pydantic_ai_harness import SystemReminders
+from pydantic_ai_harness.system_reminders import Reminder, ReminderFiredEvent
 
-reporting = Hooks()
+agent = Agent(
+    'anthropic:claude-sonnet-4-6',
+    capabilities=[SystemReminders(reminders=[Reminder('...', interval=5)])],
+)
 
-@reporting.on.event(ReminderFiredEvent)
+@agent.on_event(ReminderFiredEvent)
 async def record(ctx, event):
     print(event.text)
 ```
 
-Add `reporting` beside `SystemReminders` in the agent's capabilities. Migration: `on_fire`
-remains supported but is deprecated. Move its callback body to this subscription.
+Migration: `on_fire` remains supported but is deprecated. Move its callback body to this
+subscription.
 
 ```python
 from pydantic_ai_harness import SystemReminders

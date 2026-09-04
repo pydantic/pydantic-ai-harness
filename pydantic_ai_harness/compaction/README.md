@@ -178,24 +178,20 @@ window, and only observes:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import Hooks
 from pydantic_ai_harness import ReportContextUsage, SummarizingCompaction
 from pydantic_ai_harness.compaction import ContextUsageEvent
-
-reporting = Hooks()
-
-@reporting.on.event(ContextUsageEvent)
-async def show(ctx, event):
-    print(f'{event.fraction:.0%}')
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
         SummarizingCompaction(max_fraction=0.9, keep_messages=20),
         ReportContextUsage(),
-        reporting,
     ],
 )
+
+@agent.on_event(ContextUsageEvent)
+async def show(ctx, event):
+    print(f'{event.fraction:.0%}')
 ```
 
 Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the

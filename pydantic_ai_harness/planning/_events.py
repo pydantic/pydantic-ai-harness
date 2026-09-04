@@ -112,7 +112,7 @@ class PlanEventEmitter:
 
     def __init__(self) -> None:
         warnings.warn(
-            '`PlanEventEmitter` is deprecated; subscribe with `@on_event` to the events `Planning` emits '
+            '`PlanEventEmitter` is deprecated; subscribe with `@agent.on_event` to the events `Planning` emits '
             'instead -- `PlanCreatedEvent`, `PlanUpdatedEvent`, `PlanStatusChangedEvent`, '
             '`PlanCompletedEvent` and `PlanDeletedEvent`, from `pydantic_ai_harness.planning`, one per '
             '`on_*` method here. They are emitted from the planning tools, so a mutation your own code '

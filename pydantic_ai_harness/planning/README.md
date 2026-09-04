@@ -117,17 +117,18 @@ The planner's read-only discipline is a property of how you configure that agent
 Subscribe to typed plan events to react to changes made through the `Planning` tools:
 
 ```python
-from pydantic_ai.capabilities import Hooks
+from pydantic_ai import Agent
+from pydantic_ai_harness import Planning
 from pydantic_ai_harness.planning import PlanCompletedEvent
 
-reporting = Hooks()
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Planning()])
 
-@reporting.on.event(PlanCompletedEvent)
+@agent.on_event(PlanCompletedEvent)
 async def announce(ctx, event):
     print('done:', event.item.content)
 ```
 
-Add `reporting` beside `Planning` in the agent's capabilities. The family contains
+The family contains
 `PlanCreatedEvent`, `PlanUpdatedEvent`, `PlanStatusChangedEvent`, `PlanCompletedEvent`, and
 `PlanDeletedEvent`; each carries the affected `item` and, for updates, `previous_state`.
 
