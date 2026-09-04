@@ -24,8 +24,8 @@ target organization or project settings with at least `project:read`, then set:
 export LOGFIRE_MCP_TOKEN='your-logfire-api-key'
 ```
 
-Add only the scopes required by any mutation tools you explicitly select. API keys are bearer credentials; keep them
-out of source control.
+The defaults need `project:read`. Additional reads and mutations need their listed dashboard, alert, or variable
+scopes. API keys are bearer credentials; keep them out of source control.
 
 ## Query recent errors
 
@@ -62,11 +62,12 @@ print(result.output)
 
 - `project` is required in `organization/project` form. The capability supplies that value to each project-scoped call
   and rejects a different value before the request reaches Logfire.
-- The default tools are read-only. `tools=` accepts exact project-scoped names from Logfire's documented MCP inventory;
-  account discovery, organization-wide notification channels, and local bootstrap are excluded. Every selected
-  mutation pauses for Pydantic AI approval.
+- The default tools are read-only. `tools=` accepts supported project-scoped names from Logfire's
+  [MCP inventory](https://pydantic.dev/docs/logfire/guides/mcp-server/#available-mcp-tools). Account discovery,
+  organization-wide notification channels and schedules, and local bootstrap are excluded. Every selected mutation
+  pauses for Pydantic AI approval.
 - `query_run` SQL must end with a numeric `LIMIT` no greater than `max_query_rows` (100 by default). Logfire defaults
-  queries to 30 minutes and limits query ranges to 14 days.
+  queries to 30 minutes and limits query ranges to 14 days. SQL comments and multiple statements are rejected.
 - The hosted US endpoint is the default. Use `region='eu'` for EU data or `mcp_url=` for the `/mcp` endpoint of a
   self-hosted deployment.
 - OAuth tokens use FastMCP's in-memory storage by default. Pass a caller-owned `client=` configured with persistent
