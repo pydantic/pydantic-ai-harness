@@ -200,8 +200,8 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             session_config: Optional factory called once per session with the client's
                 [`AcpSession`][pydantic_ai_harness.experimental.acp.AcpSession] setup (its `cwd`, MCP servers,
                 and capabilities). It returns an
-                [`AcpSessionConfig`][pydantic_ai_harness.experimental.acp.AcpSessionConfig] whose `deps` and
-                `toolsets` are applied to every run in that session. May be sync or async.
+                [`AcpSessionConfig`][pydantic_ai_harness.experimental.acp.AcpSessionConfig] whose `deps`,
+                `toolsets`, and optional `sandbox` are applied to every run in that session. May be sync or async.
             permission_policy: Optional function deciding the scope under which an "always
                 allow"/"always reject" decision is remembered. Defaults to the exact call (tool
                 name plus arguments).
@@ -615,6 +615,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
                     output_type=output_type,
                     deps=config.deps,
                     toolsets=config.toolsets,
+                    sandbox=config.sandbox,
                     # Per-run override for the client's model config choice; `None` uses the
                     # agent's own model, never mutating the shared agent. A `model_resolver` (if
                     # given) maps the advertised id to a pre-built `Model` for ids `infer_model`

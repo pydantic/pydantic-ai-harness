@@ -120,7 +120,7 @@ if __name__ == '__main__':
     run_acp_stdio_sync(agent, session_config=session_config)
 ```
 
-The factory runs once per session with the client's [`AcpSession`][pydantic_ai_harness.experimental.acp.AcpSession] setup (its `cwd`, `mcp_servers`, and capabilities) and returns an [`AcpSessionConfig`][pydantic_ai_harness.experimental.acp.AcpSessionConfig] whose `deps` and `toolsets` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
+The factory runs once per session with the client's [`AcpSession`][pydantic_ai_harness.experimental.acp.AcpSession] setup (its `cwd`, `mcp_servers`, and capabilities) and returns an [`AcpSessionConfig`][pydantic_ai_harness.experimental.acp.AcpSessionConfig] whose `deps`, `toolsets`, and optional `sandbox` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static filesystem or sandbox could not be.
 
 ## Editor-native filesystem and shell (optional)
 
@@ -232,7 +232,7 @@ run_acp_stdio(            # async; serve until the client disconnects
     deps=None,
     name=None,            # advertised name; defaults to the agent's name
     version='0.1.0',
-    session_config=None,  # per-session deps/toolsets from the client's setup
+    session_config=None,  # per-session deps/toolsets/sandbox from the client's setup
     permission_policy=None,   # scope of remembered "always" approval decisions
     prompt_capabilities=None, # defaults to text-only
     mcp_capabilities=None,    # MCP transports to advertise; needs a session_config to connect them

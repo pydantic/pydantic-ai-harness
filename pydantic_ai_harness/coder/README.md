@@ -5,22 +5,29 @@ It is a regular [combined capability](https://pydantic.dev/docs/ai/capabilities/
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness import Coder
 
 agent = Agent('anthropic:claude-fable-5', capabilities=[Coder('.')])
 
-result = agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
+result = agent.run_sync(
+    'Find out why tests/test_parser.py fails and fix the bug it caught.',
+    sandbox=LocalSandbox('.'),  # the run needs a sandbox; this one is the local checkout
+)
 print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-The same agent works with every Pydantic AI interface: [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) starts an interactive chat in your terminal, and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) serves a browser chat UI.
+Every run needs a sandbox attached: `LocalSandbox('.')` works on the checkout itself, and a [`ModalSandbox`](https://pydantic.dev/docs/ai/harness/modal-sandbox/) capability supplies a remote one. Interfaces that start runs for you accept `sandbox=` too, so pass it to [`agent.to_cli_sync(sandbox=...)`](https://pydantic.dev/docs/ai/cli/) or [`agent.to_web(sandbox=...)`](https://pydantic.dev/docs/ai/web/) the same way you pass it to `run()`.
 
 Or skip the file entirely and run the exported `coder_agent` with [`clai`](https://pydantic.dev/docs/ai/cli/#custom-agents) (the Pydantic AI CLI), via [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
 uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
 ```
+
+The `clai` command does not currently expose a `sandbox` option; use
+`agent.to_cli_sync(sandbox=...)` when the CLI-launched run needs one.
 
 It is literally these capabilities combined, in this order:
 

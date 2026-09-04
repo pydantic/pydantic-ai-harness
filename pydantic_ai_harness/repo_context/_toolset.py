@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness._sandbox import sandbox_path
 from pydantic_ai_harness.repo_context._inventory import AgentContextInventory, scan_assets
 
 
@@ -20,7 +21,7 @@ class RepoContextToolset(FunctionToolset[AgentDepsT]):
         self._asset_roots = asset_roots
         self.add_function(self.inventory_agent_context, name=tool_name)
 
-    async def inventory_agent_context(self) -> AgentContextInventory:
+    async def inventory_agent_context(self, ctx: RunContext[AgentDepsT]) -> AgentContextInventory:
         """Report where this repo's coding-assistant setup lives.
 
         Returns the locations of instruction dirs (`.claude`, `.agents`,
@@ -28,4 +29,5 @@ class RepoContextToolset(FunctionToolset[AgentDepsT]):
         `settings.json` (hooks) it contains. This locates assets so you can read
         and translate them; it does not parse their contents.
         """
-        return scan_assets(self._workspace_dir, self._asset_roots)
+        workspace = Path(sandbox_path(self._workspace_dir))
+        return await scan_assets(ctx.sandbox, workspace, self._asset_roots)

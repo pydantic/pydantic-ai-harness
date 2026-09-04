@@ -9,6 +9,7 @@ from typing import Generic, Protocol, TypeAlias
 
 from acp import Client, schema
 from pydantic_ai.messages import ModelMessage
+from pydantic_ai.sandboxes import SandboxBackend, SandboxRef
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -61,14 +62,19 @@ class AcpSession:
 class AcpSessionConfig(Generic[AgentDepsT]):
     """Per-session run configuration returned by a `session_config` factory.
 
-    `deps` and `toolsets` are applied to every agent run in that session, mirroring
-    `Agent.run(..., deps=..., toolsets=...)`. `toolsets` is added to the agent's own toolsets
-    rather than replacing them. `deps` is required; pass `deps=None` for an agent with no
+    `deps`, `toolsets`, and `sandbox` are applied to every agent run in that session, mirroring
+    `Agent.run(..., deps=..., toolsets=..., sandbox=...)`. `toolsets` is added to the agent's own
+    toolsets rather than replacing them. `deps` is required; pass `deps=None` for an agent with no
     dependencies.
+
+    Without a `sandbox`, runs get the unavailable default and any tool touching `ctx.sandbox`
+    fails with attachment instructions. The session owns the backend's lifecycle: the adapter
+    never tears it down.
     """
 
     deps: AgentDepsT
     toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None
+    sandbox: SandboxBackend | SandboxRef | None = None
 
 
 # A `Protocol` rather than a `Callable` alias so it stays subscriptable (`SessionConfigFunc[MyDeps]`)

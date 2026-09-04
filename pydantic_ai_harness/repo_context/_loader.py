@@ -7,6 +7,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic_ai.sandboxes import Sandbox
+
 
 @dataclass(frozen=True)
 class ContextFile:
@@ -27,24 +29,34 @@ def _walk_dirs(workspace_dir: Path, home_dir: Path | None) -> list[Path]:
 
     Walk up from `workspace_dir` to `home_dir` inclusive. When `home_dir` is
     `None`, or is not an ancestor of `workspace_dir`, only `workspace_dir` is
-    scanned.
+    scanned. Symlink realpath resolution is delegated to the sandbox (the
+    resulting directories are used verbatim for reads).
     """
-    workspace = workspace_dir.resolve()
     if home_dir is None:
-        return [workspace]
-    home = home_dir.resolve()
-    chain: list[Path] = [workspace]
-    if workspace != home:
-        for parent in workspace.parents:
+        return [workspace_dir]
+    chain: list[Path] = [workspace_dir]
+    if workspace_dir != home_dir:
+        for parent in workspace_dir.parents:
             chain.append(parent)
-            if parent == home:
+            if parent == home_dir:
                 break
         else:
-            return [workspace]
+            return [workspace_dir]
     return list(reversed(chain))
 
 
-def discover_instruction_files(
+async def _sandbox_is_file(sandbox: Sandbox, path: Path) -> bool:
+    """True when `path` exists and is a regular file inside `sandbox`."""
+    text = str(path)
+    try:
+        entry = await sandbox.stat(text)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    return not entry.is_dir
+
+
+async def discover_instruction_files(
+    sandbox: Sandbox,
     workspace_dir: Path,
     home_dir: Path | None,
     filenames: Sequence[str],
@@ -55,9 +67,9 @@ def discover_instruction_files(
     first and the most specific (closest to the model's recency window) comes
     last. Within a directory, `filenames` are tried in order.
 
-    Files are deduped by resolved real path and by content hash, so a symlinked
-    `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical content load
-    once. The first occurrence in precedence order wins.
+    Files are deduped by the path the walker visits and by content hash, so
+    ancestors that share identical bytes (e.g. via a symlinked `AGENTS.md ->
+    CLAUDE.md`) load once.
     """
     seen_paths: set[Path] = set()
     seen_hashes: set[str] = set()
@@ -65,30 +77,29 @@ def discover_instruction_files(
     for directory in _walk_dirs(workspace_dir, home_dir):
         for filename in filenames:
             candidate = directory / filename
-            if not candidate.is_file():
+            if not await _sandbox_is_file(sandbox, candidate):
                 continue
-            real = candidate.resolve()
-            if real in seen_paths:
+            if candidate in seen_paths:
                 continue
-            content = candidate.read_text(encoding='utf-8', errors='replace')
+            content = (await sandbox.read_bytes(str(candidate))).decode('utf-8', errors='replace')
             digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
             if digest in seen_hashes:
                 continue
-            seen_paths.add(real)
+            seen_paths.add(candidate)
             seen_hashes.add(digest)
             found.append(ContextFile(directory=directory, path=candidate, content=content))
     return found
 
 
-def find_dir_context_file(directory: Path, filenames: Sequence[str]) -> ContextFile | None:
+async def find_dir_context_file(sandbox: Sandbox, directory: Path, filenames: Sequence[str]) -> ContextFile | None:
     """Return the first existing instruction file in `directory`, or `None`."""
     for filename in filenames:
         candidate = directory / filename
-        if candidate.is_file():
+        if await _sandbox_is_file(sandbox, candidate):
             return ContextFile(
                 directory=directory,
                 path=candidate,
-                content=candidate.read_text(encoding='utf-8', errors='replace'),
+                content=(await sandbox.read_bytes(str(candidate))).decode('utf-8', errors='replace'),
             )
     return None
 
@@ -113,6 +124,6 @@ def render_context_files(files: Sequence[ContextFile], *, relative_to: Path) -> 
 def _label(path: Path, relative_to: Path) -> str:
     """A stable display label: relative to `relative_to` when possible."""
     try:
-        return path.resolve().relative_to(relative_to.resolve()).as_posix()
+        return path.relative_to(relative_to).as_posix()
     except ValueError:
         return path.as_posix()

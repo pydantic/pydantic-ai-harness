@@ -27,24 +27,27 @@ from pydantic_ai_harness import RepoContext
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[RepoContext(workspace_dir=Path('.'), home_dir=Path.home())],
+    capabilities=[RepoContext(workspace_dir=Path('/workspace'), home_dir=Path('/home/agent'))],
 )
 
 result = agent.run_sync('Summarize the coding-assistant setup in this repo.')
 print(result.output)
 ```
 
+All configured paths and discovered files refer to the run sandbox. Relative paths use its working directory, and `~` is not expanded -- use an absolute sandbox path or one relative to the sandbox working directory. The capability needs a sandbox attached to the run; without one it raises an error that says how to attach one (`sandbox=LocalSandbox(root=...)` for the agent process's own filesystem).
+
 ### 1. Walk-up instruction autoload (on by default)
 
-Loads `CLAUDE.md`/`AGENTS.md` from `workspace_dir` and every ancestor up to `home_dir` (inclusive). Precedence is ancestor-first, workspace-last: broadest context first, most specific last. Files are deduped by resolved real path and by content hash, so a symlinked `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical content load once.
+Loads `CLAUDE.md`/`AGENTS.md` from `workspace_dir` and every ancestor up to `home_dir` (inclusive). Precedence is ancestor-first, workspace-last: broadest context first, most specific last. Files are deduped by visited path and by content hash, so a symlinked `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical content load once.
 
-When `home_dir` is `None` (the default), only `workspace_dir` is scanned -- no walk-up. Pass `home_dir=Path.home()` to walk up to your home directory.
+When `home_dir` is `None` (the default), only `workspace_dir` is scanned -- no walk-up. Pass the sandbox home path explicitly to walk up to it.
 
 ### 2. Asset inventory (on by default)
 
 Exposes one tool, `inventory_agent_context()`, that reports where the repo's CE assets live -- the `.claude`/`.agents`/`.codex`/`.grok` roots and, within each, the `skills/` (`SKILL.md`), `agents/` (`.md`), and `settings.json` (hooks) it contains. It returns a structured `AgentContextInventory`; it locates assets and does not parse them, leaving translation to the orchestrator.
 
 Rename the tool with `inventory_tool_name`, or scope which roots it scans with `asset_roots`.
+Roots must be relative to `workspace_dir`.
 
 ### 3. Nested-on-traversal (off by default)
 

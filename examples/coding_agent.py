@@ -6,10 +6,12 @@ Run the packaged equivalent without assembling the blocks:
 """
 
 import os
+import sys
 from pathlib import Path
 
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
+from pydantic_ai.sandboxes import LocalSandbox
 
 from pydantic_ai_harness import (
     LLM_API_KEY_ENV_PATTERNS,
@@ -82,8 +84,10 @@ def build_agent(model: Model | str = DEFAULT_MODEL, workspace: Path | None = Non
 
 
 def main() -> None:
-    """Start an interactive session in the current repository."""
-    build_agent().to_cli_sync()
+    """Run the task given on the command line in the current repository."""
+    workspace = Path.cwd()
+    result = build_agent(workspace=workspace).run_sync(' '.join(sys.argv[1:]), sandbox=LocalSandbox(root=workspace))
+    print(result.output)
 
 
 if __name__ == '__main__':

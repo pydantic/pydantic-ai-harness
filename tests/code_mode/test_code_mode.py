@@ -1856,7 +1856,9 @@ class TestCodeMode:
         await agent.run('inspect tools')
 
         assert model.last_model_request_parameters is not None
-        by_name = {td.name: td for td in model.last_model_request_parameters.function_tools}
+        # `function_tools` includes withheld tools; `declared_function_tools` is what
+        # actually reaches the provider's `tools` collection.
+        by_name = {td.name: td for td in model.last_model_request_parameters.declared_function_tools}
 
         # The bootstrap tool is a native call alongside `run_code`, not buried in the sandbox.
         assert 'load_capability' in by_name

@@ -112,31 +112,29 @@ size limit, and an invalid character in an application-supplied `env`.
 
 ## Environment control
 
-By default a spawned command inherits the agent process's full environment. In a
-sandbox that holds LLM API keys, tokens, or other secrets, a command the model
-writes can read them. Two fields control what the subprocess sees:
+With `LocalSandbox`, commands receive `PATH`, `HOME`, `LANG`, and `TMPDIR` from
+the parent when present, plus variables explicitly supplied through `env`. The
+sandbox is not an isolation boundary. Two fields control the explicit variables
+passed to the sandbox:
 
 | Field | Effect |
 |---|---|
-| `env` | Explicit environment that replaces inheritance for the subprocess's own environment. |
-| `denied_env_patterns` | Glob patterns (`fnmatch`) for variable names stripped from the base environment. Mirrors `denied_commands`. |
+| `env` | Explicit environment added to the fixed LocalSandbox environment. |
+| `denied_env_patterns` | Glob patterns (`fnmatch`) for variable names removed from `env`. Mirrors `denied_commands`. |
 
-`env` prevents inherited variables from appearing in the subprocess's own
-environment (you supply `PATH` and anything else the command needs).
-`denied_env_patterns` is a denylist over the inherited environment -- lighter to
-configure when you only need to drop a few known-sensitive names. The two
-compose: when both are set, patterns also filter the explicit `env`. Leaving
-both unset preserves the inherit-everything default.
+`env` supplies additional variables explicitly; `denied_env_patterns` filters
+that mapping before it is passed to the sandbox. Leaving both unset still gives
+LocalSandbox its small fixed environment.
 
 ```python
 import os
 
 from pydantic_ai_harness import LLM_API_KEY_ENV_PATTERNS, Shell
 
-# Strip provider credentials from the inherited environment.
-Shell(cwd='./repo', denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
+# Strip provider credentials from an explicit environment.
+Shell(cwd='./repo', env=dict(os.environ), denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
 
-# Or hand the subprocess a fixed environment, inheriting nothing.
+# Or hand the sandbox additional fixed environment values.
 Shell(cwd='./repo', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})
 ```
 
@@ -146,20 +144,16 @@ Shell(cwd='./repo', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}
 cover other host secrets (a `LOGFIRE_TOKEN`, a GitHub token, cloud
 credentials), and its prefixes are coarse, so `GOOGLE_*` also strips
 non-credential vars like `GOOGLE_APPLICATION_CREDENTIALS`. Treat it as a
-starting point and add your own patterns. It is not the default: stripping
-environment variables silently would break agents that rely on inherited
-credentials, so it is opt-in.
+starting point and add your own patterns. It is applied only to the explicit
+`env` mapping supplied to `Shell`.
 
 `env` is enforced at spawn, not applied as a post-hoc filter on a running
-process: the subprocess starts with exactly the resolved environment (your
-`env`, minus anything `denied_env_patterns` removes from it). Neither control is
-a security boundary. A command running under the same OS identity may still
-read the parent process's environment through system interfaces such as Linux
-procfs, as well as other host files. Use OS-level isolation when commands are
-untrusted. The flip side is that a pattern broad enough to strip `PATH` or
-`HOME`, or an `env` that omits them, can break command resolution. External
-commands may still run via the shell's built-in default `PATH` on some systems,
-but don't rely on it -- set `PATH` explicitly when you replace the environment.
+process: LocalSandbox combines its fixed variables with your `env`, minus
+anything `denied_env_patterns` removes from it. Neither control is a security
+boundary. A command running under the same OS identity may still read other
+host files. Use OS-level isolation when commands are untrusted. The flip side
+is that a pattern broad enough to strip `PATH` or `HOME` from the explicit
+mapping can break command resolution.
 
 ## Background processes
 

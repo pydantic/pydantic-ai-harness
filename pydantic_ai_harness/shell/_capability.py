@@ -36,14 +36,12 @@ LLM_API_KEY_ENV_PATTERNS: tuple[str, ...] = (
 )
 """Glob patterns for common LLM provider credentials, for `denied_env_patterns`.
 
-Pass these to keep provider credentials out of the subprocess's own environment.
-This is not a security boundary: a command running under the same OS identity
-may still read the parent process's environment through system interfaces such
-as Linux procfs. Use OS-level isolation for untrusted commands. Covers provider
-prefixes only -- not other host secrets, and the prefixes are coarse (`GOOGLE_*`
-also strips `GOOGLE_APPLICATION_CREDENTIALS`), so treat it as a starting point.
-Not a default: stripping env silently would break agents that rely on inherited
-credentials, so opt in explicitly.
+Pass these to remove provider credentials from the explicit `env` mapping before
+it is passed to the sandbox. With `LocalSandbox`, commands also receive its
+fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` variables when present. This is not
+an isolation boundary. Covers provider prefixes only -- not other host secrets,
+and the prefixes are coarse (`GOOGLE_*` also strips
+`GOOGLE_APPLICATION_CREDENTIALS`), so treat it as a starting point.
 """
 
 
@@ -84,13 +82,11 @@ class Shell(AbstractCapability[AgentDepsT]):
     """If True, allow interactive commands (vi, nano, ssh, etc.). Blocked by default."""
 
     env: Mapping[str, str] | None = None
-    """Explicit environment for spawned subprocesses, replacing inheritance.
+    """Explicit environment variables for spawned subprocesses.
 
-    When `None` (default) the subprocess inherits the parent environment. Set
-    this to a fixed mapping to start subprocesses with exactly these variables
-    in its own environment. This is not a security boundary: a command running
-    as the same OS user may read secrets from the parent process through system
-    interfaces such as Linux procfs. Use OS-level isolation for untrusted commands.
+    Passes these variables explicitly to the sandbox. With `LocalSandbox`, they
+    are added to its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` environment. This
+    is not a security boundary: use OS-level isolation for untrusted commands.
     """
 
     denied_env_patterns: Sequence[str] = field(default_factory=list[str])
@@ -99,8 +95,8 @@ class Shell(AbstractCapability[AgentDepsT]):
     Follows the `denied_*` naming convention but matches by glob (`fnmatch`,
     e.g. `OPENAI_*`), since env secrets cluster by prefix -- unlike
     `denied_commands`, which matches executable names exactly. Names matching
-    any pattern are removed from the base environment; applied on top of `env`
-    when both are set, so patterns filter an explicit `env` too. See
+    any pattern are removed from the explicit `env` mapping before it is passed
+    to the sandbox. See
     `LLM_API_KEY_ENV_PATTERNS` for a ready-made provider-credential denylist.
     """
 
