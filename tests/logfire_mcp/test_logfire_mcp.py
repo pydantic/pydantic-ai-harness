@@ -534,3 +534,17 @@ class TestLogfireMCP:
         assert write_instructions is not None
         assert 'approval' in write_instructions
         assert 'inspect the current Logfire state' in write_instructions
+        assert 'query_run' not in write_instructions
+        assert 'Logfire link' not in write_instructions
+
+        non_query_instructions = LogfireMCP(project='acme/production', tools=('dashboard_list',)).get_instructions()
+        assert non_query_instructions is not None
+        assert 'query_run' not in non_query_instructions
+        assert 'Logfire link' not in non_query_instructions
+        assert 'approval' not in non_query_instructions
+
+        query_only_instructions = LogfireMCP(project='acme/production', tools=('query_run',)).get_instructions()
+        assert query_only_instructions is not None
+        assert 'numeric limit' in query_only_instructions
+        assert 'query_schema_reference' not in query_only_instructions
+        assert 'Logfire link' not in query_only_instructions
