@@ -481,9 +481,9 @@ class HoldCompaction(AbstractCapability[Any]):
             event.cancel('activity state has not been saved')
 ```
 
-Application code can register the same listener with `@hooks.on.event(CompactionStartEvent)`.
-Because the decision is dispatched immediately, listeners must finish synchronously with the attempt rather than
-deferring an answer to background work.
+Application code can register the same listener with `@agent.on_event(CompactionStartEvent)`, without a
+capability of its own. Because the decision is dispatched immediately, listeners must finish synchronously
+with the attempt rather than deferring an answer to background work.
 
 ## Compaction receipts
 
