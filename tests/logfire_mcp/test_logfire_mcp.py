@@ -69,6 +69,7 @@ class TestLogfireMCP:
         [
             'http://logfire.internal/mcp',
             'HTTPS://logfire.internal/mcp',
+            'https:///mcp',
             'https://user:secret@logfire.internal/mcp',
             'https://logfire.internal/mcp?token=secret',
             'https://logfire.internal/mcp#secret',
@@ -121,6 +122,8 @@ class TestLogfireMCP:
     def test_client_owns_authentication(self, logfire_server: FastMCP):
         with pytest.raises(UserError, match='configure authentication on the client'):
             LogfireMCP(project='acme/production', client=logfire_server, api_key='secret')
+        with pytest.raises(UserError, match='mcp_url.*client'):
+            LogfireMCP(project='acme/production', client=logfire_server, mcp_url='https://logfire.acme.example/mcp')
 
     @pytest.mark.parametrize('client', ['http://logfire.internal/mcp', Path('/tmp/logfire-mcp')])
     def test_client_rejects_transport_specs_that_bypass_connection_policy(self, client: object):
@@ -174,6 +177,17 @@ class TestLogfireMCP:
         monkeypatch.setenv('LOGFIRE_MCP_TOKEN', '  ')
         with pytest.raises(UserError, match='LOGFIRE_MCP_TOKEN'):
             LogfireMCP.from_spec('acme/production').get_toolset()
+
+    def test_environment_token_is_not_forwarded_to_custom_url(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv('LOGFIRE_MCP_TOKEN', 'hosted-only-secret')
+        capability = LogfireMCP(project='acme/production', mcp_url='https://logfire.acme.example/mcp')
+
+        with pytest.warns(UserWarning):
+            transport = capability.get_toolset().client.transport
+
+        assert isinstance(transport, StreamableHttpTransport)
+        assert isinstance(transport.auth, OAuth)
+        assert 'hosted-only-secret' not in repr(transport)
 
     async def test_default_tools_are_useful_read_only_subset(
         self, logfire_server: FastMCP, logfire_state: LogfireState
@@ -233,6 +247,18 @@ class TestLogfireMCP:
         await agent.run('Inspect telemetry and dashboards')
 
         assert _tool_names(model) == {'query_run', 'dashboard_list'}
+
+    async def test_two_projects_collide_on_fixed_tool_names(self, logfire_server: FastMCP):
+        agent = Agent(
+            TestModel(call_tools=[]),
+            capabilities=[
+                LogfireMCP(project='acme/production', client=logfire_server),
+                LogfireMCP(project='acme/staging', client=logfire_server),
+            ],
+        )
+
+        with pytest.raises(UserError, match='conflicts with existing tool'):
+            await agent.run('Inspect both projects')
 
     async def test_selected_tool_hidden_by_token_scope_fails_clearly(
         self, logfire_server: FastMCP, logfire_state: LogfireState
@@ -334,6 +360,9 @@ class TestLogfireMCP:
             'SELECT count(*) FROM records limit 1',
             'SELECT count(*) FROM records LIMIT 1;',
             'SELECT count(*) FROM records LiMiT 1 OFFSET 2',
+            "SELECT message FROM records WHERE message LIKE '%--%' LIMIT 1",
+            "SELECT '/* not a comment */' FROM records LIMIT 1",
+            "SELECT ';' FROM records LIMIT 1",
         ],
     )
     async def test_supported_query_limit_forms_execute(
@@ -374,6 +403,17 @@ class TestLogfireMCP:
             tools = await toolset.get_tools(run_context)
             with pytest.raises(ModelRetry, match=match):
                 await toolset.call_tool('query_run', {'query': query}, run_context, tools['query_run'])
+
+        assert logfire_state['calls'] == []
+
+    async def test_custom_query_row_limit_is_enforced(
+        self, logfire_server: FastMCP, logfire_state: LogfireState, run_context: RunContext[None]
+    ):
+        toolset = LogfireMCP(project='acme/production', max_query_rows=2, client=logfire_server).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            with pytest.raises(ModelRetry, match='at most 2'):
+                await toolset.call_tool('query_run', {'query': 'SELECT 1 LIMIT 3'}, run_context, tools['query_run'])
 
         assert logfire_state['calls'] == []
 
@@ -443,9 +483,10 @@ class TestLogfireMCP:
 
         async with toolset:
             tools = await toolset.get_tools(run_context)
-            with pytest.raises(ModelRetry, match='Logfire unavailable'):
+            with pytest.raises(UserError, match='outcome may be unknown') as exc_info:
                 await toolset.call_tool('dashboard_create', {'name': 'Errors'}, run_context, tools['dashboard_create'])
 
+        assert isinstance(exc_info.value.__cause__, ModelRetry)
         assert logfire_state['calls'] == [('dashboard_create', {'name': 'Errors', 'project': 'acme/production'})]
         assert logfire_state['lifecycle'] == ['entered', 'exited']
 
@@ -485,9 +526,11 @@ class TestLogfireMCP:
         assert 'Select only the columns needed' in instructions
         assert '`start_timestamp` and `end_timestamp`' in instructions
         assert 'link only when the user asks' in instructions
+        assert '`handoff=true` only when opening it immediately' in instructions
         assert 'untrusted diagnostic data' in instructions
         assert 'approval' not in instructions
 
         write_instructions = LogfireMCP(project='acme/production', tools=('dashboard_create',)).get_instructions()
         assert write_instructions is not None
         assert 'approval' in write_instructions
+        assert 'inspect the current Logfire state' in write_instructions

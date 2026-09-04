@@ -45,7 +45,6 @@ agent = Agent(
     capabilities=[
         LogfireMCP(
             project=os.environ['LOGFIRE_PROJECT'],
-            api_key=os.getenv('LOGFIRE_MCP_TOKEN'),
         )
     ],
 )
@@ -67,16 +66,20 @@ print(result.output)
 
 - `project` is required in `organization/project` form. The capability supplies that value to each project-scoped call
   and rejects a different value before the request reaches Logfire.
-- The default tools are read-only. `tools=` accepts supported project-scoped names from Logfire's
-  [MCP inventory](https://pydantic.dev/docs/logfire/guides/mcp-server/#available-mcp-tools). Account discovery,
-  organization-wide notification channels and schedules, and local bootstrap are excluded. Every selected mutation
-  pauses for Pydantic AI approval.
+- The default tools are read-only. `tools=` accepts supported names from Logfire's
+  [MCP inventory](https://pydantic.dev/docs/logfire/guides/mcp-server/#available-mcp-tools). Project operations are
+  pinned to `project`; the global schema-reference tool has no project argument. Account discovery, organization-wide
+  notification channels and schedules, and local bootstrap are excluded. Every selected mutation pauses for Pydantic
+  AI approval. A mutation error stops the run because its outcome may be unknown; inspect Logfire before trying again.
+  If token permissions hide a selected tool, setup fails with a configuration error.
 - `query_run` SQL must end with a numeric `LIMIT` no greater than `max_query_rows` (100 by default). Logfire defaults
   queries to 30 minutes and limits query ranges to 14 days. SQL comments and multiple statements are rejected.
 - The hosted US endpoint is the default. Use `region='eu'` for EU data or `mcp_url=` for the `/mcp` endpoint of a
-  self-hosted deployment.
+  self-hosted deployment. For headless self-hosted use, pass `api_key=` explicitly; `LOGFIRE_MCP_TOKEN` is forwarded
+  only to the hosted Logfire endpoints.
+- Use one `LogfireMCP` instance per agent. Multiple projects expose the same tool names and conflict.
 - OAuth tokens use FastMCP's in-memory storage by default. Pass a caller-owned `client=` configured with persistent
-  encrypted storage when tokens must survive process restarts. Tool visibility still depends on granted token scopes.
+  encrypted storage when tokens must survive process restarts.
 - Telemetry can contain user-controlled text. Treat tool results as diagnostic data, not instructions.
 - While Pydantic AI Harness is on 0.x releases, this API may change between minor releases; see the
   [version policy](index.md#version-policy).
