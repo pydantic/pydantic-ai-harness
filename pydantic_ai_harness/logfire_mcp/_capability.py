@@ -32,6 +32,7 @@ _HOSTED_ENDPOINTS: dict[LogfireRegion, str] = {
     'eu': 'https://logfire-eu.pydantic.dev/mcp',
 }
 _GLOBAL_READ_TOOLS = frozenset({'query_schema_reference'})
+_LINK_TOOLS = frozenset({'project_logfire_link', 'project_logfire_ui_link'})
 _DEFAULT_TOOLS = (
     'query_run',
     'query_schema_reference',
@@ -85,6 +86,7 @@ _PROJECT_COMPONENT_RE = re.compile(r'^[A-Za-z0-9_-]+$')
 _FINAL_LIMIT_RE = re.compile(r'\blimit\s+([0-9]+)(?:\s+offset\s+[0-9]+)?\s*;?\s*$', re.IGNORECASE)
 _UNSAFE_SQL_RE = re.compile(r'--|/\*|\*/|;(?!\s*$)')
 _SQL_QUOTED_RE = re.compile(r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"")
+_SELECT_RE = re.compile(r'^\s*select\b', re.IGNORECASE)
 _DESCRIPTION = 'Query one Logfire project and manage selected observability resources through hosted MCP.'
 _API_KEY_ENV = 'LOGFIRE_MCP_TOKEN'
 
@@ -164,18 +166,28 @@ class _LogfireMCPToolset(MCPToolset[AgentDepsT]):
                 raise ModelRetry(f'`{name}` must stay within the configured Logfire project {self.project!r}.')
             scoped_args['project'] = self.project
 
+        if name in _LINK_TOOLS:
+            scoped_args['handoff'] = False
+
         if name == 'query_run':
             query = scoped_args.get('query')
             if not isinstance(query, str):
                 raise ModelRetry('`query_run` requires a string `query`.')
-            if _UNSAFE_SQL_RE.search(_SQL_QUOTED_RE.sub('', query)):
+            sanitized_query = _SQL_QUOTED_RE.sub('', query)
+            if not _SELECT_RE.match(sanitized_query):
+                raise ModelRetry('`query_run` SQL may contain only one `SELECT` statement.')
+            if _UNSAFE_SQL_RE.search(sanitized_query):
                 raise ModelRetry('`query_run` SQL cannot contain comments or multiple statements.')
-            limit = _FINAL_LIMIT_RE.search(query)
+            limit = _FINAL_LIMIT_RE.search(sanitized_query)
             if limit is None:
                 raise ModelRetry(
                     f'`query_run` SQL must end with a final numeric `LIMIT` of at most {self.max_query_rows}.'
                 )
-            if int(limit.group(1)) > self.max_query_rows:
+            try:
+                limit_value = int(limit.group(1))
+            except ValueError:
+                raise ModelRetry('`query_run` SQL `LIMIT` is too large to parse.') from None
+            if limit_value > self.max_query_rows:
                 raise ModelRetry(f'`query_run` SQL may return at most {self.max_query_rows} rows.')
 
         if name in _MUTATION_TOOLS and not ctx.tool_call_approved:
@@ -248,8 +260,8 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
         unsupported = sorted(set(selected_tools) - _SUPPORTED_TOOLS)
         if unsupported:
             raise UserError(f'Unsupported Logfire MCP tools: {unsupported!r}.')
-        if self.max_query_rows < 1:
-            raise UserError('`max_query_rows` must be at least 1.')
+        if type(self.max_query_rows) is not int or self.max_query_rows < 1:
+            raise UserError('`max_query_rows` must be a positive integer.')
         if self.client is not None and self.api_key is not None:
             raise UserError('`api_key` cannot be passed with `client`; configure authentication on the client.')
         if self.client is not None and self.mcp_url is not None:
@@ -298,11 +310,8 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
             )
             if 'query_schema_reference' in self.tools:
                 instructions.append('Call `query_schema_reference` before `query_run`.')
-        if {'project_logfire_link', 'project_logfire_ui_link'} & set(self.tools):
-            instructions.append(
-                'Create a Logfire link only when the user asks for one. Use `handoff=true` only when opening it '
-                'immediately; otherwise return the durable link.'
-            )
+        if _LINK_TOOLS & set(self.tools):
+            instructions.append('Create a Logfire link only when the user asks for one. Return the durable link.')
         if any(name in _MUTATION_TOOLS for name in self.tools):
             instructions.append(
                 'Selected mutations require caller approval before execution. After an unclear mutation failure, '

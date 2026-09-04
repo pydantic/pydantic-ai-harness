@@ -67,8 +67,9 @@ print(result.output)
   notification channels and schedules, and local bootstrap are excluded. Every selected mutation pauses for Pydantic
   AI approval. A mutation error stops the run because its outcome may be unknown; inspect Logfire before trying again.
   If token permissions hide a selected tool, setup fails with a configuration error.
-- `query_run` SQL must end with a numeric `LIMIT` no greater than `max_query_rows` (100 by default). Logfire defaults
-  queries to 30 minutes and limits query ranges to 14 days. SQL comments and multiple statements are rejected.
+- `query_run` accepts one `SELECT` statement ending with a numeric `LIMIT` no greater than `max_query_rows` (100 by
+  default). Logfire defaults queries to 30 minutes and limits query ranges to 14 days. SQL comments are rejected.
+- Link tools force `handoff=false` and return durable links. They do not create OAuth handoff tickets.
 - The hosted US endpoint is the default. Use `region='eu'` for EU data or `mcp_url=` for the `/mcp` endpoint of a
   self-hosted deployment. For headless self-hosted use, pass `api_key=` explicitly; `LOGFIRE_MCP_TOKEN` is forwarded
   only to the hosted Logfire endpoints.

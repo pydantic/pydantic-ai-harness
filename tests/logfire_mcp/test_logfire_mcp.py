@@ -118,6 +118,10 @@ class TestLogfireMCP:
             LogfireMCP(project='acme/production', region='apac')  # pyright: ignore[reportArgumentType]
         with pytest.raises(UserError, match='max_query_rows'):
             LogfireMCP(project='acme/production', max_query_rows=0)
+        with pytest.raises(UserError, match='positive integer'):
+            LogfireMCP(project='acme/production', max_query_rows=float('nan'))  # pyright: ignore[reportArgumentType]
+        with pytest.raises(UserError, match='positive integer'):
+            LogfireMCP(project='acme/production', max_query_rows=True)  # pyright: ignore[reportArgumentType]
 
     def test_client_owns_authentication(self, logfire_server: FastMCP):
         with pytest.raises(UserError, match='configure authentication on the client'):
@@ -388,6 +392,9 @@ class TestLogfireMCP:
             ('SELECT * FROM records -- LIMIT 1', 'comments or multiple statements'),
             ('SELECT * FROM records /* bounded */ LIMIT 1', 'comments or multiple statements'),
             ('SELECT * FROM records; SELECT 1 LIMIT 1', 'comments or multiple statements'),
+            ("SELECT 'LIMIT 1' FROM records", 'final numeric `LIMIT`'),
+            ('CREATE TABLE copied AS SELECT * FROM records LIMIT 1', 'only one `SELECT`'),
+            (f'SELECT * FROM records LIMIT {"9" * 5000}', 'too large to parse'),
         ],
     )
     async def test_query_row_limit_is_enforced_before_network_call(
@@ -405,6 +412,32 @@ class TestLogfireMCP:
                 await toolset.call_tool('query_run', {'query': query}, run_context, tools['query_run'])
 
         assert logfire_state['calls'] == []
+
+    async def test_link_handoff_ticket_is_disabled(
+        self, logfire_server: FastMCP, logfire_state: LogfireState, run_context: RunContext[None]
+    ):
+        toolset = LogfireMCP(
+            project='acme/production', tools=('project_logfire_link',), client=logfire_server
+        ).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            await toolset.call_tool(
+                'project_logfire_link',
+                {'trace_id': '0123456789abcdef0123456789abcdef', 'handoff': True},
+                run_context,
+                tools['project_logfire_link'],
+            )
+
+        assert logfire_state['calls'] == [
+            (
+                'project_logfire_link',
+                {
+                    'trace_id': '0123456789abcdef0123456789abcdef',
+                    'project': 'acme/production',
+                    'handoff': False,
+                },
+            )
+        ]
 
     async def test_custom_query_row_limit_is_enforced(
         self, logfire_server: FastMCP, logfire_state: LogfireState, run_context: RunContext[None]
@@ -526,7 +559,8 @@ class TestLogfireMCP:
         assert 'Select only the columns needed' in instructions
         assert '`start_timestamp` and `end_timestamp`' in instructions
         assert 'link only when the user asks' in instructions
-        assert '`handoff=true` only when opening it immediately' in instructions
+        assert 'durable link' in instructions
+        assert 'handoff=true' not in instructions
         assert 'untrusted diagnostic data' in instructions
         assert 'approval' not in instructions
 

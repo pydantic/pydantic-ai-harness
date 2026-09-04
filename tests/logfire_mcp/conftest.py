@@ -102,9 +102,11 @@ def logfire_server(logfire_state: LogfireState) -> FastMCP:
         return [{'exception_type': 'ValueError'}]
 
     @server.tool()
-    def project_logfire_link(trace_id: str, project: str | None = None) -> str:
+    def project_logfire_link(trace_id: str, project: str | None = None, handoff: bool = False) -> str:
         """Create a Logfire trace link."""
-        logfire_state['calls'].append(('project_logfire_link', {'trace_id': trace_id, 'project': project}))
+        logfire_state['calls'].append(
+            ('project_logfire_link', {'trace_id': trace_id, 'project': project, 'handoff': handoff})
+        )
         return f'https://logfire-us.pydantic.dev/{project}?trace_id={trace_id}'
 
     @server.tool()
