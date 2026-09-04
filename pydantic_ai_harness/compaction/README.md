@@ -382,6 +382,28 @@ finite request limit for the pending parent request. Pass `model_settings` to gi
 settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
 without mutating the model or the settings dictionary.
 
+The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch
+the summary as it is written, or pass `drain_summary_events` to take the streaming request path
+without handling the events -- which is what a summarizer endpoint that rejects non-streaming
+requests needs:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction, drain_summary_events
+
+agent = Agent(
+    'openai:gpt-5.6-terra',
+    capabilities=[
+        SummarizingCompaction(max_messages=60, event_stream_handler=drain_summary_events),
+    ],
+)
+```
+
+Neither transport works everywhere, which is why this is a choice rather than a default: some
+endpoints reject non-streaming requests and others reject streaming ones. The handler receives the
+summary run's own `RunContext` and event stream; the outer `Agent.run(...)` handler is not inherited
+and never sees the summary token deltas.
+
 By default `incremental=True` updates the newest existing summary from a prior compaction as an
 anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier
 releases; set `incremental=False` to retain the prior regeneration behavior. `preserve_first_user_message=True` keeps the original task turn even
@@ -401,6 +423,12 @@ request count consistent (a model request that didn't count as one would be the 
 `UsageLimits` request limit catch a runaway compaction. The nested run receives the other parent limits unchanged;
 the finite request limit is reduced by one so it cannot spend the slot already approved for the parent request.
 A run-request / iteration limiter will therefore see compaction calls among its requests.
+
+With a durable-execution capability attached, the summary call runs as a contributed durable
+operation, so replay uses the recorded summary instead of calling the model again. When `model` is
+not set, the operation uses the run's model. The capability carries a stable default `id`, which
+durable execution uses to recover the operation by the same identity. Overriding it with a custom
+value orphans recorded operations for in-flight workflows, so keep it fixed once a workflow is live.
 
 ## `DeduplicateFileReads.file_key`
 

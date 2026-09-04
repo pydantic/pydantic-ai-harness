@@ -30,14 +30,7 @@ classifiers = [
 dependencies = [
     "genai-prices>=0.0.71",
     "httpx>=0.28.1",
-    # 2.33.0 is the release whose Anthropic provider is built on HTTPX2 and raises its own
-    # `anthropic` floor to 1.0.0 to match. Below it, slim hands the SDK a client of the other
-    # kind, and the pair only type-checks when both halves come from the same generation.
-    # Earlier floors are subsumed by it: the compaction estimator and the conversation-search
-    # indexer have to recognise `ToolAvailabilityDeltaPart` (2.23.0), the one `ModelRequestPart`
-    # carrying no `content`, so code walking request parts raises `AttributeError` rather than
-    # ignoring it (#577); `CodeMode` reads `ModelRequestParameters.revealed_tool_names` (2.22.0).
-    "pydantic-ai-slim>=2.33.0",
+    "pydantic-ai-slim>=2.38.0",
 ]
 
 [project.optional-dependencies]
@@ -45,22 +38,22 @@ dependencies = [
 # without separately naming pydantic-ai-slim. (No openai/google pass-throughs: browser-use pins
 # provider SDKs that conflict with slim's floors when the workspace resolves all extras together.)
 anthropic = [
-    "pydantic-ai-slim[anthropic]>=2.33.0",
+    "pydantic-ai-slim[anthropic]>=2.38.0",
 ]
 cli = [
-    "pydantic-ai-slim[cli]>=2.33.0",
+    "pydantic-ai-slim[cli]>=2.38.0",
 ]
 code-mode = [
-    "pydantic-ai-slim[duckduckgo]>=2.33.0",
+    "pydantic-ai-slim[duckduckgo]>=2.38.0",
     "pydantic-monty>=0.0.19",
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 codemode = [
-    "pydantic-ai-slim[duckduckgo]>=2.33.0",
+    "pydantic-ai-slim[duckduckgo]>=2.38.0",
     "pydantic-monty>=0.0.19",
 ]
 researcher = [
-    "pydantic-ai-slim[duckduckgo,web-fetch]>=2.33.0",
+    "pydantic-ai-slim[duckduckgo,web-fetch]>=2.38.0",
 ]
 temporal = [
     'pydantic-ai-slim[temporal]',
@@ -84,6 +77,10 @@ acp = [
 ]
 exa = [
     "exa-py>=2.16.0",
+]
+aws-lambda = [
+    "aws-durable-execution-sdk-python>=1.7.0 ; python_full_version >= '3.11'",
+    "pydantic-ai-slim>=2.38.0",
 ]
 youdotcom = [
     "youdotcom>=3.1.1,<4",
@@ -133,7 +130,7 @@ dev = [
     'inline-snapshot>=0.32.5',
     "pydantic-ai-slim[anthropic]",
     "pydantic-ai-slim[openai]",
-    "pydantic-ai-slim[spec]>=2.18.0",
+    "pydantic-ai-slim[mcp,spec]>=2.18.0",
     "pytest-examples>=0.0.18",
     "pytest-recording>=0.13.4",
     "mongomock-motor>=0.0.36",
@@ -164,10 +161,14 @@ bump = true
 # An override *replaces* every requirement on the package it names, so it erases the floors slim
 # declares as well as browser-use's pins, and `lowest-direct` resolves `pydantic-ai-slim` to its
 # floor while taking provider SDKs to the newest release the range admits. `anthropic` therefore
-# repeats the floor slim declares: `anthropic>=1` is the HTTPX2 generation, and the
-# `pydantic-ai-slim` floor above is the release built on it, so both halves of that pair resolve
-# together under every resolution mode. Move this floor whenever that one moves.
-override-dependencies = ['anthropic>=1.0.0', 'openai>=2.45.0']
+# repeats the floor slim declares, so both halves of that pair resolve together under every
+# resolution mode. Move this floor whenever that one moves.
+#
+# This has to stay here, under `[tool.uv]`, even though uv warns on every invocation that `uv.toml`
+# shadows it: uv 0.12.1 reads `override-dependencies` only from the workspace root's `pyproject.toml`.
+# Moved into `uv.toml` it silences the warning and stops applying, and resolution then fails outright
+# on browser-use's exact pins.
+override-dependencies = ['anthropic>=1.3.0', 'openai>=2.45.0']
 
 
 [tool.hatch.build.targets.wheel]
