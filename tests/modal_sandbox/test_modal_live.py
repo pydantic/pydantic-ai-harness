@@ -1,7 +1,7 @@
 """Integration tests that require a real, running Modal container.
 
 The fake-backed suites already cover the harness-owned logic: timeout quantization,
-the output ring buffer, path resolution math, and exception mapping. This live tier
+protocol translation, path resolution math, and exception mapping. This live tier
 admits only regressions a correctly written fake could not catch: real process
 execution, infra-enforced deadlines, one filesystem shared by Modal's file API and
 the shell, create-time environment and workdir propagation, and real lifecycle
@@ -14,15 +14,8 @@ Admission rule:
 Portability:
   These assert durable sandbox behaviors, not Modal-specific spellings, so if the Modal
   mechanism is later swapped for a different backend the suite retargets rather than gets
-  rewritten:
-  * TestRealExecution: the exec call and its result fields rename; a timeout is checked via the
-    backend's raised timeout error carrying the pre-kill output, not the `-1` sentinel.
-  * TestCreateConfiguration: create-time `env` and `workdir` assertions move to the backend's
-    sandbox-configuration surface.
-  * TestRealFilesystem: byte file operations move to the backend's file API; the relative-path
-    case becomes explicit resolution against the working directory.
-  * TestRealLifecycle: dead-sandbox checks become the backend's typed not-found error, and
-    attach/reuse maps to its attach surface.
+  rewritten. Everything below runs through the `SandboxBackend` protocol, so the retarget is
+  mostly a change of constructor.
 
 Gating:
   * `modal_live` marker separates this tier from fake-backed tests.
@@ -38,16 +31,16 @@ from __future__ import annotations
 
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anyio
 import pytest
+from pydantic_ai.sandboxes import Sandbox, SandboxTimeoutError
 
 from pydantic_ai_harness.modal_sandbox import (
-    ModalSandboxError,
-    ModalSandboxSession,
-    ModalSandboxTerminalError,
+    ModalSandboxBackend,
     ModalSandboxUnavailableError,
 )
 
@@ -78,70 +71,81 @@ def _unique(prefix: str) -> str:
     return f'{prefix}-{uuid.uuid4().hex}'
 
 
+@asynccontextmanager
+async def _owned(**settings: object) -> AsyncGenerator[ModalSandboxBackend]:
+    """Create a sandbox and terminate it on the way out, as the capability's hooks do."""
+    backend = ModalSandboxBackend(image=_IMAGE, **settings)  # type: ignore[arg-type]
+    await backend.sandbox
+    try:
+        yield backend
+    finally:
+        await backend.close(terminate=True)
+
+
 @pytest.fixture(scope='module')
 def anyio_backend() -> str:
     return 'asyncio'
 
 
 @pytest.fixture(scope='module')
-async def session() -> AsyncIterator[ModalSandboxSession]:
+async def sandbox() -> AsyncIterator[ModalSandboxBackend]:
     """One live owned sandbox shared by exec and filesystem tests.
 
     Each test writes under `_unique(...)` paths, so the shared container avoids repeated cold starts
     without coupling test state. Lifecycle tests create their own sandboxes because ownership,
     expiry, attach, and termination are the behavior under test there.
     """
-    async with ModalSandboxSession(image=_IMAGE, sandbox_timeout=600) as live:
+    async with _owned(sandbox_timeout=600) as live:
         yield live
 
 
 class TestRealExecution:
     """Behaviors that only exist because a real process runs on real Modal infra."""
 
-    async def test_runs_a_real_process(self, session: ModalSandboxSession) -> None:
-        """Validates the fake-encoded assumption that exec stdout, stderr, and exit code match a process."""
-        result = await session.exec(['sh', '-c', 'echo out; echo err 1>&2; exit 3'], timeout=30)
+    async def test_runs_a_real_process(self, sandbox: ModalSandboxBackend) -> None:
+        """Validates the fake-encoded assumption that stdout, stderr, and exit code match a process."""
+        result = await sandbox.run('echo out; echo err 1>&2; exit 3', shell=True, timeout=30)
 
         assert result.stdout.strip() == 'out'
         assert result.stderr.strip() == 'err'
-        assert result.returncode == 3
-        assert result.timed_out is False
+        assert result.exit_code == 3
 
-    async def test_timeout_preserves_pre_deadline_output(self, session: ModalSandboxSession) -> None:
+    async def test_timeout_preserves_pre_deadline_output(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that output printed before an infra timeout is preserved."""
-        result = await session.exec(['sh', '-c', 'echo DIAGNOSTIC; sleep 30'], timeout=2)
+        with pytest.raises(SandboxTimeoutError) as exc_info:
+            await sandbox.run('echo DIAGNOSTIC; sleep 30', shell=True, timeout=2)
 
-        # Durable assertion: a backend that raises a typed timeout error would expose this as its retained stdout.
-        assert 'DIAGNOSTIC' in result.stdout
-        assert result.timed_out is True
+        assert 'DIAGNOSTIC' in exc_info.value.stdout
 
-    async def test_timeout_preserves_stderr(self, session: ModalSandboxSession) -> None:
-        result = await session.exec(['sh', '-c', 'echo STDERR-DIAGNOSTIC 1>&2; sleep 30'], timeout=2)
+    async def test_timeout_preserves_stderr(self, sandbox: ModalSandboxBackend) -> None:
+        """Validates the fake-encoded assumption that Modal spells a deadline kill in two ways.
 
-        assert 'STDERR-DIAGNOSTIC' in result.stderr
-        # Modal reports this deadline kill either as its client-side -1 sentinel or, when
-        # the server's SIGKILL wins the race, as a plain 137 exit. The session recognizes
-        # both (137 counts once the command consumed its whole deadline window).
-        assert result.returncode != 0
-        assert result.timed_out is True
+        Modal reports it either as its client-side `-1` sentinel or, when the server's SIGKILL
+        wins the race, as a plain 137 exit; the backend recognizes both (137 counts once the
+        command consumed its whole deadline window).
+        """
+        with pytest.raises(SandboxTimeoutError) as exc_info:
+            await sandbox.run('echo STDERR-DIAGNOSTIC 1>&2; sleep 30', shell=True, timeout=2)
 
-    async def test_large_stderr_does_not_block_stdout(self, session: ModalSandboxSession) -> None:
+        assert 'STDERR-DIAGNOSTIC' in exc_info.value.stderr
+
+    async def test_large_stderr_does_not_block_stdout(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that Modal buffers streams without stderr deadlock."""
-        result = await session.exec(['sh', '-c', 'seq 1 300000 1>&2; echo done'], timeout=60)
+        result = await sandbox.run('seq 1 300000 1>&2; echo done', shell=True, timeout=60)
 
-        assert result.returncode == 0
+        assert result.exit_code == 0
         assert result.stdout == 'done\n'
         stderr_lines = result.stderr.splitlines()
         assert stderr_lines[0] == '1'
         assert stderr_lines[-1] == '300000'
         assert len(stderr_lines) == 300000
 
-    async def test_concurrent_commands_share_one_container(self, session: ModalSandboxSession) -> None:
-        """Validates the fake-encoded assumption that one Modal sandbox can multiplex concurrent execs."""
+    async def test_concurrent_commands_share_one_container(self, sandbox: ModalSandboxBackend) -> None:
+        """Validates the fake-encoded assumption that one Modal sandbox can multiplex concurrent commands."""
         results: dict[int, str] = {}
 
         async def run(n: int) -> None:
-            out = await session.exec(['sh', '-c', f'echo job-{n}'], timeout=15)
+            out = await sandbox.run(f'echo job-{n}', shell=True, timeout=15)
             results[n] = out.stdout.strip()
 
         async with anyio.create_task_group() as tg:
@@ -150,19 +154,17 @@ class TestRealExecution:
 
         assert results == {n: f'job-{n}' for n in range(8)}
 
-    async def test_signal_exit_is_not_timeout(self, session: ModalSandboxSession) -> None:
+    async def test_signal_exit_is_not_timeout(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that signal death is a real exit, not Modal's timeout sentinel."""
-        result = await session.exec(['sh', '-c', 'kill -KILL $$'], timeout=15)
+        result = await sandbox.run('kill -KILL $$', shell=True, timeout=15)
 
-        assert result.returncode > 128
-        assert result.returncode != -1
-        assert result.timed_out is False
+        assert result.exit_code > 128
+        assert result.exit_code != -1
 
-    async def test_nonexistent_binary_returns_modal_exit_code(self, session: ModalSandboxSession) -> None:
+    async def test_nonexistent_binary_returns_modal_exit_code(self, sandbox: ModalSandboxBackend) -> None:
         """Pins Modal's current return code for an executable lookup failure."""
-        binary = _unique('definitely-not-a-real-binary')
-        result = await session.exec([binary], timeout=15)
-        assert result.returncode == 128
+        result = await sandbox.run([_unique('definitely-not-a-real-binary')], timeout=15)
+        assert result.exit_code == 128
 
 
 class TestCreateConfiguration:
@@ -171,80 +173,101 @@ class TestCreateConfiguration:
     async def test_env_and_workdir_reach_processes(self) -> None:
         """Validates the fake-encoded assumption that create-time `env` and `workdir` reach commands."""
         probe = _unique('live-value')
-        async with ModalSandboxSession(
-            image=_IMAGE,
-            sandbox_timeout=120,
-            workdir='/tmp',
-            env={'HARNESS_ENV_PROBE': probe},
-        ) as session:
-            env_result = await session.exec(['sh', '-c', 'printf %s "$HARNESS_ENV_PROBE"'], timeout=15)
-            pwd_result = await session.exec(['pwd'], timeout=15)
+        async with _owned(sandbox_timeout=120, workdir='/tmp', env={'HARNESS_ENV_PROBE': probe}) as backend:
+            env_result = await backend.run('printf %s "$HARNESS_ENV_PROBE"', shell=True, timeout=15)
+            working_dir = await backend.working_dir()
 
         assert env_result.stdout == probe
-        assert pwd_result.stdout.strip() == '/tmp'
+        assert working_dir == '/tmp'
+
+    async def test_working_dir_is_discovered_when_not_configured(self) -> None:
+        """Validates the fake-encoded assumption that `pwd` answers for a sandbox created without a workdir."""
+        async with _owned(sandbox_timeout=120) as backend:
+            working_dir = await backend.working_dir()
+            printed = await backend.run(['pwd'], timeout=15)
+
+        assert working_dir == printed.stdout.strip()
+
+    async def test_per_command_cwd_and_env_reach_the_process(self) -> None:
+        """Validates the fake-encoded assumption that Modal applies per-command `workdir` and `env`."""
+        probe = _unique('per-command')
+        async with _owned(sandbox_timeout=120) as backend:
+            result = await backend.run('printf "%s %s" "$(pwd)" "$PROBE"', shell=True, cwd='/etc', env={'PROBE': probe})
+
+        assert result.stdout == f'/etc {probe}'
 
 
 class TestRealFilesystem:
     """One real filesystem shared by Modal's file API and the shell."""
 
-    async def test_shell_and_file_api_see_the_same_filesystem(self, session: ModalSandboxSession) -> None:
-        """Validates the fake-encoded assumption that exec and filesystem APIs share one backing fs."""
+    async def test_shell_and_file_api_see_the_same_filesystem(self, sandbox: ModalSandboxBackend) -> None:
+        """Validates the protocol's one-environment contract against real Modal."""
         api_path = f'/tmp/{_unique("api")}.txt'
-        await session.write_bytes(api_path, b'from-file-api\n')
-        via_shell = await session.exec(['cat', api_path], timeout=15)
+        await sandbox.write_bytes(api_path, b'from-file-api\n')
+        via_shell = await sandbox.run(['cat', api_path], timeout=15)
         assert via_shell.stdout == 'from-file-api\n'
 
         shell_path = f'/tmp/{_unique("shell")}.txt'
-        wrote = await session.exec(['sh', '-c', f'printf from-shell > {shell_path}'], timeout=15)
-        assert wrote.returncode == 0
-        assert await session.read_bytes(shell_path) == b'from-shell'
+        wrote = await sandbox.run(f'printf from-shell > {shell_path}', shell=True, timeout=15)
+        assert wrote.exit_code == 0
+        assert await sandbox.read_bytes(shell_path) == b'from-shell'
 
-    async def test_binary_roundtrip_creating_parent_dirs(self, session: ModalSandboxSession) -> None:
+    async def test_binary_roundtrip_creating_parent_dirs(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that Modal stores raw bytes and creates real parent dirs."""
         path = f'/tmp/{_unique("io")}/nested/deep/data.bin'
         payload = b'\x00\x01hello \xf0\x9f\x9a\x80 world'
 
-        await session.write_bytes(path, payload)
+        await sandbox.write_bytes(path, payload)
 
-        assert await session.read_bytes(path) == payload
+        assert await sandbox.read_bytes(path) == payload
 
-    async def test_large_filesystem_transfer_near_read_limit(self, session: ModalSandboxSession) -> None:
-        """Validates the fake-encoded assumption that Modal's beta fs API handles a near-limit transfer."""
+    async def test_large_filesystem_transfer_near_read_limit(self, sandbox: ModalSandboxBackend) -> None:
+        """Validates the fake-encoded assumption that Modal's fs API handles a near-limit transfer."""
         path = f'/tmp/{_unique("big")}.bin'
         payload = b'A' * (4 * 1024 * 1024)
 
-        await session.write_bytes(path, payload)
+        await sandbox.write_bytes(path, payload)
 
-        assert await session.file_size(path) == len(payload)
-        assert await session.read_bytes(path) == payload
+        assert (await sandbox.stat(path)).size == len(payload)
+        assert await sandbox.read_bytes(path) == payload
 
-    async def test_missing_file_raises_recoverable_error(self, session: ModalSandboxSession) -> None:
-        """Validates the fake-encoded assumption that a missing file is recoverable, not a dead sandbox."""
-        with pytest.raises(ModalSandboxError) as exc_info:
-            await session.read_bytes(f'/tmp/{_unique("missing")}')
+    async def test_missing_file_raises_the_builtin_error(self, sandbox: ModalSandboxBackend) -> None:
+        """Validates the protocol's contract that a missing path raises the builtin `FileNotFoundError`."""
+        with pytest.raises(FileNotFoundError):
+            await sandbox.read_bytes(f'/tmp/{_unique("missing")}')
 
-        assert not isinstance(exc_info.value, ModalSandboxTerminalError)
+        assert await sandbox.exists(f'/tmp/{_unique("missing")}') is False
 
-    async def test_list_files_reports_basenames_and_dir_flags(self, session: ModalSandboxSession) -> None:
+    async def test_list_dir_reports_basenames_and_dir_flags(self, sandbox: ModalSandboxBackend) -> None:
         """Validates the fake-encoded assumption that Modal lists entries by basename with a real dir flag."""
         root = f'/tmp/{_unique("ls")}'
-        await session.write_bytes(f'{root}/file.txt', b'x')
-        await session.write_bytes(f'{root}/sub/nested.txt', b'y')
+        await sandbox.write_bytes(f'{root}/file.txt', b'x')
+        await sandbox.write_bytes(f'{root}/sub/nested.txt', b'y')
 
-        entries = await session.list_files(root)
+        entries = await sandbox.list_dir(root)
 
-        assert sorted(entries) == [('file.txt', False), ('sub', True)]
+        assert sorted((entry.name, entry.is_dir, entry.path) for entry in entries) == [
+            ('file.txt', False, f'{root}/file.txt'),
+            ('sub', True, f'{root}/sub'),
+        ]
 
-    async def test_workdir_and_relative_file_resolution_share_one_view(self) -> None:
-        """Validates the fake-encoded assumption that relative file API paths share the process cwd view.
+    async def test_make_dir_and_remove_are_recursive(self, sandbox: ModalSandboxBackend) -> None:
+        """Validates the fake-encoded assumption that Modal's `mkdir -p` and recursive remove behave as documented."""
+        root = f'/tmp/{_unique("tree")}'
+        await sandbox.make_dir(f'{root}/a/b')
+        await sandbox.write_bytes(f'{root}/a/b/file.txt', b'x')
 
-        Portability: on a backend whose filesystem seam rejects relative paths, callers resolve
-        explicitly against the working directory, and this test then covers that resolution instead.
-        """
+        await sandbox.remove(root)
+
+        assert await sandbox.exists(root) is False
+
+    async def test_relative_paths_resolve_against_the_working_directory(self) -> None:
+        """Validates the fake-encoded assumption that the facade's resolution matches the process cwd."""
         filename = f'{_unique("rel")}.txt'
-        async with ModalSandboxSession(image=_IMAGE, sandbox_timeout=120, workdir='/tmp') as session:
-            await session.write_bytes(filename, b'from-relative-path\n')
-            result = await session.exec(['cat', filename], timeout=15)
+        async with _owned(sandbox_timeout=120, workdir='/tmp') as backend:
+            facade = Sandbox(backend)
+            await facade.write_text(filename, 'from-relative-path\n')
+            result = await backend.run(['cat', filename], timeout=15)
 
         assert result.stdout == 'from-relative-path\n'
 
@@ -253,36 +276,35 @@ class TestRealLifecycle:
     """Teardown and attach semantics in Modal's real control plane."""
 
     async def test_terminate_actually_destroys_the_container(self) -> None:
-        """Validates the fake-encoded assumption that exiting an owned session destroys the real sandbox."""
-        async with ModalSandboxSession(image=_IMAGE, sandbox_timeout=120) as owner:
-            sandbox_id = owner.sandbox_id
-            assert sandbox_id is not None
+        """Validates the fake-encoded assumption that closing an owned sandbox destroys the real one."""
+        async with _owned(sandbox_timeout=120) as owner:
+            ref = owner.ref
+        assert ref is not None
 
         became_unavailable = False
         attempts = 8
         for attempt in range(attempts):
             try:
-                async with ModalSandboxSession(sandbox_id=sandbox_id):
-                    pass  # pragma: no cover
+                await ModalSandboxBackend(ref=ref).sandbox
             except ModalSandboxUnavailableError:
                 became_unavailable = True
                 break
-            # Modal can lag about 30s before reporting external termination to a fresh attach.
+            # Modal can lag about 30s before reporting external termination to a fresh connect.
             if attempt < attempts - 1:
                 await anyio.sleep(5)
 
         assert became_unavailable
 
-    async def test_attach_reuses_state_and_leaves_container_running(self) -> None:
-        """Validates the fake-encoded assumption that attach reuses state and does not terminate ownership."""
+    async def test_connect_reuses_state_and_leaves_container_running(self) -> None:
+        """Validates the fake-encoded assumption that connecting reuses state and does not take ownership."""
         marker = f'/tmp/{_unique("persist")}.txt'
-        async with ModalSandboxSession(image=_IMAGE, sandbox_timeout=120) as owner:
+        async with _owned(sandbox_timeout=120) as owner:
             await owner.write_bytes(marker, b'shared')
-            sandbox_id = owner.sandbox_id
-            assert sandbox_id is not None
 
-            async with ModalSandboxSession(sandbox_id=sandbox_id) as attached:
-                assert attached.sandbox_id == sandbox_id
-                assert await attached.read_bytes(marker) == b'shared'
+            attached = ModalSandboxBackend(ref=owner.ref)
+            await attached.sandbox
+            assert attached.ref == owner.ref
+            assert await attached.read_bytes(marker) == b'shared'
+            await attached.close(terminate=False)
 
-            assert (await owner.exec(['cat', marker], timeout=15)).stdout == 'shared'
+            assert (await owner.run(['cat', marker], timeout=15)).stdout == 'shared'

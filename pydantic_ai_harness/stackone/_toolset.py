@@ -42,6 +42,9 @@ except ImportError as _import_error:  # pragma: no cover
 __all__ = (
     'STACKONE_API_KEY_ENV',
     'STACKONE_BASE_URL',
+    # Re-exported for `_capability`, so the guarded import above stays the one place that
+    # turns a missing `mcp` extra into the StackOne-specific install hint.
+    'MCPToolsetClient',
     'StackOneToolset',
     'ToolMode',
 )
