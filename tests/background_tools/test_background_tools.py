@@ -12,7 +12,14 @@ from typing import Any
 import anyio
 import pytest
 from pydantic_ai import Agent, CancellationToken, RunCancelled, UsageLimits
-from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ModelRetry, ToolFailed, UsageLimitExceeded
+from pydantic_ai.exceptions import (
+    ApprovalRequired,
+    CallDeferred,
+    ModelRetry,
+    ToolFailed,
+    UnexpectedModelBehavior,
+    UsageLimitExceeded,
+)
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -244,6 +251,16 @@ class TestBackgroundTools:
         if private_detail is not None:
             assert not _follow_up_seen(result.all_messages(), private_detail)
         assert result.usage.tool_calls == 0
+
+    async def test_retry_exhaustion_terminates_run(self) -> None:
+        agent = Agent(_model_calling('broken'), capabilities=[BackgroundTools()])
+
+        @agent.tool_plain(metadata={'background': True}, retries=0)
+        async def broken() -> str:  # pyright: ignore[reportUnusedFunction]
+            raise ModelRetry('try again')
+
+        with pytest.raises(UnexpectedModelBehavior, match="Tool 'broken' exceeded max retries count of 0"):
+            await agent.run('go')
 
     async def test_pending_background_call_counts_toward_tool_call_limit(self) -> None:
         started = 0

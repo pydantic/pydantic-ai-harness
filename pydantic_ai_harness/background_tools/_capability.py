@@ -9,7 +9,13 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai.capabilities import AbstractCapability, AgentNode, NodeResult
-from pydantic_ai.exceptions import ApprovalRequired, CallDeferred, ToolFailedError, ToolRetryError
+from pydantic_ai.exceptions import (
+    ApprovalRequired,
+    CallDeferred,
+    ToolFailedError,
+    ToolRetryError,
+    UnexpectedModelBehavior,
+)
 from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnPart, UserContent
 from pydantic_ai.tools import (
     AgentDepsT,
@@ -204,6 +210,9 @@ class BackgroundTools(AbstractCapability[AgentDepsT]):
             try:
                 result = await handler(args)
                 message = _format_background_result(tool_name, task_id, result)
+            except UnexpectedModelBehavior as e:
+                self._task_errors.append(e)
+                raise
             except Exception as e:
                 if not isinstance(e, (ApprovalRequired, CallDeferred, ToolRetryError, ToolFailedError)):
                     logger.exception('Background tool %s failed', tool_name)
