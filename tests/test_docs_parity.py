@@ -377,6 +377,6 @@ def test_blown_out_example_matches_coder_defaults() -> None:
     identity = f"instructions='{identity_match.group(1)}'"
     assert identity in block, "the blown-out example must carry coder_agent's identity instruction verbatim"
     example = (_ROOT / 'examples/coding_agent.py').read_text(encoding='utf-8')
-    assert identity in example and 'denied_env_patterns=LLM_API_KEY_ENV_PATTERNS' in example, (
+    assert identity in example and 'denied_env_patterns=LLM_API_KEY_ENV_PATTERNS' not in example, (
         'examples/coding_agent.py drifted from the coder_agent composition'
     )

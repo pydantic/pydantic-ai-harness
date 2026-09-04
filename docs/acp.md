@@ -93,7 +93,10 @@ The provider environment must be available to the launched subprocess. GUI edito
 A coding agent should read and write files in the workspace the editor opened, not wherever the subprocess started. ACP gives each session a working directory (`cwd`); a `session_config` factory turns that into per-session tools:
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
+from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, run_acp_stdio_sync
 
@@ -122,6 +125,9 @@ The factory runs once per session with the client's `AcpSession` setup (its `cwd
 The local [`FileSystem`](filesystem.md) and [`Shell`](shell.md) above operate on the agent process's own disk and subprocesses. An editor's source of truth is different: unsaved buffers, its own idea of the workspace layout, and -- for a remote or containerized editor -- the machine the code actually lives on. When the client advertises support, `acp_filesystem` and `acp_terminal` give the agent `read_file`/`write_file`/`run_command` tools that route through the client, so it acts where the user is:
 
 ```python
+from pathlib import Path
+
+from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, acp_filesystem, acp_terminal
 
@@ -130,10 +136,14 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
     # Use the editor's filesystem/terminal when offered; otherwise fall back to local.
     fs = acp_filesystem(session) or FileSystem[None](root_dir=session.cwd).get_toolset()
     shell = acp_terminal(session) or Shell[None](cwd=session.cwd).get_toolset()
-    return AcpSessionConfig(deps=None, toolsets=[fs, shell])
+    return AcpSessionConfig(
+        deps=None,
+        toolsets=[fs, shell],
+        sandbox=LocalSandbox(root=Path(session.cwd)),
+    )
 ```
 
-Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
+Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The local fallback requires the `sandbox` on `AcpSessionConfig` shown above. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
 
 ## Tool approval
 

@@ -1,1323 +1,405 @@
-"""Tests for the Shell capability and ShellToolset."""
+"""Tests for the Shell capability and the model-facing surface of `ShellToolset`."""
 
 from __future__ import annotations
 
 import errno
+import math
 import os
-import shlex
 import shutil
-import signal
-import sys
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, NoReturn
-from unittest.mock import MagicMock, patch
+from typing import Literal
 
 import anyio
 import pytest
-import sniffio
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import ModelRetry
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
+from pydantic_ai.exceptions import ModelRetry, UserError
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.sandboxes import (
+    CommandResult,
+    LocalSandbox,
+    Sandbox,
+    SandboxCommand,
+    SandboxError,
+    SandboxFileEntry,
+    SandboxRef,
+    SandboxResult,
+    SandboxTimeoutError,
+    SandboxUnavailableError,
+)
 
 from pydantic_ai_harness.code_mode import CodeMode
+from pydantic_ai_harness.filesystem import FileSystemToolset
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
-from pydantic_ai_harness.shell._toolset import (
-    ShellToolset,
-    _is_interactive_command,
+from pydantic_ai_harness.shell._toolset import ShellToolset
+from tests.shell.conftest import (  # pyright: ignore[reportMissingTypeStubs]
+    background_toolset,
+    call_tool,
+    command_id,
+    run_context,
+    shell_toolset,
 )
 
 
-def _env_toolset(
-    shell_dir: Path,
-    *,
-    env: Mapping[str, str] | None = None,
-    denied_env_patterns: Sequence[str] = (),
-) -> ShellToolset[None]:
-    """Build a ShellToolset wired for env-control tests, with safe defaults."""
-    return ShellToolset(
-        cwd=shell_dir,
-        allowed_commands=[],
-        denied_commands=[],
-        denied_operators=[],
-        default_timeout=10.0,
-        max_output_chars=50_000,
-        persist_cwd=False,
-        allow_interactive=False,
-        env=env,
-        denied_env_patterns=denied_env_patterns,
+class TestInteractiveCommands:
+    @pytest.mark.parametrize(
+        'command',
+        [
+            'vi file.txt',
+            'vim file.txt',
+            'nano file.txt',
+            'emacs file.txt',
+            'less file.txt',
+            'more file.txt',
+            'top',
+            'htop',
+            'man ls',
+            'sudo rm -rf /',
+            'passwd',
+            'ssh host',
+            'telnet localhost 80',
+            'ftp host',
+            '  vi file.txt',  # leading whitespace must not hide the command name
+        ],
     )
+    async def test_interactive_commands_are_blocked_by_default(self, command: str, sandbox: Sandbox) -> None:
+        with pytest.raises(ModelRetry, match='Interactive commands are not allowed'):
+            await call_tool(shell_toolset(), run_context(sandbox), 'run_command', command=command)
 
-
-def _shell_toolset(
-    shell_dir: Path,
-    *,
-    max_output_chars: int = 50_000,
-    default_timeout: float = 10.0,
-) -> ShellToolset[None]:
-    return ShellToolset(
-        cwd=shell_dir,
-        allowed_commands=[],
-        denied_commands=[],
-        denied_operators=[],
-        default_timeout=default_timeout,
-        max_output_chars=max_output_chars,
-        persist_cwd=False,
-        allow_interactive=False,
+    @pytest.mark.parametrize(
+        ('command', 'output'),
+        [
+            ('viewer=x; printf $viewer', 'x'),  # an interactive name must match a whole word
+            ('printf sudo', 'sudo'),  # ...and only at the start of the command
+        ],
     )
+    async def test_commands_that_merely_resemble_interactive_ones_run(
+        self, command: str, output: str, sandbox: Sandbox
+    ) -> None:
+        result = await call_tool(shell_toolset(), run_context(sandbox), 'run_command', command=command)
+        assert result == f'[stdout]\n{output}'
+
+    async def test_allow_interactive_permits_them(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(allow_interactive=True)
+        result = await call_tool(toolset, run_context(sandbox), 'run_command', command='man() { printf ran; }; man ls')
+        assert result == '[stdout]\nran'
 
 
-def _raise_oserror(code: int, message: str) -> Callable[..., Awaitable[NoReturn]]:
-    """Build a stand-in for `anyio.open_process` that fails with a given errno."""
+class TestCommandPolicy:
+    async def test_denied_command_is_reported_as_a_retry(self, sandbox: Sandbox) -> None:
+        # A denied command is model-correctable, so it surfaces as ModelRetry (which pyai feeds
+        # back to the model) rather than aborting the run.
+        toolset = shell_toolset(denied_commands=('rm',))
+        with pytest.raises(ModelRetry, match="Command 'rm' is denied."):
+            await call_tool(toolset, run_context(sandbox), 'run_command', command='rm -rf /')
 
-    async def fail(*args: object, **kwargs: object) -> NoReturn:
-        raise OSError(code, message)
+    async def test_allowlist_blocks_unlisted_commands(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(allowed_commands=('echo',))
+        with pytest.raises(ModelRetry, match="Command 'cat' is not in the allowed list."):
+            await call_tool(toolset, run_context(sandbox), 'run_command', command='cat file.txt')
 
-    return fail
+    async def test_allowlist_permits_listed_commands(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(allowed_commands=('echo',))
+        assert await call_tool(toolset, run_context(sandbox), 'run_command', command='echo hi') == '[stdout]\nhi\n'
 
+    def test_allowlist_and_denylist_together_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match=r'^Specify allowed_commands or denied_commands, not both\.$'):
+            shell_toolset(allowed_commands=('echo',), denied_commands=('rm',))
 
-def _read_env_var(name: str) -> str:
-    """Shell command that prints an env var's value, or ABSENT if unset."""
-    return f'{sys.executable} -c "import os; print(os.environ.get({name!r}, \'ABSENT\'))"'
+    def test_max_output_chars_must_be_positive(self) -> None:
+        # A cap of 0 would blank every response, including start_command's ID line,
+        # leaving its process unstoppable.
+        with pytest.raises(ValueError, match=r'^max_output_chars must be a positive integer\.$'):
+            shell_toolset(max_output_chars=0)
 
+    @pytest.mark.parametrize('operator', ['>', '>>'])
+    async def test_denied_operator_blocks_the_command(self, operator: str, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(denied_operators=(operator,))
+        with pytest.raises(ModelRetry, match=f'Shell operator {operator!r} is not allowed.'):
+            await call_tool(toolset, run_context(sandbox), 'run_command', command=f'echo hi {operator} f')
 
-def _run_context() -> RunContext[None]:
-    """Minimal `RunContext` for invoking `for_run` directly in tests."""
-    return RunContext[None](
-        deps=None,
-        model=TestModel(),
-        usage=RunUsage(),
-        prompt=None,
-        messages=[],
-        run_step=0,
-    )
+    async def test_command_free_of_denied_operators_runs(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(denied_operators=('>', '>>'))
+        assert await call_tool(toolset, run_context(sandbox), 'run_command', command='echo hi') == '[stdout]\nhi\n'
 
+    async def test_unparseable_command_skips_the_name_check(self, sandbox: Sandbox) -> None:
+        # `shlex` cannot find the command name in an unterminated quote, so the shell rejects
+        # the command instead of the denylist.
+        toolset = shell_toolset(denied_commands=('echo',))
+        result = await call_tool(toolset, run_context(sandbox), 'run_command', command="echo 'unterminated")
+        assert '[exit code:' in result
 
-async def _call_shell_tool(toolset: ShellToolset[None], name: str, **tool_args: Any) -> str:
-    ctx = _run_context()
-    tools = await toolset.get_tools(ctx)
-    result = await toolset.call_tool(name, tool_args, ctx, tools[name])
-    assert isinstance(result, str)
-    return result
-
-
-def _parse_command_id(result: str) -> str:
-    assert 'ID: ' in result, f'Expected "ID: " in result: {result!r}'
-    return result.split('ID: ')[1].strip()
-
-
-class TestIsInteractiveCommand:
-    def test_vi(self) -> None:
-        assert _is_interactive_command('vi file.txt') is True
-
-    def test_vim(self) -> None:
-        assert _is_interactive_command('vim file.txt') is True
-
-    def test_nano(self) -> None:
-        assert _is_interactive_command('nano file.txt') is True
-
-    def test_less(self) -> None:
-        assert _is_interactive_command('less file.txt') is True
-
-    def test_top(self) -> None:
-        assert _is_interactive_command('top') is True
-
-    def test_sudo(self) -> None:
-        assert _is_interactive_command('sudo rm -rf /') is True
-
-    def test_ssh(self) -> None:
-        assert _is_interactive_command('ssh host') is True
-
-    def test_regular_command(self) -> None:
-        assert _is_interactive_command('ls -la') is False
-
-    def test_echo(self) -> None:
-        assert _is_interactive_command('echo hello') is False
-
-    def test_grep(self) -> None:
-        assert _is_interactive_command('grep pattern file') is False
-
-    def test_emacs(self) -> None:
-        assert _is_interactive_command('emacs file.txt') is True
-
-    def test_man(self) -> None:
-        assert _is_interactive_command('man ls') is True
-
-    def test_htop(self) -> None:
-        assert _is_interactive_command('htop') is True
-
-    def test_telnet(self) -> None:
-        assert _is_interactive_command('telnet localhost 80') is True
-
-    def test_ftp(self) -> None:
-        assert _is_interactive_command('ftp host') is True
-
-    def test_passwd(self) -> None:
-        assert _is_interactive_command('passwd') is True
-
-    def test_more(self) -> None:
-        assert _is_interactive_command('more file.txt') is True
-
-    def test_not_prefix_match(self) -> None:
-        assert _is_interactive_command('view file.txt') is False
-        assert _is_interactive_command('vishnu') is False
-
-    def test_leading_spaces(self) -> None:
-        assert _is_interactive_command('  vi file.txt') is True
-        assert _is_interactive_command('  sudo rm') is True
+    async def test_empty_command_has_no_name_to_check(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(allowed_commands=('echo',))
+        assert await call_tool(toolset, run_context(sandbox), 'run_command', command='') == '(no output)'
 
 
-@pytest.fixture
-def shell_dir(tmp_path: Path) -> Path:
-    (tmp_path / 'test.txt').write_text('hello\n')
-    (tmp_path / 'subdir').mkdir()
-    (tmp_path / 'subdir' / 'nested.txt').write_text('nested\n')
-    return tmp_path
-
-
-@pytest.fixture
-def toolset(shell_dir: Path) -> ShellToolset[None]:
-    return ShellToolset(
-        cwd=shell_dir,
-        allowed_commands=[],
-        denied_commands=['rm', 'rmdir'],
-        denied_operators=[],
-        default_timeout=10.0,
-        max_output_chars=50_000,
-        persist_cwd=False,
-        allow_interactive=False,
-    )
-
-
-@pytest.fixture
-def persist_toolset(shell_dir: Path) -> ShellToolset[None]:
-    return ShellToolset(
-        cwd=shell_dir,
-        allowed_commands=[],
-        denied_commands=[],
-        denied_operators=[],
-        default_timeout=10.0,
-        max_output_chars=50_000,
-        persist_cwd=True,
-        allow_interactive=False,
-    )
-
-
-class TestCommandValidation:
-    async def test_denied_command_blocked(self, toolset: ShellToolset[None]) -> None:
-        with pytest.raises(PermissionError, match="'rm' is denied"):
-            toolset._check_command('rm -rf /')
-
-    async def test_allowed_command_permitted(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=['echo', 'cat'],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
+class TestOutputRendering:
+    async def test_stdout_and_stderr_are_labelled_separately(self, sandbox: Sandbox) -> None:
+        result = await call_tool(
+            shell_toolset(), run_context(sandbox), 'run_command', command='printf out; printf err >&2'
         )
-        ts._check_command('echo hello')
-        ts._check_command('cat file.txt')
+        assert result == '[stdout]\nout\n[stderr]\nerr'
 
-    async def test_allowed_blocks_non_matching(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=['echo'],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        with pytest.raises(PermissionError, match='not in the allowed list'):
-            ts._check_command('cat file.txt')
+    async def test_command_without_output_says_so(self, sandbox: Sandbox) -> None:
+        assert await call_tool(shell_toolset(), run_context(sandbox), 'run_command', command='true') == '(no output)'
 
-    async def test_both_allow_and_deny_raises(self, shell_dir: Path) -> None:
-        with pytest.raises(ValueError, match='Specify allowed_commands or denied_commands'):
-            ShellToolset(
-                cwd=shell_dir,
-                allowed_commands=['echo'],
-                denied_commands=['rm'],
-                denied_operators=[],
-                default_timeout=10.0,
-                max_output_chars=50_000,
-                persist_cwd=False,
-                allow_interactive=False,
+
+class TestOutputCap:
+    """The model-visible cap is enforced once, at the tool dispatch seam."""
+
+    async def test_string_tool_results_are_capped(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(max_output_chars=1)
+
+        def text() -> str:
+            return 'xx'
+
+        toolset.add_function(text)
+        assert await call_tool(toolset, run_context(sandbox), 'text') == 'x'
+
+    async def test_non_string_tool_results_are_left_alone(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(max_output_chars=1)
+
+        def number() -> int:
+            return 42
+
+        toolset.add_function(number)
+        ctx = run_context(sandbox)
+        tools = await toolset.get_tools(ctx)
+        assert await toolset.call_tool('number', {}, ctx, tools['number']) == 42
+
+    async def test_cap_keeps_the_exit_code_tail(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(max_output_chars=200)
+        result = await call_tool(toolset, run_context(sandbox), 'run_command', command="printf '%0400d' 0; exit 7")
+        assert len(result) == 200
+        assert result.endswith('[exit code: 7]')
+
+    async def test_cap_keeps_the_start_command_id_tail(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        # The ID line is the tail, so a truncated echo still leaves the process stoppable.
+        toolset = background_toolset(tmp_path, max_output_chars=80)
+        ctx = run_context(sandbox)
+        # `sleep` keeps it running, so stopping it is what is being tested, not a race with its exit.
+        result = await call_tool(toolset, ctx, 'start_command', command='sleep 30 #' + 'x' * 200)
+        assert len(result) == 80
+        assert await call_tool(toolset, ctx, 'stop_command', command_id=command_id(result)) == '(no output)\n[stopped]'
+
+
+class TestTimeouts:
+    async def test_default_timeout_applies_when_none_is_given(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(default_timeout=0.05)
+        result = await call_tool(toolset, run_context(sandbox), 'run_command', command='sleep 10')
+        assert result == '[Command timed out after 0.05s]'
+
+    @pytest.mark.parametrize('field', ['default_timeout', 'max_timeout'])
+    @pytest.mark.parametrize('value', [0.0, -1.0, math.inf, math.nan], ids=['zero', 'negative', 'infinity', 'nan'])
+    def test_timeout_configuration_must_be_positive_and_finite(
+        self, field: Literal['default_timeout', 'max_timeout'], value: float
+    ) -> None:
+        with pytest.raises(ValueError, match=f'{field} must be a positive finite number'):
+            if field == 'default_timeout':
+                shell_toolset(default_timeout=value)
+            else:
+                shell_toolset(max_timeout=value)
+
+    def test_default_timeout_cannot_exceed_max_timeout(self) -> None:
+        with pytest.raises(ValueError, match='default_timeout must not exceed max_timeout'):
+            shell_toolset(default_timeout=2.0, max_timeout=1.0)
+
+    async def test_model_timeout_above_maximum_recommends_start_command(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = shell_toolset(default_timeout=1.0, max_timeout=1.0)
+            with pytest.raises(ModelRetry, match='at most 1.0.*start_command'):
+                await call_tool(
+                    toolset, run_context(Sandbox.wrap(backend)), 'run_command', command='true', timeout_seconds=2
+                )
+            assert backend.timeouts == []
+
+    async def test_model_timeout_at_maximum_is_forwarded(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = shell_toolset(default_timeout=1.0, max_timeout=1.0)
+            await call_tool(
+                toolset, run_context(Sandbox.wrap(backend)), 'run_command', command='true', timeout_seconds=1.0
             )
+            assert backend.timeouts == [1.0]
 
-    async def test_interactive_blocked_by_default(self, toolset: ShellToolset[None]) -> None:
-        with pytest.raises(PermissionError, match='Interactive commands'):
-            toolset._check_command('vim file.txt')
-
-    async def test_interactive_allowed_when_enabled(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=True,
+    async def test_tool_description_uses_the_configured_default(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(default_timeout=12.5)
+        tools = await toolset.get_tools(run_context(sandbox))
+        description = str(tools['run_command'].tool_def.parameters_json_schema)
+        assert 'configured default' in description
+        assert 'default: 30' not in description
+        assert 'Each command starts in the configured working directory' in str(
+            tools['run_command'].tool_def.description
         )
-        ts._check_command('vim file.txt')
 
-    async def test_denied_operator_blocked(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=['>', '>>'],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
+
+class TestWorkingDirectory:
+    async def test_each_command_starts_in_the_configured_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        (tmp_path / 'sub').mkdir()
+        (tmp_path / 'root.txt').write_text('root\n')
+        toolset = shell_toolset()
+        ctx = run_context(sandbox)
+        await call_tool(toolset, ctx, 'run_command', command='cd sub')
+        assert await call_tool(toolset, ctx, 'run_command', command='pwd') == f'[stdout]\n{tmp_path}\n'
+
+        filesystem = FileSystemToolset(
+            root_dir=tmp_path,
+            allowed_patterns=(),
+            denied_patterns=(),
+            protected_patterns=(),
+            max_read_lines=100,
+            max_list_results=100,
+            max_search_results=100,
+            max_find_results=100,
         )
-        with pytest.raises(PermissionError, match="'>' is not allowed"):
-            ts._check_command('echo hello > file.txt')
-
-    async def test_denied_operator_passes_when_not_present(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=['>', '>>'],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        ts._check_command('echo hello')
-
-    async def test_unparseable_command_allowed(self, toolset: ShellToolset[None]) -> None:
-        toolset._check_command("echo 'unterminated")
-
-    async def test_empty_command_allowed(self, toolset: ShellToolset[None]) -> None:
-        toolset._check_command('')
-
-    async def test_denied_operator_substring_match(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=['>>'],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        with pytest.raises(PermissionError, match="'>>' is not allowed"):
-            ts._check_command('echo hello >> file.txt')
-
-    async def test_shlex_error_returns_early(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=['rm'],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        ts._check_command("echo 'unterminated")
-
-    async def test_empty_tokens(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=['echo'],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        ts._check_command('')
-
-    def test_first_denied_operator_match(self, toolset: ShellToolset[None]) -> None:
-        ts = ShellToolset(
-            cwd=Path('/tmp'),
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=['|', '>'],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        assert ts._first_denied_operator('echo hi | cat') == '|'
-
-    def test_first_denied_operator_no_match(self, toolset: ShellToolset[None]) -> None:
-        ts = ShellToolset(
-            cwd=Path('/tmp'),
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=['|', '>'],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        assert ts._first_denied_operator('echo hello') is None
-
-    def test_first_denied_operator_empty_list(self, toolset: ShellToolset[None]) -> None:
-        assert toolset._first_denied_operator('echo hi | cat') is None
-
-
-class TestCwdCapture:
-    """The persistent-cwd mechanism records `pwd` out-of-band via a private temp
-    file, so command output can never spoof the tracked directory."""
-
-    def test_capture_disabled_returns_command_unchanged(self, toolset: ShellToolset[None]) -> None:
-        wrapped, cwd_file = toolset._build_cwd_capture('echo hi')
-        assert wrapped == 'echo hi'
-        assert cwd_file is None
-
-    def test_capture_records_pwd_out_of_band(self, persist_toolset: ShellToolset[None]) -> None:
-        wrapped, cwd_file = persist_toolset._build_cwd_capture('echo hi')
-        assert cwd_file is not None
-        try:
-            # pwd is redirected to the private temp file, never echoed to stdout
-            assert f'pwd > {shlex.quote(str(cwd_file))}' in wrapped
-            assert wrapped.startswith('echo hi')
-        finally:
-            cwd_file.unlink(missing_ok=True)
-
-    def test_apply_valid_dir_updates_cwd(
-        self, persist_toolset: ShellToolset[None], shell_dir: Path, tmp_path: Path
-    ) -> None:
-        capture = tmp_path / 'cwd'
-        capture.write_text(f'{shell_dir / "subdir"}\n')
-        persist_toolset._apply_captured_cwd(capture)
-        assert persist_toolset._cwd == shell_dir / 'subdir'
-
-    def test_apply_empty_file_keeps_cwd(self, persist_toolset: ShellToolset[None], tmp_path: Path) -> None:
-        original = persist_toolset._cwd
-        capture = tmp_path / 'cwd'
-        capture.write_text('')
-        persist_toolset._apply_captured_cwd(capture)
-        assert persist_toolset._cwd == original
-
-    def test_apply_non_dir_keeps_cwd(self, persist_toolset: ShellToolset[None], tmp_path: Path) -> None:
-        original = persist_toolset._cwd
-        capture = tmp_path / 'cwd'
-        capture.write_text(str(tmp_path / 'does_not_exist'))
-        persist_toolset._apply_captured_cwd(capture)
-        assert persist_toolset._cwd == original
-
-    async def test_capture_not_utf8_keeps_cwd(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
-        # The wrapper runs `pwd` in the same shell as the model's command, so a
-        # shell function named `pwd` decides the bytes written to the capture
-        # file. Decoding them raises `UnicodeDecodeError`, a `ValueError` and
-        # not an `OSError`, so the guard has to cover both.
-        result = await persist_toolset.run_command(r"""pwd() { printf '\377\376'; }""")
-        assert '[exit code' not in result
-        assert persist_toolset._cwd == shell_dir
-
-    async def test_capture_path_too_long_keeps_cwd(
-        self, persist_toolset: ShellToolset[None], shell_dir: Path, tmp_path: Path
-    ) -> None:
-        # `Path.is_dir` propagates ENAMETOOLONG before 3.14 and returns `False`
-        # from 3.14 on. Either way the recorded path is junk and the tracked cwd
-        # must survive.
-        capture = tmp_path / 'cwd'
-        capture.write_text(f'/{"x" * 300}')
-        persist_toolset._apply_captured_cwd(capture)
-        assert persist_toolset._cwd == shell_dir
+        tools = await filesystem.get_tools(ctx)
+        result: object = await filesystem.call_tool('read_file', {'path': 'root.txt'}, ctx, tools['read_file'])
+        assert isinstance(result, str)
+        assert result.startswith('[root.txt | 1 lines | hash:')
+        assert result.endswith('\n     1\troot\n')
 
 
 class TestForRunIsolation:
-    """B3: `get_toolset` builds one shared instance at agent construction, so
-    `for_run` must hand each run a fresh copy -- otherwise concurrent runs share
-    `_cwd`/`_background` and corrupt each other."""
+    """`for_run` gives each run independent background-process state."""
 
-    async def test_for_run_returns_fresh_instance(self, persist_toolset: ShellToolset[None]) -> None:
-        run1 = await persist_toolset.for_run(_run_context())
-        run2 = await persist_toolset.for_run(_run_context())
-        assert run1 is not persist_toolset
-        assert run2 is not run1
-
-    async def test_persist_cwd_isolated_across_runs(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
-        run1 = await persist_toolset.for_run(_run_context())
-        assert isinstance(run1, ShellToolset)
-        await run1.run_command('cd subdir')
-        assert run1._cwd == shell_dir / 'subdir'
-        # A second run must start back at the configured root, not inherit run1's cd.
-        run2 = await persist_toolset.for_run(_run_context())
-        assert isinstance(run2, ShellToolset)
-        assert run2._cwd == shell_dir
-
-
-class TestPersistCwdHardening:
-    """B4: regression tests for the old stdout-sentinel footguns -- a command's
-    output spoofing the cwd, and `;` silently disabling tracking."""
-
-    async def test_cd_persists_even_with_semicolon(self, persist_toolset: ShellToolset[None]) -> None:
-        # The old mechanism skipped tracking whenever ';' appeared, silently
-        # dropping a real `cd`. The out-of-band capture records it regardless.
-        await persist_toolset.run_command('cd subdir ; true')
-        result = await persist_toolset.run_command('pwd')
-        assert 'subdir' in result
-
-    async def test_output_cannot_spoof_cwd(self, persist_toolset: ShellToolset[None], shell_dir: Path) -> None:
-        # The old mechanism parsed cwd from stdout, so a command printing the
-        # sentinel string could redirect the tracked cwd with no real cd.
-        spoof = f'true ; echo __HARNESS_PWD__{shell_dir / "subdir"}'
-        await persist_toolset.run_command(spoof)
-        assert persist_toolset._cwd == shell_dir
+    async def test_each_run_keeps_the_configured_environment(self, sandbox: Sandbox) -> None:
+        shared = shell_toolset(
+            env={'HARNESS_VISIBLE': 'yes', 'HARNESS_DENIED': 'secret'},
+            denied_env_patterns=('HARNESS_DENIED',),
+        )
+        ctx = run_context(sandbox)
+        per_run = await shared.for_run(ctx)
+        assert isinstance(per_run, ShellToolset)
+        result = await call_tool(
+            per_run,
+            ctx,
+            'run_command',
+            command='printf \'%s:%s\' "$HARNESS_VISIBLE" "${HARNESS_DENIED-absent}"',
+        )
+        assert result == '[stdout]\nyes:absent'
 
 
 class TestSpawnFailures:
-    """Failures raised by the spawn itself, which reached past `_recoverable`
-    when it only caught `PermissionError` and aborted the whole run."""
+    """Failures raised by the spawn itself, split by whose mistake they are."""
 
-    def _toolset_in(self, cwd: Path) -> ShellToolset[None]:
-        return ShellToolset(
-            cwd=cwd,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
+    async def test_missing_working_directory_is_a_path_free_retry(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        # The model's own earlier command can do this: `mv "$PWD" "$PWD-old"` passes the
+        # denylist, which only inspects the first token.
+        (tmp_path / 'sub').mkdir()
+        toolset = shell_toolset(Path('sub'))
+        shutil.rmtree(tmp_path / 'sub')
+        with pytest.raises(ModelRetry, match='The working directory no longer exists.') as exc_info:
+            await call_tool(toolset, run_context(sandbox), 'run_command', command='echo hello')
+        assert str(tmp_path) not in str(exc_info.value)  # the retry prompt names no sandbox path
 
-    async def test_cwd_deleted(self, shell_dir: Path) -> None:
-        # The model's own earlier command can do this: `mv "$PWD" "$PWD-old"`
-        # passes the denylist, which only inspects the first token.
-        target = shell_dir / 'subdir'
-        ts = self._toolset_in(target)
-        shutil.rmtree(target)
-        with pytest.raises(ModelRetry, match='working directory no longer exists'):
-            await ts.run_command('echo hello')
-
-    async def test_cwd_replaced_by_file(self, shell_dir: Path) -> None:
-        target = shell_dir / 'subdir'
-        ts = self._toolset_in(target)
-        shutil.rmtree(target)
-        target.write_text('not a directory\n')
-        with pytest.raises(ModelRetry, match='no longer a directory'):
-            await ts.run_command('echo hello')
-
-    async def test_cwd_deleted_start_command(self, shell_dir: Path) -> None:
-        target = shell_dir / 'subdir'
-        ts = self._toolset_in(target)
-        shutil.rmtree(target)
-        with pytest.raises(ModelRetry, match='working directory no longer exists'):
-            await ts.start_command('sleep 30')
-
-    async def test_message_omits_host_path(self, shell_dir: Path) -> None:
-        target = shell_dir / 'subdir'
-        ts = self._toolset_in(target)
-        shutil.rmtree(target)
-        with pytest.raises(ModelRetry) as exc_info:
-            await ts.run_command('echo hello')
-        assert str(target) not in str(exc_info.value)
+    async def test_working_directory_replaced_by_a_file_is_a_retry(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        (tmp_path / 'sub').write_text('not a directory\n')
+        toolset = shell_toolset(Path('sub'))
+        with pytest.raises(ModelRetry, match='The working directory is no longer a directory.'):
+            await call_tool(toolset, run_context(sandbox), 'run_command', command='echo hello')
 
     @pytest.mark.parametrize(
         ('command', 'expected'),
         [('echo hi\x00there', 'NUL byte'), ('echo \ud800', 'cannot be encoded for the operating system')],
     )
-    async def test_unspawnable_command_string(self, toolset: ShellToolset[None], command: str, expected: str) -> None:
+    async def test_unspawnable_command_string_is_a_retry(self, command: str, expected: str, sandbox: Sandbox) -> None:
         with pytest.raises(ModelRetry, match=expected):
-            await toolset.run_command(command)
-
-    async def test_unspawnable_command_string_start_command(self, toolset: ShellToolset[None]) -> None:
-        with pytest.raises(ModelRetry, match='NUL byte'):
-            await toolset.start_command('echo \x00')
+            await call_tool(shell_toolset(), run_context(sandbox), 'run_command', command=command)
 
     @pytest.mark.parametrize('escaped', ['\udc80', '\udcff'])
-    async def test_surrogateescape_command_still_runs(self, toolset: ShellToolset[None], escaped: str) -> None:
-        # The spawn encodes with `surrogateescape`, which round-trips this range
-        # back to the raw byte it came from. Screening the command as plain
-        # UTF-8 would reject a command the OS runs.
-        result = await toolset.run_command(f'echo {escaped}')
+    async def test_surrogateescape_command_still_runs(self, escaped: str, sandbox: Sandbox) -> None:
+        # The spawn encodes with `surrogateescape`, which round-trips this range back to the raw
+        # byte it came from. Screening the command as plain UTF-8 would reject a command that runs.
+        result = await call_tool(shell_toolset(), run_context(sandbox), 'run_command', command=f'echo {escaped}')
         assert '[exit code' not in result
 
     @pytest.mark.parametrize('env', [{'FOO': 'bar\x00baz'}, {'FO\x00O': 'bar'}, {'FOO': 'bar\ud800'}])
-    async def test_unspawnable_env_aborts(self, shell_dir: Path, env: dict[str, str]) -> None:
-        # The spawn reports a NUL or an unencodable character as the same
-        # `ValueError` wherever it came from. This one came from the
-        # application's `env`, so the model cannot fix it and must not be asked
-        # to retry.
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-            env=env,
-        )
-        with pytest.raises(ValueError) as exc_info:
-            await ts.run_command('echo hello')
-        assert not isinstance(exc_info.value, ModelRetry)
-
-    async def test_argument_or_environment_too_long_propagates(
-        self, toolset: ShellToolset[None], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # E2BIG does not identify whether the model's command or the
-        # application's environment crossed the combined platform limit. An
-        # application configuration error must not become an unwinnable retry.
-        monkeypatch.setattr(anyio, 'open_process', _raise_oserror(errno.E2BIG, 'Argument list too long'))
-        with pytest.raises(OSError, match='Argument list too long'):
-            await toolset.run_command('echo hello')
-
-    async def test_non_recoverable_errno_propagates(
-        self, toolset: ShellToolset[None], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        # A host that can't fork is not something the model can retry its way
-        # out of, so it must keep aborting the run.
-        monkeypatch.setattr(anyio, 'open_process', _raise_oserror(errno.ENOMEM, 'Cannot allocate memory'))
-        with pytest.raises(OSError, match='Cannot allocate memory'):
-            await toolset.run_command('echo hello')
-
-
-class TestRunCommand:
-    async def test_basic_echo(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command('echo hello')
-        assert '[stdout]' in result
-        assert 'hello' in result
-
-    async def test_stderr_output(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command('echo error >&2')
-        assert '[stderr]' in result
-        assert 'error' in result
-
-    async def test_mixed_output(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command('echo out && echo err >&2')
-        assert '[stdout]' in result
-        assert '[stderr]' in result
-
-    async def test_exit_code_reported(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command('exit 42')
-        assert '[exit code: 42]' in result
-
-    async def test_exit_code_zero_not_shown(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command('echo ok')
-        assert 'exit code' not in result
-
-    async def test_no_output(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command('true')
-        assert result == '(no output)'
-
-    async def test_output_truncation(self, shell_dir: Path) -> None:
-        ts = _shell_toolset(shell_dir, max_output_chars=50)
-        result = await _call_shell_tool(ts, 'run_command', command=f'{sys.executable} -c "print(\'x\' * 200)"')
-        assert len(result) == 50
-        assert 'truncated, showing last 5 chars' in result
-
-    async def test_output_truncation_caps_complete_failure_response(self, shell_dir: Path) -> None:
-        ts = _shell_toolset(shell_dir, max_output_chars=200)
-        command = f'{sys.executable} -c "import sys; sys.stdout.write(\'x\' * 400); sys.exit(7)"'
-        result = await _call_shell_tool(ts, 'run_command', command=command)
-        assert len(result) == 200
-        assert result.startswith('[... output truncated, showing last 153 chars]\n')
-        assert result.endswith('[exit code: 7]')
-
-    async def test_persist_cwd(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=True,
-            allow_interactive=False,
-        )
-        await ts.run_command('cd subdir')
-        result = await ts.run_command('pwd')
-        assert 'subdir' in result
-
-    async def test_persist_cwd_only_on_success(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=True,
-            allow_interactive=False,
-        )
-        original = ts._cwd
-        await ts.run_command('cd nonexistent_dir_xyz && false')
-        assert ts._cwd == original
-
-    async def test_denied_command_in_run(self, toolset: ShellToolset[None]) -> None:
-        # B2: a denied command is model-correctable, so it surfaces as ModelRetry
-        # (which pyai feeds back to the model) rather than aborting the run.
-        with pytest.raises(ModelRetry, match="'rm' is denied"):
-            await toolset.run_command('rm -rf /')
-
-    async def test_cwd_used(self, toolset: ShellToolset[None], shell_dir: Path) -> None:
-        result = await toolset.run_command('cat test.txt')
-        assert 'hello' in result
-
-    async def test_multiline_output(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command(f'{sys.executable} -c "print(\'a\\nb\\nc\\n\')"')
-        assert '[stdout]' in result
-
-    async def test_timeout_reports_value(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=0.5,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.run_command('sleep 10')
-        assert 'timed out after 0.5s' in result
-
-    async def test_custom_timeout_overrides_default(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=30.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.run_command('sleep 10', timeout_seconds=0.5)
-        assert 'timed out after 0.5s' in result
-
-    async def test_persist_cwd_disabled_no_update(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        original = ts._cwd
-        await ts.run_command('cd subdir')
-        assert ts._cwd == original
-
-    async def test_nonzero_exit_shows_code(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command('exit 1')
-        assert '[exit code: 1]' in result
-
-    async def test_stdout_stderr_separated_by_newline(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command('echo out && echo err >&2')
-        assert '[stdout]\nout\n\n[stderr]\nerr' in result
-
-    async def test_non_ascii_stdout(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command(
-            f'{sys.executable} -c "import sys; sys.stdout.buffer.write(b\'hello \\xff\\xfe world\\n\')"'
-        )
-        assert 'hello' in result
-
-    async def test_non_ascii_stderr(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command(
-            f'{sys.executable} -c "import sys; sys.stderr.buffer.write(b\'err \\xff\\xfe msg\\n\')"'
-        )
-        assert 'err' in result
-
-    async def test_stdout_chunk_join(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.run_command(f"{sys.executable} -c \"print('A' * 100 + 'B' * 100)\"")
-        assert 'A' * 100 + 'B' * 100 in result
-
-    async def test_exit_code_fallback_to_zero(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=True,
-            allow_interactive=False,
-        )
-        result = await ts.run_command('echo ok')
-        assert 'exit code' not in result
-
-    async def test_error_message_content(self, shell_dir: Path) -> None:
-        with pytest.raises(ValueError, match='^Specify allowed_commands or denied_commands, not both\\.$'):
-            ShellToolset(
-                cwd=shell_dir,
-                allowed_commands=['echo'],
-                denied_commands=['rm'],
-                denied_operators=[],
-                default_timeout=10.0,
-                max_output_chars=50_000,
-                persist_cwd=False,
-                allow_interactive=False,
-            )
-
-    def test_non_positive_max_output_chars_rejected(self, shell_dir: Path) -> None:
-        # Matches LocalStackToolset: a cap of 0 would blank every response,
-        # including start_command's ID line, leaving its process unstoppable.
-        with pytest.raises(ValueError, match='max_output_chars must be a positive integer.'):
-            _shell_toolset(shell_dir, max_output_chars=0)
-
-    async def test_stdout_chunks_joined_cleanly(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=30.0,
-            max_output_chars=500_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.run_command("printf '%05000d\\n' $(seq 1 100)")
-        assert 'XXXX' not in result
-
-    async def test_stderr_chunks_joined_cleanly(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=30.0,
-            max_output_chars=500_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.run_command("printf '%0500d\\n' $(seq 1 100) >&2")
-        assert 'XXXX' not in result
-
-    async def test_persist_cwd_updates_after_cd(self, shell_dir: Path) -> None:
-        """CWD should update to the actual directory after a successful cd."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=True,
-            allow_interactive=False,
-        )
-        await ts.run_command('cd subdir')
-        assert ts._cwd == (shell_dir / 'subdir')
-
-    async def test_persist_cwd_not_updated_on_failure(self, shell_dir: Path) -> None:
-        """CWD should not update if command fails (exit code non-zero)."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=True,
-            allow_interactive=False,
-        )
-        original = ts._cwd
-        await ts.run_command('false')
-        assert ts._cwd == original
-
-
-class TestProcessGroupKill:
-    async def test_timeout_kills_subprocess_tree(self, shell_dir: Path) -> None:
-        """On timeout, the entire process group should be killed."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=0.5,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.run_command('bash -c "sleep 100 & sleep 100"')
-        assert 'timed out' in result
-
-    async def test_timeout_with_output_before_timeout(self, shell_dir: Path) -> None:
-        """Output produced before timeout should still result in timeout message."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=0.5,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.run_command('echo before_timeout && sleep 100')
-        assert 'timed out' in result
-
-    async def test_start_new_session_used(self, shell_dir: Path) -> None:
-        """Verify the child is in a different process group from the parent."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        parent_pgrp = os.getpgrp()
-        result = await ts.run_command(f'{sys.executable} -c "import os; print(os.getpgrp() != {parent_pgrp})"')
-        assert 'True' in result
-
-
-class TestBackgroundCommands:
-    async def test_start_command_returns_id(self, shell_dir: Path) -> None:
-        ts = _shell_toolset(shell_dir)
-        result = await _call_shell_tool(ts, 'start_command', command='sleep 100')
-        assert 'ID:' in result
-        assert 'Started background command' in result
-        command_id = _parse_command_id(result)
-        await ts.stop_command(command_id)
-
-    async def test_start_command_long_echo_is_capped_keeping_id(self, shell_dir: Path) -> None:
-        # The command echo is subject to the cap like any other output; the ID
-        # line is the tail, so truncation keeps it usable for check/stop calls.
-        ts = _shell_toolset(shell_dir, max_output_chars=80)
-        result = await _call_shell_tool(ts, 'start_command', command='true ' + 'x' * 200)
-        assert len(result) == 80
-        assert 'output truncated' in result
-        command_id = _parse_command_id(result)
-        assert len(command_id) == 12
-        await ts.stop_command(command_id)
-
-    async def test_check_unknown_id(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.check_command('nonexistent_id')
-        assert 'unknown command ID' in result
-
-    async def test_stop_unknown_id(self, toolset: ShellToolset[None]) -> None:
-        result = await toolset.stop_command('nonexistent_id')
-        assert 'unknown command ID' in result
-
-    async def test_start_and_stop(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('echo hello_bg')
-        command_id = _parse_command_id(start_result)
-
-        await anyio.sleep(0.5)
-
-        stop_result = await ts.stop_command(command_id)
-        assert 'stopped' in stop_result
-        assert 'hello_bg' in stop_result
-        assert stop_result.splitlines()[-2:] == ['[stopped]', '[exit code: 0]']
-
-    async def test_start_and_check_running(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('sleep 100')
-        command_id = _parse_command_id(start_result)
-
-        check_result = await ts.check_command(command_id)
-        assert 'running' in check_result
-        assert check_result.endswith('[status: running]')
-
-        await ts.stop_command(command_id)
-
-    async def test_check_and_stop_respect_output_cap(self, shell_dir: Path) -> None:
-        ts = _shell_toolset(shell_dir, max_output_chars=200)
-        start_result = await ts.start_command("printf '%0400d' 0; sleep 30")
-        command_id = _parse_command_id(start_result)
-        await anyio.sleep(0.5)
-
-        try:
-            check_result = await _call_shell_tool(ts, 'check_command', command_id=command_id)
-            assert len(check_result) == 200
-            assert 'output truncated' in check_result
-            assert check_result.endswith('[status: running]')
-        finally:
-            stop_result = await _call_shell_tool(ts, 'stop_command', command_id=command_id)
-        assert len(stop_result) == 200
-        assert 'output truncated' in stop_result
-        stop_lines = stop_result.splitlines()
-        assert stop_lines[-2] == '[stopped]'
-        assert stop_lines[-1].startswith('[exit code:')
-
-    async def test_new_string_tool_is_capped_at_dispatch(self, shell_dir: Path) -> None:
-        ts = _shell_toolset(shell_dir, max_output_chars=1)
-
-        def text() -> str:
-            return 'xx'
-
-        ts.add_function(text)
-        assert await _call_shell_tool(ts, 'text') == 'x'
-
-    async def test_non_string_tool_result_is_unchanged(self, shell_dir: Path) -> None:
-        ts = _shell_toolset(shell_dir, max_output_chars=1)
-
-        def number() -> int:
-            return 42
-
-        ts.add_function(number)
-        ctx = _run_context()
-        tools = await ts.get_tools(ctx)
-        assert await ts.call_tool('number', {}, ctx, tools['number']) == 42
-
-    async def test_start_and_check_finished(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('echo done_quick')
-        command_id = _parse_command_id(start_result)
-
-        await anyio.sleep(0.5)
-
-        check_result = await ts.check_command(command_id)
-        assert 'finished' in check_result
-        assert 'done_quick' in check_result
-        assert check_result.splitlines()[-2:] == ['[status: finished]', '[exit code: 0]']
-
-        await ts.stop_command(command_id)
-
-    async def test_start_denied_command_raises(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=['rm'],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        with pytest.raises(ModelRetry, match="'rm' is denied"):
-            await ts.start_command('rm -rf /')
-
-    async def test_stop_captures_stderr(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('echo err_bg >&2')
-        command_id = _parse_command_id(start_result)
-
-        await anyio.sleep(0.5)
-
-        stop_result = await ts.stop_command(command_id)
-        assert 'err_bg' in stop_result
-
-    async def test_stop_no_output(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('true')
-        command_id = _parse_command_id(start_result)
-
-        await anyio.sleep(0.5)
-
-        stop_result = await ts.stop_command(command_id)
-        assert '(no output)' in stop_result
-
-    async def test_check_no_output_yet(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('sleep 100')
-        command_id = _parse_command_id(start_result)
-
-        check_result = await ts.check_command(command_id)
-        assert 'no output yet' in check_result
-
-        await ts.stop_command(command_id)
-
-    async def test_check_command_captures_stderr(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('echo err_check >&2')
-        command_id = _parse_command_id(start_result)
-
-        await anyio.sleep(0.5)
-
-        check_result = await ts.check_command(command_id)
-        assert '[stderr]' in check_result
-        assert 'err_check' in check_result
-
-        await ts.stop_command(command_id)
-
-    async def test_start_command_uses_cwd(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('pwd')
-        command_id = _parse_command_id(start_result)
-
-        await anyio.sleep(0.5)
-
-        stop_result = await ts.stop_command(command_id)
-        assert str(shell_dir) in stop_result
-
-    async def test_stop_removes_from_registry(self, shell_dir: Path) -> None:
-        """After stop, the command_id should no longer be known."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        start_result = await ts.start_command('true')
-        command_id = _parse_command_id(start_result)
-
-        await anyio.sleep(0.5)
-
-        await ts.stop_command(command_id)
-
-        # Should now be unknown
-        check_result = await ts.check_command(command_id)
-        assert 'unknown command ID' in check_result
-
-    async def test_start_command_cleans_temp_files_on_failure(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        with patch('anyio.open_process', side_effect=OSError('spawn failed')):
-            with pytest.raises(OSError, match='spawn failed'):
-                await ts.start_command('echo hi')
-        assert not ts._background
-
-    async def test_aexit_terminates_background_processes(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.start_command('sleep 300')
-        command_id = _parse_command_id(result)
-        bg = ts._background[command_id]
-        stdout_path = Path(bg.stdout_path)
-        stderr_path = Path(bg.stderr_path)
-        assert stdout_path.exists()
-        assert stderr_path.exists()
-
-        await ts.__aexit__(None, None, None)
-
-        assert not ts._background
-        assert not stdout_path.exists()
-        assert not stderr_path.exists()
-
-    async def test_aexit_noop_when_no_background(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        await ts.__aexit__(None, None, None)
-        assert not ts._background
-
-    async def test_aexit_cleans_already_finished_process(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.start_command('echo done')
-        command_id = _parse_command_id(result)
-        await anyio.sleep(0.5)
-        # Mark as finished via check_command
-        await ts.check_command(command_id)
-        bg = ts._background[command_id]
-        assert bg.finished
-
-        await ts.__aexit__(None, None, None)
-        assert not ts._background
-
-
-class TestEdgeCases:
-    async def test_toolset_tool_names(self, toolset: ShellToolset[None]) -> None:
-        tool_names = list(toolset.tools.keys())
-        assert 'run_command' in tool_names
-        assert 'start_command' in tool_names
-        assert 'check_command' in tool_names
-        assert 'stop_command' in tool_names
-
-    async def test_run_command_uses_actual_cwd(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        result = await ts.run_command('pwd')
-        assert str(shell_dir) in result
-
-    async def test_persist_cwd_requires_all_three_conditions(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=True,
-            allow_interactive=False,
-        )
-        # Successful echo -- sentinel shows same dir, cwd should remain valid
-        await ts.run_command('echo hi')
-        assert ts._cwd.is_dir()
+    async def test_unspawnable_environment_aborts_the_run(self, env: dict[str, str], sandbox: Sandbox) -> None:
+        # The spawn reports a NUL or an unencodable character the same way wherever it came from.
+        # This one came from the application's `env`, so the model cannot fix it and must not retry.
+        toolset = shell_toolset(env=env)
+        with pytest.raises(ValueError):
+            await call_tool(toolset, run_context(sandbox), 'run_command', command='echo hello')
 
 
 class TestShellCapability:
-    def test_default_construction(self) -> None:
-        shell = Shell()
-        assert shell.cwd == '.'
-        assert shell.default_timeout == 30.0
-        assert 'rm' in shell.denied_commands
+    async def test_registers_the_four_command_tools(self, sandbox: Sandbox) -> None:
+        toolset = Shell[None]().get_toolset()
+        assert set(await toolset.get_tools(run_context(sandbox))) == {
+            'run_command',
+            'start_command',
+            'check_command',
+            'stop_command',
+        }
 
-    def test_custom_construction(self) -> None:
-        shell = Shell(
-            cwd='/tmp',
-            allowed_commands=['echo', 'cat'],
-            denied_commands=[],
-            default_timeout=60.0,
+    def test_defaults(self) -> None:
+        shell = Shell[None]()
+        assert (shell.cwd, shell.default_timeout, shell.max_timeout, shell.max_output_chars) == (
+            '.',
+            30.0,
+            600.0,
+            50_000,
         )
-        assert shell.default_timeout == 60.0
-        shell.get_toolset()
+        assert shell.allow_interactive is False
+        assert (shell.env, list(shell.denied_env_patterns)) == (None, [])
 
-    async def test_empty_allowlist_keeps_default_denylist(self) -> None:
-        toolset = Shell(allowed_commands=[]).get_toolset()
+    @pytest.mark.parametrize(
+        'destructive', ['rm', 'rmdir', 'mkfs', 'dd', 'format', 'shutdown', 'reboot', 'halt', 'poweroff', 'init']
+    )
+    async def test_default_denylist_blocks_destructive_commands(self, destructive: str, sandbox: Sandbox) -> None:
+        toolset = Shell[None]().get_toolset()
+        with pytest.raises(ModelRetry, match=f"Command '{destructive}' is denied."):
+            await call_tool(toolset, run_context(sandbox), 'run_command', command=f'{destructive} --version')
 
-        with pytest.raises(ModelRetry, match="'rm' is denied"):
-            await toolset.run_command('rm --version')
-        assert 'hello' in await toolset.run_command('echo hello')
+    async def test_empty_allowlist_keeps_the_default_denylist(self, sandbox: Sandbox) -> None:
+        toolset = Shell[None](allowed_commands=[]).get_toolset()
+        with pytest.raises(ModelRetry, match="Command 'rm' is denied."):
+            await call_tool(toolset, run_context(sandbox), 'run_command', command='rm --version')
 
-    def test_explicit_default_denylist_conflicts_with_allowlist(self) -> None:
-        denied_commands = Shell().denied_commands
-        shell = Shell(allowed_commands=['rm'], denied_commands=denied_commands)
+    async def test_allowlist_replaces_the_default_denylist(self, sandbox: Sandbox) -> None:
+        # Without the swap in `__post_init__` the two lists would collide and `get_toolset` raise.
+        toolset = Shell[None](allowed_commands=['echo']).get_toolset()
+        assert await call_tool(toolset, run_context(sandbox), 'run_command', command='echo hi') == '[stdout]\nhi\n'
 
+    def test_allowlist_with_an_explicitly_passed_default_denylist_is_rejected(self) -> None:
+        shell = Shell[None](allowed_commands=['rm'], denied_commands=Shell[None]().denied_commands)
         with pytest.raises(ValueError, match='Specify allowed_commands or denied_commands'):
             shell.get_toolset()
 
-    def test_agent_accepts_allowlist_without_explicit_denylist(self, tmp_path: Path) -> None:
-        Agent(TestModel(), capabilities=[Shell(cwd=tmp_path, allowed_commands=['ls', 'cat', 'rg'])])
+    def test_environment_denylist_requires_an_explicit_environment(self) -> None:
+        with pytest.raises(ValueError, match='denied_env_patterns requires an explicit env mapping'):
+            Shell(denied_env_patterns=['SECRET_*'])
 
-    def test_get_toolset_returns_toolset(self, tmp_path: Path) -> None:
-        shell = Shell(cwd=tmp_path)
-        toolset = shell.get_toolset()
-        assert isinstance(toolset, ShellToolset)
+    async def test_capability_passes_the_environment_to_the_toolset(self, sandbox: Sandbox) -> None:
+        toolset = Shell[None](
+            env={'HARNESS_VISIBLE': 'yes', 'HARNESS_DENIED': 'secret'},
+            denied_env_patterns=['HARNESS_DENIED'],
+        ).get_toolset()
+        result = await call_tool(
+            toolset,
+            run_context(sandbox),
+            'run_command',
+            command='printf \'%s:%s\' "$HARNESS_VISIBLE" "${HARNESS_DENIED-absent}"',
+        )
+        assert result == '[stdout]\nyes:absent'
 
-    def test_default_denied_commands(self) -> None:
-        shell = Shell()
-        assert 'rm' in shell.denied_commands
-        assert 'dd' in shell.denied_commands
-        assert 'shutdown' in shell.denied_commands
-
-    @pytest.mark.anyio(backends=['asyncio'])
-    async def test_agent_integration(self, tmp_path: Path) -> None:
-
-        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
-            pytest.skip('Agent.run() requires asyncio')
-        model = TestModel(custom_output_text='done', call_tools=[])
-        agent: Agent[None, str] = Agent(model, capabilities=[Shell(cwd=tmp_path)])
-        result = await agent.run('run echo hello')
-        assert result.output == 'done'
+    async def test_llm_api_key_patterns_strip_provider_credentials(self, sandbox: Sandbox) -> None:
+        secrets = {pattern.replace('*', 'KEY'): 'leak-me' for pattern in LLM_API_KEY_ENV_PATTERNS}
+        toolset = Shell[None](
+            env={**secrets, 'HARNESS_KEEP': 'kept', 'PATH': os.environ['PATH']},
+            denied_env_patterns=list(LLM_API_KEY_ENV_PATTERNS),
+        ).get_toolset()
+        result = await call_tool(toolset, run_context(sandbox), 'run_command', command='env')
+        assert 'leak-me' not in result
+        assert 'HARNESS_KEEP=kept' in result  # a name no pattern matches is still passed through
 
 
-async def _tools_offered_to_model(cwd: Path, *, shell_first: bool) -> dict[str, str | None]:
+async def _tools_offered_to_model(*, shell_first: bool) -> dict[str, str | None]:
     """Run an agent with Shell and CodeMode and return the tools the model was offered."""
     offered: dict[str, str | None] = {}
 
@@ -1325,7 +407,7 @@ async def _tools_offered_to_model(cwd: Path, *, shell_first: bool) -> dict[str, 
         offered.update({tool.name: tool.description for tool in info.function_tools})
         return ModelResponse(parts=[TextPart('done')])
 
-    shell = Shell[object](cwd=cwd)
+    shell = Shell[object]()
     code_mode = CodeMode[object]()
     capabilities: list[AbstractCapability[object]] = [shell, code_mode] if shell_first else [code_mode, shell]
     agent: Agent[None, str] = Agent(FunctionModel(capture), capabilities=capabilities)
@@ -1341,13 +423,9 @@ class TestCodeModeInterop:
     stay sandboxed like any other tool.
     """
 
-    @pytest.mark.anyio(backends=['asyncio'])
     @pytest.mark.parametrize('shell_first', [True, False], ids=['shell-first', 'code-mode-first'])
-    async def test_command_tools_stay_native(self, tmp_path: Path, shell_first: bool) -> None:
-
-        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
-            pytest.skip('Agent.run() requires asyncio')
-        tools = await _tools_offered_to_model(tmp_path, shell_first=shell_first)
+    async def test_command_tools_stay_native(self, shell_first: bool) -> None:
+        tools = await _tools_offered_to_model(shell_first=shell_first)
 
         assert 'run_command' in tools
         assert 'start_command' in tools
@@ -1356,13 +434,9 @@ class TestCodeModeInterop:
         assert 'async def run_command' not in run_code_description
         assert 'async def start_command' not in run_code_description
 
-    @pytest.mark.anyio(backends=['asyncio'])
     @pytest.mark.parametrize('shell_first', [True, False], ids=['shell-first', 'code-mode-first'])
-    async def test_command_id_tools_are_still_sandboxed(self, tmp_path: Path, shell_first: bool) -> None:
-
-        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
-            pytest.skip('Agent.run() requires asyncio')
-        tools = await _tools_offered_to_model(tmp_path, shell_first=shell_first)
+    async def test_command_id_tools_are_still_sandboxed(self, shell_first: bool) -> None:
+        tools = await _tools_offered_to_model(shell_first=shell_first)
 
         assert 'check_command' not in tools
         assert 'stop_command' not in tools
@@ -1372,418 +446,521 @@ class TestCodeModeInterop:
         assert 'async def stop_command' in run_code_description
 
 
-class TestKillProcessGroupEdgeCases:
-    async def test_sigterm_raises_process_lookup_error(self, tmp_path: Path) -> None:
-        """When SIGTERM raises ProcessLookupError, method returns without SIGKILL."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        proc = MagicMock()
-        proc.pid = 99999
-        with patch('os.killpg', side_effect=ProcessLookupError):
-            await ts._kill_process_group(proc)
-        # No exception raised, method returned early
+class _RecordingLocalBackend:
+    def __init__(self, backend: LocalSandbox) -> None:
+        self.backend = backend
+        self.remove_error: RuntimeError | None = None
+        self.environments: list[Mapping[str, str] | None] = []
+        self.timeouts: list[float | None] = []
+        self.run_error: Exception | None = None
+        self.raise_after_kill = False
+        self.kill_failure: str | None = None
+        self.kill_failure_stderr = 'kill failed'
+        self.hold_on_term = False
+        self.tail_failure = False
 
-    async def test_sigkill_escalation(self, tmp_path: Path) -> None:
-        """When process doesn't exit within grace period, SIGKILL is sent."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        proc = MagicMock()
-        proc.pid = 99999
+    @property
+    def ref(self) -> SandboxRef | None:
+        return self.backend.ref
 
-        # Make proc.wait() never complete (simulates process ignoring SIGTERM)
-        async def never_return() -> None:
-            await anyio.sleep(999)
+    async def working_dir(self) -> str:
+        return await self.backend.working_dir()
 
-        proc.wait = never_return
+    async def read_bytes(self, path: str) -> bytes:
+        return await self.backend.read_bytes(path)
 
-        kill_calls: list[tuple[int, int]] = []
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        await self.backend.write_bytes(path, data)
 
-        def fake_killpg(pgid: int, sig: int) -> None:
-            kill_calls.append((pgid, sig))
+    async def stat(self, path: str) -> SandboxFileEntry:
+        return await self.backend.stat(path)
 
-        with (
-            patch('os.killpg', side_effect=fake_killpg),
-            patch('os.getpgid', return_value=12345),
-            patch('pydantic_ai_harness.shell._toolset._KILL_GRACE_PERIOD', 0.01),
-        ):
-            await ts._kill_process_group(proc)
+    async def list_dir(self, path: str) -> Sequence[SandboxFileEntry]:
+        return await self.backend.list_dir(path)
 
-        assert len(kill_calls) == 2
-        assert kill_calls[0][1] == signal.SIGTERM
-        assert kill_calls[1][1] == signal.SIGKILL
+    async def make_dir(self, path: str) -> None:
+        await self.backend.make_dir(path)
 
-    async def test_sigkill_raises_process_lookup_error(self, tmp_path: Path) -> None:
-        """When SIGKILL raises ProcessLookupError (process exited between SIGTERM and SIGKILL)."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        proc = MagicMock()
-        proc.pid = 99999
+    async def remove(self, path: str) -> None:
+        if self.remove_error is not None:
+            raise self.remove_error
+        await self.backend.remove(path)
 
-        async def never_return() -> None:
-            await anyio.sleep(999)
+    async def exists(self, path: str) -> bool:
+        return await self.backend.exists(path)
 
-        proc.wait = never_return
-
-        call_count = 0
-
-        def fake_killpg(pgid: int, sig: int) -> None:
-            nonlocal call_count
-            call_count += 1
-            if sig == signal.SIGKILL:
-                raise ProcessLookupError
-
-        with (
-            patch('os.killpg', side_effect=fake_killpg),
-            patch('os.getpgid', return_value=12345),
-            patch('pydantic_ai_harness.shell._toolset._KILL_GRACE_PERIOD', 0.01),
-        ):
-            await ts._kill_process_group(proc)
-
-        assert call_count == 2
+    async def run(
+        self,
+        command: SandboxCommand,
+        *,
+        shell: bool = False,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> SandboxResult:
+        self.environments.append(env)
+        self.timeouts.append(timeout)
+        if self.run_error is not None:
+            raise self.run_error
+        if self.kill_failure is not None and not isinstance(command, str) and command[0] == 'kill':
+            # A held TERM reports success without signalling, so the escalation to KILL is reached.
+            if self.hold_on_term and command[1] == '-TERM':
+                return CommandResult(exit_code=0, stdout='', stderr='')
+            return CommandResult(exit_code=1, stdout='', stderr=self.kill_failure_stderr)
+        if self.tail_failure and not isinstance(command, str) and command[0] == 'tail':
+            return CommandResult(exit_code=1, stdout='', stderr='tail failed')
+        result = await self.backend.run(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
+        if self.raise_after_kill and not isinstance(command, str) and command[:2] == ['kill', '-TERM']:
+            raise RuntimeError('cleanup failed')
+        return result
 
 
-class TestDrainWithTimeoutEdgeCases:
-    async def test_stdout_closed_resource_error(self, tmp_path: Path) -> None:
-        """ClosedResourceError on stdout is caught silently after yielding data."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        proc = MagicMock()
+async def test_recording_backend_delegates_the_complete_flat_filesystem(tmp_path: Path) -> None:
+    async with LocalSandbox(root=tmp_path) as local:
+        backend = _RecordingLocalBackend(local)
+        directory = str(tmp_path / 'nested')
+        path = f'{directory}/file.txt'
 
-        # Yield one chunk then raise ClosedResourceError
-        class FailingStream:
-            def __init__(self) -> None:
-                self._yielded = False
+        await backend.make_dir(directory)
+        await backend.write_bytes(path, b'data')
 
-            def __aiter__(self) -> FailingStream:
-                return self
+        assert await backend.read_bytes(path) == b'data'
+        assert (await backend.stat(path)).size == 4
+        assert [entry.name for entry in await backend.list_dir(directory)] == ['file.txt']
+        assert await backend.exists(path) is True
 
-            async def __anext__(self) -> bytes:
-                if not self._yielded:
-                    self._yielded = True
-                    return b'partial'
-                raise anyio.ClosedResourceError
-
-        proc.stdout = FailingStream()
-        proc.stderr = None
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        await ts._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-        assert stdout_chunks == [b'partial']
-
-    async def test_stderr_broken_resource_error(self, tmp_path: Path) -> None:
-        """BrokenResourceError on stderr is caught silently after yielding data."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        proc = MagicMock()
-        proc.stdout = None
-
-        class FailingStream:
-            def __init__(self) -> None:
-                self._yielded = False
-
-            def __aiter__(self) -> FailingStream:
-                return self
-
-            async def __anext__(self) -> bytes:
-                if not self._yielded:
-                    self._yielded = True
-                    return b'partial'
-                raise anyio.BrokenResourceError
-
-        proc.stderr = FailingStream()
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        await ts._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-        assert stderr_chunks == [b'partial']
+        await backend.remove(path)
+        assert await backend.exists(path) is False
 
 
-class TestReadBgOutputEdgeCases:
-    def test_stdout_oserror(self, tmp_path: Path) -> None:
-        """OSError reading stdout file returns empty string."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        bg = MagicMock()
-        bg.stdout_path = '/nonexistent/path/stdout'
-        bg.stderr_path = '/nonexistent/path/stderr'
+class _FailingBackend:
+    ref = SandboxRef(sandbox_id='failing-1')
 
-        stdout, stderr = ts._read_bg_output(bg)
-        assert stdout == ''
-        assert stderr == ''
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
 
-    def test_stderr_oserror_only(self, tmp_path: Path) -> None:
-        """OSError reading stderr file only, stdout succeeds."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        # Create a valid stdout file but invalid stderr path
-        stdout_file = tmp_path / 'stdout.txt'
-        stdout_file.write_text('hello')
+    async def working_dir(self) -> str:
+        return '/work'
 
-        bg = MagicMock()
-        bg.stdout_path = str(stdout_file)
-        bg.stderr_path = '/nonexistent/path/stderr'
-
-        stdout, stderr = ts._read_bg_output(bg)
-        assert stdout == 'hello'
-        assert stderr == ''
+    async def run(
+        self,
+        command: SandboxCommand,
+        *,
+        shell: bool = False,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> SandboxResult:
+        raise self.error
 
 
-class TestCleanupBgFilesEdgeCases:
-    def test_unlink_oserror(self, tmp_path: Path) -> None:
-        """OSError on unlink is caught silently."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        bg = MagicMock()
-        bg.stdout_path = '/nonexistent/path/stdout'
-        bg.stderr_path = '/nonexistent/path/stderr'
-
-        # Should not raise
-        ts._cleanup_bg_files(bg)
+class _TimeoutBackend(_FailingBackend):
+    def __init__(self) -> None:
+        super().__init__(SandboxTimeoutError('timed out', stdout='before\n', stderr='problem\n'))
 
 
-class TestStopCommandAlreadyFinished:
-    async def test_stop_already_finished_process(self, shell_dir: Path) -> None:
-        """stop_command on an already-finished process skips kill."""
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        # Start a command that finishes immediately
-        start_result = await ts.start_command('echo done')
-        command_id = _parse_command_id(start_result)
+class _ResultBackend(_FailingBackend):
+    def __init__(self, stdout: str, stderr: str = '') -> None:
+        super().__init__(RuntimeError('unused'))
+        self.stdout = stdout
+        self.stderr = stderr
 
-        # Wait for the process to finish
-        await anyio.sleep(0.5)
-
-        # Manually mark as finished with exit_code = None (simulates edge case
-        # where finished is True but exit_code was never captured)
-        bg = ts._background[command_id]
-        bg.finished = True
-        bg.exit_code = None
-
-        # stop_command should skip the kill branch and handle None exit_code
-        result = await ts.stop_command(command_id)
-        assert result.endswith('[stopped]')
-        assert '[exit code:' not in result
+    async def run(
+        self,
+        command: SandboxCommand,
+        *,
+        shell: bool = False,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> SandboxResult:
+        return CommandResult(exit_code=0, stdout=self.stdout, stderr=self.stderr)
 
 
-class TestResolveEnv:
-    """Unit coverage for the env-resolution branches."""
-
-    def test_inherits_when_unconfigured(self, shell_dir: Path) -> None:
-        # Neither env nor patterns set -> None, so the subprocess inherits.
-        assert _env_toolset(shell_dir)._resolve_env() is None
-
-    def test_explicit_env_replaces(self, shell_dir: Path) -> None:
-        resolved = _env_toolset(shell_dir, env={'FOO': 'bar'})._resolve_env()
-        assert resolved == {'FOO': 'bar'}
-
-    def test_explicit_empty_env_is_not_inheritance(self, shell_dir: Path) -> None:
-        # {} produces no child environment vars, distinct from None (inherit all).
-        assert _env_toolset(shell_dir, env={})._resolve_env() == {}
-
-    def test_patterns_strip_from_inherited(self, shell_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('OPENAI_API_KEY', 'secret')
-        monkeypatch.setenv('SAFE_VAR', 'keep')
-        resolved = _env_toolset(shell_dir, denied_env_patterns=['OPENAI_*'])._resolve_env()
-        assert resolved is not None
-        assert 'OPENAI_API_KEY' not in resolved
-        assert resolved.get('SAFE_VAR') == 'keep'
-
-    def test_patterns_strip_from_explicit_env(self, shell_dir: Path) -> None:
-        resolved = _env_toolset(
-            shell_dir,
-            env={'OPENAI_API_KEY': 'secret', 'PATH': '/usr/bin'},
-            denied_env_patterns=['OPENAI_*'],
-        )._resolve_env()
-        assert resolved == {'PATH': '/usr/bin'}
-
-    def test_patterns_no_match_keeps_base(self, shell_dir: Path) -> None:
-        resolved = _env_toolset(
-            shell_dir,
-            env={'FOO': 'bar'},
-            denied_env_patterns=['OPENAI_*'],
-        )._resolve_env()
-        assert resolved == {'FOO': 'bar'}
-
-    def test_pattern_match_is_case_sensitive(self, shell_dir: Path) -> None:
-        # Env var names are case-sensitive on POSIX; lowercase must not match.
-        resolved = _env_toolset(
-            shell_dir,
-            env={'openai_api_key': 'secret'},
-            denied_env_patterns=['OPENAI_*'],
-        )._resolve_env()
-        assert resolved == {'openai_api_key': 'secret'}
+async def _await_finished(toolset: ShellToolset[None], ctx: RunContext[None], started_id: str) -> str:
+    """Poll `check_command` until the background command reports it has finished."""
+    with anyio.fail_after(5):
+        while True:
+            result = await call_tool(toolset, ctx, 'check_command', command_id=started_id)
+            if '[status: finished]' in result:
+                return result
+            await anyio.sleep(0.02)
 
 
-class TestEnvControlExecution:
-    """End-to-end: the resolved env actually reaches spawned subprocesses."""
+class TestRunCommand:
+    async def test_runs_in_sandbox_root_and_labels_output(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        result = await call_tool(shell_toolset(), run_context(sandbox), 'run_command', command='pwd')
+        assert result == f'[stdout]\n{tmp_path}\n'
 
-    async def test_explicit_env_seen_by_command(self, shell_dir: Path) -> None:
-        ts = _env_toolset(shell_dir, env={'MY_TOKEN': 'present', 'PATH': os.environ['PATH']})
-        result = await ts.run_command(_read_env_var('MY_TOKEN'))
-        assert 'present' in result
-
-    async def test_explicit_env_hides_inherited_secret(self, shell_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('OPENROUTER_API_KEY', 'leak-me')
-        ts = _env_toolset(shell_dir, env={'PATH': os.environ['PATH']})
-        result = await ts.run_command(_read_env_var('OPENROUTER_API_KEY'))
-        assert 'ABSENT' in result
-        assert 'leak-me' not in result
-
-    async def test_denied_pattern_strips_inherited_secret(
-        self, shell_dir: Path, monkeypatch: pytest.MonkeyPatch
+    async def test_relative_cwd_resolves_against_the_sandbox_working_directory(
+        self, tmp_path: Path, sandbox: Sandbox
     ) -> None:
-        monkeypatch.setenv('ANTHROPIC_API_KEY', 'leak-me')
-        ts = _env_toolset(shell_dir, denied_env_patterns=['ANTHROPIC_*'])
-        result = await ts.run_command(_read_env_var('ANTHROPIC_API_KEY'))
-        assert 'ABSENT' in result
-        assert 'leak-me' not in result
+        (tmp_path / 'sub').mkdir()
+        result = await call_tool(shell_toolset(Path('sub')), run_context(sandbox), 'run_command', command='pwd')
+        assert result == f'[stdout]\n{tmp_path / "sub"}\n'
 
-    async def test_unstripped_inherited_var_still_visible(
-        self, shell_dir: Path, monkeypatch: pytest.MonkeyPatch
+    async def test_nonzero_exit_code_is_rendered(self, sandbox: Sandbox) -> None:
+        result = await call_tool(
+            shell_toolset(), run_context(sandbox), 'run_command', command='printf error >&2; exit 7'
+        )
+        assert result == '[stderr]\nerror\n[exit code: 7]'
+
+    async def test_default_environment_selection_is_delegated_to_the_backend(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # A var not matched by any pattern is still inherited as before.
-        monkeypatch.setenv('HARNESS_KEEP', 'visible')
-        ts = _env_toolset(shell_dir, denied_env_patterns=['ANTHROPIC_*'])
-        result = await ts.run_command(_read_env_var('HARNESS_KEEP'))
-        assert 'visible' in result
+        monkeypatch.setenv('HARNESS_HOST_ONLY', 'secret')
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            await call_tool(shell_toolset(), run_context(Sandbox.wrap(backend)), 'run_command', command='true')
+        assert backend.environments == [None]
 
-    async def test_default_inherits_parent_env(self, shell_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Backward compatible: with no env control, inherited vars pass through.
-        monkeypatch.setenv('HARNESS_INHERITED', 'yes')
-        ts = _env_toolset(shell_dir)
-        result = await ts.run_command(_read_env_var('HARNESS_INHERITED'))
-        assert 'yes' in result
-
-    async def test_env_and_patterns_compose_at_spawn(self, shell_dir: Path) -> None:
-        # Both set: a pattern strips a key from the explicit env, the rest survives.
-        ts = _env_toolset(
-            shell_dir,
-            env={'SECRET_KEY': 'leak-me', 'KEEP_VAR': 'kept', 'PATH': os.environ['PATH']},
-            denied_env_patterns=['SECRET_*'],
+    async def test_explicit_environment_is_filtered(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset(
+            env={'HARNESS_VISIBLE': 'yes', 'HARNESS_DENIED': 'secret'},
+            denied_env_patterns=('HARNESS_DENIED',),
         )
-        stripped = await ts.run_command(_read_env_var('SECRET_KEY'))
-        assert 'ABSENT' in stripped
-        assert 'leak-me' not in stripped
-        survived = await ts.run_command(_read_env_var('KEEP_VAR'))
-        assert 'kept' in survived
-
-    async def test_background_command_honors_env(self, shell_dir: Path) -> None:
-        ts = _env_toolset(shell_dir, env={'BG_TOKEN': 'bg-present', 'PATH': os.environ['PATH']})
-        start_result = await ts.start_command(_read_env_var('BG_TOKEN'))
-        command_id = _parse_command_id(start_result)
-        await anyio.sleep(0.5)
-        stop_result = await ts.stop_command(command_id)
-        assert 'bg-present' in stop_result
-
-
-class TestEnvControlPropagation:
-    """The capability and `for_run` carry env control through unchanged."""
-
-    async def test_for_run_propagates_env(self, shell_dir: Path) -> None:
-        ts = _env_toolset(shell_dir, env={'FOO': 'bar'}, denied_env_patterns=['OPENAI_*'])
-        run_ts = await ts.for_run(_run_context())
-        assert isinstance(run_ts, ShellToolset)
-        assert run_ts._resolve_env() == {'FOO': 'bar'}
-
-    def test_capability_defaults_inherit(self) -> None:
-        shell = Shell()
-        assert shell.env is None
-        assert list(shell.denied_env_patterns) == []
-
-    def test_capability_passes_env_to_toolset(self, tmp_path: Path) -> None:
-        shell = Shell(
-            cwd=tmp_path,
-            env={'FOO': 'bar'},
-            denied_env_patterns=['OPENAI_*'],
+        result = await call_tool(
+            toolset,
+            run_context(sandbox),
+            'run_command',
+            command='printf \'%s:%s\' "$HARNESS_VISIBLE" "${HARNESS_DENIED-absent}"',
         )
-        toolset = shell.get_toolset()
-        assert isinstance(toolset, ShellToolset)
-        assert toolset._resolve_env() == {'FOO': 'bar'}
+        assert result == '[stdout]\nyes:absent'
 
-    def test_llm_pattern_constant_strips_provider_keys(self, tmp_path: Path) -> None:
-        shell = Shell(cwd=tmp_path, denied_env_patterns=list(LLM_API_KEY_ENV_PATTERNS))
-        toolset = shell.get_toolset()
-        assert isinstance(toolset, ShellToolset)
-        resolved = toolset._resolve_env()
-        assert resolved is not None
-        # None of the provider-credential prefixes survive.
-        leaked = {
-            name
-            for name in resolved
-            if name.startswith(('ANTHROPIC_', 'OPENAI_', 'OPENROUTER_', 'GEMINI_', 'GOOGLE_', 'GATEWAY_'))
-            or name == 'PYDANTIC_AI_GATEWAY_API_KEY'
-        }
-        assert leaked == set()
+    async def test_timeout_is_returned(self, sandbox: Sandbox) -> None:
+        result = await call_tool(
+            shell_toolset(), run_context(sandbox), 'run_command', command='sleep 10', timeout_seconds=0.05
+        )
+        assert result == '[Command timed out after 0.05s]'
+
+    async def test_timeout_includes_partial_output(self) -> None:
+        result = await call_tool(
+            shell_toolset(), run_context(Sandbox.wrap(_TimeoutBackend())), 'run_command', command='slow'
+        )
+        assert result == '[stdout]\nbefore\n\n[stderr]\nproblem\n\n[Command timed out after 10.0s]'
+
+    @pytest.mark.parametrize(
+        ('error', 'expected'),
+        [
+            (SandboxError('temporary failure'), ModelRetry),
+            (SandboxUnavailableError('gone'), SandboxUnavailableError),
+            (RuntimeError('backend bug'), RuntimeError),
+        ],
+    )
+    async def test_error_mapping(self, error: RuntimeError, expected: type[RuntimeError]) -> None:
+        sandbox = Sandbox.wrap(_FailingBackend(error))
+        assert await sandbox.working_dir() == '/work'
+        with pytest.raises(expected, match=str(error)):
+            await call_tool(shell_toolset(), run_context(sandbox), 'run_command', command='echo hello')
+
+    async def test_non_recoverable_errno_propagates(self) -> None:
+        # A sandbox that cannot fork is not something the model can retry its way out of, so it
+        # must keep aborting the run rather than starting an unwinnable retry loop.
+        sandbox = Sandbox.wrap(_FailingBackend(OSError(errno.ENOMEM, 'Cannot allocate memory')))
+        with pytest.raises(OSError, match='Cannot allocate memory'):
+            await call_tool(shell_toolset(), run_context(sandbox), 'run_command', command='echo hello')
+
+    async def test_missing_sandbox_asks_the_application_to_attach_one(self) -> None:
+        # The unavailable default raises `UserError`, itself a `RuntimeError`: without an explicit
+        # re-raise the attachment instructions would reach the model as a retry prompt instead.
+        with pytest.raises(UserError, match='No sandbox is attached'):
+            await call_tool(shell_toolset(), run_context(), 'run_command', command='echo hello')
+
+
+class TestBackgroundCommands:
+    async def test_short_command_finishes_with_output(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        toolset = background_toolset(tmp_path)
+        ctx = run_context(sandbox)
+        started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='printf background; false'))
+
+        assert await _await_finished(toolset, ctx, started_id) == (
+            '[stdout]\nbackground\n[status: finished]\n[exit code: 1]'
+        )
+        await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_exit_command_records_its_exit_code(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        toolset = background_toolset(tmp_path)
+        ctx = run_context(sandbox)
+        started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='exit 3'))
+
+        assert await _await_finished(toolset, ctx, started_id) == '(no output yet)\n[status: finished]\n[exit code: 3]'
+        await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_stderr_and_junk_exit_capture_are_rendered_as_running(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        toolset = background_toolset(tmp_path)
+        ctx = run_context(sandbox)
+        started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='printf problem >&2; sleep 30'))
+        await sandbox.write_bytes(f'/tmp/harness_{started_id}_ec', b'junk')
+
+        with anyio.fail_after(5):
+            while True:
+                result = await call_tool(toolset, ctx, 'check_command', command_id=started_id)
+                if '[stderr]\nproblem' in result:
+                    break
+                await anyio.sleep(0.02)  # pragma: no cover - retry timing is race-dependent
+        assert result == '[stderr]\nproblem\n[status: running]'
+        await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_missing_output_files_are_empty(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        toolset = background_toolset(tmp_path)
+        ctx = run_context(sandbox)
+        started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+        await sandbox.remove(f'/tmp/harness_{started_id}_out')
+        await sandbox.remove(f'/tmp/harness_{started_id}_err')
+
+        result = await call_tool(toolset, ctx, 'check_command', command_id=started_id)
+        assert result == '(no output yet)\n[status: running]'
+        await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_starts_in_the_configured_directory_with_the_configured_environment(
+        self, tmp_path: Path, sandbox: Sandbox
+    ) -> None:
+        (tmp_path / 'sub').mkdir()
+        toolset = background_toolset(tmp_path / 'sub', env={'BG_TOKEN': 'bg-present'})
+        ctx = run_context(sandbox)
+        start = await call_tool(toolset, ctx, 'start_command', command='printf \'%s %s\' "$BG_TOKEN" "$(pwd)"')
+        started_id = command_id(start)
+
+        assert await _await_finished(toolset, ctx, started_id) == (
+            f'[stdout]\nbg-present {tmp_path / "sub"}\n[status: finished]\n[exit code: 0]'
+        )
+        await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_stop_kills_command_and_removes_record(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        toolset = background_toolset(tmp_path)
+        ctx = run_context(sandbox)
+        started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+
+        result = await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+        assert result == '(no output)\n[stopped]'
+        assert await call_tool(toolset, ctx, 'check_command', command_id=started_id) == (
+            f'[Error: unknown command ID {started_id!r}]'
+        )
+
+    async def test_exit_cleans_up_unfinished_command(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        toolset = background_toolset(tmp_path)
+        ctx = run_context(sandbox)
+        started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+        paths = [Path(f'/tmp/harness_{started_id}_{suffix}') for suffix in ('out', 'err', 'ec')]
+
+        await toolset.__aexit__(None, None, None)
+
+        assert not any(path.exists() for path in paths)
+        assert await call_tool(toolset, ctx, 'check_command', command_id=started_id) == (
+            f'[Error: unknown command ID {started_id!r}]'
+        )
+
+    async def test_exit_cleans_up_finished_command(self, tmp_path: Path, sandbox: Sandbox) -> None:
+        toolset = background_toolset(tmp_path)
+        ctx = run_context(sandbox)
+        started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='true'))
+        await _await_finished(toolset, ctx, started_id)
+
+        await toolset.__aexit__(None, None, None)
+        assert await call_tool(toolset, ctx, 'check_command', command_id=started_id) == (
+            f'[Error: unknown command ID {started_id!r}]'
+        )
+
+    async def test_exit_surfaces_sandbox_cleanup_failure_and_keeps_record(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            sandbox = Sandbox.wrap(backend)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(sandbox)
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.remove_error = RuntimeError('cleanup failed')
+            # The protocol members the shell tools never consult still work through the facade.
+            assert sandbox.ref == local.ref
+            assert await sandbox.working_dir() == str(tmp_path)
+
+            with pytest.raises(RuntimeError, match='cleanup failed'):
+                await toolset.__aexit__(None, None, None)
+
+            assert await call_tool(toolset, ctx, 'check_command', command_id=started_id) == (
+                '(no output yet)\n[status: running]'
+            )
+            backend.remove_error = None
+            await toolset.__aexit__(None, None, None)
+
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.run_error = RuntimeError('kill cleanup failed')
+            with pytest.raises(RuntimeError, match='kill cleanup failed'):
+                await toolset.__aexit__(None, None, None)
+            backend.run_error = None
+            await toolset.__aexit__(None, None, None)
+
+    async def test_background_output_read_failure_is_reported(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.tail_failure = True
+
+            with pytest.raises(RuntimeError, match='tail failed'):
+                await call_tool(toolset, ctx, 'check_command', command_id=started_id)
+            backend.tail_failure = False
+            await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_exit_surfaces_kill_failure_and_keeps_record(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.raise_after_kill = True
+
+            with pytest.raises(RuntimeError, match='cleanup failed'):
+                await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+            assert '[status: running]' in await call_tool(toolset, ctx, 'check_command', command_id=started_id)
+            backend.raise_after_kill = False
+            await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_missing_background_output_file_is_empty(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.run_error = FileNotFoundError('missing')
+
+            assert await call_tool(toolset, ctx, 'check_command', command_id=started_id) == (
+                '(no output yet)\n[status: running]'
+            )
+            backend.run_error = None
+            await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    @pytest.mark.parametrize('signal', ['-TERM', '-KILL'])
+    async def test_stop_surfaces_kill_failure_and_keeps_record(self, tmp_path: Path, signal: str) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.kill_failure = signal
+            backend.hold_on_term = signal == '-KILL'
+
+            with pytest.raises(RuntimeError, match='kill failed'):
+                await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+            assert '[status: running]' in await call_tool(toolset, ctx, 'check_command', command_id=started_id)
+            backend.kill_failure = None
+            await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    @pytest.mark.parametrize('signal', ['-TERM', '-KILL'])
+    async def test_stop_accepts_a_kill_that_failed_because_the_group_is_gone(self, tmp_path: Path, signal: str) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.kill_failure = signal
+            backend.kill_failure_stderr = 'kill: No such process'
+            backend.hold_on_term = signal == '-KILL'
+
+            assert await call_tool(toolset, ctx, 'stop_command', command_id=started_id) == '(no output)\n[stopped]'
+
+    async def test_stop_accepts_successful_kill(self, tmp_path: Path) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.hold_on_term = True
+
+            await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    async def test_unknown_id_messages_are_unchanged(self, sandbox: Sandbox) -> None:
+        toolset = shell_toolset()
+        ctx = run_context(sandbox)
+        assert await call_tool(toolset, ctx, 'check_command', command_id='missing') == (
+            "[Error: unknown command ID 'missing']"
+        )
+        assert await call_tool(toolset, ctx, 'stop_command', command_id='missing') == (
+            "[Error: unknown command ID 'missing']"
+        )
+
+    @pytest.mark.parametrize(
+        ('backend', 'message', 'expected'),
+        [
+            (_ResultBackend('not-a-pid', 'setsid failed'), 'setsid failed', ModelRetry),
+            (_ResultBackend('', ''), 'Sandbox did not return a background process ID.', ModelRetry),
+            (_FailingBackend(SandboxError('temporary failure')), 'temporary failure', ModelRetry),
+            (_FailingBackend(SandboxUnavailableError('gone')), 'gone', SandboxUnavailableError),
+            (_FailingBackend(RuntimeError('backend bug')), 'backend bug', RuntimeError),
+        ],
+    )
+    async def test_start_error_mapping(
+        self, backend: _FailingBackend, message: str, expected: type[BaseException]
+    ) -> None:
+        with pytest.raises(expected, match=message):
+            await call_tool(shell_toolset(), run_context(Sandbox.wrap(backend)), 'start_command', command='echo hello')
+
+    @pytest.mark.parametrize(
+        ('error', 'expected'),
+        [
+            (SandboxError('temporary failure'), ModelRetry),
+            (SandboxUnavailableError('gone'), SandboxUnavailableError),
+            (RuntimeError('backend bug'), RuntimeError),
+        ],
+    )
+    async def test_check_error_mapping(
+        self,
+        tmp_path: Path,
+        error: RuntimeError,
+        expected: type[RuntimeError],
+    ) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.run_error = error
+            with pytest.raises(expected, match=str(error)):
+                await call_tool(toolset, ctx, 'check_command', command_id=started_id)
+            backend.run_error = None
+            await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+    @pytest.mark.parametrize(
+        ('error', 'expected'),
+        [
+            (SandboxError('temporary failure'), ModelRetry),
+            (SandboxUnavailableError('gone'), SandboxUnavailableError),
+            (RuntimeError('backend bug'), RuntimeError),
+        ],
+    )
+    async def test_stop_error_mapping(
+        self,
+        tmp_path: Path,
+        error: RuntimeError,
+        expected: type[RuntimeError],
+    ) -> None:
+        async with LocalSandbox(root=tmp_path) as local:
+            backend = _RecordingLocalBackend(local)
+            toolset = background_toolset(tmp_path)
+            ctx = run_context(Sandbox.wrap(backend))
+            started_id = command_id(await call_tool(toolset, ctx, 'start_command', command='sleep 30'))
+            backend.run_error = error
+            with pytest.raises(expected, match=str(error)):
+                await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+            backend.run_error = None
+            await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
+
+
+async def test_shell_capability_runs_through_an_agent_with_a_sandbox(tmp_path: Path) -> None:
+    responses = [
+        ModelResponse(parts=[ToolCallPart('run_command', {'command': 'printf hello'})]),
+        ModelResponse(parts=[TextPart('done')]),
+    ]
+
+    def model(_: list[ModelMessage], __: AgentInfo) -> ModelResponse:
+        return responses.pop(0)
+
+    async with LocalSandbox(root=tmp_path) as sandbox:
+        result = await Agent(FunctionModel(model), capabilities=[Shell()]).run('run', sandbox=sandbox)
+
+    assert result.output == 'done'
+
+
+async def test_shell_capability_requires_a_sandbox_on_the_public_agent_path() -> None:
+    with pytest.raises(UserError, match='No sandbox is attached'):
+        await Agent(TestModel(call_tools=['run_command']), capabilities=[Shell()]).run('run')

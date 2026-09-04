@@ -22,24 +22,23 @@ uv add "pydantic-ai-harness[anthropic]"
 ```
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
+from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness import Coder
 
 agent = Agent('anthropic:claude-fable-5', capabilities=[Coder()])
 
-result = agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
+result = agent.run_sync(
+    'Find out why tests/test_parser.py fails and fix the bug it caught.',
+    sandbox=LocalSandbox(root=Path.cwd()),
+)
 print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-That's a complete [coding agent](coder.md): [workspace-rooted file access](filesystem.md), [allowlisted shell](shell.md), [repo orientation](repo-context.md), [planning](planning.md), a read-only [explorer sub-agent](subagents.md), and [context management](compaction.md) that survives long sessions, and it runs anywhere a Pydantic AI agent runs. [`agent.to_cli_sync(sandbox=...)`](/ai/cli/) opens it as a chat in your terminal and [`agent.to_web(sandbox=...)`](/ai/web/) in the browser, passing the sandbox just as `run()` does. [`Coder`](coder.md)'s exported [`coder_agent`](coder.md#api-reference) runs without writing a file at all, combined with [`clai`](/ai/cli/) (the Pydantic AI CLI) and [`uvx`](https://docs.astral.sh/uv/guides/tools/):
-
-```bash
-uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
-```
-
-The `clai` command does not currently expose a `sandbox` option; use
-`agent.to_cli_sync(sandbox=...)` when the CLI-launched run needs one.
+That's a complete [coding agent](coder.md): [workspace-rooted file access](filesystem.md), [allowlisted shell](shell.md), [repo orientation](repo-context.md), [planning](planning.md), a read-only [explorer sub-agent](subagents.md), and [context management](compaction.md) that survives long sessions. Attach a sandbox to each run, or pass it to `agent.to_cli_sync(sandbox=...)` or `agent.to_web(sandbox=...)` for those interfaces.
 
 Every model works: swap the string for [any provider's](/ai/models/overview/). Need more? Add capabilities to the list; here's the same coder on `gpt-5.6-sol`, with web search and cross-session memory:
 
@@ -78,7 +77,6 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import (
     ClearToolResults,
     FileSystem,
-    LLM_API_KEY_ENV_PATTERNS,
     Planning,
     RepoContext,
     Shell,
@@ -110,11 +108,10 @@ agent = Agent(
     name='coder',
     instructions='You are a coding agent built on Pydantic AI.',
     capabilities=[
-        FileSystem('.'),  # read/write/edit/search, path-traversal safe
-        Shell(  # allowlisted commands, LLM API keys stripped from their environment
+        FileSystem('.'),  # read/write/edit/search, with textual path checks
+        Shell(  # allowlisted commands
             cwd='.',
             allowed_commands=allowed_commands,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
         ),
         RepoContext(workspace_dir=Path('.')),  # loads AGENTS.md/CLAUDE.md + repo structure
         Planning(),  # structured task plans the model maintains
@@ -147,8 +144,8 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 
 | Capability | Package | What it does |
 |---|---|---|
-| [FileSystem](filesystem.md) | Harness | Read, write, edit, search files under a root; path-traversal and symlink safe, secrets read-only |
-| [Shell](shell.md) | Harness | Command execution with allowlists, denylists, timeouts, and credential-stripping |
+| [FileSystem](filesystem.md) | Harness | Read, write, edit, search files under a root; textual path checks, secrets read-only |
+| [Shell](shell.md) | Harness | Command execution with allowlists, denylists, timeouts, and optional filtering of explicit environments |
 | [Modal Sandbox](modal-sandbox.md) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
 
 ### Tools & native abilities

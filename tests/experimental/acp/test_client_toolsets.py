@@ -10,6 +10,7 @@ import pytest
 from acp import Client, schema
 from pydantic_ai import RunContext
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.sandboxes import LocalSandbox, Sandbox
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.code_mode import CodeMode, CodeModeToolset
@@ -25,8 +26,11 @@ from tests.experimental.acp._acp_clients import RecordingClient  # pyright: igno
 pytestmark = pytest.mark.anyio
 
 
-def _ctx() -> RunContext[None]:
-    return RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
+def _ctx(sandbox: Sandbox | None = None) -> RunContext[None]:
+    ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
+    if sandbox is not None:
+        ctx.sandbox = sandbox
+    return ctx
 
 
 def _session(client: Client, capabilities: schema.ClientCapabilities | None) -> AcpSession:
@@ -56,7 +60,7 @@ async def test_read_file_reads_through_the_client() -> None:
 async def test_write_file_writes_through_the_client() -> None:
     client = RecordingClient()
     ts = AcpFileSystemToolset[None](client=client, session_id='sid')
-    result = await ts.write_file('/ws/b.py', 'data')
+    result = await ts.write_file(_ctx(), '/ws/b.py', 'data')
     assert client.writes == [('/ws/b.py', 'data', 'sid')]
     assert client.files['/ws/b.py'] == 'data'
     assert '/ws/b.py' in result  # confirmation names the path so the model knows the write landed
@@ -68,7 +72,7 @@ async def test_relative_paths_resolve_against_the_session_cwd() -> None:
     client = RecordingClient({'/ws/src/a.py': 'code'})
     ts = AcpFileSystemToolset[None](client=client, session_id='sid', cwd='/ws')
     assert await ts.read_file('src/a.py') == 'code'
-    await ts.write_file('src/b.py', 'new')
+    await ts.write_file(_ctx(), 'src/b.py', 'new')
     assert client.reads == [('/ws/src/a.py', 'sid')]
     assert client.writes == [('/ws/src/b.py', 'new', 'sid')]
 
@@ -95,7 +99,7 @@ async def test_acp_filesystem_builds_a_working_toolset_when_fs_is_advertised() -
     assert await toolset.read_file('/ws/a.py') == 'hi'  # the built toolset routes through the same client
 
 
-async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_locally(tmp_path: Path) -> None:
+async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_in_the_sandbox(tmp_path: Path) -> None:
     # A read-only client keeps editor-native reads, but writes go to the local workspace disk
     # rather than the client (coherent only when the agent shares that disk -- see the helper docs).
     client = RecordingClient({str(tmp_path / 'notes.txt'): 'hello'})
@@ -112,7 +116,8 @@ async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_locally(
 
     assert await toolset.read_file('notes.txt') == 'hello'
     assert client.reads == [(str(tmp_path / 'notes.txt'), 'sid')]  # the read routed through the editor
-    await toolset.write_file('out.txt', 'data')
+    async with LocalSandbox(root=tmp_path) as backend:
+        await toolset.write_file(_ctx(Sandbox.wrap(backend)), 'out.txt', 'data')
     assert client.writes == []  # the client was never asked to write
     assert (tmp_path / 'out.txt').read_text() == 'data'  # the write landed on local disk
 

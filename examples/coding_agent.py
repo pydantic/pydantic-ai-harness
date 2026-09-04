@@ -14,7 +14,6 @@ from pydantic_ai.models import Model
 from pydantic_ai.sandboxes import LocalSandbox
 
 from pydantic_ai_harness import (
-    LLM_API_KEY_ENV_PATTERNS,
     ClearToolResults,
     FileSystem,
     Planning,
@@ -67,11 +66,10 @@ def build_agent(model: Model | str = DEFAULT_MODEL, workspace: Path | None = Non
         name='coder',
         instructions='You are a coding agent built on Pydantic AI.',
         capabilities=[
-            FileSystem(workspace),  # read/write/edit/search, path-traversal safe
-            Shell(  # allowlisted commands, LLM API keys stripped from their environment
+            FileSystem(workspace),  # read/write/edit/search, with textual path checks
+            Shell(  # allowlisted commands
                 cwd=workspace,
                 allowed_commands=ALLOWED_COMMANDS,
-                denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
             ),
             RepoContext(workspace_dir=workspace),  # loads AGENTS.md/CLAUDE.md + repo structure
             Planning(),  # structured task plans the model maintains

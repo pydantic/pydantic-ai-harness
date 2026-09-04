@@ -27,11 +27,11 @@ import asyncio
 import contextlib
 import os.path
 from collections.abc import Awaitable
-from typing import Protocol
+from typing import Any, Protocol
 
 import anyio
 from acp import Client, schema
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.experimental.acp._session import AcpSession
@@ -39,9 +39,13 @@ from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
 
 
 class _LocalFileWriter(Protocol):
-    """Something that can write a file on the local disk -- structurally satisfied by `FileSystemToolset`."""
+    """Something that can write a file in the run's sandbox -- structurally satisfied by `FileSystemToolset`."""
 
-    def write_file(self, path: str, content: str) -> Awaitable[str]: ...  # pragma: no cover - structural protocol
+    # `ctx` is positional-only: `FileSystemToolset.write_file` is wrapped by a decorator
+    # that takes it through a `Concatenate` prefix, which drops the parameter name.
+    def write_file(
+        self, ctx: RunContext[Any], /, path: str, content: str
+    ) -> Awaitable[str]: ...  # pragma: no cover - structural protocol
 
 
 class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
@@ -85,16 +89,17 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
         response = await self._client.read_text_file(path=self._absolute(path), session_id=self._session_id)
         return response.content
 
-    async def write_file(self, path: str, content: str) -> str:
+    async def write_file(self, ctx: RunContext[AgentDepsT], path: str, content: str) -> str:
         """Write a text file's full contents through the editor.
 
         Args:
+            ctx: The current agent run context.
             path: Path to the file; resolved against the session workspace when relative.
             content: The complete new contents of the file.
         """
         path = self._absolute(path)
         if self._local_writer is not None:
-            return await self._local_writer.write_file(path, content)
+            return await self._local_writer.write_file(ctx, path, content)
         await self._client.write_text_file(content=content, path=path, session_id=self._session_id)
         return f'Wrote {path} ({len(content)} characters).'
 
@@ -107,10 +112,10 @@ def acp_filesystem(session: AcpSession) -> AcpFileSystemToolset[None] | None:
 
     - read + write advertised: reads and writes both route through the editor.
     - read only (no `fs/write_text_file`): reads route through the editor, while writes go to the
-      local [`FileSystem`][pydantic_ai_harness.FileSystem] rooted at `session.cwd`. This is coherent
-      only when the agent shares the workspace disk with the editor (same machine, or an agent
-      running inside the editor's container) -- for a *remote* editor the writes land on the agent's
-      disk, not the editor's.
+      run's sandbox through a [`FileSystem`][pydantic_ai_harness.FileSystem] rooted at `session.cwd`.
+      This is coherent only when that sandbox shares the workspace disk with the editor (a
+      `LocalSandbox` on the same machine, or an agent running inside the editor's container) -- for
+      a *remote* editor the writes land in the sandbox, not the editor.
 
     Returns `None` only when the client advertised no readable filesystem, so the caller can fall
     back to a fully local toolset:

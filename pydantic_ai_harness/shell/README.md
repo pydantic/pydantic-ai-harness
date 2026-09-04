@@ -1,14 +1,14 @@
 # Shell
 
-Give an agent the ability to run shell commands, with allow/deny controls and
-managed background processes.
+Give an agent the ability to run shell commands inside the run's sandbox, with
+allow/deny controls and managed background processes.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/shell/)
 
 ## The problem
 
 Agents frequently need to run a build, a test suite, a linter, or a quick
-`grep`. Wiring up subprocess handling -- streaming output, timeouts, truncation,
+`grep`. Wiring up command execution -- streaming output, timeouts, truncation,
 killing runaway processes, and cleaning up background jobs at the end of a run --
 is fiddly boilerplate that every agent reinvents.
 
@@ -16,20 +16,33 @@ is fiddly boilerplate that every agent reinvents.
 
 `Shell` exposes command-execution tools rooted at a working directory, with
 configurable allow/deny lists and automatic cleanup of background processes
-when the agent run ends.
+when the agent run ends. Commands run inside the sandbox attached to the run, so
+every run needs one; without it the first tool call raises an error that says
+how to attach one.
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
+from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness import Shell
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[Shell(cwd='./workspace', allowed_commands=['ls', 'cat', 'rg'])],
+    capabilities=[Shell(cwd='workspace', allowed_commands=['ls', 'cat', 'rg'])],
 )
 
-result = agent.run_sync('List the Python files and summarize the largest one.')
+result = agent.run_sync(
+    'List the Python files and summarize the largest one.',
+    sandbox=LocalSandbox(root=Path.cwd()),  # the agent process's own filesystem
+)
 print(result.output)
 ```
+
+`cwd` is a sandbox path: absolute, or relative to the sandbox working directory.
+`~` is not expanded. `LocalSandbox` runs commands on the agent process's own
+machine and isolates nothing; for untrusted work attach a container- or
+VM-backed sandbox instead.
 
 ## Tools
 
@@ -41,10 +54,16 @@ print(result.output)
 | `stop_command` | Terminate a background command and return its final output. |
 
 Output is labelled with `[stdout]` / `[stderr]` markers and an `[exit code: N]`
-line on non-zero exit. When it exceeds `max_output_chars` the **tail** is kept
-(the head is dropped), so errors, stack traces, and the `[stderr]` section --
-which all land at the end -- survive truncation. Background command status and
-exit metadata follow the captured output so they remain in the retained tail.
+line on non-zero exit. `max_output_chars` limits the text sent to the model after
+execution; the **tail** is kept (the head is dropped), so errors, stack traces,
+and the `[stderr]` section -- which all land at the end -- survive truncation.
+Background command status and exit metadata follow the captured output so they
+remain in the retained tail. `LocalSandbox` also has a separate 10 MiB safety
+ceiling on command output.
+
+Each command starts in the configured `cwd`; `cd` affects only that command. The
+omitted foreground timeout uses the configured default, and an override must be
+positive and at most `max_timeout`. For longer work, use `start_command`.
 
 ## Command controls
 
@@ -68,100 +87,87 @@ denylist. Pass `denied_commands=[]` to disable command-name filtering.
 A denied or blocked command surfaces to the model as a `ModelRetry` (the model
 can retry with an allowed command) rather than aborting the run. So does every
 other failure the model can act on: a working directory an earlier command
-deleted or replaced with a file, and a command the operating system refuses to
-spawn because it holds a NUL byte or contains a character the operating system
-cannot encode. Failures
-the model can do nothing about still abort the run: a host that cannot allocate
-a process, an argument or environment that exceeds the platform's combined
-size limit, and an invalid character in an application-supplied `env`.
+deleted or replaced with a file, and a command holding a NUL byte or a character
+that cannot be encoded for the operating system. A sandbox that has gone away
+aborts the run instead, since the model cannot recover from it. Bare backend
+programming failures also abort the run.
 
 > **These checks are best-effort, not a security boundary.** `allowed_commands`
 > is a guardrail against accidents, not a security boundary. Validation checks
 > only the first token, and allowlisted commands such as `python`, `git`, `uv`,
 > and `make` can spawn arbitrary processes. A model that wants to work around
-> the allowlist can. For untrusted work, run the agent inside OS-level isolation
-> such as [`ModalSandbox`](https://pydantic.dev/docs/ai/harness/modal-sandbox/) or a container.
+> the allowlist can. The sandbox is the isolation boundary: for untrusted work
+> attach a container- or VM-backed one rather than `LocalSandbox`.
 
 ## Environment control
 
-With `LocalSandbox`, commands receive `PATH`, `HOME`, `LANG`, and `TMPDIR` from
-the parent when present, plus variables explicitly supplied through `env`. The
-sandbox is not an isolation boundary. Two fields control the explicit variables
-passed to the sandbox:
+`env` sets the environment commands run with; `denied_env_patterns` removes
+names from it by glob before it is handed to the sandbox.
 
 | Field | Effect |
 |---|---|
-| `env` | Explicit environment added to the fixed LocalSandbox environment. |
+| `env` | Explicit environment for commands. `None` (the default) leaves the sandbox's own environment in place. |
 | `denied_env_patterns` | Glob patterns (`fnmatch`) for variable names removed from `env`. Mirrors `denied_commands`. |
 
-`env` supplies additional variables explicitly; `denied_env_patterns` filters
-that mapping before it is passed to the sandbox. Leaving both unset still gives
-LocalSandbox its small fixed environment.
+`denied_env_patterns` requires an explicit `env` mapping and filters that mapping
+only; it cannot remove a variable the sandbox itself provides.
+`LocalSandbox` runs commands on the agent process's own machine, but passes only
+its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` variables plus the explicit `env`.
+It is not an isolation boundary: commands can still access other host files.
+A container- or VM-backed sandbox starts from its own image instead.
 
 ```python
+import os
+
 from pydantic_ai_harness import LLM_API_KEY_ENV_PATTERNS, Shell
 
-# Strip provider credentials from an explicit environment.
-Shell(cwd='./repo', env=dict(os.environ), denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
+# A fixed environment.
+Shell(cwd='.', env={'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': '/home/agent'})
 
-# Or hand the sandbox additional fixed environment values.
-import os
-Shell(cwd='./repo', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})
+# Or one assembled from your own, minus provider credentials.
+Shell(cwd='.', env=dict(os.environ), denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
 ```
 
 `LLM_API_KEY_ENV_PATTERNS` covers common provider prefixes (`ANTHROPIC_*`,
-`OPENAI_*`, `OPENROUTER_*`, `GOOGLE_*`, `GEMINI_*`, `GATEWAY_*`) plus
-`PYDANTIC_AI_GATEWAY_API_KEY`. It targets LLM credentials only -- it does not
-cover other host secrets (a `LOGFIRE_TOKEN`, a GitHub token, cloud
-credentials), and its prefixes are coarse, so `GOOGLE_*` also strips
-non-credential vars like `GOOGLE_APPLICATION_CREDENTIALS`. Treat it as a
-starting point and add your own patterns. It is applied only to the explicit
-`env` mapping supplied to `Shell`.
+`GATEWAY_*`, `GEMINI_*`, `GOOGLE_*`, `OPENAI_*`, `OPENROUTER_*`) plus
+`PYDANTIC_AI_GATEWAY_API_KEY`. It targets LLM credentials only: it does not
+cover other secrets (a `LOGFIRE_TOKEN`, a GitHub token, cloud credentials), and
+its prefixes are coarse, so `GOOGLE_*` also strips non-credential vars like
+`GOOGLE_APPLICATION_CREDENTIALS`. Treat it as a starting point and add your own
+patterns.
 
-`env` is enforced at spawn, not applied as a post-hoc filter on a running
-process: LocalSandbox combines its fixed variables with your `env`, minus
-anything `denied_env_patterns` removes from it. Neither control is a security
-boundary. A command running under the same OS identity may still read other
-host files. Use OS-level isolation when commands are untrusted. The flip side
-is that a pattern broad enough to strip `PATH` or `HOME` from the explicit
-mapping can break command resolution.
+How `env` combines with what the sandbox already provides is the sandbox backend's
+decision: `LocalSandbox` adds yours to its own fixed `PATH`, `HOME`, `LANG` and
+`TMPDIR`, others may replace it outright. Supply what a command needs rather
+than assuming the agent process's environment reaches it.
 
 ## Background processes
 
-`start_command` writes stdout/stderr to temp files and returns a short ID. Use
-`check_command(command_id)` to poll and `stop_command(command_id)` to terminate
-and collect final output. Processes are launched in their own session (`start_new_session`)
-so the whole process group can be signalled -- `SIGTERM`, escalating to
-`SIGKILL` after a grace period.
+`start_command` writes stdout/stderr to temp files in the sandbox and returns a
+short ID. Use `check_command(command_id)` to poll and `stop_command(command_id)`
+to terminate and collect final output. Each process is started with `setsid`, so
+the whole process group can be signalled -- `SIGTERM`, escalating to `SIGKILL`
+after a grace period.
 
 On run end, the toolset's `__aexit__` terminates every still-running background
 process and deletes its temp files. The agent runtime enters toolsets via an
 `AsyncExitStack`, so this cleanup runs whether the run succeeds or raises -- an
 agent that forgets to call `stop_command` won't leak processes.
 
-## Working directory
-
-By default each command runs in `cwd` and `cd` has no lasting effect. Set
-`persist_cwd=True` to make `cd` sticky across calls: each command is wrapped so
-that after it runs, its final working directory is recorded to a private temp
-file, and that directory is carried into subsequent calls. The path is only
-updated when the command exits `0`, and the record is written out-of-band (not
-to stdout) so command output can never spoof the tracked directory.
-
 ## Configuration
 
 ```python
 Shell(
-    cwd='.',                       # str | Path -- working directory
+    cwd='.',                       # str | Path -- sandbox working directory
     allowed_commands=[],           # allowlist (mutually exclusive with denied)
     denied_commands=[...],         # denylist (defaults to destructive commands)
     denied_operators=[],           # blocked shell operators
     default_timeout=30.0,          # seconds, per run_command
+    max_timeout=600.0,              # maximum seconds, per run_command
     max_output_chars=50_000,       # output cap returned to the model
-    persist_cwd=False,             # make cd sticky across calls
     allow_interactive=False,       # allow TTY-style commands
-    env=None,                      # explicit env added to LocalSandbox's fixed env
-    denied_env_patterns=[],        # glob patterns stripped from explicit env
+    env=None,                      # explicit env (None = the sandbox's own)
+    denied_env_patterns=[],        # glob patterns removed from `env`
 )
 ```
 

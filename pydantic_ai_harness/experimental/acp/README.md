@@ -97,7 +97,10 @@ the command's process can see variables such as `ANTHROPIC_API_KEY`.
 A coding agent should read and write files in the workspace the editor opened, not wherever the subprocess started. ACP gives each session a working directory (`cwd`); a `session_config` factory turns that into per-session tools:
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
+from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, run_acp_stdio_sync
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
@@ -113,6 +116,7 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
             FileSystem[None](root_dir=session.cwd).get_toolset(),
             Shell[None](cwd=session.cwd).get_toolset(),
         ],
+        sandbox=LocalSandbox(root=Path(session.cwd)),
     )
 
 
@@ -127,6 +131,9 @@ The factory runs once per session with the client's [`AcpSession`][pydantic_ai_h
 The local `FileSystem` and `Shell` above operate on the agent process's own disk and subprocesses. An editor's source of truth is different: it has unsaved buffers, the file layout it considers the workspace, and -- for a remote or containerized editor -- the machine the code actually lives on. When the client advertises support, [`acp_filesystem`][pydantic_ai_harness.experimental.acp.acp_filesystem] and [`acp_terminal`][pydantic_ai_harness.experimental.acp.acp_terminal] give the agent `read_file`/`write_file`/`run_command` tools that route through the client, so it acts where the user is:
 
 ```python
+from pathlib import Path
+
+from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, acp_filesystem, acp_terminal
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
@@ -139,9 +146,9 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
     return AcpSessionConfig(deps=None, toolsets=[fs, shell])
 ```
 
-Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The tool names match the local `FileSystem`/`Shell`, so rich rendering (next section) is identical. `acp_terminal` runs the command in the editor's environment and returns its captured output (see [Limitations](#cancellation-and-limitations)).
+Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The local fallback requires the `sandbox` on `AcpSessionConfig` shown above. The tool names match the local `FileSystem`/`Shell`, so rich rendering (next section) is identical. `acp_terminal` runs the command in the editor's environment and returns its captured output (see [Limitations](#cancellation-and-limitations)).
 
-If a client advertises filesystem *reads* but not *writes*, `acp_filesystem` keeps editor-native reads and sends writes to the local `FileSystem` rooted at `session.cwd` -- coherent only when the agent shares the workspace disk with the editor (same machine, or an agent inside the editor's container); for a remote editor those writes land on the agent's disk, not the editor's.
+If a client advertises filesystem *reads* but not *writes*, `acp_filesystem` keeps editor-native reads and sends writes to the local `FileSystem` rooted at `session.cwd`. That fallback requires the session's `AcpSessionConfig.sandbox`; it is coherent only when that sandbox shares the workspace disk with the editor (same machine, or an agent inside the editor's container). For a remote editor those writes land in the sandbox, not the editor.
 
 ## Tool approval
 

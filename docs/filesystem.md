@@ -1,14 +1,14 @@
 ---
 title: FileSystem
-description: Give a Pydantic AI agent sandboxed, glob-filtered file access scoped to a single directory tree, with symlink-safe containment checks.
+description: Give a Pydantic AI agent glob-filtered file access scoped to a single directory tree inside the run's sandbox.
 ---
 
 # FileSystem
 
 `FileSystem` gives an agent a fixed set of file tools -- read, write, edit, list,
-search, find, create, and inspect -- all scoped to a single `root_dir`. Every path is
-resolved and containment-checked (symlinks included) before any I/O, and access
-is filtered through allow / deny / protected glob patterns.
+search, find, create, and inspect -- all scoped to a single `root_dir` inside the
+run's sandbox. Access is filtered through allow / deny / protected glob
+patterns.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/filesystem/)
 
@@ -16,35 +16,46 @@ is filtered through allow / deny / protected glob patterns.
 
 ## The problem
 
-Letting an agent touch the filesystem directly is risky: path traversal
-(`../../etc/passwd`), symlinks that escape the project, clobbering `.git`, or
-leaking `.env` secrets. Hand-rolling the guards around every tool call is
-repetitive and easy to get subtly wrong.
+Letting an agent loose on a whole filesystem is risky: path traversal
+(`../../etc/passwd`), clobbering `.git`, or leaking `.env` secrets.
+Hand-rolling the guards around every tool call is repetitive and easy to get
+subtly wrong.
 
 `FileSystem` centralizes those guards. It exposes one bounded, sandboxed
 toolset so you configure the boundary once and reuse it across agents.
+Relative paths always resolve from the configured root, regardless of which
+other tools ran before them.
 
 ## Usage
 
-Add `FileSystem` to your agent's `capabilities` with a `root_dir`. Everything
-the agent reads or writes is confined to that directory.
+Add `FileSystem` to your agent's `capabilities` with a `root_dir`. The capability
+applies textual path checks relative to that directory inside the sandbox
+attached to the run, so every run needs one; without it the first tool call
+raises an error that says how to attach one.
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
+from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness import FileSystem
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[FileSystem(root_dir='./workspace')],
+    capabilities=[FileSystem(root_dir='workspace')],
 )
 
-result = agent.run_sync('Read config.toml and tell me the package name.')
+result = agent.run_sync(
+    'Read config.toml and tell me the package name.',
+    sandbox=LocalSandbox(root=Path.cwd()),  # the agent process's own filesystem
+)
 print(result.output)
 ```
 
-`root_dir` defaults to the current directory (`.`), but passing an explicit
-workspace path is the recommended practice -- the sandbox is only as tight as
-the root you give it.
+`root_dir` is a sandbox path: absolute, or relative to the sandbox working
+directory, which is what the default `.` means. `~` is not expanded.
+`LocalSandbox` reads and writes the agent process's own filesystem and isolates
+nothing; for untrusted work attach a container- or VM-backed sandbox instead.
 
 ## Tools
 
@@ -52,49 +63,45 @@ the root you give it.
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read a text file with line numbers and a content hash. Binary files are detected and not dumped. Supports `offset`/`limit` paging. |
+| `read_file` | Read a UTF-8 text file with line numbers and a content hash. Binary or undecodable files are detected and not dumped. Supports `offset`/`limit` paging. |
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement; `old_text` must match exactly once. Optional `expected_hash`. |
 | `list_directory` | List a directory's entries with type indicators and sizes. |
 | `search_files` | Regex search over file contents, optionally narrowed by an `include_glob`. |
 | `find_files` | Glob search over file names (e.g. `*.py`, `**/*.json`). The pattern is relative to `path`; absolute patterns are rejected. |
 | `create_directory` | Create a directory and any missing parents. |
-| `file_info` | Metadata for a file or directory (size, type, line count, hash, symlink target). |
+| `file_info` | Metadata for a file or directory (type, size and, for text files, line count and content hash). |
+
+`search_files` and `find_files` run `grep` and `find` inside the sandbox, so the
+sandbox image needs both.
 
 Tool errors the model can correct -- a missing file, a denied path, a stale
 edit, a directory that collides with an existing file, an invalid glob pattern,
-a path name rejected by Windows, a path name the filesystem cannot encode, an
-over-long path name, a symlink loop -- are surfaced as
+a path name the filesystem cannot encode, an over-long path name, a symlink
+loop -- are surfaced as
 [`ModelRetry`](/ai/core-concepts/agent/#reflection-and-self-correction),
 so the agent gets the error message back and can adjust rather than aborting
 the run. Failures the model can do nothing about, such as a full or read-only
 disk, still abort.
 
 When an OS error supplies a filename, `FileSystem` reports it relative to
-`root_dir`; paths outside `root_dir` become `<outside-workspace>`. `file_info`
-applies the same rule to absolute symlink targets.
+`root_dir`; paths outside `root_dir` become `<outside-workspace>`.
 
 ## Security model
 
-- **Containment.** Paths resolve relative to `root_dir`; anything resolving
-  outside -- via `..`, an absolute path, or a symlink -- is rejected. Symlinks
-  are resolved with `os.path.realpath` *before* the containment check, and I/O
-  then uses the resolved path. Directory walks (`list_directory`,
-  `search_files`, `find_files`) resolve each entry the same way and match the
-  patterns against that resolved target, so a symlink cannot name a file
-  outside the tree or present a denied file under a permitted name. These
-  checks are pathname-based: if another process mutates the tree between
-  resolution and I/O, the path read can differ from the path checked.
-- **Binary detection.** `read_file` returns a placeholder instead of dumping
-  binary bytes into the model context.
+- **Containment.** Paths resolve relative to `root_dir`; anything landing
+  outside it, via `..` or an absolute path, is rejected. The check is textual
+  and shapes policy, not isolation. Symlink targets are not resolved for
+  pattern matching; the sandbox is the isolation boundary, so scope it to what
+  the agent is allowed to reach.
+- **Binary detection.** `read_file` and `file_info` sample up to the first 8 KiB
+  for NUL-containing or undecodable UTF-8 content. `read_file` returns a
+  placeholder instead of dumping binary bytes into the model context.
 - **Optimistic concurrency.** `write_file`/`edit_file` accept an
   `expected_hash` so an agent operating on a stale read is told to re-read
   rather than silently overwriting newer content.
-- **Regular write targets.** `write_file` rejects an existing target that is
-  not a regular file. On POSIX, it opens the final target descriptor in
-  non-blocking mode and checks that descriptor's type before truncating, so a
-  FIFO at the final component cannot stall the tool even if it is swapped into
-  place during the write.
+- **Regular write targets.** `write_file` rejects an existing target that is not
+  a regular file.
 
 ## Pattern filtering
 
@@ -138,9 +145,8 @@ The three rules apply at two different granularities:
   by denied patterns, but **not** by `allowed_patterns` -- a directory root
   like `.` never matches a file pattern such as `src/*.py`, so requiring it to
   would make every listing fail. Instead, the root is walked and each
-  **entry** is filtered with read-level access against `allowed_patterns` and
-  `denied_patterns`. A directory listing cannot surface a path the agent
-  couldn't otherwise read.
+  **entry** is filtered against `allowed_patterns` and `denied_patterns`. A
+  directory listing cannot surface a path the agent couldn't otherwise read.
 
 So with `allowed_patterns=['*.py']`, `list_directory('.')` succeeds and shows
 only the `.py` entries; `read_file('notes.md')` is rejected.
@@ -161,7 +167,7 @@ reject them.
 from pydantic_ai_harness import FileSystem
 
 FileSystem(
-    root_dir='.',                  # str | Path -- sandbox root
+    root_dir='.',                  # str | Path -- root inside the sandbox
     allowed_patterns=[],           # allowlist globs (empty = allow all)
     denied_patterns=[],            # denylist globs
     protected_patterns=[...],      # read-only globs (defaults to secrets/.git)

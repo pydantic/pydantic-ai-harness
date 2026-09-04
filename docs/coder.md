@@ -15,6 +15,8 @@ It is a regular [combined capability](https://pydantic.dev/docs/ai/capabilities/
 Hand the agent a task directly:
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
 from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai_harness import Coder
@@ -23,29 +25,20 @@ agent = Agent('anthropic:claude-fable-5', capabilities=[Coder('.')])
 
 result = agent.run_sync(
     'Find out why tests/test_parser.py fails and fix the bug it caught.',
-    sandbox=LocalSandbox('.'),  # the run needs a sandbox; this one is the local checkout
+    sandbox=LocalSandbox(root=Path.cwd()),  # the run needs a sandbox; this one is the local checkout
 )
 print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-Every run needs a sandbox attached: `LocalSandbox('.')` works on the checkout itself, and a [`ModalSandbox`](modal-sandbox.md) capability supplies a remote one. Interfaces that start runs for you accept `sandbox=` too, so pass it to [`agent.to_cli_sync(sandbox=...)`](https://pydantic.dev/docs/ai/cli/) or [`agent.to_web(sandbox=...)`](https://pydantic.dev/docs/ai/web/) the same way you pass it to `run()`.
-
-Or skip the file entirely and run the exported [`coder_agent`](#api-reference) with [`clai`](https://pydantic.dev/docs/ai/cli/#custom-agents) (the Pydantic AI CLI), via [`uvx`](https://docs.astral.sh/uv/guides/tools/):
-
-```bash
-uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
-```
-
-The `clai` command does not currently expose a `sandbox` option; use
-`agent.to_cli_sync(sandbox=...)` when the CLI-launched run needs one.
+Every run needs a sandbox attached: `LocalSandbox(root=...)` works on the checkout itself, and a container- or VM-backed sandbox runs the same agent somewhere isolated. Interfaces that start runs for you accept `sandbox=` too, so pass it to `agent.to_cli_sync(sandbox=...)` or `agent.to_web(sandbox=...)` the same way you pass it to `run()`.
 
 ## What's inside
 
 It is literally these capabilities combined, in this order:
 
-- [`FileSystem`](filesystem.md): read, write, edit, and search tools rooted at the workspace, path-traversal and symlink safe
-- [`Shell`](shell.md): allowlisted commands rooted at the workspace (a guardrail, not a security boundary), with common LLM provider API-key variables filtered from inherited command environments
+- [`FileSystem`](filesystem.md): read, write, edit, and search tools rooted at the workspace inside the run's sandbox
+- [`Shell`](shell.md): allowlisted commands run in the run's sandbox, rooted at the workspace (the allowlist is a guardrail, not a security boundary)
 - [`RepoContext`](repo-context.md): repository instructions and structure
 - [`Planning`](planning.md): a plan the agent creates and keeps current during multi-step work
 - [`SubAgents`](subagents.md): delegation, with a read-only `explorer` sub-agent by default
@@ -59,7 +52,7 @@ Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries
 
 `Coder` ships with **no default instructions**: modern models don't need procedural coaching ("work step by step", "run the tests"), and each composed capability already contributes its own tool guidance. Pass `instructions='...'` to add your own (identity, tone, or house rules) and it becomes a regular instructions capability at the front of the composition. The exported `coder_agent` separately carries the identity instruction `You are a coding agent built on Pydantic AI.`
 
-The command allowlist is a guardrail against accidents, not a security boundary. Validation checks only the first token, and allowlisted commands such as `python`, `git`, `uv`, and `make` can spawn arbitrary processes, so a model that wants to work around the allowlist can. For untrusted work, run the agent inside an OS-level sandbox such as [`ModalSandbox`](modal-sandbox.md) or a container.
+The command allowlist is a guardrail against accidents, not a security boundary. Validation checks only the first token, and allowlisted commands such as `python`, `git`, `uv`, and `make` can spawn arbitrary processes, so a model that wants to work around the allowlist can. The sandbox attached to the run is the isolation boundary: `LocalSandbox` isolates nothing, so for untrusted work attach a container- or VM-backed one instead.
 
 ### Not included by default
 
@@ -105,7 +98,6 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import (
     ClearToolResults,
     FileSystem,
-    LLM_API_KEY_ENV_PATTERNS,
     Planning,
     RepoContext,
     Shell,
@@ -137,11 +129,10 @@ agent = Agent(
     name='coder',
     instructions='You are a coding agent built on Pydantic AI.',
     capabilities=[
-        FileSystem('.'),  # read/write/edit/search, path-traversal safe
-        Shell(  # allowlisted commands, LLM API keys stripped from their environment
+        FileSystem('.'),  # read/write/edit/search, with textual path checks
+        Shell(  # allowlisted commands
             cwd='.',
             allowed_commands=allowed_commands,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
         ),
         RepoContext(workspace_dir=Path('.')),  # loads AGENTS.md/CLAUDE.md + repo structure
         Planning(),  # structured task plans the model maintains

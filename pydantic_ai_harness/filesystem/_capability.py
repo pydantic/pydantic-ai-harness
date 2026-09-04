@@ -25,14 +25,14 @@ _DEFAULT_PROTECTED: list[str] = [
 
 @dataclass
 class FileSystem(AbstractCapability[AgentDepsT]):
-    """File system access scoped to a root directory.
+    """File system access inside the run's sandbox, scoped to a root directory.
 
     All paths are resolved relative to `root_dir`. Traversal above the root
-    is rejected. Symlinks are resolved before authorization.
+    is rejected; the sandbox is the isolation boundary.
     """
 
     root_dir: str | Path = '.'
-    """Root directory for all file operations. Defaults to the current directory."""
+    """Root directory for all file operations: a sandbox path, absolute or relative to the sandbox working directory."""
 
     allowed_patterns: Sequence[str] = field(default_factory=list[str])
     """If non-empty, only paths matching at least one glob pattern are accessible."""

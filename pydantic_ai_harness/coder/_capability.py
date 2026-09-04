@@ -13,7 +13,7 @@ from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.repo_context import RepoContext
-from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
+from pydantic_ai_harness.shell import Shell
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
 from pydantic_ai_harness.tool_output_limits import ToolOutputLimits
 
@@ -80,7 +80,6 @@ class Coder(CombinedCapability[AgentDepsT]):
                 Shell[AgentDepsT](
                     cwd=workspace,
                     allowed_commands=DEFAULT_ALLOWED_COMMANDS if allowed_commands is None else allowed_commands,
-                    denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
                 ),
                 RepoContext[AgentDepsT](workspace_dir=Path(workspace)),
                 Planning[AgentDepsT](),
