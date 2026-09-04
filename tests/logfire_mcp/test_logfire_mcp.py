@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -90,10 +91,14 @@ class TestLogfireMCP:
     def test_unknown_or_duplicate_tools_are_rejected(self):
         with pytest.raises(UserError, match='Unsupported Logfire MCP tools'):
             LogfireMCP(project='acme/production', tools=('query_run', 'future_tool'))
+        with pytest.raises(UserError, match='Unsupported Logfire MCP tools'):
+            LogfireMCP(project='acme/production', tools=('channel_list',))
         with pytest.raises(UserError, match='unique'):
             LogfireMCP(project='acme/production', tools=('query_run', 'query_run'))
         with pytest.raises(UserError, match='unique'):
             LogfireMCP(project='acme/production', tools=())
+        with pytest.raises(UserError, match='not one string'):
+            LogfireMCP(project='acme/production', tools='query_run')
 
     def test_invalid_region_and_query_limit_fail_closed(self):
         with pytest.raises(UserError, match='region'):
@@ -104,6 +109,11 @@ class TestLogfireMCP:
     def test_client_owns_authentication(self, logfire_server: FastMCP):
         with pytest.raises(UserError, match='configure authentication on the client'):
             LogfireMCP(project='acme/production', client=logfire_server, api_key='secret')
+
+    @pytest.mark.parametrize('client', ['http://logfire.internal/mcp', Path('/tmp/logfire-mcp')])
+    def test_client_rejects_transport_specs_that_bypass_connection_policy(self, client: object):
+        with pytest.raises(UserError, match='pre-built MCP client'):
+            LogfireMCP(project='acme/production', client=client)  # pyright: ignore[reportArgumentType]
 
     def test_agent_spec_excludes_credentials_and_runtime_client(self):
         schema = AgentSpec.model_json_schema_with_capabilities([LogfireMCP])
@@ -190,6 +200,15 @@ class TestLogfireMCP:
 
         assert _tool_names(model) == {'query_run', 'dashboard_list'}
 
+    async def test_selected_tool_hidden_by_token_scope_fails_clearly(self, logfire_server: FastMCP):
+        agent = Agent(
+            TestModel(call_tools=[]),
+            capabilities=[LogfireMCP(project='acme/production', tools=('alert_list',), client=logfire_server)],
+        )
+
+        with pytest.raises(UserError, match='not available.*token permissions'):
+            await agent.run('List alerts')
+
     async def test_selected_project_tool_without_scope_field_fails_closed(self, logfire_server: FastMCP):
         agent = Agent(
             TestModel(call_tools=[]),
@@ -215,12 +234,44 @@ class TestLogfireMCP:
 
         assert logfire_state['calls'] == []
 
+    async def test_global_schema_tool_executes_without_project(
+        self, logfire_server: FastMCP, logfire_state: LogfireState, run_context: RunContext[None]
+    ):
+        toolset = LogfireMCP(
+            project='acme/production', tools=('query_schema_reference',), client=logfire_server
+        ).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            result = await toolset.call_tool('query_schema_reference', {}, run_context, tools['query_schema_reference'])
+
+        assert 'CREATE TABLE records' in str(result)
+        assert logfire_state['calls'] == [('query_schema_reference', {})]
+
+    async def test_query_requires_string_before_network_call(
+        self, logfire_server: FastMCP, logfire_state: LogfireState, run_context: RunContext[None]
+    ):
+        toolset = LogfireMCP(project='acme/production', client=logfire_server).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            with pytest.raises(ModelRetry, match='requires a string'):
+                await toolset.call_tool(
+                    'query_run',
+                    {'query': 1},
+                    run_context,
+                    tools['query_run'],  # pyright: ignore[reportArgumentType]
+                )
+
+        assert logfire_state['calls'] == []
+
     @pytest.mark.parametrize(
         ('query', 'match'),
         [
             ('SELECT * FROM records', 'final numeric `LIMIT`'),
             ('SELECT * FROM records LIMIT 101', 'at most 100'),
             ('SELECT * FROM records LIMIT ALL', 'final numeric `LIMIT`'),
+            ('SELECT * FROM records -- LIMIT 1', 'comments or multiple statements'),
+            ('SELECT * FROM records /* bounded */ LIMIT 1', 'comments or multiple statements'),
+            ('SELECT * FROM records; SELECT 1 LIMIT 1', 'comments or multiple statements'),
         ],
     )
     async def test_query_row_limit_is_enforced_before_network_call(
@@ -262,6 +313,7 @@ class TestLogfireMCP:
         deferred = await agent.run('Create an errors dashboard')
         assert isinstance(deferred.output, DeferredToolRequests)
         assert [call.tool_name for call in deferred.output.approvals] == ['dashboard_create']
+        assert deferred.output.metadata == {'create-1': {'project': 'acme/production'}}
         assert logfire_state['calls'] == []
 
         resumed = await agent.run(
@@ -324,6 +376,9 @@ class TestLogfireMCP:
         assert 'acme/production' in instructions
         assert '100 rows' in instructions
         assert '30 minutes' in instructions
+        assert 'Select only the columns needed' in instructions
+        assert '`min_timestamp` and `max_timestamp`' in instructions
+        assert 'link only when the user asks' in instructions
         assert 'untrusted diagnostic data' in instructions
         assert 'approval' not in instructions
 

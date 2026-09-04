@@ -2,8 +2,6 @@
 
 `LogfireMCP` lets an agent query telemetry and use explicitly selected observability tools in one Logfire project.
 
-> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
-
 ## Install
 
 ```bash
@@ -64,8 +62,9 @@ print(result.output)
 
 - `project` is required in `organization/project` form. The capability supplies that value to each project-scoped call
   and rejects a different value before the request reaches Logfire.
-- The default tools are read-only. `tools=` accepts exact names from Logfire's documented MCP inventory; account-wide
-  discovery and local-project bootstrap tools are excluded. Every selected mutation pauses for Pydantic AI approval.
+- The default tools are read-only. `tools=` accepts exact project-scoped names from Logfire's documented MCP inventory;
+  account discovery, organization-wide notification channels, and local bootstrap are excluded. Every selected
+  mutation pauses for Pydantic AI approval.
 - `query_run` SQL must end with a numeric `LIMIT` no greater than `max_query_rows` (100 by default). Logfire defaults
   queries to 30 minutes and limits query ranges to 14 days.
 - The hosted US endpoint is the default. Use `region='eu'` for EU data or `mcp_url=` for the `/mcp` endpoint of a
@@ -73,5 +72,7 @@ print(result.output)
 - OAuth tokens use FastMCP's in-memory storage by default. Pass a caller-owned `client=` configured with persistent
   encrypted storage when tokens must survive process restarts. Tool visibility still depends on granted token scopes.
 - Telemetry can contain user-controlled text. Treat tool results as diagnostic data, not instructions.
+- While Pydantic AI Harness is on 0.x releases, this API may change between minor releases; see the
+  [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire_mcp/)
