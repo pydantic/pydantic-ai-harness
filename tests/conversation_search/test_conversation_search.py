@@ -14,14 +14,14 @@ import warnings
 from pathlib import Path
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, PydanticAIDeprecationWarning
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
     ModelRequest,
     ModelResponse,
     RetryFeedbackPart,
-    RetryPromptPart,
+    RetryPromptPart,  # pyright: ignore[reportDeprecated]
     SpeechPart,
     SystemPromptPart,
     TextContent,
@@ -727,7 +727,7 @@ class TestSearchScope:
                     SystemPromptPart(content='system guidance ' * 30),
                     UserPromptPart(content='find the ZEBRA passphrase mango'),
                     ToolReturnPart(tool_name='readfile', content='X' * 600, tool_call_id='c1'),
-                    RetryPromptPart(content='please retry', tool_name='readfile', tool_call_id='c1'),
+                    ToolReturnPart(tool_name='readfile', content='please retry', tool_call_id='c1', outcome='retried'),
                 ]
             ),
             ModelResponse(
@@ -748,7 +748,7 @@ class TestSearchScope:
         assert '[Compaction summary]' in rendered
         assert 'Tool Call [search]' in rendered
         assert 'Tool [readfile]' in rendered
-        assert 'Retry [readfile]: please retry' in rendered  # RetryPromptPart is searchable
+        assert 'Retry [readfile]: please retry' in rendered  # a retried tool return is searchable
         assert '...' in rendered  # truncation applied to the long tool return / args
 
     async def test_retry_feedback_is_indexed(self) -> None:
@@ -800,6 +800,26 @@ class TestSearchScope:
         assert 'Retry: ' in rendered
         assert '...' in rendered
 
+    async def test_a_hand_built_legacy_retry_prompt_part_is_indexed(self) -> None:
+        """Code that still builds one and passes it as `message_history` reaches the indexer.
+
+        A stored history loads as one of the two parts above, and the model translates an
+        in-memory instance before the request goes out, but the index reads the history first.
+        Capped for display like every other content branch, with the index keeping the full text.
+        """
+        content = 'please retry mango ' + 'padding ' * 80 + 'rambutan'
+        with pytest.warns(PydanticAIDeprecationWarning):
+            part = RetryPromptPart(content=content, tool_name='readfile', tool_call_id='c1')  # pyright: ignore[reportDeprecated]
+
+        source = _StubSource({'r1': [ModelRequest(parts=[part])]})
+
+        rendered = await _search(source, 'rambutan')
+
+        # `rambutan` sits past the display cutoff: matching on it proves the index kept the full
+        # text, and the ellipsis proves the excerpt did not.
+        assert 'Retry [readfile]: please retry mango' in rendered
+        assert '...' in rendered
+
     async def test_tool_availability_delta_is_not_indexed(self) -> None:
         """Tool-list bookkeeping is not conversation content, so it contributes no line.
 
@@ -823,8 +843,8 @@ class TestSearchScope:
 
         assert 'User: mango question' in rendered
         assert 'Assistant: mango answer' in rendered
-        # The delta contributes nothing. Before it was recognized it fell through to the
-        # `RetryPromptPart` branch, which reads `part.tool_name` and raised `AttributeError`.
+        # The delta contributes nothing. Before it was recognized it fell through to the retry
+        # branch, which read `part.tool_name` and raised `AttributeError`.
         assert 'Retry [' not in rendered
 
     async def test_user_and_text_parts_truncate_but_stay_searchable(self) -> None:

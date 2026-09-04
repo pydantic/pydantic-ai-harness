@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer, get_tracer
-from pydantic_ai import Agent, Tool
+from pydantic_ai import Agent, PydanticAIDeprecationWarning, Tool
 from pydantic_ai.capabilities import AbstractCapability, ToolSearch
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import (
@@ -25,7 +25,7 @@ from pydantic_ai.messages import (
     NativeToolCallPart,
     NativeToolReturnPart,
     RetryFeedbackPart,
-    RetryPromptPart,
+    RetryPromptPart,  # pyright: ignore[reportDeprecated]
     SystemPromptPart,
     TextContent,
     TextPart,
@@ -2502,17 +2502,20 @@ class TestHelperBranchCoverage:
         ]
         assert [p.content for p in _extract_system_prompts(msgs)] == ['a', 'b']
 
-    def test_a_retry_and_a_thinking_block_are_counted(self):
+    def test_a_retried_tool_return_and_a_thinking_block_are_counted(self):
         """Both are sent to the provider, and a run under load is where they appear."""
 
         msgs: list[ModelMessage] = [
-            ModelRequest(parts=[RetryPromptPart(content='r' * 400)]),
+            ModelRequest(
+                parts=[ToolReturnPart(tool_name='t', content='r' * 400, tool_call_id='c1', outcome='retried')]
+            ),
             ModelResponse(parts=[ThinkingPart(content='t' * 400)]),
         ]
         assert estimate_token_count(msgs) == 200
-        # `_format_messages` renders history for a summarizer prompt, which is a different
-        # question from what the request costs; a retry and a thinking block stay out of it.
-        assert _format_messages(msgs) == ''
+        # `_format_messages` renders history for a summarizer prompt, which is a different question
+        # from what the request costs. A retry that answers a call is that call's return, so it is
+        # rendered as one; a thinking block stays out.
+        assert _format_messages(msgs) == f'Tool [t]: {"r" * 400}'
 
     def test_retry_feedback_costs_what_its_feedback_text_costs_as_a_system_prompt(self):
         """It reaches the model as a mid-conversation system message, so it occupies the window.
@@ -2532,6 +2535,17 @@ class TestHelperBranchCoverage:
         rendered: list[ModelMessage] = [ModelRequest(parts=[SystemPromptPart(content=part.model_response())])]
 
         assert estimate_token_count(feedback) == estimate_token_count(rendered) > 0
+
+    def test_a_hand_built_legacy_retry_prompt_part_is_counted(self):
+        """Code that still builds one and passes it as `message_history` reaches the estimator.
+
+        A stored history loads as one of the two parts above, and the model translates an
+        in-memory instance before the request goes out, but compaction reads the history first.
+        """
+        with pytest.warns(PydanticAIDeprecationWarning):
+            part = RetryPromptPart(content='r' * 400)  # pyright: ignore[reportDeprecated]
+
+        assert estimate_token_count([ModelRequest(parts=[part])]) == 100
 
     def test_a_provider_side_tool_call_and_its_result_are_counted(self):
         """A web search runs on the provider's side and its result still lands in the context."""

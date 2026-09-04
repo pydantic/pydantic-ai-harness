@@ -23,7 +23,7 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelRequestPart,
     RetryFeedbackPart,
-    RetryPromptPart,
+    RetryPromptPart,  # pyright: ignore[reportDeprecated]  # TODO(v3): remove RetryPromptPart
     SpeechPart,
     SystemPromptPart,
     TextContent,
@@ -201,13 +201,19 @@ def _format_request_part(part: ModelRequestPart, *, truncate: bool) -> str | Non
             content = content[:200]
         return f'System: {content}'
     if isinstance(part, ToolReturnPart):
-        content = str(part.content)
+        # A retried call reads as a retry rather than a return: `outcome='retried'` is how a retry
+        # that answers a call travels, and why a run changed course is what makes it worth
+        # recalling. `model_response_str` renders a validation failure's serialized errors the way
+        # the model was shown them, unwrapped because the `{"error": ...}` envelope is a wire
+        # detail; `str(part.content)` would put a Python repr in the index.
+        label, content = (
+            ('Retry', part.model_response_str(wrap_if_error=False))
+            if part.outcome == 'retried'
+            else ('Tool', str(part.content))
+        )
         if truncate and len(content) > 500:
             content = content[:500] + '...'
-        return f'Tool [{part.tool_name}]: {content}'
-    if isinstance(part, RetryPromptPart):
-        # A retry or validation-error prompt is worth recalling, so index it in full.
-        return f'Retry [{part.tool_name}]: {part.content}'
+        return f'{label} [{part.tool_name}]: {content}'
     if isinstance(part, RetryFeedbackPart):
         # The same feedback for a response that answered no particular call -- output validation
         # failed, an output validator raised, or nothing usable came back. Its tool-bound
@@ -224,6 +230,16 @@ def _format_request_part(part: ModelRequestPart, *, truncate: bool) -> str | Non
         if truncate and len(feedback) > 500:
             feedback = feedback[:500] + '...'
         return f'Retry: {feedback}'
+    # TODO(v3): remove RetryPromptPart
+    if isinstance(part, RetryPromptPart):  # pyright: ignore[reportDeprecated]
+        # The part the two above replaced. A stored history loads as one of them, but code that
+        # builds one by hand and passes it as `message_history` still puts an instance here, and
+        # this reads the history before the model translates it. `tool_name` is `None` on the
+        # half that became `RetryFeedbackPart`, which is how the old line already rendered it.
+        content = str(part.content)
+        if truncate and len(content) > 500:
+            content = content[:500] + '...'
+        return f'Retry [{part.tool_name}]: {content}'
     if isinstance(part, SpeechPart):
         # A realtime user turn: index the spoken transcript so speech is searchable, not the
         # raw audio. `transcript` is optional, so an audio-only part contributes no text.

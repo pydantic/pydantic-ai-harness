@@ -24,7 +24,7 @@ from pydantic_ai.messages import (
     NativeToolCallPart,
     NativeToolReturnPart,
     RetryFeedbackPart,
-    RetryPromptPart,
+    RetryPromptPart,  # pyright: ignore[reportDeprecated]  # TODO(v3): remove RetryPromptPart
     SpeechPart,
     SystemPromptPart,
     TextContent,
@@ -103,9 +103,10 @@ def _request_part_text(part: ModelRequestPart) -> list[str]:
         return [_user_prompt_text_for_counting(part)]
     elif isinstance(part, SystemPromptPart):
         return [part.content]
-    elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
-        # Both are sent in full. The tool-search and capability-load returns subclass
-        # `ToolReturnPart`, so they arrive here too.
+    elif isinstance(part, ToolReturnPart):
+        # Sent in full, a retried call's feedback included: a retry that answers a call travels as
+        # that call's return. The tool-search and capability-load returns subclass `ToolReturnPart`,
+        # so they arrive here too.
         return [str(part.content)]
     elif isinstance(part, RetryFeedbackPart):
         # Retry feedback that answers no tool call. It is stored model-neutral and rendered at
@@ -117,6 +118,13 @@ def _request_part_text(part: ModelRequestPart) -> list[str]:
         # so is not counted -- a small fixed undercount, in an estimator that already counts no
         # tool definitions at all.
         return [part.model_response()]
+    # TODO(v3): remove RetryPromptPart
+    elif isinstance(part, RetryPromptPart):  # pyright: ignore[reportDeprecated]
+        # The part the two above replaced. A stored history loads as one of them, but code that
+        # builds one by hand and passes it as `message_history` still puts an instance here, and
+        # this reads the history before the model translates it. Counted like the tool return it
+        # is translated into -- the same undercount as the branch above, on a part being retired.
+        return [str(part.content)]
     # Control bookkeeping rather than message text: it records which tools became available, and
     # the schemas themselves travel in the request's tool definitions. Those schemas are not free
     # -- this estimator counts no tool definitions at all, so revealing tools mid-run costs
