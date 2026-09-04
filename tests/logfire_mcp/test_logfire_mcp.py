@@ -548,3 +548,10 @@ class TestLogfireMCP:
         assert 'numeric limit' in query_only_instructions
         assert 'query_schema_reference' not in query_only_instructions
         assert 'Logfire link' not in query_only_instructions
+
+        schema_instructions = LogfireMCP(
+            project='acme/production', tools=('query_schema_reference',)
+        ).get_instructions()
+        assert schema_instructions is not None
+        assert 'Project-scoped Logfire tools' in schema_instructions
+        assert 'query_run' not in schema_instructions
