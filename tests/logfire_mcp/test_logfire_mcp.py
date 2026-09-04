@@ -252,6 +252,34 @@ class TestLogfireMCP:
 
         assert _tool_names(model) == {'query_run', 'dashboard_list'}
 
+    async def test_selected_read_tools_execute_with_project_scope(
+        self, logfire_server: FastMCP, logfire_state: LogfireState, run_context: RunContext[None]
+    ):
+        toolset = LogfireMCP(
+            project='acme/production',
+            tools=('query_find_exceptions_in_file', 'dashboard_list'),
+            client=logfire_server,
+        ).get_toolset()
+        async with toolset:
+            tools = await toolset.get_tools(run_context)
+            exceptions = await toolset.call_tool(
+                'query_find_exceptions_in_file',
+                {'filepath': 'service.py'},
+                run_context,
+                tools['query_find_exceptions_in_file'],
+            )
+            dashboards = await toolset.call_tool('dashboard_list', {}, run_context, tools['dashboard_list'])
+
+        assert 'ValueError' in str(exceptions)
+        assert 'API health' in str(dashboards)
+        assert logfire_state['calls'] == [
+            (
+                'query_find_exceptions_in_file',
+                {'filepath': 'service.py', 'project': 'acme/production'},
+            ),
+            ('dashboard_list', {'project': 'acme/production'}),
+        ]
+
     async def test_two_projects_collide_on_fixed_tool_names(self, logfire_server: FastMCP):
         agent = Agent(
             TestModel(call_tools=[]),
@@ -530,7 +558,7 @@ class TestLogfireMCP:
             calls = sum(isinstance(part, ToolCallPart) for message in messages for part in message.parts)
             if calls < 2:
                 return ModelResponse(parts=[ToolCallPart('query_run', {'query': 'SELECT 1 LIMIT 1'})])
-            return ModelResponse(parts=[TextPart('unreachable')])
+            return ModelResponse(parts=[TextPart('unreachable')])  # pragma: no cover
 
         agent = Agent(
             FunctionModel(retry_query),

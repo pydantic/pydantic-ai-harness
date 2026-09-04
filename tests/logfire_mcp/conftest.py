@@ -124,17 +124,17 @@ def logfire_server(logfire_state: LogfireState) -> FastMCP:
         return {'name': name, 'project': project}
 
     @server.tool()
-    def issue_list() -> list[dict[str, str]]:
+    def issue_list() -> list[dict[str, str]]:  # pragma: no cover
         """Malformed fake: a project tool whose schema has lost its project field."""
         return []
 
     @server.tool()
-    def project_list() -> list[str]:
+    def project_list() -> list[str]:  # pragma: no cover
         """List every accessible project."""
         return ['acme/production', 'acme/staging']
 
     @server.tool()
-    def future_mutation(project: str | None = None) -> str:
+    def future_mutation(project: str | None = None) -> str:  # pragma: no cover
         """A tool unknown to this harness release."""
         return project or ''
 
