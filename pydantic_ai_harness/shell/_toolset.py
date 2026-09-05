@@ -10,6 +10,7 @@ import re
 import shlex
 import signal
 import subprocess
+import sys
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -325,7 +326,20 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             return
 
     async def _kill_process_group(self, proc: anyio.abc.Process) -> None:
-        """SIGTERM the process group, escalating to SIGKILL after the grace period."""
+        """SIGTERM the process group, escalating to SIGKILL after the grace period.
+
+        Windows has no process-group signal API (`os.killpg`/`os.getpgid`/`signal.SIGKILL`
+        don't exist there), so on Windows we fall back to `proc.kill()`, which anyio maps to
+        `TerminateProcess()`. That only stops the spawned process itself, not any children it
+        started -- there's no cheap Windows equivalent of a POSIX process-group kill.
+        """
+        if sys.platform == 'win32':
+            try:
+                proc.kill()
+            except (ProcessLookupError, PermissionError, OSError):
+                pass
+            return
+
         pid = proc.pid
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
