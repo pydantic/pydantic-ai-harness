@@ -50,7 +50,7 @@ class SlackApprovals:
 
         Args:
             interactions: Shared prompt registry. Give the same instance to
-                [`SlackAgent`][pydantic_ai_harness.slack.SlackAgent] so button
+                [`SlackBot`][pydantic_ai_harness.slack.SlackBot] so button
                 clicks reach the run waiting on them.
             allowed_user_ids: Who may approve. Defaults to the person whose
                 message started the run. Set it to a reviewer group when the

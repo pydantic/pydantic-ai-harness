@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections import OrderedDict
 from collections.abc import Collection, Mapping
 from typing import Protocol
 from weakref import WeakValueDictionary
@@ -19,12 +20,13 @@ from pydantic_ai_harness.slack._thread import SlackThread
 from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS
 
 try:
+    from slack_bolt.adapter.asgi.async_handler import AsyncSlackRequestHandler
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
     from slack_bolt.app.async_app import AsyncApp
     from slack_sdk.web.async_client import AsyncWebClient
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
-        'slack-bolt is required for SlackAgent. Install it with: pip install "pydantic-ai-harness[slack]"'
+        'slack-bolt is required for SlackBot. Install it with: pip install "pydantic-ai-harness[slack]"'
     ) from _import_error
 
 logger = logging.getLogger(__name__)
@@ -68,25 +70,39 @@ def _prompt_click_fields(body: Mapping[str, object]) -> tuple[str, str, str] | N
 
 DEFAULT_ERROR_REPLY = 'Something went wrong handling that message. The details are in the logs.'
 
+_REMEMBERED_EVENTS = 1000
+"""How many delivered event ids to remember, so a Slack retry does not start a
+second run. Slack retries three times, minutes apart at most, so this is far more
+history than it takes to recognise one."""
 
-class SlackAgent:
+
+class SlackBot:
     """Serve one Pydantic AI agent as a Slack bot.
 
-    Wires the pieces in this package to a Socket Mode Slack app: DMs and channel
-    mentions start a run, history is kept per thread, prompts posted by
-    `ask_user` and by approval handling resolve through the same registry, and
-    the agent's text output is posted back into the thread.
+    DMs and channel mentions start a run, history is kept per thread, prompts
+    posted by `ask_user` and by approval handling resolve through the same
+    registry, and the agent's text output is posted back into the thread.
 
     The agent's `deps` type must be
     [`SlackThread`][pydantic_ai_harness.slack.SlackThread].
 
-    Socket Mode opens an outbound connection, so no public HTTPS endpoint is
-    needed. For OAuth distribution across workspaces, build your own `AsyncApp`
-    in HTTP mode and call [`handle_message`][pydantic_ai_harness.slack.SlackAgent.handle_message]
-    from your own listeners instead.
+    Slack can reach the bot two ways, and only the last line differs:
+
+    ```python {test="skip"}
+    bot = SlackBot(agent)
+
+    bot.run()                                   # Socket Mode, no public URL
+    app.mount('/slack/events', bot.http_app())  # Events API, any ASGI server
+    ```
+
+    Socket Mode needs `SLACK_APP_TOKEN` and opens an outbound connection, so it
+    suits anything that can hold one. The Events API needs `SLACK_SIGNING_SECRET`
+    and a public HTTPS endpoint, and suits anything that cannot -- a Lambda, or a
+    container that scales to zero.
 
     Attributes:
-        app: The underlying Bolt app. Register extra listeners on it if you need them.
+        app: The underlying Bolt app. Register extra listeners on it if you need
+            them, or hand it to any of Bolt's other adapters.
     """
 
     def __init__(
@@ -97,6 +113,7 @@ class SlackAgent:
         interactions: SlackInteractions | None = None,
         bot_token: str | None = None,
         app_token: str | None = None,
+        signing_secret: str | None = None,
         allowed_user_ids: Collection[str] | None = None,
         error_reply: str = DEFAULT_ERROR_REPLY,
     ) -> None:
@@ -110,7 +127,12 @@ class SlackAgent:
                 approval handler. Pass the same instance you gave those.
             bot_token: Bot token (`xoxb-`). Defaults to `SLACK_BOT_TOKEN`.
             app_token: App-level token (`xapp-`) with `connections:write`.
-                Defaults to `SLACK_APP_TOKEN`.
+                Defaults to `SLACK_APP_TOKEN`. Only [`run`][pydantic_ai_harness.slack.SlackBot.run]
+                needs it, so an Events API deployment can leave it unset.
+            signing_secret: Secret Slack signs its HTTP requests with. Defaults to
+                `SLACK_SIGNING_SECRET`. Only
+                [`http_app`][pydantic_ai_harness.slack.SlackBot.http_app] needs
+                it, so a Socket Mode deployment can leave it unset.
             allowed_user_ids: Slack user ids allowed to start runs. Defaults to
                 `SLACK_ALLOWED_USER_IDS`, comma separated. When neither is set,
                 anyone who can reach the bot can spend its tokens and invoke its
@@ -118,8 +140,8 @@ class SlackAgent:
             error_reply: Posted in the thread when a run raises.
 
         Raises:
-            ValueError: If a token is missing, or `allowed_user_ids` is a string
-                rather than a collection of ids.
+            ValueError: If `bot_token` is missing, or `allowed_user_ids` is a
+                string rather than a collection of ids.
         """
         self._agent = agent
         self._store = store if store is not None else InMemoryConversationStore()
@@ -127,12 +149,12 @@ class SlackAgent:
         self._error_reply = error_reply
 
         bot = bot_token or os.environ.get('SLACK_BOT_TOKEN')
-        app = app_token or os.environ.get('SLACK_APP_TOKEN')
         if not bot:
             raise ValueError('bot_token is required; pass it or set SLACK_BOT_TOKEN')
-        if not app:
-            raise ValueError('app_token is required; pass it or set SLACK_APP_TOKEN')
-        self._app_token = app
+        # Each transport needs one of these and neither needs both, so they are
+        # checked where they are used rather than here.
+        self._app_token = app_token or os.environ.get('SLACK_APP_TOKEN')
+        self._signing_secret = signing_secret or os.environ.get('SLACK_SIGNING_SECRET')
 
         if isinstance(allowed_user_ids, str):
             raise ValueError('allowed_user_ids must be a collection of user ids, not a string')
@@ -149,7 +171,10 @@ class SlackAgent:
         # Weak, so a thread's lock is collected once no turn holds it. A busy
         # workspace would otherwise accumulate one lock per thread forever.
         self._locks: WeakValueDictionary[str, anyio.Lock] = WeakValueDictionary()
-        self.app = AsyncApp(token=bot)
+        # Slack retries an event it thinks was not delivered, and a retried
+        # mention would start a second run with the same side effects.
+        self._handled_events: OrderedDict[str, None] = OrderedDict()
+        self.app = AsyncApp(token=bot, signing_secret=self._signing_secret)
         self._register_listeners()
 
     def _register_listeners(self) -> None:
@@ -162,17 +187,26 @@ class SlackAgent:
         self.app.action(prompt_clicks)(self._on_prompt_click)  # pyright: ignore[reportUnknownMemberType]
 
     async def _on_mention(
-        self, event: Mapping[str, object], client: AsyncWebClient, context: Mapping[str, object]
+        self,
+        event: Mapping[str, object],
+        client: AsyncWebClient,
+        context: Mapping[str, object],
+        body: Mapping[str, object],
     ) -> None:
         await self.handle_message(
             event,
             client,
             bot_user_id=_string(context, 'bot_user_id'),
             team_id=_string(context, 'team_id'),
+            event_id=_string(body, 'event_id'),
         )
 
     async def _on_direct_message(
-        self, event: Mapping[str, object], client: AsyncWebClient, context: Mapping[str, object]
+        self,
+        event: Mapping[str, object],
+        client: AsyncWebClient,
+        context: Mapping[str, object],
+        body: Mapping[str, object],
     ) -> None:
         # Channel messages reach this listener too, and `app_mention` already
         # covers those. Only a direct or group DM starts a run without a mention.
@@ -183,6 +217,7 @@ class SlackAgent:
             client,
             bot_user_id=_string(context, 'bot_user_id'),
             team_id=_string(context, 'team_id'),
+            event_id=_string(body, 'event_id'),
         )
 
     async def _on_prompt_click(self, ack: _Ack, body: Mapping[str, object]) -> None:
@@ -212,6 +247,7 @@ class SlackAgent:
         *,
         bot_user_id: str | None = None,
         team_id: str | None = None,
+        event_id: str | None = None,
     ) -> None:
         """Run the agent for one inbound Slack message and post its reply.
 
@@ -222,7 +258,14 @@ class SlackAgent:
         `team_id` names the workspace and keeps history separate across a
         multi-workspace install. Bolt puts it on the listener's `context`, which
         is more reliable than the event body.
+
+        `event_id` comes off the Slack envelope. Passing it means a redelivery of
+        the same event is ignored rather than starting a second run, which for an
+        agent with write access means doing the work twice.
         """
+        if event_id is not None and self._already_handled(event_id):
+            logger.info('Ignoring a repeat delivery of Slack event %s', event_id)
+            return
         if event.get('bot_id') is not None or event.get('subtype') is not None:
             return
         user_id = _string(event, 'user')
@@ -258,6 +301,15 @@ class SlackAgent:
         async with lock:
             await self._run_turn(thread, prompt)
 
+    def _already_handled(self, event_id: str) -> bool:
+        """True when this event has been delivered before. Records it either way."""
+        if event_id in self._handled_events:
+            return True
+        self._handled_events[event_id] = None
+        if len(self._handled_events) > _REMEMBERED_EVENTS:
+            self._handled_events.popitem(last=False)
+        return False
+
     async def _run_turn(self, thread: SlackThread, prompt: str) -> None:
         try:
             history = await self._store.load(thread.key)
@@ -287,10 +339,44 @@ class SlackAgent:
                 text=text[start : start + MAX_MESSAGE_CHARS],
             )
 
+    def http_app(self, path: str = '/slack/events') -> AsyncSlackRequestHandler:
+        """An ASGI app serving Slack's Events API, to mount on your own server.
+
+        Mount it at `path`, and give Slack that same URL as the request URL. Bolt
+        verifies the signature on every request and answers Slack's setup
+        challenge, so there is nothing to write.
+
+        ```python {test="skip"}
+        app = FastAPI()
+        app.mount('/slack/events', bot.http_app())
+        ```
+
+        Bolt replies before running the listener, so Slack's three-second
+        deadline is met however long the agent takes.
+
+        Raises:
+            ValueError: If no signing secret was configured.
+        """
+        if not self._signing_secret:
+            raise ValueError(
+                'signing_secret is required to serve the Events API; pass it or set SLACK_SIGNING_SECRET. '
+                'Socket Mode needs no signing secret -- use run() instead if that is what you want.'
+            )
+        return AsyncSlackRequestHandler(self.app, path=path)
+
     async def start(self) -> None:
-        """Connect over Socket Mode and serve until cancelled."""
+        """Connect over Socket Mode and serve until cancelled.
+
+        Raises:
+            ValueError: If no app token was configured.
+        """
+        if not self._app_token:
+            raise ValueError(
+                'app_token is required for Socket Mode; pass it or set SLACK_APP_TOKEN. '
+                'The Events API needs no app token -- use http_app() instead if that is what you want.'
+            )
         await AsyncSocketModeHandler(self.app, self._app_token).start_async()
 
     def run(self) -> None:
-        """Start the app and block. The synchronous entry point for a script."""
+        """Start Socket Mode and block. The synchronous entry point for a script."""
         anyio.run(self.start)

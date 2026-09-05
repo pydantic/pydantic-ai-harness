@@ -2,10 +2,10 @@
 
 Slack is both the front door and one of the tools. `SlackChatToolset` gives the
 model a way to talk to the thread it is running in, `SlackApprovals` gates
-dangerous tools behind a button, and `SlackAgent` wires both to a Socket Mode
+dangerous tools behind a button, and `SlackBot` wires both to a Socket Mode
 app so a working bot is a few lines. Every piece is usable on its own.
 
-`SlackAgent` needs `slack-bolt`, so it is imported lazily: naming it is what
+`SlackBot` needs `slack-bolt`, so it is imported lazily: naming it is what
 pulls Bolt in. Everything else needs only `slack-sdk`.
 """
 
@@ -29,7 +29,7 @@ from pydantic_ai_harness.slack._thread import SlackThread, conversation_key
 from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS, PlanStep, SlackChatToolset, StepStatus
 
 if TYPE_CHECKING:
-    from pydantic_ai_harness.slack._app import DEFAULT_ERROR_REPLY, SlackAgent
+    from pydantic_ai_harness.slack._app import DEFAULT_ERROR_REPLY, SlackBot
 
 __all__ = [
     'APPROVE',
@@ -43,7 +43,7 @@ __all__ = [
     'FileConversationStore',
     'InMemoryConversationStore',
     'PlanStep',
-    'SlackAgent',
+    'SlackBot',
     'SlackApprovals',
     'SlackChat',
     'SlackChatToolset',
@@ -55,7 +55,7 @@ __all__ = [
     'conversation_key',
 ]
 
-_BOLT_EXPORTS = {'DEFAULT_ERROR_REPLY', 'SlackAgent'}
+_BOLT_EXPORTS = {'DEFAULT_ERROR_REPLY', 'SlackBot'}
 
 
 def __getattr__(name: str) -> object:

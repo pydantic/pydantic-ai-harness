@@ -14,7 +14,7 @@ import pydantic_ai_harness.slack as slack_package
 import pydantic_ai_harness.slack._app as app_module
 from pydantic_ai_harness.slack import (
     InMemoryConversationStore,
-    SlackAgent,
+    SlackBot,
     SlackInteractions,
     SlackThread,
 )
@@ -28,9 +28,10 @@ Handler = Callable[..., Any]
 
 @dataclass
 class FakeBoltApp:
-    """Records the listeners `SlackAgent` registers, without touching Slack."""
+    """Records the listeners `SlackBot` registers, without touching Slack."""
 
     token: str
+    signing_secret: str | None = None
     events: dict[str, Handler] = field(default_factory=dict[str, Handler])
     actions: list[Handler] = field(default_factory=list[Handler])
 
@@ -55,8 +56,8 @@ def bolt(monkeypatch: pytest.MonkeyPatch) -> Callable[[], FakeBoltApp]:
     request it by name only to inspect what was registered."""
     built: list[FakeBoltApp] = []
 
-    def factory(*, token: str) -> FakeBoltApp:
-        app = FakeBoltApp(token=token)
+    def factory(*, token: str, signing_secret: str | None = None) -> FakeBoltApp:
+        app = FakeBoltApp(token=token, signing_secret=signing_secret)
         built.append(app)
         return app
 
@@ -65,7 +66,7 @@ def bolt(monkeypatch: pytest.MonkeyPatch) -> Callable[[], FakeBoltApp]:
 
 
 @pytest.fixture
-def slack_agent_with_store(agent: Agent[SlackThread, str]) -> tuple[SlackAgent, InMemoryConversationStore]:
+def slack_agent_with_store(agent: Agent[SlackThread, str]) -> tuple[SlackBot, InMemoryConversationStore]:
     store = InMemoryConversationStore()
     return build(agent, store=store), store
 
@@ -87,21 +88,21 @@ def message(**overrides: object) -> dict[str, object]:
     return event
 
 
-def build(agent: Agent[SlackThread, str], **kwargs: object) -> SlackAgent:
+def build(agent: Agent[SlackThread, str], **kwargs: object) -> SlackBot:
     defaults: dict[str, object] = {'bot_token': 'xoxb-t', 'app_token': 'xapp-t', 'allowed_user_ids': ['U0ASKER']}
     defaults.update(kwargs)
-    return SlackAgent(agent, **defaults)  # pyright: ignore[reportArgumentType]
+    return SlackBot(agent, **defaults)  # pyright: ignore[reportArgumentType]
 
 
 class TestLazyExport:
     def test_the_bolt_app_is_reachable_from_the_package(self) -> None:
         # Named on the package, imported only when asked for, so the rest of the
         # package stays usable without `slack-bolt`.
-        assert slack_package.SlackAgent is SlackAgent
+        assert slack_package.SlackBot is SlackBot
 
     def test_an_unknown_name_still_raises(self) -> None:
         with pytest.raises(AttributeError, match='has no attribute'):
-            _ = slack_package.SlackBot  # pyright: ignore[reportAttributeAccessIssue]
+            _ = slack_package.SlackWidget  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class TestConfiguration:
@@ -111,22 +112,40 @@ class TestConfiguration:
         monkeypatch.setenv('SLACK_BOT_TOKEN', 'xoxb-env')
         monkeypatch.setenv('SLACK_APP_TOKEN', 'xapp-env')
         monkeypatch.setenv('SLACK_ALLOWED_USER_IDS', 'U1, U2 ,')
-        slack_agent = SlackAgent(agent)
+        slack_agent = SlackBot(agent)
         assert bolt().token == 'xoxb-env'
         assert slack_agent._allowed_user_ids == frozenset({'U1', 'U2'})  # pyright: ignore[reportPrivateUsage]
 
-    @pytest.mark.parametrize('missing', ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'])
-    def test_a_missing_token_is_refused(
-        self,
-        agent: Agent[SlackThread, str],
-        monkeypatch: pytest.MonkeyPatch,
-        missing: str,
+    def test_a_missing_bot_token_is_refused(
+        self, agent: Agent[SlackThread, str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setenv('SLACK_BOT_TOKEN', 'xoxb-env')
-        monkeypatch.setenv('SLACK_APP_TOKEN', 'xapp-env')
-        monkeypatch.delenv(missing)
-        with pytest.raises(ValueError, match=missing):
-            SlackAgent(agent)
+        monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
+        with pytest.raises(ValueError, match='SLACK_BOT_TOKEN'):
+            SlackBot(agent, app_token='xapp-t')
+
+    async def test_socket_mode_asks_for_its_token_only_when_started(
+        self, agent: Agent[SlackThread, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An Events API deployment has no app token and must still construct.
+        monkeypatch.delenv('SLACK_APP_TOKEN', raising=False)
+        bot = SlackBot(agent, bot_token='xoxb-t', signing_secret='s')
+        with pytest.raises(ValueError, match='SLACK_APP_TOKEN'):
+            await bot.start()
+
+    def test_the_events_api_asks_for_its_secret_only_when_mounted(
+        self, agent: Agent[SlackThread, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # And a Socket Mode deployment has no signing secret.
+        monkeypatch.delenv('SLACK_SIGNING_SECRET', raising=False)
+        bot = SlackBot(agent, bot_token='xoxb-t', app_token='xapp-t')
+        with pytest.raises(ValueError, match='SLACK_SIGNING_SECRET'):
+            bot.http_app()
+
+    def test_the_signing_secret_reaches_bolt(
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str]
+    ) -> None:
+        build(agent, signing_secret='shhh')
+        assert bolt().signing_secret == 'shhh'
 
     def test_a_string_allowlist_is_refused(self, agent: Agent[SlackThread, str]) -> None:
         with pytest.raises(ValueError, match='not a string'):
@@ -167,7 +186,7 @@ class TestHandleMessage:
         assert slack_client.method_calls('chat_postMessage')[0].kwargs['thread_ts'] == '1700000000.000001'
 
     async def test_history_accumulates_across_turns_in_one_thread(
-        self, slack_agent_with_store: tuple[SlackAgent, InMemoryConversationStore], slack_client: FakeSlackClient
+        self, slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore], slack_client: FakeSlackClient
     ) -> None:
         slack_agent, store = slack_agent_with_store
         await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
@@ -176,7 +195,7 @@ class TestHandleMessage:
         assert len(await store.load('T1:C123:1700000000.000001')) == 4
 
     async def test_a_separate_thread_keeps_its_own_history(
-        self, slack_agent_with_store: tuple[SlackAgent, InMemoryConversationStore], slack_client: FakeSlackClient
+        self, slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore], slack_client: FakeSlackClient
     ) -> None:
         slack_agent, store = slack_agent_with_store
         await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
@@ -279,7 +298,7 @@ class TestHandleMessage:
 
     async def test_an_undelivered_reply_is_not_written_into_the_history(
         self,
-        slack_agent_with_store: tuple[SlackAgent, InMemoryConversationStore],
+        slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore],
         slack_client: FakeSlackClient,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -304,13 +323,70 @@ class TestHandleMessage:
         assert 'Slack agent run failed' in caplog.text
 
 
+class TestHttpApp:
+    def test_mounts_the_bolt_app_at_the_given_path(
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str]
+    ) -> None:
+        bot = build(agent, signing_secret='shhh')
+        mounted = bot.http_app(path='/hooks/slack')
+        assert mounted.app is bot.app
+        assert mounted.path == '/hooks/slack'
+
+    def test_defaults_to_the_path_slack_suggests(self, agent: Agent[SlackThread, str]) -> None:
+        assert build(agent, signing_secret='shhh').http_app().path == '/slack/events'
+
+
+class TestRetries:
+    async def test_a_redelivered_event_does_not_run_twice(
+        self,
+        slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore],
+        slack_client: FakeSlackClient,
+    ) -> None:
+        # Slack retries what it thinks was not delivered. For an agent with write
+        # access, running it again means doing the work again.
+        slack_bot, store = slack_agent_with_store
+        for _ in range(2):
+            await slack_bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev1')
+        assert len(slack_client.method_calls('chat_postMessage')) == 1
+        assert len(await store.load('T1:C123:1700000000.000001')) == 2
+
+    async def test_a_different_event_still_runs(
+        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+    ) -> None:
+        bot = build(agent)
+        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev1')
+        await bot.handle_message(message(ts='1700000000.000002'), slack_client, bot_user_id='U0BOT', event_id='Ev2')
+        assert len(slack_client.method_calls('chat_postMessage')) == 2
+
+    async def test_remembering_events_stays_bounded(
+        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The oldest id is dropped rather than the set growing without limit, so a
+        # long-lived bot does not keep one entry per message it ever saw. Shrunk
+        # here so the test does not run a thousand turns to prove it.
+        monkeypatch.setattr(app_module, '_REMEMBERED_EVENTS', 3)
+        bot = build(agent)
+        for index in range(4):
+            await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id=f'Ev{index}')
+        assert len(slack_client.method_calls('chat_postMessage')) == 4
+        # `Ev0` has fallen out of the window, so it is no longer recognised.
+        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev0')
+        assert len(slack_client.method_calls('chat_postMessage')) == 5
+        # `Ev3` is still inside it.
+        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev3')
+        assert len(slack_client.method_calls('chat_postMessage')) == 5
+
+
 class TestListeners:
     async def test_a_direct_message_runs_without_a_mention(
         self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str], slack_client: FakeSlackClient
     ) -> None:
         build(agent)
         await bolt().events['message'](
-            event=message(text='ship it', channel_type='im'), client=slack_client, context={'bot_user_id': 'U0BOT'}
+            event=message(text='ship it', channel_type='im'),
+            client=slack_client,
+            context={'bot_user_id': 'U0BOT'},
+            body={},
         )
         assert slack_client.method_calls('chat_postMessage')
 
@@ -319,7 +395,7 @@ class TestListeners:
     ) -> None:
         build(agent)
         await bolt().events['message'](
-            event=message(text='ship it', channel_type='channel'), client=slack_client, context={}
+            event=message(text='ship it', channel_type='channel'), client=slack_client, context={}, body={}
         )
         assert slack_client.calls == []
 
@@ -327,13 +403,15 @@ class TestListeners:
         self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str], slack_client: FakeSlackClient
     ) -> None:
         build(agent)
-        await bolt().events['app_mention'](event=message(), client=slack_client, context={'bot_user_id': 'U0BOT'})
+        await bolt().events['app_mention'](
+            event=message(), client=slack_client, context={'bot_user_id': 'U0BOT'}, body={}
+        )
         assert slack_client.method_calls('chat_postMessage')
 
     async def test_the_workspace_comes_from_the_listener_context(
         self,
         bolt: Callable[[], FakeBoltApp],
-        slack_agent_with_store: tuple[SlackAgent, InMemoryConversationStore],
+        slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore],
         slack_client: FakeSlackClient,
     ) -> None:
         # Bolt puts the workspace on the context; the event body may not carry it,
@@ -341,7 +419,7 @@ class TestListeners:
         _, store = slack_agent_with_store
         event = message()
         del event['team']
-        await bolt().events['app_mention'](event=event, client=slack_client, context={'team_id': 'T9'})
+        await bolt().events['app_mention'](event=event, client=slack_client, context={'team_id': 'T9'}, body={})
         assert len(await store.load('T9:C123:1700000000.000001')) == 2
 
 

@@ -17,8 +17,8 @@ from pydantic_ai.models import Model
 
 from pydantic_ai_harness.slack import (
     FileConversationStore,
-    SlackAgent,
     SlackApprovals,
+    SlackBot,
     SlackChat,
     SlackInteractions,
     SlackThread,
@@ -52,7 +52,7 @@ def build_agent(model: Model | str = DEFAULT_MODEL) -> Agent[SlackThread, str]:
 
 def main() -> None:
     """Start the bot and serve Slack until interrupted."""
-    SlackAgent(
+    SlackBot(
         build_agent(),
         interactions=INTERACTIONS,
         store=FileConversationStore('~/.slack-agent'),

@@ -5,11 +5,11 @@ description: Run a Pydantic AI agent in a Slack thread -- progress messages, a l
 
 # Slack
 
-`SlackChat`, `SlackApprovals`, and `SlackAgent` put a Pydantic AI agent in a
+`SlackChat`, `SlackApprovals`, and `SlackBot` put a Pydantic AI agent in a
 Slack thread. The capability lets the agent post progress, show a checklist, ask
 a question, and send files while it works, and tells it when to do each. `SlackApprovals` stops a dangerous tool until a person
-clicks Approve. `SlackAgent` wires both to a Socket Mode app, so a working bot
-is a few lines and no public web server.
+clicks Approve. `SlackBot` wires both to a working bot in a few lines, over
+whichever transport suits where you deploy it.
 
 Slack is a front door here, not the agent's only reach. The same agent takes
 whatever other toolsets you give it, so it can read a Linear ticket, open a pull
@@ -25,7 +25,7 @@ request, and report back in the thread it was asked in.
 uv add "pydantic-ai-harness[slack,anthropic]"
 ```
 
-The `slack` extra pulls in `slack-sdk` and `slack-bolt`. Only `SlackAgent`
+The `slack` extra pulls in `slack-sdk` and `slack-bolt`. Only `SlackBot`
 needs Bolt, and it lives in its own module, so importing anything else from
 this package does not require it.
 
@@ -37,7 +37,7 @@ from pydantic_ai.capabilities import HandleDeferredToolCalls
 
 from pydantic_ai_harness.slack import (
     FileConversationStore,
-    SlackAgent,
+    SlackBot,
     SlackApprovals,
     SlackChat,
     SlackInteractions,
@@ -62,7 +62,7 @@ def merge_pull_request(number: int) -> str:
     return f'Merged #{number}'
 
 
-SlackAgent(
+SlackBot(
     agent,
     interactions=interactions,
     store=FileConversationStore('~/.slack-agent'),
@@ -72,6 +72,34 @@ SlackAgent(
 
 Set `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`, run the script, invite the bot to a
 channel, and mention it.
+
+## How Slack reaches the bot
+
+Two transports, and only the last line of your program differs.
+
+```python {test="skip"}
+bot.run()                                   # Socket Mode
+app.mount('/slack/events', bot.http_app())  # Events API
+```
+
+| | Socket Mode | Events API |
+| --- | --- | --- |
+| Needs | `SLACK_APP_TOKEN` | `SLACK_SIGNING_SECRET` and a public HTTPS URL |
+| Connection | your process dials out | Slack posts to you |
+| Suits | a laptop, a container, anything that stays up | Lambda, Cloud Run, anything that scales to zero |
+
+`http_app()` returns an ASGI app, so it mounts on FastAPI, Starlette, or
+anything else ASGI. Bolt checks the signature on every request and answers
+Slack's setup challenge, and it replies before running the agent, so Slack's
+three-second deadline is met however long the turn takes. Give Slack the URL you
+mounted it at as the **Request URL**, and turn Socket Mode off in the manifest.
+
+A redelivered event is ignored rather than run twice, which for an agent with
+write access is the difference between one pull request and two.
+
+Neither credential is needed to construct a `SlackBot`. `run()` asks for the app
+token and `http_app()` asks for the signing secret, so you only configure the one
+you use.
 
 ## Setting up the Slack app
 
@@ -116,8 +144,10 @@ channel, and mention it.
 }
 ```
 
-Socket Mode means Slack connects to you, so this runs on a laptop behind a
-firewall with no public URL. `assistant:write` is what makes `set_status` show a
+That manifest sets up Socket Mode, so Slack connects to you and this runs on a
+laptop behind a firewall with no public URL. For the Events API instead, set
+`socket_mode_enabled` to `false` and give `event_subscriptions` a `request_url`
+pointing at wherever you mounted `http_app()`. `assistant:write` is what makes `set_status` show a
 working-state line; without it that tool reports it is unavailable and the run
 carries on. `app_home` is what lets people DM the bot: without
 `messages_tab_enabled` Slack answers "Sending messages to this app has been
@@ -214,7 +244,7 @@ implement `ConversationStore` against your database.
 
 ## Building the app yourself
 
-`SlackAgent` is convenience, not a requirement. To keep control of the Bolt app
+`SlackBot` is convenience, not a requirement. To keep control of the Bolt app
 -- HTTP mode, OAuth across workspaces, your own listeners -- build it yourself
 and call the same pieces:
 
@@ -284,4 +314,4 @@ for things without being allowed to approve a production deploy.
   for code fences.
 - Cancelling a run while a prompt is open leaves its buttons in the thread; they
   no longer resolve to anything.
-- One `SlackAgent` serves one workspace.
+- One `SlackBot` serves one workspace.
