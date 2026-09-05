@@ -35,7 +35,7 @@ print(result.output)
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read a text file with line numbers and a content hash. Binary files are detected and not dumped. Supports `offset`/`limit` paging. |
+| `read_file` | Read a text file with line numbers and a content hash. Binary files are detected and not dumped. Supports `offset`/`limit` paging; `offset` is 1-indexed, matching `grep -n`, editors, and stack traces (`offset=0` is rejected -- omit `offset` or use `offset=1` to start from the first line). |
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement; `old_text` must match exactly once. Optional `expected_hash`. |
 | `list_directory` | List a directory's entries with type indicators and sizes. |

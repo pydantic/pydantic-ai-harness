@@ -115,25 +115,36 @@ def _recoverable(
     return wrapper
 
 
-def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
-    """Format pre-split lines with line numbers and continuation hint."""
+def _format_lines(lines: Sequence[str], offset: int | None, limit: int) -> str:
+    """Format pre-split lines with line numbers and continuation hint.
+
+    `offset` is a 1-indexed line number (matching `grep -n`, editors, and stack
+    traces), or `None` to start from the first line.
+    """
     total = len(lines)
 
-    if total == 0:
-        return '(empty file)\n'
+    if offset is not None and offset < 1:
+        raise ValueError(
+            f'offset must be >= 1: line numbers are 1-indexed (previously 0-indexed), matching '
+            f'grep -n, editors, and stack traces. Use offset=1, or omit it, to start from the '
+            f'beginning. Got offset={offset}.'
+        )
 
-    if offset >= total:
+    start = offset - 1 if offset is not None else 0
+    if start >= total:
+        if total == 0:
+            return '(empty file)\n'
         raise ValueError(f'Offset {offset} exceeds file length ({total} lines).')
 
-    selected = lines[offset : offset + limit]
-    numbered = [f'{i:>6}\t{line}' for i, line in enumerate(selected, start=offset + 1)]
+    selected = lines[start : start + limit]
+    numbered = [f'{i:>6}\t{line}' for i, line in enumerate(selected, start=start + 1)]
     result = ''.join(numbered)
     if not result.endswith('\n'):
         result += '\n'
 
-    remaining = total - (offset + len(selected))
+    remaining = total - (start + len(selected))
     if remaining > 0:
-        next_offset = offset + len(selected)
+        next_offset = start + len(selected) + 1
         result += f'... ({remaining} more lines. Use offset={next_offset} to continue reading.)\n'
 
     return result
@@ -320,12 +331,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         return resolved
 
     @_recoverable
-    async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
+    async def read_file(self, path: str, *, offset: int | None = None, limit: int | None = None) -> str:
         """Read a text file with line numbers.
 
         Args:
             path: File path relative to the root directory.
-            offset: Zero-based line offset to start reading from.
+            offset: 1-indexed line number to start reading from (matching `grep -n`,
+                editors, and stack traces). Omit to start from the first line.
             limit: Maximum number of lines to return (default: 2000).
 
         Returns:
