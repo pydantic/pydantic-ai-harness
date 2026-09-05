@@ -194,7 +194,7 @@ class TestThroughAnAgent:
         merged: list[str] = []
 
         @agent.tool_plain(requires_approval=True)
-        def merge_pr(number: int) -> str:
+        def merge_pr(number: int) -> str:  # pragma: no cover - the denial is what stops this running
             merged.append('merged')
             return 'merged'
 
