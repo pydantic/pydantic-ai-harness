@@ -307,6 +307,9 @@ class Memory(AbstractCapability[AgentDepsT]):
         max_search_files: int = 1_000,
         guidance: str | None = None,
         injection_errors: Literal['ignore', 'raise'] = 'ignore',
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
     ) -> Memory[AgentDepsT]:
         """Construct a memory capability from serializable options."""
         if backend != 'file' and directory != '.agent-memory':
@@ -340,6 +343,9 @@ class Memory(AbstractCapability[AgentDepsT]):
             max_search_files=max_search_files,
             guidance=guidance,
             injection_errors=injection_errors,
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
         )
 
     @classmethod
