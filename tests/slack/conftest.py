@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,7 +10,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.web.async_slack_response import AsyncSlackResponse
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.slack import SlackThread
+from pydantic_ai_harness.slack import SlackThread, bind_thread
 
 
 class _ActionBlock(TypedDict):
@@ -163,14 +163,20 @@ def slack_client() -> FakeSlackClient:
 
 
 @pytest.fixture
-def thread(slack_client: FakeSlackClient) -> SlackThread:
+def thread() -> SlackThread:
     return SlackThread(
-        client=slack_client,
         channel_id='C123',
         thread_ts='1700000000.000001',
         user_id='U0ASKER',
         team_id='T1',
     )
+
+
+@pytest.fixture
+def bound_thread(thread: SlackThread) -> Iterator[SlackThread]:
+    """A thread bound for the test, the way `SlackBot` binds one around a run."""
+    with bind_thread(thread):
+        yield thread
 
 
 def prompt_block_id(client: FakeSlackClient, index: int = 0) -> str:

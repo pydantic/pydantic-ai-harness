@@ -1,21 +1,23 @@
-"""Tools that let an agent talk to the Slack thread it is running in."""
+"""Tools that let an agent talk to Slack: the thread it is in, or a channel you named."""
 
 from __future__ import annotations
 
 import hmac
 import logging
 import secrets
+from collections.abc import Callable, Sequence
 from hashlib import sha256
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypeVar
 
 from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import ModelRetry
-from pydantic_ai.tools import RunContext
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._interactions import SlackInteractions
-from pydantic_ai_harness.slack._thread import SlackThread
+from pydantic_ai_harness.slack._thread import SlackThread, current_thread
 
 StepStatus = Literal['pending', 'running', 'done', 'failed']
 """State of one plan step, rendered as an icon in the posted checklist."""
@@ -37,6 +39,13 @@ _MAX_PLAN_STEPS = 20
 
 logger = logging.getLogger(__name__)
 
+SlackDepsT = TypeVar('SlackDepsT')
+"""The deps type a thread resolver reads. Its own variable because `AgentDepsT` is
+contravariant, which a resolver's parameter position cannot use here."""
+
+ThreadResolver = Callable[[RunContext[SlackDepsT]], 'SlackThread | None']
+"""Works out which Slack thread a run is talking to, from its run context."""
+
 
 class PlanStep(BaseModel):
     """One line of the checklist the agent shows while it works."""
@@ -45,37 +54,55 @@ class PlanStep(BaseModel):
     status: StepStatus = Field(default='pending', description='Where this step has got to.')
 
 
-class SlackChatToolset(FunctionToolset[SlackThread]):
+class SlackChatToolset(FunctionToolset[AgentDepsT]):
     """Tools for reporting progress, asking questions, and sending files in Slack.
 
-    The agent's `deps` must be a [`SlackThread`][pydantic_ai_harness.slack.SlackThread]
-    naming where the run is talking. Every tool posts into that thread, so one
-    `Agent` serves every conversation.
+    Prefer [`SlackChat`][pydantic_ai_harness.slack.SlackChat], which adds the
+    instructions that make these tools worth having. Use the toolset directly for
+    an agent whose own instructions already cover them.
+
+    Nothing here reads the agent's `deps`. Where a message goes is settled in this
+    order: the channel the model named, if the toolset was given a list of
+    channels it may name; then the thread the run is bound to; then the single
+    channel it was configured with.
 
     What the model chooses to say belongs here. Mechanical liveness -- a typing
     indicator, an error notice when a run fails -- belongs in the application,
     which knows those things without asking the model.
-
-    `upload_file` is only registered when `file_root` is set. Without it there is
-    no directory to judge a model-supplied path against, and uploading an
-    arbitrary path off the host is not a sensible default.
     """
 
     def __init__(
         self,
+        client: SlackClient | Callable[[], SlackClient],
         *,
+        channels: Sequence[str] = (),
+        thread: SlackThread | ThreadResolver[AgentDepsT] | None = None,
         interactions: SlackInteractions | None = None,
         file_root: Path | str | None = None,
     ) -> None:
-        """Configure which tools the agent gets.
+        """Configure where these tools post and which of them the agent gets.
 
         Args:
-            interactions: Shared prompt registry backing `ask_user`. Omit to leave
+            client: Slack client every call goes through, or a callable
+                returning one. A callable is not called until a tool first posts,
+                so building the toolset needs no credentials.
+            channels: Channels the model may name, by `#name` or id. With one, it
+                is where messages go by default. With several, the model picks.
+                Empty means the agent can only talk in the thread it is in.
+            thread: The thread to post in, or a callable working it out from the
+                run context. Omit to use whatever
+                [`bind_thread`][pydantic_ai_harness.slack.bind_thread] set, which
+                is what `SlackBot` does for an inbound message.
+            interactions: Prompt registry backing `ask_user`. Omit to leave
                 `ask_user` unregistered, which is right for an agent that should
                 never block waiting for a person.
             file_root: Directory that `upload_file` may read from. Paths outside it
                 are refused. Omit to leave `upload_file` unregistered.
         """
+        self._client_source = client
+        self._client: SlackClient | None = None
+        self._channels = tuple(channels)
+        self._thread = thread
         self._interactions = interactions
         self._file_root = Path(file_root).expanduser().resolve() if file_root is not None else None
         # Plan ids go out to the model and come back, so they are signed. That
@@ -93,12 +120,46 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         if self._file_root is not None:
             self.add_function(self.upload_file)
 
-    async def post_message(self, ctx: RunContext[SlackThread], text: str) -> str:
-        """Post a message into the Slack thread now, without ending your turn.
+    def _get_client(self) -> SlackClient:
+        if self._client is None:
+            source = self._client_source
+            self._client = source() if callable(source) else source
+        return self._client
+
+    def _destination(self, ctx: RunContext[AgentDepsT], channel: str | None) -> SlackThread:
+        """Where a call posts, given the channel the model asked for, if any."""
+        if channel is not None:
+            if channel not in self._channels:
+                raise ModelRetry(
+                    f'{channel!r} is not a channel you can post to. '
+                    + (
+                        f'You can post to: {", ".join(self._channels)}.'
+                        if self._channels
+                        else 'Leave channel unset to post where this conversation is happening.'
+                    )
+                )
+            return SlackThread(channel_id=channel)
+        thread = self._thread(ctx) if callable(self._thread) else self._thread
+        thread = thread if thread is not None else current_thread()
+        if thread is not None:
+            return thread
+        if len(self._channels) == 1:
+            return SlackThread(channel_id=self._channels[0])
+        if self._channels:
+            raise ModelRetry(f'Say which channel to post to: {", ".join(self._channels)}.')
+        raise ModelRetry(
+            'This agent is not connected to a Slack conversation, so there is nowhere to post. '
+            'Answer normally instead of using the Slack tools.'
+        )
+
+    async def post_message(self, ctx: RunContext[AgentDepsT], text: str, channel: str | None = None) -> str:
+        """Post a message into Slack now, without ending your turn.
 
         Use this to report something worth knowing while you keep working: what
         you found, what you are about to do, why you changed approach. Your final
         answer is delivered separately, so do not repeat it here.
+
+        Leave `channel` unset to post where this conversation is happening.
         """
         if not text.strip():
             raise ModelRetry('Message text cannot be empty.')
@@ -107,11 +168,17 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
                 f'That message is {len(text)} characters and Slack takes at most {MAX_MESSAGE_CHARS}. '
                 'Send it as several shorter messages, or put the long form in a file.'
             )
-        thread = ctx.deps
-        await thread.client.chat_postMessage(channel=thread.channel_id, thread_ts=thread.thread_ts, text=text)
+        thread = self._destination(ctx, channel)
+        await self._get_client().chat_postMessage(channel=thread.channel_id, thread_ts=thread.thread_ts, text=text)
         return 'Posted.'
 
-    async def post_plan(self, ctx: RunContext[SlackThread], steps: list[PlanStep], plan_id: str | None = None) -> str:
+    async def post_plan(
+        self,
+        ctx: RunContext[AgentDepsT],
+        steps: list[PlanStep],
+        plan_id: str | None = None,
+        channel: str | None = None,
+    ) -> str:
         """Show the checklist of what you are doing, or update one you posted.
 
         Call it with the whole plan before starting multi-step work. It returns a
@@ -123,7 +190,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
             raise ModelRetry('A plan needs at least one step.')
         if len(steps) > _MAX_PLAN_STEPS:
             raise ModelRetry(f'Keep the plan to {_MAX_PLAN_STEPS} steps or fewer; group the smaller ones.')
-        thread = ctx.deps
+        thread = self._destination(ctx, channel)
         text = '\n'.join(f'{_STATUS_ICONS[step.status]} {step.text}' for step in steps)
         if len(text) > MAX_MESSAGE_CHARS:
             raise ModelRetry(
@@ -131,44 +198,48 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
                 'Say each step in a few words.'
             )
         if plan_id is not None:
-            timestamp = self._plan_timestamp(ctx, plan_id)
+            timestamp = self._plan_timestamp(ctx, thread, plan_id)
             if timestamp is None:
                 raise ModelRetry(f'{plan_id!r} is not a plan you posted here. Post the plan again with no plan_id.')
-            await thread.client.chat_update(channel=thread.channel_id, ts=timestamp, text=text)
+            await self._get_client().chat_update(channel=thread.channel_id, ts=timestamp, text=text)
             return f'Plan updated. Its plan_id is still {plan_id!r}.'
-        response = await thread.client.chat_postMessage(
+        response = await self._get_client().chat_postMessage(
             channel=thread.channel_id, thread_ts=thread.thread_ts, text=text
         )
         timestamp = response.get('ts')
         if not isinstance(timestamp, str):
             return 'Plan posted, but Slack gave no id for it, so post a fresh plan rather than updating this one.'
-        return f'Plan posted. To update it, call post_plan again with plan_id={self._plan_id(ctx, timestamp)!r}.'
+        return (
+            f'Plan posted. To update it, call post_plan again with plan_id={self._plan_id(ctx, thread, timestamp)!r}.'
+        )
 
-    def _plan_id(self, ctx: RunContext[SlackThread], timestamp: str) -> str:
+    def _plan_id(self, ctx: RunContext[AgentDepsT], thread: SlackThread, timestamp: str) -> str:
         # Signed over the run as well as the thread: a plan id stays in the
         # transcript, so binding it to the thread alone would let the next turn
         # edit the checklist this one posted instead of showing its own.
-        issued_for = f'{ctx.deps.key}\x00{ctx.run_id}\x00{timestamp}'
+        issued_for = f'{thread.key}\x00{ctx.run_id}\x00{timestamp}'
         return f'{timestamp}.{hmac.new(self._plan_key, issued_for.encode(), sha256).hexdigest()[:16]}'
 
-    def _plan_timestamp(self, ctx: RunContext[SlackThread], plan_id: str) -> str | None:
+    def _plan_timestamp(self, ctx: RunContext[AgentDepsT], thread: SlackThread, plan_id: str) -> str | None:
         """The message this plan id names, or `None` if this run did not post it."""
         # Slack timestamps contain a dot, so split on the last one.
         timestamp, _, _signature = plan_id.rpartition('.')
-        if timestamp and self._plan_id(ctx, timestamp) == plan_id:
+        if timestamp and self._plan_id(ctx, thread, timestamp) == plan_id:
             return timestamp
         return None
 
-    async def set_status(self, ctx: RunContext[SlackThread], status: str) -> str:
+    async def set_status(self, ctx: RunContext[AgentDepsT], status: str) -> str:
         """Set the short working-state line shown next to your name.
 
         For example `reading the deploy logs`. It is replaced by your next status
         and is not part of the conversation, so use it for the current activity
         only.
         """
-        thread = ctx.deps
+        thread = self._destination(ctx, None)
+        if thread.thread_ts is None:
+            return 'Status is not available in this conversation; carry on without it.'
         try:
-            await thread.client.assistant_threads_setStatus(
+            await self._get_client().assistant_threads_setStatus(
                 channel_id=thread.channel_id, thread_ts=thread.thread_ts, status=status
             )
         except Exception:
@@ -181,7 +252,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
             return 'Status is not available in this conversation; carry on without it.'
         return 'Status set.'
 
-    async def ask_user(self, ctx: RunContext[SlackThread], question: str, options: list[str]) -> str:
+    async def ask_user(self, ctx: RunContext[AgentDepsT], question: str, options: list[str]) -> str:
         """Ask the person a multiple-choice question and wait for them to answer.
 
         Use it when you genuinely cannot proceed without a decision that is theirs
@@ -190,8 +261,9 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         """
         if self._interactions is None:  # pragma: no cover - not registered without interactions
             raise ModelRetry('Asking the user is not enabled for this agent.')
+        thread = self._destination(ctx, None)
         try:
-            answer = await self._interactions.ask(ctx.deps, question, options)
+            answer = await self._interactions.ask(self._get_client(), thread, question, options)
         except ValueError as error:
             # The model chose these options, so an unusable set is something it can
             # fix. Only the validation `ask` does up front raises `ValueError`.
@@ -202,12 +274,13 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
 
     async def upload_file(
         self,
-        ctx: RunContext[SlackThread],
+        ctx: RunContext[AgentDepsT],
         path: str,
         title: str | None = None,
         comment: str | None = None,
+        channel: str | None = None,
     ) -> str:
-        """Send a file you produced into the thread.
+        """Send a file you produced into Slack.
 
         Prefer this over pasting long output into a message: a spreadsheet, a
         report, a diff, or an image reads far better as a file. `path` must be
@@ -220,8 +293,8 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
             raise ModelRetry(f'{path} is outside the directory you may send files from.')
         if not resolved.is_file():
             raise ModelRetry(f'There is no file at {path}. Write it first, then send it.')
-        thread = ctx.deps
-        await thread.client.files_upload_v2(
+        thread = self._destination(ctx, channel)
+        await self._get_client().files_upload_v2(
             channel=thread.channel_id,
             thread_ts=thread.thread_ts,
             file=str(resolved),

@@ -1,4 +1,4 @@
-"""A ready-made Slack app that serves a Pydantic AI agent over Socket Mode."""
+"""A ready-made Slack app that serves a Pydantic AI agent, over Socket Mode or HTTP."""
 
 from __future__ import annotations
 
@@ -6,17 +6,20 @@ import logging
 import os
 import re
 from collections import OrderedDict
-from collections.abc import Collection, Mapping
-from typing import Protocol
+from collections.abc import Callable, Collection, Mapping
+from typing import Generic, Protocol, TypeVar
 from weakref import WeakValueDictionary
 
 import anyio
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.capabilities import AbstractCapability
 
-from pydantic_ai_harness.slack._interactions import PROMPT_ACTION_PREFIX, SlackInteractions
+from pydantic_ai_harness.slack._capability import SlackChat
+from pydantic_ai_harness.slack._client import SlackClient
+from pydantic_ai_harness.slack._interactions import PROMPT_ACTION_PREFIX
 from pydantic_ai_harness.slack._store import ConversationStore, InMemoryConversationStore
-from pydantic_ai_harness.slack._thread import SlackThread
+from pydantic_ai_harness.slack._thread import SlackThread, bind_thread
 from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS
 
 try:
@@ -30,6 +33,10 @@ except ImportError as _import_error:  # pragma: no cover
     ) from _import_error
 
 logger = logging.getLogger(__name__)
+
+BotDepsT = TypeVar('BotDepsT')
+"""The deps type the served agent takes. Its own variable because `BotDepsT` is
+contravariant, and `SlackBot` builds deps as well as passing them."""
 
 _MAPPING_ADAPTER = TypeAdapter(dict[str, object])
 _ACTION_LIST_ADAPTER = TypeAdapter(list[dict[str, object]])
@@ -76,15 +83,20 @@ second run. Slack retries three times, minutes apart at most, so this is far mor
 history than it takes to recognise one."""
 
 
-class SlackBot:
+class SlackBot(Generic[BotDepsT]):
     """Serve one Pydantic AI agent as a Slack bot.
 
-    DMs and channel mentions start a run, history is kept per thread, prompts
-    posted by `ask_user` and by approval handling resolve through the same
-    registry, and the agent's text output is posted back into the thread.
+    DMs and channel mentions start a run, history is kept per thread, and the
+    agent's text output is posted back into the thread.
 
-    The agent's `deps` type must be
-    [`SlackThread`][pydantic_ai_harness.slack.SlackThread].
+    Any agent works, whatever its `deps` type. The thread a run is answering is
+    bound around the run rather than passed as `deps`, so
+    [`SlackChat`][pydantic_ai_harness.slack.SlackChat] posts to the right place
+    and the agent keeps the deps it already had.
+
+    Button clicks route themselves: the bot finds the `SlackChat` on the agent
+    and hands clicks to it, so `ask_user` and approvals work with nothing wired
+    up by hand.
 
     Slack can reach the bot two ways, and only the last line differs:
 
@@ -107,10 +119,11 @@ class SlackBot:
 
     def __init__(
         self,
-        agent: AbstractAgent[SlackThread, str],
+        agent: AbstractAgent[BotDepsT, str],
         *,
+        deps: BotDepsT = None,
+        deps_factory: Callable[[SlackThread], BotDepsT] | None = None,
         store: ConversationStore | None = None,
-        interactions: SlackInteractions | None = None,
         bot_token: str | None = None,
         app_token: str | None = None,
         signing_secret: str | None = None,
@@ -120,11 +133,17 @@ class SlackBot:
         """Configure the app without connecting.
 
         Args:
-            agent: A text-output agent whose deps type is `SlackThread`.
+            agent: Any text-output agent. Its deps type does not matter.
+            deps: Passed to the agent as `deps` for every thread. Agents that
+                take no deps can leave it unset.
+            deps_factory: Builds the deps for one run from the
+                [`SlackThread`][pydantic_ai_harness.slack.SlackThread] it is
+                answering, for deps that differ per channel or per person. Kept
+                separate from `deps` rather than accepting either in one argument,
+                so a deps object that happens to be callable is not mistaken for a
+                factory.
             store: Where thread history lives. Defaults to process memory, which
                 is lost on restart.
-            interactions: Prompt registry shared with the chat toolset and any
-                approval handler. Pass the same instance you gave those.
             bot_token: Bot token (`xoxb-`). Defaults to `SLACK_BOT_TOKEN`.
             app_token: App-level token (`xapp-`) with `connections:write`.
                 Defaults to `SLACK_APP_TOKEN`. Only [`run`][pydantic_ai_harness.slack.SlackBot.run]
@@ -140,13 +159,18 @@ class SlackBot:
             error_reply: Posted in the thread when a run raises.
 
         Raises:
-            ValueError: If `bot_token` is missing, or `allowed_user_ids` is a
-                string rather than a collection of ids.
+            ValueError: If `bot_token` is missing, both `deps` and `deps_factory`
+                were given, or `allowed_user_ids` is a string rather than a
+                collection of ids.
         """
         self._agent = agent
+        if deps is not None and deps_factory is not None:
+            raise ValueError('Pass deps or deps_factory, not both.')
+        self._deps = deps
+        self._deps_factory = deps_factory
         self._store = store if store is not None else InMemoryConversationStore()
-        self._interactions = interactions
         self._error_reply = error_reply
+        self._chat = _find_chat(agent.root_capability)
 
         bot = bot_token or os.environ.get('SLACK_BOT_TOKEN')
         if not bot:
@@ -174,8 +198,19 @@ class SlackBot:
         # Slack retries an event it thinks was not delivered, and a retried
         # mention would start a second run with the same side effects.
         self._handled_events: OrderedDict[str, None] = OrderedDict()
+        # The capability posts through its own client. Handing it this token
+        # means an agent set up for Slack does not need SLACK_BOT_TOKEN as well
+        # when the bot was given its token directly.
+        if self._chat is not None and self._chat.client is None and self._chat.token is None:
+            self._chat.token = bot
         self.app = AsyncApp(token=bot, signing_secret=self._signing_secret)
         self._register_listeners()
+
+    def _deps_for(self, thread: SlackThread) -> BotDepsT:
+        """The deps this run gets, built for this thread when a factory was given."""
+        if self._deps_factory is not None:
+            return self._deps_factory(thread)
+        return self._deps
 
     def _register_listeners(self) -> None:
         # Bolt ships no type information for its decorators, so registration is
@@ -234,11 +269,12 @@ class SlackBot:
 
         Call it from your own action handler when you build the Bolt app
         yourself. Returns `False` when the click changed nothing, which covers an
-        expired prompt, a repeat click, and a person not allowed to answer.
+        expired prompt, a repeat click, a person not allowed to answer, and an
+        agent with no `SlackChat` that asks anything.
         """
-        if self._interactions is None:
+        if self._chat is None:
             return False
-        return self._interactions.resolve(block_id=block_id, value=value, user_id=user_id)
+        return self._chat.resolve_prompt(block_id=block_id, value=value, user_id=user_id)
 
     async def handle_message(
         self,
@@ -288,7 +324,6 @@ class SlackBot:
 
         thread_ts = _string(event, 'thread_ts')
         thread = SlackThread(
-            client=client,
             channel_id=channel_id,
             thread_ts=thread_ts or timestamp,
             user_id=user_id,
@@ -299,7 +334,7 @@ class SlackBot:
         # adding to rather than racing it for the same history.
         lock = self._locks.setdefault(thread.key, anyio.Lock())
         async with lock:
-            await self._run_turn(thread, prompt)
+            await self._run_turn(client, thread, prompt)
 
     def _already_handled(self, event_id: str) -> bool:
         """True when this event has been delivered before. Records it either way."""
@@ -310,30 +345,33 @@ class SlackBot:
             self._handled_events.popitem(last=False)
         return False
 
-    async def _run_turn(self, thread: SlackThread, prompt: str) -> None:
+    async def _run_turn(self, client: SlackClient, thread: SlackThread, prompt: str) -> None:
         try:
             history = await self._store.load(thread.key)
-            result = await self._agent.run(
-                prompt,
-                deps=thread,
-                conversation_id=thread.key,
-                message_history=list(history) or None,
-            )
+            # Bound rather than passed as deps, so the agent's own deps are
+            # untouched and `SlackChat` still knows where it is talking.
+            with bind_thread(thread):
+                result = await self._agent.run(
+                    prompt,
+                    deps=self._deps_for(thread),
+                    conversation_id=thread.key,
+                    message_history=list(history) or None,
+                )
             if result.output.strip():
-                await self._post(thread, result.output)
+                await self._post(client, thread, result.output)
             # Saved only once the reply is out. Saving first would leave the next
             # turn building on an answer nobody in the thread ever saw.
             await self._store.save(thread.key, result.all_messages())
         except Exception:
             logger.exception('Slack agent run failed in %s', thread.key)
             try:
-                await self._post(thread, self._error_reply)
+                await self._post(client, thread, self._error_reply)
             except Exception:
                 logger.exception('Could not post the error reply in %s', thread.key)
 
-    async def _post(self, thread: SlackThread, text: str) -> None:
+    async def _post(self, client: SlackClient, thread: SlackThread, text: str) -> None:
         for start in range(0, len(text), MAX_MESSAGE_CHARS):
-            await thread.client.chat_postMessage(
+            await client.chat_postMessage(
                 channel=thread.channel_id,
                 thread_ts=thread.thread_ts,
                 text=text[start : start + MAX_MESSAGE_CHARS],
@@ -380,3 +418,26 @@ class SlackBot:
     def run(self) -> None:
         """Start Socket Mode and block. The synchronous entry point for a script."""
         anyio.run(self.start)
+
+
+def _find_chat(root: AbstractCapability[BotDepsT]) -> SlackChat[BotDepsT] | None:
+    """The agent's `SlackChat`, so clicks and the bot token can reach it.
+
+    Walks the whole capability tree rather than the top level, so a `SlackChat`
+    inside a combined or wrapped capability is still found.
+    """
+    found: list[SlackChat[BotDepsT]] = []
+
+    def visit(capability: AbstractCapability[BotDepsT]) -> AbstractCapability[BotDepsT]:
+        if isinstance(capability, SlackChat):
+            found.append(capability)
+        return capability
+
+    root.visit_and_replace(visit)
+    if len(found) > 1:
+        logger.warning(
+            'The agent has %d SlackChat capabilities; button clicks are routed to the first. '
+            'Use one SlackChat, or pass the same interactions= to each.',
+            len(found),
+        )
+    return found[0] if found else None

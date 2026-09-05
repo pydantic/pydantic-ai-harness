@@ -6,11 +6,10 @@ and one unknown anywhere in a signature makes the whole method partially
 unknown, so strict Pyright reports every call through `AsyncWebClient`.
 
 Naming the four methods used here fixes that without a suppression at each call,
-and it checks more than suppressions did: a real `AsyncWebClient` is verified
-against this protocol wherever one is assigned to
-[`SlackThread.client`][pydantic_ai_harness.slack.SlackThread], so a method the
-SDK renames or retypes fails there. Keyword names are checked too, which a
-suppressed call is not -- the SDK's own `**kwargs` accepts anything.
+and it checks more than suppressions did: `default_client` returns a real
+`AsyncWebClient` as a `SlackClient`, so a method the SDK renames or retypes fails
+there. Keyword names are checked too, which a suppressed call is not -- the SDK's
+own `**kwargs` accepts anything.
 
 The signatures mirror `AsyncWebClient`'s, so a real client satisfies this as-is
 and nothing has to be wrapped or adapted.
@@ -18,10 +17,12 @@ and nothing has to be wrapped or adapted.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from typing import Any, Protocol
 
 try:
+    from slack_sdk.web.async_client import AsyncWebClient
     from slack_sdk.web.async_slack_response import AsyncSlackResponse
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -83,3 +84,15 @@ class SlackClient(Protocol):
     ) -> AsyncSlackResponse:
         """Set the working-state line shown in an agent or assistant thread."""
         ...  # pragma: no cover
+
+
+def default_client(token: str | None = None) -> SlackClient:
+    """Build a Slack client from a bot token, defaulting to `SLACK_BOT_TOKEN`.
+
+    Raises:
+        ValueError: If no token was given and the environment has none.
+    """
+    resolved = token or os.environ.get('SLACK_BOT_TOKEN')
+    if not resolved:
+        raise ValueError('A Slack bot token is required. Set SLACK_BOT_TOKEN, or pass token= or client= to SlackChat.')
+    return AsyncWebClient(token=resolved)

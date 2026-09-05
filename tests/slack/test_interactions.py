@@ -25,7 +25,7 @@ class TestAsk:
         async with anyio.create_task_group() as tg:
 
             async def ask() -> None:
-                answers.append(await interactions.ask(thread, 'Ship it?', ['Yes', 'No']))
+                answers.append(await interactions.ask(slack_client, thread, 'Ship it?', ['Yes', 'No']))
 
             tg.start_soon(ask)
             assert await _answer(interactions, slack_client, 'Yes', 'U0ASKER')
@@ -37,7 +37,7 @@ class TestAsk:
     ) -> None:
         interactions = SlackInteractions()
         async with anyio.create_task_group() as tg:
-            tg.start_soon(lambda: interactions.ask(thread, 'Pick', ['A', 'B', 'C']))
+            tg.start_soon(lambda: interactions.ask(slack_client, thread, 'Pick', ['A', 'B', 'C']))
             await _answer(interactions, slack_client, 'B', 'U0ASKER')
 
         post = slack_client.method_calls('chat_postMessage')[0]
@@ -51,7 +51,7 @@ class TestAsk:
     ) -> None:
         interactions = SlackInteractions()
         async with anyio.create_task_group() as tg:
-            tg.start_soon(lambda: interactions.ask(thread, 'Ship it?', ['Yes', 'No']))
+            tg.start_soon(lambda: interactions.ask(slack_client, thread, 'Ship it?', ['Yes', 'No']))
             await _answer(interactions, slack_client, 'No', 'U0ASKER')
 
         update = slack_client.method_calls('chat_update')[0]
@@ -62,7 +62,7 @@ class TestAsk:
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
         interactions = SlackInteractions(timeout_seconds=0.01)
-        assert await interactions.ask(thread, 'Ship it?', ['Yes', 'No']) is None
+        assert await interactions.ask(slack_client, thread, 'Ship it?', ['Yes', 'No']) is None
         assert 'expired' in str(slack_client.method_calls('chat_update')[0].kwargs['text'])
 
     async def test_raises_when_slack_returns_no_timestamp(
@@ -70,7 +70,7 @@ class TestAsk:
     ) -> None:
         slack_client.recorder.post_response = {'ok': True}
         with pytest.raises(SlackPromptError, match='did not return a timestamp'):
-            await SlackInteractions(timeout_seconds=0.01).ask(thread, 'Ship it?', ['Yes'])
+            await SlackInteractions(timeout_seconds=0.01).ask(slack_client, thread, 'Ship it?', ['Yes'])
 
     async def test_an_answer_survives_a_failure_to_tidy_the_buttons_away(
         self, thread: SlackThread, slack_client: FakeSlackClient
@@ -82,7 +82,7 @@ class TestAsk:
         async with anyio.create_task_group() as tg:
 
             async def ask() -> None:
-                answers.append(await interactions.ask(thread, 'Ship it?', ['Yes', 'No']))
+                answers.append(await interactions.ask(slack_client, thread, 'Ship it?', ['Yes', 'No']))
 
             tg.start_soon(ask)
             assert await _answer(interactions, slack_client, 'Yes', 'U0ASKER')
@@ -95,8 +95,8 @@ class TestAsk:
         # A counter would restart with the process, so a button left over from a
         # previous run could answer the first prompt of the next one.
         interactions = SlackInteractions(timeout_seconds=0.01)
-        await interactions.ask(thread, 'First?', ['Yes'])
-        await interactions.ask(thread, 'Second?', ['Yes'])
+        await interactions.ask(slack_client, thread, 'First?', ['Yes'])
+        await interactions.ask(slack_client, thread, 'Second?', ['Yes'])
         first, second = prompt_block_id(slack_client, 0), prompt_block_id(slack_client, 1)
         assert first != second
         assert thread.key not in first
@@ -104,8 +104,8 @@ class TestAsk:
     async def test_second_prompt_waits_for_the_first(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         interactions = SlackInteractions(timeout_seconds=0.01)
         async with anyio.create_task_group() as tg:
-            tg.start_soon(lambda: interactions.ask(thread, 'First?', ['Yes']))
-            tg.start_soon(lambda: interactions.ask(thread, 'Second?', ['Yes']))
+            tg.start_soon(lambda: interactions.ask(slack_client, thread, 'First?', ['Yes']))
+            tg.start_soon(lambda: interactions.ask(slack_client, thread, 'Second?', ['Yes']))
 
         posted = [str(call.kwargs['text']) for call in slack_client.method_calls('chat_postMessage')]
         assert posted == ['First?', 'Second?']
@@ -130,15 +130,19 @@ class TestAskValidation:
             (['x' * 76], 'between 1 and 75'),
         ],
     )
-    async def test_rejects_unusable_options(self, thread: SlackThread, options: list[str], message: str) -> None:
+    async def test_rejects_unusable_options(
+        self, thread: SlackThread, slack_client: FakeSlackClient, options: list[str], message: str
+    ) -> None:
         with pytest.raises(ValueError, match=message):
-            await SlackInteractions().ask(thread, 'Pick', options)
+            await SlackInteractions().ask(slack_client, thread, 'Pick', options)
 
-    async def test_rejects_an_allowlist_passed_as_a_string(self, thread: SlackThread) -> None:
+    async def test_rejects_an_allowlist_passed_as_a_string(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
         with pytest.raises(ValueError, match='not a string'):
-            await SlackInteractions().ask(thread, 'Pick', ['A'], allowed_user_ids='U0REVIEWER')
+            await SlackInteractions().ask(slack_client, thread, 'Pick', ['A'], allowed_user_ids='U0REVIEWER')
 
-    def test_rejects_a_non_positive_timeout(self) -> None:
+    def test_rejects_a_non_positive_timeout(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         with pytest.raises(ValueError, match='timeout_seconds must be positive'):
             SlackInteractions(timeout_seconds=0)
 
@@ -156,7 +160,7 @@ class TestResolve:
     ) -> None:
         interactions = SlackInteractions(timeout_seconds=0.05)
         async with anyio.create_task_group() as tg:
-            tg.start_soon(lambda: interactions.ask(thread, 'Ship it?', ['Yes', 'No']))
+            tg.start_soon(lambda: interactions.ask(slack_client, thread, 'Ship it?', ['Yes', 'No']))
             assert await _answer(interactions, slack_client, value, user_id) is False
 
     async def test_ignores_a_second_click_on_an_answered_prompt(
@@ -164,7 +168,7 @@ class TestResolve:
     ) -> None:
         interactions = SlackInteractions()
         async with anyio.create_task_group() as tg:
-            tg.start_soon(lambda: interactions.ask(thread, 'Ship it?', ['Yes', 'No']))
+            tg.start_soon(lambda: interactions.ask(slack_client, thread, 'Ship it?', ['Yes', 'No']))
             while not slack_client.method_calls('chat_postMessage'):
                 await anyio.sleep(0)
             block_id = prompt_block_id(slack_client)
@@ -180,7 +184,9 @@ class TestResolve:
         async with anyio.create_task_group() as tg:
 
             async def ask() -> None:
-                answers.append(await interactions.ask(thread, 'Ship it?', ['Yes'], allowed_user_ids=['U0REVIEWER']))
+                answers.append(
+                    await interactions.ask(slack_client, thread, 'Ship it?', ['Yes'], allowed_user_ids=['U0REVIEWER'])
+                )
 
             tg.start_soon(ask)
             assert await _answer(interactions, slack_client, 'Yes', 'U0ASKER') is False

@@ -14,6 +14,7 @@ from weakref import WeakValueDictionary
 
 import anyio
 
+from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._thread import SlackThread
 
 PROMPT_ACTION_PREFIX = 'pydantic_ai_harness_slack_prompt:'
@@ -78,6 +79,7 @@ class SlackInteractions:
 
     async def ask(
         self,
+        client: SlackClient,
         thread: SlackThread,
         question: str,
         options: Sequence[str],
@@ -93,8 +95,9 @@ class SlackInteractions:
 
         Raises:
             ValueError: If `options` is empty, exceeds Slack's limits, contains
-                duplicates that would make the answer ambiguous, or
-                `allowed_user_ids` is a string rather than a collection of ids.
+                duplicates that would make the answer ambiguous, `allowed_user_ids`
+                is a string rather than a collection of ids, or nobody is allowed
+                to answer because the thread names no user.
             SlackPromptError: If Slack did not identify the message it posted.
         """
         choices = tuple(options)
@@ -110,13 +113,22 @@ class SlackInteractions:
 
         if isinstance(allowed_user_ids, str):
             raise ValueError('allowed_user_ids must be a collection of user ids, not a string')
-        allowed = frozenset(allowed_user_ids) if allowed_user_ids is not None else frozenset({thread.user_id})
+        if allowed_user_ids is not None:
+            allowed = frozenset(allowed_user_ids)
+        elif thread.user_id is not None:
+            allowed = frozenset({thread.user_id})
+        else:
+            raise ValueError(
+                'There is nobody to ask: this thread names no user, and no allowed_user_ids were given. '
+                'Prompts only work in a conversation someone started.'
+            )
         lock = self._locks.setdefault(thread.key, anyio.Lock())
         async with lock:
-            return await self._ask_once(thread, question, choices, allowed)
+            return await self._ask_once(client, thread, question, choices, allowed)
 
     async def _ask_once(
         self,
+        client: SlackClient,
         thread: SlackThread,
         question: str,
         choices: tuple[str, ...],
@@ -126,7 +138,7 @@ class SlackInteractions:
         # left over from a previous run would resolve the first prompt of the new
         # one -- an old Approve click answering an unrelated question.
         token = secrets.token_urlsafe(16)
-        response = await thread.client.chat_postMessage(
+        response = await client.chat_postMessage(
             channel=thread.channel_id,
             thread_ts=thread.thread_ts,
             text=question,
@@ -148,7 +160,7 @@ class SlackInteractions:
 
         answer = pending.answer
         try:
-            await thread.client.chat_update(
+            await client.chat_update(
                 channel=thread.channel_id,
                 ts=timestamp,
                 text=_settled_text(question, answer, pending.answered_by),

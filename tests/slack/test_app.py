@@ -2,21 +2,26 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, TypeVar
 
 import anyio
 import pytest
 from pydantic_ai import Agent
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 
 import pydantic_ai_harness.slack as slack_package
 import pydantic_ai_harness.slack._app as app_module
+from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.slack import (
     InMemoryConversationStore,
     SlackBot,
+    SlackChat,
     SlackInteractions,
     SlackThread,
+    current_thread,
 )
 
 from .conftest import FakeSlackClient
@@ -24,6 +29,19 @@ from .conftest import FakeSlackClient
 pytestmark = pytest.mark.anyio
 
 Handler = Callable[..., Any]
+
+DepsT = TypeVar('DepsT')
+
+
+@dataclass
+class Warehouse:
+    """Deps an agent already had before anyone thought about Slack."""
+
+    dsn: str
+
+
+def warehouse_for(thread: SlackThread) -> Warehouse:
+    return Warehouse(dsn=f'postgres://{thread.channel_id}')
 
 
 @dataclass
@@ -66,14 +84,14 @@ def bolt(monkeypatch: pytest.MonkeyPatch) -> Callable[[], FakeBoltApp]:
 
 
 @pytest.fixture
-def slack_agent_with_store(agent: Agent[SlackThread, str]) -> tuple[SlackBot, InMemoryConversationStore]:
+def slack_agent_with_store(agent: Agent[None, str]) -> tuple[SlackBot[None], InMemoryConversationStore]:
     store = InMemoryConversationStore()
     return build(agent, store=store), store
 
 
 @pytest.fixture
-def agent() -> Agent[SlackThread, str]:
-    return Agent(TestModel(custom_output_text='done'), deps_type=SlackThread)
+def agent() -> Agent[None, str]:
+    return Agent(TestModel(custom_output_text='done'))
 
 
 def message(**overrides: object) -> dict[str, object]:
@@ -88,7 +106,15 @@ def message(**overrides: object) -> dict[str, object]:
     return event
 
 
-def build(agent: Agent[SlackThread, str], **kwargs: object) -> SlackBot:
+def asking(interactions: SlackInteractions, client: FakeSlackClient) -> Agent[None, str]:
+    """An agent whose `SlackChat` is where the bot should find the registry."""
+    return Agent(
+        TestModel(custom_output_text='done'),
+        capabilities=[SlackChat(client=client, ask_user=True, interactions=interactions)],
+    )
+
+
+def build(agent: Agent[DepsT, str], **kwargs: object) -> SlackBot[DepsT]:
     defaults: dict[str, object] = {'bot_token': 'xoxb-t', 'app_token': 'xapp-t', 'allowed_user_ids': ['U0ASKER']}
     defaults.update(kwargs)
     return SlackBot(agent, **defaults)  # pyright: ignore[reportArgumentType]
@@ -107,7 +133,7 @@ class TestLazyExport:
 
 class TestConfiguration:
     def test_reads_tokens_from_the_environment(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp], monkeypatch: pytest.MonkeyPatch
+        self, agent: Agent[None, str], bolt: Callable[[], FakeBoltApp], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv('SLACK_BOT_TOKEN', 'xoxb-env')
         monkeypatch.setenv('SLACK_APP_TOKEN', 'xapp-env')
@@ -116,15 +142,13 @@ class TestConfiguration:
         assert bolt().token == 'xoxb-env'
         assert slack_agent._allowed_user_ids == frozenset({'U1', 'U2'})  # pyright: ignore[reportPrivateUsage]
 
-    def test_a_missing_bot_token_is_refused(
-        self, agent: Agent[SlackThread, str], monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_a_missing_bot_token_is_refused(self, agent: Agent[None, str], monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
         with pytest.raises(ValueError, match='SLACK_BOT_TOKEN'):
             SlackBot(agent, app_token='xapp-t')
 
     async def test_socket_mode_asks_for_its_token_only_when_started(
-        self, agent: Agent[SlackThread, str], monkeypatch: pytest.MonkeyPatch
+        self, agent: Agent[None, str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # An Events API deployment has no app token and must still construct.
         monkeypatch.delenv('SLACK_APP_TOKEN', raising=False)
@@ -133,7 +157,7 @@ class TestConfiguration:
             await bot.start()
 
     def test_the_events_api_asks_for_its_secret_only_when_mounted(
-        self, agent: Agent[SlackThread, str], monkeypatch: pytest.MonkeyPatch
+        self, agent: Agent[None, str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # And a Socket Mode deployment has no signing secret.
         monkeypatch.delenv('SLACK_SIGNING_SECRET', raising=False)
@@ -141,19 +165,17 @@ class TestConfiguration:
         with pytest.raises(ValueError, match='SLACK_SIGNING_SECRET'):
             bot.http_app()
 
-    def test_the_signing_secret_reaches_bolt(
-        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str]
-    ) -> None:
+    def test_the_signing_secret_reaches_bolt(self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str]) -> None:
         build(agent, signing_secret='shhh')
         assert bolt().signing_secret == 'shhh'
 
-    def test_a_string_allowlist_is_refused(self, agent: Agent[SlackThread, str]) -> None:
+    def test_a_string_allowlist_is_refused(self, agent: Agent[None, str]) -> None:
         with pytest.raises(ValueError, match='not a string'):
             build(agent, allowed_user_ids='U0ASKER')
 
     def test_an_empty_allowlist_warns(
         self,
-        agent: Agent[SlackThread, str],
+        agent: Agent[None, str],
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -162,7 +184,7 @@ class TestConfiguration:
         assert 'anyone who can reach this bot' in caplog.text
 
     def test_registers_the_listeners_a_slack_agent_needs(
-        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str]
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str]
     ) -> None:
         build(agent)
         assert set(bolt().events) == {'app_mention', 'message'}
@@ -171,7 +193,7 @@ class TestConfiguration:
 
 class TestHandleMessage:
     async def test_runs_the_agent_and_replies_in_the_thread(
-        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+        self, agent: Agent[None, str], slack_client: FakeSlackClient
     ) -> None:
         await build(agent).handle_message(message(), slack_client, bot_user_id='U0BOT')
         call = slack_client.method_calls('chat_postMessage')[0]
@@ -179,14 +201,14 @@ class TestHandleMessage:
         assert call.kwargs['thread_ts'] == '1700000000.000001'
 
     async def test_a_reply_continues_the_thread_it_arrived_in(
-        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+        self, agent: Agent[None, str], slack_client: FakeSlackClient
     ) -> None:
         event = message(ts='1700000000.000009', thread_ts='1700000000.000001')
         await build(agent).handle_message(event, slack_client, bot_user_id='U0BOT')
         assert slack_client.method_calls('chat_postMessage')[0].kwargs['thread_ts'] == '1700000000.000001'
 
     async def test_history_accumulates_across_turns_in_one_thread(
-        self, slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore], slack_client: FakeSlackClient
+        self, slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore], slack_client: FakeSlackClient
     ) -> None:
         slack_agent, store = slack_agent_with_store
         await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
@@ -195,7 +217,7 @@ class TestHandleMessage:
         assert len(await store.load('T1:C123:1700000000.000001')) == 4
 
     async def test_a_separate_thread_keeps_its_own_history(
-        self, slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore], slack_client: FakeSlackClient
+        self, slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore], slack_client: FakeSlackClient
     ) -> None:
         slack_agent, store = slack_agent_with_store
         await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
@@ -204,15 +226,16 @@ class TestHandleMessage:
         assert len(await store.load('T1:C123:1700000000.000002')) == 2
 
     async def test_only_the_bots_own_mention_is_stripped(
-        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+        self, agent: Agent[None, str], slack_client: FakeSlackClient
     ) -> None:
         captured: list[str] = []
-        recording = Agent(TestModel(custom_output_text='done'), deps_type=SlackThread)
 
-        @recording.instructions
-        def remember(ctx: RunContext[SlackThread]) -> str:
-            captured.append(ctx.prompt if isinstance(ctx.prompt, str) else '')
-            return ''
+        def remember(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            part = messages[-1].parts[-1]
+            captured.append(part.content if isinstance(part, UserPromptPart) and isinstance(part.content, str) else '')
+            return ModelResponse(parts=[TextPart('done')])
+
+        recording: Agent[None, str] = Agent(FunctionModel(remember))
 
         event = message(text='<@U0BOT> ask <@U0ALICE> about the deploy')
         await build(recording).handle_message(event, slack_client, bot_user_id='U0BOT')
@@ -245,7 +268,7 @@ class TestHandleMessage:
     )
     async def test_ignores(
         self,
-        agent: Agent[SlackThread, str],
+        agent: Agent[None, str],
         slack_client: FakeSlackClient,
         event: dict[str, object],
     ) -> None:
@@ -253,24 +276,24 @@ class TestHandleMessage:
         assert slack_client.calls == []
 
     async def test_an_empty_answer_posts_nothing(self, slack_client: FakeSlackClient) -> None:
-        quiet = Agent(TestModel(custom_output_text='   '), deps_type=SlackThread)
+        quiet = Agent(TestModel(custom_output_text='   '))
         await build(quiet).handle_message(message(), slack_client, bot_user_id='U0BOT')
         assert slack_client.calls == []
 
     async def test_a_long_answer_is_split_rather_than_dropped(self, slack_client: FakeSlackClient) -> None:
-        chatty = Agent(TestModel(custom_output_text='x' * 7001), deps_type=SlackThread)
+        chatty = Agent(TestModel(custom_output_text='x' * 7001))
         await build(chatty).handle_message(message(), slack_client, bot_user_id='U0BOT')
         posts = slack_client.method_calls('chat_postMessage')
         assert [len(str(post.kwargs['text'])) for post in posts] == [3500, 3500, 1]
 
     async def test_a_second_message_waits_for_the_running_turn(
-        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+        self, agent: Agent[None, str], slack_client: FakeSlackClient
     ) -> None:
         # Two turns in one thread share a history. Running them at once means the
         # second loads the history the first has not finished writing.
         order: list[str] = []
         release = anyio.Event()
-        slow = Agent(TestModel(custom_output_text='done'), deps_type=SlackThread)
+        slow = Agent(TestModel(custom_output_text='done'))
 
         @slow.instructions
         async def gate() -> str:
@@ -298,7 +321,7 @@ class TestHandleMessage:
 
     async def test_an_undelivered_reply_is_not_written_into_the_history(
         self,
-        slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore],
+        slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore],
         slack_client: FakeSlackClient,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -312,7 +335,7 @@ class TestHandleMessage:
     async def test_a_failing_run_says_so_in_the_thread(
         self, slack_client: FakeSlackClient, caplog: pytest.LogCaptureFixture
     ) -> None:
-        broken = Agent(TestModel(custom_output_text='ok'), deps_type=SlackThread)
+        broken = Agent(TestModel(custom_output_text='ok'))
 
         @broken.instructions
         def explode() -> str:
@@ -325,21 +348,21 @@ class TestHandleMessage:
 
 class TestHttpApp:
     def test_mounts_the_bolt_app_at_the_given_path(
-        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str]
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str]
     ) -> None:
         bot = build(agent, signing_secret='shhh')
         mounted = bot.http_app(path='/hooks/slack')
         assert mounted.app is bot.app
         assert mounted.path == '/hooks/slack'
 
-    def test_defaults_to_the_path_slack_suggests(self, agent: Agent[SlackThread, str]) -> None:
+    def test_defaults_to_the_path_slack_suggests(self, agent: Agent[None, str]) -> None:
         assert build(agent, signing_secret='shhh').http_app().path == '/slack/events'
 
 
 class TestRetries:
     async def test_a_redelivered_event_does_not_run_twice(
         self,
-        slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore],
+        slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore],
         slack_client: FakeSlackClient,
     ) -> None:
         # Slack retries what it thinks was not delivered. For an agent with write
@@ -350,16 +373,14 @@ class TestRetries:
         assert len(slack_client.method_calls('chat_postMessage')) == 1
         assert len(await store.load('T1:C123:1700000000.000001')) == 2
 
-    async def test_a_different_event_still_runs(
-        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
-    ) -> None:
+    async def test_a_different_event_still_runs(self, agent: Agent[None, str], slack_client: FakeSlackClient) -> None:
         bot = build(agent)
         await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev1')
         await bot.handle_message(message(ts='1700000000.000002'), slack_client, bot_user_id='U0BOT', event_id='Ev2')
         assert len(slack_client.method_calls('chat_postMessage')) == 2
 
     async def test_remembering_events_stays_bounded(
-        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient, monkeypatch: pytest.MonkeyPatch
+        self, agent: Agent[None, str], slack_client: FakeSlackClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # The oldest id is dropped rather than the set growing without limit, so a
         # long-lived bot does not keep one entry per message it ever saw. Shrunk
@@ -379,7 +400,7 @@ class TestRetries:
 
 class TestListeners:
     async def test_a_direct_message_runs_without_a_mention(
-        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str], slack_client: FakeSlackClient
     ) -> None:
         build(agent)
         await bolt().events['message'](
@@ -391,7 +412,7 @@ class TestListeners:
         assert slack_client.method_calls('chat_postMessage')
 
     async def test_a_channel_message_without_a_mention_is_left_alone(
-        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str], slack_client: FakeSlackClient
     ) -> None:
         build(agent)
         await bolt().events['message'](
@@ -400,7 +421,7 @@ class TestListeners:
         assert slack_client.calls == []
 
     async def test_a_mention_runs(
-        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str], slack_client: FakeSlackClient
     ) -> None:
         build(agent)
         await bolt().events['app_mention'](
@@ -411,7 +432,7 @@ class TestListeners:
     async def test_the_workspace_comes_from_the_listener_context(
         self,
         bolt: Callable[[], FakeBoltApp],
-        slack_agent_with_store: tuple[SlackBot, InMemoryConversationStore],
+        slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore],
         slack_client: FakeSlackClient,
     ) -> None:
         # Bolt puts the workspace on the context; the event body may not carry it,
@@ -433,7 +454,7 @@ class TestPromptClicks:
         return body
 
     async def test_a_click_reaches_the_waiting_prompt(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp]
+        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
     ) -> None:
         resolved: list[tuple[str, str, str]] = []
 
@@ -442,7 +463,7 @@ class TestPromptClicks:
                 resolved.append((block_id, value, user_id))
                 return True
 
-        build(agent, interactions=RecordingInteractions())
+        build(asking(RecordingInteractions(), slack_client))
         acked: list[bool] = []
 
         async def ack() -> None:
@@ -452,7 +473,7 @@ class TestPromptClicks:
         assert acked == [True]
         assert resolved == [('T1:C123:1.1#1', 'Yes', 'U0ASKER')]
 
-    def test_clicks_are_dropped_without_a_prompt_registry(self, agent: Agent[SlackThread, str]) -> None:
+    def test_clicks_are_dropped_by_an_agent_with_no_slack_chat(self, agent: Agent[None, str]) -> None:
         assert build(agent).resolve_prompt(block_id='b', value='Yes', user_id='U0ASKER') is False
 
     @pytest.mark.parametrize(
@@ -467,10 +488,9 @@ class TestPromptClicks:
         ids=['empty', 'not a list', 'missing block id', 'user is not a mapping', 'no user'],
     )
     async def test_a_malformed_click_payload_is_acknowledged_and_dropped(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp], body: Mapping[str, object]
+        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient, body: Mapping[str, object]
     ) -> None:
-        interactions = SlackInteractions()
-        build(agent, interactions=interactions)
+        build(asking(SlackInteractions(), slack_client))
         acked: list[bool] = []
 
         async def ack() -> None:
@@ -498,7 +518,7 @@ class TestStarting:
 
     async def test_start_connects_socket_mode_with_the_app_token(
         self,
-        agent: Agent[SlackThread, str],
+        agent: Agent[None, str],
         socket_handler: list[tuple[object, str]],
     ) -> None:
         slack_agent = build(agent)
@@ -507,8 +527,96 @@ class TestStarting:
 
     def test_run_is_the_blocking_entry_point(
         self,
-        agent: Agent[SlackThread, str],
+        agent: Agent[None, str],
         socket_handler: list[tuple[object, str]],
     ) -> None:
         build(agent).run()
         assert len(socket_handler) == 1
+
+
+class TestDeps:
+    async def test_an_agent_keeps_the_deps_it_already_had(
+        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+    ) -> None:
+        seen: list[Warehouse] = []
+
+        agent: Agent[Warehouse, str] = Agent(TestModel(call_tools=['record']), deps_type=Warehouse)
+
+        @agent.tool
+        def record(ctx: RunContext[Warehouse], note: str) -> str:
+            seen.append(ctx.deps)
+            return 'noted'
+
+        build(agent, deps=Warehouse(dsn='postgres://one'))
+        await bolt().events['app_mention'](event=message(), client=slack_client, context={}, body={})
+        assert seen == [Warehouse(dsn='postgres://one')]
+
+    async def test_deps_can_be_built_per_thread(
+        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+    ) -> None:
+        seen: list[Warehouse] = []
+
+        agent: Agent[Warehouse, str] = Agent(TestModel(call_tools=['record']), deps_type=Warehouse)
+
+        @agent.tool
+        def record(ctx: RunContext[Warehouse], note: str) -> str:
+            seen.append(ctx.deps)
+            return 'noted'
+
+        build(agent, deps_factory=warehouse_for)
+        await bolt().events['app_mention'](event=message(), client=slack_client, context={}, body={})
+        assert seen == [Warehouse(dsn='postgres://C123')]
+
+    def test_a_value_and_a_factory_together_is_refused(self, agent: Agent[None, str]) -> None:
+        # Both set means one is being ignored, and which one is not obvious.
+        with pytest.raises(ValueError, match='not both'):
+            build(agent, deps=Warehouse(dsn='x'), deps_factory=warehouse_for)
+
+    async def test_the_thread_is_bound_around_the_run(
+        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+    ) -> None:
+        seen: list[SlackThread | None] = []
+
+        def record(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen.append(current_thread())
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent: Agent[None, str] = Agent(FunctionModel(record))
+
+        build(agent)
+        await bolt().events['app_mention'](event=message(), client=slack_client, context={}, body={})
+        assert seen == [SlackThread(channel_id='C123', thread_ts='1700000000.000001', user_id='U0ASKER', team_id='T1')]
+        # Unbound once the turn is over, so a later run elsewhere cannot inherit it.
+        assert current_thread() is None
+
+
+class TestFindingTheCapability:
+    def test_a_slack_chat_nested_in_a_combined_capability_is_found(self, slack_client: FakeSlackClient) -> None:
+        interactions = SlackInteractions()
+        chat = SlackChat(client=slack_client, ask_user=True, interactions=interactions)
+        agent: Agent[None, str] = Agent(TestModel(custom_output_text='done'), capabilities=[Planning(), chat])
+        assert build(agent).resolve_prompt(block_id='nothing', value='Yes', user_id='U0ASKER') is False
+        assert chat.resolve_interactions() is interactions
+
+    def test_the_bots_token_reaches_a_capability_that_has_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Configuring the bot is enough; the capability does not need
+        # SLACK_BOT_TOKEN set as well.
+        monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
+        chat = SlackChat()
+        build(Agent(TestModel(custom_output_text='done'), capabilities=[chat]))
+        assert chat.token == 'xoxb-t'
+
+    def test_a_token_you_configured_is_left_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        chat = SlackChat(token='xoxb-mine')
+        build(Agent(TestModel(custom_output_text='done'), capabilities=[chat]))
+        assert chat.token == 'xoxb-mine'
+
+    def test_two_slack_chats_warn_and_route_to_the_first(
+        self, slack_client: FakeSlackClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        agent: Agent[None, str] = Agent(
+            TestModel(custom_output_text='done'),
+            capabilities=[SlackChat(client=slack_client), SlackChat(client=slack_client)],
+        )
+        build(agent)
+        assert 'SlackChat capabilities' in caplog.text

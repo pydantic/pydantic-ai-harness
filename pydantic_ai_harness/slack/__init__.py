@@ -1,9 +1,10 @@
 """Primitives for building a Pydantic AI agent that lives in Slack.
 
-Slack is both the front door and one of the tools. `SlackChatToolset` gives the
-model a way to talk to the thread it is running in, `SlackApprovals` gates
-dangerous tools behind a button, and `SlackBot` wires both to a Socket Mode
-app so a working bot is a few lines. Every piece is usable on its own.
+Slack is both the front door and one of the tools. `SlackChat` is a capability
+you add to any agent, whatever its deps: it gives the model a way to report,
+ask, and send files, either in the thread it is answering or in channels you
+name. `SlackBot` puts that agent behind Slack, over Socket Mode or the Events
+API. Every piece is usable on its own.
 
 `SlackBot` needs `slack-bolt`, so it is imported lazily: naming it is what
 pulls Bolt in. Everything else needs only `slack-sdk`.
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING
 
 from pydantic_ai_harness.slack._approvals import APPROVE, DENY, SlackApprovals
 from pydantic_ai_harness.slack._capability import DEFAULT_INSTRUCTIONS, SlackChat
-from pydantic_ai_harness.slack._client import SlackClient
+from pydantic_ai_harness.slack._client import SlackClient, default_client
 from pydantic_ai_harness.slack._interactions import (
     DEFAULT_PROMPT_TIMEOUT_SECONDS,
     PROMPT_ACTION_PREFIX,
@@ -25,8 +26,14 @@ from pydantic_ai_harness.slack._store import (
     FileConversationStore,
     InMemoryConversationStore,
 )
-from pydantic_ai_harness.slack._thread import SlackThread, conversation_key
-from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS, PlanStep, SlackChatToolset, StepStatus
+from pydantic_ai_harness.slack._thread import SlackThread, bind_thread, conversation_key, current_thread
+from pydantic_ai_harness.slack._toolset import (
+    MAX_MESSAGE_CHARS,
+    PlanStep,
+    SlackChatToolset,
+    StepStatus,
+    ThreadResolver,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai_harness.slack._app import DEFAULT_ERROR_REPLY, SlackBot
@@ -52,7 +59,11 @@ __all__ = [
     'SlackPromptError',
     'SlackThread',
     'StepStatus',
+    'ThreadResolver',
+    'bind_thread',
     'conversation_key',
+    'current_thread',
+    'default_client',
 ]
 
 _BOLT_EXPORTS = {'DEFAULT_ERROR_REPLY', 'SlackBot'}
