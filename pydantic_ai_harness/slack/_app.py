@@ -11,7 +11,7 @@ from typing import Generic, Protocol, TypeVar
 from weakref import WeakValueDictionary
 
 import anyio
-from pydantic import TypeAdapter, ValidationError
+from pydantic import AliasPath, BaseModel, Field, TypeAdapter, ValidationError
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AbstractCapability
 
@@ -38,9 +38,6 @@ BotDepsT = TypeVar('BotDepsT')
 """The deps type the served agent takes. Its own variable because `BotDepsT` is
 contravariant, and `SlackBot` builds deps as well as passing them."""
 
-_MAPPING_ADAPTER = TypeAdapter(dict[str, object])
-_ACTION_LIST_ADAPTER = TypeAdapter(list[dict[str, object]])
-
 
 class _Ack(Protocol):
     async def __call__(self) -> object: ...  # pragma: no cover
@@ -51,28 +48,28 @@ def _string(mapping: Mapping[str, object], key: str) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _mapping(value: object) -> dict[str, object] | None:
-    try:
-        return _MAPPING_ADAPTER.validate_python(value)
-    except ValidationError:
-        return None
+class _PromptClick(BaseModel):
+    """The three fields that identify a button click, pulled out of Slack's payload.
+
+    Slack nests them, and everything else in the payload is ignored. Declaring
+    the shape means a payload that is not a prompt click fails validation rather
+    than being routed with a field missing.
+    """
+
+    block_id: str = Field(validation_alias=AliasPath('actions', 0, 'block_id'))
+    value: str = Field(validation_alias=AliasPath('actions', 0, 'value'))
+    user_id: str = Field(validation_alias=AliasPath('user', 'id'))
 
 
-def _prompt_click_fields(body: Mapping[str, object]) -> tuple[str, str, str] | None:
+_CLICK_ADAPTER = TypeAdapter(_PromptClick)
+
+
+def _prompt_click(body: Mapping[str, object]) -> _PromptClick | None:
+    """The click this payload describes, or `None` when it does not describe one."""
     try:
-        actions = _ACTION_LIST_ADAPTER.validate_python(body.get('actions'))
+        return _CLICK_ADAPTER.validate_python(body)
     except ValidationError:
         return None
-    user = _mapping(body.get('user'))
-    if not actions or user is None:
-        return None
-    action = actions[0]
-    block_id = _string(action, 'block_id')
-    value = _string(action, 'value')
-    user_id = _string(user, 'id')
-    if block_id is None or value is None or user_id is None:
-        return None
-    return block_id, value, user_id
 
 
 DEFAULT_ERROR_REPLY = 'Something went wrong handling that message. The details are in the logs.'
@@ -216,18 +213,19 @@ class SlackBot(Generic[BotDepsT]):
         # Bolt ships no type information for its decorators, so registration is
         # done by explicit call and the untyped members are silenced one by one.
         # Everything the listeners hand on is narrowed before it leaves here.
-        self.app.event('app_mention')(self._on_mention)  # pyright: ignore[reportUnknownMemberType]
+        self.app.event('app_mention')(self._on_event)  # pyright: ignore[reportUnknownMemberType]
         self.app.event('message')(self._on_direct_message)  # pyright: ignore[reportUnknownMemberType]
         prompt_clicks = re.compile(f'^{re.escape(PROMPT_ACTION_PREFIX)}')
         self.app.action(prompt_clicks)(self._on_prompt_click)  # pyright: ignore[reportUnknownMemberType]
 
-    async def _on_mention(
+    async def _on_event(
         self,
         event: Mapping[str, object],
         client: AsyncWebClient,
         context: Mapping[str, object],
         body: Mapping[str, object],
     ) -> None:
+        """Pull the envelope fields off a Bolt listener's arguments and run a turn."""
         await self.handle_message(
             event,
             client,
@@ -245,20 +243,13 @@ class SlackBot(Generic[BotDepsT]):
     ) -> None:
         # Channel messages reach this listener too, and `app_mention` already
         # covers those. Only a direct or group DM starts a run without a mention.
-        if event.get('channel_type') not in ('im', 'mpim'):
-            return
-        await self.handle_message(
-            event,
-            client,
-            bot_user_id=_string(context, 'bot_user_id'),
-            team_id=_string(context, 'team_id'),
-            event_id=_string(body, 'event_id'),
-        )
+        if event.get('channel_type') in ('im', 'mpim'):
+            await self._on_event(event, client, context, body)
 
     async def _on_prompt_click(self, ack: _Ack, body: Mapping[str, object]) -> None:
         await ack()
-        fields = _prompt_click_fields(body)
-        if fields is None or not self.resolve_prompt(block_id=fields[0], value=fields[1], user_id=fields[2]):
+        click = _prompt_click(body)
+        if click is None or not self.resolve_prompt(block_id=click.block_id, value=click.value, user_id=click.user_id):
             # Slack shows nothing for a click that changes nothing, so the
             # operator needs a record of prompts that expired or were clicked by
             # someone who could not answer them.

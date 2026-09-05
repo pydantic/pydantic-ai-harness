@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+from typing import TypeVar
+
+from pydantic_ai.tools import RunContext
+
+SlackDepsT = TypeVar('SlackDepsT')
+"""The deps type a thread resolver reads. Its own variable because pydantic-ai's
+`AgentDepsT` is contravariant, which a resolver's parameter position cannot use."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -83,3 +90,22 @@ def bind_thread(thread: SlackThread) -> Generator[None]:
 def current_thread() -> SlackThread | None:
     """The thread bound by [`bind_thread`][pydantic_ai_harness.slack.bind_thread], if any."""
     return _CURRENT_THREAD.get()
+
+
+ThreadResolver = Callable[[RunContext[SlackDepsT]], 'SlackThread | None']
+"""Works out which Slack thread a run is talking to, from its run context."""
+
+
+def resolve_thread(
+    thread: SlackThread | ThreadResolver[SlackDepsT] | None, ctx: RunContext[SlackDepsT]
+) -> SlackThread | None:
+    """Which thread a configured `thread` means for this run, if any.
+
+    A fixed thread is itself, a resolver is asked, and an unset one falls back to
+    whatever [`bind_thread`][pydantic_ai_harness.slack.bind_thread] set. Every
+    piece that posts settles it this way, so an agent's tools and its approval
+    prompts always land in the same conversation.
+    """
+    if callable(thread):
+        thread = thread(ctx)
+    return thread if thread is not None else current_thread()

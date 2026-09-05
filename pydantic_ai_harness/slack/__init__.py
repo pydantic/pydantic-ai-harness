@@ -26,14 +26,14 @@ from pydantic_ai_harness.slack._store import (
     FileConversationStore,
     InMemoryConversationStore,
 )
-from pydantic_ai_harness.slack._thread import SlackThread, bind_thread, conversation_key, current_thread
-from pydantic_ai_harness.slack._toolset import (
-    MAX_MESSAGE_CHARS,
-    PlanStep,
-    SlackChatToolset,
-    StepStatus,
+from pydantic_ai_harness.slack._thread import (
+    SlackThread,
     ThreadResolver,
+    bind_thread,
+    conversation_key,
+    current_thread,
 )
+from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS, PlanStep, SlackChatToolset, StepStatus
 
 if TYPE_CHECKING:
     from pydantic_ai_harness.slack._app import DEFAULT_ERROR_REPLY, SlackBot

@@ -14,8 +14,8 @@ from pydantic_ai.tools import AgentDepsT, DeferredToolRequests, DeferredToolResu
 from pydantic_ai_harness.slack._approvals import SlackApprovals
 from pydantic_ai_harness.slack._client import SlackClient, default_client
 from pydantic_ai_harness.slack._interactions import SlackInteractions
-from pydantic_ai_harness.slack._thread import SlackThread
-from pydantic_ai_harness.slack._toolset import SlackChatToolset, ThreadResolver
+from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver
+from pydantic_ai_harness.slack._toolset import SlackChatToolset
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
@@ -146,7 +146,6 @@ class SlackChat(AbstractCapability[AgentDepsT]):
     _resolved_client: SlackClient | None = field(default=None, init=False, repr=False, compare=False)
     _resolved_interactions: SlackInteractions | None = field(default=None, init=False, repr=False, compare=False)
     _resolved_toolset: SlackChatToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
-    _resolved_approvals: SlackApprovals[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
 
     @classmethod
     def from_spec(cls, *args: Any, **kwargs: Any) -> SlackChat[Any]:
@@ -214,14 +213,15 @@ class SlackChat(AbstractCapability[AgentDepsT]):
         """Ask in Slack about tools that require approval, when `approvals` is on."""
         if not self.approvals:
             return None
-        if self._resolved_approvals is None:
-            self._resolved_approvals = SlackApprovals(
-                self.resolve_client(),
-                self.resolve_interactions(),
-                thread=self.thread,
-                allowed_user_ids=self.approver_ids,
-            )
-        return await self._resolved_approvals(ctx, requests)
+        # Built per round rather than cached: it holds no state between rounds,
+        # and everything it needs is already resolved once and kept.
+        approvals = SlackApprovals[AgentDepsT](
+            self.resolve_client(),
+            self.resolve_interactions(),
+            thread=self.thread,
+            allowed_user_ids=self.approver_ids,
+        )
+        return await approvals(ctx, requests)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
         """Tell the model how to use the tools, or nothing when told to add none."""

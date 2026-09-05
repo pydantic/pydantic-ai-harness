@@ -17,8 +17,7 @@ from pydantic_ai.tools import (
 
 from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._interactions import SlackInteractions
-from pydantic_ai_harness.slack._thread import SlackThread, current_thread
-from pydantic_ai_harness.slack._toolset import SlackDepsT, ThreadResolver
+from pydantic_ai_harness.slack._thread import SlackDepsT, SlackThread, ThreadResolver, resolve_thread
 
 APPROVE = 'Approve'
 DENY = 'Deny'
@@ -86,8 +85,7 @@ class SlackApprovals(Generic[SlackDepsT]):
         Returns `None` when there is no Slack conversation to ask in, leaving the
         calls for another handler rather than approving them unasked.
         """
-        thread = self._thread(ctx) if callable(self._thread) else self._thread
-        thread = thread if thread is not None else current_thread()
+        thread = resolve_thread(self._thread, ctx)
         if thread is None:
             return None
         approvals: dict[str, bool | DeferredToolApprovalResult] = {}

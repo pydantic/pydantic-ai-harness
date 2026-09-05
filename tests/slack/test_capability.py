@@ -8,8 +8,6 @@ import yaml
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import DeferredToolRequests, RunContext
-from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.slack import (
     DEFAULT_INSTRUCTIONS,
@@ -22,10 +20,6 @@ from pydantic_ai_harness.slack import (
 from .conftest import FakeSlackClient
 
 pytestmark = pytest.mark.anyio
-
-
-def run_context() -> RunContext[None]:
-    return RunContext(deps=None, model=TestModel(), usage=RunUsage())
 
 
 @dataclass
@@ -211,14 +205,3 @@ class TestAgentSpec:
         # other than the spec says.
         with pytest.raises(ValueError, match='client cannot be set from an agent spec'):
             SlackChat.from_spec(client=slack_client)
-
-
-class TestApprovalReuse:
-    async def test_the_approval_handler_is_built_once(self, slack_client: FakeSlackClient) -> None:
-        # Rebuilding it per round would be harmless but wasteful, and a handler
-        # that held per-run state would quietly lose it.
-        capability = SlackChat[None](client=slack_client, approvals=True)
-        requests = DeferredToolRequests(approvals=[])
-        first = await capability.handle_deferred_tool_calls(run_context(), requests=requests)
-        second = await capability.handle_deferred_tool_calls(run_context(), requests=requests)
-        assert (first, second) == (None, None)

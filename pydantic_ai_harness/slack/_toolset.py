@@ -8,7 +8,7 @@ import secrets
 from collections.abc import Callable, Sequence
 from hashlib import sha256
 from pathlib import Path
-from typing import Literal, TypeVar
+from typing import Literal
 
 from pydantic import BaseModel, Field
 from pydantic_ai.exceptions import ModelRetry
@@ -17,7 +17,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._interactions import SlackInteractions
-from pydantic_ai_harness.slack._thread import SlackThread, current_thread
+from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver, resolve_thread
 
 StepStatus = Literal['pending', 'running', 'done', 'failed']
 """State of one plan step, rendered as an icon in the posted checklist."""
@@ -38,13 +38,6 @@ _MAX_PLAN_STEPS = 20
 """Longer checklists stop being scannable, which is the only reason to post one."""
 
 logger = logging.getLogger(__name__)
-
-SlackDepsT = TypeVar('SlackDepsT')
-"""The deps type a thread resolver reads. Its own variable because `AgentDepsT` is
-contravariant, which a resolver's parameter position cannot use here."""
-
-ThreadResolver = Callable[[RunContext[SlackDepsT]], 'SlackThread | None']
-"""Works out which Slack thread a run is talking to, from its run context."""
 
 
 class PlanStep(BaseModel):
@@ -139,8 +132,7 @@ class SlackChatToolset(FunctionToolset[AgentDepsT]):
                     )
                 )
             return SlackThread(channel_id=channel)
-        thread = self._thread(ctx) if callable(self._thread) else self._thread
-        thread = thread if thread is not None else current_thread()
+        thread = resolve_thread(self._thread, ctx)
         if thread is not None:
             return thread
         if len(self._channels) == 1:
