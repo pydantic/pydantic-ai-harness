@@ -450,8 +450,7 @@ when historical reconstruction matters.
 `BinaryContent` payloads (images, audio, documents, video) inline as
 base64 inside a snapshot would balloon every file/row containing the
 message; a large text part (e.g. a big tool-return string) does the same and
-can push a `MongoStepStore` snapshot past MongoDB's 16 MiB document cap
-([#440](https://github.com/pydantic/pydantic-ai-harness/issues/440)). The
+can push a `MongoStepStore` snapshot past MongoDB's 16 MiB document cap. The
 file/sqlite/mongo backends externalize any `BinaryContent.data`, and any
 part whose string `content` is at or above 64 KiB, through a configured
 `MediaStore`, leaving a URI reference in the snapshot. The same
@@ -529,11 +528,7 @@ implementations are:
 ### Exposing externalized bytes as URLs
 
 Each store accepts a `public_url=` callable that turns the canonical
-`media+sha256://<hex>` URI into a URL the model can fetch directly. The
-forthcoming `MediaExternalizer` capability will use this to swap
-`BinaryContent` parts for `ImageUrl` / `AudioUrl` / etc. before the
-model sees the message -- letting providers fetch big media over the wire
-without re-encoding bytes into the request body.
+`media+sha256://<hex>` URI into a URL the model can fetch directly.
 
 Static base URL (public R2 bucket, CDN):
 

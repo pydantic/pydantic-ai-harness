@@ -34,8 +34,7 @@ compressing or dropping context already inside it.
 | `Summarize` | one LLM call | yes | A size-gated summary (inherits the run's model by default) |
 
 `Spill` is lossless: the full payload is persisted and the model reads slices of it through
-the registered `read_tool_result(handle, offset, limit, from_end, pattern)` tool (the Claude
-Code pattern, the core [#4352](https://github.com/pydantic/pydantic-ai/issues/4352) design).
+the registered `read_tool_result(handle, offset, limit, from_end, pattern)` tool.
 That tool is bounded: `offset >= 0`, `limit` clamped to a built-in line cap, the joined output
 capped, and `pattern` is a literal substring (not a regex), so a model-supplied value cannot
 hang the host with catastrophic backtracking.
@@ -171,8 +170,7 @@ Spilled payloads go through the narrow `OverflowStore` protocol. The default `Lo
 writes one file per `(run_id, tool_call_id, retry)` under a stable root directory and keeps it
 after the run, so a later `read_tool_result` -- in this run or a subsequent agent/run -- can
 still reach it. The handle is backend-addressable (a relative key), not an absolute local
-path, so a durable backend (Temporal, a blob store, or the core `ExecutionEnvironment`
-workspace once #4352 lands) can resolve the same handle in another process. Supply your own
+path, so a backend shared across processes (a blob store, or storage every durable-engine worker reaches) can resolve the same handle in another process. Supply your own
 backend with `store=...`.
 
 ```python
@@ -268,8 +266,6 @@ again on replay.
 
 - Distinct from [compaction](compaction.md), which compresses or drops context already inside
   the window; this capability moves large tool outputs out of the window at production time.
-- Consumes core [#4352](https://github.com/pydantic/pydantic-ai/issues/4352) (the canonical
-  queryable-file primitive) through the `OverflowStore` seam once it lands.
 - Distinct from `ClampOversizedMessages`, which clamps runaway model responses, not tool
   returns.
 
