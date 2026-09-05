@@ -8,8 +8,16 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 
+# `SlackAgent` is the only part of the package that needs Bolt, so the slim
+# install has nothing to test here.
+pytest.importorskip('slack_bolt')
+
 import pydantic_ai_harness.slack._app as app_module
-from pydantic_ai_harness.slack import InMemoryConversationStore, SlackInteractions, SlackThread
+from pydantic_ai_harness.slack import (
+    InMemoryConversationStore,
+    SlackInteractions,
+    SlackThread,
+)
 from pydantic_ai_harness.slack.app import SlackAgent
 
 from .conftest import FakeSlackClient
