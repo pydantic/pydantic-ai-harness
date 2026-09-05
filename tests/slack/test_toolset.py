@@ -283,6 +283,12 @@ class TestChannels:
         assert call.kwargs['channel'] == '#alerts'
         assert call.kwargs['thread_ts'] is None
 
+    def test_a_single_channel_as_a_string_is_refused(self, slack_client: FakeSlackClient) -> None:
+        # A string is a Sequence[str], so this type checks and would otherwise
+        # become seven channels called '#', 'a', 'l', and so on.
+        with pytest.raises(ValueError, match=r"channels=\['#alerts'\]"):
+            SlackChatToolset(slack_client, channels='#alerts')
+
     async def test_the_model_picks_when_several_are_listed(self, slack_client: FakeSlackClient) -> None:
         toolset = SlackChatToolset(slack_client, channels=['#alerts', '#eng'])
         await toolset.post_message(context(), 'deploying', channel='#eng')

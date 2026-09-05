@@ -21,6 +21,7 @@ from pydantic_ai_harness.slack._interactions import PROMPT_ACTION_PREFIX
 from pydantic_ai_harness.slack._store import ConversationStore, InMemoryConversationStore
 from pydantic_ai_harness.slack._thread import SlackThread, bind_thread
 from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS
+from pydantic_ai_harness.slack._validate import string_sequence
 
 try:
     from slack_bolt.adapter.asgi.async_handler import AsyncSlackRequestHandler
@@ -177,12 +178,10 @@ class SlackBot(Generic[BotDepsT]):
         self._app_token = app_token or os.environ.get('SLACK_APP_TOKEN')
         self._signing_secret = signing_secret or os.environ.get('SLACK_SIGNING_SECRET')
 
-        if isinstance(allowed_user_ids, str):
-            raise ValueError('allowed_user_ids must be a collection of user ids, not a string')
         if allowed_user_ids is None:
             configured = os.environ.get('SLACK_ALLOWED_USER_IDS', '')
             allowed_user_ids = [entry.strip() for entry in configured.split(',') if entry.strip()]
-        self._allowed_user_ids = frozenset(allowed_user_ids)
+        self._allowed_user_ids = frozenset(string_sequence(allowed_user_ids, 'allowed_user_ids'))
         if not self._allowed_user_ids:
             logger.warning(
                 'No allowed user ids configured, so anyone who can reach this bot can run the agent. '
@@ -198,8 +197,8 @@ class SlackBot(Generic[BotDepsT]):
         # The capability posts through its own client. Handing it this token
         # means an agent set up for Slack does not need SLACK_BOT_TOKEN as well
         # when the bot was given its token directly.
-        if self._chat is not None and self._chat.client is None and self._chat.token is None:
-            self._chat.token = bot
+        if self._chat is not None:
+            self._chat.set_default_token(bot)
         self.app = AsyncApp(token=bot, signing_secret=self._signing_secret)
         self._register_listeners()
 

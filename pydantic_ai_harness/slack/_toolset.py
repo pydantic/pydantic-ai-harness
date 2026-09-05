@@ -18,6 +18,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._interactions import SlackInteractions
 from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver, resolve_thread
+from pydantic_ai_harness.slack._validate import string_sequence
 
 StepStatus = Literal['pending', 'running', 'done', 'failed']
 """State of one plan step, rendered as an icon in the posted checklist."""
@@ -91,10 +92,13 @@ class SlackChatToolset(FunctionToolset[AgentDepsT]):
                 never block waiting for a person.
             file_root: Directory that `upload_file` may read from. Paths outside it
                 are refused. Omit to leave `upload_file` unregistered.
+
+        Raises:
+            ValueError: If `channels` is a string rather than a sequence of them.
         """
         self._client_source = client
         self._client: SlackClient | None = None
-        self._channels = tuple(channels)
+        self._channels = string_sequence(channels, 'channels')
         self._thread = thread
         self._interactions = interactions
         self._file_root = Path(file_root).expanduser().resolve() if file_root is not None else None

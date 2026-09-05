@@ -136,10 +136,20 @@ class TestAskValidation:
         with pytest.raises(ValueError, match=message):
             await SlackInteractions().ask(slack_client, thread, 'Pick', options)
 
+    async def test_rejects_a_question_slack_cannot_show(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        # The model writes the question `ask_user` asks, so an over-long one has
+        # to come back as something it can fix rather than as a Slack API error
+        # that fails the whole run.
+        with pytest.raises(ValueError, match='Slack shows at most 3000'):
+            await SlackInteractions().ask(slack_client, thread, 'x' * 3001, ['A'])
+        assert slack_client.method_calls('chat_postMessage') == []
+
     async def test_rejects_an_allowlist_passed_as_a_string(
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
-        with pytest.raises(ValueError, match='not a string'):
+        with pytest.raises(ValueError, match='one entry per character'):
             await SlackInteractions().ask(slack_client, thread, 'Pick', ['A'], allowed_user_ids='U0REVIEWER')
 
     def test_rejects_a_non_positive_timeout(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:

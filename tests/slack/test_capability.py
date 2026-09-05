@@ -45,6 +45,24 @@ class TestToolset:
         assert capability.get_toolset() is capability.get_toolset()
 
 
+class TestNameLists:
+    def test_a_single_channel_as_a_string_is_refused(self) -> None:
+        # A string is a Sequence[str], so this type checks. Left alone it reaches
+        # the model as seven channels called '#', 'a', 'l', and so on.
+        with pytest.raises(ValueError, match=r"channels=\['#alerts'\]"):
+            SlackChat(channels='#alerts')
+
+    def test_a_single_approver_as_a_string_is_refused(self) -> None:
+        # Caught here rather than at the first approval prompt, which is minutes
+        # into a run and only on the path that needed someone to say yes.
+        with pytest.raises(ValueError, match=r"approver_ids=\['U0REVIEWER'\]"):
+            SlackChat(approver_ids='U0REVIEWER')
+
+    def test_the_token_stays_out_of_the_repr(self) -> None:
+        # Capabilities turn up in logs and exception messages.
+        assert 'xoxb-secret' not in repr(SlackChat(token='xoxb-secret'))
+
+
 class TestClient:
     def test_a_token_is_only_needed_when_something_posts(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Constructing must not need credentials: capabilities are built at import
@@ -177,7 +195,7 @@ class TestAgentSpec:
     def test_an_agent_defined_in_yaml_gets_the_slack_tools(self) -> None:
         agent = Agent.from_spec(yaml.safe_load(SPEC), custom_capability_types=[SlackChat])
         capability = spec_capability(agent)
-        assert capability.channels == ['#alerts', '#eng']
+        assert capability.channels == ('#alerts', '#eng')
         assert (capability.approvals, capability.token) == (True, 'xoxb-from-the-spec')
 
     async def test_a_spec_defined_agent_posts_where_the_spec_said(self, slack_client: FakeSlackClient) -> None:

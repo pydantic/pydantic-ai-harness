@@ -16,18 +16,12 @@ from pydantic_ai.tools import (
 )
 
 from pydantic_ai_harness.slack._client import SlackClient
-from pydantic_ai_harness.slack._interactions import SlackInteractions
+from pydantic_ai_harness.slack._interactions import MAX_QUESTION_CHARS, SlackInteractions
 from pydantic_ai_harness.slack._thread import SlackDepsT, SlackThread, ThreadResolver, resolve_thread
+from pydantic_ai_harness.slack._validate import string_sequence
 
 APPROVE = 'Approve'
 DENY = 'Deny'
-
-_MAX_QUESTION_CHARS = 2900
-"""Longest prompt these approvals post. Slack caps one section block at 3000
-characters; the margin covers the settled-message suffix. The whole prompt is
-measured, not just the arguments, because the tool name and the code fence around
-them count too. Nothing is truncated to fit: approving half a call is approving
-something nobody read, so a call that does not fit is denied instead."""
 
 
 class SlackApprovals(Generic[SlackDepsT]):
@@ -72,12 +66,12 @@ class SlackApprovals(Generic[SlackDepsT]):
             ValueError: If `allowed_user_ids` is a string rather than a collection
                 of ids.
         """
-        if isinstance(allowed_user_ids, str):
-            raise ValueError('allowed_user_ids must be a collection of user ids, not a string')
         self._client = client
         self._interactions = interactions
         self._thread = thread
-        self._allowed_user_ids = frozenset(allowed_user_ids) if allowed_user_ids is not None else None
+        self._allowed_user_ids = (
+            frozenset(string_sequence(allowed_user_ids, 'allowed_user_ids')) if allowed_user_ids is not None else None
+        )
 
     async def __call__(self, ctx: RunContext[SlackDepsT], requests: DeferredToolRequests) -> DeferredToolResults | None:
         """Ask about every pending approval and build the results.
@@ -95,10 +89,13 @@ class SlackApprovals(Generic[SlackDepsT]):
 
     async def _decide(self, thread: SlackThread, call: ToolCallPart) -> bool | DeferredToolApprovalResult:
         question = _question(call, _render(call))
-        if len(question) > _MAX_QUESTION_CHARS:
+        # Checked here rather than left to `ask`, so the denial says what to do
+        # about it. Nothing is truncated to fit: approving half a call is
+        # approving something nobody read.
+        if len(question) > MAX_QUESTION_CHARS:
             return ToolDenied(
                 f'This call was not offered for approval: showing it takes {len(question)} characters, '
-                f'and Slack can show at most {_MAX_QUESTION_CHARS}, so nobody could review the whole call. '
+                f'and Slack can show at most {MAX_QUESTION_CHARS}, so nobody could review the whole call. '
                 'Call the tool with smaller arguments, for instance by writing the long part to a file first.'
             )
         try:

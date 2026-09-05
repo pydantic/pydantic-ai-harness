@@ -16,6 +16,7 @@ from pydantic_ai_harness.slack._client import SlackClient, default_client
 from pydantic_ai_harness.slack._interactions import SlackInteractions
 from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver
 from pydantic_ai_harness.slack._toolset import SlackChatToolset
+from pydantic_ai_harness.slack._validate import string_sequence
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
@@ -114,7 +115,7 @@ class SlackChat(AbstractCapability[AgentDepsT]):
     host is not a sensible default.
     """
 
-    token: str | None = None
+    token: str | None = field(default=None, repr=False)
     """Slack bot token (`xoxb-`). Defaults to `SLACK_BOT_TOKEN`."""
 
     client: SlackClient | None = None
@@ -143,9 +144,18 @@ class SlackChat(AbstractCapability[AgentDepsT]):
     how to behave in a thread.
     """
 
+    _bot_token: str | None = field(default=None, init=False, repr=False, compare=False)
+    """Token `SlackBot` was given, used when this capability was configured with none."""
+
     _resolved_client: SlackClient | None = field(default=None, init=False, repr=False, compare=False)
     _resolved_interactions: SlackInteractions | None = field(default=None, init=False, repr=False, compare=False)
     _resolved_toolset: SlackChatToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        """Settle the name lists once, so every reader sees the same checked values."""
+        self.channels = string_sequence(self.channels, 'channels')
+        if self.approver_ids is not None:
+            self.approver_ids = string_sequence(self.approver_ids, 'approver_ids')
 
     @classmethod
     def from_spec(cls, *args: Any, **kwargs: Any) -> SlackChat[Any]:
@@ -169,10 +179,23 @@ class SlackChat(AbstractCapability[AgentDepsT]):
             kwargs['thread'] = _THREAD_ADAPTER.validate_python(thread)
         return cls(*args, **kwargs)
 
+    def set_default_token(self, token: str) -> None:
+        """Authenticate with `token` unless this capability was given one of its own.
+
+        [`SlackBot`][pydantic_ai_harness.slack.SlackBot] calls this with the token
+        it was configured with, so an agent that is going to be served over Slack
+        does not have to be told the same token twice. An explicit `token` or
+        `client` on this capability still wins, and this has no effect once a
+        client has been built.
+        """
+        self._bot_token = token
+
     def resolve_client(self) -> SlackClient:
         """The Slack client these tools call through, built from the token on first use."""
         if self._resolved_client is None:
-            self._resolved_client = self.client if self.client is not None else default_client(self.token)
+            self._resolved_client = (
+                self.client if self.client is not None else default_client(self.token or self._bot_token)
+            )
         return self._resolved_client
 
     def resolve_interactions(self) -> SlackInteractions:

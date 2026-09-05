@@ -273,7 +273,7 @@ SlackChat(approvals=True, approver_ids=['U01REVIEWER'])
 ```
 
 A prompt nobody answers is denied, and so is a call that does not fit in the
-2900 characters Slack can show in one block. Neither is truncated: approving half
+3000 characters Slack can show in one block. Neither is truncated: approving half
 a call is approving something nobody read. An agent with write access to real
 systems should not act because a question timed out, or because the part that
 mattered scrolled off the end. A tool that genuinely needs a large payload should

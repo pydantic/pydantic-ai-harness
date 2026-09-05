@@ -17,6 +17,7 @@ from pydantic_ai_harness.slack._capability import DEFAULT_INSTRUCTIONS, SlackCha
 from pydantic_ai_harness.slack._client import SlackClient, default_client
 from pydantic_ai_harness.slack._interactions import (
     DEFAULT_PROMPT_TIMEOUT_SECONDS,
+    MAX_QUESTION_CHARS,
     PROMPT_ACTION_PREFIX,
     SlackInteractions,
     SlackPromptError,
@@ -45,6 +46,7 @@ __all__ = [
     'DEFAULT_PROMPT_TIMEOUT_SECONDS',
     'DENY',
     'MAX_MESSAGE_CHARS',
+    'MAX_QUESTION_CHARS',
     'PROMPT_ACTION_PREFIX',
     'ConversationStore',
     'FileConversationStore',

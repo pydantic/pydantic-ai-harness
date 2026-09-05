@@ -11,6 +11,7 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserProm
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
+from slack_sdk.web.async_client import AsyncWebClient
 
 import pydantic_ai_harness.slack as slack_package
 import pydantic_ai_harness.slack._app as app_module
@@ -170,7 +171,7 @@ class TestConfiguration:
         assert bolt().signing_secret == 'shhh'
 
     def test_a_string_allowlist_is_refused(self, agent: Agent[None, str]) -> None:
-        with pytest.raises(ValueError, match='not a string'):
+        with pytest.raises(ValueError, match='one entry per character'):
             build(agent, allowed_user_ids='U0ASKER')
 
     def test_an_empty_allowlist_warns(
@@ -604,12 +605,25 @@ class TestFindingTheCapability:
         monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
         chat = SlackChat()
         build(Agent(TestModel(custom_output_text='done'), capabilities=[chat]))
-        assert chat.token == 'xoxb-t'
+        client = chat.resolve_client()
+        assert isinstance(client, AsyncWebClient)
+        assert client.token == 'xoxb-t'
 
-    def test_a_token_you_configured_is_left_alone(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_the_capability_you_passed_in_is_not_written_to(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The bot's token is remembered beside the field, not put in it: a token
+        # nobody configured should not turn up in an object the caller still holds.
+        monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
+        chat = SlackChat()
+        build(Agent(TestModel(custom_output_text='done'), capabilities=[chat]))
+        assert chat.token is None
+
+    def test_a_token_you_configured_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
         chat = SlackChat(token='xoxb-mine')
         build(Agent(TestModel(custom_output_text='done'), capabilities=[chat]))
-        assert chat.token == 'xoxb-mine'
+        client = chat.resolve_client()
+        assert isinstance(client, AsyncWebClient)
+        assert client.token == 'xoxb-mine'
 
     def test_two_slack_chats_warn_and_route_to_the_first(
         self, slack_client: FakeSlackClient, caplog: pytest.LogCaptureFixture

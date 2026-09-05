@@ -16,6 +16,7 @@ import anyio
 
 from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._thread import SlackThread
+from pydantic_ai_harness.slack._validate import string_sequence
 
 PROMPT_ACTION_PREFIX = 'pydantic_ai_harness_slack_prompt:'
 """Prefix on the `action_id` of every button these prompts post.
@@ -28,6 +29,12 @@ DEFAULT_PROMPT_TIMEOUT_SECONDS = 600.0
 """How long a prompt waits before giving up. Ten minutes suits a working thread:
 long enough for someone to come back from a meeting, short enough that a run does
 not sit open overnight holding an agent turn."""
+
+MAX_QUESTION_CHARS = 3000
+"""Longest question a prompt can ask. Slack's cap on one section block, which is
+what the question is rendered as. The settled message that replaces the prompt is
+plain text under a 4000 cap, so it needs no margin here. Longer questions are
+refused rather than truncated: half a question is one nobody can answer."""
 
 _MAX_OPTIONS = 25
 """Slack's cap on elements in one `actions` block."""
@@ -94,12 +101,18 @@ class SlackInteractions:
         instead skips that edit and leaves the buttons in place.
 
         Raises:
-            ValueError: If `options` is empty, exceeds Slack's limits, contains
-                duplicates that would make the answer ambiguous, `allowed_user_ids`
-                is a string rather than a collection of ids, or nobody is allowed
-                to answer because the thread names no user.
+            ValueError: If `question` is too long for Slack to show, `options` is
+                empty, exceeds Slack's limits, contains duplicates that would make
+                the answer ambiguous, `allowed_user_ids` is a string rather than a
+                collection of ids, or nobody is allowed to answer because the
+                thread names no user.
             SlackPromptError: If Slack did not identify the message it posted.
         """
+        if len(question) > MAX_QUESTION_CHARS:
+            raise ValueError(
+                f'that question is {len(question)} characters and Slack shows at most {MAX_QUESTION_CHARS}; '
+                'ask something shorter, or put the detail in a message before it'
+            )
         choices = tuple(options)
         if not choices:
             raise ValueError('options must contain at least one option')
@@ -111,10 +124,8 @@ class SlackInteractions:
             if not choice or len(choice) > _MAX_OPTION_CHARS:
                 raise ValueError(f'each option must be between 1 and {_MAX_OPTION_CHARS} characters')
 
-        if isinstance(allowed_user_ids, str):
-            raise ValueError('allowed_user_ids must be a collection of user ids, not a string')
         if allowed_user_ids is not None:
-            allowed = frozenset(allowed_user_ids)
+            allowed = frozenset(string_sequence(allowed_user_ids, 'allowed_user_ids'))
         elif thread.user_id is not None:
             allowed = frozenset({thread.user_id})
         else:

@@ -109,7 +109,13 @@ prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
 slack = [
-    "aiohttp>=3.10",
+    # `AsyncWebClient` and Bolt's async app both import aiohttp, but neither
+    # package requires it: slack-sdk hides it behind an `optional` extra that
+    # also pulls boto3, SQLAlchemy and two websocket clients, and slack-bolt
+    # does not declare it at all, so it is named here directly. 3.13.0 is the
+    # first release with wheels for every Python this package supports; below it
+    # the `test-floor` job builds aiohttp's C extensions from an sdist.
+    "aiohttp>=3.13",
     "slack-bolt>=1.23.0",
     "slack-sdk>=3.44.0",
 ]
