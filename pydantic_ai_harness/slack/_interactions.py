@@ -126,7 +126,7 @@ class SlackInteractions:
         # left over from a previous run would resolve the first prompt of the new
         # one -- an old Approve click answering an unrelated question.
         token = secrets.token_urlsafe(16)
-        response = await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+        response = await thread.client.chat_postMessage(
             channel=thread.channel_id,
             thread_ts=thread.thread_ts,
             text=question,
@@ -148,7 +148,7 @@ class SlackInteractions:
 
         answer = pending.answer
         try:
-            await thread.client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+            await thread.client.chat_update(
                 channel=thread.channel_id,
                 ts=timestamp,
                 text=_settled_text(question, answer, pending.answered_by),

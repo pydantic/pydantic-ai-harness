@@ -1,14 +1,4 @@
-"""Tools that let an agent talk to the Slack thread it is running in.
-
-`slack_sdk` leaves generics unparameterised in its signatures -- bare `Dict`,
-`List`, `PathLike`, and an unannotated `**kwargs` -- and one `Unknown` anywhere
-in a signature makes the whole method partially unknown, so strict Pyright
-reports every call. Hence the `reportUnknownMemberType` suppressions here and
-in the sibling modules. They are narrow: a renamed or removed method still
-fails as `reportAttributeAccessIssue` and a changed parameter type as
-`reportArgumentType`. A renamed keyword argument is the one drift that gets
-through, because the SDK's own `**kwargs` accepts anything.
-"""
+"""Tools that let an agent talk to the Slack thread it is running in."""
 
 from __future__ import annotations
 
@@ -118,7 +108,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
                 'Send it as several shorter messages, or put the long form in a file.'
             )
         thread = ctx.deps
-        await thread.client.chat_postMessage(channel=thread.channel_id, thread_ts=thread.thread_ts, text=text)  # pyright: ignore[reportUnknownMemberType]
+        await thread.client.chat_postMessage(channel=thread.channel_id, thread_ts=thread.thread_ts, text=text)
         return 'Posted.'
 
     async def post_plan(self, ctx: RunContext[SlackThread], steps: list[PlanStep], plan_id: str | None = None) -> str:
@@ -144,9 +134,9 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
             timestamp = self._plan_timestamp(ctx, plan_id)
             if timestamp is None:
                 raise ModelRetry(f'{plan_id!r} is not a plan you posted here. Post the plan again with no plan_id.')
-            await thread.client.chat_update(channel=thread.channel_id, ts=timestamp, text=text)  # pyright: ignore[reportUnknownMemberType]
+            await thread.client.chat_update(channel=thread.channel_id, ts=timestamp, text=text)
             return f'Plan updated. Its plan_id is still {plan_id!r}.'
-        response = await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+        response = await thread.client.chat_postMessage(
             channel=thread.channel_id, thread_ts=thread.thread_ts, text=text
         )
         timestamp = response.get('ts')
@@ -165,9 +155,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         """The message this plan id names, or `None` if this run did not post it."""
         # Slack timestamps contain a dot, so split on the last one.
         timestamp, _, _signature = plan_id.rpartition('.')
-        # Compared as bytes: `compare_digest` raises on non-ASCII text, and the
-        # model picks this string.
-        if timestamp and hmac.compare_digest(self._plan_id(ctx, timestamp).encode(), plan_id.encode()):
+        if timestamp and self._plan_id(ctx, timestamp) == plan_id:
             return timestamp
         return None
 
@@ -180,7 +168,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         """
         thread = ctx.deps
         try:
-            await thread.client.assistant_threads_setStatus(  # pyright: ignore[reportUnknownMemberType]
+            await thread.client.assistant_threads_setStatus(
                 channel_id=thread.channel_id, thread_ts=thread.thread_ts, status=status
             )
         except Exception:
@@ -233,7 +221,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         if not resolved.is_file():
             raise ModelRetry(f'There is no file at {path}. Write it first, then send it.')
         thread = ctx.deps
-        await thread.client.files_upload_v2(  # pyright: ignore[reportUnknownMemberType]
+        await thread.client.files_upload_v2(
             channel=thread.channel_id,
             thread_ts=thread.thread_ts,
             file=str(resolved),

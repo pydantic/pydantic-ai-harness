@@ -1,10 +1,10 @@
 # Slack
 
-Put a Pydantic AI agent in a Slack thread. `SlackChatToolset` lets the agent
-post progress, show a checklist, ask a question, and send files while it works.
-`SlackApprovals` stops a dangerous tool until a person clicks Approve.
-`SlackAgent` wires both to a Socket Mode app, so a working bot is a few lines
-and no public web server.
+Put a Pydantic AI agent in a Slack thread. `SlackChat` lets the agent post
+progress, show a checklist, ask a question, and send files while it works, and
+tells it when to do each. `SlackApprovals` stops a dangerous tool until a person
+clicks Approve. `SlackAgent` wires both to a Socket Mode app, so a working bot
+is a few lines and no public web server.
 
 Slack is a front door here, not the agent's only reach. The same agent takes
 whatever other toolsets you give it, so it can read a Linear ticket, open a pull
@@ -30,24 +30,22 @@ from pydantic_ai.capabilities import HandleDeferredToolCalls
 
 from pydantic_ai_harness.slack import (
     FileConversationStore,
+    SlackAgent,
     SlackApprovals,
-    SlackChatToolset,
+    SlackChat,
     SlackInteractions,
     SlackThread,
 )
-from pydantic_ai_harness.slack.app import SlackAgent
 
 interactions = SlackInteractions()
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
     deps_type=SlackThread,
-    instructions=(
-        'You work in Slack. Post a plan before multi-step work and keep it updated. '
-        'Keep replies short; put anything long in a file and send that instead.'
-    ),
-    toolsets=[SlackChatToolset(interactions=interactions, file_root='./workspace')],
-    capabilities=[HandleDeferredToolCalls(handler=SlackApprovals(interactions))],
+    capabilities=[
+        SlackChat(interactions=interactions, file_root='./workspace'),
+        HandleDeferredToolCalls(handler=SlackApprovals(interactions)),
+    ],
 )
 
 
@@ -121,7 +119,7 @@ apps can no longer set.
 
 ## What the agent can do in the thread
 
-`SlackChatToolset` registers three tools always, and two more when configured:
+`SlackChat` registers three tools always, and two more when configured:
 
 | Tool | Registered | What it does |
 | --- | --- | --- |
@@ -130,6 +128,14 @@ apps can no longer set.
 | `set_status` | always | Sets the short working-state line |
 | `ask_user` | with `interactions=` | Asks a multiple-choice question and waits for a click |
 | `upload_file` | with `file_root=` | Sends a file from that directory into the thread |
+
+It also ships the instructions that make those tools worth having. A model with
+`post_message` and no guidance says nothing until it finishes, which is the one
+thing a Slack agent exists not to do. Pass `instructions=` to replace the
+default, or `instructions=''` to add none and say it yourself.
+
+`SlackChatToolset` is the same tools without the guidance, for an agent whose
+instructions already cover it.
 
 `ask_user` and `upload_file` are opt-in on purpose. An agent that should never
 block on a person should not be given a tool that blocks on a person, and there

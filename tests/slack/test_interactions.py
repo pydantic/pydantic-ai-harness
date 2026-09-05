@@ -109,6 +109,14 @@ class TestAsk:
 
         posted = [str(call.kwargs['text']) for call in slack_client.method_calls('chat_postMessage')]
         assert posted == ['First?', 'Second?']
+        # Each prompt settles before the next is posted. Without the per-thread
+        # lock both post first and the thread carries two live sets of buttons.
+        assert [call.method for call in slack_client.calls] == [
+            'chat_postMessage',
+            'chat_update',
+            'chat_postMessage',
+            'chat_update',
+        ]
 
 
 class TestAskValidation:

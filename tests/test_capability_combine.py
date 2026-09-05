@@ -284,6 +284,10 @@ COMBINE_POLICY: dict[str, Policy] = {
         lambda cls: (cls(), cls()),
     ),
     'CodeMode': Collides('`run_code` is reserved, so a second one is rejected by name'),
+    'SlackChat': Collides(
+        'its toolset registers `post_message` and friends under fixed names',
+        lambda cls: (cls(), cls(file_root=str(_TMP_A))),
+    ),
     'BrowserUse': Collides('its toolset registers its browser tools under fixed names'),
     'PlaywrightBrowser': Collides('its toolset registers `click` and friends under fixed names'),
     'ModalSandbox': Collides('its toolset registers `run_command` and friends under fixed names'),

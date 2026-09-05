@@ -17,32 +17,16 @@ from pydantic_ai.models import Model
 
 from pydantic_ai_harness.slack import (
     FileConversationStore,
+    SlackAgent,
     SlackApprovals,
-    SlackChatToolset,
+    SlackChat,
     SlackInteractions,
     SlackThread,
 )
-from pydantic_ai_harness.slack.app import SlackAgent
 
 DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'anthropic:claude-sonnet-4-6')
 
-INSTRUCTIONS = """\
-You work in a Slack thread, so the people reading you are watching it happen.
-
-Post a plan with `post_plan` before any work that takes more than one step. It
-returns a `plan_id`; pass that back to tick steps off in place. Say what you
-found along the way with `post_message` rather than saving it all for the end.
-
-Keep your final answer short. Anything long -- a report, a table, a diff --
-belongs in a file you send with `upload_file`, with a couple of lines saying
-what is in it.
-
-Decide what you can decide. Use `ask_user` only when the choice is genuinely
-theirs to make.
-"""
-
-
-# One registry per process: the toolset asks through it and the app resolves
+# One registry per process: the capability asks through it and the app resolves
 # button clicks against it, so both halves must be the same object.
 INTERACTIONS = SlackInteractions()
 
@@ -52,9 +36,10 @@ def build_agent(model: Model | str = DEFAULT_MODEL) -> Agent[SlackThread, str]:
     agent = Agent(
         model,
         deps_type=SlackThread,
-        instructions=INSTRUCTIONS,
-        toolsets=[SlackChatToolset(interactions=INTERACTIONS, file_root='./workspace')],
-        capabilities=[HandleDeferredToolCalls(handler=SlackApprovals(INTERACTIONS))],
+        capabilities=[
+            SlackChat(interactions=INTERACTIONS, file_root='./workspace'),
+            HandleDeferredToolCalls(handler=SlackApprovals(INTERACTIONS)),
+        ],
     )
 
     @agent.tool_plain(requires_approval=True)

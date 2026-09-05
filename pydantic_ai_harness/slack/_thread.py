@@ -4,12 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-try:
-    from slack_sdk.web.async_client import AsyncWebClient
-except ImportError as _import_error:  # pragma: no cover
-    raise ImportError(
-        'slack-sdk is required for the Slack package. Install it with: pip install "pydantic-ai-harness[slack]"'
-    ) from _import_error
+from pydantic_ai_harness.slack._client import SlackClient
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -26,8 +21,11 @@ class SlackThread:
     derives the history key from the same value.
     """
 
-    client: AsyncWebClient
-    """Authenticated Slack Web API client used for every call in this run."""
+    client: SlackClient
+    """Authenticated Slack Web API client used for every call in this run.
+
+    `slack_sdk`'s `AsyncWebClient` satisfies
+    [`SlackClient`][pydantic_ai_harness.slack.SlackClient] as it stands."""
 
     channel_id: str
     """Channel, group, or DM the message arrived in."""

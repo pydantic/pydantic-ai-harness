@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     from .researcher import DEFAULT_RESEARCHER_INSTRUCTIONS, Researcher
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
     from .skills import Skills
+    from .slack import SlackChat
     from .spend import SpendLimits
     from .stackone import StackOne
     from .step_persistence import StepPersistence
@@ -98,6 +99,7 @@ __all__ = [
     'Researcher',
     'Shell',
     'Skills',
+    'SlackChat',
     'SlidingWindowCompaction',
     'SpendLimits',
     'StackOne',
@@ -143,6 +145,7 @@ _CAPABILITY_EXPORTS = {
     'Researcher': 'researcher',
     'Shell': 'shell',
     'Skills': 'skills',
+    'SlackChat': 'slack',
     'SlidingWindowCompaction': 'compaction',
     'SpendLimits': 'spend',
     'StackOne': 'stackone',

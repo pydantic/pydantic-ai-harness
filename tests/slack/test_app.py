@@ -4,18 +4,20 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 
+import pydantic_ai_harness.slack as slack_package
 import pydantic_ai_harness.slack._app as app_module
 from pydantic_ai_harness.slack import (
     InMemoryConversationStore,
+    SlackAgent,
     SlackInteractions,
     SlackThread,
 )
-from pydantic_ai_harness.slack.app import SlackAgent
 
 from .conftest import FakeSlackClient
 
@@ -89,6 +91,17 @@ def build(agent: Agent[SlackThread, str], **kwargs: object) -> SlackAgent:
     defaults: dict[str, object] = {'bot_token': 'xoxb-t', 'app_token': 'xapp-t', 'allowed_user_ids': ['U0ASKER']}
     defaults.update(kwargs)
     return SlackAgent(agent, **defaults)  # pyright: ignore[reportArgumentType]
+
+
+class TestLazyExport:
+    def test_the_bolt_app_is_reachable_from_the_package(self) -> None:
+        # Named on the package, imported only when asked for, so the rest of the
+        # package stays usable without `slack-bolt`.
+        assert slack_package.SlackAgent is SlackAgent
+
+    def test_an_unknown_name_still_raises(self) -> None:
+        with pytest.raises(AttributeError, match='has no attribute'):
+            _ = slack_package.SlackBot  # pyright: ignore[reportAttributeAccessIssue]
 
 
 class TestConfiguration:
@@ -230,6 +243,39 @@ class TestHandleMessage:
         await build(chatty).handle_message(message(), slack_client, bot_user_id='U0BOT')
         posts = slack_client.method_calls('chat_postMessage')
         assert [len(str(post.kwargs['text'])) for post in posts] == [3500, 3500, 1]
+
+    async def test_a_second_message_waits_for_the_running_turn(
+        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+    ) -> None:
+        # Two turns in one thread share a history. Running them at once means the
+        # second loads the history the first has not finished writing.
+        order: list[str] = []
+        release = anyio.Event()
+        slow = Agent(TestModel(custom_output_text='done'), deps_type=SlackThread)
+
+        @slow.instructions
+        async def gate() -> str:
+            order.append('enter')
+            await release.wait()
+            order.append('exit')
+            return ''
+
+        slack_agent = build(slow)
+        first = message()
+        second = message(ts='1700000000.000002', thread_ts='1700000000.000001')
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(lambda: slack_agent.handle_message(first, slack_client, bot_user_id='U0BOT'))
+            while order != ['enter']:
+                await anyio.sleep(0)
+            tg.start_soon(lambda: slack_agent.handle_message(second, slack_client, bot_user_id='U0BOT'))
+            # Real time, not a yield count: the second turn has to get far enough
+            # to reach the agent run before "it did not start" means anything.
+            await anyio.sleep(0.2)
+            assert order == ['enter'], 'the second turn started while the first was still running'
+            release.set()
+
+        assert order == ['enter', 'exit', 'enter', 'exit']
 
     async def test_an_undelivered_reply_is_not_written_into_the_history(
         self,

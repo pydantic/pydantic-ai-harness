@@ -281,7 +281,7 @@ class SlackAgent:
 
     async def _post(self, thread: SlackThread, text: str) -> None:
         for start in range(0, len(text), MAX_MESSAGE_CHARS):
-            await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            await thread.client.chat_postMessage(
                 channel=thread.channel_id,
                 thread_ts=thread.thread_ts,
                 text=text[start : start + MAX_MESSAGE_CHARS],
