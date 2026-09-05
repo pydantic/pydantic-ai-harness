@@ -142,6 +142,13 @@ jobs:
 
       - run: make typecheck
 
+      # `gh-aw/pydantic.md` is read by GitHub Agentic Workflows off the
+      # `gh-aw-engine` branch, and the two jobs that verify a commit before that
+      # branch advances to it key off its frontmatter. Validating it on every pull
+      # request means an edit that breaks those fields fails here rather than on
+      # the release that would ship it.
+      - run: uv run --script scripts/gh_aw_engine_version.py
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -512,6 +519,64 @@ jobs:
 
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+
+  # GitHub Agentic Workflows resolves its `pydantic-ai` engine from
+  # `gh-aw/pydantic.md` on this repository's `gh-aw-engine` branch, so that branch
+  # is the published artifact and main is only its source. The definition pins the
+  # `pydantic-ai-harness` release a generated gh-aw workflow installs, which is why
+  # the branch moves here: a release commit is exactly the point at which the
+  # pinned version becomes installable.
+  #
+  # Releases whose tag does not match the pin fail this job instead of the publish.
+  # The package is already on PyPI and the release stands; what is left undone is
+  # the engine ref, and `gh-aw-engine` keeps serving the previous definition until
+  # someone bumps the pin. Bumping it therefore belongs to preparing a release.
+  #
+  # Validation and advancement are separate jobs so that the one holding a write
+  # token runs no code from this repository and none from PyPI. See
+  # `advance-gh-aw-engine` below.
+  verify-gh-aw-engine:
+    name: gh-aw engine / verify (release)
+    needs: [release]
+    # Same skipped-ancestor opt-out as `release` above.
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      # The advancing job takes this commit rather than resolving the tag itself,
+      # so the commit that was validated is the commit that ships.
+      sha: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: false
+
+      # `refs/tags/v1.2.3` published 1.2.3, so this commit may only ship as the
+      # engine definition if the definition pins that same version.
+      - run: uv run --script scripts/gh_aw_engine_version.py --expect "${GITHUB_REF_NAME#v}"
+
+  advance-gh-aw-engine:
+    name: gh-aw engine / advance (release)
+    needs: [verify-gh-aw-engine]
+    if: ${{ !cancelled() && needs.verify-gh-aw-engine.result == 'success' }}
+    # The environment, the write token and the fast-forward are argued for in the
+    # called workflow, which the dispatch path calls too.
+    uses: ./.github/workflows/gh-aw-engine-advance.yml # zizmor: ignore[secrets-inherit] -- The advance credential is a `gh-aw-engine` environment secret, and only the called job declares that environment, so it cannot be named and passed from here
+    # A called workflow can only downgrade the caller's token, never raise it, so
+    # the write the advancing job needs has to be granted here.
+    permissions:
+      contents: write
+    with:
+      sha: ${{ needs.verify-gh-aw-engine.outputs.sha }}
+    # Environment secrets do not reach a called workflow otherwise.
+    secrets: inherit
 
   send-tweet:
     name: Send tweet

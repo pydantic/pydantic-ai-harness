@@ -1,0 +1,87 @@
+name: gh-aw engine advance
+
+# Fast-forwards this repository's `gh-aw-engine` branch to a commit the caller has
+# already verified. Both paths that publish the engine definition call it -- the
+# release path in `main.yml` and the `gh-aw engine ref` dispatch -- so the reasoning
+# about the one job in this repository that holds a write token has a single home.
+#
+# A reusable workflow rather than a composite action: GitHub fetches a called
+# workflow instead of checking it out, so the advancing job still runs nothing from
+# the repository tree.
+on:
+  workflow_call:
+    inputs:
+      sha:
+        description: The commit to fast-forward `gh-aw-engine` to. Verifying it belongs to the caller.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The write token is granted to a deployment of this environment, and an
+    # environment's protection rules are enforced by GitHub rather than by the
+    # workflow file. That distinction is the point: both callers run the workflow
+    # definition carried by a ref someone else picked -- the pushed tag on the
+    # release path, the dispatcher's ref on the dispatch path -- so no condition
+    # written in a caller can stop a ref from running its own version of this job.
+    # Protection rules can.
+    #
+    # A deployment ref policy is not the whole answer, because it matches the ref's
+    # name rather than its provenance: the `v*` policy that would gate the tag path
+    # is worth exactly as much as the restrictions on creating `v*` tags, and this
+    # repository has none. Required reviewers are what close that, which is how the
+    # `release` environment already protects the PyPI publish in `main.yml`. Until
+    # an administrator configures this environment, the line is inert and the gate
+    # is the write-access list.
+    environment: gh-aw-engine
+    permissions:
+      contents: write
+    steps:
+      # No checkout and no actions. This is the only job that holds a write token,
+      # and nothing it runs comes from the repository tree, from PyPI, or from a
+      # third-party action. The two API calls below are the entire job.
+      - name: Fast-forward the engine ref
+        env:
+          # The secret lives in the `gh-aw-engine` environment, so only a job that
+          # cleared that environment's protection rules can read it. That is what
+          # makes it worth more than `github.token`: the environment gate binds our
+          # jobs, but every account with write access can move a branch on its own,
+          # so a ruleset on `refs/heads/gh-aw-engine` has to restrict updates to
+          # this credential alone. A ruleset grants bypass to roles, teams and
+          # GitHub Apps rather than to a named person, so the credential belongs to
+          # a machine account in a dedicated team holding nothing else, and that
+          # team is the only bypass. Until an administrator creates both, the
+          # fallback keeps the workflow working and the branch stays open to any
+          # writer.
+          GH_TOKEN: ${{ secrets.GH_AW_ENGINE_ADVANCE_TOKEN || github.token }}
+          SHA: ${{ inputs.sha }}
+          ENGINE_REF: gh-aw-engine
+        run: |
+          # `force: false` has GitHub refuse a non-fast-forward server-side, so the
+          # guarantee holds even if this script is wrong. gh-aw's engine catalog
+          # names the branch rather than a commit and resolves it at compile time,
+          # so a non-fast-forward would change the definition under every consumer
+          # that recompiles.
+          if response="$(gh api -X PATCH \
+            "repos/${GITHUB_REPOSITORY}/git/refs/heads/${ENGINE_REF}" \
+            -f sha="${SHA}" -F force=false 2>&1)"; then
+            echo "${ENGINE_REF} now points at ${SHA}"
+            exit 0
+          fi
+
+          # A refused fast-forward and a branch that does not exist yet both answer
+          # 422, and only the message separates them. Anything else fails closed.
+          if ! printf '%s' "${response}" | grep -q 'Reference does not exist'; then
+            printf '%s\n' "${response}" >&2
+            echo "${ENGINE_REF} was not advanced to ${SHA}." >&2
+            exit 1
+          fi
+
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f ref="refs/heads/${ENGINE_REF}" -f sha="${SHA}" --silent
+          echo "${ENGINE_REF} created at ${SHA}"

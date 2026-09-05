@@ -1,0 +1,87 @@
+name: gh-aw engine ref
+
+# GitHub Agentic Workflows resolves its `pydantic-ai` engine from
+# `gh-aw/pydantic.md` on this repository's `gh-aw-engine` branch. The release path
+# in `main.yml` advances that branch whenever a tag ships the version the
+# definition pins, which covers changes that ride along with a release. This
+# workflow covers the rest: a correction to the definition itself has no package
+# release to ride, and until someone runs this the fix sits on main while gh-aw
+# keeps serving the previous commit. It is also how the branch is created.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: gh-aw engine / verify (dispatch)
+    runs-on: ubuntu-latest
+    # Every step here but the `git rev-parse` reaches the network, and none of
+    # those owns a timeout beyond the curl bounds below.
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      # Advancing to the commit this job checked out, rather than re-resolving main
+      # one job later, keeps the commit that was validated and the commit that ships
+      # the same one even if main moves in between.
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # main rather than the dispatched ref: the ref picker chooses which copy of
+          # this workflow runs, so it cannot be trusted to choose what gets published.
+          # An engine definition that has not landed on main must not become the one
+          # gh-aw serves.
+          ref: main
+          persist-credentials: false
+
+      - id: commit
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: false
+
+      - id: engine
+        run: |
+          version="$(uv run --script scripts/gh_aw_engine_version.py)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # The release path gets this for free: it runs seconds after the publish whose
+      # version it matched. Nothing is published here, so the pin is checked against
+      # PyPI directly. A definition naming a version pip cannot install fails every
+      # gh-aw workflow that selects this engine, at install time, in someone else's
+      # repository.
+      #
+      # The timeouts are what stop a connection that is accepted but never answered
+      # from holding the runner until the six-hour job default. curl exits 28 on
+      # either, which fails the step rather than reporting a version as unpublished.
+      - name: Check the pinned version is published
+        env:
+          VERSION: ${{ steps.engine.outputs.version }}
+        run: |
+          status="$(curl --silent --show-error --connect-timeout 10 --max-time 30 \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/pydantic-ai-harness/${VERSION}/json")"
+          if [ "$status" != '200' ]; then
+            echo "pydantic-ai-harness ${VERSION} is not on PyPI (HTTP ${status}), so gh-aw-engine was not advanced." >&2
+            exit 1
+          fi
+
+  advance:
+    name: gh-aw engine / advance (dispatch)
+    needs: [verify]
+    # The environment, the write token and the fast-forward are argued for in the
+    # called workflow, which the release path in `main.yml` calls too.
+    uses: ./.github/workflows/gh-aw-engine-advance.yml # zizmor: ignore[secrets-inherit] -- The advance credential is a `gh-aw-engine` environment secret, and only the called job declares that environment, so it cannot be named and passed from here
+    # A called workflow can only downgrade the caller's token, never raise it, so
+    # the write the advancing job needs has to be granted here.
+    permissions:
+      contents: write
+    with:
+      sha: ${{ needs.verify.outputs.sha }}
+    # Environment secrets do not reach a called workflow otherwise.
+    secrets: inherit
