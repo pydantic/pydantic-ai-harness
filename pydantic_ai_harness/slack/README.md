@@ -99,7 +99,7 @@ One token, read from the environment on first use:
 ```python {test="skip"}
 SlackChat()                       # reads SLACK_BOT_TOKEN
 SlackChat(token='xoxb-...')       # or name it
-SlackChat(client=my_client)       # or hand it a client
+SlackChat(client=my_client)       # or hand it a client, of any `SlackClient`
 ```
 
 Nothing is read at construction, so building an agent needs no credentials.
@@ -314,10 +314,13 @@ SlackBot(agent).run()
 ```
 
 A spec can set `channels`, `ask_user`, `approvals`, `approver_ids`, `file_root`,
-`token`, `instructions`, and `thread` (as a mapping of `SlackThread` fields).
-`client` and `interactions` are live objects and are refused from a spec rather
-than ignored, so an agent never authenticates as something other than the spec
-says. Leave the token out of the file and let `SLACK_BOT_TOKEN` supply it.
+`instructions`, and `thread` (as a mapping of `SlackThread` fields).
+
+`token` is refused. A spec is a file, so the only way to put a token in one is to
+write the secret down; authentication comes from `SLACK_BOT_TOKEN` or from
+`SlackBot`. `client` and `interactions` are refused too, being live objects a
+file cannot describe. All three are refused rather than ignored, so an agent
+never authenticates as something other than the spec says.
 
 ## Conversation history
 

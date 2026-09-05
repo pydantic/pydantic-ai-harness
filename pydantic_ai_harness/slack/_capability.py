@@ -161,15 +161,24 @@ class SlackChat(AbstractCapability[AgentDepsT]):
         """Build from an agent spec, where everything arrives as plain data.
 
         A spec can set `channels`, `ask_user`, `approvals`, `approver_ids`,
-        `file_root`, `token`, `instructions`, and `thread` as a mapping of
-        `SlackThread` fields. `client` and `interactions` are live objects, so
-        they can only be passed in code.
+        `file_root`, `instructions`, and `thread` as a mapping of `SlackThread`
+        fields.
+
+        `token` is refused: a spec is a file, and the only way to put a token in
+        one is to write the secret down. Authentication comes from the
+        environment or from `SlackBot`. `client` and `interactions` are refused
+        too, being live objects a file cannot describe.
         """
+        if 'token' in kwargs:
+            raise ValueError(
+                'token cannot be set from an agent spec, because that means writing a credential into a file. '
+                'Set SLACK_BOT_TOKEN in the environment, or pass token= to SlackChat or SlackBot in code.'
+            )
         for live in ('client', 'interactions'):
             if live in kwargs:
                 raise ValueError(
                     f'{live} cannot be set from an agent spec because it is a live object. '
-                    f'Leave it out and set it in code, or set token to authenticate from the spec.'
+                    f'Leave it out and set it in code.'
                 )
         thread: object = kwargs.get('thread')
         if isinstance(thread, Mapping):

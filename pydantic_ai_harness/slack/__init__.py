@@ -12,12 +12,10 @@ pulls Bolt in. Everything else needs only `slack-sdk`.
 
 from typing import TYPE_CHECKING
 
-from pydantic_ai_harness.slack._approvals import APPROVE, DENY, SlackApprovals
+from pydantic_ai_harness.slack._approvals import SlackApprovals
 from pydantic_ai_harness.slack._capability import DEFAULT_INSTRUCTIONS, SlackChat
-from pydantic_ai_harness.slack._client import SlackClient, default_client
+from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._interactions import (
-    DEFAULT_PROMPT_TIMEOUT_SECONDS,
-    MAX_QUESTION_CHARS,
     PROMPT_ACTION_PREFIX,
     SlackInteractions,
     SlackPromptError,
@@ -27,26 +25,15 @@ from pydantic_ai_harness.slack._store import (
     FileConversationStore,
     InMemoryConversationStore,
 )
-from pydantic_ai_harness.slack._thread import (
-    SlackThread,
-    ThreadResolver,
-    bind_thread,
-    conversation_key,
-    current_thread,
-)
+from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver, bind_thread, current_thread
 from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS, PlanStep, SlackChatToolset, StepStatus
 
 if TYPE_CHECKING:
-    from pydantic_ai_harness.slack._app import DEFAULT_ERROR_REPLY, SlackBot
+    from pydantic_ai_harness.slack._app import SlackBot
 
 __all__ = [
-    'APPROVE',
-    'DEFAULT_ERROR_REPLY',
     'DEFAULT_INSTRUCTIONS',
-    'DEFAULT_PROMPT_TIMEOUT_SECONDS',
-    'DENY',
     'MAX_MESSAGE_CHARS',
-    'MAX_QUESTION_CHARS',
     'PROMPT_ACTION_PREFIX',
     'ConversationStore',
     'FileConversationStore',
@@ -63,12 +50,10 @@ __all__ = [
     'StepStatus',
     'ThreadResolver',
     'bind_thread',
-    'conversation_key',
     'current_thread',
-    'default_client',
 ]
 
-_BOLT_EXPORTS = {'DEFAULT_ERROR_REPLY', 'SlackBot'}
+_BOLT_EXPORTS = {'SlackBot'}
 
 
 def __getattr__(name: str) -> object:

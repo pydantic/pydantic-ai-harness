@@ -7,12 +7,7 @@ import anyio
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from pydantic_ai_harness.slack import (
-    FileConversationStore,
-    InMemoryConversationStore,
-    SlackThread,
-    conversation_key,
-)
+from pydantic_ai_harness.slack import FileConversationStore, InMemoryConversationStore, SlackThread
 
 pytestmark = pytest.mark.anyio
 
@@ -26,16 +21,18 @@ def _history() -> list[ModelRequest | ModelResponse]:
 
 class TestConversationKey:
     def test_includes_team_when_set(self) -> None:
-        assert conversation_key(channel_id='C1', thread_ts='1.1', team_id='T1') == 'T1:C1:1.1'
+        # Two workspaces can hold the same channel id, so history has to stay apart.
+        assert SlackThread(channel_id='C1', thread_ts='1.1', team_id='T1').key == 'T1:C1:1.1'
 
     def test_omits_team_when_absent(self) -> None:
-        assert conversation_key(channel_id='C1', thread_ts='1.1') == 'C1:1.1'
+        assert SlackThread(channel_id='C1', thread_ts='1.1').key == 'C1:1.1'
 
-    def test_thread_exposes_the_same_key(self, thread: SlackThread) -> None:
-        assert thread.key == conversation_key(channel_id='C123', thread_ts='1700000000.000001', team_id='T1')
+    def test_a_channel_with_no_thread_keys_on_the_channel(self) -> None:
+        assert SlackThread(channel_id='C1').key == 'C1'
 
     def test_threads_in_one_channel_stay_separate(self) -> None:
-        assert conversation_key(channel_id='C1', thread_ts='1.1') != conversation_key(channel_id='C1', thread_ts='2.2')
+        first = SlackThread(channel_id='C1', thread_ts='1.1')
+        assert first.key != SlackThread(channel_id='C1', thread_ts='2.2').key
 
 
 class TestInMemoryConversationStore:

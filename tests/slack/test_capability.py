@@ -9,13 +9,7 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.slack import (
-    DEFAULT_INSTRUCTIONS,
-    SlackChat,
-    SlackInteractions,
-    SlackThread,
-    default_client,
-)
+from pydantic_ai_harness.slack import DEFAULT_INSTRUCTIONS, SlackChat, SlackInteractions, SlackThread
 
 from .conftest import FakeSlackClient
 
@@ -77,8 +71,10 @@ class TestClient:
         assert SlackChat().resolve_client() is not None
 
     def test_a_real_client_satisfies_the_protocol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The client built from a token is a real `AsyncWebClient` used as a
+        # `SlackClient`, so a method the SDK renames would fail here.
         monkeypatch.setenv('SLACK_BOT_TOKEN', 'xoxb-from-the-environment')
-        assert default_client().chat_postMessage is not None
+        assert SlackChat().resolve_client().chat_postMessage is not None
 
     def test_the_client_is_built_once(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('SLACK_BOT_TOKEN', 'xoxb-from-the-environment')
@@ -180,7 +176,6 @@ capabilities:
   - SlackChat:
       channels: ['#alerts', '#eng']
       approvals: true
-      token: xoxb-from-the-spec
 """
 
 
@@ -196,7 +191,7 @@ class TestAgentSpec:
         agent = Agent.from_spec(yaml.safe_load(SPEC), custom_capability_types=[SlackChat])
         capability = spec_capability(agent)
         assert capability.channels == ['#alerts', '#eng']
-        assert (capability.approvals, capability.token) == (True, 'xoxb-from-the-spec')
+        assert capability.approvals is True
 
     async def test_a_spec_defined_agent_posts_where_the_spec_said(self, slack_client: FakeSlackClient) -> None:
         spec = yaml.safe_load(SPEC)
@@ -232,3 +227,9 @@ class TestAgentSpec:
         # other than the spec says.
         with pytest.raises(ValueError, match='client cannot be set from an agent spec'):
             SlackChat.from_spec(client=slack_client)
+
+    def test_a_token_cannot_come_from_a_spec(self) -> None:
+        # A spec is a file. Accepting this would mean the documented way to
+        # authenticate a spec-defined agent is to commit the credential.
+        with pytest.raises(ValueError, match='SLACK_BOT_TOKEN'):
+            SlackChat.from_spec(token='xoxb-written-down')

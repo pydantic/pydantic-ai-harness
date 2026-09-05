@@ -16,7 +16,7 @@ class ConversationStore(Protocol):
     """Where a Slack agent keeps one thread's message history.
 
     Implement this to put history somewhere that outlives the process. Keys come
-    from [`conversation_key`][pydantic_ai_harness.slack.conversation_key], so they
+    from [`SlackThread.key`][pydantic_ai_harness.slack.SlackThread.key], so they
     are safe to use verbatim as row ids.
     """
 

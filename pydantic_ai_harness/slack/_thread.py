@@ -47,18 +47,8 @@ class SlackThread:
         Pass it as `conversation_id` to `Agent.run()` and use it as the
         [`ConversationStore`][pydantic_ai_harness.slack.ConversationStore] key.
         """
-        return conversation_key(channel_id=self.channel_id, thread_ts=self.thread_ts, team_id=self.team_id)
-
-
-def conversation_key(*, channel_id: str, thread_ts: str | None = None, team_id: str | None = None) -> str:
-    """Build the history key for one Slack thread.
-
-    Kept separate from [`SlackThread`][pydantic_ai_harness.slack.SlackThread] so an
-    application can compute the key straight from a raw Slack event -- for
-    instance to look up history before deciding whether to start a run.
-    """
-    prefix = f'{team_id}:' if team_id else ''
-    return f'{prefix}{channel_id}:{thread_ts}' if thread_ts else f'{prefix}{channel_id}'
+        prefix = f'{self.team_id}:' if self.team_id else ''
+        return f'{prefix}{self.channel_id}:{self.thread_ts}' if self.thread_ts else f'{prefix}{self.channel_id}'
 
 
 _CURRENT_THREAD: ContextVar[SlackThread | None] = ContextVar('pydantic_ai_harness.slack.thread', default=None)

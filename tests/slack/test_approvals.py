@@ -11,7 +11,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import DeferredToolRequests, RunContext
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.slack import APPROVE, DENY, SlackApprovals, SlackChat, SlackInteractions, SlackThread
+from pydantic_ai_harness.slack import SlackApprovals, SlackChat, SlackInteractions, SlackThread
 
 from .conftest import FakeSlackClient, prompt_block_id
 
@@ -54,7 +54,7 @@ class TestSlackApprovals:
                 results.append(built.approvals['c1'])
 
             tg.start_soon(decide)
-            await click(interactions, slack_client, APPROVE)
+            await click(interactions, slack_client, 'Approve')
 
         assert results == [True]
 
@@ -74,7 +74,7 @@ class TestSlackApprovals:
                 results.append(built.approvals['c1'])
 
             tg.start_soon(decide)
-            await click(interactions, slack_client, DENY)
+            await click(interactions, slack_client, 'Deny')
 
         denied = results[0]
         assert isinstance(denied, ToolDenied)
@@ -171,8 +171,8 @@ class TestSlackApprovals:
                 results.append(dict(built.approvals))
 
             tg.start_soon(decide)
-            await click(interactions, slack_client, APPROVE, index=0)
-            await click(interactions, slack_client, DENY, index=1)
+            await click(interactions, slack_client, 'Approve', index=0)
+            await click(interactions, slack_client, 'Deny', index=1)
 
         assert results[0]['c1'] is True
         assert isinstance(results[0]['c2'], ToolDenied)
@@ -196,8 +196,8 @@ class TestSlackApprovals:
             while not slack_client.method_calls('chat_postMessage'):
                 await anyio.sleep(0)
             block_id = prompt_block_id(slack_client)
-            assert interactions.resolve(block_id=block_id, value=APPROVE, user_id='U0ASKER') is False
-            assert interactions.resolve(block_id=block_id, value=APPROVE, user_id='U0REVIEWER') is True
+            assert interactions.resolve(block_id=block_id, value='Approve', user_id='U0ASKER') is False
+            assert interactions.resolve(block_id=block_id, value='Approve', user_id='U0REVIEWER') is True
 
         assert results == [True]
 
@@ -227,7 +227,7 @@ class TestThroughAnAgent:
             while not slack_client.method_calls('chat_postMessage'):
                 await anyio.sleep(0)
             assert merged == []
-            assert interactions.resolve(block_id=prompt_block_id(slack_client), value=APPROVE, user_id='U0ASKER')
+            assert interactions.resolve(block_id=prompt_block_id(slack_client), value='Approve', user_id='U0ASKER')
 
         assert merged == ['merged 0']
 
@@ -252,7 +252,7 @@ class TestThroughAnAgent:
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(lambda: agent.run('merge it', deps=Warehouse(dsn='postgres://')))
-            await click(interactions, slack_client, DENY)
+            await click(interactions, slack_client, 'Deny')
 
         assert merged == []
 
@@ -277,7 +277,7 @@ class TestThroughTheCapability:
             while not slack_client.method_calls('chat_postMessage'):
                 await anyio.sleep(0)
             assert merged == []
-            assert chat.resolve_prompt(block_id=prompt_block_id(slack_client), value=APPROVE, user_id='U0ASKER')
+            assert chat.resolve_prompt(block_id=prompt_block_id(slack_client), value='Approve', user_id='U0ASKER')
 
         assert merged == ['merged 0']
 
@@ -317,8 +317,8 @@ class TestThroughTheCapability:
             while not slack_client.method_calls('chat_postMessage'):
                 await anyio.sleep(0)
             block_id = prompt_block_id(slack_client)
-            assert chat.resolve_prompt(block_id=block_id, value=APPROVE, user_id='U0ASKER') is False
-            assert chat.resolve_prompt(block_id=block_id, value=APPROVE, user_id='U0REVIEWER') is True
+            assert chat.resolve_prompt(block_id=block_id, value='Approve', user_id='U0ASKER') is False
+            assert chat.resolve_prompt(block_id=block_id, value='Approve', user_id='U0REVIEWER') is True
 
         assert merged == ['merged']
 
