@@ -4,7 +4,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-import anyio
 import pydantic_ai.mcp as mcp_module
 import pytest
 from pydantic import TypeAdapter
@@ -13,7 +12,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.web.async_slack_response import AsyncSlackResponse
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.slack import SlackThread, SlackTool
+from pydantic_ai_harness.slack import SlackTool
 
 
 async def _fake_read_channel(channel_id: str) -> str:
@@ -95,7 +94,6 @@ class _Recorder:
     next_ts: str = '1700000000.000100'
     post_response: dict[str, object] | None = None
     post_error: Exception | None = None
-    post_gate: anyio.Event | None = None
     update_error: Exception | None = None
     update_attempts: int = 0
     status_error: Exception | None = None
@@ -180,8 +178,6 @@ class FakeSlackClient(AsyncWebClient):
             },
             self.recorder.post_response or {'ok': True, 'ts': self.next_ts},
         )
-        if self.recorder.post_gate is not None:
-            await self.recorder.post_gate.wait()
         return response
 
     async def chat_update(
@@ -230,24 +226,9 @@ def slack_client() -> FakeSlackClient:
     return FakeSlackClient()
 
 
-@pytest.fixture
-def thread() -> SlackThread:
-    return SlackThread(
-        channel_id='C123',
-        thread_ts='1700000000.000001',
-        user_id='U0ASKER',
-        team_id='T1',
-    )
-
-
 def prompt_block_id(client: FakeSlackClient, index: int = 0) -> str:
     """Block id of the nth prompt posted, which is what a button click carries back."""
     return _prompt_action_block(client, index)['block_id']
-
-
-def prompt_buttons(client: FakeSlackClient, index: int = 0) -> list[dict[str, object]]:
-    """The button elements of the nth prompt posted."""
-    return _prompt_action_block(client, index)['elements']
 
 
 def _prompt_action_block(client: FakeSlackClient, index: int) -> _ActionBlock:

@@ -607,7 +607,7 @@ class TestListeners:
         async def wait_forever() -> str:
             entered.set()
             await anyio.sleep_forever()
-            return ''
+            return ''  # pragma: no cover - cancellation sentinel
 
         build(slow)
         async with anyio.create_task_group() as tg:
@@ -676,7 +676,7 @@ class TestListeners:
         async def wait_for_release() -> str:
             entered.set()
             await release.wait()
-            return ''
+            return ''  # pragma: no cover - cancellation sentinel
 
         build(slow, access=SlackAccess.users('U0ASKER', 'U0OTHER'))
         async with anyio.create_task_group() as tg:
