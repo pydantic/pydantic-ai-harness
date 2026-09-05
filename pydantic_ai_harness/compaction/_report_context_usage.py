@@ -105,7 +105,7 @@ class ReportContextUsage(AbstractCapability[AgentDepsT]):
         if self.fallback_context_window < 1:
             raise ValueError('fallback_context_window must be positive.')
 
-    def _measure(self, request_context: ModelRequestContext) -> ContextUsage:
+    def _measure(self, ctx: RunContext[AgentDepsT], request_context: ModelRequestContext) -> ContextUsage:
         """Build a reading for the request as it stands."""
         messages: list[ModelMessage] = list(request_context.messages)
         used = estimate_context_tokens(
@@ -114,7 +114,7 @@ class ReportContextUsage(AbstractCapability[AgentDepsT]):
             model_request_parameters=request_context.model_request_parameters,
         )
         if has_context_usage_anchor(messages):
-            used = max(used - get_compaction_reclaim(request_context), 0)
+            used = max(used - get_compaction_reclaim(ctx), 0)
         if self.context_window is not None:
             return ContextUsage(used_tokens=used, window_tokens=self.context_window, resolved=True)
         # Resolved from the request's model rather than the run's: a capability may replace
@@ -132,7 +132,7 @@ class ReportContextUsage(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
         """Measure the pending history and hand the reading to `on_usage`."""
-        outcome = self.on_usage(self._measure(request_context))
+        outcome = self.on_usage(self._measure(ctx, request_context))
         if isinstance(outcome, Awaitable):
             await outcome
         return request_context
