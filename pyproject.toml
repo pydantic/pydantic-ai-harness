@@ -108,6 +108,10 @@ prompt-injection-defender = [
 prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
+slack = [
+    "aiohttp>=3.10",
+    "slack-bolt>=1.23.0",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'

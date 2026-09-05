@@ -3987,6 +3987,11 @@ researcher = [
 skills = [
     { name = "pyyaml" },
 ]
+slack = [
+    { name = "aiohttp", version = "3.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "aiohttp", version = "3.14.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "slack-bolt" },
+]
 stackone = [
     { name = "fastmcp" },
     { name = "pydantic-ai-slim", extra = ["mcp"] },
@@ -4023,6 +4028,7 @@ lint = [
 [package.metadata]
 requires-dist = [
     { name = "agent-client-protocol", marker = "extra == 'acp'", specifier = ">=0.11,<0.12" },
+    { name = "aiohttp", marker = "extra == 'slack'", specifier = ">=3.10" },
     { name = "aws-durable-execution-sdk-python", marker = "python_full_version >= '3.11' and extra == 'aws-lambda'", specifier = ">=1.7.0" },
     { name = "browser-use", marker = "python_full_version >= '3.11' and extra == 'browser-use'", specifier = ">=0.13.6,<0.14" },
     { name = "exa-py", marker = "extra == 'exa'", specifier = ">=2.16.0" },
@@ -4049,11 +4055,12 @@ requires-dist = [
     { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.19" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.17.0" },
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
+    { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.23.0" },
     { name = "stackone-defender", marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender'", specifier = ">=0.7.3,<0.8" },
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
     { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.1,<4" },
 ]
-provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "stackone", "temporal", "youdotcom"]
+provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "slack", "stackone", "temporal", "youdotcom"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -8468,6 +8475,27 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031, upload-time = "2024-12-04T17:35:28.174Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
+]
+
+[[package]]
+name = "slack-bolt"
+version = "1.30.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "slack-sdk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e3/4f/5ba15533d66da2e7174334cc0e2805142e5390c9f4c5f31633df78b17006/slack_bolt-1.30.0.tar.gz", hash = "sha256:af38258d41f801ad9c74503090e0f39accd66c49f667f7e55c97fcdb0e51b886", size = 131180, upload-time = "2026-07-15T20:47:33.679Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2f/ee/1a7a286cf98fa3f4eeffaabc090e82f58f058ab4812aa1d7421d92c2637a/slack_bolt-1.30.0-py2.py3-none-any.whl", hash = "sha256:81f5bc46e79516d23d5e2a31dded6304dd1b8b6b72c0083f2f31d5d801e262c4", size = 235341, upload-time = "2026-07-15T20:47:32.113Z" },
+]
+
+[[package]]
+name = "slack-sdk"
+version = "3.44.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/6e/4e/371068dd7281139307e60cd18553b96b9c8c391a4c3040617192713a3cc4/slack_sdk-3.44.1.tar.gz", hash = "sha256:ca19505423789fa2a3189ff486f989f02e49289f008d0a5813df7255b3fb93ea", size = 256661, upload-time = "2026-09-03T14:21:13.879Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ab/fc/67352b742fc6fa520a550581b0284f5757e4e31a32327c2a00276747fd30/slack_sdk-3.44.1-py2.py3-none-any.whl", hash = "sha256:d6f20a0fbe3fecf9cac955c99d686301b48a645b7045472c3a0cdd186d7c42b2", size = 319865, upload-time = "2026-09-03T14:21:12.405Z" },
 ]
 
 [[package]]
