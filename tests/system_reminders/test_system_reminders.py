@@ -40,7 +40,10 @@ from tests._recording_durability import (  # pyright: ignore[reportMissingTypeSt
     RestrictedRunContext,
 )
 
-pytestmark = pytest.mark.anyio
+pytestmark = [
+    pytest.mark.anyio,
+    pytest.mark.filterwarnings('ignore::pydantic_ai_harness.HarnessDeprecationWarning'),
+]
 
 
 @pytest.fixture
@@ -61,6 +64,11 @@ def _ctx(
     ctx.messages = messages if messages is not None else []
     ctx.usage = usage if usage is not None else RunUsage()
     ctx.usage_limits = usage_limits if usage_limits is not None else UsageLimits()
+
+    async def emit(event: Any) -> Any:
+        return event
+
+    ctx.emit = emit
     return ctx
 
 
