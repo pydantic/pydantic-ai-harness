@@ -266,6 +266,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `run_command` and friends under fixed names',
         lambda cls: (cls(cwd=str(_TMP_A)), cls(cwd=str(_TMP_B))),
     ),
+    'Stripe': Collides('its fixed Stripe MCP tool names make two account-scoped connections conflict'),
     'CapabilityCreation': Collides(
         'its toolset registers `author_capability` and friends under fixed names',
         lambda cls: (cls(str(_TMP_A)), cls(str(_TMP_B))),
