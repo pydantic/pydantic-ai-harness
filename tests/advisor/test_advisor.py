@@ -11,7 +11,6 @@ from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded, 
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -362,7 +361,11 @@ class TestAdvisor:
             raise UnexpectedModelBehavior('advisor did not return advice')
 
         def executor(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
-            if any(isinstance(part, RetryPromptPart) for message in messages for part in message.parts):
+            if any(
+                isinstance(part, ToolReturnPart) and part.outcome == 'retried'
+                for message in messages
+                for part in message.parts
+            ):
                 return ModelResponse(parts=[TextPart('continued without advice')])
             return ModelResponse(parts=[ToolCallPart('advisor', {'prompt': 'Review this.'})])
 
