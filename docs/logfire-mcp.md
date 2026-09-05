@@ -29,8 +29,9 @@ target organization or project settings with at least `project:read`, then set:
 export LOGFIRE_MCP_TOKEN='your-logfire-api-key'
 ```
 
-The defaults need `project:read`. Additional reads and mutations need their listed dashboard, alert, or variable
-scopes. API keys are bearer credentials; keep them out of source control.
+The defaults need `project:read`. Additional tools require the scopes listed by Logfire: issue reads use
+`project:read_alert`, and `issue_set_states` uses `project:write_alert`. API keys are bearer credentials; keep them out
+of source control.
 
 ## Query recent errors
 
@@ -71,7 +72,10 @@ print(result.output)
   pinned to `project`; the global schema-reference tool has no project argument. Account discovery, organization-wide
   notification channels and schedules, and local bootstrap are excluded. Every selected mutation pauses for Pydantic
   AI approval. A mutation error stops the run because its outcome may be unknown; inspect Logfire before trying again.
-  If token permissions hide a selected tool, setup fails with a configuration error.
+  If token permissions hide a selected tool, setup fails with a configuration error. Without an approval handler,
+  mutation runs must include `DeferredToolRequests` in the agent's `output_type`; resume from `result.all_messages()`
+  with a `DeferredToolResults` approval. An approval handler can resolve the request inline. See
+  [human-in-the-loop tool approval](/ai/tools-toolsets/deferred-tools/#human-in-the-loop-tool-approval).
 - `query_run` accepts one `SELECT` statement ending with a numeric `LIMIT` no greater than `max_query_rows` (100 by
   default). Logfire defaults queries to 30 minutes and limits query ranges to 14 days. SQL comments are rejected.
 - Link tools force `handoff=false` and return durable links. They do not create OAuth handoff tickets.
