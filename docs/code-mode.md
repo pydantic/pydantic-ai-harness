@@ -412,6 +412,22 @@ capabilities:
       max_retries: 5
 ```
 
+`mount` is expressed as one mapping or a list of them, each carrying `MountDir`'s
+keyword arguments (`host_path` and `virtual_path`, plus optional `mode`,
+`write_bytes_limit`, and `memory_usage_limit`); `CodeMode.from_spec` builds the real
+`MountDir` instances:
+
+```yaml
+capabilities:
+  - CodeMode:
+      mount:
+        - {host_path: /tmp/agent-work, virtual_path: /work, mode: read-write}
+```
+
+`os_access` takes a live OS implementation or a callback, which no spec can carry, so
+a spec naming it is rejected rather than dropped. Construct the capability in code to
+use it.
+
 ## Further reading
 
 - [Tool use via code](https://www.anthropic.com/engineering/code-execution-with-mcp) (Anthropic)

@@ -5,8 +5,10 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AgentToolset
 
@@ -284,6 +286,66 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
         ceiling = self.max_command_timeout if self.max_command_timeout is not None else self.sandbox_timeout
         default_timeout = min(max(1, math.ceil(self.default_command_timeout)), ceiling)
         return template.format(default_timeout=default_timeout, max_timeout=ceiling)
+
+    @classmethod
+    def from_spec(
+        cls,
+        *,
+        image: str = _DEFAULT_IMAGE,
+        sandbox_id: str | None = None,
+        app_name: str = _DEFAULT_APP_NAME,
+        create_app_if_missing: bool = True,
+        sandbox_timeout: int = _DEFAULT_SANDBOX_TIMEOUT,
+        workdir: str | None = None,
+        env: Mapping[str, str] | None = None,
+        default_command_timeout: float = 60.0,
+        max_command_timeout: int | None = None,
+        max_output_bytes: int = DEFAULT_MAX_BYTES,
+        max_output_lines: int = DEFAULT_MAX_LINES,
+        max_read_bytes: int = _DEFAULT_MAX_READ_BYTES,
+        instructions: str | None = None,
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
+        **unsupported: Any,
+    ) -> ModalSandbox[Any]:
+        """Build from an agent spec, covering the fields a spec can express.
+
+        Every parameter is named because this signature is what core reads to generate the
+        spec's JSON schema, and the `session` field's type has no JSON representation,
+        which would otherwise erase the whole `ModalSandbox` entry from that schema.
+
+        `session` takes a live, already-entered `ModalSandboxSession`, which no spec can
+        carry, so a spec naming it is rejected rather than dropped. To reuse one sandbox
+        across runs from a spec, set `sandbox_id`; to control the session's lifetime
+        yourself, construct the capability in code.
+        """
+        if 'session' in unsupported:
+            raise UserError(
+                'ModalSandbox cannot be built from a spec with `session`: it takes a live, '
+                'already-entered `ModalSandboxSession`. Set `sandbox_id` to attach to an '
+                'existing sandbox, or construct the capability in code to inject a session.'
+            )
+        if unsupported:
+            raise UserError(f'ModalSandbox has no spec field(s) {sorted(unsupported)}.')
+        return cls(
+            image=image,
+            sandbox_id=sandbox_id,
+            app_name=app_name,
+            create_app_if_missing=create_app_if_missing,
+            sandbox_timeout=sandbox_timeout,
+            workdir=workdir,
+            env=env,
+            default_command_timeout=default_command_timeout,
+            max_command_timeout=max_command_timeout,
+            max_output_bytes=max_output_bytes,
+            max_output_lines=max_output_lines,
+            max_read_bytes=max_read_bytes,
+            instructions=instructions,
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
+        )
 
     def get_toolset(self) -> AgentToolset[AgentDepsT]:
         """Build and return the Modal sandbox toolset."""

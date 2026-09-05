@@ -6,7 +6,7 @@ import warnings
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import overload
+from typing import Any, overload
 
 from pydantic_ai.capabilities import AbstractCapability, Capability
 from pydantic_ai.tools import AgentDepsT
@@ -103,6 +103,27 @@ class Skills(AbstractCapability[AgentDepsT]):
                 stacklevel=2,
             )
         self._deferred_capabilities = tuple(self._to_capability(skill) for skill in definitions)
+
+    @classmethod
+    def from_spec(
+        cls,
+        directories: str | Path | Sequence[str | Path],
+        *,
+        include: Sequence[str] | None = None,
+        exclude: Sequence[str] | None = None,
+    ) -> Skills[Any]:
+        """Build from an agent spec, covering the fields a spec can express.
+
+        Every parameter is named because this signature is what core reads to generate the
+        spec's JSON schema. `__init__` annotates `include` and `exclude` as `Collection[str]`,
+        which has no JSON representation and would otherwise erase the long form of the
+        `Skills` entry from that schema; a spec delivers them as sequences anyway.
+        """
+        if include is not None and exclude is not None:
+            raise ValueError('include and exclude cannot be used together.')
+        if include is not None:
+            return cls(directories, include=include)
+        return cls(directories, exclude=exclude)
 
     def __repr__(self) -> str:
         """Show only the `Skills` configuration that callers control."""
