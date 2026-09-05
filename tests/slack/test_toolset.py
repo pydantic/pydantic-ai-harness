@@ -142,7 +142,11 @@ class TestPostPlan:
         with pytest.raises(ModelRetry, match='Slack takes at most'):
             await SlackChatToolset().post_plan(context(thread), [PlanStep(text='x' * 400)] * 10)
 
-    @pytest.mark.parametrize('plan_id', ['1700000000.000100', 'made-up'], ids=['a real timestamp', 'nonsense'])
+    @pytest.mark.parametrize(
+        'plan_id',
+        ['1700000000.000100', 'made-up', 'e.abc', 'é.abc'],
+        ids=['a real timestamp', 'nonsense', 'ascii junk', 'non-ascii junk'],
+    )
     async def test_refuses_a_plan_id_this_thread_did_not_issue(
         self, thread: SlackThread, slack_client: FakeSlackClient, plan_id: str
     ) -> None:
@@ -196,6 +200,11 @@ class TestSetStatus:
 
 
 class TestAskUser:
+    async def test_unusable_options_come_back_as_something_the_model_can_fix(self, thread: SlackThread) -> None:
+        toolset = SlackChatToolset(interactions=SlackInteractions(timeout_seconds=0.01))
+        with pytest.raises(ModelRetry, match='must be unique'):
+            await toolset.ask_user(context(thread), 'Pick', ['A', 'A'])
+
     async def test_returns_the_answer(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         interactions = SlackInteractions()
         toolset = SlackChatToolset(interactions=interactions)

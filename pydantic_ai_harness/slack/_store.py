@@ -61,6 +61,11 @@ class InMemoryConversationStore:
 class FileConversationStore:
     """Keep each conversation's history in its own JSON file.
 
+    Created for the owner only, since the files hold whole conversations. A
+    directory that already exists keeps the permissions it has: point this at a
+    private path, because anyone who can write to it can put words in the agent's
+    history.
+
     Enough for a single-process bot that should survive a restart. Each write goes
     to its own temporary file that then replaces the old one, so a crash mid-write
     leaves the previous history intact rather than a truncated file, and two saves

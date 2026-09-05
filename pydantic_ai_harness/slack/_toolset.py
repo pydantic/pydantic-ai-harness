@@ -165,7 +165,9 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         """The message this plan id names, or `None` if this run did not post it."""
         # Slack timestamps contain a dot, so split on the last one.
         timestamp, _, _signature = plan_id.rpartition('.')
-        if timestamp and hmac.compare_digest(self._plan_id(ctx, timestamp), plan_id):
+        # Compared as bytes: `compare_digest` raises on non-ASCII text, and the
+        # model picks this string.
+        if timestamp and hmac.compare_digest(self._plan_id(ctx, timestamp).encode(), plan_id.encode()):
             return timestamp
         return None
 
@@ -200,7 +202,12 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         """
         if self._interactions is None:  # pragma: no cover - not registered without interactions
             raise ModelRetry('Asking the user is not enabled for this agent.')
-        answer = await self._interactions.ask(ctx.deps, question, options)
+        try:
+            answer = await self._interactions.ask(ctx.deps, question, options)
+        except ValueError as error:
+            # The model chose these options, so an unusable set is something it can
+            # fix. Only the validation `ask` does up front raises `ValueError`.
+            raise ModelRetry(str(error)) from error
         if answer is None:
             return 'Nobody answered in time. Choose a reasonable default, say which you chose, and carry on.'
         return answer

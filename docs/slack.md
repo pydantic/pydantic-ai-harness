@@ -201,9 +201,11 @@ own conversation and a reply picks up where the last turn left off.
 `InMemoryConversationStore` is the default and is lost on restart.
 `FileConversationStore` writes one JSON file per conversation, through a
 temporary file it then moves into place, so a crash does not leave a truncated
-history. The directory and its files are created for the owner only, since they
-hold whole conversations. For anything shared between processes, implement
-`ConversationStore` against your database.
+history. It creates the directory and its files for the owner only, since they
+hold whole conversations, but a directory that already exists keeps the
+permissions it has. Point it at a private path: anyone who can write there can
+put words in the agent's history. For anything shared between processes,
+implement `ConversationStore` against your database.
 
 ## Building the app yourself
 
