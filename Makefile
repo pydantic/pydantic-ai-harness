@@ -41,6 +41,6 @@ integration-mongodb:
 # Needs a reachable Redis (`docker run -d -p 6379:6379 redis:8`); without one the
 # tests skip. Set REDIS_TEST_URL to point at a server elsewhere.
 integration-redis:
-	uv run pytest integration_tests/redis/test_live_redis.py
+	uv run pytest integration_tests/redis
 
 all: format lint typecheck testcov

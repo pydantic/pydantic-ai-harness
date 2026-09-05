@@ -369,9 +369,23 @@ configured retention can delete older snapshots.
   still exceed MongoDB's 16 MiB document limit and fail on insert -- lower the
   threshold if that is a risk for your workload.
 
+- `RedisStepStore(client)` -- one set of keys per run under a configurable
+  `prefix`, plus the `runs:all` / `runs:conversation:<id>` / `runs:parent:<id>` sets
+  serving `list_runs` (see
+  [What `RedisStepStore` writes](#what-redisstepstore-writes)).
+  `SET ... NX` on the run key enforces the single-shot `run_id` contract.
+  No extra to install: pass any `redis.asyncio`-compatible client, which the
+  store reaches through the `RedisClient` protocol, so the harness carries no
+  Redis driver dependency of its own.
+  Pass `expire_seconds=` to give a run's keys a TTL that later writes to the run
+  refresh (details below). Unlike the three stores above, `media_store` defaults to `None`:
+  payloads stay inline, because moving large binary or text parts into an
+  in-memory database is a decision to make deliberately. Pass a
+  `DiskMediaStore` or `S3MediaStore` to externalize them.
+
 All implement the same async `StepStore` protocol, so capability hooks never
 block the event loop on the file/sqlite backends (I/O is dispatched via
-`anyio.to_thread`); the Mongo backend is natively async.
+`anyio.to_thread`); the Mongo and Redis backends are natively async.
 
 `FileStepStore` validates `run_id` against `[A-Za-z0-9_.-]{1,200}` (and
 rejects `..`) to prevent path traversal -- callers passing user-controlled
@@ -403,6 +417,48 @@ so their keys become BSON field names: keys containing `.` or starting with
 and a key containing a NULL byte is rejected by the BSON encoder before it
 reaches the server. CI exercises both Mongo backends against `mongo:8`.
 
+### What `RedisStepStore` writes
+
+Keys under the configured `prefix` (default `pydantic-ai-harness:step`). A
+`{run_id}` hash tag keeps one run's keys on a single Redis Cluster slot, so
+`run_id` must be non-empty (`{}` is not a hash tag; the store raises
+`ValueError`):
+
+| Key                                  | Type   | Holds                                     |
+| ------------------------------------ | ------ | ----------------------------------------- |
+| `<prefix>:run:{<run_id>}`            | string | `RunRecord` JSON                          |
+| `<prefix>:runs:all`                  | set    | every run id                              |
+| `<prefix>:runs:conversation:<cid>`   | set    | run ids in one conversation               |
+| `<prefix>:runs:parent:<pid>`         | set    | run ids spawned by one run                |
+| `<prefix>:events:{<run_id>}`         | list   | one `StepEvent` JSON per `RPUSH`          |
+| `<prefix>:snapshots:seq:{<run_id>}`  | string | `INCR` counter allocating `seq`           |
+| `<prefix>:snapshots:{<run_id>}`      | zset   | member `<seq>:<state>`, score `seq`       |
+| `<prefix>:snapshot:{<run_id>}:<seq>` | string | `ContinuableSnapshot` JSON                |
+| `<prefix>:tool_effects:{<run_id>}`   | hash   | `tool_call_id` -> `ToolEffectRecord` JSON |
+
+The snapshot index carries the state in the member rather than only in the
+payload, so picking the snapshot to read and the ones to prune costs one
+`ZRANGE` and no payload fetches.
+
+`expire_seconds` covers every key the store writes. Each write refreshes the
+run key and the key it wrote, so the run key expires that long after the run's
+last write of any kind, while the events, snapshot index, and tool-effect keys
+each expire that long after their own last write. Each snapshot payload carries
+the TTL from its own write, so older snapshots of a long run expire on their own
+horizon while the newest keeps the full window. The three index sets take the
+TTL too: `runs:all` is refreshed by every write, and a conversation or parent
+set by `register_run`, `append_event`, and `save_snapshot`, which carry those
+ids. A set busier than the runs in it still holds ids whose run key has gone;
+`list_runs` drops those as it reads, and a `runs:all` that never goes idle is
+repaired only by an unfiltered `list_runs()`.
+
+One write spans several keys and Redis runs each command on its own, so a worker
+that dies mid-`save_snapshot` can leave a payload no index member points at. The
+payload is unreachable rather than wrong; under `expire_seconds` its own TTL
+collects it, and without one it stays. Reads also skip an index member whose
+payload is missing, which is the tolerance `FileStepStore` has for a snapshot
+file that vanishes under it.
+
 ## Bounding snapshot growth
 
 Each step writes a new full-history snapshot keyed by an incrementing `seq`,
@@ -410,8 +466,8 @@ and nothing is pruned by default. Within one long `Agent.run` the snapshot
 count equals the number of settled tool-call steps, so a long single run pays a
 growing storage cost.
 
-All four stores -- `InMemoryStepStore`, `FileStepStore`, `SqliteStepStore`, and
-`MongoStepStore` -- accept an opt-in `max_snapshots_per_run: int | None`
+All five stores -- `InMemoryStepStore`, `FileStepStore`, `SqliteStepStore`,
+`MongoStepStore`, and `RedisStepStore` -- accept an opt-in `max_snapshots_per_run: int | None`
 (default `None`, unbounded -- byte-for-byte the prior behavior). When set to
 `N >= 1`, each `save_snapshot` prunes the run down to a retain set:
 
@@ -423,7 +479,7 @@ The last two keep both read modes correct even when the newest `N` snapshots
 are all `interrupted` and the newest resumable `complete` sits below that
 window, so the retain set can exceed `N`. `from_spec(..., max_snapshots_per_run=N)`
 forwards the bound to the store it constructs (`backend='memory'`, `'file'`, or
-`'sqlite'`; a Mongo store is built directly, not from a spec).
+`'sqlite'`; a Mongo or Redis store is built directly, not from a spec).
 
 ```python
 from pydantic_ai_harness.step_persistence import FileStepStore
@@ -457,7 +513,9 @@ part whose string `content` is at or above 64 KiB, through a configured
 `MediaStore`, leaving a URI reference in the snapshot. The same
 `media_threshold_bytes` governs both binary and text; there is no separate
 text knob. Round-trip is transparent -- `latest_snapshot(...).messages[*]`
-returns the original `BinaryContent` bytes and text.
+returns the original `BinaryContent` bytes and text. `RedisStepStore` runs
+the same walk, but only when it is given a `media_store`: its default is
+`None`, so parts stay inline in the snapshot value.
 
 Text externalization is not Mongo-only and has no opt-out short of
 `media_store=None`: the walker is shared, so an existing `FileStepStore` or
@@ -475,6 +533,7 @@ markers.
 | `FileStepStore`     | `DiskMediaStore(<root>/media/)`        | `<root>/media/<sha256>.bin`           |
 | `SqliteStepStore`   | `SqliteMediaStore(database=<same db>)` | sibling `media` table in the same DB  |
 | `MongoStepStore`    | `MongoMediaStore(client=<same client>)` | sibling `media` + `media_chunks` collections |
+| `RedisStepStore`    | _(none -- inline)_                      | payloads stay in the snapshot value   |
 
 Override the destination by passing your own `MediaStore`:
 
@@ -645,7 +704,7 @@ always safe -- you only ever lose wire savings, never correctness.
 
 ### Persisting unsupported backends
 
-DynamoDB, Postgres, Redis, GCS, and other backends are out of scope for
+DynamoDB, Postgres, GCS, and other backends are out of scope for
 this release. Write your own `StepStore` (about ten methods on a Protocol) or
 your own `MediaStore` (five methods: `put`, `get`, `exists`, `public_url`,
 `get_metadata`) and pass it via `store=` / `media_store=`. Please open an issue if you ship one -- we want to feed
