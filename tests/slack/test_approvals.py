@@ -27,7 +27,7 @@ def requests_for(*calls: ToolCallPart) -> DeferredToolRequests:
 async def click(interactions: SlackInteractions, client: FakeSlackClient, value: str, index: int = 0) -> None:
     while len(client.method_calls('chat_postMessage')) <= index:
         await anyio.sleep(0)
-    interactions.resolve(block_id=prompt_block_id(client, index), value=value, user_id='U0ASKER')
+    assert interactions.resolve(block_id=prompt_block_id(client, index), value=value, user_id='U0ASKER')
 
 
 class TestSlackApprovals:
@@ -88,11 +88,11 @@ class TestSlackApprovals:
         assert '"number": 7' in text
 
     @pytest.mark.parametrize(
-        'args,shows_detail,truncates',
+        'args,shows_detail',
         [
-            ({}, False, False),
-            ('not json at all', True, False),
-            ({'note': 'x' * 500}, True, True),
+            ({}, False),
+            ('not json at all', True),
+            ({'note': 'x' * 500}, True),
         ],
     )
     async def test_every_shape_of_arguments_still_gets_a_prompt(
@@ -101,7 +101,6 @@ class TestSlackApprovals:
         slack_client: FakeSlackClient,
         args: object,
         shows_detail: bool,
-        truncates: bool,
     ) -> None:
         approvals = SlackApprovals(SlackInteractions(timeout_seconds=0.01))
         call = ToolCallPart(tool_name='act', args=args, tool_call_id='c1')  # pyright: ignore[reportArgumentType]
@@ -109,7 +108,21 @@ class TestSlackApprovals:
         text = str(slack_client.method_calls('chat_postMessage')[0].kwargs['text'])
         assert text.startswith('Run `act`?')
         assert ('```' in text) is shows_detail
-        assert ('truncated' in text) is truncates
+
+    async def test_arguments_too_long_to_show_are_denied_without_asking(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        approvals = SlackApprovals(SlackInteractions(timeout_seconds=0.01))
+        call = ToolCallPart(tool_name='write_file', args={'body': 'x' * 4000}, tool_call_id='c1')
+        built = await approvals(context(thread), requests_for(call))
+        denied = built.approvals['c1']
+        assert isinstance(denied, ToolDenied)
+        assert 'nobody could review the whole call' in denied.message
+        assert slack_client.method_calls('chat_postMessage') == []
+
+    def test_a_reviewer_id_passed_as_a_string_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match='not a string'):
+            SlackApprovals(SlackInteractions(), allowed_user_ids='U0REVIEWER')
 
     async def test_each_pending_call_gets_its_own_prompt(
         self, thread: SlackThread, slack_client: FakeSlackClient
@@ -178,7 +191,10 @@ class TestThroughAnAgent:
 
         async with anyio.create_task_group() as tg:
             tg.start_soon(lambda: agent.run('merge it', deps=thread))
-            await click(interactions, slack_client, APPROVE)
+            while not slack_client.method_calls('chat_postMessage'):
+                await anyio.sleep(0)
+            assert merged == []
+            assert interactions.resolve(block_id=prompt_block_id(slack_client), value=APPROVE, user_id='U0ASKER')
 
         assert merged == ['merged 0']
 

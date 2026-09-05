@@ -12,6 +12,9 @@ through, because the SDK's own `**kwargs` accepts anything.
 
 from __future__ import annotations
 
+import hmac
+import secrets
+from hashlib import sha256
 from pathlib import Path
 from typing import Literal
 
@@ -82,6 +85,11 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         """
         self._interactions = interactions
         self._file_root = Path(file_root).expanduser().resolve() if file_root is not None else None
+        # Plan ids go out to the model and come back, so they are signed. That
+        # keeps `post_plan` stateless while stopping the model editing a message
+        # this thread did not post -- another thread's prompt, say, or any other
+        # message from this bot whose timestamp it happened to see.
+        self._plan_key = secrets.token_bytes(32)
 
         super().__init__()
         self.add_function(self.post_message)
@@ -124,8 +132,16 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
             raise ModelRetry(f'Keep the plan to {_MAX_PLAN_STEPS} steps or fewer; group the smaller ones.')
         thread = ctx.deps
         text = '\n'.join(f'{_STATUS_ICONS[step.status]} {step.text}' for step in steps)
+        if len(text) > MAX_MESSAGE_CHARS:
+            raise ModelRetry(
+                f'That plan is {len(text)} characters and Slack takes at most {MAX_MESSAGE_CHARS}. '
+                'Say each step in a few words.'
+            )
         if plan_id is not None:
-            await thread.client.chat_update(channel=thread.channel_id, ts=plan_id, text=text)  # pyright: ignore[reportUnknownMemberType]
+            timestamp = self._plan_timestamp(thread, plan_id)
+            if timestamp is None:
+                raise ModelRetry(f'{plan_id!r} is not a plan you posted here. Post the plan again with no plan_id.')
+            await thread.client.chat_update(channel=thread.channel_id, ts=timestamp, text=text)  # pyright: ignore[reportUnknownMemberType]
             return f'Plan updated. Its plan_id is still {plan_id!r}.'
         response = await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
             channel=thread.channel_id, thread_ts=thread.thread_ts, text=text
@@ -133,7 +149,19 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         timestamp = response.get('ts')
         if not isinstance(timestamp, str):
             return 'Plan posted, but Slack gave no id for it, so post a fresh plan rather than updating this one.'
-        return f'Plan posted. To update it, call post_plan again with plan_id={timestamp!r}.'
+        return f'Plan posted. To update it, call post_plan again with plan_id={self._plan_id(thread, timestamp)!r}.'
+
+    def _plan_id(self, thread: SlackThread, timestamp: str) -> str:
+        signature = hmac.new(self._plan_key, f'{thread.key}\x00{timestamp}'.encode(), sha256).hexdigest()[:16]
+        return f'{timestamp}.{signature}'
+
+    def _plan_timestamp(self, thread: SlackThread, plan_id: str) -> str | None:
+        """The message this plan id names, or `None` if it was not issued for this thread."""
+        # Slack timestamps contain a dot, so split on the last one.
+        timestamp, _, _signature = plan_id.rpartition('.')
+        if timestamp and hmac.compare_digest(self._plan_id(thread, timestamp), plan_id):
+            return timestamp
+        return None
 
     async def set_status(self, ctx: RunContext[SlackThread], status: str) -> str:
         """Set the short working-state line shown next to your name.

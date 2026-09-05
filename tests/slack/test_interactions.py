@@ -72,6 +72,35 @@ class TestAsk:
         with pytest.raises(SlackPromptError, match='did not return a timestamp'):
             await SlackInteractions(timeout_seconds=0.01).ask(thread, 'Ship it?', ['Yes'])
 
+    async def test_an_answer_survives_a_failure_to_tidy_the_buttons_away(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        slack_client.recorder.update_error = RuntimeError('slack is having a moment')
+        interactions = SlackInteractions()
+        answers: list[str | None] = []
+
+        async with anyio.create_task_group() as tg:
+
+            async def ask() -> None:
+                answers.append(await interactions.ask(thread, 'Ship it?', ['Yes', 'No']))
+
+            tg.start_soon(ask)
+            assert await _answer(interactions, slack_client, 'Yes', 'U0ASKER')
+
+        assert answers == ['Yes']
+
+    async def test_each_prompt_gets_its_own_unguessable_id(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        # A counter would restart with the process, so a button left over from a
+        # previous run could answer the first prompt of the next one.
+        interactions = SlackInteractions(timeout_seconds=0.01)
+        await interactions.ask(thread, 'First?', ['Yes'])
+        await interactions.ask(thread, 'Second?', ['Yes'])
+        first, second = prompt_block_id(slack_client, 0), prompt_block_id(slack_client, 1)
+        assert first != second
+        assert thread.key not in first
+
     async def test_second_prompt_waits_for_the_first(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         interactions = SlackInteractions(timeout_seconds=0.01)
         async with anyio.create_task_group() as tg:
@@ -96,6 +125,10 @@ class TestAskValidation:
     async def test_rejects_unusable_options(self, thread: SlackThread, options: list[str], message: str) -> None:
         with pytest.raises(ValueError, match=message):
             await SlackInteractions().ask(thread, 'Pick', options)
+
+    async def test_rejects_an_allowlist_passed_as_a_string(self, thread: SlackThread) -> None:
+        with pytest.raises(ValueError, match='not a string'):
+            await SlackInteractions().ask(thread, 'Pick', ['A'], allowed_user_ids='U0REVIEWER')
 
     def test_rejects_a_non_positive_timeout(self) -> None:
         with pytest.raises(ValueError, match='timeout_seconds must be positive'):

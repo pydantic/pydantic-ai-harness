@@ -164,7 +164,12 @@ class SlackAgent:
     async def _on_mention(
         self, event: Mapping[str, object], client: AsyncWebClient, context: Mapping[str, object]
     ) -> None:
-        await self.handle_message(event, client, bot_user_id=_string(context, 'bot_user_id'))
+        await self.handle_message(
+            event,
+            client,
+            bot_user_id=_string(context, 'bot_user_id'),
+            team_id=_string(context, 'team_id'),
+        )
 
     async def _on_direct_message(
         self, event: Mapping[str, object], client: AsyncWebClient, context: Mapping[str, object]
@@ -173,7 +178,12 @@ class SlackAgent:
         # covers those. Only a direct or group DM starts a run without a mention.
         if event.get('channel_type') not in ('im', 'mpim'):
             return
-        await self.handle_message(event, client, bot_user_id=_string(context, 'bot_user_id'))
+        await self.handle_message(
+            event,
+            client,
+            bot_user_id=_string(context, 'bot_user_id'),
+            team_id=_string(context, 'team_id'),
+        )
 
     async def _on_prompt_click(self, ack: _Ack, body: Mapping[str, object]) -> None:
         await ack()
@@ -201,12 +211,17 @@ class SlackAgent:
         client: AsyncWebClient,
         *,
         bot_user_id: str | None = None,
+        team_id: str | None = None,
     ) -> None:
         """Run the agent for one inbound Slack message and post its reply.
 
         Call this from your own Bolt listeners when you build the app yourself.
         Messages the bot itself sent, messages with a subtype, and messages from
         users outside the allowlist are ignored.
+
+        `team_id` names the workspace and keeps history separate across a
+        multi-workspace install. Bolt puts it on the listener's `context`, which
+        is more reliable than the event body.
         """
         if event.get('bot_id') is not None or event.get('subtype') is not None:
             return
@@ -234,7 +249,7 @@ class SlackAgent:
             channel_id=channel_id,
             thread_ts=thread_ts or timestamp,
             user_id=user_id,
-            team_id=_string(event, 'team'),
+            team_id=team_id or _string(event, 'team'),
         )
 
         # One run at a time per thread, so a follow-up queues behind the run it is
@@ -252,13 +267,17 @@ class SlackAgent:
                 conversation_id=thread.key,
                 message_history=list(history) or None,
             )
+            if result.output.strip():
+                await self._post(thread, result.output)
+            # Saved only once the reply is out. Saving first would leave the next
+            # turn building on an answer nobody in the thread ever saw.
             await self._store.save(thread.key, result.all_messages())
         except Exception:
             logger.exception('Slack agent run failed in %s', thread.key)
-            await self._post(thread, self._error_reply)
-            return
-        if result.output.strip():
-            await self._post(thread, result.output)
+            try:
+                await self._post(thread, self._error_reply)
+            except Exception:
+                logger.exception('Could not post the error reply in %s', thread.key)
 
     async def _post(self, thread: SlackThread, text: str) -> None:
         for start in range(0, len(text), MAX_MESSAGE_CHARS):

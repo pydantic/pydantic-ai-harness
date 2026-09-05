@@ -32,7 +32,7 @@ this package does not require it.
 
 ## Quick start
 
-```python {title="slack_agent.py" test="skip"}
+```python {title="slack_agent.py"}
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import HandleDeferredToolCalls
 
@@ -90,7 +90,8 @@ channel, and mention it.
   "display_information": { "name": "My Agent" },
   "features": {
     "bot_user": { "display_name": "My Agent", "always_online": true },
-    "assistant_view": { "assistant_description": "Does the work, in the thread" }
+    "agent_view": { "agent_description": "Does the work, in the thread" },
+    "app_home": { "messages_tab_enabled": true, "messages_tab_read_only_enabled": false }
   },
   "oauth_config": {
     "scopes": {
@@ -121,7 +122,10 @@ channel, and mention it.
 Socket Mode means Slack connects to you, so this runs on a laptop behind a
 firewall with no public URL. `assistant:write` is what makes `set_status` show a
 working-state line; without it that tool reports it is unavailable and the run
-carries on.
+carries on. `app_home` is what lets people DM the bot: without
+`messages_tab_enabled` Slack answers "Sending messages to this app has been
+turned off". Use `agent_view` rather than the older `assistant_view`, which new
+apps can no longer set.
 
 ## What the agent can do in the thread
 
@@ -141,7 +145,9 @@ is no safe directory to judge a model-supplied path against until you name one.
 
 `post_plan` keeps no state of its own: it hands the model a `plan_id` and edits
 that message when the model passes it back. So a second turn in the same thread
-posts a fresh checklist rather than overwriting the one before it.
+posts a fresh checklist rather than overwriting the one before it. The id is
+signed for the thread it came from, so a model cannot edit some other message it
+saw the timestamp of.
 
 Paths outside `file_root` are refused, as are directories and paths that do not
 exist. `post_message` refuses text over 3500 characters rather than truncating
@@ -152,11 +158,16 @@ it, because a reader cannot see what was cut.
 `ask_user` is the model choosing to ask. Approvals are you deciding it does not
 get a choice:
 
-```python {test="skip"}
-from pydantic_ai.toolsets import ApprovalRequiredToolset
+```python
+from pydantic_ai.toolsets import ApprovalRequiredToolset, FunctionToolset
+
+
+def merge_pull_request(number: int) -> str:
+    return f'Merged #{number}'
+
 
 github = ApprovalRequiredToolset(
-    my_github_toolset,
+    FunctionToolset([merge_pull_request]),
     approval_required_func=lambda ctx, tool_def, args: tool_def.name.startswith('merge'),
 )
 ```
@@ -165,12 +176,16 @@ Every call the wrapper flags is posted as a question with Approve and Deny
 buttons, and the run continues the moment someone answers. Only the person who
 started the run can answer, unless you name a group:
 
-```python {test="skip"}
+```python
 SlackApprovals(interactions, allowed_user_ids=['U01REVIEWER'])
 ```
 
-A prompt nobody answers is denied. An agent with write access to real systems
-should not act because a question timed out. The default wait is ten minutes;
+A prompt nobody answers is denied, and so is a call whose arguments are longer
+than the 2900 characters Slack can show in one block. Neither is truncated to
+fit: approving half a call is approving something nobody read. An agent with
+write access to real systems should not act because a question timed out, or
+because the part that mattered scrolled off the end. A tool that genuinely needs
+a large payload should take a file path instead. The default wait is ten minutes;
 change it with `SlackInteractions(timeout_seconds=...)`. Options are capped at
 75 characters, Slack's own button limit, and are refused rather than shortened
 so two buttons can never read the same.
@@ -194,20 +209,47 @@ shared between processes, implement `ConversationStore` against your database.
 -- HTTP mode, OAuth across workspaces, your own listeners -- build it yourself
 and call the same pieces:
 
-```python {test="skip"}
-from pydantic_ai_harness.slack import SlackThread
+```python {title="my_slack_app.py"}
+from collections.abc import Mapping
 
-thread = SlackThread(
-    client=client,
-    channel_id=event['channel'],
-    thread_ts=event.get('thread_ts') or event['ts'],
-    user_id=event['user'],
-    team_id=event.get('team'),
-)
-history = await store.load(thread.key)
-result = await agent.run(text, deps=thread, conversation_id=thread.key, message_history=list(history) or None)
-await store.save(thread.key, result.all_messages())
+from pydantic_ai import Agent
+from slack_bolt.app.async_app import AsyncApp
+from slack_sdk.web.async_client import AsyncWebClient
+
+from pydantic_ai_harness.slack import InMemoryConversationStore, SlackThread
+
+app = AsyncApp()
+store = InMemoryConversationStore()
+agent = Agent('anthropic:claude-sonnet-4-6', deps_type=SlackThread)
+
+
+@app.event('app_mention')
+async def on_mention(
+    event: Mapping[str, object], client: AsyncWebClient, context: Mapping[str, object]
+) -> None:
+    thread = SlackThread(
+        client=client,
+        channel_id=str(event['channel']),
+        thread_ts=str(event.get('thread_ts') or event['ts']),
+        user_id=str(event['user']),
+        team_id=str(context['team_id']),
+    )
+    history = await store.load(thread.key)
+    result = await agent.run(
+        str(event['text']),
+        deps=thread,
+        conversation_id=thread.key,
+        message_history=list(history) or None,
+    )
+    await client.chat_postMessage(
+        channel=thread.channel_id, thread_ts=thread.thread_ts, text=result.output
+    )
+    await store.save(thread.key, result.all_messages())
 ```
+
+`team_id` comes off the listener's `context` rather than the event body, which is
+where Bolt puts it reliably. Post before you save, so a failed post does not leave
+the next turn building on a reply nobody saw.
 
 Route button clicks back with `SlackInteractions.resolve(block_id=..., value=...,
 user_id=...)`, reading all three off the Slack action payload. Every button these

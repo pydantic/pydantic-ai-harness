@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from dataclasses import replace
 from pathlib import Path
 
 import anyio
@@ -29,6 +31,13 @@ def context(thread: SlackThread) -> RunContext[SlackThread]:
 
 def tool_names(toolset: SlackChatToolset) -> set[str]:
     return set(toolset.tools)
+
+
+def _plan_id(answer: str) -> str:
+    """The plan id `post_plan` told the model to send back."""
+    found = re.search(r"plan_id='([^']+)'", answer)
+    assert found is not None, answer
+    return found.group(1)
 
 
 class TestRegistration:
@@ -84,7 +93,7 @@ class TestPostPlan:
 
         steps[0].status = 'done'
         steps[1].status = 'running'
-        await toolset.post_plan(context(thread), steps, plan_id=slack_client.next_ts)
+        await toolset.post_plan(context(thread), steps, plan_id=_plan_id(posted))
 
         assert len(slack_client.method_calls('chat_postMessage')) == 1
         update = slack_client.method_calls('chat_update')[0]
@@ -128,6 +137,29 @@ class TestPostPlan:
     async def test_rejects_an_overlong_plan(self, thread: SlackThread) -> None:
         with pytest.raises(ModelRetry, match='20 steps or fewer'):
             await SlackChatToolset().post_plan(context(thread), [PlanStep(text='a')] * 21)
+
+    async def test_rejects_a_plan_slack_would_not_accept(self, thread: SlackThread) -> None:
+        with pytest.raises(ModelRetry, match='Slack takes at most'):
+            await SlackChatToolset().post_plan(context(thread), [PlanStep(text='x' * 400)] * 10)
+
+    @pytest.mark.parametrize('plan_id', ['1700000000.000100', 'made-up'], ids=['a real timestamp', 'nonsense'])
+    async def test_refuses_a_plan_id_this_thread_did_not_issue(
+        self, thread: SlackThread, slack_client: FakeSlackClient, plan_id: str
+    ) -> None:
+        # A raw Slack timestamp is what a model would read off another message in
+        # the channel. Accepting it would let a plan overwrite someone's prompt.
+        with pytest.raises(ModelRetry, match='not a plan you posted here'):
+            await SlackChatToolset().post_plan(context(thread), [PlanStep(text='a')], plan_id=plan_id)
+        assert slack_client.method_calls('chat_update') == []
+
+    async def test_refuses_a_plan_id_issued_for_another_thread(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        toolset = SlackChatToolset()
+        elsewhere = replace(thread, channel_id='C999')
+        posted = await toolset.post_plan(context(elsewhere), [PlanStep(text='a')])
+        with pytest.raises(ModelRetry, match='not a plan you posted here'):
+            await toolset.post_plan(context(thread), [PlanStep(text='a')], plan_id=_plan_id(posted))
 
 
 class TestSetStatus:

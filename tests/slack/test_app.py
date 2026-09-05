@@ -9,10 +9,6 @@ from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 
-# `SlackAgent` is the only part of the package that needs Bolt, so the slim
-# install has nothing to test here.
-pytest.importorskip('slack_bolt')
-
 import pydantic_ai_harness.slack._app as app_module
 from pydantic_ai_harness.slack import (
     InMemoryConversationStore,
@@ -235,6 +231,19 @@ class TestHandleMessage:
         posts = slack_client.method_calls('chat_postMessage')
         assert [len(str(post.kwargs['text'])) for post in posts] == [3500, 3500, 1]
 
+    async def test_an_undelivered_reply_is_not_written_into_the_history(
+        self,
+        slack_agent_with_store: tuple[SlackAgent, InMemoryConversationStore],
+        slack_client: FakeSlackClient,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Saving first would leave the next turn answering a message nobody saw.
+        slack_agent, store = slack_agent_with_store
+        slack_client.recorder.post_error = RuntimeError('slack is down')
+        await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
+        assert list(await store.load('T1:C123:1700000000.000001')) == []
+        assert 'Could not post the error reply' in caplog.text
+
     async def test_a_failing_run_says_so_in_the_thread(
         self, slack_client: FakeSlackClient, caplog: pytest.LogCaptureFixture
     ) -> None:
@@ -274,6 +283,20 @@ class TestListeners:
         build(agent)
         await bolt().events['app_mention'](event=message(), client=slack_client, context={'bot_user_id': 'U0BOT'})
         assert slack_client.method_calls('chat_postMessage')
+
+    async def test_the_workspace_comes_from_the_listener_context(
+        self,
+        bolt: Callable[[], FakeBoltApp],
+        slack_agent_with_store: tuple[SlackAgent, InMemoryConversationStore],
+        slack_client: FakeSlackClient,
+    ) -> None:
+        # Bolt puts the workspace on the context; the event body may not carry it,
+        # and without it two workspaces share one thread's history.
+        _, store = slack_agent_with_store
+        event = message()
+        del event['team']
+        await bolt().events['app_mention'](event=event, client=slack_client, context={'team_id': 'T9'})
+        assert len(await store.load('T9:C123:1700000000.000001')) == 2
 
 
 class TestPromptClicks:

@@ -78,6 +78,14 @@ class TestFileConversationStore:
         await store.save('k', _history()[:1])
         assert len(await store.load('k')) == 1
 
+    async def test_saves_leave_no_temporary_file_behind(self, tmp_path: Path) -> None:
+        # Two saves for one key must not share a temporary name, or one can rename
+        # the other's half-written bytes into place.
+        store = FileConversationStore(tmp_path)
+        await store.save('k', _history())
+        await store.save('k', _history())
+        assert sorted(path.suffix for path in tmp_path.iterdir()) == ['.json']
+
     async def test_keys_with_path_characters_do_not_escape_the_directory(self, tmp_path: Path) -> None:
         store = FileConversationStore(tmp_path)
         await store.save('../../etc/passwd', _history())

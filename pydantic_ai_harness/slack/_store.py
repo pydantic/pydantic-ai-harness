@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import secrets
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
@@ -60,10 +61,12 @@ class InMemoryConversationStore:
 class FileConversationStore:
     """Keep each conversation's history in its own JSON file.
 
-    Enough for a single-process bot that should survive a restart. Writes go to a
-    temporary file that is then renamed, so a crash mid-write leaves the previous
-    history intact rather than a truncated file. Concurrent writers in separate
-    processes are not coordinated; use a database-backed store for that.
+    Enough for a single-process bot that should survive a restart. Each write goes
+    to its own temporary file that then replaces the old one, so a crash mid-write
+    leaves the previous history intact rather than a truncated file, and two saves
+    for the same conversation cannot overwrite each other's partial file. Which of
+    two concurrent saves wins is still whichever finishes last; use a
+    database-backed store when that matters.
     """
 
     def __init__(self, directory: Path | str) -> None:
@@ -91,9 +94,12 @@ class FileConversationStore:
         directory = anyio.Path(self._directory)
         await directory.mkdir(parents=True, exist_ok=True)
         path = self._path(key)
-        temporary = anyio.Path(path.with_suffix('.json.tmp'))
+        # A name unique to this write. A shared one lets two saves for the same key
+        # clobber each other's half-written file and rename the wrong bytes in.
+        temporary = anyio.Path(path.with_suffix(f'.{secrets.token_hex(8)}.tmp'))
         await temporary.write_bytes(ModelMessagesTypeAdapter.dump_json(list(messages)))
-        await temporary.rename(path)
+        # `replace`, not `rename`: on Windows renaming onto an existing file raises.
+        await temporary.replace(path)
 
     async def delete(self, key: str) -> None:
         """Drop the history file if it exists."""

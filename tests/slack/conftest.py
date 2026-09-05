@@ -6,12 +6,9 @@ from typing import Any
 
 import pytest
 from pydantic import TypeAdapter
-from typing_extensions import TypedDict
-
-pytest.importorskip('slack_sdk')
-
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.web.async_slack_response import AsyncSlackResponse
+from typing_extensions import TypedDict
 
 from pydantic_ai_harness.slack import SlackThread
 
@@ -42,6 +39,8 @@ class _Recorder:
     calls: list[SlackCall] = field(default_factory=list[SlackCall])
     next_ts: str = '1700000000.000100'
     post_response: dict[str, object] | None = None
+    post_error: Exception | None = None
+    update_error: Exception | None = None
     status_error: Exception | None = None
 
 
@@ -89,6 +88,8 @@ class FakeSlackClient(AsyncWebClient):
         thread_ts: str | None = None,
         **kwargs: Any,
     ) -> AsyncSlackResponse:
+        if self.recorder.post_error is not None:
+            raise self.recorder.post_error
         return self._record(
             'chat_postMessage',
             {'channel': channel, 'text': text, 'blocks': blocks, 'thread_ts': thread_ts},
@@ -104,6 +105,8 @@ class FakeSlackClient(AsyncWebClient):
         blocks: Sequence[object] | None = None,
         **kwargs: Any,
     ) -> AsyncSlackResponse:
+        if self.recorder.update_error is not None:
+            raise self.recorder.update_error
         return self._record(
             'chat_update',
             {'channel': channel, 'ts': ts, 'text': text, 'blocks': blocks},

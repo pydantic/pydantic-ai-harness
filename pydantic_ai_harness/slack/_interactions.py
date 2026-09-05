@@ -6,6 +6,8 @@ has two sets of buttons live in the same thread at once.
 
 from __future__ import annotations
 
+import logging
+import secrets
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from weakref import WeakValueDictionary
@@ -32,6 +34,8 @@ _MAX_OPTIONS = 25
 _MAX_OPTION_CHARS = 75
 """Slack's cap on button text. Longer options are refused rather than shortened,
 so two options can never render as the same button."""
+
+logger = logging.getLogger(__name__)
 
 
 class SlackPromptError(RuntimeError):
@@ -71,7 +75,6 @@ class SlackInteractions:
         # Weak, so a thread's lock is collected once no prompt holds it. A busy
         # workspace would otherwise accumulate one lock per thread forever.
         self._locks: WeakValueDictionary[str, anyio.Lock] = WeakValueDictionary()
-        self._next_token = 0
 
     async def ask(
         self,
@@ -89,8 +92,9 @@ class SlackInteractions:
         instead skips that edit and leaves the buttons in place.
 
         Raises:
-            ValueError: If `options` is empty, exceeds Slack's limits, or contains
-                duplicates that would make the answer ambiguous.
+            ValueError: If `options` is empty, exceeds Slack's limits, contains
+                duplicates that would make the answer ambiguous, or
+                `allowed_user_ids` is a string rather than a collection of ids.
             SlackPromptError: If Slack did not identify the message it posted.
         """
         choices = tuple(options)
@@ -104,6 +108,8 @@ class SlackInteractions:
             if not choice or len(choice) > _MAX_OPTION_CHARS:
                 raise ValueError(f'each option must be between 1 and {_MAX_OPTION_CHARS} characters')
 
+        if isinstance(allowed_user_ids, str):
+            raise ValueError('allowed_user_ids must be a collection of user ids, not a string')
         allowed = frozenset(allowed_user_ids) if allowed_user_ids is not None else frozenset({thread.user_id})
         lock = self._locks.setdefault(thread.key, anyio.Lock())
         async with lock:
@@ -116,8 +122,10 @@ class SlackInteractions:
         choices: tuple[str, ...],
         allowed: frozenset[str],
     ) -> str | None:
-        self._next_token += 1
-        token = f'{thread.key}#{self._next_token}'
+        # Random, not a counter: a counter restarts with the process, so a button
+        # left over from a previous run would resolve the first prompt of the new
+        # one -- an old Approve click answering an unrelated question.
+        token = secrets.token_urlsafe(16)
         response = await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
             channel=thread.channel_id,
             thread_ts=thread.thread_ts,
@@ -139,12 +147,18 @@ class SlackInteractions:
             del self._pending[token]
 
         answer = pending.answer
-        await thread.client.chat_update(  # pyright: ignore[reportUnknownMemberType]
-            channel=thread.channel_id,
-            ts=timestamp,
-            text=_settled_text(question, answer, pending.answered_by),
-            blocks=[],
-        )
+        try:
+            await thread.client.chat_update(  # pyright: ignore[reportUnknownMemberType]
+                channel=thread.channel_id,
+                ts=timestamp,
+                text=_settled_text(question, answer, pending.answered_by),
+                blocks=[],
+            )
+        except Exception:
+            # The answer is already in hand, so failing to tidy the buttons away is
+            # not a reason to fail the run. The prompt is deregistered either way,
+            # so those buttons now resolve to nothing.
+            logger.warning('Could not update the settled Slack prompt in %s', thread.key, exc_info=True)
         return answer
 
     def resolve(self, *, block_id: str, value: str, user_id: str) -> bool:
