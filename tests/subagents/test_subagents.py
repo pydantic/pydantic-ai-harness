@@ -20,11 +20,13 @@ from pydantic_ai.messages import (
     ToolCallPart,
     ToolReturnPart,
 )
+from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai.usage import UsageLimits
+from pydantic_ai.usage import RequestUsage, RunUsage, UsageLimits
 
 from pydantic_ai_harness.subagents import SubAgent, SubAgents, SubAgentToolset
 
@@ -115,6 +117,25 @@ def _delegate_two_then_finish(first: str, second: str) -> FunctionModel:
         return ModelResponse(parts=[TextPart('all done')])
 
     return FunctionModel(model_fn)
+
+
+def _parent_delegating_to_worker_making(child_tool_calls: int) -> Agent[object, str]:
+    """A parent that delegates once to a `worker` making exactly `child_tool_calls` tool calls."""
+    seen = {'n': 0}
+
+    def worker_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen['n'] += 1
+        if seen['n'] <= child_tool_calls:
+            return ModelResponse(parts=[ToolCallPart('noop', {}, tool_call_id=f'n{seen["n"]}')])
+        return ModelResponse(parts=[TextPart('W')])
+
+    worker = Agent(FunctionModel(worker_fn), name='worker')
+
+    @worker.tool_plain
+    def noop() -> str:  # pyright: ignore[reportUnusedFunction]
+        return 'x'
+
+    return Agent(_delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])])
 
 
 def _delegate_returns(result: Any) -> list[str]:
@@ -545,6 +566,92 @@ class TestRunControls:
         )
         with pytest.raises(UsageLimitExceeded):
             await parent.run('go', usage_limits=UsageLimits(request_limit=1))
+
+    async def test_shared_usage_honors_parent_request_limit(self) -> None:
+        # A parent limit looser than pydantic-ai's default 50 must not be downgraded to it:
+        # the child is checked against the parent's ceiling, not against `UsageLimits()`.
+        worker = Agent(TestModel(custom_output_text='W'), name='worker')
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'),
+            capabilities=[SubAgents(agents=[SubAgent(worker)])],
+        )
+        usage = RunUsage(requests=49)
+        result = await parent.run('go', usage=usage, usage_limits=UsageLimits(request_limit=100))
+        assert result.output == 'all done'
+
+    async def test_shared_usage_stops_child_at_parent_request_limit(self) -> None:
+        # The enforcement direction: a parent limit tighter than the default 50 bounds the whole
+        # tree. Without the forwarded limits the child runs against `UsageLimits()` and overspends
+        # the parent's ceiling many times over before the parent's next request notices.
+        def worker_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart('noop', {}, tool_call_id=f'n{len(messages)}')])
+
+        worker = Agent(FunctionModel(worker_fn), name='worker')
+
+        @worker.tool_plain
+        def noop() -> str:  # pyright: ignore[reportUnusedFunction]
+            return 'x'
+
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'),
+            capabilities=[SubAgents(agents=[SubAgent(worker)])],
+        )
+        usage = RunUsage()
+        with pytest.raises(UsageLimitExceeded):
+            await parent.run('go', usage=usage, usage_limits=UsageLimits(request_limit=3))
+        assert usage.requests == 3
+
+    async def test_shared_tool_calls_limit_bounds_the_tree(self) -> None:
+        # `tool_calls_limit` is forwarded like every other ceiling, and the delegation itself
+        # counts: one `delegate_task` call plus one child tool call exactly fills a limit of 2.
+        parent = _parent_delegating_to_worker_making(1)
+        usage = RunUsage()
+        result = await parent.run('go', usage=usage, usage_limits=UsageLimits(tool_calls_limit=2))
+        assert result.output == 'all done'
+        assert usage.tool_calls == 2
+
+    async def test_shared_tool_calls_limit_reserves_the_delegation_in_flight(self) -> None:
+        # `delegate_task` is counted when it returns, not when it starts, so the child runs
+        # against a limit reduced by one. Without that reservation a child that fits its own
+        # budget still leaves the tree one call over the ceiling.
+        parent = _parent_delegating_to_worker_making(1)
+        usage = RunUsage()
+        with pytest.raises(UsageLimitExceeded):
+            await parent.run('go', usage=usage, usage_limits=UsageLimits(tool_calls_limit=1))
+        assert usage.tool_calls == 0
+
+    async def test_count_tokens_before_request_is_not_forwarded(self) -> None:
+        # The parent's token-counting pass is a request pipeline, not a budget. Forwarding it
+        # would abort every delegation to a model without `count_tokens` support.
+        class _CountingModel(FunctionModel):
+            async def count_tokens(
+                self,
+                messages: list[ModelMessage],
+                model_settings: ModelSettings | None,
+                model_request_parameters: ModelRequestParameters,
+            ) -> RequestUsage:
+                return RequestUsage(input_tokens=10)
+
+        calls = {'n': 0}
+
+        def parent_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            calls['n'] += 1
+            if calls['n'] == 1:
+                return ModelResponse(
+                    parts=[ToolCallPart('delegate_task', {'agent_name': 'worker', 'task': 'do it'}, tool_call_id='c1')]
+                )
+            return ModelResponse(parts=[TextPart('all done')])
+
+        worker = Agent(TestModel(custom_output_text='W'), name='worker')
+        parent: Agent[object, str] = Agent(
+            _CountingModel(parent_fn),
+            capabilities=[SubAgents(agents=[SubAgent(worker)])],
+        )
+        result = await parent.run(
+            'go',
+            usage_limits=UsageLimits(count_tokens_before_request=True, input_tokens_limit=10_000),
+        )
+        assert result.output == 'all done'
 
     async def test_timeout_returns_soft_message(self) -> None:
         async def slow_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

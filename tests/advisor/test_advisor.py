@@ -21,7 +21,7 @@ from pydantic_ai.models import ModelRequestParameters
 from pydantic_ai.models.function import AgentInfo, FunctionDef, FunctionModel
 from pydantic_ai.profiles import ModelProfile
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.usage import UsageLimits
+from pydantic_ai.usage import RequestUsage, UsageLimits
 
 from pydantic_ai_harness.advisor import Advisor
 
@@ -356,6 +356,33 @@ class TestAdvisor:
 
         with pytest.raises(UsageLimitExceeded, match='request_limit'):
             await agent.run('Ask for advice.', usage_limits=UsageLimits(request_limit=1))
+
+    async def test_local_advisor_does_not_inherit_the_token_counting_pass(self) -> None:
+        # `count_tokens_before_request` selects a request pipeline, not a budget. Forwarding it
+        # aborts the run whenever the advisor's model has no `count_tokens` support, which is the
+        # normal case for `Advisor`: the whole point is consulting a different model.
+        class _CountingModel(FunctionModel):
+            async def count_tokens(
+                self,
+                messages: list[ModelMessage],
+                model_settings: ModelSettings | None,
+                model_request_parameters: ModelRequestParameters,
+            ) -> RequestUsage:
+                return RequestUsage(input_tokens=10)
+
+        def executor(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            if not _has_tool_return(messages):
+                return ModelResponse(parts=[ToolCallPart('advisor', {'prompt': 'Review this.'})])
+            return ModelResponse(parts=[TextPart('done')])
+
+        advisor = FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart('advice')]))
+        agent = Agent(_CountingModel(executor), capabilities=[Advisor(advisor, mode='local')])
+
+        result = await agent.run(
+            'Ask for advice.',
+            usage_limits=UsageLimits(count_tokens_before_request=True, input_tokens_limit=10_000),
+        )
+        assert result.output == 'done'
 
     async def test_local_unexpected_model_behavior_retries_executor(self) -> None:
         def advisor_model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:

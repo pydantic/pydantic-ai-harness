@@ -15,6 +15,8 @@ from pydantic_ai.native_tools import AdvisorTool
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, AgentNativeTool, RunContext
 
+from pydantic_ai_harness._usage import forwarded_usage_limits
+
 _LIMIT_REACHED = 'Advisor consultation limit reached for this model request. Continue without further advice.'
 
 
@@ -155,7 +157,7 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
                         prompt,
                         message_history=ctx.messages[:-1] if forward_history else None,
                         usage=ctx.usage,
-                        usage_limits=ctx.usage_limits,
+                        usage_limits=forwarded_usage_limits(ctx.usage_limits),
                     )
                 except UnexpectedModelBehavior as e:
                     raise ModelRetry(str(e)) from e
