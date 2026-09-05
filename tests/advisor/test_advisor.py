@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 
+import pydantic_ai.native_tools as native_tools
 import pytest
 from inline_snapshot import snapshot
 from pydantic_ai import AdvisorTool, Agent
@@ -88,7 +89,16 @@ class TestAdvisor:
         await agent.run('Review this plan.')
 
         assert seen[0].function_tools == []
-        assert seen[0].native_tools == [AdvisorTool(model='claude-opus-4-8', max_tokens=2048, caching='5m')]
+        assert len(seen[0].native_tools) == 1
+        tool = seen[0].native_tools[0]
+        assert isinstance(tool, AdvisorTool)
+        assert tool.model == 'claude-opus-4-8'
+        assert tool.max_tokens == 2048
+        if hasattr(native_tools, 'AnthropicAdvisorToolSettings'):  # pragma: no cover - new-version path
+            assert getattr(tool, 'provider_settings') == {'anthropic': {'caching': '5m'}}
+            assert tool.caching is None
+        else:  # pragma: no cover - old-version path
+            assert tool.caching == '5m'
 
     async def test_model_instance_uses_local_advisor_and_preserves_identity(self) -> None:
         advisor_prompts: list[str] = []
