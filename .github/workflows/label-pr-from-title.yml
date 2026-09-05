@@ -1,0 +1,52 @@
+name: Label PR from title
+
+on:
+  pull_request_target:
+    # zizmor: ignore[dangerous-triggers] -- no contributor code is checked out or executed; the job
+    # only reads the PR title from the event payload and applies a label to the PR
+    types: [opened, edited, reopened]
+
+permissions: {}
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      # `.github/release.yml` can only exclude PRs from generated release notes by label, and
+      # maintainers do not label harness PRs by hand (#394). PR titles are the one reliable signal:
+      # AGENTS.md bans conventional-commit prefixes on titles, but external PRs still arrive with
+      # them, so a prefix that survives to merge marks exactly the PRs the notes should filter.
+      # The title reaches the shell through an environment variable, never through template
+      # expansion inside the script, so a crafted title cannot inject commands.
+      - name: Map the conventional-commit title prefix to a release-notes label
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ github.event.pull_request.title }}
+          OLD_TITLE: ${{ github.event.changes.title.from }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          label_for_title() {
+            case "$1" in
+              feat:* | feat\(*) echo enhancement ;;
+              fix:* | fix\(*) echo bug ;;
+              docs:* | docs\(*) echo documentation ;;
+              chore:* | chore\(* | ci:* | ci\(* | refactor:* | refactor\(*) echo chore ;;
+            esac
+          }
+
+          label=$(label_for_title "$TITLE")
+          old_label=$(label_for_title "$OLD_TITLE")
+
+          if [ -n "$old_label" ] && [ "$old_label" != "$label" ] &&
+            gh pr view "$PR_URL" --json labels --jq '.labels[].name' | grep -Fxq "$old_label"
+          then
+            gh pr edit "$PR_URL" --remove-label "$old_label"
+          fi
+
+          if [ -n "$label" ]; then
+            gh pr edit "$PR_URL" --add-label "$label"
+          else
+            echo 'No conventional-commit title prefix; nothing to add.'
+          fi
