@@ -44,7 +44,6 @@ class _Recorder:
     post_gate: anyio.Event | None = None
     update_error: Exception | None = None
     update_attempts: int = 0
-    status_error: Exception | None = None
 
 
 class FakeSlackClient(AsyncWebClient):
@@ -120,44 +119,6 @@ class FakeSlackClient(AsyncWebClient):
             'chat_update',
             {'channel': channel, 'ts': ts, 'text': text, 'blocks': blocks, 'mrkdwn': mrkdwn},
             {'ok': True, 'ts': ts},
-        )
-
-    async def files_upload_v2(
-        self,
-        *,
-        channel: str | None = None,
-        file: str | bytes | object = None,
-        title: str | None = None,
-        initial_comment: str | None = None,
-        thread_ts: str | None = None,
-        **kwargs: Any,
-    ) -> AsyncSlackResponse:
-        return self._record(
-            'files_upload_v2',
-            {
-                'channel': channel,
-                'file': file,
-                'title': title,
-                'initial_comment': initial_comment,
-                'thread_ts': thread_ts,
-            },
-            {'ok': True},
-        )
-
-    async def assistant_threads_setStatus(
-        self,
-        *,
-        channel_id: str | None = None,
-        thread_ts: str | None = None,
-        status: str | None = None,
-        **kwargs: Any,
-    ) -> AsyncSlackResponse:
-        if self.recorder.status_error is not None:
-            raise self.recorder.status_error
-        return self._record(
-            'assistant_threads_setStatus',
-            {'channel_id': channel_id, 'thread_ts': thread_ts, 'status': status},
-            {'ok': True},
         )
 
 

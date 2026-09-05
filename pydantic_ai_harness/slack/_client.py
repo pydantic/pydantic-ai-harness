@@ -5,7 +5,7 @@ signatures -- bare `Dict`, `List`, `PathLike`, and an unannotated `**kwargs` --
 and one unknown anywhere in a signature makes the whole method partially
 unknown, so strict Pyright reports every call through `AsyncWebClient`.
 
-Naming the four methods used here fixes that without a suppression at each call,
+Naming the two methods used here fixes that without a suppression at each call,
 and it checks more than suppressions did: `default_client` returns a real
 `AsyncWebClient` as a `SlackClient`, so a method the SDK renames or retypes fails
 there. Keyword names are checked too, which a suppressed call is not -- the SDK's
@@ -59,32 +59,6 @@ class SlackClient(Protocol):
         mrkdwn: bool | None = None,
     ) -> AsyncSlackResponse:
         """Replace the text and blocks of a message already posted."""
-        ...  # pragma: no cover
-
-    async def files_upload_v2(
-        self,
-        *,
-        channel: str | None = None,
-        file: str | None = None,
-        title: str | None = None,
-        initial_comment: str | None = None,
-        thread_ts: str | None = None,
-    ) -> AsyncSlackResponse:
-        """Upload a file by path and share it into a channel or thread.
-
-        The SDK also takes bytes and open file objects. Only the path form is
-        named here, because that is all this package sends.
-        """
-        ...  # pragma: no cover
-
-    async def assistant_threads_setStatus(
-        self,
-        *,
-        channel_id: str,
-        thread_ts: str,
-        status: str,
-    ) -> AsyncSlackResponse:
-        """Set the working-state line shown in an agent or assistant thread."""
         ...  # pragma: no cover
 
 

@@ -840,6 +840,11 @@ class TestFindingTheCapability:
         assert client.token == 'xoxb-mine'
         assert chat.resolve_client() is client
 
+    def test_resolving_a_delivery_client_without_a_token_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
+        with pytest.raises(ValueError, match='Slack bot token is required'):
+            Slack().resolve_client()
+
     def test_two_slack_capabilities_are_refused(self, slack_client: FakeSlackClient) -> None:
         agent: Agent[None, str] = Agent(
             TestModel(custom_output_text='done'),

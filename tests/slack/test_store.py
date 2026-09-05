@@ -66,6 +66,11 @@ class TestFileConversationStore:
     async def test_unknown_key_loads_empty(self, tmp_path: Path) -> None:
         assert list(await FileConversationStore(tmp_path).load('missing')) == []
 
+    async def test_loading_from_an_absent_directory_does_not_create_it(self, tmp_path: Path) -> None:
+        directory = tmp_path / 'not-created'
+        assert list(await FileConversationStore(directory).load('missing')) == []
+        assert not directory.exists()
+
     async def test_creates_the_directory_on_first_save(self, tmp_path: Path) -> None:
         store = FileConversationStore(tmp_path / 'nested' / 'deeper')
         await store.save('k', _history())

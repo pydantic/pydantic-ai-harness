@@ -56,6 +56,19 @@ class TestSlackApprovals:
         assert isinstance(denied, ToolDenied)
         assert 'nobody to ask' in denied.message
 
+    async def test_a_thread_resolver_is_evaluated_for_the_run(self, slack_client: FakeSlackClient) -> None:
+        resolved: list[str] = []
+
+        def thread_for_run(ctx: RunContext[None]) -> SlackThread:
+            resolved.append(type(ctx.model).__name__)
+            return SlackThread(channel_id='C123', thread_ts='1.1')
+
+        approvals = SlackApprovals[None](slack_client, SlackInteractions(), thread=thread_for_run)
+        call = ToolCallPart(tool_name='merge_pr', args={}, tool_call_id='c1')
+        result = await approvals(context(), requests_for(call))
+        assert result is not None
+        assert resolved == ['TestModel']
+
     async def test_approving_returns_true(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         interactions = SlackInteractions()
         approvals = SlackApprovals[None](slack_client, interactions, thread=thread)
@@ -296,6 +309,12 @@ class TestThroughAnAgent:
 
 
 class TestThroughTheCapability:
+    def test_the_bound_bolt_client_wins_for_delivery(self, slack_client: FakeSlackClient) -> None:
+        capability = Slack(tools=SlackTools.of())
+        slack_context = SlackContext('C123', '1700000000.000001', '1700000000.000002', 'U0ASKER')
+        with bind_slack_context(slack_context, slack_client):
+            assert capability.resolve_client() is slack_client
+
     async def test_one_capability_covers_tools_that_need_approval(self, slack_client: FakeSlackClient) -> None:
         chat = Slack(tools=SlackTools.of(), delivery_client=slack_client)
         agent: Agent[None, str] = Agent(TestModel(call_tools=['merge_pr']), capabilities=[chat])

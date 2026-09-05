@@ -116,6 +116,18 @@ class TestSelection:
         with pytest.raises(UserError, match='slack_create_canvas'):
             await Agent(TestModel(), capabilities=[capability]).run('go')
 
+    async def test_named_tool_can_run_when_approval_is_explicitly_disabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_mcp(monkeypatch, extra_names=('slack_new_read_tool',))
+        capability = Slack(
+            tools=SlackTools.named('slack_new_read_tool'),
+            approval='none',
+            mcp_token='xoxp-a',
+        )
+        result = await Agent(TestModel(call_tools=['slack_new_read_tool']), capabilities=[capability]).run('use it')
+        assert result.output == '{"slack_new_read_tool":"ok"}'
+
 
 class TestRunIdentity:
     async def test_each_run_gets_its_invoking_users_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
