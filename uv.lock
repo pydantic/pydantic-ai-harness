@@ -4058,7 +4058,7 @@ requires-dist = [
     { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.19" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.17.0" },
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
-    { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.23.0" },
+    { name = "slack-bolt", marker = "extra == 'slack'", specifier = ">=1.29.0" },
     { name = "slack-sdk", marker = "extra == 'slack'", specifier = ">=3.44.0" },
     { name = "stackone-defender", marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender'", specifier = ">=0.7.3,<0.8" },
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },

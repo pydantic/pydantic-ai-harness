@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 from typing import Generic
 
 from pydantic_ai import ToolDenied
@@ -15,19 +16,14 @@ from pydantic_ai.tools import (
 )
 
 from pydantic_ai_harness.slack._client import SlackClient
-from pydantic_ai_harness.slack._interactions import MAX_QUESTION_CHARS, SlackInteractions
-from pydantic_ai_harness.slack._thread import SlackDepsT, SlackThread, ThreadResolver, resolve_thread
-from pydantic_ai_harness.slack._validate import reject_bare_string
-
-APPROVE = 'Approve'
-DENY = 'Deny'
+from pydantic_ai_harness.slack._interactions import APPROVE, DENY, MAX_QUESTION_CHARS, SlackInteractions
+from pydantic_ai_harness.slack._thread import SlackDepsT, SlackThread
 
 
 class SlackApprovals(Generic[SlackDepsT]):
     """Ask in Slack before a tool that requires approval runs.
 
-    `Slack` sets this up for you. Build one directly to pass as the handler of
-    `HandleDeferredToolCalls`, or to give approvals their own reviewer group.
+    `Slack` sets this internal handler up for each Slack-hosted run.
 
     This is not something the model decides to do. The gate is on the tool, so a
     model cannot skip it.
@@ -43,50 +39,40 @@ class SlackApprovals(Generic[SlackDepsT]):
         client: SlackClient,
         interactions: SlackInteractions,
         *,
-        thread: SlackThread | ThreadResolver[SlackDepsT] | None = None,
-        allowed_user_ids: list[str] | None = None,
+        thread: SlackThread,
+        allowed_user_ids: Collection[str] | None = None,
     ) -> None:
         """Ask through `interactions`, which must be the one the app resolves clicks against.
 
         Args:
             client: Slack client the prompts are posted with.
-            interactions: Prompt registry. `SlackApp` finds this on the agent's
-                `Slack` so button clicks reach the run waiting on them; pass
-                the same instance explicitly when you build the app yourself.
-            thread: Where to ask, or a callable working it out from the run
-                context. Omit to ask in the thread the run is bound to.
+            interactions: Prompt registry that lets `SlackApp` route button
+                clicks to the run waiting on them.
+            thread: Where to ask.
             allowed_user_ids: Who may approve. Defaults to the person whose
                 message started the run. Set it to a reviewer group when the
                 requester should not approve their own agent's actions.
 
-        Raises:
-            ValueError: If `allowed_user_ids` is a string rather than a collection
-                of ids.
         """
         self._client = client
         self._interactions = interactions
         self._thread = thread
-        reject_bare_string(allowed_user_ids, 'allowed_user_ids')
         # Copied, not kept: these decide who may approve, so a list the caller
         # edits later should not quietly change who this handler accepts.
         self._allowed_user_ids = list(allowed_user_ids) if allowed_user_ids is not None else None
 
-    async def __call__(self, ctx: RunContext[SlackDepsT], requests: DeferredToolRequests) -> DeferredToolResults | None:
+    async def __call__(self, _ctx: RunContext[SlackDepsT], requests: DeferredToolRequests) -> DeferredToolResults:
         """Ask about every pending approval and build the results.
 
-        Returns `None` when there is no Slack conversation to ask in, leaving the
-        calls for another handler rather than approving them unasked.
+        Every requested approval receives a Slack decision.
         """
-        thread = resolve_thread(self._thread, ctx)
-        if thread is None:
-            return None
         approvals: dict[str, bool | DeferredToolApprovalResult] = {}
         for call in requests.approvals:
-            approvals[call.tool_call_id] = await self._decide(thread, call)
+            approvals[call.tool_call_id] = await self._decide(self._thread, call)
         return requests.build_results(approvals=approvals)
 
     async def _decide(self, thread: SlackThread, call: ToolCallPart) -> bool | DeferredToolApprovalResult:
-        question = _question(call, _render(call))
+        question = _question(thread, call, _render(call))
         # Checked here rather than left to `ask`, so the denial says what to do
         # about it. Nothing is truncated to fit: approving half a call is
         # approving something nobody read.
@@ -96,18 +82,12 @@ class SlackApprovals(Generic[SlackDepsT]):
                 f'and Slack can show at most {MAX_QUESTION_CHARS}, so nobody could review the whole call. '
                 'Call the tool with smaller arguments, for instance by writing the long part to a file first.'
             )
-        try:
-            answer = await self._interactions.ask(
-                self._client,
-                thread,
-                question,
-                [APPROVE, DENY],
-                allowed_user_ids=self._allowed_user_ids,
-            )
-        except ValueError as error:
-            # Nobody is allowed to answer, so nobody can approve. Denying says why
-            # in the transcript rather than failing the run at the approval gate.
-            return ToolDenied(f'This action could not be approved in Slack: {error}')
+        answer = await self._interactions.ask(
+            self._client,
+            thread,
+            question,
+            allowed_user_ids=self._allowed_user_ids,
+        )
         if answer == APPROVE:
             return True
         if answer == DENY:
@@ -115,9 +95,13 @@ class SlackApprovals(Generic[SlackDepsT]):
         return ToolDenied('Nobody approved this action in Slack in time, so it was not run.')
 
 
-def _question(call: ToolCallPart, arguments: str | None) -> str:
+def _question(thread: SlackThread, call: ToolCallPart, arguments: str | None) -> str:
+    source = f'Workspace: {thread.team_id or "unknown"}\nChannel: {thread.channel_id}'
+    if thread.thread_ts is not None:  # pragma: no branch - SlackApp approval runs always have a thread root
+        source += f'\nThread: {thread.thread_ts}'
+    source += f'\nRequested by: {thread.user_id or "unknown"}'
     detail = f'\n\nArguments:\n{arguments}' if arguments else ''
-    return f'Run {call.tool_name}?{detail}'
+    return f'{source}\n\nRun {call.tool_name}?{detail}'
 
 
 def _render(call: ToolCallPart) -> str | None:

@@ -117,7 +117,7 @@ slack = [
     # the `test-floor` job builds aiohttp's C extensions from an sdist.
     "aiohttp>=3.13",
     "pydantic-ai-slim[mcp]>=2.38.0",
-    "slack-bolt>=1.23.0",
+    "slack-bolt>=1.29.0",
     "slack-sdk>=3.44.0",
 ]
 

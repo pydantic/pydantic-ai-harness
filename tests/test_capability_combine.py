@@ -284,7 +284,6 @@ COMBINE_POLICY: dict[str, Policy] = {
         lambda cls: (cls(), cls()),
     ),
     'CodeMode': Collides('`run_code` is reserved, so a second one is rejected by name'),
-    'Slack': Collides('two Slack MCP selections can expose the same provider-owned tool names'),
     'BrowserUse': Collides('its toolset registers its browser tools under fixed names'),
     'PlaywrightBrowser': Collides('its toolset registers `click` and friends under fixed names'),
     'ModalSandbox': Collides('its toolset registers `run_command` and friends under fixed names'),
@@ -293,6 +292,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'Slack': Rejected('SlackApp rejects more than one because one invocation can bind only one Slack identity policy'),
 }
 
 

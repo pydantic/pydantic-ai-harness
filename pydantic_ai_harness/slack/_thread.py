@@ -1,14 +1,9 @@
-"""Where a Slack message goes, and how a run says which thread it is in."""
+"""Typed addressing for a Slack conversation."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Generator
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TypeVar
-
-from pydantic_ai.tools import RunContext
 
 SlackDepsT = TypeVar('SlackDepsT')
 """The deps type a thread resolver reads. Its own variable because pydantic-ai's
@@ -49,42 +44,3 @@ class SlackThread:
         """
         prefix = f'{self.team_id}:' if self.team_id else ''
         return f'{prefix}{self.channel_id}:{self.thread_ts}' if self.thread_ts else f'{prefix}{self.channel_id}'
-
-
-_CURRENT_THREAD: ContextVar[SlackThread | None] = ContextVar('pydantic_ai_harness.slack.thread', default=None)
-
-
-@contextmanager
-def bind_thread(thread: SlackThread) -> Generator[None]:
-    """Say that everything inside this block is talking to `thread`.
-
-    `SlackApp` uses this internal compatibility context for direct
-    `SlackApprovals` handlers. New integrations should use `SlackContext`.
-    """
-    token = _CURRENT_THREAD.set(thread)
-    try:
-        yield
-    finally:
-        _CURRENT_THREAD.reset(token)
-
-
-def current_thread() -> SlackThread | None:
-    """The Slack thread bound around the current run, if any."""
-    return _CURRENT_THREAD.get()
-
-
-ThreadResolver = Callable[[RunContext[SlackDepsT]], 'SlackThread | None']
-"""Works out which Slack thread a run is talking to, from its run context."""
-
-
-def resolve_thread(
-    thread: SlackThread | ThreadResolver[SlackDepsT] | None, ctx: RunContext[SlackDepsT]
-) -> SlackThread | None:
-    """Which thread a configured `thread` means for this run, if any.
-
-    A fixed thread is itself, a resolver is asked, and an unset one falls back to
-    the thread bound around the current run.
-    """
-    if callable(thread):
-        thread = thread(ctx)
-    return thread if thread is not None else current_thread()

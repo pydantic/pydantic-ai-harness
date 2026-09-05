@@ -3,14 +3,15 @@
 from typing import TYPE_CHECKING
 
 from pydantic_ai_harness.slack._access import SlackAccess
-from pydantic_ai_harness.slack._approvals import SlackApprovals
 from pydantic_ai_harness.slack._capability import Slack
-from pydantic_ai_harness.slack._context import SlackContext, SlackContextEntity, current_slack_context
-from pydantic_ai_harness.slack._interactions import (
-    SlackInteractions,
-    SlackPromptError,
+from pydantic_ai_harness.slack._context import (
+    SlackContext,
+    SlackContextEntity,
+    SlackFile,
+    SlackMessageContext,
+    current_slack_context,
 )
-from pydantic_ai_harness.slack._mcp import SlackTool, SlackTools
+from pydantic_ai_harness.slack._mcp import SlackCustomTool, SlackTool, SlackTools
 from pydantic_ai_harness.slack._store import (
     ConversationStore,
     FileConversationStore,
@@ -27,14 +28,14 @@ __all__ = [
     'InMemoryConversationStore',
     'SlackApp',
     'SlackAccess',
-    'SlackApprovals',
     'Slack',
     'SlackContext',
     'SlackContextEntity',
+    'SlackCustomTool',
+    'SlackFile',
+    'SlackMessageContext',
     'SlackTool',
     'SlackTools',
-    'SlackInteractions',
-    'SlackPromptError',
     'SlackThread',
     'current_slack_context',
 ]

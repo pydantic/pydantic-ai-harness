@@ -1,21 +1,22 @@
-"""Ask a person a question in Slack and wait for the answer.
+"""Ask approvers a question in Slack and wait for the answer.
 
-One object serves approval prompts, so a run never has two sets of buttons live
-in the same thread at once.
+One registry routes button clicks to pending runs and serializes approval rounds
+from the same source thread.
 """
 
 from __future__ import annotations
 
 import logging
 import secrets
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from weakref import WeakValueDictionary
 
 import anyio
+from pydantic import BaseModel, ValidationError
 
-from pydantic_ai_harness.slack._client import SlackClient
+from pydantic_ai_harness.slack._client import SlackClient, SlackResponse
 from pydantic_ai_harness.slack._thread import SlackThread
-from pydantic_ai_harness.slack._validate import reject_bare_string
 
 PROMPT_ACTION_PREFIX = 'pydantic_ai_harness_slack_prompt:'
 """Prefix on the `action_id` of every button these prompts post.
@@ -28,21 +29,24 @@ DEFAULT_PROMPT_TIMEOUT_SECONDS = 600.0
 long enough for someone to come back from a meeting, short enough that a run does
 not sit open overnight holding an agent turn."""
 
+# Slack-owned Block Kit limits were verified 2026-09-05 against:
+# https://docs.slack.dev/reference/methods/conversations.open/
+# https://docs.slack.dev/reference/block-kit/blocks/section-block/
+# https://docs.slack.dev/reference/block-kit/blocks/actions-block/
+# https://docs.slack.dev/reference/block-kit/block-elements/button-element/
+# Re-check these pages before changing the question, option-count, or button limits.
 MAX_QUESTION_CHARS = 3000
 """Longest question a prompt can ask. Slack's cap on one section block, which is
 what the question is rendered as. The settled message that replaces the prompt is
 plain text under a 4000 cap, so it needs no margin here. Longer questions are
 refused rather than truncated: half a question is one nobody can answer."""
 
-_MAX_OPTIONS = 25
-"""Slack's cap on elements in one `actions` block."""
-
-_MAX_OPTION_CHARS = 75
-"""Slack's cap on button text. Longer options are refused rather than shortened,
-so two options can never render as the same button."""
+APPROVE = 'Approve'
+DENY = 'Deny'
+_APPROVAL_OPTIONS = (APPROVE, DENY)
 
 _SETTLE_RETRY_DELAYS = (0.25, 1.0)
-"""Bounded backoff for removing buttons after a prompt settles."""
+"""Local bounded backoff for removing buttons after a prompt settles."""
 
 logger = logging.getLogger(__name__)
 
@@ -56,18 +60,27 @@ class SlackPromptError(RuntimeError):
 
 @dataclass(slots=True)
 class _Pending:
-    options: tuple[str, ...]
     allowed_user_ids: frozenset[str]
     event: anyio.Event = field(default_factory=anyio.Event)
     answer: str | None = None
     answered_by: str | None = None
 
 
-class SlackInteractions:
-    """Post a question with buttons into a thread and wait for someone to click.
+@dataclass(frozen=True, slots=True)
+class _PostedPrompt:
+    channel_id: str
+    timestamp: str
 
-    Create one per application and share it between the chat toolset and the
-    approval handler. Prompts for the same thread are serialized, so a second
+
+class _Conversation(BaseModel):
+    id: str
+
+
+class SlackInteractions:
+    """Post private approval buttons to each approver and wait for a click.
+
+    One registry per capability routes the app's action listener to pending
+    approval prompts. Prompts for the same thread are serialized, so a second
     question waits for the first to be answered rather than posting a competing
     set of buttons.
 
@@ -77,8 +90,6 @@ class SlackInteractions:
 
     def __init__(self, *, timeout_seconds: float = DEFAULT_PROMPT_TIMEOUT_SECONDS) -> None:
         """Wait `timeout_seconds` for an answer before treating a prompt as unanswered."""
-        if timeout_seconds <= 0:
-            raise ValueError('timeout_seconds must be positive')
         self._timeout_seconds = timeout_seconds
         self._pending: dict[str, _Pending] = {}
         # Weak, so a thread's lock is collected once no prompt holds it. A busy
@@ -90,118 +101,101 @@ class SlackInteractions:
         client: SlackClient,
         thread: SlackThread,
         question: str,
-        options: list[str],
         *,
-        allowed_user_ids: list[str] | None = None,
+        allowed_user_ids: Collection[str] | None = None,
     ) -> str | None:
-        """Post `question` with one button per option and wait for a click.
+        """DM `question` with Approve and Deny buttons to each approver.
 
         Returns the chosen option, or `None` when nobody answered in time. Either
-        way the posted message is edited to record what happened, so the thread
-        does not keep buttons that no longer do anything. Cleanup is shielded
+        way each private message is edited to record what happened, so approver
+        DMs do not keep buttons that no longer do anything. Cleanup is shielded
         from run cancellation.
 
         Raises:
-            ValueError: If `options` or `allowed_user_ids` is a single string
-                rather than a list of them, `question` is too long for Slack to
-                show, `options` is empty, exceeds Slack's limits or contains
-                duplicates that would make the answer ambiguous, or nobody is
-                allowed to answer because the thread names no user.
-            SlackPromptError: If Slack did not identify the message it posted.
+            SlackPromptError: If Slack cannot identify or settle the posted message.
         """
-        reject_bare_string(options, 'options')
-        if len(question) > MAX_QUESTION_CHARS:
-            raise ValueError(
-                f'that question is {len(question)} characters and Slack shows at most {MAX_QUESTION_CHARS}; '
-                'ask something shorter, or put the detail in a message before it'
-            )
-        choices = tuple(options)
-        if not choices:
-            raise ValueError('options must contain at least one option')
-        if len(choices) > _MAX_OPTIONS:
-            raise ValueError(f'Slack allows at most {_MAX_OPTIONS} buttons in one prompt, got {len(choices)}')
-        if len(set(choices)) != len(choices):
-            raise ValueError('options must be unique so the answer is unambiguous')
-        for choice in choices:
-            if not choice or len(choice) > _MAX_OPTION_CHARS:
-                raise ValueError(f'each option must be between 1 and {_MAX_OPTION_CHARS} characters')
-
-        reject_bare_string(allowed_user_ids, 'allowed_user_ids')
         if allowed_user_ids is not None:
             allowed = frozenset(allowed_user_ids)
-            if not allowed:
-                raise ValueError('allowed_user_ids must contain at least one user id')
         elif thread.user_id is not None:
             allowed = frozenset({thread.user_id})
-        else:
-            raise ValueError(
-                'There is nobody to ask: this thread names no user, and no allowed_user_ids were given. '
-                'Prompts only work in a conversation someone started.'
-            )
+        else:  # pragma: no cover - SlackApp always supplies the invoking user
+            raise RuntimeError('Slack approval prompts require an invoking user or explicit approvers')
         lock = self._locks.setdefault(thread.key, anyio.Lock())
         async with lock:
-            return await self._ask_once(client, thread, question, choices, allowed)
+            return await self._ask_once(client, thread, question, allowed)
 
     async def _ask_once(
         self,
         client: SlackClient,
         thread: SlackThread,
         question: str,
-        choices: tuple[str, ...],
         allowed: frozenset[str],
     ) -> str | None:
         # Random, not a counter: a counter restarts with the process, so a button
         # left over from a previous run would resolve the first prompt of the new
         # one -- an old Approve click answering an unrelated question.
         token = secrets.token_urlsafe(16)
-        pending = _Pending(options=choices, allowed_user_ids=allowed)
+        pending = _Pending(allowed_user_ids=allowed)
         self._pending[token] = pending
-        timestamp: str | None = None
+        posted: list[_PostedPrompt] = []
+        settlement_error: Exception | None = None
+        waiting = False
+        expired = False
         try:
-            response = await client.chat_postMessage(
-                channel=thread.channel_id,
-                thread_ts=thread.thread_ts,
-                text=question,
-                blocks=_prompt_blocks(token, question, choices),
-                mrkdwn=False,
-            )
-            posted_timestamp = response.get('ts')
-            if not isinstance(posted_timestamp, str):
-                raise SlackPromptError('Slack did not return a timestamp for the prompt message')
-            timestamp = posted_timestamp
+            for user_id in sorted(allowed):
+                dm = await client.conversations_open(users=user_id)
+                channel_id = _conversation_id(dm)
+                response = await client.chat_postMessage(
+                    channel=channel_id,
+                    text=question,
+                    blocks=_prompt_blocks(token, question),
+                    mrkdwn=False,
+                )
+                posted_timestamp = response.get('ts')
+                if not isinstance(posted_timestamp, str):
+                    raise SlackPromptError('Slack did not return a timestamp for the prompt message')
+                posted.append(_PostedPrompt(channel_id=channel_id, timestamp=posted_timestamp))
 
+            await _set_status(client, thread, 'suspended')
+            waiting = True
             with anyio.move_on_after(self._timeout_seconds):
                 await pending.event.wait()
+            expired = pending.answer is None
             return pending.answer
         finally:
             # Cleanup must finish when the run is cancelled. Keep the prompt
             # registered until its buttons have been removed, so a click during
             # the update cannot race a prompt that already looks settled.
-            if timestamp is not None:
-                with anyio.CancelScope(shield=True):
+            with anyio.CancelScope(shield=True):
+                for prompt in posted:
                     for attempt in range(len(_SETTLE_RETRY_DELAYS) + 1):
                         try:
                             await client.chat_update(
-                                channel=thread.channel_id,
-                                ts=timestamp,
-                                text=_settled_text(question, pending.answer, pending.answered_by),
+                                channel=prompt.channel_id,
+                                ts=prompt.timestamp,
+                                text=_settled_text(question, pending.answer, pending.answered_by, expired=expired),
                                 blocks=[],
                                 mrkdwn=False,
                             )
                             break
-                        except Exception:
+                        except Exception as error:
                             if attempt == len(_SETTLE_RETRY_DELAYS):
-                                # The answer is already in hand, so a Slack cleanup
-                                # failure does not fail the run.
                                 logger.warning(
-                                    'Could not update the settled Slack prompt in %s after %d attempts',
+                                    'Could not update a settled Slack prompt for %s after %d attempts',
                                     thread.key,
                                     len(_SETTLE_RETRY_DELAYS) + 1,
                                     exc_info=True,
                                 )
+                                settlement_error = error
                             else:
                                 await anyio.sleep(_SETTLE_RETRY_DELAYS[attempt])
+                if waiting:
+                    await _set_status(client, thread, 'processing')
             del self._pending[token]
+            if settlement_error is not None:
+                raise SlackPromptError(
+                    'Slack did not remove the approval buttons, so the answer was not accepted'
+                ) from settlement_error
 
     def resolve(self, *, block_id: str, value: str, user_id: str) -> bool:
         """Record a button click. Call this from the application's action handler.
@@ -214,7 +208,7 @@ class SlackInteractions:
         pending = self._pending.get(block_id)
         if pending is None or pending.answer is not None:
             return False
-        if user_id not in pending.allowed_user_ids or value not in pending.options:
+        if user_id not in pending.allowed_user_ids or value not in _APPROVAL_OPTIONS:
             return False
         pending.answer = value
         pending.answered_by = user_id
@@ -222,7 +216,29 @@ class SlackInteractions:
         return True
 
 
-def _prompt_blocks(token: str, question: str, choices: tuple[str, ...]) -> list[dict[str, object]]:
+def _conversation_id(response: SlackResponse) -> str:
+    """Return the DM channel ID from `conversations.open`, or fail closed."""
+    try:
+        return _Conversation.model_validate(response.get('channel')).id
+    except ValidationError as error:
+        raise SlackPromptError('Slack did not return a channel ID for the approval conversation') from error
+
+
+async def _set_status(client: SlackClient, thread: SlackThread, status: str) -> None:
+    """Reflect approval waiting in Slack without making the decision depend on status UI."""
+    if thread.thread_ts is None:  # pragma: no cover - SlackApp approval runs always have a thread root
+        return
+    try:
+        await client.agents_sessions_setStatus(
+            channel_id=thread.channel_id,
+            thread_ts=thread.thread_ts,
+            status=status,
+        )
+    except Exception:
+        logger.debug('Could not update the Slack approval status for %s', thread.key, exc_info=True)
+
+
+def _prompt_blocks(token: str, question: str) -> list[dict[str, object]]:
     return [
         {'type': 'section', 'text': {'type': 'plain_text', 'text': question}},
         {
@@ -235,13 +251,14 @@ def _prompt_blocks(token: str, question: str, choices: tuple[str, ...]) -> list[
                     'text': {'type': 'plain_text', 'text': choice},
                     'value': choice,
                 }
-                for index, choice in enumerate(choices)
+                for index, choice in enumerate(_APPROVAL_OPTIONS)
             ],
         },
     ]
 
 
-def _settled_text(question: str, answer: str | None, answered_by: str | None) -> str:
+def _settled_text(question: str, answer: str | None, answered_by: str | None, *, expired: bool) -> str:
     if answer is None:
-        return f'{question}\n\nNo answer, so this prompt expired.'
+        outcome = 'No answer, so this prompt expired.' if expired else 'Approval was abandoned before a decision.'
+        return f'{question}\n\n{outcome}'
     return f'{question}\n\n{answered_by} chose {answer}.'
