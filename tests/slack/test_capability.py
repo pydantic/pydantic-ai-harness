@@ -220,8 +220,8 @@ class TestAgentSpec:
             Agent.from_spec(spec, custom_capability_types=[SlackChat])
 
     def test_a_thread_can_be_written_out_in_the_spec(self) -> None:
-        # Pydantic leaves it a mapping, because the field also accepts a resolver
-        # callable. `from_spec` is what turns it into a SlackThread.
+        # It arrives as the mapping the file held, since nothing validates spec
+        # arguments against the field. `from_spec` is what makes it a SlackThread.
         spec = yaml.safe_load(SPEC)
         spec['capabilities'][0]['SlackChat']['thread'] = {'channel_id': 'C777', 'thread_ts': '1.1'}
         agent = Agent.from_spec(spec, custom_capability_types=[SlackChat])
