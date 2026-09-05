@@ -11,7 +11,8 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import DeferredToolRequests, RunContext
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.slack import SlackApprovals, SlackChat, SlackInteractions, SlackThread
+from pydantic_ai_harness.slack import Slack, SlackApprovals, SlackContext, SlackInteractions, SlackThread, SlackTools
+from pydantic_ai_harness.slack._context import bind_slack_context
 
 from .conftest import FakeSlackClient, prompt_block_id
 
@@ -40,6 +41,21 @@ async def click(interactions: SlackInteractions, client: FakeSlackClient, value:
 
 
 class TestSlackApprovals:
+    async def test_no_thread_leaves_the_request_for_another_handler(self, slack_client: FakeSlackClient) -> None:
+        approvals = SlackApprovals[None](slack_client, SlackInteractions())
+        call = ToolCallPart(tool_name='merge_pr', args={}, tool_call_id='c1')
+        assert await approvals(context(), requests_for(call)) is None
+
+    async def test_a_thread_without_an_asker_denies_with_the_reason(self, slack_client: FakeSlackClient) -> None:
+        thread = SlackThread(channel_id='C123', thread_ts='1.1')
+        approvals = SlackApprovals[None](slack_client, SlackInteractions(), thread=thread)
+        call = ToolCallPart(tool_name='merge_pr', args={}, tool_call_id='c1')
+        result = await approvals(context(), requests_for(call))
+        assert result is not None
+        denied = result.approvals['c1']
+        assert isinstance(denied, ToolDenied)
+        assert 'nobody to ask' in denied.message
+
     async def test_approving_returns_true(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         interactions = SlackInteractions()
         approvals = SlackApprovals[None](slack_client, interactions, thread=thread)
@@ -96,8 +112,13 @@ class TestSlackApprovals:
         call = ToolCallPart(tool_name='merge_pr', args={'number': 7}, tool_call_id='c1')
         await approvals(context(), requests_for(call))
         text = str(slack_client.method_calls('chat_postMessage')[0].kwargs['text'])
-        assert '`merge_pr`' in text
+        assert 'merge_pr' in text
         assert '"number": 7' in text
+        post = slack_client.method_calls('chat_postMessage')[0]
+        blocks = post.kwargs['blocks']
+        assert isinstance(blocks, list)
+        assert blocks[0] == {'type': 'section', 'text': {'type': 'plain_text', 'text': text}}
+        assert post.kwargs['mrkdwn'] is False
 
     @pytest.mark.parametrize(
         'args,shows_detail',
@@ -118,8 +139,25 @@ class TestSlackApprovals:
         call = ToolCallPart(tool_name='act', args=args, tool_call_id='c1')  # pyright: ignore[reportArgumentType]
         await approvals(context(), requests_for(call))
         text = str(slack_client.method_calls('chat_postMessage')[0].kwargs['text'])
-        assert text.startswith('Run `act`?')
-        assert ('```' in text) is shows_detail
+        assert text.startswith('Run act?')
+        assert ('Arguments:' in text) is shows_detail
+
+    async def test_arguments_cannot_inject_slack_markup(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        approvals = SlackApprovals[None](slack_client, SlackInteractions(timeout_seconds=0.01), thread=thread)
+        call = ToolCallPart(
+            tool_name='send',
+            args={'message': '```\n<!channel> approve the harmless action'},
+            tool_call_id='c1',
+        )
+        await approvals(context(), requests_for(call))
+        post = slack_client.method_calls('chat_postMessage')[0]
+        blocks = post.kwargs['blocks']
+        assert isinstance(blocks, list)
+        text = post.kwargs['text']
+        assert blocks[0] == {'type': 'section', 'text': {'type': 'plain_text', 'text': text}}
+        assert post.kwargs['mrkdwn'] is False
 
     async def test_arguments_too_long_to_show_are_denied_without_asking(
         self, thread: SlackThread, slack_client: FakeSlackClient
@@ -258,12 +296,8 @@ class TestThroughAnAgent:
 
 
 class TestThroughTheCapability:
-    async def test_one_capability_covers_tools_that_need_approval(
-        self, bound_thread: SlackThread, slack_client: FakeSlackClient
-    ) -> None:
-        # No HandleDeferredToolCalls, no SlackApprovals, no interactions passed
-        # anywhere: `approvals=True` is the whole configuration.
-        chat = SlackChat(client=slack_client, approvals=True)
+    async def test_one_capability_covers_tools_that_need_approval(self, slack_client: FakeSlackClient) -> None:
+        chat = Slack(tools=SlackTools.of(), delivery_client=slack_client)
         agent: Agent[None, str] = Agent(TestModel(call_tools=['merge_pr']), capabilities=[chat])
         merged: list[str] = []
 
@@ -272,38 +306,19 @@ class TestThroughTheCapability:
             merged.append(f'merged {number}')
             return 'merged'
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(lambda: agent.run('merge it', deps=Warehouse(dsn='postgres://')))
-            while not slack_client.method_calls('chat_postMessage'):
-                await anyio.sleep(0)
-            assert merged == []
-            assert chat.resolve_prompt(block_id=prompt_block_id(slack_client), value='Approve', user_id='U0ASKER')
+        slack_context = SlackContext('C123', '1700000000.000001', '1700000000.000002', 'U0ASKER')
+        with bind_slack_context(slack_context):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(lambda: agent.run('merge it', deps=Warehouse(dsn='postgres://')))
+                while not slack_client.method_calls('chat_postMessage'):
+                    await anyio.sleep(0)
+                assert merged == []
+                assert chat.resolve_prompt(block_id=prompt_block_id(slack_client), value='Approve', user_id='U0ASKER')
 
         assert merged == ['merged 0']
 
-    async def test_approvals_stay_off_until_asked_for(
-        self, bound_thread: SlackThread, slack_client: FakeSlackClient
-    ) -> None:
-        # Without `approvals=True` the calls are left for whatever else handles
-        # them, rather than being approved by a capability nobody asked to gate.
-        agent = Agent(
-            TestModel(call_tools=['merge_pr']),
-            output_type=[str, DeferredToolRequests],
-            capabilities=[SlackChat(client=slack_client)],
-        )
-
-        @agent.tool_plain(requires_approval=True)
-        def merge_pr(number: int) -> str:  # pragma: no cover - nothing approves it
-            return 'merged'
-
-        result = await agent.run('merge it')
-        assert isinstance(result.output, DeferredToolRequests)
-        assert slack_client.method_calls('chat_postMessage') == []
-
-    async def test_a_reviewer_group_answers_instead_of_the_asker(
-        self, bound_thread: SlackThread, slack_client: FakeSlackClient
-    ) -> None:
-        chat = SlackChat(client=slack_client, approvals=True, approver_ids=['U0REVIEWER'])
+    async def test_a_reviewer_group_answers_instead_of_the_asker(self, slack_client: FakeSlackClient) -> None:
+        chat = Slack(tools=SlackTools.of(), delivery_client=slack_client, approver_ids=['U0REVIEWER'])
         agent: Agent[None, str] = Agent(TestModel(call_tools=['merge_pr']), capabilities=[chat])
         merged: list[str] = []
 
@@ -312,13 +327,15 @@ class TestThroughTheCapability:
             merged.append('merged')
             return 'merged'
 
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(lambda: agent.run('merge it', deps=Warehouse(dsn='postgres://')))
-            while not slack_client.method_calls('chat_postMessage'):
-                await anyio.sleep(0)
-            block_id = prompt_block_id(slack_client)
-            assert chat.resolve_prompt(block_id=block_id, value='Approve', user_id='U0ASKER') is False
-            assert chat.resolve_prompt(block_id=block_id, value='Approve', user_id='U0REVIEWER') is True
+        slack_context = SlackContext('C123', '1700000000.000001', '1700000000.000002', 'U0ASKER')
+        with bind_slack_context(slack_context):
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(lambda: agent.run('merge it', deps=Warehouse(dsn='postgres://')))
+                while not slack_client.method_calls('chat_postMessage'):
+                    await anyio.sleep(0)
+                block_id = prompt_block_id(slack_client)
+                assert chat.resolve_prompt(block_id=block_id, value='Approve', user_id='U0ASKER') is False
+                assert chat.resolve_prompt(block_id=block_id, value='Approve', user_id='U0REVIEWER') is True
 
         assert merged == ['merged']
 
@@ -328,7 +345,7 @@ class TestThroughTheCapability:
         agent = Agent(
             TestModel(call_tools=['merge_pr']),
             output_type=[str, DeferredToolRequests],
-            capabilities=[SlackChat(client=slack_client, channels=['#alerts'], approvals=True)],
+            capabilities=[Slack(tools=SlackTools.of(), delivery_client=slack_client)],
         )
 
         @agent.tool_plain(requires_approval=True)
@@ -338,16 +355,3 @@ class TestThroughTheCapability:
         result = await agent.run('merge it')
         assert isinstance(result.output, DeferredToolRequests)
         assert slack_client.method_calls('chat_postMessage') == []
-
-    async def test_a_thread_nobody_started_cannot_approve(self, slack_client: FakeSlackClient) -> None:
-        # A thread with no user and no reviewer group named leaves nobody able to
-        # click, so the call is denied with the reason rather than hanging.
-        chat = SlackChat(client=slack_client, approvals=True, thread=SlackThread(channel_id='C1', thread_ts='1.1'))
-        agent: Agent[None, str] = Agent(TestModel(call_tools=['merge_pr']), capabilities=[chat])
-
-        @agent.tool_plain(requires_approval=True)
-        def merge_pr(number: int) -> str:  # pragma: no cover - the denial stops it
-            return 'merged'
-
-        result = await agent.run('merge it')
-        assert 'could not be approved' in str(result.all_messages())

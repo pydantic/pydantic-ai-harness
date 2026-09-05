@@ -61,10 +61,8 @@ class InMemoryConversationStore:
 class FileConversationStore:
     """Keep each conversation's history in its own JSON file.
 
-    Created for the owner only, since the files hold whole conversations. A
-    directory that already exists keeps the permissions it has: point this at a
-    private path, because anyone who can write to it can put words in the agent's
-    history.
+    The directory and files are restricted to the owner because they hold whole
+    conversations. Existing directory permissions are tightened before access.
 
     Enough for a single-process bot that should survive a restart. Each write goes
     to its own temporary file that then replaces the old one, so a crash mid-write
@@ -85,8 +83,20 @@ class FileConversationStore:
         digest = hashlib.sha256(key.encode()).hexdigest()[:32]
         return self._directory / f'{digest}.json'
 
+    async def _secure_directory(self, *, create: bool) -> None:
+        """Create when requested and restrict an existing directory to its owner."""
+        directory = anyio.Path(self._directory)
+        if create:
+            await directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            await directory.chmod(0o700)
+        except FileNotFoundError:
+            if create:  # pragma: no cover - the successful mkdir above made it
+                raise
+
     async def load(self, key: str) -> Sequence[ModelMessage]:
         """Return the stored history, or an empty sequence when the file is absent."""
+        await self._secure_directory(create=False)
         path = anyio.Path(self._path(key))
         try:
             raw = await path.read_bytes()
@@ -96,10 +106,9 @@ class FileConversationStore:
 
     async def save(self, key: str, messages: Sequence[ModelMessage]) -> None:
         """Write the history, replacing any previous file for this key."""
-        directory = anyio.Path(self._directory)
         # These files hold whole conversations, so keep them to the owner rather
         # than whatever a umask of 022 would leave readable.
-        await directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        await self._secure_directory(create=True)
         path = self._path(key)
         # A name unique to this write. A shared one lets two saves for the same key
         # clobber each other's half-written file and rename the wrong bytes in.
@@ -116,4 +125,5 @@ class FileConversationStore:
 
     async def delete(self, key: str) -> None:
         """Drop the history file if it exists."""
+        await self._secure_directory(create=False)
         await anyio.Path(self._path(key)).unlink(missing_ok=True)

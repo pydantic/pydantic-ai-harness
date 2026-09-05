@@ -58,17 +58,8 @@ _CURRENT_THREAD: ContextVar[SlackThread | None] = ContextVar('pydantic_ai_harnes
 def bind_thread(thread: SlackThread) -> Generator[None]:
     """Say that everything inside this block is talking to `thread`.
 
-    [`SlackChat`][pydantic_ai_harness.slack.SlackChat]'s tools post to the bound
-    thread, so an agent answering a Slack message replies where it was asked
-    without the thread going anywhere near its `deps`.
-    [`SlackBot`][pydantic_ai_harness.slack.SlackBot] binds it for you; bind it
-    yourself when you drive the agent from your own Slack listeners.
-
-    The binding follows into tasks started inside the block, so tools running
-    concurrently in one turn all see the same thread. It does not cross a process
-    boundary: under durable execution, configure `SlackChat(thread=...)` or
-    `SlackChat(channels=[...])` instead, which a worker can rebuild from the run
-    context.
+    `SlackApp` uses this internal compatibility context for direct
+    `SlackApprovals` handlers. New integrations should use `SlackContext`.
     """
     token = _CURRENT_THREAD.set(thread)
     try:
@@ -78,7 +69,7 @@ def bind_thread(thread: SlackThread) -> Generator[None]:
 
 
 def current_thread() -> SlackThread | None:
-    """The thread bound by [`bind_thread`][pydantic_ai_harness.slack.bind_thread], if any."""
+    """The Slack thread bound around the current run, if any."""
     return _CURRENT_THREAD.get()
 
 
@@ -92,9 +83,7 @@ def resolve_thread(
     """Which thread a configured `thread` means for this run, if any.
 
     A fixed thread is itself, a resolver is asked, and an unset one falls back to
-    whatever [`bind_thread`][pydantic_ai_harness.slack.bind_thread] set. Every
-    piece that posts settles it this way, so an agent's tools and its approval
-    prompts always land in the same conversation.
+    the thread bound around the current run.
     """
     if callable(thread):
         thread = thread(ctx)

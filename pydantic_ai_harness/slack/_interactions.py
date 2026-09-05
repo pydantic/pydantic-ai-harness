@@ -1,7 +1,7 @@
 """Ask a person a question in Slack and wait for the answer.
 
-One object serves both the `ask_user` tool and approval prompts, so a run never
-has two sets of buttons live in the same thread at once.
+One object serves approval prompts, so a run never has two sets of buttons live
+in the same thread at once.
 """
 
 from __future__ import annotations
@@ -20,8 +20,7 @@ from pydantic_ai_harness.slack._validate import reject_bare_string
 PROMPT_ACTION_PREFIX = 'pydantic_ai_harness_slack_prompt:'
 """Prefix on the `action_id` of every button these prompts post.
 
-Register one Slack action handler matching this prefix and forward the click to
-[`SlackInteractions.resolve`][pydantic_ai_harness.slack.SlackInteractions.resolve].
+`SlackApp` registers the matching Bolt action handler.
 """
 
 DEFAULT_PROMPT_TIMEOUT_SECONDS = 600.0
@@ -41,6 +40,9 @@ _MAX_OPTIONS = 25
 _MAX_OPTION_CHARS = 75
 """Slack's cap on button text. Longer options are refused rather than shortened,
 so two options can never render as the same button."""
+
+_SETTLE_RETRY_DELAYS = (0.25, 1.0)
+"""Bounded backoff for removing buttons after a prompt settles."""
 
 logger = logging.getLogger(__name__)
 
@@ -96,8 +98,8 @@ class SlackInteractions:
 
         Returns the chosen option, or `None` when nobody answered in time. Either
         way the posted message is edited to record what happened, so the thread
-        does not keep buttons that no longer do anything. Cancelling the run
-        instead skips that edit and leaves the buttons in place.
+        does not keep buttons that no longer do anything. Cleanup is shielded
+        from run cancellation.
 
         Raises:
             ValueError: If `options` or `allowed_user_ids` is a single string
@@ -127,6 +129,8 @@ class SlackInteractions:
         reject_bare_string(allowed_user_ids, 'allowed_user_ids')
         if allowed_user_ids is not None:
             allowed = frozenset(allowed_user_ids)
+            if not allowed:
+                raise ValueError('allowed_user_ids must contain at least one user id')
         elif thread.user_id is not None:
             allowed = frozenset({thread.user_id})
         else:
@@ -150,40 +154,54 @@ class SlackInteractions:
         # left over from a previous run would resolve the first prompt of the new
         # one -- an old Approve click answering an unrelated question.
         token = secrets.token_urlsafe(16)
-        response = await client.chat_postMessage(
-            channel=thread.channel_id,
-            thread_ts=thread.thread_ts,
-            text=question,
-            blocks=_prompt_blocks(token, question, choices),
-        )
-        timestamp = response.get('ts')
-        if not isinstance(timestamp, str):
-            raise SlackPromptError('Slack did not return a timestamp for the prompt message')
-
-        # No `await` separates the post from this registration, so a click cannot
-        # arrive while the prompt is unregistered.
         pending = _Pending(options=choices, allowed_user_ids=allowed)
         self._pending[token] = pending
+        timestamp: str | None = None
         try:
+            response = await client.chat_postMessage(
+                channel=thread.channel_id,
+                thread_ts=thread.thread_ts,
+                text=question,
+                blocks=_prompt_blocks(token, question, choices),
+                mrkdwn=False,
+            )
+            posted_timestamp = response.get('ts')
+            if not isinstance(posted_timestamp, str):
+                raise SlackPromptError('Slack did not return a timestamp for the prompt message')
+            timestamp = posted_timestamp
+
             with anyio.move_on_after(self._timeout_seconds):
                 await pending.event.wait()
+            return pending.answer
         finally:
+            # Cleanup must finish when the run is cancelled. Keep the prompt
+            # registered until its buttons have been removed, so a click during
+            # the update cannot race a prompt that already looks settled.
+            if timestamp is not None:
+                with anyio.CancelScope(shield=True):
+                    for attempt in range(len(_SETTLE_RETRY_DELAYS) + 1):
+                        try:
+                            await client.chat_update(
+                                channel=thread.channel_id,
+                                ts=timestamp,
+                                text=_settled_text(question, pending.answer, pending.answered_by),
+                                blocks=[],
+                                mrkdwn=False,
+                            )
+                            break
+                        except Exception:
+                            if attempt == len(_SETTLE_RETRY_DELAYS):
+                                # The answer is already in hand, so a Slack cleanup
+                                # failure does not fail the run.
+                                logger.warning(
+                                    'Could not update the settled Slack prompt in %s after %d attempts',
+                                    thread.key,
+                                    len(_SETTLE_RETRY_DELAYS) + 1,
+                                    exc_info=True,
+                                )
+                            else:
+                                await anyio.sleep(_SETTLE_RETRY_DELAYS[attempt])
             del self._pending[token]
-
-        answer = pending.answer
-        try:
-            await client.chat_update(
-                channel=thread.channel_id,
-                ts=timestamp,
-                text=_settled_text(question, answer, pending.answered_by),
-                blocks=[],
-            )
-        except Exception:
-            # The answer is already in hand, so failing to tidy the buttons away is
-            # not a reason to fail the run. The prompt is deregistered either way,
-            # so those buttons now resolve to nothing.
-            logger.warning('Could not update the settled Slack prompt in %s', thread.key, exc_info=True)
-        return answer
 
     def resolve(self, *, block_id: str, value: str, user_id: str) -> bool:
         """Record a button click. Call this from the application's action handler.
@@ -206,7 +224,7 @@ class SlackInteractions:
 
 def _prompt_blocks(token: str, question: str, choices: tuple[str, ...]) -> list[dict[str, object]]:
     return [
-        {'type': 'section', 'text': {'type': 'mrkdwn', 'text': question}},
+        {'type': 'section', 'text': {'type': 'plain_text', 'text': question}},
         {
             'type': 'actions',
             'block_id': token,
@@ -225,5 +243,5 @@ def _prompt_blocks(token: str, question: str, choices: tuple[str, ...]) -> list[
 
 def _settled_text(question: str, answer: str | None, answered_by: str | None) -> str:
     if answer is None:
-        return f'{question}\n\n_No answer, so this prompt expired._'
-    return f'{question}\n\n_<@{answered_by}> chose *{answer}*._'
+        return f'{question}\n\nNo answer, so this prompt expired.'
+    return f'{question}\n\n{answered_by} chose {answer}.'

@@ -5,24 +5,31 @@ from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
 import anyio
+import httpx
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
+from slack_bolt.app.async_app import AsyncApp as RealAsyncApp
 from slack_sdk.web.async_client import AsyncWebClient
+from starlette.applications import Starlette
+from starlette.routing import Mount
 
 import pydantic_ai_harness.slack as slack_package
 import pydantic_ai_harness.slack._app as app_module
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.slack import (
     InMemoryConversationStore,
-    SlackBot,
-    SlackChat,
+    Slack,
+    SlackAccess,
+    SlackApp,
+    SlackContext,
+    SlackContextEntity,
     SlackInteractions,
     SlackThread,
-    current_thread,
+    current_slack_context,
 )
 
 from .conftest import FakeSlackClient
@@ -47,7 +54,7 @@ def warehouse_for(thread: SlackThread) -> Warehouse:
 
 @dataclass
 class FakeBoltApp:
-    """Records the listeners `SlackBot` registers, without touching Slack."""
+    """Records the listeners `SlackApp` registers, without touching Slack."""
 
     token: str
     signing_secret: str | None = None
@@ -85,7 +92,7 @@ def bolt(monkeypatch: pytest.MonkeyPatch) -> Callable[[], FakeBoltApp]:
 
 
 @pytest.fixture
-def slack_agent_with_store(agent: Agent[None, str]) -> tuple[SlackBot[None], InMemoryConversationStore]:
+def slack_agent_with_store(agent: Agent[None, str]) -> tuple[SlackApp[None], InMemoryConversationStore]:
     store = InMemoryConversationStore()
     return build(agent, store=store), store
 
@@ -108,24 +115,24 @@ def message(**overrides: object) -> dict[str, object]:
 
 
 def asking(interactions: SlackInteractions, client: FakeSlackClient) -> Agent[None, str]:
-    """An agent whose `SlackChat` is where the bot should find the registry."""
+    """An agent whose `Slack` is where the bot should find the registry."""
     return Agent(
         TestModel(custom_output_text='done'),
-        capabilities=[SlackChat(client=client, ask_user=True, interactions=interactions)],
+        capabilities=[Slack(delivery_client=client, interactions=interactions)],
     )
 
 
-def build(agent: Agent[DepsT, str], **kwargs: object) -> SlackBot[DepsT]:
-    defaults: dict[str, object] = {'bot_token': 'xoxb-t', 'app_token': 'xapp-t', 'allowed_user_ids': ['U0ASKER']}
+def build(agent: Agent[DepsT, str], **kwargs: object) -> SlackApp[DepsT]:
+    defaults: dict[str, object] = {'bot_token': 'xoxb-t', 'app_token': 'xapp-t', 'access': SlackAccess.users('U0ASKER')}
     defaults.update(kwargs)
-    return SlackBot(agent, **defaults)  # pyright: ignore[reportArgumentType]
+    return SlackApp(agent, **defaults)  # pyright: ignore[reportArgumentType]
 
 
 class TestLazyExport:
     def test_the_bolt_app_is_reachable_from_the_package(self) -> None:
         # Named on the package, imported only when asked for, so the rest of the
         # package stays usable without `slack-bolt`.
-        assert slack_package.SlackBot is SlackBot
+        assert slack_package.SlackApp is SlackApp
 
     def test_an_unknown_name_still_raises(self) -> None:
         with pytest.raises(AttributeError, match='has no attribute'):
@@ -133,27 +140,41 @@ class TestLazyExport:
 
 
 class TestConfiguration:
+    def test_accepts_a_caller_configured_bolt_app_for_oauth(
+        self, agent: Agent[None, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
+        configured = FakeBoltApp(token='resolved-by-oauth')
+        slack_app = SlackApp(
+            agent,
+            app=configured,  # pyright: ignore[reportArgumentType] - fake records Bolt listener registration
+            access=SlackAccess.users('U0ASKER'),
+        )
+        assert slack_app.app is configured
+
     def test_reads_tokens_from_the_environment(
         self, agent: Agent[None, str], bolt: Callable[[], FakeBoltApp], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv('SLACK_BOT_TOKEN', 'xoxb-env')
         monkeypatch.setenv('SLACK_APP_TOKEN', 'xapp-env')
         monkeypatch.setenv('SLACK_ALLOWED_USER_IDS', 'U1, U2 ,')
-        slack_agent = SlackBot(agent)
+        slack_agent = SlackApp(agent)
         assert bolt().token == 'xoxb-env'
-        assert slack_agent._allowed_user_ids == frozenset({'U1', 'U2'})  # pyright: ignore[reportPrivateUsage]
+        assert slack_agent.access.allows('U1')
+        assert slack_agent.access.allows('U2')
+        assert not slack_agent.access.allows('U3')
 
     def test_a_missing_bot_token_is_refused(self, agent: Agent[None, str], monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
         with pytest.raises(ValueError, match='SLACK_BOT_TOKEN'):
-            SlackBot(agent, app_token='xapp-t')
+            SlackApp(agent, app_token='xapp-t')
 
     async def test_socket_mode_asks_for_its_token_only_when_started(
         self, agent: Agent[None, str], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # An Events API deployment has no app token and must still construct.
         monkeypatch.delenv('SLACK_APP_TOKEN', raising=False)
-        bot = SlackBot(agent, bot_token='xoxb-t', signing_secret='s')
+        bot = SlackApp(agent, bot_token='xoxb-t', signing_secret='s', access=SlackAccess.users('U0ASKER'))
         with pytest.raises(ValueError, match='SLACK_APP_TOKEN'):
             await bot.start()
 
@@ -162,7 +183,7 @@ class TestConfiguration:
     ) -> None:
         # And a Socket Mode deployment has no signing secret.
         monkeypatch.delenv('SLACK_SIGNING_SECRET', raising=False)
-        bot = SlackBot(agent, bot_token='xoxb-t', app_token='xapp-t')
+        bot = SlackApp(agent, bot_token='xoxb-t', app_token='xapp-t', access=SlackAccess.users('U0ASKER'))
         with pytest.raises(ValueError, match='SLACK_SIGNING_SECRET'):
             bot.http_app()
 
@@ -170,19 +191,73 @@ class TestConfiguration:
         build(agent, signing_secret='shhh')
         assert bolt().signing_secret == 'shhh'
 
-    def test_a_string_allowlist_is_refused(self, agent: Agent[None, str]) -> None:
-        with pytest.raises(ValueError, match='one entry per character'):
-            build(agent, allowed_user_ids='U0ASKER')
+    def test_slack_access_rejects_an_empty_user_list(self) -> None:
+        with pytest.raises(ValueError, match='non-empty Slack user ID'):
+            SlackAccess.users()
 
-    def test_an_empty_allowlist_warns(
+    def test_slack_access_rejects_an_empty_user_id(self) -> None:
+        with pytest.raises(ValueError, match='non-empty Slack user ID'):
+            SlackAccess.users('')
+
+    def test_slack_access_normalizes_surrounding_whitespace(self) -> None:
+        access = SlackAccess.users(' U0ASKER ')
+        assert access.allows('U0ASKER')
+        assert not access.allows(' U0ASKER ')
+
+    def test_workspace_access_is_an_explicit_allow_all_policy(self) -> None:
+        access = SlackAccess.workspace()
+        assert access.allows('U0ANYONE')
+        assert access.allowed_user_ids is None
+
+    def test_selected_user_access_exposes_an_immutable_policy(self) -> None:
+        assert SlackAccess.users('U1', 'U2').allowed_user_ids == frozenset({'U1', 'U2'})
+
+    @pytest.mark.parametrize('access', [SlackAccess.workspace(), SlackAccess.users('U1', 'U2')])
+    def test_environment_mcp_token_requires_exactly_one_allowed_user(
+        self, access: SlackAccess, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv('SLACK_MCP_TOKEN', 'xoxp-one-person')
+        with pytest.raises(ValueError, match='requires exactly one allowed Slack user'):
+            SlackApp(
+                Agent(TestModel(), capabilities=[Slack()]),
+                bot_token='xoxb-t',
+                access=access,
+            )
+
+    def test_environment_mcp_token_accepts_its_single_owner(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('SLACK_MCP_TOKEN', 'xoxp-one-person')
+        SlackApp(
+            Agent(TestModel(), capabilities=[Slack()]),
+            bot_token='xoxb-t',
+            access=SlackAccess.users('U1'),
+        )
+
+    def test_explicit_mcp_token_is_an_opt_in_to_a_shared_identity(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('SLACK_MCP_TOKEN', 'xoxp-ignored')
+        SlackApp(
+            Agent(TestModel(), capabilities=[Slack(mcp_token='xoxp-explicit')]),
+            bot_token='xoxb-t',
+            access=SlackAccess.workspace(),
+        )
+
+    def test_environment_mcp_token_does_not_constrain_an_agent_without_slack(
+        self, agent: Agent[None, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv('SLACK_MCP_TOKEN', 'xoxp-unused')
+        SlackApp(agent, bot_token='xoxb-t', access=SlackAccess.workspace())
+
+    def test_slack_access_rejects_a_non_string_user_id(self) -> None:
+        with pytest.raises(ValueError, match='non-empty Slack user ID'):
+            SlackAccess.users(None)  # pyright: ignore[reportArgumentType]
+
+    def test_missing_access_policy_is_refused(
         self,
         agent: Agent[None, str],
         monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
     ) -> None:
         monkeypatch.delenv('SLACK_ALLOWED_USER_IDS', raising=False)
-        build(agent, allowed_user_ids=None)
-        assert 'anyone who can reach this bot' in caplog.text
+        with pytest.raises(ValueError, match='access is not configured'):
+            SlackApp(agent, bot_token='xoxb-t', app_token='xapp-t')
 
     def test_registers_the_listeners_a_slack_agent_needs(
         self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str]
@@ -209,7 +284,7 @@ class TestHandleMessage:
         assert slack_client.method_calls('chat_postMessage')[0].kwargs['thread_ts'] == '1700000000.000001'
 
     async def test_history_accumulates_across_turns_in_one_thread(
-        self, slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore], slack_client: FakeSlackClient
+        self, slack_agent_with_store: tuple[SlackApp[None], InMemoryConversationStore], slack_client: FakeSlackClient
     ) -> None:
         slack_agent, store = slack_agent_with_store
         await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
@@ -218,7 +293,7 @@ class TestHandleMessage:
         assert len(await store.load('T1:C123:1700000000.000001')) == 4
 
     async def test_a_separate_thread_keeps_its_own_history(
-        self, slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore], slack_client: FakeSlackClient
+        self, slack_agent_with_store: tuple[SlackApp[None], InMemoryConversationStore], slack_client: FakeSlackClient
     ) -> None:
         slack_agent, store = slack_agent_with_store
         await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
@@ -322,7 +397,7 @@ class TestHandleMessage:
 
     async def test_an_undelivered_reply_is_not_written_into_the_history(
         self,
-        slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore],
+        slack_agent_with_store: tuple[SlackApp[None], InMemoryConversationStore],
         slack_client: FakeSlackClient,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -359,11 +434,24 @@ class TestHttpApp:
     def test_defaults_to_the_path_slack_suggests(self, agent: Agent[None, str]) -> None:
         assert build(agent, signing_secret='shhh').http_app().path == '/slack/events'
 
+    async def test_root_mount_preserves_the_full_bolt_event_path(self, agent: Agent[None, str]) -> None:
+        bolt = RealAsyncApp(token='xoxb-test', signing_secret='shhh')
+        slack_app = SlackApp(agent, app=bolt, access=SlackAccess.users('U0ASKER'))
+        combined_app = Starlette(
+            routes=[Mount('/', app=slack_app.http_app())]  # pyright: ignore[reportArgumentType] - Bolt's ASGI types differ
+        )
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=combined_app), base_url='http://test') as client:
+            response = await client.post('/slack/events', content='{}')
+
+        # Invalid Slack authentication reaches Bolt. A mismatched mount returns 404.
+        assert response.status_code == 401
+
 
 class TestRetries:
     async def test_a_redelivered_event_does_not_run_twice(
         self,
-        slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore],
+        slack_agent_with_store: tuple[SlackApp[None], InMemoryConversationStore],
         slack_client: FakeSlackClient,
     ) -> None:
         # Slack retries what it thinks was not delivered. For an agent with write
@@ -380,23 +468,42 @@ class TestRetries:
         await bot.handle_message(message(ts='1700000000.000002'), slack_client, bot_user_id='U0BOT', event_id='Ev2')
         assert len(slack_client.method_calls('chat_postMessage')) == 2
 
-    async def test_remembering_events_stays_bounded(
+    async def test_event_ids_are_retained_for_slacks_retry_window(
         self, agent: Agent[None, str], slack_client: FakeSlackClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # The oldest id is dropped rather than the set growing without limit, so a
-        # long-lived bot does not keep one entry per message it ever saw. Shrunk
-        # here so the test does not run a thousand turns to prove it.
-        monkeypatch.setattr(app_module, '_REMEMBERED_EVENTS', 3)
+        times = iter([100.0, 100.0, 699.0, 701.0])
+        monkeypatch.setattr(app_module, 'monotonic', lambda: next(times))
         bot = build(agent)
-        for index in range(4):
-            await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id=f'Ev{index}')
-        assert len(slack_client.method_calls('chat_postMessage')) == 4
-        # `Ev0` has fallen out of the window, so it is no longer recognised.
-        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev0')
-        assert len(slack_client.method_calls('chat_postMessage')) == 5
-        # `Ev3` is still inside it.
-        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev3')
-        assert len(slack_client.method_calls('chat_postMessage')) == 5
+        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev1')
+        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev1')
+        assert len(slack_client.method_calls('chat_postMessage')) == 1
+        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev2')
+        await bot.handle_message(message(), slack_client, bot_user_id='U0BOT', event_id='Ev1')
+        assert len(slack_client.method_calls('chat_postMessage')) == 3
+
+    async def test_engaged_thread_memory_is_bounded(
+        self,
+        bolt: Callable[[], FakeBoltApp],
+        agent: Agent[None, str],
+        slack_client: FakeSlackClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(app_module, '_REMEMBERED_THREADS', 1)
+        store = InMemoryConversationStore()
+        bot = build(agent, store=store)
+        first = message(ts='1.1')
+        second = message(ts='2.2')
+        await bot.handle_message(first, slack_client, bot_user_id='U0BOT')
+        await store.delete('T1:C123:1.1')
+        await bot.handle_message(second, slack_client, bot_user_id='U0BOT')
+
+        await bolt().events['message'](
+            event=message(ts='1.2', thread_ts='1.1'),
+            client=slack_client,
+            context={'team_id': 'T1'},
+            body={},
+        )
+        assert len(slack_client.method_calls('chat_postMessage')) == 2
 
 
 class TestListeners:
@@ -421,6 +528,33 @@ class TestListeners:
         )
         assert slack_client.calls == []
 
+    async def test_a_thread_reply_runs_without_another_mention_after_the_agent_joined(
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str], slack_client: FakeSlackClient
+    ) -> None:
+        build(agent)
+        await bolt().events['app_mention'](
+            event=message(), client=slack_client, context={'bot_user_id': 'U0BOT', 'team_id': 'T1'}, body={}
+        )
+        await bolt().events['message'](
+            event=message(text='what about today?', ts='1700000000.000002', thread_ts='1700000000.000001'),
+            client=slack_client,
+            context={'bot_user_id': 'U0BOT', 'team_id': 'T1'},
+            body={},
+        )
+        assert len(slack_client.method_calls('chat_postMessage')) == 2
+
+    async def test_a_reply_in_an_unrelated_channel_thread_is_left_alone(
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str], slack_client: FakeSlackClient
+    ) -> None:
+        build(agent)
+        await bolt().events['message'](
+            event=message(text='team discussion', thread_ts='1700000000.000000'),
+            client=slack_client,
+            context={'team_id': 'T1'},
+            body={},
+        )
+        assert slack_client.calls == []
+
     async def test_a_mention_runs(
         self, bolt: Callable[[], FakeBoltApp], agent: Agent[None, str], slack_client: FakeSlackClient
     ) -> None:
@@ -430,10 +564,55 @@ class TestListeners:
         )
         assert slack_client.method_calls('chat_postMessage')
 
+    async def test_missing_mcp_authorization_gets_an_actionable_reply(
+        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv('SLACK_MCP_TOKEN', raising=False)
+        monkeypatch.delenv('SLACK_INSTALL_URL', raising=False)
+        build(Agent(TestModel(), capabilities=[Slack()]))
+        await bolt().events['app_mention'](
+            event=message(), client=slack_client, context={'bot_user_id': 'U0BOT'}, body={}
+        )
+        reply = slack_client.method_calls('chat_postMessage')[0].kwargs['text']
+        assert isinstance(reply, str)
+        assert 'Slack workspace access is not connected' in reply
+
+    async def test_missing_mcp_authorization_links_the_users_oauth_flow(
+        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv('SLACK_MCP_TOKEN', raising=False)
+        build(
+            Agent(TestModel(), capabilities=[Slack()]),
+            install_url='https://agent.example/slack/install',
+        )
+        await bolt().events['app_mention'](
+            event=message(), client=slack_client, context={'bot_user_id': 'U0BOT'}, body={}
+        )
+        reply = slack_client.method_calls('chat_postMessage')[0].kwargs['text']
+        assert isinstance(reply, str)
+        assert 'https://agent.example/slack/install' in reply
+
+    async def test_oauth_app_does_not_fall_back_to_a_process_wide_user_token(
+        self, slack_client: FakeSlackClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv('SLACK_MCP_TOKEN', 'xoxp-someone-else')
+        configured = FakeBoltApp(token='resolved-by-oauth')
+        SlackApp(
+            Agent(TestModel(), capabilities=[Slack()]),
+            app=configured,  # pyright: ignore[reportArgumentType]
+            access=SlackAccess.users('U0ASKER'),
+        )
+        await configured.events['app_mention'](
+            event=message(), client=slack_client, context={'bot_user_id': 'U0BOT'}, body={}
+        )
+        reply = slack_client.method_calls('chat_postMessage')[0].kwargs['text']
+        assert isinstance(reply, str)
+        assert 'Slack workspace access is not connected' in reply
+
     async def test_the_workspace_comes_from_the_listener_context(
         self,
         bolt: Callable[[], FakeBoltApp],
-        slack_agent_with_store: tuple[SlackBot[None], InMemoryConversationStore],
+        slack_agent_with_store: tuple[SlackApp[None], InMemoryConversationStore],
         slack_client: FakeSlackClient,
     ) -> None:
         # Bolt puts the workspace on the context; the event body may not carry it,
@@ -573,28 +752,63 @@ class TestDeps:
         with pytest.raises(ValueError, match='not both'):
             build(agent, deps=Warehouse(dsn='x'), deps_factory=warehouse_for)
 
-    async def test_the_thread_is_bound_around_the_run(
+    async def test_the_typed_slack_context_includes_the_invoking_user_token(
         self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
     ) -> None:
-        seen: list[SlackThread | None] = []
+        seen: list[SlackContext | None] = []
 
         def record(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            seen.append(current_thread())
+            seen.append(current_slack_context())
             return ModelResponse(parts=[TextPart('done')])
 
-        agent: Agent[None, str] = Agent(FunctionModel(record))
+        build(Agent(FunctionModel(record)))
+        await bolt().events['app_mention'](
+            event=message(),
+            client=slack_client,
+            context={'team_id': 'T1', 'enterprise_id': 'E1', 'user_token': 'xoxp-user'},
+            body={},
+        )
+        context = seen[0]
+        assert context is not None
+        assert context.user_token == 'xoxp-user'
+        assert context.enterprise_id == 'E1'
+        assert current_slack_context() is None
 
-        build(agent)
-        await bolt().events['app_mention'](event=message(), client=slack_client, context={}, body={})
-        assert seen == [SlackThread(channel_id='C123', thread_ts='1700000000.000001', user_id='U0ASKER', team_id='T1')]
-        # Unbound once the turn is over, so a later run elsewhere cannot inherit it.
-        assert current_thread() is None
+    async def test_agent_view_context_is_typed_and_keeps_relevance_order(
+        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+    ) -> None:
+        seen: list[SlackContext | None] = []
+
+        def record(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen.append(current_slack_context())
+            return ModelResponse(parts=[TextPart('done')])
+
+        build(Agent(FunctionModel(record)))
+        event = message(
+            channel='D123',
+            channel_type='im',
+            text='summarize this',
+            app_context={
+                'entities': [
+                    {'type': 'slack#/types/channel_id', 'value': 'C456', 'team_id': 'T1'},
+                    {'type': 'slack#/types/thread_ts', 'value': '1700.5', 'team_id': 'T1'},
+                    {'type': 7, 'value': 'ignored'},
+                ]
+            },
+        )
+        await bolt().events['message'](event=event, client=slack_client, context={}, body={})
+        context = seen[0]
+        assert context is not None
+        assert context.active_entities == (
+            SlackContextEntity('slack#/types/channel_id', 'C456', 'T1'),
+            SlackContextEntity('slack#/types/thread_ts', '1700.5', 'T1'),
+        )
 
 
 class TestFindingTheCapability:
-    def test_a_slack_chat_nested_in_a_combined_capability_is_found(self, slack_client: FakeSlackClient) -> None:
+    def test_a_slack_capability_nested_in_a_combined_capability_is_found(self, slack_client: FakeSlackClient) -> None:
         interactions = SlackInteractions()
-        chat = SlackChat(client=slack_client, ask_user=True, interactions=interactions)
+        chat = Slack(delivery_client=slack_client, interactions=interactions)
         agent: Agent[None, str] = Agent(TestModel(custom_output_text='done'), capabilities=[Planning(), chat])
         assert build(agent).resolve_prompt(block_id='nothing', value='Yes', user_id='U0ASKER') is False
         assert chat.resolve_interactions() is interactions
@@ -603,7 +817,7 @@ class TestFindingTheCapability:
         # Configuring the bot is enough; the capability does not need
         # SLACK_BOT_TOKEN set as well.
         monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
-        chat = SlackChat()
+        chat = Slack()
         build(Agent(TestModel(custom_output_text='done'), capabilities=[chat]))
         client = chat.resolve_client()
         assert isinstance(client, AsyncWebClient)
@@ -613,24 +827,23 @@ class TestFindingTheCapability:
         # The bot's token is remembered beside the field, not put in it: a token
         # nobody configured should not turn up in an object the caller still holds.
         monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
-        chat = SlackChat()
+        chat = Slack()
         build(Agent(TestModel(custom_output_text='done'), capabilities=[chat]))
-        assert chat.token is None
+        assert chat.delivery_token is None
 
     def test_a_token_you_configured_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
-        chat = SlackChat(token='xoxb-mine')
+        chat = Slack(delivery_token='xoxb-mine')
         build(Agent(TestModel(custom_output_text='done'), capabilities=[chat]))
         client = chat.resolve_client()
         assert isinstance(client, AsyncWebClient)
         assert client.token == 'xoxb-mine'
+        assert chat.resolve_client() is client
 
-    def test_two_slack_chats_warn_and_route_to_the_first(
-        self, slack_client: FakeSlackClient, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_two_slack_capabilities_are_refused(self, slack_client: FakeSlackClient) -> None:
         agent: Agent[None, str] = Agent(
             TestModel(custom_output_text='done'),
-            capabilities=[SlackChat(client=slack_client), SlackChat(client=slack_client)],
+            capabilities=[Slack(delivery_client=slack_client), Slack(delivery_client=slack_client)],
         )
-        build(agent)
-        assert 'SlackChat capabilities' in caplog.text
+        with pytest.raises(ValueError, match='exactly one Slack capability'):
+            build(agent)

@@ -3990,6 +3990,7 @@ skills = [
 slack = [
     { name = "aiohttp", version = "3.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "aiohttp", version = "3.14.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
     { name = "slack-bolt" },
     { name = "slack-sdk" },
 ]
@@ -4048,6 +4049,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", specifier = ">=2.38.0" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", specifier = ">=2.38.0" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", specifier = ">=2.38.0" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'slack'", specifier = ">=2.38.0" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", specifier = ">=2.18.0" },
     { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", specifier = ">=2.18.0" },
     { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'" },

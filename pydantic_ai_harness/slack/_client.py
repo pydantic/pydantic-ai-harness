@@ -44,6 +44,7 @@ class SlackClient(Protocol):
         text: str | None = None,
         blocks: Sequence[dict[str, Any]] | None = None,
         thread_ts: str | None = None,
+        mrkdwn: bool | None = None,
     ) -> AsyncSlackResponse:
         """Post a message, optionally into a thread."""
         ...  # pragma: no cover
@@ -55,6 +56,7 @@ class SlackClient(Protocol):
         ts: str,
         text: str | None = None,
         blocks: Sequence[dict[str, Any]] | None = None,
+        mrkdwn: bool | None = None,
     ) -> AsyncSlackResponse:
         """Replace the text and blocks of a message already posted."""
         ...  # pragma: no cover
@@ -94,5 +96,5 @@ def default_client(token: str | None = None) -> SlackClient:
     """
     resolved = token or os.environ.get('SLACK_BOT_TOKEN')
     if not resolved:
-        raise ValueError('A Slack bot token is required. Set SLACK_BOT_TOKEN, or pass token= or client= to SlackChat.')
+        raise ValueError('A Slack bot token is required. Set SLACK_BOT_TOKEN, or pass token= or client= to Slack.')
     return AsyncWebClient(token=resolved)

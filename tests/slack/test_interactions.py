@@ -3,7 +3,7 @@ from __future__ import annotations
 import anyio
 import pytest
 
-from pydantic_ai_harness.slack import PROMPT_ACTION_PREFIX, SlackInteractions, SlackPromptError, SlackThread
+from pydantic_ai_harness.slack import SlackInteractions, SlackPromptError, SlackThread
 
 from .conftest import FakeSlackClient, prompt_block_id, prompt_buttons
 
@@ -11,7 +11,7 @@ pytestmark = pytest.mark.anyio
 
 
 async def _answer(interactions: SlackInteractions, client: FakeSlackClient, value: str, user_id: str) -> bool:
-    # The prompt is only registered once the message has been posted.
+    # Wait until the outgoing message records the prompt's generated block id.
     while not client.method_calls('chat_postMessage'):
         await anyio.sleep(0)
     return interactions.resolve(block_id=prompt_block_id(client), value=value, user_id=user_id)
@@ -44,7 +44,7 @@ class TestAsk:
         assert post.kwargs['thread_ts'] == thread.thread_ts
         buttons = prompt_buttons(slack_client)
         assert [button['value'] for button in buttons] == ['A', 'B', 'C']
-        assert all(str(button['action_id']).startswith(PROMPT_ACTION_PREFIX) for button in buttons)
+        assert len({str(button['action_id']) for button in buttons}) == 3
 
     async def test_edits_the_message_to_record_the_answer(
         self, thread: SlackThread, slack_client: FakeSlackClient
@@ -56,7 +56,7 @@ class TestAsk:
 
         update = slack_client.method_calls('chat_update')[0]
         assert update.kwargs['blocks'] == []
-        assert 'chose *No*' in str(update.kwargs['text'])
+        assert 'U0ASKER chose No.' in str(update.kwargs['text'])
 
     async def test_returns_none_and_says_so_when_nobody_answers(
         self, thread: SlackThread, slack_client: FakeSlackClient
@@ -88,6 +88,42 @@ class TestAsk:
             assert await _answer(interactions, slack_client, 'Yes', 'U0ASKER')
 
         assert answers == ['Yes']
+        assert slack_client.recorder.update_attempts == 3
+
+    async def test_a_click_while_the_post_is_returning_is_not_lost(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        gate = anyio.Event()
+        slack_client.recorder.post_gate = gate
+        interactions = SlackInteractions()
+        answers: list[str | None] = []
+
+        async with anyio.create_task_group() as tg:
+
+            async def ask() -> None:
+                answers.append(await interactions.ask(slack_client, thread, 'Ship it?', ['Yes']))
+
+            tg.start_soon(ask)
+            while not slack_client.method_calls('chat_postMessage'):
+                await anyio.sleep(0)
+            assert interactions.resolve(block_id=prompt_block_id(slack_client), value='Yes', user_id='U0ASKER')
+            gate.set()
+
+        assert answers == ['Yes']
+
+    async def test_cancellation_still_removes_live_buttons(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        interactions = SlackInteractions()
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(lambda: interactions.ask(slack_client, thread, 'Ship it?', ['Yes']))
+            while not slack_client.method_calls('chat_postMessage'):
+                await anyio.sleep(0)
+            tg.cancel_scope.cancel()
+
+        update = slack_client.method_calls('chat_update')[0]
+        assert update.kwargs['blocks'] == []
+        assert update.kwargs['mrkdwn'] is False
 
     async def test_each_prompt_gets_its_own_unguessable_id(
         self, thread: SlackThread, slack_client: FakeSlackClient
@@ -158,6 +194,15 @@ class TestAskValidation:
     ) -> None:
         with pytest.raises(ValueError, match='one entry per character'):
             await SlackInteractions().ask(slack_client, thread, 'Pick', ['A'], allowed_user_ids='U0REVIEWER')  # pyright: ignore[reportArgumentType]
+
+    async def test_rejects_an_empty_allowlist(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
+        with pytest.raises(ValueError, match='at least one user id'):
+            await SlackInteractions().ask(slack_client, thread, 'Pick', ['A'], allowed_user_ids=[])
+
+    async def test_requires_an_asker_or_an_explicit_reviewer(self, slack_client: FakeSlackClient) -> None:
+        thread = SlackThread(channel_id='C123', thread_ts='1.1')
+        with pytest.raises(ValueError, match='There is nobody to ask'):
+            await SlackInteractions().ask(slack_client, thread, 'Pick', ['A'])
 
     def test_rejects_a_non_positive_timeout(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         with pytest.raises(ValueError, match='timeout_seconds must be positive'):

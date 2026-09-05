@@ -26,13 +26,11 @@ DENY = 'Deny'
 class SlackApprovals(Generic[SlackDepsT]):
     """Ask in Slack before a tool that requires approval runs.
 
-    [`SlackChat(approvals=True)`][pydantic_ai_harness.slack.SlackChat] sets this
-    up for you. Build one directly to pass as the handler of
+    `Slack` sets this up for you. Build one directly to pass as the handler of
     `HandleDeferredToolCalls`, or to give approvals their own reviewer group.
 
-    Unlike an `ask_user` tool, this is not something the model decides to do. The
-    gate is on the tool, so a model that would rather not ask does not get to
-    skip it -- which is the point of having it.
+    This is not something the model decides to do. The gate is on the tool, so a
+    model cannot skip it.
 
     A prompt nobody answers is denied, and so is a call whose arguments are too
     long for Slack to show in full. An agent with write access to real systems
@@ -52,8 +50,8 @@ class SlackApprovals(Generic[SlackDepsT]):
 
         Args:
             client: Slack client the prompts are posted with.
-            interactions: Prompt registry. `SlackBot` finds this on the agent's
-                `SlackChat` so button clicks reach the run waiting on them; pass
+            interactions: Prompt registry. `SlackApp` finds this on the agent's
+                `Slack` so button clicks reach the run waiting on them; pass
                 the same instance explicitly when you build the app yourself.
             thread: Where to ask, or a callable working it out from the run
                 context. Omit to ask in the thread the run is bound to.
@@ -118,8 +116,8 @@ class SlackApprovals(Generic[SlackDepsT]):
 
 
 def _question(call: ToolCallPart, arguments: str | None) -> str:
-    detail = f'\n```\n{arguments}\n```' if arguments else ''
-    return f'Run `{call.tool_name}`?{detail}'
+    detail = f'\n\nArguments:\n{arguments}' if arguments else ''
+    return f'Run {call.tool_name}?{detail}'
 
 
 def _render(call: ToolCallPart) -> str | None:

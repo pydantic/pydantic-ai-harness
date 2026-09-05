@@ -99,6 +99,21 @@ class TestFileConversationStore:
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700
         assert stat.S_IMODE(saved.stat().st_mode) == 0o600
 
+    async def test_tightens_an_existing_directory(self, tmp_path: Path) -> None:
+        directory = tmp_path / 'history'
+        directory.mkdir(mode=0o777)
+        directory.chmod(0o777)
+        await FileConversationStore(directory).save('k', _history())
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+    async def test_tightens_an_existing_directory_before_reading(self, tmp_path: Path) -> None:
+        directory = tmp_path / 'history'
+        store = FileConversationStore(directory)
+        await store.save('k', _history())
+        directory.chmod(0o777)
+        assert len(await store.load('k')) == 2
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
     async def test_a_failed_write_leaves_no_transcript_behind(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:

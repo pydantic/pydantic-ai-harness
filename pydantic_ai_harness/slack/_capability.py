@@ -1,272 +1,218 @@
-"""The Slack chat capability: tools for talking to Slack, plus how to use them."""
+"""Slack capability backed by Slack's hosted MCP server."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import os
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import TypeAdapter
+from pydantic import BaseModel, ConfigDict
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, DeferredToolRequests, DeferredToolResults, RunContext
+from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
 from pydantic_ai_harness.slack._approvals import SlackApprovals
 from pydantic_ai_harness.slack._client import SlackClient, default_client
+from pydantic_ai_harness.slack._context import (
+    current_delivery_client,
+    current_slack_context,
+    fixed_mcp_fallback_allowed,
+)
 from pydantic_ai_harness.slack._interactions import SlackInteractions
-from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver
-from pydantic_ai_harness.slack._toolset import SlackChatToolset
+from pydantic_ai_harness.slack._mcp import SlackTool, SlackTools, slack_mcp_toolset
+from pydantic_ai_harness.slack._thread import SlackThread
 from pydantic_ai_harness.slack._validate import reject_bare_string
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
 
+
 DEFAULT_INSTRUCTIONS = """\
-You work in Slack, so the people reading you are watching it happen.
-
-Post a plan with `post_plan` before any work that takes more than one step. It
-returns a `plan_id`; pass that back with every step to tick them off in place.
-Say what you found along the way with `post_message` rather than saving it all
-for the end.
-
-Keep your final answer short. Anything long -- a report, a table, a diff --
-belongs in a file you send with `upload_file`, with a couple of lines saying
-what is in it.
+You are participating in Slack. Use the Slack tools when the user asks about
+people, messages, channels, or threads in their workspace. Resolve names
+to Slack user or channel IDs before searching when needed. Follow every cursor
+until no page remains when the user asks for a complete count or exhaustive
+result. Return ordinary answers as the final output; do not use a Slack write
+tool to deliver the reply. Keep the final reply concise and suitable for a
+Slack thread.
 """
-"""Guidance that makes the tools behave like a colleague rather than a log."""
+"""Default guidance for using Slack MCP tools correctly."""
 
-_THREAD_ADAPTER = TypeAdapter(SlackThread)
-"""Validates the mapping form a spec writes a thread in."""
 
-_ASK_USER_GUIDANCE = """
-Decide what you can decide. Use `ask_user` only when the choice is genuinely
-theirs to make, because it stops your turn until someone clicks.
-"""
+class SlackMCPAuthenticationError(UserError):
+    """No user token is available for the Slack MCP session."""
+
+
+class _SlackSpec(BaseModel):
+    """Runtime validation for values loaded from YAML or JSON."""
+
+    model_config = ConfigDict(extra='forbid')
+
+    tools: list[SlackTool] | None = None
+    approval: Literal['writes', 'all', 'none'] = 'writes'
+    approver_ids: list[str] | None = None
+    instructions: str | None = None
 
 
 @dataclass
-class SlackChat(AbstractCapability[AgentDepsT]):
-    """Let an agent report progress, ask, and send files in Slack.
+class Slack(AbstractCapability[AgentDepsT]):
+    """Give an agent user-scoped Slack search, read, and action tools.
 
-    Add it to any agent. It does not touch the agent's `deps`, so an agent you
-    already have keeps the deps it already has:
+    `Slack()` exposes a curated workspace conversation set from Slack's hosted MCP server.
+    Select additional tools with `SlackTools.of(...)`. Slack actions selected by
+    the caller require approval by default.
 
-    ```python {test="skip"}
-    agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[SlackChat()])
-    ```
-
-    Where messages go is settled per run, in this order: the channel the model
-    named, if `channels` lists one it may name; then the thread the run is bound
-    to, which [`SlackBot`][pydantic_ai_harness.slack.SlackBot] binds for an
-    inbound message; then the single channel in `channels`.
-
-    So the same capability covers an agent answering in the thread it was
-    mentioned in, and an agent with no Slack front door at all that reports into
-    `#alerts` when a cron job runs it.
-
-    Ships the tools and the guidance together. Without instructions a model
-    treats `post_message` as optional and says nothing until it finishes, which
-    is the thing a Slack agent exists not to do.
-
-    Authentication comes from the `SLACK_BOT_TOKEN` environment variable by
-    default; pass `token` or `client` to configure it explicitly. The token is
-    only read when a tool first posts, so constructing this needs no credentials.
+    [`SlackApp`][pydantic_ai_harness.slack.SlackApp] supplies the invoking user's
+    OAuth token for each run. For runs hosted elsewhere, pass `mcp_token` or set
+    `SLACK_MCP_TOKEN`. A fresh MCP session is created for every run, so concurrent
+    users never share an authenticated Slack session.
     """
 
-    channels: list[str] = field(default_factory=list[str])
-    """Channels the model may post to, by `#name` or id.
+    tools: SlackTools = field(default_factory=SlackTools.workspace_read)
+    """Exact Slack MCP tools visible to the model."""
 
-    Empty means the agent can only talk in the thread it is running in. With one
-    channel, that is where messages go when the model does not say. With several,
-    the model picks and anything not listed is refused.
+    approval: Literal['writes', 'all', 'none'] = 'writes'
+    """Which selected Slack MCP calls require Pydantic AI tool approval."""
 
-    This bounds what the model can name, not what the token can reach: the bot
-    can still post anywhere it has been added. Real scoping is the app's install.
-    """
-
-    ask_user: bool = False
-    """Register `ask_user`, which posts a multiple-choice question and waits.
-
-    Off by default: it stops the turn until someone clicks, which is wrong for an
-    agent that should never block on a person, and needs something routing button
-    clicks back -- `SlackBot` does, a cron job does not.
-    """
-
-    approvals: bool = False
-    """Ask in Slack before any tool marked `requires_approval` runs.
-
-    Posts each pending call with Approve and Deny buttons and continues the run
-    when someone answers. Unlike `ask_user` this is not the model's choice: the
-    gate is on the tool. Needs button clicks routed back, same as `ask_user`.
-    """
+    mcp_token: str | None = field(default=None, repr=False)
+    """Fixed Slack MCP user token for runs not hosted by `SlackApp`."""
 
     approver_ids: list[str] | None = None
-    """Slack user ids that may answer approval prompts. Defaults to whoever started the run.
-
-    Set it to a reviewer group when the person asking should not approve their
-    own agent's actions.
-    """
-
-    file_root: str | Path | None = None
-    """Directory `upload_file` may send from. Paths outside it are refused.
-
-    Leave it unset and `upload_file` is not registered: there is no directory to
-    judge a model-supplied path against, and sending an arbitrary path off the
-    host is not a sensible default.
-    """
-
-    token: str | None = field(default=None, repr=False)
-    """Slack bot token (`xoxb-`). Defaults to `SLACK_BOT_TOKEN`."""
-
-    client: SlackClient | None = None
-    """Slack client to call through, instead of one built from a token."""
-
-    thread: SlackThread | ThreadResolver[AgentDepsT] | None = None
-    """Fix the thread to post in, or work it out from the run context.
-
-    Omit it and the tools use the thread bound by
-    [`bind_thread`][pydantic_ai_harness.slack.bind_thread]. Set it when the
-    binding cannot reach the run -- under durable execution, where the worker
-    rebuilds the capability in another process.
-    """
-
-    interactions: SlackInteractions | None = None
-    """Prompt registry backing `ask_user` and approvals. One is made if you omit it.
-
-    Pass your own to change the answer timeout, or to share one registry between
-    several capabilities.
-    """
+    """Slack users allowed to approve actions. Defaults to the invoking user."""
 
     instructions: str | None = None
-    """Replaces [`DEFAULT_INSTRUCTIONS`][pydantic_ai_harness.slack.DEFAULT_INSTRUCTIONS] verbatim.
+    """Replace `DEFAULT_INSTRUCTIONS`; use an empty string to add no guidance."""
 
-    Set it to `''` to add none, for an agent whose own instructions already say
-    how to behave in a thread.
-    """
+    delivery_token: str | None = field(default=None, repr=False)
+    """Bot token used only for approval prompts outside `SlackApp`."""
 
-    _bot_token: str | None = field(default=None, init=False, repr=False, compare=False)
-    """Token `SlackBot` was given, used when this capability was configured with none."""
+    delivery_client: SlackClient | None = field(default=None, repr=False)
+    """Slack Web API client used only for approval prompts and deterministic delivery."""
 
+    interactions: SlackInteractions | None = field(default=None, repr=False)
+    """Prompt registry used by Slack approval buttons."""
+
+    _app_delivery_token: str | None = field(default=None, init=False, repr=False, compare=False)
     _resolved_client: SlackClient | None = field(default=None, init=False, repr=False, compare=False)
     _resolved_interactions: SlackInteractions | None = field(default=None, init=False, repr=False, compare=False)
-    _resolved_toolset: SlackChatToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
+    _dynamic_toolset: DynamicToolset[AgentDepsT] = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Catch a name list given as one string, which the annotations cannot."""
-        reject_bare_string(self.channels, 'channels')
+        if self.approval not in ('writes', 'all', 'none'):
+            raise ValueError("approval must be 'writes', 'all', or 'none'")
         reject_bare_string(self.approver_ids, 'approver_ids')
+        self._dynamic_toolset = DynamicToolset(self._toolset_for_run, per_run_step=False, id='slack-mcp')
 
     @classmethod
-    def from_spec(cls, *args: Any, **kwargs: Any) -> SlackChat[Any]:
-        """Build from an agent spec, where everything arrives as plain data.
+    def from_spec(
+        cls,
+        *,
+        tools: list[str] | None = None,
+        approval: Literal['writes', 'all', 'none'] = 'writes',
+        approver_ids: list[str] | None = None,
+        instructions: str | None = None,
+    ) -> Slack[AgentDepsT]:
+        """Build the serializable part of the capability from an agent spec."""
+        spec = _SlackSpec.model_validate(
+            {
+                'tools': tools,
+                'approval': approval,
+                'approver_ids': approver_ids,
+                'instructions': instructions,
+            }
+        )
+        selected = SlackTools.workspace_read() if spec.tools is None else SlackTools.of(*spec.tools)
+        return cls(
+            tools=selected,
+            approval=spec.approval,
+            approver_ids=spec.approver_ids,
+            instructions=spec.instructions,
+        )
 
-        A spec can set `channels`, `ask_user`, `approvals`, `approver_ids`,
-        `file_root`, `instructions`, and `thread` as a mapping of `SlackThread`
-        fields.
+    def get_toolset(self) -> AbstractToolset[AgentDepsT]:
+        """Return a dynamic toolset that creates one MCP session per run."""
+        return self._dynamic_toolset
 
-        `token` is refused: a spec is a file, and the only way to put a token in
-        one is to write the secret down. Authentication comes from the
-        environment or from `SlackBot`. `client` and `interactions` are refused
-        too, being live objects a file cannot describe.
-        """
-        if 'token' in kwargs:
-            raise ValueError(
-                'token cannot be set from an agent spec, because that means writing a credential into a file. '
-                'Set SLACK_BOT_TOKEN in the environment, or pass token= to SlackChat or SlackBot in code.'
+    def _toolset_for_run(self, _ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
+        slack_context = current_slack_context()
+        token = (slack_context.user_token if slack_context is not None else None) or self.mcp_token
+        if token is None and fixed_mcp_fallback_allowed():
+            token = os.environ.get('SLACK_MCP_TOKEN')
+        if token is None and not self.tools.selected:
+            return None
+        if token is None:
+            raise SlackMCPAuthenticationError(
+                'Slack MCP needs the invoking user OAuth token. Configure Bolt OAuth, pass mcp_token, '
+                'or set SLACK_MCP_TOKEN.'
             )
-        for live in ('client', 'interactions'):
-            if live in kwargs:
-                raise ValueError(
-                    f'{live} cannot be set from an agent spec because it is a live object. '
-                    f'Leave it out and set it in code.'
-                )
-        thread: object = kwargs.get('thread')
-        if isinstance(thread, Mapping):
-            # Spec values arrive as whatever the file said, so this is the only
-            # thing that turns the mapping into a `SlackThread`.
-            kwargs['thread'] = _THREAD_ADAPTER.validate_python(thread)
-        return cls(*args, **kwargs)
+        toolset = slack_mcp_toolset(token=token, tools=self.tools, approval=self.approval)
+        return toolset
 
-    def set_default_token(self, token: str) -> None:
-        """Authenticate with `token` unless this capability was given one of its own.
-
-        [`SlackBot`][pydantic_ai_harness.slack.SlackBot] calls this with the token
-        it was configured with, so an agent that is going to be served over Slack
-        does not have to be told the same token twice. An explicit `token` or
-        `client` on this capability still wins, and this has no effect once a
-        client has been built.
-        """
-        self._bot_token = token
+    def set_app_delivery_token(self, token: str) -> None:
+        """Set the bot token `SlackApp` uses for approval UI delivery."""
+        self._app_delivery_token = token
 
     def resolve_client(self) -> SlackClient:
-        """The Slack client these tools call through, built from the token on first use."""
+        """Resolve the Web API client used for approval prompts."""
+        if bound_client := current_delivery_client():
+            return bound_client
         if self._resolved_client is None:
             self._resolved_client = (
-                self.client if self.client is not None else default_client(self.token or self._bot_token)
+                self.delivery_client
+                if self.delivery_client is not None
+                else default_client(self.delivery_token or self._app_delivery_token)
             )
         return self._resolved_client
 
     def resolve_interactions(self) -> SlackInteractions:
-        """The prompt registry backing `ask_user` and approvals, made on first use."""
+        """Resolve the registry backing Slack approval buttons."""
         if self._resolved_interactions is None:
             self._resolved_interactions = self.interactions if self.interactions is not None else SlackInteractions()
         return self._resolved_interactions
 
     def resolve_prompt(self, *, block_id: str, value: str, user_id: str) -> bool:
-        """Route a button click back to the run waiting on it.
-
-        [`SlackBot`][pydantic_ai_harness.slack.SlackBot] finds this capability on
-        the agent and calls it, so nothing has to be wired up by hand. Returns
-        `False` when the click changed nothing: an expired prompt, a repeat click,
-        a person not allowed to answer, or an agent that asks nothing.
-        """
-        if not (self.ask_user or self.approvals):
-            return False
+        """Route a Slack approval-button click to the suspended run."""
         return self.resolve_interactions().resolve(block_id=block_id, value=value, user_id=user_id)
-
-    def get_toolset(self) -> SlackChatToolset[AgentDepsT]:
-        """Build the chat toolset this capability configures."""
-        if self._resolved_toolset is None:
-            self._resolved_toolset = SlackChatToolset[AgentDepsT](
-                # Resolved on first post, not now: adding this capability to an
-                # agent must not require a token to be configured yet.
-                self.resolve_client,
-                channels=self.channels,
-                thread=self.thread,
-                interactions=self.resolve_interactions() if self.ask_user else None,
-                file_root=self.file_root,
-            )
-        return self._resolved_toolset
 
     async def handle_deferred_tool_calls(
         self, ctx: RunContext[AgentDepsT], *, requests: DeferredToolRequests
     ) -> DeferredToolResults | None:
-        """Ask in Slack about tools that require approval, when `approvals` is on."""
-        if not self.approvals:
+        """Render selected tool approvals in the current Slack thread."""
+        slack_context = current_slack_context()
+        if slack_context is None:
             return None
-        # Built per round rather than cached: it holds no state between rounds,
-        # and everything it needs is already resolved once and kept.
+        thread = SlackThread(
+            channel_id=slack_context.channel_id,
+            thread_ts=slack_context.thread_ts,
+            user_id=slack_context.user_id,
+            team_id=slack_context.team_id,
+        )
         approvals = SlackApprovals[AgentDepsT](
             self.resolve_client(),
             self.resolve_interactions(),
-            thread=self.thread,
+            thread=thread,
             allowed_user_ids=self.approver_ids,
         )
         return await approvals(ctx, requests)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:
-        """Tell the model how to use the tools, or nothing when told to add none."""
-        if self.instructions is not None:
-            return self.instructions or None
-        parts = [DEFAULT_INSTRUCTIONS]
-        # The sentence about `ask_user` is dropped when the tool is not there, so
-        # the instructions never describe a tool the model cannot call.
-        if self.ask_user:
-            parts.append(_ASK_USER_GUIDANCE)
-        if len(self.channels) > 1:
-            listed = ', '.join(self.channels)
-            parts.append(
-                f'\nYou can post to these channels by naming one: {listed}. '
-                'Leave the channel unset to post where the conversation is happening.\n'
+        """Describe Slack tool behavior and the current conversation coordinates."""
+        base = self.instructions if self.instructions is not None else DEFAULT_INSTRUCTIONS
+        if not base:
+            return None
+
+        def current_conversation() -> str:
+            context = current_slack_context()
+            if context is None:
+                return ''
+            conversation = (
+                f'The current Slack channel ID is `{context.channel_id}` and the current thread timestamp is '
+                f'`{context.thread_ts}`. The invoking Slack user ID is `{context.user_id}`.'
             )
-        return ''.join(parts)
+            if not context.active_entities:
+                return conversation
+            active = ', '.join(f'`{entity.entity_type}` = `{entity.value}`' for entity in context.active_entities)
+            return f"{conversation} The user's active Slack view, in relevance order, is: {active}."
+
+        return [base, current_conversation]

@@ -1,16 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
 import pytest
 from pydantic import TypeAdapter
 from slack_sdk.web.async_client import AsyncWebClient
 from slack_sdk.web.async_slack_response import AsyncSlackResponse
 from typing_extensions import TypedDict
 
-from pydantic_ai_harness.slack import SlackThread, bind_thread
+from pydantic_ai_harness.slack import SlackThread
 
 
 class _ActionBlock(TypedDict):
@@ -40,7 +41,9 @@ class _Recorder:
     next_ts: str = '1700000000.000100'
     post_response: dict[str, object] | None = None
     post_error: Exception | None = None
+    post_gate: anyio.Event | None = None
     update_error: Exception | None = None
+    update_attempts: int = 0
     status_error: Exception | None = None
 
 
@@ -86,15 +89,19 @@ class FakeSlackClient(AsyncWebClient):
         text: str | None = None,
         blocks: Sequence[object] | None = None,
         thread_ts: str | None = None,
+        mrkdwn: bool | None = None,
         **kwargs: Any,
     ) -> AsyncSlackResponse:
         if self.recorder.post_error is not None:
             raise self.recorder.post_error
-        return self._record(
+        response = self._record(
             'chat_postMessage',
-            {'channel': channel, 'text': text, 'blocks': blocks, 'thread_ts': thread_ts},
+            {'channel': channel, 'text': text, 'blocks': blocks, 'thread_ts': thread_ts, 'mrkdwn': mrkdwn},
             self.recorder.post_response or {'ok': True, 'ts': self.next_ts},
         )
+        if self.recorder.post_gate is not None:
+            await self.recorder.post_gate.wait()
+        return response
 
     async def chat_update(
         self,
@@ -103,13 +110,15 @@ class FakeSlackClient(AsyncWebClient):
         ts: str | None = None,
         text: str | None = None,
         blocks: Sequence[object] | None = None,
+        mrkdwn: bool | None = None,
         **kwargs: Any,
     ) -> AsyncSlackResponse:
+        self.recorder.update_attempts += 1
         if self.recorder.update_error is not None:
             raise self.recorder.update_error
         return self._record(
             'chat_update',
-            {'channel': channel, 'ts': ts, 'text': text, 'blocks': blocks},
+            {'channel': channel, 'ts': ts, 'text': text, 'blocks': blocks, 'mrkdwn': mrkdwn},
             {'ok': True, 'ts': ts},
         )
 
@@ -170,13 +179,6 @@ def thread() -> SlackThread:
         user_id='U0ASKER',
         team_id='T1',
     )
-
-
-@pytest.fixture
-def bound_thread(thread: SlackThread) -> Iterator[SlackThread]:
-    """A thread bound for the test, the way `SlackBot` binds one around a run."""
-    with bind_thread(thread):
-        yield thread
 
 
 def prompt_block_id(client: FakeSlackClient, index: int = 0) -> str:

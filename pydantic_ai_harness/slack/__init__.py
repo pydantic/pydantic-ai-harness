@@ -1,59 +1,45 @@
-"""Primitives for building a Pydantic AI agent that lives in Slack.
-
-Slack is both the front door and one of the tools. `SlackChat` is a capability
-you add to any agent, whatever its deps: it gives the model a way to report,
-ask, and send files, either in the thread it is answering or in channels you
-name. `SlackBot` puts that agent behind Slack, over Socket Mode or the Events
-API. Every piece is usable on its own.
-
-`SlackBot` needs `slack-bolt`, so it is imported lazily: naming it is what
-pulls Bolt in. Everything else needs only `slack-sdk`.
-"""
+"""Give an agent typed Slack MCP tools and serve it in Slack with Bolt."""
 
 from typing import TYPE_CHECKING
 
+from pydantic_ai_harness.slack._access import SlackAccess
 from pydantic_ai_harness.slack._approvals import SlackApprovals
-from pydantic_ai_harness.slack._capability import DEFAULT_INSTRUCTIONS, SlackChat
-from pydantic_ai_harness.slack._client import SlackClient
+from pydantic_ai_harness.slack._capability import Slack
+from pydantic_ai_harness.slack._context import SlackContext, SlackContextEntity, current_slack_context
 from pydantic_ai_harness.slack._interactions import (
-    PROMPT_ACTION_PREFIX,
     SlackInteractions,
     SlackPromptError,
 )
+from pydantic_ai_harness.slack._mcp import SlackTool, SlackTools
 from pydantic_ai_harness.slack._store import (
     ConversationStore,
     FileConversationStore,
     InMemoryConversationStore,
 )
-from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver, bind_thread, current_thread
-from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS, PlanStep, SlackChatToolset, StepStatus
+from pydantic_ai_harness.slack._thread import SlackThread
 
 if TYPE_CHECKING:
-    from pydantic_ai_harness.slack._app import SlackBot
+    from pydantic_ai_harness.slack._app import SlackApp
 
 __all__ = [
-    'DEFAULT_INSTRUCTIONS',
-    'MAX_MESSAGE_CHARS',
-    'PROMPT_ACTION_PREFIX',
     'ConversationStore',
     'FileConversationStore',
     'InMemoryConversationStore',
-    'PlanStep',
-    'SlackBot',
+    'SlackApp',
+    'SlackAccess',
     'SlackApprovals',
-    'SlackChat',
-    'SlackChatToolset',
-    'SlackClient',
+    'Slack',
+    'SlackContext',
+    'SlackContextEntity',
+    'SlackTool',
+    'SlackTools',
     'SlackInteractions',
     'SlackPromptError',
     'SlackThread',
-    'StepStatus',
-    'ThreadResolver',
-    'bind_thread',
-    'current_thread',
+    'current_slack_context',
 ]
 
-_BOLT_EXPORTS = {'SlackBot'}
+_BOLT_EXPORTS = {'SlackApp'}
 
 
 def __getattr__(name: str) -> object:
