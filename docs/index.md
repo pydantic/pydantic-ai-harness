@@ -156,6 +156,7 @@ Connections to systems outside the agent's workspace, and abilities the provider
 |---|---|---|
 | [MCP](/ai/capabilities/mcp/) | Core | Connect any MCP server's tools; local by default, provider-native connectors opt-in |
 | [Image Generation](/ai/capabilities/image-generation/) | Core | Generate and edit images; provider-native where supported, sub-agent fallback elsewhere |
+| [Google Workspace](google-workspace.md) | Harness | Read selected Gmail, Calendar, Drive, Docs, Sheets, Slides, Chat, and People data through Google's remote MCP servers |
 | [StackOne](stackone.md) | Harness | Act on linked SaaS accounts (HRIS, ATS, CRM, …) via [StackOne](https://www.stackone.com) |
 | [LocalStack](localstack.md) | Harness | An emulated AWS environment with AWS CLI tools |
 | [Macroscope](macroscope.md) | Harness | Run a local [Macroscope](https://docs.macroscope.com/cli) code review and hand the findings to the agent |
