@@ -23,12 +23,13 @@ from pydantic_ai_harness.slack._store import (
     InMemoryConversationStore,
 )
 from pydantic_ai_harness.slack._thread import SlackThread, conversation_key
-from pydantic_ai_harness.slack._toolset import PlanStep, SlackChatToolset, StepStatus
+from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS, PlanStep, SlackChatToolset, StepStatus
 
 __all__ = [
     'APPROVE',
     'DENY',
     'DEFAULT_PROMPT_TIMEOUT_SECONDS',
+    'MAX_MESSAGE_CHARS',
     'PROMPT_ACTION_PREFIX',
     'ConversationStore',
     'FileConversationStore',

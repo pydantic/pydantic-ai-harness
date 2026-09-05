@@ -1,12 +1,13 @@
 """Tools that let an agent talk to the Slack thread it is running in.
 
-The `reportUnknownMemberType` suppressions on the Slack calls here and in the
-sibling modules cover one thing only: `slack_sdk` types every Web API method
-with a trailing `**kwargs`, so strict Pyright cannot fully resolve the call.
-They do not hide a renamed or removed method (`reportAttributeAccessIssue`) or
-a changed parameter type (`reportArgumentType`), both of which still fail the
-build. A renamed keyword argument is the one drift that gets through, because
-the SDK's own `**kwargs` accepts it.
+`slack_sdk` leaves generics unparameterised in its signatures -- bare `Dict`,
+`List`, `PathLike`, and an unannotated `**kwargs` -- and one `Unknown` anywhere
+in a signature makes the whole method partially unknown, so strict Pyright
+reports every call. Hence the `reportUnknownMemberType` suppressions here and
+in the sibling modules. They are narrow: a renamed or removed method still
+fails as `reportAttributeAccessIssue` and a changed parameter type as
+`reportArgumentType`. A renamed keyword argument is the one drift that gets
+through, because the SDK's own `**kwargs` accepts anything.
 """
 
 from __future__ import annotations
@@ -32,10 +33,13 @@ _STATUS_ICONS: dict[StepStatus, str] = {
     'failed': ':x:',
 }
 
-_MAX_MESSAGE_CHARS = 3500
-"""Below Slack's 4000-character limit, leaving room for the mrkdwn Slack adds."""
+MAX_MESSAGE_CHARS = 3500
+"""Longest message these tools send. Slack's limit is 4000; the margin covers the
+mrkdwn Slack adds. Longer text is refused rather than truncated, because a reader
+cannot see what was cut."""
 
 _MAX_PLAN_STEPS = 20
+"""Longer checklists stop being scannable, which is the only reason to post one."""
 
 
 class PlanStep(BaseModel):
@@ -66,7 +70,6 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         *,
         interactions: SlackInteractions | None = None,
         file_root: Path | str | None = None,
-        max_message_chars: int = _MAX_MESSAGE_CHARS,
     ) -> None:
         """Configure which tools the agent gets.
 
@@ -76,16 +79,9 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
                 never block waiting for a person.
             file_root: Directory that `upload_file` may read from. Paths outside it
                 are refused. Omit to leave `upload_file` unregistered.
-            max_message_chars: Longest single message `post_message` will send.
-                Longer text is refused with a retry telling the model to split it,
-                rather than being truncated where a reader cannot see the loss.
         """
-        if max_message_chars <= 0:
-            raise ValueError('max_message_chars must be positive')
         self._interactions = interactions
         self._file_root = Path(file_root).expanduser().resolve() if file_root is not None else None
-        self._max_message_chars = max_message_chars
-        self._plans: dict[str, str] = {}
 
         super().__init__()
         self.add_function(self.post_message)
@@ -103,24 +99,24 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         you found, what you are about to do, why you changed approach. Your final
         answer is delivered separately, so do not repeat it here.
         """
-        if len(text) > self._max_message_chars:
-            raise ModelRetry(
-                f'That message is {len(text)} characters and Slack takes at most {self._max_message_chars}. '
-                'Send it as several shorter messages, or put the long form in a file.'
-            )
         if not text.strip():
             raise ModelRetry('Message text cannot be empty.')
+        if len(text) > MAX_MESSAGE_CHARS:
+            raise ModelRetry(
+                f'That message is {len(text)} characters and Slack takes at most {MAX_MESSAGE_CHARS}. '
+                'Send it as several shorter messages, or put the long form in a file.'
+            )
         thread = ctx.deps
         await thread.client.chat_postMessage(channel=thread.channel_id, thread_ts=thread.thread_ts, text=text)  # pyright: ignore[reportUnknownMemberType]
         return 'Posted.'
 
-    async def post_plan(self, ctx: RunContext[SlackThread], steps: list[PlanStep]) -> str:
-        """Show or update the checklist of what you are doing.
+    async def post_plan(self, ctx: RunContext[SlackThread], steps: list[PlanStep], plan_id: str | None = None) -> str:
+        """Show the checklist of what you are doing, or update one you posted.
 
-        Call it once with the whole plan before starting multi-step work, then
-        call it again with the same steps and updated statuses as you go. Each
-        call replaces the previous checklist rather than posting a new one, so
-        send the complete list every time.
+        Call it with the whole plan before starting multi-step work. It returns a
+        `plan_id`; pass that back with the full list and updated statuses to edit
+        the same checklist in place instead of posting another one. Always send
+        every step, not just the ones that changed.
         """
         if not steps:
             raise ModelRetry('A plan needs at least one step.')
@@ -128,17 +124,16 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
             raise ModelRetry(f'Keep the plan to {_MAX_PLAN_STEPS} steps or fewer; group the smaller ones.')
         thread = ctx.deps
         text = '\n'.join(f'{_STATUS_ICONS[step.status]} {step.text}' for step in steps)
-        existing = self._plans.get(thread.key)
-        if existing is None:
-            response = await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
-                channel=thread.channel_id, thread_ts=thread.thread_ts, text=text
-            )
-            timestamp = response.get('ts')
-            if isinstance(timestamp, str):
-                self._plans[thread.key] = timestamp
-            return 'Plan posted.'
-        await thread.client.chat_update(channel=thread.channel_id, ts=existing, text=text)  # pyright: ignore[reportUnknownMemberType]
-        return 'Plan updated.'
+        if plan_id is not None:
+            await thread.client.chat_update(channel=thread.channel_id, ts=plan_id, text=text)  # pyright: ignore[reportUnknownMemberType]
+            return f'Plan updated. Its plan_id is still {plan_id!r}.'
+        response = await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
+            channel=thread.channel_id, thread_ts=thread.thread_ts, text=text
+        )
+        timestamp = response.get('ts')
+        if not isinstance(timestamp, str):
+            return 'Plan posted, but Slack gave no id for it, so post a fresh plan rather than updating this one.'
+        return f'Plan posted. To update it, call post_plan again with plan_id={timestamp!r}.'
 
     async def set_status(self, ctx: RunContext[SlackThread], status: str) -> str:
         """Set the short working-state line shown next to your name.

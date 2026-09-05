@@ -7,6 +7,7 @@ import os
 import re
 from collections.abc import Collection, Mapping
 from typing import Protocol
+from weakref import WeakValueDictionary
 
 import anyio
 from pydantic import TypeAdapter, ValidationError
@@ -15,6 +16,7 @@ from pydantic_ai.agent import AbstractAgent
 from pydantic_ai_harness.slack._interactions import PROMPT_ACTION_PREFIX, SlackInteractions
 from pydantic_ai_harness.slack._store import ConversationStore, InMemoryConversationStore
 from pydantic_ai_harness.slack._thread import SlackThread
+from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS
 
 try:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
@@ -64,9 +66,6 @@ def _prompt_click_fields(body: Mapping[str, object]) -> tuple[str, str, str] | N
     return block_id, value, user_id
 
 
-_MENTION = re.compile(r'<@[A-Z0-9]+>')
-_MAX_REPLY_CHARS = 3500
-
 DEFAULT_ERROR_REPLY = 'Something went wrong handling that message. The details are in the logs.'
 
 
@@ -85,6 +84,9 @@ class SlackAgent:
     needed. For OAuth distribution across workspaces, build your own `AsyncApp`
     in HTTP mode and call [`handle_message`][pydantic_ai_harness.slack.SlackAgent.handle_message]
     from your own listeners instead.
+
+    Attributes:
+        app: The underlying Bolt app. Register extra listeners on it if you need them.
     """
 
     def __init__(
@@ -144,22 +146,22 @@ class SlackAgent:
                 'Pass allowed_user_ids or set SLACK_ALLOWED_USER_IDS to restrict it.'
             )
 
-        self._locks: dict[str, anyio.Lock] = {}
+        # Weak, so a thread's lock is collected once no turn holds it. A busy
+        # workspace would otherwise accumulate one lock per thread forever.
+        self._locks: WeakValueDictionary[str, anyio.Lock] = WeakValueDictionary()
         self.app = AsyncApp(token=bot)
-        """The underlying Bolt app. Register extra listeners on it if you need them."""
-
         self._register_listeners()
 
     def _register_listeners(self) -> None:
         # Bolt ships no type information for its decorators, so registration is
         # done by explicit call and the untyped members are silenced one by one.
         # Everything the listeners hand on is narrowed before it leaves here.
-        self.app.event('app_mention')(self._on_event)  # pyright: ignore[reportUnknownMemberType]
+        self.app.event('app_mention')(self._on_mention)  # pyright: ignore[reportUnknownMemberType]
         self.app.event('message')(self._on_direct_message)  # pyright: ignore[reportUnknownMemberType]
         prompt_clicks = re.compile(f'^{re.escape(PROMPT_ACTION_PREFIX)}')
         self.app.action(prompt_clicks)(self._on_prompt_click)  # pyright: ignore[reportUnknownMemberType]
 
-    async def _on_event(
+    async def _on_mention(
         self, event: Mapping[str, object], client: AsyncWebClient, context: Mapping[str, object]
     ) -> None:
         await self.handle_message(event, client, bot_user_id=_string(context, 'bot_user_id'))
@@ -176,8 +178,11 @@ class SlackAgent:
     async def _on_prompt_click(self, ack: _Ack, body: Mapping[str, object]) -> None:
         await ack()
         fields = _prompt_click_fields(body)
-        if fields is not None:
-            self.resolve_prompt(block_id=fields[0], value=fields[1], user_id=fields[2])
+        if fields is None or not self.resolve_prompt(block_id=fields[0], value=fields[1], user_id=fields[2]):
+            # Slack shows nothing for a click that changes nothing, so the
+            # operator needs a record of prompts that expired or were clicked by
+            # someone who could not answer them.
+            logger.info('Ignoring a Slack prompt click that resolved nothing')
 
     def resolve_prompt(self, *, block_id: str, value: str, user_id: str) -> bool:
         """Route a button click from a prompt back to the run waiting on it.
@@ -217,7 +222,9 @@ class SlackAgent:
             logger.info('Ignoring Slack message from %s, who is not on the allowlist', user_id)
             return
 
-        prompt = _MENTION.sub('', text).strip()
+        # Strip only this bot's own mention. Removing every mention would delete
+        # the names of people the message refers to, which the agent needs.
+        prompt = text.replace(f'<@{bot_user_id}>', '').strip() if bot_user_id else text.strip()
         if not prompt:
             return
 
@@ -254,11 +261,11 @@ class SlackAgent:
             await self._post(thread, result.output)
 
     async def _post(self, thread: SlackThread, text: str) -> None:
-        for start in range(0, len(text), _MAX_REPLY_CHARS):
+        for start in range(0, len(text), MAX_MESSAGE_CHARS):
             await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=thread.channel_id,
                 thread_ts=thread.thread_ts,
-                text=text[start : start + _MAX_REPLY_CHARS],
+                text=text[start : start + MAX_MESSAGE_CHARS],
             )
 
     async def start(self) -> None:

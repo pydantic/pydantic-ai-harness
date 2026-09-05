@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
 
 # `SlackAgent` is the only part of the package that needs Bolt, so the slim
 # install has nothing to test here.
@@ -50,8 +51,10 @@ class FakeBoltApp:
         return register
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def bolt(monkeypatch: pytest.MonkeyPatch) -> Callable[[], FakeBoltApp]:
+    """Replace Bolt's app with a recorder. Autouse, so no test reaches real Slack;
+    request it by name only to inspect what was registered."""
     built: list[FakeBoltApp] = []
 
     def factory(*, token: str) -> FakeBoltApp:
@@ -61,6 +64,12 @@ def bolt(monkeypatch: pytest.MonkeyPatch) -> Callable[[], FakeBoltApp]:
 
     monkeypatch.setattr(app_module, 'AsyncApp', factory)
     return lambda: built[-1]
+
+
+@pytest.fixture
+def slack_agent_with_store(agent: Agent[SlackThread, str]) -> tuple[SlackAgent, InMemoryConversationStore]:
+    store = InMemoryConversationStore()
+    return build(agent, store=store), store
 
 
 @pytest.fixture
@@ -101,7 +110,6 @@ class TestConfiguration:
     def test_a_missing_token_is_refused(
         self,
         agent: Agent[SlackThread, str],
-        bolt: Callable[[], FakeBoltApp],
         monkeypatch: pytest.MonkeyPatch,
         missing: str,
     ) -> None:
@@ -111,16 +119,13 @@ class TestConfiguration:
         with pytest.raises(ValueError, match=missing):
             SlackAgent(agent)
 
-    def test_a_string_allowlist_is_refused(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp]
-    ) -> None:
+    def test_a_string_allowlist_is_refused(self, agent: Agent[SlackThread, str]) -> None:
         with pytest.raises(ValueError, match='not a string'):
             build(agent, allowed_user_ids='U0ASKER')
 
     def test_an_empty_allowlist_warns(
         self,
         agent: Agent[SlackThread, str],
-        bolt: Callable[[], FakeBoltApp],
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
@@ -129,7 +134,7 @@ class TestConfiguration:
         assert 'anyone who can reach this bot' in caplog.text
 
     def test_registers_the_listeners_a_slack_agent_needs(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp]
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str]
     ) -> None:
         build(agent)
         assert set(bolt().events) == {'app_mention', 'message'}
@@ -138,7 +143,7 @@ class TestConfiguration:
 
 class TestHandleMessage:
     async def test_runs_the_agent_and_replies_in_the_thread(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
     ) -> None:
         await build(agent).handle_message(message(), slack_client, bot_user_id='U0BOT')
         call = slack_client.method_calls('chat_postMessage')[0]
@@ -146,20 +151,44 @@ class TestHandleMessage:
         assert call.kwargs['thread_ts'] == '1700000000.000001'
 
     async def test_a_reply_continues_the_thread_it_arrived_in(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
     ) -> None:
         event = message(ts='1700000000.000009', thread_ts='1700000000.000001')
         await build(agent).handle_message(event, slack_client, bot_user_id='U0BOT')
         assert slack_client.method_calls('chat_postMessage')[0].kwargs['thread_ts'] == '1700000000.000001'
 
     async def test_history_accumulates_across_turns_in_one_thread(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+        self, slack_agent_with_store: tuple[SlackAgent, InMemoryConversationStore], slack_client: FakeSlackClient
     ) -> None:
-        store = InMemoryConversationStore()
-        slack_agent = build(agent, store=store)
+        slack_agent, store = slack_agent_with_store
+        await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
+        reply_in_same_thread = message(ts='1700000000.000002', thread_ts='1700000000.000001')
+        await slack_agent.handle_message(reply_in_same_thread, slack_client, bot_user_id='U0BOT')
+        assert len(await store.load('T1:C123:1700000000.000001')) == 4
+
+    async def test_a_separate_thread_keeps_its_own_history(
+        self, slack_agent_with_store: tuple[SlackAgent, InMemoryConversationStore], slack_client: FakeSlackClient
+    ) -> None:
+        slack_agent, store = slack_agent_with_store
         await slack_agent.handle_message(message(), slack_client, bot_user_id='U0BOT')
         await slack_agent.handle_message(message(ts='1700000000.000002'), slack_client, bot_user_id='U0BOT')
         assert len(await store.load('T1:C123:1700000000.000001')) == 2
+        assert len(await store.load('T1:C123:1700000000.000002')) == 2
+
+    async def test_only_the_bots_own_mention_is_stripped(
+        self, agent: Agent[SlackThread, str], slack_client: FakeSlackClient
+    ) -> None:
+        captured: list[str] = []
+        recording = Agent(TestModel(custom_output_text='done'), deps_type=SlackThread)
+
+        @recording.instructions
+        def remember(ctx: RunContext[SlackThread]) -> str:
+            captured.append(ctx.prompt if isinstance(ctx.prompt, str) else '')
+            return ''
+
+        event = message(text='<@U0BOT> ask <@U0ALICE> about the deploy')
+        await build(recording).handle_message(event, slack_client, bot_user_id='U0BOT')
+        assert captured == ['ask <@U0ALICE> about the deploy']
 
     @pytest.mark.parametrize(
         'event',
@@ -189,30 +218,25 @@ class TestHandleMessage:
     async def test_ignores(
         self,
         agent: Agent[SlackThread, str],
-        bolt: Callable[[], FakeBoltApp],
         slack_client: FakeSlackClient,
         event: dict[str, object],
     ) -> None:
         await build(agent).handle_message(event, slack_client, bot_user_id='U0BOT')
         assert slack_client.calls == []
 
-    async def test_an_empty_answer_posts_nothing(
-        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
-    ) -> None:
+    async def test_an_empty_answer_posts_nothing(self, slack_client: FakeSlackClient) -> None:
         quiet = Agent(TestModel(custom_output_text='   '), deps_type=SlackThread)
         await build(quiet).handle_message(message(), slack_client, bot_user_id='U0BOT')
         assert slack_client.calls == []
 
-    async def test_a_long_answer_is_split_rather_than_dropped(
-        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
-    ) -> None:
+    async def test_a_long_answer_is_split_rather_than_dropped(self, slack_client: FakeSlackClient) -> None:
         chatty = Agent(TestModel(custom_output_text='x' * 7001), deps_type=SlackThread)
         await build(chatty).handle_message(message(), slack_client, bot_user_id='U0BOT')
         posts = slack_client.method_calls('chat_postMessage')
         assert [len(str(post.kwargs['text'])) for post in posts] == [3500, 3500, 1]
 
     async def test_a_failing_run_says_so_in_the_thread(
-        self, bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient, caplog: pytest.LogCaptureFixture
+        self, slack_client: FakeSlackClient, caplog: pytest.LogCaptureFixture
     ) -> None:
         broken = Agent(TestModel(custom_output_text='ok'), deps_type=SlackThread)
 
@@ -227,7 +251,7 @@ class TestHandleMessage:
 
 class TestListeners:
     async def test_a_direct_message_runs_without_a_mention(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str], slack_client: FakeSlackClient
     ) -> None:
         build(agent)
         await bolt().events['message'](
@@ -236,7 +260,7 @@ class TestListeners:
         assert slack_client.method_calls('chat_postMessage')
 
     async def test_a_channel_message_without_a_mention_is_left_alone(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str], slack_client: FakeSlackClient
     ) -> None:
         build(agent)
         await bolt().events['message'](
@@ -245,7 +269,7 @@ class TestListeners:
         assert slack_client.calls == []
 
     async def test_a_mention_runs(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp], slack_client: FakeSlackClient
+        self, bolt: Callable[[], FakeBoltApp], agent: Agent[SlackThread, str], slack_client: FakeSlackClient
     ) -> None:
         build(agent)
         await bolt().events['app_mention'](event=message(), client=slack_client, context={'bot_user_id': 'U0BOT'})
@@ -281,9 +305,7 @@ class TestPromptClicks:
         assert acked == [True]
         assert resolved == [('T1:C123:1.1#1', 'Yes', 'U0ASKER')]
 
-    def test_clicks_are_dropped_without_a_prompt_registry(
-        self, agent: Agent[SlackThread, str], bolt: Callable[[], FakeBoltApp]
-    ) -> None:
+    def test_clicks_are_dropped_without_a_prompt_registry(self, agent: Agent[SlackThread, str]) -> None:
         assert build(agent).resolve_prompt(block_id='b', value='Yes', user_id='U0ASKER') is False
 
     @pytest.mark.parametrize(
@@ -330,7 +352,6 @@ class TestStarting:
     async def test_start_connects_socket_mode_with_the_app_token(
         self,
         agent: Agent[SlackThread, str],
-        bolt: Callable[[], FakeBoltApp],
         socket_handler: list[tuple[object, str]],
     ) -> None:
         slack_agent = build(agent)
@@ -340,7 +361,6 @@ class TestStarting:
     def test_run_is_the_blocking_entry_point(
         self,
         agent: Agent[SlackThread, str],
-        bolt: Callable[[], FakeBoltApp],
         socket_handler: list[tuple[object, str]],
     ) -> None:
         build(agent).run()

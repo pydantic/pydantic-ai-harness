@@ -10,7 +10,13 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.slack import PlanStep, SlackChatToolset, SlackInteractions, SlackThread
+from pydantic_ai_harness.slack import (
+    MAX_MESSAGE_CHARS,
+    PlanStep,
+    SlackChatToolset,
+    SlackInteractions,
+    SlackThread,
+)
 
 from .conftest import FakeSlackClient, prompt_block_id
 
@@ -35,10 +41,6 @@ class TestRegistration:
     def test_upload_file_appears_with_a_file_root(self, tmp_path: Path) -> None:
         assert 'upload_file' in tool_names(SlackChatToolset(file_root=tmp_path))
 
-    def test_rejects_a_non_positive_message_limit(self) -> None:
-        with pytest.raises(ValueError, match='max_message_chars must be positive'):
-            SlackChatToolset(max_message_chars=0)
-
 
 class TestPostMessage:
     async def test_posts_into_the_thread(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
@@ -52,9 +54,8 @@ class TestPostMessage:
         }
 
     async def test_asks_the_model_to_split_an_oversized_message(self, thread: SlackThread) -> None:
-        toolset = SlackChatToolset(max_message_chars=10)
         with pytest.raises(ModelRetry, match='Send it as several shorter messages'):
-            await toolset.post_message(context(thread), 'x' * 11)
+            await SlackChatToolset().post_message(context(thread), 'x' * (MAX_MESSAGE_CHARS + 1))
 
     async def test_rejects_an_empty_message(self, thread: SlackThread) -> None:
         with pytest.raises(ModelRetry, match='cannot be empty'):
@@ -73,16 +74,17 @@ class TestPostMessage:
 
 
 class TestPostPlan:
-    async def test_posts_once_then_edits_the_same_message(
+    async def test_the_returned_plan_id_edits_the_same_message(
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
         toolset = SlackChatToolset()
         steps = [PlanStep(text='read the logs'), PlanStep(text='open a PR')]
-        assert await toolset.post_plan(context(thread), steps) == 'Plan posted.'
+        posted = await toolset.post_plan(context(thread), steps)
+        assert slack_client.next_ts in posted
 
         steps[0].status = 'done'
         steps[1].status = 'running'
-        assert await toolset.post_plan(context(thread), steps) == 'Plan updated.'
+        await toolset.post_plan(context(thread), steps, plan_id=slack_client.next_ts)
 
         assert len(slack_client.method_calls('chat_postMessage')) == 1
         update = slack_client.method_calls('chat_update')[0]
@@ -91,6 +93,14 @@ class TestPostPlan:
             ':white_check_mark: read the logs',
             ':hourglass_flowing_sand: open a PR',
         ]
+
+    async def test_a_plan_without_an_id_posts_a_new_message(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        toolset = SlackChatToolset()
+        await toolset.post_plan(context(thread), [PlanStep(text='a')])
+        await toolset.post_plan(context(thread), [PlanStep(text='b')])
+        assert len(slack_client.method_calls('chat_postMessage')) == 2
 
     async def test_renders_every_status(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         steps = [
@@ -104,14 +114,12 @@ class TestPostPlan:
         assert text.count(':white_circle:') == 1
         assert text.count(':x:') == 1
 
-    async def test_reposts_when_slack_gave_no_timestamp(
+    async def test_tells_the_model_to_repost_when_slack_gave_no_id(
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
         slack_client.recorder.post_response = {'ok': True}
-        toolset = SlackChatToolset()
-        await toolset.post_plan(context(thread), [PlanStep(text='a')])
-        await toolset.post_plan(context(thread), [PlanStep(text='a')])
-        assert len(slack_client.method_calls('chat_postMessage')) == 2
+        answer = await SlackChatToolset().post_plan(context(thread), [PlanStep(text='a')])
+        assert 'post a fresh plan' in answer
 
     async def test_rejects_an_empty_plan(self, thread: SlackThread) -> None:
         with pytest.raises(ModelRetry, match='at least one step'):

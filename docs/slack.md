@@ -130,7 +130,7 @@ carries on.
 | Tool | Registered | What it does |
 | --- | --- | --- |
 | `post_message` | always | Says something mid-run without ending the turn |
-| `post_plan` | always | Posts a checklist and edits the same message as steps progress |
+| `post_plan` | always | Posts a checklist, and edits it in place when given the `plan_id` it returned |
 | `set_status` | always | Sets the short working-state line |
 | `ask_user` | with `interactions=` | Asks a multiple-choice question and waits for a click |
 | `upload_file` | with `file_root=` | Sends a file from that directory into the thread |
@@ -139,9 +139,13 @@ carries on.
 block on a person should not be given a tool that blocks on a person, and there
 is no safe directory to judge a model-supplied path against until you name one.
 
+`post_plan` keeps no state of its own: it hands the model a `plan_id` and edits
+that message when the model passes it back. So a second turn in the same thread
+posts a fresh checklist rather than overwriting the one before it.
+
 Paths outside `file_root` are refused, as are directories and paths that do not
-exist. `post_message` refuses text over the limit rather than truncating it,
-because a reader cannot see what was cut.
+exist. `post_message` refuses text over 3500 characters rather than truncating
+it, because a reader cannot see what was cut.
 
 ## Approvals
 
@@ -167,7 +171,9 @@ SlackApprovals(interactions, allowed_user_ids=['U01REVIEWER'])
 
 A prompt nobody answers is denied. An agent with write access to real systems
 should not act because a question timed out. The default wait is ten minutes;
-change it with `SlackInteractions(timeout_seconds=...)`.
+change it with `SlackInteractions(timeout_seconds=...)`. Options are capped at
+75 characters, Slack's own button limit, and are refused rather than shortened
+so two buttons can never read the same.
 
 Prompts for one thread are posted one at a time, so two questions never leave
 competing sets of buttons in the same conversation.
@@ -189,7 +195,7 @@ shared between processes, implement `ConversationStore` against your database.
 and call the same pieces:
 
 ```python {test="skip"}
-from pydantic_ai_harness.slack import SlackThread, conversation_key
+from pydantic_ai_harness.slack import SlackThread
 
 thread = SlackThread(
     client=client,
@@ -225,4 +231,6 @@ for things without being allowed to approve a production deploy.
   than interrupting it, and there is no stop button.
 - Replies longer than 3500 characters are split at that boundary, without regard
   for code fences.
+- Cancelling a run while a prompt is open leaves its buttons in the thread; they
+  no longer resolve to anything.
 - One `SlackAgent` serves one workspace.

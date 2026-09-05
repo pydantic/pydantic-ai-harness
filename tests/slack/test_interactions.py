@@ -89,8 +89,8 @@ class TestAskValidation:
             ([], 'at least one option'),
             (['A'] * 26, 'at most 25 buttons'),
             (['A', 'A'], 'must be unique'),
-            ([''], 'between 1 and 2000'),
-            (['x' * 2001], 'between 1 and 2000'),
+            ([''], 'between 1 and 75'),
+            (['x' * 76], 'between 1 and 75'),
         ],
     )
     async def test_rejects_unusable_options(self, thread: SlackThread, options: list[str], message: str) -> None:

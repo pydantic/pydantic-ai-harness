@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
+from weakref import WeakValueDictionary
 
 import anyio
 
@@ -28,12 +29,16 @@ not sit open overnight holding an agent turn."""
 _MAX_OPTIONS = 25
 """Slack's cap on elements in one `actions` block."""
 
-_MAX_VALUE_CHARS = 2000
-"""Slack's cap on a button `value`."""
+_MAX_OPTION_CHARS = 75
+"""Slack's cap on button text. Longer options are refused rather than shortened,
+so two options can never render as the same button."""
 
 
 class SlackPromptError(RuntimeError):
-    """A prompt could not be posted or was rejected before anyone could answer."""
+    """Slack posted the prompt but did not identify the message.
+
+    Without a message id there is nothing to edit once the prompt settles.
+    """
 
 
 @dataclass(slots=True)
@@ -63,7 +68,9 @@ class SlackInteractions:
             raise ValueError('timeout_seconds must be positive')
         self._timeout_seconds = timeout_seconds
         self._pending: dict[str, _Pending] = {}
-        self._locks: dict[str, anyio.Lock] = {}
+        # Weak, so a thread's lock is collected once no prompt holds it. A busy
+        # workspace would otherwise accumulate one lock per thread forever.
+        self._locks: WeakValueDictionary[str, anyio.Lock] = WeakValueDictionary()
         self._next_token = 0
 
     async def ask(
@@ -76,14 +83,15 @@ class SlackInteractions:
     ) -> str | None:
         """Post `question` with one button per option and wait for a click.
 
-        Returns the chosen option, or `None` when nobody answered in time. The
-        posted message is edited either way, so a thread never keeps live buttons
-        that no longer do anything.
+        Returns the chosen option, or `None` when nobody answered in time. Either
+        way the posted message is edited to record what happened, so the thread
+        does not keep buttons that no longer do anything. Cancelling the run
+        instead skips that edit and leaves the buttons in place.
 
         Raises:
             ValueError: If `options` is empty, exceeds Slack's limits, or contains
                 duplicates that would make the answer ambiguous.
-            SlackPromptError: If Slack rejected the message.
+            SlackPromptError: If Slack did not identify the message it posted.
         """
         choices = tuple(options)
         if not choices:
@@ -93,8 +101,8 @@ class SlackInteractions:
         if len(set(choices)) != len(choices):
             raise ValueError('options must be unique so the answer is unambiguous')
         for choice in choices:
-            if not choice or len(choice) > _MAX_VALUE_CHARS:
-                raise ValueError(f'each option must be between 1 and {_MAX_VALUE_CHARS} characters')
+            if not choice or len(choice) > _MAX_OPTION_CHARS:
+                raise ValueError(f'each option must be between 1 and {_MAX_OPTION_CHARS} characters')
 
         allowed = frozenset(allowed_user_ids) if allowed_user_ids is not None else frozenset({thread.user_id})
         lock = self._locks.setdefault(thread.key, anyio.Lock())
@@ -145,8 +153,7 @@ class SlackInteractions:
         `block_id` and `value` come straight off the Slack action payload. Returns
         `False` when the click changes nothing -- an expired prompt, a value that
         is not one of its options, a second click on a prompt already answered, or
-        a user who is not allowed to answer this one. Tell the person that rather
-        than letting the click disappear.
+        a user who is not allowed to answer this one.
         """
         pending = self._pending.get(block_id)
         if pending is None or pending.answer is not None:
@@ -169,7 +176,7 @@ def _prompt_blocks(token: str, question: str, choices: tuple[str, ...]) -> list[
                 {
                     'type': 'button',
                     'action_id': f'{PROMPT_ACTION_PREFIX}{index}',
-                    'text': {'type': 'plain_text', 'text': choice[:75]},
+                    'text': {'type': 'plain_text', 'text': choice},
                     'value': choice,
                 }
                 for index, choice in enumerate(choices)
