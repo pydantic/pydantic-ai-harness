@@ -250,7 +250,8 @@ Core also ships loop-customization capabilities for production servers: [Select 
 And the agent plugs into any interface: [ACP](acp.md) *(experimental, Harness)* serves it to editors like Zed over the [Agent Client Protocol](https://agentclientprotocol.com), and core ships the [web chat UI](/ai/web/), [CLI](/ai/cli/), [frontend adapters](/ai/ui/overview/) (AG-UI, Vercel AI), and [realtime voice](/ai/realtime/overview/).
 
 Harness also ships [Channels](channels.md) for running text-output agents from verified Slack
-messages while caller-owned HTTP and queue infrastructure handles delivery.
+messages and Discord Gateway events while caller-owned infrastructure handles delivery and event
+claims.
 
 Community packages extend the same capability system further; see [third-party capabilities](/ai/capabilities/third-party/).
 

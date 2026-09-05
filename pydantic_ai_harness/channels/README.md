@@ -1,10 +1,10 @@
 # Channels
 
-Channels let a Pydantic AI agent answer Slack mentions and continue each Slack thread with its own message history.
+Channels let a Pydantic AI agent answer messages in Slack and Discord while keeping conversation history separate.
 
 ## Install
 
-Channels uses the base Harness package. This example uses an OpenAI model and FastAPI:
+The Slack example uses the base Harness package, an OpenAI model, and FastAPI:
 
 ```bash
 uv add pydantic-ai-harness "pydantic-ai-slim[openai]" fastapi uvicorn
@@ -137,5 +137,104 @@ Expose port 8000 through your HTTPS host, invite the bot to a channel, and menti
 - On the first HTTP 429, this adapter instance pauses its replies in the current process, waits for `Retry-After`, and retries the same generated reply once. A second 429 waits again before it propagates; timeouts and 5xx responses are not retried because their delivery outcome can be ambiguous.
 - The caller owns FastAPI, the queue, OAuth, and any injected `httpx.AsyncClient`.
 - While Harness is on 0.x releases, minor releases may change this API. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+
+## Discord
+
+The Discord adapter lets an agent answer direct messages and mentioned messages in allowed servers and threads.
+
+Install the Gateway transport and the OpenAI model provider used below:
+
+```bash
+uv add "pydantic-ai-harness[discord]" "pydantic-ai-slim[openai]"
+```
+
+In Discord's browser-based developer portal, create an application and add a bot. Use the OAuth2
+URL Generator to install the bot with the `bot` scope and the View Channels, Read Message History,
+Send Messages, and Send Messages in Threads permissions. Discord handles this one-time browser
+authorization; the adapter does not implement OAuth. On the application's **Bot** page, use
+**Reset Token** to copy the bot token. In Discord, enable **Developer Mode** under **User Settings >
+Advanced**, then right-click your user and server and choose **Copy ID**.
+
+Set the required credentials and admitted IDs:
+
+```bash
+export OPENAI_API_KEY='your-openai-api-key'
+export DISCORD_BOT_TOKEN='your-discord-bot-token'
+export DISCORD_USER_ID='your-discord-user-id'
+export DISCORD_GUILD_ID='your-discord-server-id'
+```
+
+Save this as `discord_bot.py`:
+
+```python {names="defined"}
+import logging
+import os
+
+import anyio
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.channels import ChannelHost
+from pydantic_ai_harness.channels.discord import DiscordChannel
+
+
+async def main() -> None:
+    channel = DiscordChannel(
+        os.environ['DISCORD_BOT_TOKEN'],
+        allowed_user_ids={os.environ['DISCORD_USER_ID']},
+        allowed_guild_ids={os.environ['DISCORD_GUILD_ID']},
+    )
+    agent = Agent('openai:gpt-5.6-sol', instructions='Answer questions clearly and briefly.')
+    host = ChannelHost(agent, channel)
+    async with channel:
+        async for event in channel.events():
+            try:
+                await host.handle(event)
+            except Exception:
+                logging.exception('Discord event failed')
+
+
+anyio.run(main)
+```
+
+Run it:
+
+```bash
+uv run python discord_bot.py
+```
+
+Users can ask the agent to:
+
+- answer questions in a direct message;
+- respond when mentioned in an allowed server channel or thread;
+- continue a conversation in the same channel or thread;
+- use any tools and capabilities configured on the `Agent`.
+
+Discord may deliver the same event more than once. Atomically claim `event.event_id` in durable
+storage before `host.handle()` when duplicate turns are unacceptable. The default conversation
+store also loses history on restart. The sequential example bounds pending work and continues after
+a failed event; run a bounded worker pool when different conversations need to overlap.
+
+A long reply can post earlier chunks before a later request fails, and a transport timeout can
+leave a chunk's outcome unknown. Do not blindly retry the whole `host.handle()` call. Retrying
+`channel.reply(event, same_text)` promptly uses the same nonce, but Discord only retains nonce
+deduplication for a few minutes. Replies over 20,000 characters fail before the first chunk is sent
+to bound the number of automatic writes.
+
+The adapter admits only `allowed_user_ids`. Server messages also require an
+`allowed_guild_ids` match and a bot mention unless `require_mention=False`. Passing `None`
+explicitly for either allowlist admits every ID in that category. There is no channel allowlist: an
+allowed user can invoke the bot in any bot-visible channel or thread in an allowed guild, so use
+Discord channel permission overrides to limit channel access. A Discord thread ID is globally
+unique and is both the conversation identity and reply destination, so `delivery_id` remains
+unset. With the default `intents`, setting `require_mention=False` requests the privileged Message
+Content intent, which must also be enabled in Discord's developer portal. A custom `intents` value
+must include Message Content to receive unmentioned server text.
+
+Run the adapter on asyncio with one active `events()` iterator per `DiscordChannel`. Identify pacing,
+the reconnect circuit breaker, and REST rate-limit state are process-local, while Discord's 1,000
+Identify calls per 24 hours limit applies across the bot and can reset its token. Run one adapter per
+bot. This adapter is unsharded, so Discord close code 4011 means the bot has outgrown this transport.
+The adapter serializes replies in one process and retries HTTP 429 twice when each requested delay is
+at most 60 seconds. Longer delays and other HTTP failures surface to the caller.
 
 [Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/channels/)

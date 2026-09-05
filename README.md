@@ -251,7 +251,8 @@ Core also ships loop-customization capabilities for production servers: [Select 
 And the agent plugs into any interface: [ACP](pydantic_ai_harness/experimental/acp/) *(experimental, Harness)* serves it to editors like Zed over the [Agent Client Protocol](https://agentclientprotocol.com), and core ships the [web chat UI](https://ai.pydantic.dev/web/), [CLI](https://ai.pydantic.dev/cli/), [frontend adapters](https://ai.pydantic.dev/ui/) (AG-UI, Vercel AI), and [realtime voice](https://ai.pydantic.dev/realtime/).
 
 Harness also ships [Channels](pydantic_ai_harness/channels/) for running text-output agents from
-verified Slack messages while caller-owned HTTP and queue infrastructure handles delivery.
+verified Slack messages and Discord Gateway events while caller-owned infrastructure handles
+delivery and event claims.
 
 Community packages extend the same capability system further; see [third-party capabilities](https://ai.pydantic.dev/capabilities/third-party/).
 
