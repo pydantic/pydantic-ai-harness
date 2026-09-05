@@ -4051,7 +4051,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
     { name = "stackone-defender", marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender'", specifier = ">=0.7.3,<0.8" },
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
-    { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.1,<4" },
+    { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.2,<4" },
 ]
 provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "stackone", "temporal", "youdotcom"]
 
@@ -9460,7 +9460,7 @@ wheels = [
 
 [[package]]
 name = "youdotcom"
-version = "3.1.1"
+version = "3.1.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpcore" },
@@ -9468,9 +9468,9 @@ dependencies = [
     { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/38/83/e495bf7682785e56d5687a409e23757aae1395cca3e54a8e1daa38fe1d25/youdotcom-3.1.1.tar.gz", hash = "sha256:f2008847a881a41c84016baa7ec6f3224969908fb81132398e8c1428418a9602", size = 116688, upload-time = "2026-08-12T18:23:22.62Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2d/99/77c5b7246ca4ffbb0ae0fc98757836b2a6cd114e2454e2bc73cd52c2bef0/youdotcom-3.1.2.tar.gz", hash = "sha256:73b4801203b6fca15f0531c5c34ae1dc680d2d41edf83748f572023c6137916d", size = 141929, upload-time = "2026-08-21T06:46:55.788Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/18/4a35e8ee8e37f18290a49ead01d7a5f23b8023dd328b3879a30a1d323602/youdotcom-3.1.1-py3-none-any.whl", hash = "sha256:d46e8657d4906218817c7850c6bdf2a36cda4efd75abca8c92190149193d9e1f", size = 105118, upload-time = "2026-08-12T18:23:21.462Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/bb/258571903378fc865b87b3749c460dad7a8534bbccf8c4a3873203359536/youdotcom-3.1.2-py3-none-any.whl", hash = "sha256:1ef5c66871e0fe3320d5fa0869ba59420511560648e9fb793f9c7f1e0e7d641c", size = 114867, upload-time = "2026-08-21T06:46:54.5Z" },
 ]
 
 [[package]]
