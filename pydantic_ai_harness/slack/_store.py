@@ -92,14 +92,22 @@ class FileConversationStore:
     async def save(self, key: str, messages: Sequence[ModelMessage]) -> None:
         """Write the history, replacing any previous file for this key."""
         directory = anyio.Path(self._directory)
-        await directory.mkdir(parents=True, exist_ok=True)
+        # These files hold whole conversations, so keep them to the owner rather
+        # than whatever a umask of 022 would leave readable.
+        await directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         path = self._path(key)
         # A name unique to this write. A shared one lets two saves for the same key
         # clobber each other's half-written file and rename the wrong bytes in.
         temporary = anyio.Path(path.with_suffix(f'.{secrets.token_hex(8)}.tmp'))
-        await temporary.write_bytes(ModelMessagesTypeAdapter.dump_json(list(messages)))
-        # `replace`, not `rename`: on Windows renaming onto an existing file raises.
-        await temporary.replace(path)
+        try:
+            await temporary.touch(mode=0o600)
+            await temporary.write_bytes(ModelMessagesTypeAdapter.dump_json(list(messages)))
+            # `replace`, not `rename`: on Windows renaming onto an existing file raises.
+            await temporary.replace(path)
+        finally:
+            # A failed write would otherwise leave the transcript sitting in the
+            # temporary file. After a successful replace there is nothing to remove.
+            await temporary.unlink(missing_ok=True)
 
     async def delete(self, key: str) -> None:
         """Drop the history file if it exists."""

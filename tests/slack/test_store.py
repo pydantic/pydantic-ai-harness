@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path
 
+import anyio
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
@@ -90,6 +92,26 @@ class TestFileConversationStore:
         store = FileConversationStore(tmp_path)
         await store.save('../../etc/passwd', _history())
         assert [path.parent for path in tmp_path.rglob('*.json')] == [tmp_path]
+
+    async def test_history_is_readable_only_by_its_owner(self, tmp_path: Path) -> None:
+        # These files hold whole conversations, so a umask of 022 leaving them
+        # world-readable in a home directory is not good enough.
+        directory = tmp_path / 'history'
+        await FileConversationStore(directory).save('k', _history())
+        saved = next(directory.iterdir())
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert stat.S_IMODE(saved.stat().st_mode) == 0o600
+
+    async def test_a_failed_write_leaves_no_transcript_behind(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def explode(self: anyio.Path, data: bytes) -> int:
+            raise OSError('no space left on device')
+
+        monkeypatch.setattr(anyio.Path, 'write_bytes', explode)
+        with pytest.raises(OSError, match='no space left'):
+            await FileConversationStore(tmp_path).save('k', _history())
+        assert list(tmp_path.iterdir()) == []
 
     async def test_delete_is_forgiving(self, tmp_path: Path) -> None:
         store = FileConversationStore(tmp_path)

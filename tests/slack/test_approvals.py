@@ -120,6 +120,18 @@ class TestSlackApprovals:
         assert 'nobody could review the whole call' in denied.message
         assert slack_client.method_calls('chat_postMessage') == []
 
+    async def test_the_tool_name_and_fences_count_toward_the_limit(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        # The arguments alone fit. What Slack has to render does not.
+        approvals = SlackApprovals(SlackInteractions(timeout_seconds=0.01))
+        call = ToolCallPart(tool_name='x' * 200, args={'body': 'y' * 2800}, tool_call_id='c1')
+        built = await approvals(context(thread), requests_for(call))
+        denied = built.approvals['c1']
+        assert isinstance(denied, ToolDenied)
+        assert 'nobody could review the whole call' in denied.message
+        assert slack_client.method_calls('chat_postMessage') == []
+
     def test_a_reviewer_id_passed_as_a_string_is_rejected(self) -> None:
         with pytest.raises(ValueError, match='not a string'):
             SlackApprovals(SlackInteractions(), allowed_user_ids='U0REVIEWER')

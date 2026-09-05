@@ -136,10 +136,10 @@ block on a person should not be given a tool that blocks on a person, and there
 is no safe directory to judge a model-supplied path against until you name one.
 
 `post_plan` keeps no state of its own: it hands the model a `plan_id` and edits
-that message when the model passes it back. So a second turn in the same thread
-posts a fresh checklist rather than overwriting the one before it. The id is
-signed for the thread it came from, so a model cannot edit some other message it
-saw the timestamp of.
+that message when the model passes it back. The id is signed for the run that
+posted it, so a model cannot edit another message whose timestamp it happened to
+see, and a second turn in the thread posts a fresh checklist rather than
+overwriting the one before it.
 
 Paths outside `file_root` are refused, as are directories and paths that do not
 exist. `post_message` refuses text over 3500 characters rather than truncating
@@ -172,12 +172,12 @@ started the run can answer, unless you name a group:
 SlackApprovals(interactions, allowed_user_ids=['U01REVIEWER'])
 ```
 
-A prompt nobody answers is denied, and so is a call whose arguments are longer
-than the 2900 characters Slack can show in one block. Neither is truncated to
-fit: approving half a call is approving something nobody read. An agent with
-write access to real systems should not act because a question timed out, or
-because the part that mattered scrolled off the end. A tool that genuinely needs
-a large payload should take a file path instead. The default wait is ten minutes;
+A prompt nobody answers is denied, and so is a call that does not fit in the
+2900 characters Slack can show in one block. Neither is truncated: approving half
+a call is approving something nobody read. An agent with write access to real
+systems should not act because a question timed out, or because the part that
+mattered scrolled off the end. A tool that genuinely needs a large payload should
+take a file path instead. The default wait is ten minutes;
 change it with `SlackInteractions(timeout_seconds=...)`. Options are capped at
 75 characters, Slack's own button limit, and are refused rather than shortened
 so two buttons can never read the same.
@@ -191,9 +191,11 @@ History is keyed by workspace, channel, and thread root, so each thread is its
 own conversation and a reply picks up where the last turn left off.
 
 `InMemoryConversationStore` is the default and is lost on restart.
-`FileConversationStore` writes one JSON file per conversation, via a temporary
-file and a rename so a crash does not leave a truncated history. For anything
-shared between processes, implement `ConversationStore` against your database.
+`FileConversationStore` writes one JSON file per conversation, through a
+temporary file it then moves into place, so a crash does not leave a truncated
+history. The directory and its files are created for the owner only, since they
+hold whole conversations. For anything shared between processes, implement
+`ConversationStore` against your database.
 
 ## Building the app yourself
 

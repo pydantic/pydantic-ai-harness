@@ -13,6 +13,7 @@ through, because the SDK's own `**kwargs` accepts anything.
 from __future__ import annotations
 
 import hmac
+import logging
 import secrets
 from hashlib import sha256
 from pathlib import Path
@@ -43,6 +44,8 @@ cannot see what was cut."""
 
 _MAX_PLAN_STEPS = 20
 """Longer checklists stop being scannable, which is the only reason to post one."""
+
+logger = logging.getLogger(__name__)
 
 
 class PlanStep(BaseModel):
@@ -138,7 +141,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
                 'Say each step in a few words.'
             )
         if plan_id is not None:
-            timestamp = self._plan_timestamp(thread, plan_id)
+            timestamp = self._plan_timestamp(ctx, plan_id)
             if timestamp is None:
                 raise ModelRetry(f'{plan_id!r} is not a plan you posted here. Post the plan again with no plan_id.')
             await thread.client.chat_update(channel=thread.channel_id, ts=timestamp, text=text)  # pyright: ignore[reportUnknownMemberType]
@@ -149,17 +152,20 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         timestamp = response.get('ts')
         if not isinstance(timestamp, str):
             return 'Plan posted, but Slack gave no id for it, so post a fresh plan rather than updating this one.'
-        return f'Plan posted. To update it, call post_plan again with plan_id={self._plan_id(thread, timestamp)!r}.'
+        return f'Plan posted. To update it, call post_plan again with plan_id={self._plan_id(ctx, timestamp)!r}.'
 
-    def _plan_id(self, thread: SlackThread, timestamp: str) -> str:
-        signature = hmac.new(self._plan_key, f'{thread.key}\x00{timestamp}'.encode(), sha256).hexdigest()[:16]
-        return f'{timestamp}.{signature}'
+    def _plan_id(self, ctx: RunContext[SlackThread], timestamp: str) -> str:
+        # Signed over the run as well as the thread: a plan id stays in the
+        # transcript, so binding it to the thread alone would let the next turn
+        # edit the checklist this one posted instead of showing its own.
+        issued_for = f'{ctx.deps.key}\x00{ctx.run_id}\x00{timestamp}'
+        return f'{timestamp}.{hmac.new(self._plan_key, issued_for.encode(), sha256).hexdigest()[:16]}'
 
-    def _plan_timestamp(self, thread: SlackThread, plan_id: str) -> str | None:
-        """The message this plan id names, or `None` if it was not issued for this thread."""
+    def _plan_timestamp(self, ctx: RunContext[SlackThread], plan_id: str) -> str | None:
+        """The message this plan id names, or `None` if this run did not post it."""
         # Slack timestamps contain a dot, so split on the last one.
         timestamp, _, _signature = plan_id.rpartition('.')
-        if timestamp and hmac.compare_digest(self._plan_id(thread, timestamp), plan_id):
+        if timestamp and hmac.compare_digest(self._plan_id(ctx, timestamp), plan_id):
             return timestamp
         return None
 
@@ -178,7 +184,10 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         except Exception:
             # The status line only exists in agent and assistant threads. In a
             # plain channel thread Slack rejects the call, and that is not a
-            # reason to fail the turn or make the model retry.
+            # reason to fail the turn or make the model retry. Logged because the
+            # same answer covers a bad token or a rate limit, which are worth
+            # seeing rather than reading as "this conversation has no status".
+            logger.info('Could not set the Slack status in %s', thread.key, exc_info=True)
             return 'Status is not available in this conversation; carry on without it.'
         return 'Status set.'
 

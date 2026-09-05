@@ -25,8 +25,8 @@ from .conftest import FakeSlackClient, prompt_block_id
 pytestmark = pytest.mark.anyio
 
 
-def context(thread: SlackThread) -> RunContext[SlackThread]:
-    return RunContext(deps=thread, model=TestModel(), usage=RunUsage())
+def context(thread: SlackThread, run_id: str = 'run-1') -> RunContext[SlackThread]:
+    return RunContext(deps=thread, model=TestModel(), usage=RunUsage(), run_id=run_id)
 
 
 def tool_names(toolset: SlackChatToolset) -> set[str]:
@@ -152,6 +152,16 @@ class TestPostPlan:
             await SlackChatToolset().post_plan(context(thread), [PlanStep(text='a')], plan_id=plan_id)
         assert slack_client.method_calls('chat_update') == []
 
+    async def test_refuses_a_plan_id_from_an_earlier_turn(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        # The id stays in the transcript, so the next turn can see it. It should
+        # post its own checklist rather than edit the one before it.
+        toolset = SlackChatToolset()
+        posted = await toolset.post_plan(context(thread, run_id='run-1'), [PlanStep(text='a')])
+        with pytest.raises(ModelRetry, match='not a plan you posted here'):
+            await toolset.post_plan(context(thread, run_id='run-2'), [PlanStep(text='a')], plan_id=_plan_id(posted))
+
     async def test_refuses_a_plan_id_issued_for_another_thread(
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
@@ -172,6 +182,17 @@ class TestSetStatus:
     ) -> None:
         slack_client.recorder.status_error = RuntimeError('not_allowed_in_channel')
         assert 'not available' in await SlackChatToolset().set_status(context(thread), 'reading logs')
+
+    async def test_a_broken_status_call_is_logged_rather_than_hidden(
+        self, thread: SlackThread, slack_client: FakeSlackClient, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # The same answer covers a bad token and a rate limit, so the reason has
+        # to be somewhere an operator can find it.
+        caplog.set_level('INFO')
+        slack_client.recorder.status_error = RuntimeError('invalid_auth')
+        await SlackChatToolset().set_status(context(thread), 'reading logs')
+        assert 'Could not set the Slack status' in caplog.text
+        assert 'invalid_auth' in caplog.text
 
 
 class TestAskUser:

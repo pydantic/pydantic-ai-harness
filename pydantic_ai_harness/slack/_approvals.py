@@ -15,11 +15,12 @@ from pydantic_ai_harness.slack._thread import SlackThread
 APPROVE = 'Approve'
 DENY = 'Deny'
 
-_MAX_ARGUMENT_CHARS = 2900
-"""Longest rendered arguments a prompt shows. Slack caps one section block at 3000
-characters, and the arguments are never truncated to fit: approving half a call is
-approving something nobody read. A call whose arguments do not fit is denied
-instead."""
+_MAX_QUESTION_CHARS = 2900
+"""Longest prompt these approvals post. Slack caps one section block at 3000
+characters; the margin covers the settled-message suffix. The whole prompt is
+measured, not just the arguments, because the tool name and the code fence around
+them count too. Nothing is truncated to fit: approving half a call is approving
+something nobody read, so a call that does not fit is denied instead."""
 
 
 class SlackApprovals:
@@ -72,16 +73,16 @@ class SlackApprovals:
         return requests.build_results(approvals=approvals)
 
     async def _decide(self, thread: SlackThread, call: ToolCallPart) -> bool | DeferredToolApprovalResult:
-        arguments = _render(call)
-        if arguments is not None and len(arguments) > _MAX_ARGUMENT_CHARS:
+        question = _question(call, _render(call))
+        if len(question) > _MAX_QUESTION_CHARS:
             return ToolDenied(
-                f'This call was not offered for approval: its arguments are {len(arguments)} characters, '
-                f'and Slack can show at most {_MAX_ARGUMENT_CHARS}, so nobody could review the whole call. '
+                f'This call was not offered for approval: showing it takes {len(question)} characters, '
+                f'and Slack can show at most {_MAX_QUESTION_CHARS}, so nobody could review the whole call. '
                 'Call the tool with smaller arguments, for instance by writing the long part to a file first.'
             )
         answer = await self._interactions.ask(
             thread,
-            _question(call, arguments),
+            question,
             [APPROVE, DENY],
             allowed_user_ids=self._allowed_user_ids,
         )
