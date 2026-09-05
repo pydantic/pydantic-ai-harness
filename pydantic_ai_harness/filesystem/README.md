@@ -44,6 +44,25 @@ print(result.output)
 | `create_directory` | Create a directory and any missing parents. |
 | `file_info` | Metadata for a file or directory (size, type, line count, hash, symlink target). |
 
+## Events
+
+`FileSystem` emits typed capability events after successful operations:
+
+| Event | Operation | Payload |
+|---|---|---|
+| `FileReadEvent` | `read_file` | `path`, `content_hash` |
+| `DirectoryListedEvent` | `list_directory` | `path`, `entry_count` |
+| `FileWrittenEvent` | `write_file`, `edit_file` | `path`, `content_hash` |
+
+Event paths are normalized, authorization-checked, relative to `root_dir`, and
+never absolute host paths. A denied or failed operation emits no event.
+
+Other capabilities can subscribe with `@on_event`, and application code with
+`@agent.on_event`. A host with its own file
+tools can emit the same event types by importing them from
+`pydantic_ai_harness.filesystem`, which lets subscribers such as `RepoContext`
+react without depending on tool names or raw model arguments.
+
 Tool errors the model can correct -- a missing file, a denied path, a stale
 edit, a directory that collides with an existing file, an invalid glob pattern,
 a path name rejected by Windows, a path name the filesystem cannot encode, an
