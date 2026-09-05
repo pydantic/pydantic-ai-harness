@@ -13,6 +13,7 @@ import os
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import HandleDeferredToolCalls
+from pydantic_ai.models import Model
 
 from pydantic_ai_harness.slack import (
     FileConversationStore,
@@ -41,14 +42,19 @@ theirs to make.
 """
 
 
-def build_agent(interactions: SlackInteractions) -> Agent[SlackThread, str]:
+# One registry per process: the toolset asks through it and the app resolves
+# button clicks against it, so both halves must be the same object.
+INTERACTIONS = SlackInteractions()
+
+
+def build_agent(model: Model | str = DEFAULT_MODEL) -> Agent[SlackThread, str]:
     """A Slack-native agent with one tool that needs a person's approval."""
     agent = Agent(
-        DEFAULT_MODEL,
+        model,
         deps_type=SlackThread,
         instructions=INSTRUCTIONS,
-        toolsets=[SlackChatToolset(interactions=interactions, file_root='./workspace')],
-        capabilities=[HandleDeferredToolCalls(handler=SlackApprovals(interactions))],
+        toolsets=[SlackChatToolset(interactions=INTERACTIONS, file_root='./workspace')],
+        capabilities=[HandleDeferredToolCalls(handler=SlackApprovals(INTERACTIONS))],
     )
 
     @agent.tool_plain(requires_approval=True)
@@ -61,10 +67,9 @@ def build_agent(interactions: SlackInteractions) -> Agent[SlackThread, str]:
 
 def main() -> None:
     """Start the bot and serve Slack until interrupted."""
-    interactions = SlackInteractions()
     SlackAgent(
-        build_agent(interactions),
-        interactions=interactions,
+        build_agent(),
+        interactions=INTERACTIONS,
         store=FileConversationStore('~/.slack-agent'),
     ).run()
 

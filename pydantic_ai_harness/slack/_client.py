@@ -1,7 +1,11 @@
 """The Slack Web API surface the Slack primitives call.
 
-Typed as a `Protocol` so the package works against `slack_sdk`'s
-`AsyncWebClient` without importing it, and so tests can substitute a fake.
+Declared as a `Protocol` rather than importing `slack_sdk.web.async_client.AsyncWebClient`
+directly. That client ships `py.typed`, but every method takes `**kwargs` and
+`Dict[Unknown, Unknown]` parameters, so under this repository's strict Pyright
+mode each call site reports `reportUnknownMemberType`. Naming the four methods
+used here keeps the calls fully checked, the same trade `RedisClient` makes in
+`pydantic_ai_harness.spend`. A real `AsyncWebClient` satisfies it unchanged.
 """
 
 from __future__ import annotations
