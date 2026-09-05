@@ -14,12 +14,10 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
-    RetryPromptPart,
     SystemPromptPart,
     TextContent,
     TextPart,
     ToolCallPart,
-    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import ModelRequestContext, ModelRequestParameters
@@ -94,8 +92,8 @@ async def _run_wrap(
 def _fired_text(messages: list[ModelMessage]) -> str | None:
     """The reminder text injected into the tail this turn, or None if nothing fired.
 
-    A fired reminder is the only tail `UserPromptPart` with list content (a `CachePoint`
-    followed by the joined text); an unfired turn leaves the plain string prompt as the tail.
+    A fired reminder is the only tail `UserPromptPart` with list content. An unfired turn
+    leaves the plain string prompt as the tail.
     """
     part = messages[-1].parts[-1]
     if isinstance(part, UserPromptPart) and isinstance(part.content, list):
@@ -132,14 +130,17 @@ def _has_cache_point(messages: list[ModelMessage]) -> bool:
     )
 
 
-def _injected_leads_with_cache_point(messages: list[ModelMessage]) -> bool:
-    """Whether the reminder appended this turn (the tail's last part) leads with a `CachePoint`."""
+def _injected_cache_point_follows_opening_tag(messages: list[ModelMessage]) -> bool:
+    """Whether the tail reminder places a `CachePoint` after its opening tag."""
     part = messages[-1].parts[-1]
-    return (
-        isinstance(part, UserPromptPart)
-        and isinstance(part.content, list)
-        and len(part.content) > 0
-        and isinstance(part.content[0], CachePoint)
+    if not isinstance(part, UserPromptPart) or not isinstance(part.content, list):
+        return False
+    return any(
+        isinstance(item, str)
+        and item.startswith('<')
+        and item.endswith('>\n')
+        and isinstance(part.content[index + 1], CachePoint)
+        for index, item in enumerate(part.content[:-1])
     )
 
 
@@ -373,17 +374,27 @@ class TestDynamicReminders:
 
 
 class TestInjectionMechanics:
-    async def test_tail_leads_with_cache_point(self) -> None:
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)], cache_ttl='1h')
+    async def test_tagged_tail_places_cache_point_after_opening_tag(self) -> None:
+        cap = SystemReminders[None](reminders=[Reminder('r')], cache_ttl='1h')
         seen = await _run_wrap(cap, _fresh_request())
         last = seen[-1]
         assert isinstance(last, ModelRequest)
         reminder = last.parts[-1]
         assert isinstance(reminder, UserPromptPart)
         assert isinstance(reminder.content, list)
-        assert isinstance(reminder.content[0], CachePoint)
-        assert reminder.content[0].ttl == '1h'
-        assert reminder.content[1] == 'r'
+        assert reminder.content[0] == '<system-reminder>\n'
+        assert isinstance(reminder.content[1], CachePoint)
+        assert reminder.content[1].ttl == '1h'
+        assert reminder.content[2] == 'r\n</system-reminder>'
+
+    async def test_raw_tail_preserves_content_without_cache_point(self) -> None:
+        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
+        seen = await _run_wrap(cap, _fresh_request())
+        last = seen[-1]
+        assert isinstance(last, ModelRequest)
+        reminder = last.parts[-1]
+        assert isinstance(reminder, UserPromptPart)
+        assert reminder.content == ['r']
 
     async def test_default_tag_in_injection(self) -> None:
         cap = SystemReminders[None](reminders=[Reminder('stay focused')])
@@ -423,69 +434,67 @@ class TestInjectionMechanics:
         assert cap._request_count == 0
 
 
-# --- CachePoint guard (leading CachePoint is illegal without preceding user content) ---
+# --- CachePoint layout ------------------------------------------------------
 
 
-class TestCachePointGuard:
-    async def test_cache_point_with_user_prompt(self) -> None:
+class TestCachePointLayout:
+    def test_plain_prompt_has_no_injected_cache_point_prefix(self) -> None:
+        assert not _injected_cache_point_follows_opening_tag(_fresh_request())
+
+    async def test_tagged_reminder_has_its_own_cache_point_prefix(self) -> None:
+        cap = SystemReminders[None](reminders=[Reminder('r')])
+        seen = await _run_wrap(cap, _fresh_request())
+        assert _fired_text(seen) == '<system-reminder>\nr\n</system-reminder>'
+        assert _injected_cache_point_follows_opening_tag(seen)
+
+    async def test_tagged_reminder_does_not_need_prior_user_content(self) -> None:
+        cap = SystemReminders[None](reminders=[Reminder('r')])
+        seen = await _run_wrap(cap, [ModelRequest(parts=[])])
+        assert _injected_cache_point_follows_opening_tag(seen)
+
+    async def test_custom_tag_is_the_cache_point_prefix(self) -> None:
+        cap = SystemReminders[None](reminders=[Reminder('r', tag='note')])
+        seen = await _run_wrap(cap, _fresh_request())
+        last = seen[-1]
+        assert isinstance(last, ModelRequest)
+        reminder = last.parts[-1]
+        assert isinstance(reminder, UserPromptPart)
+        assert reminder.content == ['<note>\n', CachePoint(ttl='5m'), 'r\n</note>']
+
+    async def test_raw_reminder_omits_cache_point_even_with_user_content(self) -> None:
         cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
         seen = await _run_wrap(cap, _fresh_request())
         assert _fired_text(seen) == 'r'
-        assert _injected_leads_with_cache_point(seen)
+        assert not _has_cache_point(seen)
+        assert not _injected_cache_point_follows_opening_tag(seen)
 
-    async def test_cache_point_with_tool_return(self) -> None:
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        tail = ModelRequest(parts=[ToolReturnPart('tool', 'out', tool_call_id='c1')])
-        seen = await _run_wrap(cap, [tail])
-        assert _injected_leads_with_cache_point(seen)
-
-    async def test_cache_point_with_retry_prompt(self) -> None:
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        tail = ModelRequest(parts=[RetryPromptPart('try again', tool_name='tool', tool_call_id='c1')])
-        seen = await _run_wrap(cap, [tail])
-        assert _injected_leads_with_cache_point(seen)
-
-    async def test_cache_point_with_binary_user_content(self) -> None:
-        img = BinaryContent(data=b'\x00', media_type='image/png')
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        seen = await _run_wrap(cap, [ModelRequest(parts=[UserPromptPart(content=[img])])])
-        assert _injected_leads_with_cache_point(seen)
-
-    async def test_cache_point_with_mixed_list_content(self) -> None:
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        tail = ModelRequest(parts=[UserPromptPart(content=[CachePoint(), '', 'real'])])
-        seen = await _run_wrap(cap, [tail])
-        assert _injected_leads_with_cache_point(seen)
-
-    async def test_cache_point_with_text_content(self) -> None:
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        seen = await _run_wrap(cap, [ModelRequest(parts=[UserPromptPart(content=[TextContent('goal')])])])
-        assert _injected_leads_with_cache_point(seen)
-
-    async def test_no_cache_point_with_empty_text_content(self) -> None:
-        # An empty TextContent maps to nothing (like an empty str), so no CachePoint may lead.
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        seen = await _run_wrap(cap, [ModelRequest(parts=[UserPromptPart(content=[TextContent('')])])])
+    async def test_dynamic_reminder_omits_cache_point(self) -> None:
+        cap = SystemReminders[None](dynamic_reminders=[lambda ctx: 'r'])
+        seen = await _run_wrap(cap, _fresh_request())
         assert _fired_text(seen) == 'r'
-        assert not _injected_leads_with_cache_point(seen)
+        assert not _has_cache_point(seen)
 
-    async def test_no_cache_point_with_system_prompt_only(self) -> None:
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        seen = await _run_wrap(cap, [ModelRequest(parts=[SystemPromptPart('sys')])])
-        assert _fired_text(seen) == 'r'
-        assert not _injected_leads_with_cache_point(seen)
-
-    async def test_no_cache_point_with_empty_user_prompt(self) -> None:
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        seen = await _run_wrap(cap, [ModelRequest(parts=[UserPromptPart('')])])
-        assert _fired_text(seen) == 'r'
-        assert not _injected_leads_with_cache_point(seen)
-
-    async def test_no_cache_point_with_cachepoint_only_content(self) -> None:
-        cap = SystemReminders[None](reminders=[Reminder('r', tag=None)])
-        seen = await _run_wrap(cap, [ModelRequest(parts=[UserPromptPart(content=[CachePoint()])])])
-        assert _fired_text(seen) == 'r'
-        assert not _injected_leads_with_cache_point(seen)
+    async def test_tagged_reminder_gets_a_cache_point_after_a_raw_reminder(self) -> None:
+        cap = SystemReminders[None](
+            reminders=[Reminder('raw', tag=None), Reminder('tagged', tag='note')],
+            dynamic_reminders=[lambda ctx: 'dynamic'],
+        )
+        seen = await _run_wrap(cap, _fresh_request())
+        assert _fired_text(seen) == 'raw\n\n<note>\ntagged\n</note>\n\ndynamic'
+        assert _injected_cache_point_follows_opening_tag(seen)
+        last = seen[-1]
+        assert isinstance(last, ModelRequest)
+        reminder = last.parts[-1]
+        assert isinstance(reminder, UserPromptPart)
+        assert reminder.content == [
+            'raw',
+            '\n\n',
+            '<note>\n',
+            CachePoint(ttl='5m'),
+            'tagged\n</note>',
+            '\n\n',
+            'dynamic',
+        ]
 
 
 # --- on_fire callback ---
