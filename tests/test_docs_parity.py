@@ -155,6 +155,7 @@ _CAPABILITY_PAGE_META = {
     'spend.md': ('spend', 'Spend'),
     'localstack.md': ('localstack', 'LocalStack'),
     'stackone.md': ('stackone', 'StackOne'),
+    'cloudflare.md': ('cloudflare', 'Cloudflare'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
 }
 
