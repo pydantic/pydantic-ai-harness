@@ -75,6 +75,9 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     """The deepest directory the agent works in. The walk-up and asset scan are
     anchored here."""
 
+    id: str | None = field(default='repo_context', kw_only=True)
+    """Stable capability and toolset ID."""
+
     home_dir: Path | None = None
     """The shallowest directory to stop the walk-up at, inclusive. `None` (the
     default) scans only `workspace_dir` -- no walk-up."""
@@ -138,7 +141,9 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         """The asset-inventory toolset, or `None` when the tool is disabled."""
         if not self.expose_inventory_tool:
             return None
-        return RepoContextToolset[AgentDepsT](self.workspace_dir, self.asset_roots, self.inventory_tool_name)
+        return RepoContextToolset[AgentDepsT](
+            self.workspace_dir, self.asset_roots, self.inventory_tool_name, id=self.id
+        )
 
     async def after_tool_execute(
         self,

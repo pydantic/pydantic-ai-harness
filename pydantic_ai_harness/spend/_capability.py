@@ -95,6 +95,9 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
     because its single-key `add` method has nowhere to receive `SpendEntry.token`.
     """
 
+    id: str | None = field(default='spend', kw_only=True)
+    """Stable capability and toolset ID."""
+
     budgets: Sequence[Budget[AgentDepsT]] = ()
     """Windows to accumulate against, and which of them can refuse a request."""
 

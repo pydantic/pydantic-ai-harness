@@ -54,6 +54,9 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
     default; pass `client` to configure it explicitly.
     """
 
+    id: str | None = field(default='exa_search', kw_only=True)
+    """Stable capability and toolset ID."""
+
     num_results: int = 5
     """Number of results `web_search` returns per query (1 to 100, the Exa API range)."""
 
@@ -142,6 +145,7 @@ class ExaSearch(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> ExaSearchToolset[AgentDepsT]:
         """Build the toolset providing `web_search`, `get_page`, and the optional `deep_search` tool."""
         return ExaSearchToolset[AgentDepsT](
+            id=self.id,
             client=self.client,
             num_results=self.num_results,
             max_text_chars=self.max_text_chars,
