@@ -108,6 +108,9 @@ prompt-injection-defender = [
 prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
+logfire-mcp = [
+    "pydantic-ai-slim[mcp]>=2.38.0",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'
@@ -193,6 +196,7 @@ extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251', 'PLC0415']
 # `mcp` and `fastmcp` ship only with the `stackone` extra, so slim CI cannot import
 # them at module scope; these tests defer the import on purpose.
 'tests/stackone/**/*.py' = ['PLC0415']
+'tests/logfire_mcp/**/*.py' = ['PLC0415']
 
 [tool.ruff.lint.flake8-quotes]
 inline-quotes = 'single'
