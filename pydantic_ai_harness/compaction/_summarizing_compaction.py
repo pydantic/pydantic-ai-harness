@@ -589,7 +589,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         by = summarizer or 'the summarizer model'
         record_receipt(
             ReceiptInfo(
-                strategy='SummarizingCompaction',
+                strategy='summarizing',
                 dropped_messages=len(to_summarize),
                 dropped_tokens=dropped_tokens,
                 by=by,
@@ -628,7 +628,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             return request_context
         compacted = await compact_with_span(
             request_ctx,
-            strategy='SummarizingCompaction',
+            strategy='summarizing',
             messages=messages,
             compact=lambda: self.compact(messages, request_ctx),
             tokenizer=self.tokenizer,

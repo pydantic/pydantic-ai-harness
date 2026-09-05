@@ -93,6 +93,13 @@ def _ctx(model: Any = None) -> Any:
         model: Model = dataclasses.field(default_factory=TestModel)
         deps: None = None
         tracer: Tracer = dataclasses.field(default_factory=NoOpTracer)
+        emitted: list[Any] = dataclasses.field(default_factory=list[Any])
+
+        async def emit(self, event: Any) -> Any:
+            # Like the real `RunContext.emit` with no listeners: the event is recorded and
+            # returned unmutated, so an immediate-dispatch emitter can read its own decision.
+            self.emitted.append(event)
+            return event
 
     return _FakeCtx(model=model) if model is not None else _FakeCtx()
 
@@ -1163,7 +1170,7 @@ class TestCompactNowSpan:
         assert len(spans) == 1
         attrs = spans[0]['attributes']
         assert attrs['gen_ai.conversation.compacted'] is True
-        assert attrs['compaction.strategy'] == 'SlidingWindowCompaction'
+        assert attrs['compaction.strategy'] == 'sliding_window'
         assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
 
     async def test_the_span_is_measured_with_the_tokenizer_it_was_given(self, capfire: CaptureLogfire):
@@ -1198,7 +1205,7 @@ class TestCompactNowSpan:
 
         await compact_now(tiered, _history(6), model=TestModel(), focus='auth', tracer=get_tracer('test'))
 
-        assert self._spans(capfire)[0]['attributes']['compaction.strategy'] == 'TieredCompaction'
+        assert self._spans(capfire)[0]['attributes']['compaction.strategy'] == 'tiered'
 
     async def test_a_default_tracer_records_nothing(self, capfire: CaptureLogfire):
         strategy: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_tokens=1, keep_messages=2)

@@ -131,6 +131,11 @@ def _make_ctx(
             default_factory=dict[str, AbstractCapability[None]]
         )
 
+        async def emit(self, event: Any) -> Any:
+            # Like the real `RunContext.emit` with no listeners: immediate dispatch
+            # returns the (unmutated) event for the emitter to inspect.
+            return event
+
     return _FakeCtx(usage=usage, usage_limits=usage_limits)
 
 
@@ -2666,7 +2671,7 @@ class TestCompactionSpan:
         assert len(spans) == 1
         attrs = spans[0]['attributes']
         assert attrs['gen_ai.conversation.compacted'] is True
-        assert attrs['compaction.strategy'] == 'SlidingWindowCompaction'
+        assert attrs['compaction.strategy'] == 'sliding_window'
         assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
         assert attrs['compaction.tokens_before'] > attrs['compaction.tokens_after']
 
@@ -2699,7 +2704,7 @@ class TestCompactionSpan:
 
         spans = _compact_spans(capfire)
         assert len(spans) == 1
-        assert spans[0]['attributes']['compaction.strategy'] == 'SummarizingCompaction'
+        assert spans[0]['attributes']['compaction.strategy'] == 'summarizing'
 
     @pytest.mark.anyio
     async def test_clamp_emits_span_only_when_a_part_is_clamped(self, capfire: CaptureLogfire) -> None:
@@ -2713,7 +2718,7 @@ class TestCompactionSpan:
         await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(oversized))
         spans = _compact_spans(capfire)
         assert len(spans) == 1
-        assert spans[0]['attributes']['compaction.strategy'] == 'ClampOversizedMessages'
+        assert spans[0]['attributes']['compaction.strategy'] == 'clamp_oversized_messages'
 
     @pytest.mark.anyio
     async def test_clamp_emits_span_for_oversized_tool_call_args(self, capfire: CaptureLogfire) -> None:
@@ -2725,7 +2730,7 @@ class TestCompactionSpan:
 
         spans = _compact_spans(capfire)
         assert len(spans) == 1
-        assert spans[0]['attributes']['compaction.strategy'] == 'ClampOversizedMessages'
+        assert spans[0]['attributes']['compaction.strategy'] == 'clamp_oversized_messages'
 
     @pytest.mark.anyio
     async def test_clamp_no_span_for_non_oversized_or_skipped_parts(self, capfire: CaptureLogfire) -> None:
@@ -2763,7 +2768,7 @@ class TestCompactionSpan:
         spans = _compact_spans(capfire)
         # The orchestrator drives each tier's `compact` directly, so only one span is emitted.
         assert len(spans) == 1
-        assert spans[0]['attributes']['compaction.strategy'] == 'TieredCompaction'
+        assert spans[0]['attributes']['compaction.strategy'] == 'tiered'
 
     @pytest.mark.anyio
     async def test_no_span_when_compaction_is_noop(self, capfire: CaptureLogfire) -> None:
@@ -2793,7 +2798,7 @@ class TestCompactionSpan:
 
         spans = _compact_spans(capfire)
         assert len(spans) == 1
-        assert spans[0]['attributes']['compaction.strategy'] == 'DeduplicateFileReads'
+        assert spans[0]['attributes']['compaction.strategy'] == 'deduplicate_file_reads'
 
     @pytest.mark.anyio
     async def test_clear_tool_results_emits_span(self, capfire: CaptureLogfire) -> None:
@@ -2810,7 +2815,7 @@ class TestCompactionSpan:
 
         spans = _compact_spans(capfire)
         assert len(spans) == 1
-        assert spans[0]['attributes']['compaction.strategy'] == 'ClearToolResults'
+        assert spans[0]['attributes']['compaction.strategy'] == 'clear_tool_results'
 
 
 # ---------------------------------------------------------------------------
@@ -2894,6 +2899,8 @@ class TestCompactWithSpan:
     @pytest.mark.anyio
     async def test_non_recording_tracer_skips_attributes(self):
         # A no-op tracer returns a non-recording span, so attribute computation is skipped.
+        # Events are disabled here because an emitted `CompactionStartEvent` legitimately
+        # invokes the tokenizer for its `tokens_before`.
         before: list[ModelMessage] = [_user('a'), _user('b')]
         after: list[ModelMessage] = [_user('a')]
         called = False
@@ -2907,7 +2914,7 @@ class TestCompactWithSpan:
             return after
 
         result = await compact_with_span(
-            _make_ctx(), strategy='Strat', messages=before, compact=_compact, tokenizer=_tokenizer
+            _make_ctx(), strategy='Strat', messages=before, compact=_compact, tokenizer=_tokenizer, emits=False
         )
         assert result is after
         assert called is False
@@ -3309,7 +3316,7 @@ class TestReceiptSpanEvent:
         receipt_events = [e for e in events if e['name'] == 'compaction.receipt']
         assert len(receipt_events) == 1
         attrs = receipt_events[0]['attributes']
-        assert attrs['compaction.receipt.strategy'] == 'SlidingWindowCompaction'
+        assert attrs['compaction.receipt.strategy'] == 'sliding_window'
         assert attrs['compaction.receipt.by'] == 'the harness'
         assert 'compaction.receipt.handle' not in attrs
 

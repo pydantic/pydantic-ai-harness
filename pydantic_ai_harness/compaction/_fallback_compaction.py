@@ -11,7 +11,7 @@ from pydantic_ai.exceptions import FallbackExceptionGroup, ModelAPIError
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.tools import RunContext
 
-from pydantic_ai_harness.compaction._shared import CompactionStrategy, SupportsFocus
+from pydantic_ai_harness.compaction._shared import CompactionStrategy, SupportsFocus, compact_with_events, strategy_id
 
 
 @dataclass
@@ -55,7 +55,13 @@ class FallbackCompaction(Generic[AgentDepsT]):
         last_error: Exception | None = None
         for strategy in self.fallback_chain:
             try:
-                return await strategy.compact(list(messages), ctx)
+                attempt_messages = list(messages)
+                return await compact_with_events(
+                    ctx,
+                    strategy=strategy_id(strategy),
+                    messages=attempt_messages,
+                    compact=lambda: strategy.compact(attempt_messages, ctx),
+                )
             except self.fallback_on as error:
                 last_error = error
         assert last_error is not None

@@ -151,7 +151,7 @@ class DeduplicateFileReads(AbstractCapability[AgentDepsT]):
                 return request_context
         compacted = await compact_with_span(
             request_ctx,
-            strategy='DeduplicateFileReads',
+            strategy='deduplicate_file_reads',
             messages=messages,
             compact=lambda: self.compact(messages, request_ctx),
             tokenizer=self.tokenizer,

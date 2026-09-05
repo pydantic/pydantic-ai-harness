@@ -461,7 +461,7 @@ to keep span cardinality low. Attributes:
 | Attribute | Type | Meaning |
 |---|---|---|
 | `gen_ai.conversation.compacted` | bool | Always `true`; the OpenTelemetry GenAI convention's flag for a compacted context |
-| `compaction.strategy` | str | Strategy class name (e.g. `SlidingWindowCompaction`, `SummarizingCompaction`) |
+| `compaction.strategy` | str | Stable strategy identifier (e.g. `sliding_window`, `summarizing`) |
 | `compaction.messages_before` | int | Message count before compaction |
 | `compaction.messages_after` | int | Message count after compaction |
 | `compaction.tokens_before` | int | Estimated token count before compaction |
@@ -472,10 +472,46 @@ harness-specific. Token counts use the strategy's `tokenizer` when set, otherwis
 ~4-chars-per-token heuristic.
 Raw message content is not recorded.
 
+## Events
+
+Every strategy attempt emits `CompactionStartEvent` (from the compaction event family Pydantic AI core defines and its provider-native compaction capabilities share) after its trigger fires and before it rewrites
+history. The event reports the strategy, message count, and estimated tokens. It uses immediate
+dispatch, so capability and application listeners can call `cancel()` before the strategy
+continues. Cancellation applies to this attempt only; a later trigger tries again. A cancelled
+fallback candidate is a deliberate skip and does not advance the fallback chain.
+
+`CompactionEndEvent` follows only when the strategy actually changes history. It reports the
+before/after message and token counts. The event is a live coordination signal; compaction receipts
+remain an in-history note for the model.
+
+```python
+from dataclasses import dataclass
+from typing import Any
+
+from pydantic_ai.capabilities import AbstractCapability, on_event
+from pydantic_ai.tools import RunContext
+from pydantic_ai.capabilities import CompactionStartEvent
+
+
+@dataclass
+class HoldCompaction(AbstractCapability[Any]):
+    activity_in_progress: bool = False
+
+    @on_event(CompactionStartEvent)
+    async def hold(self, ctx: RunContext[Any], event: CompactionStartEvent) -> None:
+        if self.activity_in_progress:
+            event.cancel('activity state has not been saved')
+```
+
+Application code can register the same listener with `@agent.on_event(CompactionStartEvent)`, without a
+capability of its own. Because the decision is dispatched immediately, listeners must finish synchronously
+with the attempt rather than deferring an answer to background work.
+
 ## Compaction receipts
 
-Compaction is a memory wipe the model cannot veto and often cannot detect, which invites
-*resumption drift* -- the model confabulates continuity with history it no longer has. A
+Compaction is a memory wipe the model cannot veto and often cannot detect. Capabilities and
+application hooks can now veto an individual attempt with `CompactionStartEvent`; the model still
+cannot. Without a receipt, completed compaction invites *resumption drift* -- the model confabulates continuity with history it no longer has. A
 receipt makes the wipe legible: after a boundary-crossing strategy rewrites history it can
 append a short, deterministic note recording how much was compacted, warning that what
 survives is secondhand, and -- when a handle provider is attached -- an identifier for persisted

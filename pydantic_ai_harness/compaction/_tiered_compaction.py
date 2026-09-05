@@ -16,12 +16,14 @@ from pydantic_ai_harness.compaction._pinning import reinject_pinned
 from pydantic_ai_harness.compaction._shared import (
     CompactionStrategy,
     SupportsFocus,
+    compact_with_events,
     compact_with_span,
     context_for_request,
     estimate_context_tokens,
     estimate_token_count,
     record_compaction_reclaim,
     resolve_token_trigger,
+    strategy_id,
     validate_token_trigger,
 )
 
@@ -159,7 +161,13 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
         for tier in self.tiers:
             if estimate <= target:
                 break
-            messages = await tier.compact(messages, ctx)
+            tier_messages = messages
+            messages = await compact_with_events(
+                ctx,
+                strategy=strategy_id(tier),
+                messages=tier_messages,
+                compact=lambda: tier.compact(tier_messages, ctx),
+            )
             # Before the next stop decision, so escalation measures the history it would return.
             messages = reinject_pinned(original, messages)
             reclaimed = heuristic_baseline - estimate_token_count(messages, self.tokenizer)
@@ -202,7 +210,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
             return request_context
         compacted = await compact_with_span(
             request_ctx,
-            strategy='TieredCompaction',
+            strategy='tiered',
             messages=messages,
             compact=lambda: self._escalate(messages, request_ctx, target, request_context.model_request_parameters),
             tokenizer=self.tokenizer,
