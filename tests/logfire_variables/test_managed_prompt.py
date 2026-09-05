@@ -28,7 +28,7 @@ from logfire.testing import CaptureLogfire
 from logfire.variables import LabeledValue, Rollout, VariableConfig, VariablesConfig
 from logfire.variables.abstract import NoOpVariableProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from pydantic_ai import Agent, RunContext
+from pydantic_ai import Agent, AgentSpec, RunContext
 from pydantic_ai.capabilities import Instrumentation
 from pydantic_ai.messages import ModelMessage, ModelRequest
 from pydantic_ai.models.test import TestModel
@@ -168,6 +168,61 @@ def test_prompt_prefix_in_slug_warns_and_is_stripped() -> None:
 def test_invalid_slug_raises() -> None:
     with pytest.raises(ValueError, match='invalid variable name'):
         ManagedPrompt('has spaces', default=DEFAULT)
+
+
+def test_spec_schema_publishes_from_spec_fields() -> None:
+    # Regression for #552: without the `from_spec` override, the unresolvable
+    # `Logfire` annotation on `__init__` collapsed the schema entry to a bare name.
+    schema = AgentSpec.model_json_schema_with_capabilities([ManagedPrompt])
+    params = schema['$defs']['spec_params_ManagedPrompt']
+    assert set(params['properties']) == {
+        'name',
+        'default',
+        'label',
+        'targeting_key',
+        'attributes',
+        'render_template',
+        'id',
+        'description',
+        'defer_loading',
+    }
+    assert sorted(params['required']) == ['default', 'name']
+
+
+def test_from_spec_builds_capability() -> None:
+    capability = ManagedPrompt[None].from_spec(
+        'spec_built_prompt',
+        'Fallback prompt.',
+        label='production',
+        targeting_key='user-1',
+        attributes={'plan': 'pro'},
+        render_template=True,
+        id='support-prompt',
+        description='Backs the support agent instructions.',
+    )
+    assert capability.name == 'spec_built_prompt'
+    assert capability.default == 'Fallback prompt.'
+    assert capability.label == 'production'
+    assert capability.targeting_key == 'user-1'
+    assert capability.attributes == {'plan': 'pro'}
+    assert capability.render_template is True
+    assert capability.id == 'support-prompt'
+    assert capability.description == 'Backs the support agent instructions.'
+    assert capability.logfire_instance is None
+
+
+async def test_agent_loads_from_spec() -> None:
+    agent = Agent.from_spec(
+        {
+            'model': 'test',
+            'capabilities': [{'ManagedPrompt': {'name': 'spec_loaded_prompt', 'default': 'From the spec.'}}],
+        },
+        custom_capability_types=[ManagedPrompt],
+    )
+
+    result = await agent.run('hello')
+
+    assert instructions_seen(result.all_messages()) == ['From the spec.']
 
 
 async def test_resolves_default_into_instructions() -> None:

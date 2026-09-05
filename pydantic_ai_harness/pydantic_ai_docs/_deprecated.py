@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+# `@dataclass` rebuilds `__init__` in this module, so the inherited `local_docs_path: Path`
+# annotation must resolve against these globals when the agent-spec schema is built (#552).
+from pathlib import Path  # noqa: F401  # pyright: ignore[reportUnusedImport]
+
 from pydantic_ai.tools import AgentDepsT
 
 from pydantic_ai_harness.pydantic_ai_docs._capability import PydanticAIDocs

@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 import pytest
 from inline_snapshot import snapshot
-from pydantic_ai import AdvisorTool, Agent
+from pydantic_ai import AdvisorTool, Agent, AgentSpec
 from pydantic_ai.capabilities import AbstractCapability, PrefixTools
 from pydantic_ai.exceptions import UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
@@ -437,6 +437,15 @@ class TestAdvisor:
             Advisor('anthropic:', mode='native')
         with pytest.raises(ValueError, match='not supported by OpenRouter'):
             Advisor('openrouter:anthropic/claude-opus-4.8', mode='native', max_uses=1)
+
+    def test_spec_schema_publishes_init_fields(self) -> None:
+        # Regression for #552: core's `ModelSelection` alias resolves against this
+        # capability's module globals, so `Model` and `KnownModelName` must be
+        # importable there at runtime for the schema to publish any fields.
+        schema = AgentSpec.model_json_schema_with_capabilities([Advisor])
+        params = schema['$defs']['spec_params_Advisor']
+        assert set(params['properties']) == {'model', 'mode', 'max_uses', 'max_tokens', 'caching', 'forward_history'}
+        assert params['required'] == ['model']
 
     async def test_loads_string_model_from_agent_spec(self) -> None:
         agent = Agent.from_spec(

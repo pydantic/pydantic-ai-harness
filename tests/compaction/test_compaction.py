@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer, get_tracer
-from pydantic_ai import Agent, Tool
+from pydantic_ai import Agent, AgentSpec, Tool
 from pydantic_ai.capabilities import AbstractCapability, ToolSearch
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import (
@@ -718,6 +718,35 @@ class TestWarnNearLimits:
 
 
 class TestCompaction:
+    def test_spec_schema_publishes_init_fields(self):
+        # Regression for #552: `Model` must stay importable at runtime in the
+        # capability's module so the spec schema can resolve `__init__` annotations.
+        schema = AgentSpec.model_json_schema_with_capabilities([SummarizingCompaction])
+        params = schema['$defs']['spec_params_SummarizingCompaction']
+        assert set(params['properties']) == {
+            'bridge_prefix',
+            'context_window',
+            'defer_loading',
+            'description',
+            'fallback_context_window',
+            'id',
+            'incremental',
+            'instructions',
+            'keep_messages',
+            'keep_tokens',
+            'keep_user_messages',
+            'keep_user_messages_max_chars',
+            'max_fraction',
+            'max_messages',
+            'max_tokens',
+            'model',
+            'model_settings',
+            'preserve_first_user_message',
+            'receipts',
+            'summary_prompt',
+            'tokenizer',
+        }
+
     def test_validation_no_trigger(self):
         with pytest.raises(ValueError, match='At least one of max_messages, max_tokens, or max_fraction must be set'):
             SummarizingCompaction(model='test', max_messages=None, max_tokens=None)
