@@ -6,7 +6,7 @@ import logging
 import os
 import re
 from collections import OrderedDict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from typing import Generic, Protocol, TypeVar
 from weakref import WeakValueDictionary
 
@@ -21,7 +21,7 @@ from pydantic_ai_harness.slack._interactions import PROMPT_ACTION_PREFIX
 from pydantic_ai_harness.slack._store import ConversationStore, InMemoryConversationStore
 from pydantic_ai_harness.slack._thread import SlackThread, bind_thread
 from pydantic_ai_harness.slack._toolset import MAX_MESSAGE_CHARS
-from pydantic_ai_harness.slack._validate import string_sequence
+from pydantic_ai_harness.slack._validate import reject_bare_string
 
 try:
     from slack_bolt.adapter.asgi.async_handler import AsyncSlackRequestHandler
@@ -125,7 +125,7 @@ class SlackBot(Generic[BotDepsT]):
         bot_token: str | None = None,
         app_token: str | None = None,
         signing_secret: str | None = None,
-        allowed_user_ids: Collection[str] | None = None,
+        allowed_user_ids: list[str] | None = None,
         error_reply: str = DEFAULT_ERROR_REPLY,
     ) -> None:
         """Configure the app without connecting.
@@ -178,10 +178,11 @@ class SlackBot(Generic[BotDepsT]):
         self._app_token = app_token or os.environ.get('SLACK_APP_TOKEN')
         self._signing_secret = signing_secret or os.environ.get('SLACK_SIGNING_SECRET')
 
+        reject_bare_string(allowed_user_ids, 'allowed_user_ids')
         if allowed_user_ids is None:
             configured = os.environ.get('SLACK_ALLOWED_USER_IDS', '')
             allowed_user_ids = [entry.strip() for entry in configured.split(',') if entry.strip()]
-        self._allowed_user_ids = frozenset(string_sequence(allowed_user_ids, 'allowed_user_ids'))
+        self._allowed_user_ids = frozenset(allowed_user_ids)
         if not self._allowed_user_ids:
             logger.warning(
                 'No allowed user ids configured, so anyone who can reach this bot can run the agent. '

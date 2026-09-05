@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Collection
 from typing import Generic
 
 from pydantic_ai import ToolDenied
@@ -18,7 +17,7 @@ from pydantic_ai.tools import (
 from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._interactions import MAX_QUESTION_CHARS, SlackInteractions
 from pydantic_ai_harness.slack._thread import SlackDepsT, SlackThread, ThreadResolver, resolve_thread
-from pydantic_ai_harness.slack._validate import string_sequence
+from pydantic_ai_harness.slack._validate import reject_bare_string
 
 APPROVE = 'Approve'
 DENY = 'Deny'
@@ -47,7 +46,7 @@ class SlackApprovals(Generic[SlackDepsT]):
         interactions: SlackInteractions,
         *,
         thread: SlackThread | ThreadResolver[SlackDepsT] | None = None,
-        allowed_user_ids: Collection[str] | None = None,
+        allowed_user_ids: list[str] | None = None,
     ) -> None:
         """Ask through `interactions`, which must be the one the app resolves clicks against.
 
@@ -69,9 +68,10 @@ class SlackApprovals(Generic[SlackDepsT]):
         self._client = client
         self._interactions = interactions
         self._thread = thread
-        self._allowed_user_ids = (
-            frozenset(string_sequence(allowed_user_ids, 'allowed_user_ids')) if allowed_user_ids is not None else None
-        )
+        reject_bare_string(allowed_user_ids, 'allowed_user_ids')
+        # Copied, not kept: these decide who may approve, so a list the caller
+        # edits later should not quietly change who this handler accepts.
+        self._allowed_user_ids = list(allowed_user_ids) if allowed_user_ids is not None else None
 
     async def __call__(self, ctx: RunContext[SlackDepsT], requests: DeferredToolRequests) -> DeferredToolResults | None:
         """Ask about every pending approval and build the results.

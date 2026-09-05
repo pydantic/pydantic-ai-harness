@@ -287,7 +287,7 @@ class TestChannels:
         # A string is a Sequence[str], so this type checks and would otherwise
         # become seven channels called '#', 'a', 'l', and so on.
         with pytest.raises(ValueError, match=r"channels=\['#alerts'\]"):
-            SlackChatToolset(slack_client, channels='#alerts')
+            SlackChatToolset(slack_client, channels='#alerts')  # pyright: ignore[reportArgumentType]
 
     async def test_the_model_picks_when_several_are_listed(self, slack_client: FakeSlackClient) -> None:
         toolset = SlackChatToolset(slack_client, channels=['#alerts', '#eng'])

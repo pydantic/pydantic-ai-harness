@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 import secrets
-from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from weakref import WeakValueDictionary
 
@@ -16,7 +15,7 @@ import anyio
 
 from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._thread import SlackThread
-from pydantic_ai_harness.slack._validate import string_sequence
+from pydantic_ai_harness.slack._validate import reject_bare_string
 
 PROMPT_ACTION_PREFIX = 'pydantic_ai_harness_slack_prompt:'
 """Prefix on the `action_id` of every button these prompts post.
@@ -89,9 +88,9 @@ class SlackInteractions:
         client: SlackClient,
         thread: SlackThread,
         question: str,
-        options: Sequence[str],
+        options: list[str],
         *,
-        allowed_user_ids: Collection[str] | None = None,
+        allowed_user_ids: list[str] | None = None,
     ) -> str | None:
         """Post `question` with one button per option and wait for a click.
 
@@ -101,13 +100,14 @@ class SlackInteractions:
         instead skips that edit and leaves the buttons in place.
 
         Raises:
-            ValueError: If `question` is too long for Slack to show, `options` is
-                empty, exceeds Slack's limits, contains duplicates that would make
-                the answer ambiguous, `allowed_user_ids` is a string rather than a
-                collection of ids, or nobody is allowed to answer because the
-                thread names no user.
+            ValueError: If `options` or `allowed_user_ids` is a single string
+                rather than a list of them, `question` is too long for Slack to
+                show, `options` is empty, exceeds Slack's limits or contains
+                duplicates that would make the answer ambiguous, or nobody is
+                allowed to answer because the thread names no user.
             SlackPromptError: If Slack did not identify the message it posted.
         """
+        reject_bare_string(options, 'options')
         if len(question) > MAX_QUESTION_CHARS:
             raise ValueError(
                 f'that question is {len(question)} characters and Slack shows at most {MAX_QUESTION_CHARS}; '
@@ -124,8 +124,9 @@ class SlackInteractions:
             if not choice or len(choice) > _MAX_OPTION_CHARS:
                 raise ValueError(f'each option must be between 1 and {_MAX_OPTION_CHARS} characters')
 
+        reject_bare_string(allowed_user_ids, 'allowed_user_ids')
         if allowed_user_ids is not None:
-            allowed = frozenset(string_sequence(allowed_user_ids, 'allowed_user_ids'))
+            allowed = frozenset(allowed_user_ids)
         elif thread.user_id is not None:
             allowed = frozenset({thread.user_id})
         else:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hmac
 import logging
 import secrets
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from hashlib import sha256
 from pathlib import Path
 from typing import Literal
@@ -18,7 +18,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._interactions import SlackInteractions
 from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver, resolve_thread
-from pydantic_ai_harness.slack._validate import string_sequence
+from pydantic_ai_harness.slack._validate import reject_bare_string
 
 StepStatus = Literal['pending', 'running', 'done', 'failed']
 """State of one plan step, rendered as an icon in the posted checklist."""
@@ -69,7 +69,7 @@ class SlackChatToolset(FunctionToolset[AgentDepsT]):
         self,
         client: SlackClient | Callable[[], SlackClient],
         *,
-        channels: Sequence[str] = (),
+        channels: list[str] | None = None,
         thread: SlackThread | ThreadResolver[AgentDepsT] | None = None,
         interactions: SlackInteractions | None = None,
         file_root: Path | str | None = None,
@@ -98,7 +98,8 @@ class SlackChatToolset(FunctionToolset[AgentDepsT]):
         """
         self._client_source = client
         self._client: SlackClient | None = None
-        self._channels = string_sequence(channels, 'channels')
+        reject_bare_string(channels, 'channels')
+        self._channels = tuple(channels or ())
         self._thread = thread
         self._interactions = interactions
         self._file_root = Path(file_root).expanduser().resolve() if file_root is not None else None

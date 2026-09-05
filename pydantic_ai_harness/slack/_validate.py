@@ -1,21 +1,23 @@
-"""Checks shared by the places a caller hands this package a list of names."""
+"""The check the annotations cannot do."""
 
 from __future__ import annotations
 
-from collections.abc import Collection
 
+def reject_bare_string(value: object, name: str) -> None:
+    """Refuse a single string where a list of them belongs.
 
-def string_sequence(value: Collection[str], name: str) -> tuple[str, ...]:
-    """`value` as a tuple, refusing a bare string.
+    A string is a `Sequence[str]` and a `Collection[str]`, so those annotations
+    accept one and then iterate it per character. The public annotations here are
+    `list[str]`, which a type checker refuses. This covers the callers a type
+    checker does not see: an agent spec, whose values reach `from_spec` as
+    whatever the file said, and untyped Python.
 
-    A string is a `Collection[str]`, so passing one where a list belongs type
-    checks and then iterates per character. That reaches Slack as seven channels
-    called `#`, `a`, `l` and so on, or an approver list of single letters that no
-    real user id matches.
+    It matters most for `channels`, which is written into the model's
+    instructions. Left alone, `'#alerts'` reaches the model as seven channels
+    called `#`, `a`, `l` and so on, and nothing tells the person who set it.
     """
     if isinstance(value, str):
         raise ValueError(
             f'{name} was given a single string, which would be one entry per character. '
-            f'Pass a sequence: {name}=[{value!r}].'
+            f'Pass a list: {name}=[{value!r}].'
         )
-    return tuple(value)

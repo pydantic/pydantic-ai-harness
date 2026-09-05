@@ -50,13 +50,13 @@ class TestNameLists:
         # A string is a Sequence[str], so this type checks. Left alone it reaches
         # the model as seven channels called '#', 'a', 'l', and so on.
         with pytest.raises(ValueError, match=r"channels=\['#alerts'\]"):
-            SlackChat(channels='#alerts')
+            SlackChat(channels='#alerts')  # pyright: ignore[reportArgumentType]
 
     def test_a_single_approver_as_a_string_is_refused(self) -> None:
         # Caught here rather than at the first approval prompt, which is minutes
         # into a run and only on the path that needed someone to say yes.
         with pytest.raises(ValueError, match=r"approver_ids=\['U0REVIEWER'\]"):
-            SlackChat(approver_ids='U0REVIEWER')
+            SlackChat(approver_ids='U0REVIEWER')  # pyright: ignore[reportArgumentType]
 
     def test_the_token_stays_out_of_the_repr(self) -> None:
         # Capabilities turn up in logs and exception messages.
@@ -195,7 +195,7 @@ class TestAgentSpec:
     def test_an_agent_defined_in_yaml_gets_the_slack_tools(self) -> None:
         agent = Agent.from_spec(yaml.safe_load(SPEC), custom_capability_types=[SlackChat])
         capability = spec_capability(agent)
-        assert capability.channels == ('#alerts', '#eng')
+        assert capability.channels == ['#alerts', '#eng']
         assert (capability.approvals, capability.token) == (True, 'xoxb-from-the-spec')
 
     async def test_a_spec_defined_agent_posts_where_the_spec_said(self, slack_client: FakeSlackClient) -> None:
@@ -209,6 +209,15 @@ class TestAgentSpec:
         spec_capability(agent).client = slack_client
         await agent.run('go', deps=None)
         assert slack_client.method_calls('chat_postMessage')[0].kwargs['channel'] == '#alerts'
+
+    def test_a_channel_list_written_as_one_string_is_refused(self) -> None:
+        # Spec values reach `from_spec` as whatever the file said -- nothing type
+        # checks a YAML file and nothing validates these against the annotation --
+        # so the runtime guard is what covers this path.
+        spec = yaml.safe_load(SPEC)
+        spec['capabilities'][0]['SlackChat']['channels'] = '#alerts'
+        with pytest.raises(ValueError, match='one entry per character'):
+            Agent.from_spec(spec, custom_capability_types=[SlackChat])
 
     def test_a_thread_can_be_written_out_in_the_spec(self) -> None:
         # Pydantic leaves it a mapping, because the field also accepts a resolver

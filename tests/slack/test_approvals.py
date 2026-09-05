@@ -150,7 +150,7 @@ class TestSlackApprovals:
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
         with pytest.raises(ValueError, match='one entry per character'):
-            SlackApprovals[None](slack_client, SlackInteractions(), thread=thread, allowed_user_ids='U0REVIEWER')
+            SlackApprovals[None](slack_client, SlackInteractions(), thread=thread, allowed_user_ids='U0REVIEWER')  # pyright: ignore[reportArgumentType]
 
     async def test_each_pending_call_gets_its_own_prompt(
         self, thread: SlackThread, slack_client: FakeSlackClient

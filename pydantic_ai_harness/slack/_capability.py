@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -16,7 +16,7 @@ from pydantic_ai_harness.slack._client import SlackClient, default_client
 from pydantic_ai_harness.slack._interactions import SlackInteractions
 from pydantic_ai_harness.slack._thread import SlackThread, ThreadResolver
 from pydantic_ai_harness.slack._toolset import SlackChatToolset
-from pydantic_ai_harness.slack._validate import string_sequence
+from pydantic_ai_harness.slack._validate import reject_bare_string
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
@@ -73,7 +73,7 @@ class SlackChat(AbstractCapability[AgentDepsT]):
     only read when a tool first posts, so constructing this needs no credentials.
     """
 
-    channels: Sequence[str] = ()
+    channels: list[str] = field(default_factory=list[str])
     """Channels the model may post to, by `#name` or id.
 
     Empty means the agent can only talk in the thread it is running in. With one
@@ -100,8 +100,8 @@ class SlackChat(AbstractCapability[AgentDepsT]):
     gate is on the tool. Needs button clicks routed back, same as `ask_user`.
     """
 
-    approver_ids: Collection[str] | None = None
-    """Who may answer approval prompts. Defaults to whoever started the run.
+    approver_ids: list[str] | None = None
+    """Slack user ids that may answer approval prompts. Defaults to whoever started the run.
 
     Set it to a reviewer group when the person asking should not approve their
     own agent's actions.
@@ -152,10 +152,9 @@ class SlackChat(AbstractCapability[AgentDepsT]):
     _resolved_toolset: SlackChatToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        """Settle the name lists once, so every reader sees the same checked values."""
-        self.channels = string_sequence(self.channels, 'channels')
-        if self.approver_ids is not None:
-            self.approver_ids = string_sequence(self.approver_ids, 'approver_ids')
+        """Catch a name list given as one string, which the annotations cannot."""
+        reject_bare_string(self.channels, 'channels')
+        reject_bare_string(self.approver_ids, 'approver_ids')
 
     @classmethod
     def from_spec(cls, *args: Any, **kwargs: Any) -> SlackChat[Any]:
@@ -174,8 +173,8 @@ class SlackChat(AbstractCapability[AgentDepsT]):
                 )
         thread: object = kwargs.get('thread')
         if isinstance(thread, Mapping):
-            # Pydantic leaves it as a mapping: the field's union with a resolver
-            # callable stops it coercing to `SlackThread` on its own.
+            # Spec values arrive as whatever the file said, so this is the only
+            # thing that turns the mapping into a `SlackThread`.
             kwargs['thread'] = _THREAD_ADAPTER.validate_python(thread)
         return cls(*args, **kwargs)
 

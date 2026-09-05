@@ -136,6 +136,13 @@ class TestAskValidation:
         with pytest.raises(ValueError, match=message):
             await SlackInteractions().ask(slack_client, thread, 'Pick', options)
 
+    async def test_rejects_options_passed_as_one_string(
+        self, thread: SlackThread, slack_client: FakeSlackClient
+    ) -> None:
+        # 'Yes' would post three buttons reading 'Y', 'e' and 's'.
+        with pytest.raises(ValueError, match='one entry per character'):
+            await SlackInteractions().ask(slack_client, thread, 'Pick', 'Yes')  # pyright: ignore[reportArgumentType]
+
     async def test_rejects_a_question_slack_cannot_show(
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
@@ -150,7 +157,7 @@ class TestAskValidation:
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
         with pytest.raises(ValueError, match='one entry per character'):
-            await SlackInteractions().ask(slack_client, thread, 'Pick', ['A'], allowed_user_ids='U0REVIEWER')
+            await SlackInteractions().ask(slack_client, thread, 'Pick', ['A'], allowed_user_ids='U0REVIEWER')  # pyright: ignore[reportArgumentType]
 
     def test_rejects_a_non_positive_timeout(self, thread: SlackThread, slack_client: FakeSlackClient) -> None:
         with pytest.raises(ValueError, match='timeout_seconds must be positive'):
