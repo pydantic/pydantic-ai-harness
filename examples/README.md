@@ -28,6 +28,7 @@ then need that provider's key instead.
 | Example | What it does | Default model |
 |---|---|---|
 | [`coding_agent.py`](coding_agent.py) | A coding agent for the current repo, built from the blocks that make up `Coder` | `anthropic:claude-fable-5` |
+| [`github_pr_review.py`](github_pr_review.py) | A read-only review of one GitHub pull request through GitHub's hosted MCP server | `openai:gpt-5.6-sol` |
 | [`research_agent.py`](research_agent.py) | A web-research agent that cites every claim, built from the blocks that make up `Researcher` | `openai:gpt-5.6-sol` |
 
 Every example exposes a `build_agent()` factory (imported by the test suite, and

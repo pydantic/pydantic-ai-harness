@@ -33,6 +33,7 @@ def _load(path: Path) -> ModuleType:
 def test_examples_present():
     assert [path.name for path in EXAMPLE_FILES] == [
         'coding_agent.py',
+        'github_pr_review.py',
         'research_agent.py',
     ]
 
@@ -54,6 +55,8 @@ def test_example_builds_agent(
 ):
     # Keep any filesystem-scoped capabilities and memory stores inside tmp_path.
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('GITHUB_REPOSITORY', 'pydantic/pydantic-ai')
+    monkeypatch.setenv('GITHUB_TOKEN', 'test-token')
     monkeypatch.setenv('SUPPORT_MEMORY_DIR', str(tmp_path / 'memory'))
     try:
         module = _load(path)
