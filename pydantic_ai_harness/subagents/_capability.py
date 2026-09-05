@@ -7,6 +7,7 @@ import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import EllipsisType
 from typing import TYPE_CHECKING, Any
 
 from pydantic_ai._utils import replace_no_init  # pyright: ignore[reportPrivateUsage]
@@ -18,6 +19,7 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
 
+from pydantic_ai_harness._warn import warn_default_changed
 from pydantic_ai_harness.subagents._disk import (
     AgentOverride,
     ParsedAgent,
@@ -30,6 +32,19 @@ from pydantic_ai_harness.subagents._toolset import SubAgent, SubAgentToolset
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
+
+_CONVENTION_FOLDER_NAME = 'agents'
+"""The folder-name an unset `agent_folders` resolves to in discovery mode."""
+
+
+class _UnsetAgents(tuple[()]):
+    """Empty sequence sentinel that keeps the public `agents` type precise."""
+
+    def __repr__(self) -> str:
+        return '...'
+
+
+_AGENTS_UNSET = _UnsetAgents()
 
 ToolResolver = Callable[[str], 'Sequence[AgentToolset[object]] | None']
 """Maps one tool name from a disk definition's `tools` list to the toolsets that
@@ -73,15 +88,16 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     one of the menu's keys, so the parent routes each task to the model that fits
     it. A `SubAgent` can restrict which keys it accepts (`SubAgent.models`).
 
-    Sub-agents are also loaded from disk by default: each markdown agent definition
-    under `./.agents/agents/` and `~/.agents/agents/` (or the `.claude/` equivalent)
-    becomes a delegate, built with the parent's model. Disk delegates get no tools
-    by default (`inherit_tools` is `False`); set `inherit_tools=True` to expose the
-    parent's tools, or pass a `tool_resolver` to map their frontmatter tool names.
-    Disk delegates coexist with explicitly-passed ones; explicitly-passed agents take
-    precedence, then the project folder, then the home folder. A disk delegate whose
-    name is already taken is skipped with a warning. Configure or disable this with
-    `agent_folders`; see also `agent_overrides` and `tool_resolver`.
+    When no explicit `agents` are passed, sub-agents are also loaded from disk: each
+    markdown agent definition under `./.agents/agents/` and `~/.agents/agents/` (or
+    the `.claude/` equivalent) becomes a delegate, built with the parent's model.
+    Passing `agents` turns disk loading off; set `agent_folders` explicitly to
+    combine both sources. Disk delegates get no tools by default (`inherit_tools` is
+    `False`); set `inherit_tools=True` to expose the parent's tools, or pass a
+    `tool_resolver` to map their frontmatter tool names. When both sources are
+    configured, explicitly-passed agents take precedence, then the project folder,
+    then the home folder. A disk delegate whose name is already taken is skipped
+    with a warning. See also `agent_overrides` and `tool_resolver`.
 
     The parent's `deps` are forwarded to each sub-agent (sub-agents therefore
     share the parent's `AgentDepsT`), and by default the parent's `usage` is
@@ -104,10 +120,12 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     ```
     """
 
-    agents: Sequence[SubAgent[AgentDepsT]] = ()
+    agents: Sequence[SubAgent[AgentDepsT]] = _AGENTS_UNSET
     """The sub-agents to expose, each a `SubAgent` pairing an agent with its
     per-delegate run controls. See `SubAgent`. These take precedence over any
-    disk-loaded agents of the same name."""
+    disk-loaded agents of the same name. Left unset, disk discovery uses the
+    conventional `agent_folders`; passing any sequence, including an empty one,
+    means the caller is composing an explicit roster."""
 
     models: Mapping[str, Model | KnownModelName | str | ModelOption] = field(
         default_factory=dict[str, 'Model | KnownModelName | str | ModelOption']
@@ -129,14 +147,21 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     ```
     """
 
-    agent_folders: str | Sequence[Path] | None = 'agents'
+    agent_folders: str | Sequence[Path] | EllipsisType | None = ...
     """Where to load markdown agent definitions from, in addition to `agents`.
-    Defaults to the conventional layout, so constructing the capability auto-loads
-    a repo's agent files with no extra configuration.
 
-    - a folder-name `str` (the default `'agents'` is the conventional layout): for
-      the project root (cwd) then the home root, load from `<root>/.agents/<name>/`,
-      falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
+    Left unset, the conventional `'agents'` layout is auto-loaded, but only when no
+    explicit `agents` were passed: an explicit list means the caller is composing a
+    known roster, so nothing is pulled from disk. Earlier releases auto-loaded the
+    conventional layout unconditionally; a construction that would have loaded
+    definitions under that behavior emits a `HarnessDeprecationWarning` naming the
+    change.
+
+    - a folder-name `str` (`'agents'` is the conventional layout): for the project
+      root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling
+      back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent. Set
+      `agent_folders='agents'` explicitly to combine disk definitions with
+      explicitly-passed `agents`.
     - a sequence of paths: load from exactly those folders, in order.
     - `None`: disable disk loading entirely (only `agents` are exposed).
 
@@ -205,6 +230,9 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     can override this per delegate. See `SubAgent.contain_errors` for the
     containment contract and what always propagates regardless."""
 
+    _agents_explicit: bool = field(init=False, repr=False, compare=False)
+    """Whether the caller supplied `agents`, including an explicitly empty sequence."""
+
     _by_name: dict[str, SubAgent[AgentDepsT]] = field(
         default_factory=dict[str, 'SubAgent[AgentDepsT]'], init=False, repr=False, compare=False
     )
@@ -236,6 +264,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
 
     def _build_roster(self, disk_agents: list[SubAgent[AgentDepsT]]) -> None:
         by_name: dict[str, SubAgent[AgentDepsT]] = {}
+        self._agents_explicit = self.agents is not _AGENTS_UNSET
         for sub_agent in self.agents:
             name = sub_agent.resolved_name
             if name is None:
@@ -272,10 +301,11 @@ class SubAgents(AbstractCapability[AgentDepsT]):
         Folders are returned in precedence order (project before home); within a
         folder, files are loaded in sorted name order for a stable listing.
         """
-        if self.agent_folders is None:
+        agent_folders = self._effective_agent_folders()
+        if agent_folders is None:
             return []
         result: list[SubAgent[AgentDepsT]] = []
-        for folder in resolve_folders(self.agent_folders, Path.cwd(), Path.home()):
+        for folder in resolve_folders(agent_folders, Path.cwd(), Path.home()):
             if not folder.is_dir():
                 continue
             for path in sorted(folder.glob('*.md')):
@@ -287,6 +317,47 @@ class SubAgents(AbstractCapability[AgentDepsT]):
                 parsed = parse_agent_markdown(text)
                 result.append(self._build_disk_agent(parsed.name or path.stem, parsed))
         return result
+
+    def _effective_agent_folders(self) -> str | Sequence[Path] | None:
+        """The disk source actually scanned: the caller's choice, or the convention only in discovery mode.
+
+        Left unset (the `...` default), the conventional `'agents'` layout applies
+        only when no explicit `agents` were passed: an explicit list means the
+        caller is composing, not discovering. Earlier releases auto-loaded the
+        convention unconditionally, so a construction that would have loaded
+        definitions under the old default warns about the change; one whose
+        behavior is unchanged stays quiet.
+        """
+        if not isinstance(self.agent_folders, EllipsisType):
+            return self.agent_folders
+        if not self._agents_explicit:
+            return _CONVENTION_FOLDER_NAME
+        if self._convention_has_definitions():
+            # stacklevel reaches the constructor's caller through `__init__` ->
+            # `__post_init__` -> `_load_disk_agents` -> here -> the helper.
+            warn_default_changed(
+                owner='SubAgents',
+                option='agent_folders',
+                old='agents',
+                new=None,
+                impact='With `agents` passed explicitly, markdown agent definitions are no longer auto-loaded '
+                'from the conventional folders, and this construction found definitions it now skips.',
+                stacklevel=6,
+            )
+        return None
+
+    def _convention_has_definitions(self) -> bool:
+        """Whether the conventional folders hold any readable definition the old default loaded."""
+        for folder in resolve_folders(_CONVENTION_FOLDER_NAME, Path.cwd(), Path.home()):
+            if not folder.is_dir():
+                continue
+            for path in folder.glob('*.md'):
+                try:
+                    path.read_text(encoding='utf-8')
+                except (OSError, UnicodeDecodeError):
+                    continue
+                return True
+        return False
 
     def _build_disk_agent(self, name: str, parsed: ParsedAgent) -> SubAgent[AgentDepsT]:
         """Build one disk-defined sub-agent: parent model + floored effort, tools resolved or inherited.

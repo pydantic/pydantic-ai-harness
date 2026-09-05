@@ -145,7 +145,7 @@ The sub-agents are listed in the system prompt via `get_instructions`, using eac
 
 ## Loading sub-agents from disk
 
-A repo's markdown agent definitions become delegates without writing any `Agent` code. By default every `*.md` file under the conventional folders is loaded as a sub-agent, alongside the explicitly-passed `agents`.
+A repo's markdown agent definitions become delegates without writing any `Agent` code. When no explicit `agents` are passed, every `*.md` file under the conventional folders is loaded as a sub-agent.
 
 ```python
 from pydantic_ai import Agent
@@ -157,11 +157,13 @@ orchestrator = Agent(
 )
 ```
 
-`agent_folders` controls where definitions come from. It defaults to `'agents'`, the conventional layout:
+`agent_folders` controls where definitions come from. Left unset, the conventional `'agents'` layout applies only when `agents` is also unset: an explicit sequence, including an empty one, means you are composing a known roster, so nothing is pulled from disk. To combine both sources, set the option explicitly:
 
-- A folder-name `str` (the default `'agents'`): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
+- A folder-name `str` (`'agents'` is the conventional layout): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
 - A sequence of paths loads from exactly those folders, in order.
 - `None` disables disk loading, exposing only the explicitly-passed `agents`.
+
+Earlier releases auto-loaded the conventional layout even when `agents` were passed. A construction that would have loaded definitions under that behavior emits a `HarnessDeprecationWarning`: pass `agent_folders='agents'` to keep loading them alongside your `agents`, or `agent_folders=None` to keep the new behavior and silence it.
 
 ### Definition format
 
@@ -221,9 +223,9 @@ When the same name appears in more than one source, the higher-precedence one wi
 
 ```python
 SubAgents(
-    agents=(),             # Sequence[SubAgent[AgentDepsT]] -- each pairs an agent with its run controls
+    agents=...,            # unset (discover from disk) | Sequence[SubAgent[AgentDepsT]] (an empty sequence is an empty roster)
     models={},             # Mapping[str, Model | str | ModelOption] -- per-delegation model menu (off when empty)
-    agent_folders='agents',# folder-name str (convention) | Sequence[Path] | None (disable)
+    agent_folders=...,     # unset (convention 'agents' when agents is unset) | folder-name str | Sequence[Path] | None (disable)
     agent_overrides={},    # Mapping[str, AgentOverride] -- per-disk-agent model/effort override
     tool_resolver=None,    # Callable[[str], Sequence[AgentToolset[object]] | None] -- disk-agent tool mapping
     forward_usage=True,    # share the parent's usage with sub-agent runs

@@ -40,7 +40,9 @@ def warn_module_renamed(old: str, new: str) -> None:
     )
 
 
-def warn_default_changed(*, owner: str, option: str, old: str, new: str, impact: str, stacklevel: int = 4) -> None:
+def warn_default_changed(
+    *, owner: str, option: str, old: object, new: object, impact: str, stacklevel: int = 4
+) -> None:
     """Emit a `HarnessDeprecationWarning` that `<owner>`'s `<option>` default changed.
 
     For an option whose default moved to a value that changes behavior rather than breaking
@@ -50,6 +52,8 @@ def warn_default_changed(*, owner: str, option: str, old: str, new: str, impact:
 
     `impact` states what the new default does differently; the rest of the message names the
     value that restores the old behavior and the value that keeps the new one without warning.
+    `old` and `new` are rendered with `repr`, so they are the option values themselves, not strings
+    describing them.
     `stacklevel` defaults to reporting the caller of a dataclass `__post_init__`.
     """
     warnings.warn(
