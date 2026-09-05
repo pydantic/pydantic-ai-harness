@@ -26,9 +26,9 @@ request, and report back in the thread it was asked in.
 uv add "pydantic-ai-harness[slack,anthropic]"
 ```
 
-The `slack` extra pulls in `slack-bolt`, which only `SlackAgent` needs.
-Everything else in this package talks to Slack through a small protocol and has
-no dependency beyond Pydantic AI, so you can use it with your own client.
+The `slack` extra pulls in `slack-sdk` and `slack-bolt`. Only `SlackAgent`
+needs Bolt, and it lives in its own module, so importing anything else from
+this package does not require it.
 
 ## Quick start
 

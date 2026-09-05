@@ -12,7 +12,6 @@ import anyio
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai.agent import AbstractAgent
 
-from pydantic_ai_harness.slack._client import SlackClient
 from pydantic_ai_harness.slack._interactions import PROMPT_ACTION_PREFIX, SlackInteractions
 from pydantic_ai_harness.slack._store import ConversationStore, InMemoryConversationStore
 from pydantic_ai_harness.slack._thread import SlackThread
@@ -20,6 +19,7 @@ from pydantic_ai_harness.slack._thread import SlackThread
 try:
     from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
     from slack_bolt.app.async_app import AsyncApp
+    from slack_sdk.web.async_client import AsyncWebClient
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
         'slack-bolt is required for SlackAgent. Install it with: pip install "pydantic-ai-harness[slack]"'
@@ -159,11 +159,13 @@ class SlackAgent:
         prompt_clicks = re.compile(f'^{re.escape(PROMPT_ACTION_PREFIX)}')
         self.app.action(prompt_clicks)(self._on_prompt_click)  # pyright: ignore[reportUnknownMemberType]
 
-    async def _on_event(self, event: Mapping[str, object], client: SlackClient, context: Mapping[str, object]) -> None:
+    async def _on_event(
+        self, event: Mapping[str, object], client: AsyncWebClient, context: Mapping[str, object]
+    ) -> None:
         await self.handle_message(event, client, bot_user_id=_string(context, 'bot_user_id'))
 
     async def _on_direct_message(
-        self, event: Mapping[str, object], client: SlackClient, context: Mapping[str, object]
+        self, event: Mapping[str, object], client: AsyncWebClient, context: Mapping[str, object]
     ) -> None:
         # Channel messages reach this listener too, and `app_mention` already
         # covers those. Only a direct or group DM starts a run without a mention.
@@ -191,7 +193,7 @@ class SlackAgent:
     async def handle_message(
         self,
         event: Mapping[str, object],
-        client: SlackClient,
+        client: AsyncWebClient,
         *,
         bot_user_id: str | None = None,
     ) -> None:
@@ -253,7 +255,7 @@ class SlackAgent:
 
     async def _post(self, thread: SlackThread, text: str) -> None:
         for start in range(0, len(text), _MAX_REPLY_CHARS):
-            await thread.client.chat_postMessage(
+            await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=thread.channel_id,
                 thread_ts=thread.thread_ts,
                 text=text[start : start + _MAX_REPLY_CHARS],

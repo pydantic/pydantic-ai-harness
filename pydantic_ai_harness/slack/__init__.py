@@ -6,12 +6,11 @@ dangerous tools behind a button, and `SlackAgent` wires both to a Socket Mode
 app so a working bot is a few lines. Every piece is usable on its own.
 
 `SlackAgent` needs `slack-bolt`, so it is imported from
-`pydantic_ai_harness.slack.app` rather than from here; the rest of the package
-has no dependency beyond Pydantic AI.
+`pydantic_ai_harness.slack.app` rather than from here. Everything else needs
+only `slack-sdk`.
 """
 
 from pydantic_ai_harness.slack._approvals import APPROVE, DENY, SlackApprovals
-from pydantic_ai_harness.slack._client import SlackClient, SlackResponse
 from pydantic_ai_harness.slack._interactions import (
     DEFAULT_PROMPT_TIMEOUT_SECONDS,
     PROMPT_ACTION_PREFIX,
@@ -37,10 +36,8 @@ __all__ = [
     'PlanStep',
     'SlackApprovals',
     'SlackChatToolset',
-    'SlackClient',
     'SlackInteractions',
     'SlackPromptError',
-    'SlackResponse',
     'SlackThread',
     'StepStatus',
     'conversation_key',

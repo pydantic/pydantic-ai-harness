@@ -68,7 +68,7 @@ class TestAsk:
     async def test_raises_when_slack_returns_no_timestamp(
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
-        slack_client.post_response = {'ok': True}
+        slack_client.recorder.post_response = {'ok': True}
         with pytest.raises(SlackPromptError, match='did not return a timestamp'):
             await SlackInteractions(timeout_seconds=0.01).ask(thread, 'Ship it?', ['Yes'])
 

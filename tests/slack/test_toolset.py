@@ -107,7 +107,7 @@ class TestPostPlan:
     async def test_reposts_when_slack_gave_no_timestamp(
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
-        slack_client.post_response = {'ok': True}
+        slack_client.recorder.post_response = {'ok': True}
         toolset = SlackChatToolset()
         await toolset.post_plan(context(thread), [PlanStep(text='a')])
         await toolset.post_plan(context(thread), [PlanStep(text='a')])
@@ -130,7 +130,7 @@ class TestSetStatus:
     async def test_a_channel_without_status_support_does_not_fail_the_turn(
         self, thread: SlackThread, slack_client: FakeSlackClient
     ) -> None:
-        slack_client.status_error = RuntimeError('not_allowed_in_channel')
+        slack_client.recorder.status_error = RuntimeError('not_allowed_in_channel')
         assert 'not available' in await SlackChatToolset().set_status(context(thread), 'reading logs')
 
 

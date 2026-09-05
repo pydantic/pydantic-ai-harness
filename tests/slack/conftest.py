@@ -2,10 +2,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 from pydantic import TypeAdapter
 from typing_extensions import TypedDict
+
+pytest.importorskip('slack_sdk')
+
+from slack_sdk.web.async_client import AsyncWebClient
+from slack_sdk.web.async_slack_response import AsyncSlackResponse
 
 from pydantic_ai_harness.slack import SlackThread
 
@@ -21,11 +27,6 @@ _BLOCKS_ADAPTER = TypeAdapter(list[dict[str, object]])
 _ACTION_BLOCK_ADAPTER = TypeAdapter(_ActionBlock)
 
 
-@pytest.fixture
-def anyio_backend() -> str:
-    return 'asyncio'
-
-
 @dataclass
 class SlackCall:
     """One recorded Slack Web API call."""
@@ -34,64 +35,91 @@ class SlackCall:
     kwargs: dict[str, object]
 
 
-class FakeSlackResponse:
-    def __init__(self, payload: dict[str, object]) -> None:
-        self._payload = payload
-
-    def get(self, key: str, default: object = None) -> object:
-        return self._payload.get(key, default)
-
-
 @dataclass
-class FakeSlackClient:
-    """Records calls and hands back canned responses."""
+class _Recorder:
+    """Mutable state the fake carries, kept off `AsyncWebClient`'s own attributes."""
 
     calls: list[SlackCall] = field(default_factory=list[SlackCall])
     next_ts: str = '1700000000.000100'
     post_response: dict[str, object] | None = None
     status_error: Exception | None = None
 
-    def _record(self, method: str, kwargs: dict[str, object]) -> FakeSlackResponse:
-        self.calls.append(SlackCall(method, kwargs))
-        return FakeSlackResponse({'ok': True, 'ts': self.next_ts})
+
+class FakeSlackClient(AsyncWebClient):
+    """A real `AsyncWebClient` whose calls are recorded rather than sent.
+
+    Subclassing rather than duck-typing is what keeps the fake honest: Pyright
+    checks each override against the SDK's own signature, so a method the SDK
+    renames or retypes fails here instead of against live Slack.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(token='xoxb-fake')  # pyright: ignore[reportUnknownMemberType]
+        self.recorder = _Recorder()
+
+    @property
+    def calls(self) -> list[SlackCall]:
+        return self.recorder.calls
+
+    @property
+    def next_ts(self) -> str:
+        return self.recorder.next_ts
 
     def method_calls(self, method: str) -> list[SlackCall]:
         return [call for call in self.calls if call.method == method]
 
+    def _record(self, method: str, kwargs: dict[str, object], payload: dict[str, object]) -> AsyncSlackResponse:
+        self.calls.append(SlackCall(method, kwargs))
+        return AsyncSlackResponse(
+            client=self,
+            http_verb='POST',
+            api_url=f'https://slack.com/api/{method}',
+            req_args={},
+            data=payload,
+            headers={},
+            status_code=200,
+        )
+
     async def chat_postMessage(
         self,
         *,
-        channel: str,
+        channel: str | None = None,
         text: str | None = None,
         blocks: Sequence[object] | None = None,
         thread_ts: str | None = None,
-    ) -> FakeSlackResponse:
-        self.calls.append(
-            SlackCall('chat_postMessage', {'channel': channel, 'text': text, 'blocks': blocks, 'thread_ts': thread_ts})
+        **kwargs: Any,
+    ) -> AsyncSlackResponse:
+        return self._record(
+            'chat_postMessage',
+            {'channel': channel, 'text': text, 'blocks': blocks, 'thread_ts': thread_ts},
+            self.recorder.post_response or {'ok': True, 'ts': self.next_ts},
         )
-        if self.post_response is not None:
-            return FakeSlackResponse(self.post_response)
-        return FakeSlackResponse({'ok': True, 'ts': self.next_ts})
 
     async def chat_update(
         self,
         *,
-        channel: str,
-        ts: str,
+        channel: str | None = None,
+        ts: str | None = None,
         text: str | None = None,
         blocks: Sequence[object] | None = None,
-    ) -> FakeSlackResponse:
-        return self._record('chat_update', {'channel': channel, 'ts': ts, 'text': text, 'blocks': blocks})
+        **kwargs: Any,
+    ) -> AsyncSlackResponse:
+        return self._record(
+            'chat_update',
+            {'channel': channel, 'ts': ts, 'text': text, 'blocks': blocks},
+            {'ok': True, 'ts': ts},
+        )
 
     async def files_upload_v2(
         self,
         *,
-        channel: str,
-        file: str,
+        channel: str | None = None,
+        file: str | bytes | object = None,
         title: str | None = None,
         initial_comment: str | None = None,
         thread_ts: str | None = None,
-    ) -> FakeSlackResponse:
+        **kwargs: Any,
+    ) -> AsyncSlackResponse:
         return self._record(
             'files_upload_v2',
             {
@@ -101,20 +129,29 @@ class FakeSlackClient:
                 'initial_comment': initial_comment,
                 'thread_ts': thread_ts,
             },
+            {'ok': True},
         )
 
     async def assistant_threads_setStatus(
         self,
         *,
-        channel_id: str,
-        thread_ts: str,
-        status: str,
-    ) -> FakeSlackResponse:
-        if self.status_error is not None:
-            raise self.status_error
+        channel_id: str | None = None,
+        thread_ts: str | None = None,
+        status: str | None = None,
+        **kwargs: Any,
+    ) -> AsyncSlackResponse:
+        if self.recorder.status_error is not None:
+            raise self.recorder.status_error
         return self._record(
-            'assistant_threads_setStatus', {'channel_id': channel_id, 'thread_ts': thread_ts, 'status': status}
+            'assistant_threads_setStatus',
+            {'channel_id': channel_id, 'thread_ts': thread_ts, 'status': status},
+            {'ok': True},
         )
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return 'asyncio'
 
 
 @pytest.fixture

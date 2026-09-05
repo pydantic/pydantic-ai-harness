@@ -110,7 +110,7 @@ class SlackInteractions:
     ) -> str | None:
         self._next_token += 1
         token = f'{thread.key}#{self._next_token}'
-        response = await thread.client.chat_postMessage(
+        response = await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
             channel=thread.channel_id,
             thread_ts=thread.thread_ts,
             text=question,
@@ -131,7 +131,7 @@ class SlackInteractions:
             del self._pending[token]
 
         answer = pending.answer
-        await thread.client.chat_update(
+        await thread.client.chat_update(  # pyright: ignore[reportUnknownMemberType]
             channel=thread.channel_id,
             ts=timestamp,
             text=_settled_text(question, answer, pending.answered_by),

@@ -111,6 +111,7 @@ prompt-injection-defender-ml = [
 slack = [
     "aiohttp>=3.10",
     "slack-bolt>=1.23.0",
+    "slack-sdk>=3.44.0",
 ]
 
 [project.urls]

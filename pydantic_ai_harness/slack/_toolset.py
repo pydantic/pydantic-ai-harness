@@ -1,4 +1,13 @@
-"""Tools that let an agent talk to the Slack thread it is running in."""
+"""Tools that let an agent talk to the Slack thread it is running in.
+
+The `reportUnknownMemberType` suppressions on the Slack calls here and in the
+sibling modules cover one thing only: `slack_sdk` types every Web API method
+with a trailing `**kwargs`, so strict Pyright cannot fully resolve the call.
+They do not hide a renamed or removed method (`reportAttributeAccessIssue`) or
+a changed parameter type (`reportArgumentType`), both of which still fail the
+build. A renamed keyword argument is the one drift that gets through, because
+the SDK's own `**kwargs` accepts it.
+"""
 
 from __future__ import annotations
 
@@ -102,7 +111,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         if not text.strip():
             raise ModelRetry('Message text cannot be empty.')
         thread = ctx.deps
-        await thread.client.chat_postMessage(channel=thread.channel_id, thread_ts=thread.thread_ts, text=text)
+        await thread.client.chat_postMessage(channel=thread.channel_id, thread_ts=thread.thread_ts, text=text)  # pyright: ignore[reportUnknownMemberType]
         return 'Posted.'
 
     async def post_plan(self, ctx: RunContext[SlackThread], steps: list[PlanStep]) -> str:
@@ -121,14 +130,14 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         text = '\n'.join(f'{_STATUS_ICONS[step.status]} {step.text}' for step in steps)
         existing = self._plans.get(thread.key)
         if existing is None:
-            response = await thread.client.chat_postMessage(
+            response = await thread.client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=thread.channel_id, thread_ts=thread.thread_ts, text=text
             )
             timestamp = response.get('ts')
             if isinstance(timestamp, str):
                 self._plans[thread.key] = timestamp
             return 'Plan posted.'
-        await thread.client.chat_update(channel=thread.channel_id, ts=existing, text=text)
+        await thread.client.chat_update(channel=thread.channel_id, ts=existing, text=text)  # pyright: ignore[reportUnknownMemberType]
         return 'Plan updated.'
 
     async def set_status(self, ctx: RunContext[SlackThread], status: str) -> str:
@@ -140,7 +149,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         """
         thread = ctx.deps
         try:
-            await thread.client.assistant_threads_setStatus(
+            await thread.client.assistant_threads_setStatus(  # pyright: ignore[reportUnknownMemberType]
                 channel_id=thread.channel_id, thread_ts=thread.thread_ts, status=status
             )
         except Exception:
@@ -185,7 +194,7 @@ class SlackChatToolset(FunctionToolset[SlackThread]):
         if not resolved.is_file():
             raise ModelRetry(f'There is no file at {path}. Write it first, then send it.')
         thread = ctx.deps
-        await thread.client.files_upload_v2(
+        await thread.client.files_upload_v2(  # pyright: ignore[reportUnknownMemberType]
             channel=thread.channel_id,
             thread_ts=thread.thread_ts,
             file=str(resolved),
