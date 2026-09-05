@@ -33,6 +33,7 @@ def _load(path: Path) -> ModuleType:
 def test_examples_present():
     assert [path.name for path in EXAMPLE_FILES] == [
         'coding_agent.py',
+        'notion_page_update.py',
         'research_agent.py',
     ]
 
@@ -57,13 +58,19 @@ def test_example_builds_agent(
     monkeypatch.setenv('SUPPORT_MEMORY_DIR', str(tmp_path / 'memory'))
     try:
         module = _load(path)
+        kwargs: dict[str, object] = {'model': TestModel()}
+        if path.name == 'notion_page_update.py':
+            from mcp.server.fastmcp.server import FastMCP, Settings  # noqa: PLC0415
+
+            Settings.model_rebuild()
+            kwargs['client'] = FastMCP('notion-example-fake')
         if optional_dependency_error is not None:
 
-            def raise_optional_dependency_error(*, model: TestModel) -> None:
+            def raise_optional_dependency_error(**_kwargs: object) -> None:
                 raise optional_dependency_error
 
             monkeypatch.setattr(module, 'build_agent', raise_optional_dependency_error)
-        agent = module.build_agent(model=TestModel())
+        agent = module.build_agent(**kwargs)
     except (ImportError, UserError) as exc:
         assert 'pydantic-ai-harness[' in str(exc) or 'pydantic-ai-slim[' in str(exc)
         pytest.skip(str(exc))

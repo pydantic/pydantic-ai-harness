@@ -28,6 +28,7 @@ then need that provider's key instead.
 | Example | What it does | Default model |
 |---|---|---|
 | [`coding_agent.py`](coding_agent.py) | A coding agent for the current repo, built from the blocks that make up `Coder` | `anthropic:claude-fable-5` |
+| [`notion_page_update.py`](notion_page_update.py) | Search Notion and update one page after terminal approval | `openai:gpt-5.6-sol` |
 | [`research_agent.py`](research_agent.py) | A web-research agent that cites every claim, built from the blocks that make up `Researcher` | `openai:gpt-5.6-sol` |
 
 Every example exposes a `build_agent()` factory (imported by the test suite, and

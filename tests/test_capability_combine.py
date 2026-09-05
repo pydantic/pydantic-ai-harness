@@ -274,6 +274,9 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `read_pyai_docs` under a fixed name',
         lambda cls: (cls(), cls()),
     ),
+    'Notion': Collides(
+        'one per authenticated user; merging mutation selections would widen access',
+    ),
     'PyaiDocs': Collides('deprecated alias of `PydanticAIDocs`, and collides the same way'),
     'Macroscope': Collides(
         'its toolset registers `run_macroscope_review` under a fixed name',
