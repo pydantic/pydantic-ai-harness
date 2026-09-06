@@ -1,26 +1,29 @@
-"""Typed context for the Slack message that started an agent run."""
+"""Typed context for a Slack-hosted agent run."""
 
 from __future__ import annotations
 
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from pydantic_ai_harness.slack._client import SlackClient
+from dataclasses import dataclass, field
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class SlackMessageContext:
-    """A message Slack says is relevant to the user's active view."""
+def _require_non_empty_string(value: object, name: str) -> None:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f'{name} must be a non-empty string')
 
-    channel_id: str
-    """Conversation containing the message."""
 
-    message_ts: str
-    """Timestamp identifying the message."""
+def _require_optional_string(value: object, name: str) -> None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f'{name} must be a string or None')
+
+
+def _require_files(value: object) -> None:
+    if not isinstance(value, tuple) or not all(  # pyright: ignore[reportUnknownVariableType]
+        isinstance(file, SlackFile)
+        for file in value  # pyright: ignore[reportUnknownVariableType]
+    ):
+        raise ValueError('files must be a tuple of SlackFile instances')
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -28,123 +31,66 @@ class SlackFile:
     """A file attached to the Slack message that started this run."""
 
     file_id: str
-    """Slack file ID accepted by `slack_read_file`."""
-
     name: str | None = None
-    """Original file name, when Slack supplies one."""
-
     mimetype: str | None = None
-    """Media type reported by Slack, when present."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class SlackContextEntity:
-    """One item in Slack's relevance-ordered active-view context."""
-
-    entity_type: str
-    """Slack entity type, for example `slack#/types/channel_id`."""
-
-    value: str | SlackMessageContext
-    """Slack ID, or typed coordinates when the entity is a message context."""
-
-    team_id: str | None = None
-    """Workspace containing this entity, when Slack supplies one."""
 
     def __post_init__(self) -> None:
-        is_message = self.entity_type == 'slack#/types/message_context'
-        if is_message != isinstance(self.value, SlackMessageContext):
-            raise ValueError(
-                "The 'slack#/types/message_context' entity requires SlackMessageContext; "
-                'all other Slack context entities require a string value.'
-            )
+        _require_non_empty_string(self.file_id, 'file_id')
+        _require_optional_string(self.name, 'name')
+        _require_optional_string(self.mimetype, 'mimetype')
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SlackContext:
-    """The Slack identities and conversation coordinates for one agent run."""
+    """Slack identities and conversation coordinates for one agent run."""
 
+    team_id: str
     channel_id: str
-    """Conversation containing the message."""
-
     thread_ts: str
-    """Timestamp of the root message for this conversation."""
-
     message_ts: str
-    """Timestamp of the message that started this run."""
-
     user_id: str
-    """Slack user that sent the message."""
-
-    team_id: str | None = None
-    """Workspace containing the conversation."""
-
     enterprise_id: str | None = None
-    """Enterprise Grid organization containing the workspace, when present."""
-
-    active_entities: tuple[SlackContextEntity, ...] = ()
-    """What the user is viewing, ordered from most to least relevant."""
-
     files: tuple[SlackFile, ...] = ()
-    """Files attached to the message that started this run."""
 
-    @contextmanager
-    def bind(self) -> Generator[None]:
-        """Bind this context around a run hosted outside `SlackApp`.
+    def __post_init__(self) -> None:
+        for name in ('team_id', 'channel_id', 'thread_ts', 'message_ts', 'user_id'):
+            _require_non_empty_string(getattr(self, name), name)
+        _require_optional_string(self.enterprise_id, 'enterprise_id')
+        _require_files(self.files)
 
-        This supplies conversation coordinates only. Configure a fixed MCP token
-        on `Slack` and an appropriate tool selection for the external host.
-        """
-        with bind_slack_context(self):
-            yield
+    @property
+    def conversation_id(self) -> str:
+        return f'{self.team_id}:{self.channel_id}:{self.thread_ts}'
 
 
-_current_context: ContextVar[SlackContext | None] = ContextVar('pydantic_ai_harness_slack_context', default=None)
-_current_user_token: ContextVar[str | None] = ContextVar('pydantic_ai_harness_slack_user_token', default=None)
-_current_delivery_client: ContextVar[SlackClient | None] = ContextVar(
-    'pydantic_ai_harness_slack_delivery_client', default=None
-)
-_fixed_mcp_fallback_allowed: ContextVar[bool] = ContextVar(
-    'pydantic_ai_harness_slack_fixed_mcp_fallback_allowed', default=True
-)
+@dataclass(frozen=True)
+class _SlackRun:
+    context: SlackContext
+    user_token: str | None = field(default=None, repr=False)
+
+
+_slack_run: ContextVar[_SlackRun | None] = ContextVar('pydantic_ai_harness_slack_run', default=None)
+
+
+def _current_slack_run() -> _SlackRun | None:
+    return _slack_run.get()
+
+
+def _current_slack_user_token() -> str | None:  # pyright: ignore[reportUnusedFunction]
+    run = _current_slack_run()
+    return None if run is None else run.user_token
+
+
+@contextmanager
+def _bind_slack_run(context: SlackContext, user_token: str | None = None) -> Generator[None]:  # pyright: ignore[reportUnusedFunction]
+    token = _slack_run.set(_SlackRun(context=context, user_token=user_token))
+    try:
+        yield
+    finally:
+        _slack_run.reset(token)
 
 
 def current_slack_context() -> SlackContext | None:
     """Return the Slack context bound to the current agent run, if any."""
-    return _current_context.get()
-
-
-def current_delivery_client() -> SlackClient | None:
-    """Return the Bolt-authorized client bound to the current Slack run."""
-    return _current_delivery_client.get()
-
-
-def current_user_token() -> str | None:
-    """Return the private OAuth credential bound to this Slack run."""
-    return _current_user_token.get()
-
-
-def fixed_mcp_fallback_allowed() -> bool:
-    """Whether this run may fall back to the process-wide MCP token."""
-    return _fixed_mcp_fallback_allowed.get()
-
-
-@contextmanager
-def bind_slack_context(
-    context: SlackContext,
-    client: SlackClient | None = None,
-    *,
-    user_token: str | None = None,
-    allow_fixed_mcp_fallback: bool = True,
-) -> Generator[None]:
-    """Bind `context` while a Slack-hosted agent run is executing."""
-    context_token = _current_context.set(context)
-    user_token_token = _current_user_token.set(user_token)
-    client_token = _current_delivery_client.set(client)
-    fallback_token = _fixed_mcp_fallback_allowed.set(allow_fixed_mcp_fallback)
-    try:
-        yield
-    finally:
-        _fixed_mcp_fallback_allowed.reset(fallback_token)
-        _current_delivery_client.reset(client_token)
-        _current_user_token.reset(user_token_token)
-        _current_context.reset(context_token)
+    run = _current_slack_run()
+    return None if run is None else run.context

@@ -72,6 +72,7 @@ from pydantic_ai_harness import (
     SystemReminders,
     ToolOutputLimits,
 )
+from pydantic_ai_harness.slack import Slack
 from pydantic_ai_harness.system_reminders import Reminder
 
 pytestmark = pytest.mark.anyio
@@ -172,6 +173,10 @@ def _check_advisor(merged: Any) -> None:
 def _check_sub_agents(merged: Any) -> None:
     # Rosters union: an agent either side could reach stays reachable through one delegate tool.
     assert [entry.agent.name for entry in merged.agents] == ['alpha', 'beta']
+
+
+def _check_slack(merged: Any) -> None:
+    assert merged.id == 'slack'
 
 
 COMBINE_POLICY: dict[str, Policy] = {
@@ -292,7 +297,11 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
-    'Slack': Rejected('SlackApp rejects more than one because one invocation can bind only one Slack identity policy'),
+    'Slack': Combines(
+        'one native Slack MCP capability per agent; duplicate defaults merge in the core resolver',
+        lambda: (Slack(), Slack()),
+        _check_slack,
+    ),
 }
 
 

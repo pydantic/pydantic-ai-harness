@@ -7,7 +7,7 @@ import anyio
 import pytest
 from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart, UserPromptPart
 
-from pydantic_ai_harness.slack import FileConversationStore, InMemoryConversationStore, SlackThread
+from pydantic_ai_harness.slack import FileConversationStore, InMemoryConversationStore
 
 pytestmark = pytest.mark.anyio
 
@@ -17,22 +17,6 @@ def _history() -> list[ModelRequest | ModelResponse]:
         ModelRequest(parts=[UserPromptPart(content='ship it')]),
         ModelResponse(parts=[TextPart(content='shipped')]),
     ]
-
-
-class TestConversationKey:
-    def test_includes_team_when_set(self) -> None:
-        # Two workspaces can hold the same channel id, so history has to stay apart.
-        assert SlackThread(channel_id='C1', thread_ts='1.1', team_id='T1').key == 'T1:C1:1.1'
-
-    def test_omits_team_when_absent(self) -> None:
-        assert SlackThread(channel_id='C1', thread_ts='1.1').key == 'C1:1.1'
-
-    def test_a_channel_with_no_thread_keys_on_the_channel(self) -> None:
-        assert SlackThread(channel_id='C1').key == 'C1'
-
-    def test_threads_in_one_channel_stay_separate(self) -> None:
-        first = SlackThread(channel_id='C1', thread_ts='1.1')
-        assert first.key != SlackThread(channel_id='C1', thread_ts='2.2').key
 
 
 class TestInMemoryConversationStore:
@@ -45,16 +29,10 @@ class TestInMemoryConversationStore:
     async def test_load_returns_a_copy(self) -> None:
         store = InMemoryConversationStore()
         await store.save('k', _history())
-        loaded = list(await store.load('k'))
+        loaded = await store.load('k')
+        assert isinstance(loaded, list)
         loaded.clear()
         assert len(await store.load('k')) == 2
-
-    async def test_delete_is_forgiving(self) -> None:
-        store = InMemoryConversationStore()
-        await store.save('k', _history())
-        await store.delete('k')
-        await store.delete('k')
-        assert list(await store.load('k')) == []
 
 
 class TestFileConversationStore:
@@ -104,20 +82,21 @@ class TestFileConversationStore:
         assert stat.S_IMODE(directory.stat().st_mode) == 0o700
         assert stat.S_IMODE(saved.stat().st_mode) == 0o600
 
-    async def test_tightens_an_existing_directory(self, tmp_path: Path) -> None:
+    async def test_rejects_an_existing_directory_accessible_to_group_or_others(self, tmp_path: Path) -> None:
         directory = tmp_path / 'history'
         directory.mkdir(mode=0o777)
         directory.chmod(0o777)
-        await FileConversationStore(directory).save('k', _history())
-        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        with pytest.raises(PermissionError, match='accessible by group or others'):
+            await FileConversationStore(directory).save('k', _history())
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o777
 
-    async def test_tightens_an_existing_directory_before_reading(self, tmp_path: Path) -> None:
+    async def test_rejects_an_existing_directory_before_reading(self, tmp_path: Path) -> None:
         directory = tmp_path / 'history'
-        store = FileConversationStore(directory)
-        await store.save('k', _history())
+        directory.mkdir()
         directory.chmod(0o777)
-        assert len(await store.load('k')) == 2
-        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        with pytest.raises(PermissionError, match='accessible by group or others'):
+            await FileConversationStore(directory).load('k')
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o777
 
     async def test_a_failed_write_leaves_no_transcript_behind(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -130,12 +109,38 @@ class TestFileConversationStore:
             await FileConversationStore(tmp_path).save('k', _history())
         assert list(tmp_path.iterdir()) == []
 
-    async def test_delete_is_forgiving(self, tmp_path: Path) -> None:
+    async def test_a_failed_replacement_preserves_previous_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         store = FileConversationStore(tmp_path)
         await store.save('k', _history())
-        await store.delete('k')
-        await store.delete('k')
-        assert list(await store.load('k')) == []
+
+        async def explode(self: anyio.Path, target: Path) -> None:
+            raise OSError('replace failed')
+
+        monkeypatch.setattr(anyio.Path, 'replace', explode)
+        with pytest.raises(OSError, match='replace failed'):
+            await store.save('k', _history()[:1])
+        assert len(await store.load('k')) == 2
+        assert sorted(path.suffix for path in tmp_path.iterdir()) == ['.json']
+
+    async def test_cancellation_after_write_cleans_temp_and_preserves_previous_transcript(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        store = FileConversationStore(tmp_path)
+        await store.save('k', _history())
+        original_write = anyio.Path.write_bytes
+
+        async def write_then_cancel(self: anyio.Path, data: bytes) -> int:
+            result = await original_write(self, data)
+            cancel_scope.cancel()
+            return result
+
+        monkeypatch.setattr(anyio.Path, 'write_bytes', write_then_cancel)
+        with anyio.CancelScope() as cancel_scope:
+            await store.save('k', _history()[:1])
+        assert len(await store.load('k')) == 2
+        assert sorted(path.suffix for path in tmp_path.iterdir()) == ['.json']
 
     async def test_expands_a_user_relative_directory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('HOME', str(tmp_path))

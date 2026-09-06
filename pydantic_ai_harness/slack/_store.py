@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
+import stat
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
@@ -16,8 +18,7 @@ class ConversationStore(Protocol):
     """Where a Slack agent keeps one thread's message history.
 
     Implement this to put history somewhere that outlives the process. Keys come
-    from [`SlackThread.key`][pydantic_ai_harness.slack.SlackThread.key], so they
-    are safe to use verbatim as row ids.
+    from `SlackContext.conversation_id`, so they are safe to use verbatim as row ids.
     """
 
     async def load(self, key: str) -> Sequence[ModelMessage]:
@@ -26,10 +27,6 @@ class ConversationStore(Protocol):
 
     async def save(self, key: str, messages: Sequence[ModelMessage]) -> None:
         """Replace the stored history."""
-        ...  # pragma: no cover
-
-    async def delete(self, key: str) -> None:
-        """Drop the history if it exists. Used by a reset command."""
         ...  # pragma: no cover
 
 
@@ -53,16 +50,12 @@ class InMemoryConversationStore:
         """Replace the stored history with a copy of `messages`."""
         self._messages[key] = list(messages)
 
-    async def delete(self, key: str) -> None:
-        """Drop the history if it exists."""
-        self._messages.pop(key, None)
-
 
 class FileConversationStore:
     """Keep each conversation's history in its own JSON file.
 
     The directory and files are restricted to the owner because they hold whole
-    conversations. Existing directory permissions are tightened before access.
+    conversations. Existing directories must already have private permissions.
 
     Enough for a single-process bot that should survive a restart. Each write goes
     to its own temporary file that then replaces the old one, so a crash mid-write
@@ -84,15 +77,16 @@ class FileConversationStore:
         return self._directory / f'{digest}.json'
 
     async def _secure_directory(self, *, create: bool) -> None:
-        """Create when requested and restrict an existing directory to its owner."""
+        """Create a private directory or reject an existing non-private one."""
         directory = anyio.Path(self._directory)
         if create:
             await directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
-            await directory.chmod(0o700)
+            mode = (await directory.stat()).st_mode
         except FileNotFoundError:
-            if create:  # pragma: no cover - the successful mkdir above made it
-                raise
+            return
+        if os.name == 'posix' and mode & (stat.S_IRWXG | stat.S_IRWXO):
+            raise PermissionError(f'conversation directory is accessible by group or others: {self._directory}')
 
     async def load(self, key: str) -> Sequence[ModelMessage]:
         """Return the stored history, or an empty sequence when the file is absent."""
@@ -121,9 +115,5 @@ class FileConversationStore:
         finally:
             # A failed write would otherwise leave the transcript sitting in the
             # temporary file. After a successful replace there is nothing to remove.
-            await temporary.unlink(missing_ok=True)
-
-    async def delete(self, key: str) -> None:
-        """Drop the history file if it exists."""
-        await self._secure_directory(create=False)
-        await anyio.Path(self._path(key)).unlink(missing_ok=True)
+            with anyio.CancelScope(shield=True):
+                await temporary.unlink(missing_ok=True)

@@ -1,237 +1,152 @@
+"""Offline Streamable HTTP MCP server used by the Slack capability tests."""
+
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass, field
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack
+from dataclasses import dataclass
 
-import pydantic_ai.mcp as mcp_module
+import anyio
+import httpx
 import pytest
-from pydantic import TypeAdapter
-from pydantic_ai import FunctionToolset
-from slack_sdk.web.async_client import AsyncWebClient
-from slack_sdk.web.async_slack_response import AsyncSlackResponse
-from typing_extensions import TypedDict
-
-from pydantic_ai_harness.slack import SlackTool
-
-
-async def _fake_read_channel(channel_id: str) -> str:
-    return channel_id
-
-
-async def _fake_read_thread(channel_id: str, message_ts: str) -> str:
-    return f'{channel_id}:{message_ts}'
-
-
-async def _fake_read_file(file_id: str) -> str:
-    return file_id
-
-
-async def _fake_operation() -> str:
-    return 'ok'
-
-
-def fake_mcp(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    omit: SlackTool | None = None,
-    extra_names: tuple[str, ...] = (),
-) -> list[dict[str, str]]:
-    """Replace the remote Slack boundary with the same public tool catalog."""
-    authorizations: list[dict[str, str]] = []
-
-    def build(_url: str, *, id: str, headers: dict[str, str]) -> FunctionToolset[object]:
-        assert id == 'slack-mcp'
-        authorizations.append(headers)
-        toolset = FunctionToolset[object](id=id)
-        for slack_tool in SlackTool:
-            if slack_tool is omit:
-                continue
-            if slack_tool is SlackTool.READ_CHANNEL:
-                toolset.add_function(_fake_read_channel, name=slack_tool.value, description='Slack operation')
-            elif slack_tool is SlackTool.READ_THREAD:
-                toolset.add_function(_fake_read_thread, name=slack_tool.value, description='Slack operation')
-            elif slack_tool is SlackTool.READ_FILE:
-                toolset.add_function(_fake_read_file, name=slack_tool.value, description='Slack operation')
-            else:
-                toolset.add_function(_fake_operation, name=slack_tool.value, description='Slack operation')
-        for name in extra_names:
-
-            async def provider_operation() -> str:
-                return 'ok'
-
-            toolset.add_function(provider_operation, name=name, description='New Slack provider operation')
-        return toolset
-
-    monkeypatch.setattr(mcp_module, 'MCPToolset', build)
-    return authorizations
-
-
-class _ActionBlock(TypedDict):
-    """The `actions` block of a posted prompt, as far as the tests read it."""
-
-    block_id: str
-    elements: list[dict[str, object]]
-
-
-_BLOCKS_ADAPTER = TypeAdapter(list[dict[str, object]])
-_ACTION_BLOCK_ADAPTER = TypeAdapter(_ActionBlock)
+from anyio.abc import TaskGroup
+from mcp import types
+from mcp.server.lowlevel import Server
+from mcp.server.streamable_http import StreamableHTTPServerTransport
+from starlette.types import Receive, Scope, Send
 
 
 @dataclass
-class SlackCall:
-    """One recorded Slack Web API call."""
-
-    method: str
-    kwargs: dict[str, object]
+class MCPCall:
+    token: str
+    name: str
+    arguments: dict[str, object]
 
 
 @dataclass
-class _Recorder:
-    """Mutable state the fake carries, kept off `AsyncWebClient`'s own attributes."""
-
-    calls: list[SlackCall] = field(default_factory=list[SlackCall])
-    next_ts: str = '1700000000.000100'
-    post_response: dict[str, object] | None = None
-    post_error: Exception | None = None
-    update_error: Exception | None = None
-    update_attempts: int = 0
-    status_error: Exception | None = None
-    open_response: dict[str, object] | None = None
-    open_error_user_id: str | None = None
+class _Session:
+    token: str
+    transport: StreamableHTTPServerTransport
+    started: anyio.Event
+    closed: anyio.Event
 
 
-class FakeSlackClient(AsyncWebClient):
-    """A real `AsyncWebClient` whose calls are recorded rather than sent.
+class OfflineMCP:
+    """A real MCP Streamable HTTP server exposed through an in-process ASGI transport."""
 
-    Subclassing rather than duck-typing is what keeps the fake honest: Pyright
-    checks each override against the SDK's own signature, so a method the SDK
-    renames or retypes fails here instead of against live Slack.
-    """
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.tools: list[types.Tool] = []
+        self.instructions = 'Offline MCP server instructions.'
+        self.calls: list[MCPCall] = []
+        self.authorization_headers: list[str] = []
+        self.http_clients: list[httpx.AsyncClient] = []
+        self.session_starts: list[str] = []
+        self.session_closes: list[str] = []
+        self.result: types.CallToolResult | None = None
+        self.error: Exception | None = None
+        self.error_once = False
+        self.block_calls = False
+        self.call_started = anyio.Event()
+        self.call_release = anyio.Event()
+        self._sessions: dict[str, _Session] = {}
+        self._task_group: TaskGroup | None = None
+        self._stack: AsyncExitStack | None = None
 
-    def __init__(self) -> None:
-        super().__init__(token='xoxb-fake')  # pyright: ignore[reportUnknownMemberType]
-        self.recorder = _Recorder()
+        def create_client(
+            *,
+            headers: dict[str, str] | None = None,
+            timeout: httpx.Timeout | None = None,
+            auth: httpx.Auth | None = None,
+            follow_redirects: bool = True,
+            **_: object,
+        ) -> httpx.AsyncClient:
+            del auth
+            client_headers = headers or {}
+            token = client_headers.get('Authorization')
+            if token is not None:
+                self.authorization_headers.append(token)
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=self),
+                headers=client_headers,
+                follow_redirects=follow_redirects,
+                timeout=timeout,
+            )
+            self.http_clients.append(client)
+            return client
 
-    @property
-    def calls(self) -> list[SlackCall]:
-        return self.recorder.calls
+        monkeypatch.setattr('fastmcp.client.transports.http.create_mcp_http_client', create_client)
 
-    @property
-    def next_ts(self) -> str:
-        return self.recorder.next_ts
+    async def __aenter__(self) -> OfflineMCP:
+        self._stack = AsyncExitStack()
+        self._task_group = await self._stack.enter_async_context(anyio.create_task_group())
+        return self
 
-    def method_calls(self, method: str) -> list[SlackCall]:
-        return [call for call in self.calls if call.method == method]
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        assert self._stack is not None
+        await self._terminate_sessions()
+        if self._task_group is not None:
+            self._task_group.cancel_scope.cancel()
+        await self._stack.aclose()
+        self._task_group = None
 
-    def _record(self, method: str, kwargs: dict[str, object], payload: dict[str, object]) -> AsyncSlackResponse:
-        self.calls.append(SlackCall(method, kwargs))
-        return AsyncSlackResponse(
-            client=self,
-            http_verb='POST',
-            api_url=f'https://slack.com/api/{method}',
-            req_args={},
-            data=payload,
-            headers={},
-            status_code=200,
-        )
+    async def _terminate_sessions(self) -> None:
+        for session in self._sessions.values():
+            await session.transport.terminate()
+        with anyio.move_on_after(2):
+            for session in self._sessions.values():
+                await session.closed.wait()
 
-    async def conversations_open(
-        self,
-        *,
-        channel: str | None = None,
-        return_im: bool | None = None,
-        users: str | Sequence[str] | None = None,
-        **kwargs: Any,
-    ) -> AsyncSlackResponse:
-        user_id = users if isinstance(users, str) else '-'.join(users or ())
-        if self.recorder.open_error_user_id == user_id:
-            raise RuntimeError(f'Could not open a DM with {user_id}')
-        return self._record(
-            'conversations_open',
-            {'channel': channel, 'return_im': return_im, 'users': users},
-            self.recorder.open_response or {'ok': True, 'channel': {'id': f'D-{user_id}'}},
-        )
+    async def _create_session(self, token: str) -> _Session:
+        if self._task_group is None:  # pragma: no cover - fixture always enters first
+            raise RuntimeError('OfflineMCP must be used as an async context manager')
+        transport = StreamableHTTPServerTransport(None, is_json_response_enabled=True)
+        session = _Session(token, transport, anyio.Event(), anyio.Event())
+        self._sessions[token] = session
+        server = Server('offline-slack-mcp', instructions=self.instructions)
 
-    async def chat_postMessage(
-        self,
-        *,
-        channel: str | None = None,
-        text: str | None = None,
-        markdown_text: str | None = None,
-        blocks: Sequence[object] | None = None,
-        thread_ts: str | None = None,
-        mrkdwn: bool | None = None,
-        **kwargs: Any,
-    ) -> AsyncSlackResponse:
-        if self.recorder.post_error is not None:
-            raise self.recorder.post_error
-        response = self._record(
-            'chat_postMessage',
-            {
-                'channel': channel,
-                'text': text,
-                'markdown_text': markdown_text,
-                'blocks': blocks,
-                'thread_ts': thread_ts,
-                'mrkdwn': mrkdwn,
-            },
-            self.recorder.post_response or {'ok': True, 'ts': self.next_ts},
-        )
-        return response
+        @server.list_tools()
+        async def list_tools() -> list[types.Tool]:
+            return self.tools
 
-    async def chat_update(
-        self,
-        *,
-        channel: str | None = None,
-        ts: str | None = None,
-        text: str | None = None,
-        blocks: Sequence[object] | None = None,
-        mrkdwn: bool | None = None,
-        **kwargs: Any,
-    ) -> AsyncSlackResponse:
-        self.recorder.update_attempts += 1
-        if self.recorder.update_error is not None:
-            raise self.recorder.update_error
-        return self._record(
-            'chat_update',
-            {'channel': channel, 'ts': ts, 'text': text, 'blocks': blocks, 'mrkdwn': mrkdwn},
-            {'ok': True, 'ts': ts},
-        )
+        @server.call_tool()
+        async def call_tool(name: str, arguments: dict[str, object]) -> types.CallToolResult:
+            self.calls.append(MCPCall(token, name, arguments))
+            if self.block_calls:
+                self.call_started.set()
+                await self.call_release.wait()
+            if self.error is not None:
+                error = self.error
+                if self.error_once:
+                    self.error = None
+                raise error
+            if self.result is None:
+                return types.CallToolResult(content=[types.TextContent(type='text', text='ok')])
+            return self.result
 
-    async def agents_sessions_setStatus(
-        self,
-        *,
-        channel_id: str,
-        thread_ts: str | None = None,
-        status: str,
-        **kwargs: Any,
-    ) -> AsyncSlackResponse:
-        if self.recorder.status_error is not None:
-            raise self.recorder.status_error
-        return self._record(
-            'agents_sessions_setStatus',
-            {'channel_id': channel_id, 'thread_ts': thread_ts, 'status': status},
-            {'ok': True},
-        )
+        async def run_server() -> None:
+            try:
+                async with transport.connect() as streams:
+                    session.started.set()
+                    self.session_starts.append(token)
+                    await server.run(*streams, server.create_initialization_options())
+            finally:
+                session.closed.set()
+                self.session_closes.append(token)
+
+        self._task_group.start_soon(run_server)
+        await session.started.wait()
+        return session
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        headers = dict(scope.get('headers', []))  # type: ignore[arg-type]
+        token_header = headers.get(b'authorization', b'').decode()
+        session = self._sessions.get(token_header)
+        if session is None or session.closed.is_set():
+            session = await self._create_session(token_header)
+        await session.transport.handle_request(scope, receive, send)
 
 
 @pytest.fixture
-def anyio_backend() -> str:
-    return 'asyncio'
-
-
-@pytest.fixture
-def slack_client() -> FakeSlackClient:
-    return FakeSlackClient()
-
-
-def prompt_block_id(client: FakeSlackClient, index: int = 0) -> str:
-    """Block id of the nth prompt posted, which is what a button click carries back."""
-    return _prompt_action_block(client, index)['block_id']
-
-
-def _prompt_action_block(client: FakeSlackClient, index: int) -> _ActionBlock:
-    posts = client.method_calls('chat_postMessage')
-    blocks = _BLOCKS_ADAPTER.validate_python(posts[index].kwargs['blocks'])
-    return _ACTION_BLOCK_ADAPTER.validate_python(blocks[1])
+async def offline_mcp(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[OfflineMCP]:
+    async with OfflineMCP(monkeypatch) as server:
+        yield server

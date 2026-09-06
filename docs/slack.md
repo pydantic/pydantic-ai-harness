@@ -1,14 +1,13 @@
 ---
 title: Slack
-description: Give an agent typed Slack workspace tools and serve it inside Slack with Bolt.
+description: Give an agent native Slack MCP tools and serve it through a caller-owned Bolt app.
 ---
 
 # Slack
 
-`Slack` gives an agent Slack workspace tools, and `SlackApp` serves that agent
-inside Slack. The capability uses Slack's hosted MCP server for model-selected
-search, reads, and actions. The app adapter uses Bolt for events, OAuth, thread
-routing, and response delivery.
+Use `Slack` when an agent should answer questions about the Slack conversation
+that invoked it, using Slack's hosted MCP server. Use `SlackApp` to connect that
+agent to a caller-owned asynchronous Slack Bolt app.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/slack/)
 
@@ -20,152 +19,40 @@ routing, and response delivery.
 uv add "pydantic-ai-harness[slack]"
 ```
 
+The Slack extra supplies the Bolt integration. Create a Slack app that is
+eligible for Slack's hosted MCP server: use an internal app or an app published
+in the Slack directory, and enable MCP for that app. Slack's [hosted MCP
+guide](https://docs.slack.dev/ai/slack-mcp-server/) is authoritative for
+eligibility, tool schemas, result shapes, OAuth scopes, and pagination.
+
+> External assumptions, verified 2026-09-06: the native MCP endpoint is
+> `https://mcp.slack.com/mcp`, and the installed Slack Bolt APIs provide
+> `AsyncOAuthSettings`, `installation_store_bot_only`,
+> `AsyncSocketModeHandler.start_async`, `close_async`, and
+> `AsyncSlackRequestHandler`. Re-check these signatures and the provider
+> contract against the [hosted MCP guide](https://docs.slack.dev/ai/slack-mcp-server/),
+> [Bolt OAuth guide](https://docs.slack.dev/tools/bolt-python/concepts/authenticating-oauth/),
+> and the installed SDK before changing integration code.
+
 ## Quick start
 
 ```python
-from pydantic_ai import Agent
-
-from pydantic_ai_harness.slack import Slack, SlackApp
-
-agent = Agent('openai:gpt-5.6-sol', capabilities=[Slack()])
-SlackApp(agent).run()
-```
-
-For this Socket Mode example, set `SLACK_BOT_TOKEN`, `SLACK_APP_TOKEN`, and
-`SLACK_MCP_TOKEN`. Set `SLACK_ALLOWED_USER_IDS` to the user ID that owns that
-MCP token. This fixed-identity setup is intended for a local or internal
-single-user app; use per-user OAuth below before allowing multiple users.
-Invite the app to a channel, then mention it once to start a thread. Direct
-messages need no mention.
-
-## Slack app setup
-
-Create one internal or Marketplace Slack app for both Bolt and MCP. Enable
-Socket Mode for `SlackApp.run()`, or configure HTTP request URLs for
-`SlackApp.http_app()`.
-
-For ingress and delivery, subscribe the bot to `app_mention`, `message.im`,
-`message.channels`, `app_context_changed`, and `agent_session_stopped`. Add
-`message.groups` for private-channel threads and `message.mpim` for group DMs.
-Grant the matching bot scopes:
-
-- `app_mentions:read`
-- `chat:write`
-- `im:write` for private approval prompts
-- `channels:history`
-- `groups:history` when subscribing to `message.groups`
-- `im:history`
-- `mpim:history` when subscribing to `message.mpim`
-
-When using Slack's `agent_view`, `SlackContext.active_entities` preserves any
-active-view entities attached to a message, including typed message coordinates.
-Slack's agent surface requires the `assistant:write` bot scope. `SlackApp` uses
-`agents.sessions.setStatus` for the visible working state and handles Slack's
-native stop button.
-
-Enable interactivity for approval buttons. In Socket Mode it needs no request
-URL. For the Events API, point both event subscriptions and interactivity to the
-public URL served at `/slack/events`. Public and private channels must invite
-the app before it can receive their events.
-
-Generate an app-level token with `connections:write` for Socket Mode. The Events
-API uses the bot token and signing secret instead.
-
-Enable the [Slack MCP server](https://docs.slack.dev/ai/slack-mcp-server/) for
-the same app. `SlackTools.required_user_scopes` returns the user scopes for an
-exact typed selection. The default `Slack()` needs `search:read.users`,
-`files:read`, `channels:history`, `groups:history`, `im:history`, and
-`mpim:history`.
-
-The following manifest is the complete starting point for the default toolset.
-Replace the name and request URLs. Remove event families your app will not use.
-
-```json
-{
-  "display_information": {"name": "Pydantic AI Agent"},
-  "features": {
-    "agent_view": {"agent_description": "A Pydantic AI agent", "suggested_prompts": []},
-    "app_home": {
-      "home_tab_enabled": false,
-      "messages_tab_enabled": true,
-      "messages_tab_read_only_enabled": false
-    },
-    "bot_user": {"display_name": "Pydantic AI Agent", "always_online": true}
-  },
-  "oauth_config": {
-    "redirect_urls": ["https://agent.example/slack/oauth_redirect"],
-    "scopes": {
-      "user": [
-        "search:read.users",
-        "files:read",
-        "channels:history",
-        "groups:history",
-        "im:history",
-        "mpim:history"
-      ],
-      "bot": [
-        "app_mentions:read",
-        "assistant:write",
-        "channels:history",
-        "chat:write",
-        "groups:history",
-        "im:history",
-        "im:write",
-        "mpim:history"
-      ]
-    }
-  },
-  "settings": {
-    "event_subscriptions": {
-      "request_url": "https://agent.example/slack/events",
-      "bot_events": [
-        "agent_session_stopped",
-        "app_context_changed",
-        "app_mention",
-        "message.channels",
-        "message.groups",
-        "message.im",
-        "message.mpim"
-      ]
-    },
-    "interactivity": {"is_enabled": true, "request_url": "https://agent.example/slack/events"},
-    "is_mcp_enabled": true,
-    "socket_mode_enabled": true,
-    "token_rotation_enabled": false
-  }
-}
-```
-
-`SLACK_MCP_TOKEN` is a fixed user identity. `SlackApp` accepts it only when
-exactly one Slack user is allowed to invoke the agent. A distributed or
-multi-user app should let Bolt perform OAuth, store installations by user, and
-pass a caller-configured `AsyncApp` to `SlackApp`.
-
-For a multi-user app, configure Bolt OAuth with a user-keyed installation store.
-This example uses Slack SDK's SQLite store; use a shared database-backed store
-when more than one process serves the app.
-
-That store persists OAuth installations only. Approval waits, stop routing,
-per-thread locks, engagement, and retry deduplication are process-local. Run one
-`SlackApp` worker, or configure ingress affinity so every event for a workspace
-and thread reaches the same worker. A shared `ConversationStore` does not provide
-that coordination.
-
-```python {test="skip"}
 import os
 
 from pydantic_ai import Agent
 from slack_bolt.app.async_app import AsyncApp
 from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
-from slack_sdk.oauth.installation_store.sqlite3 import SQLite3InstallationStore
+from slack_sdk.oauth.installation_store.file import FileInstallationStore
 
-from pydantic_ai_harness.slack import Slack, SlackAccess, SlackApp
+from pydantic_ai_harness.slack import Slack, SlackApp
 
-slack = Slack()
-agent = Agent('openai:gpt-5.6-sol', capabilities=[slack])
-client_id = os.environ['SLACK_CLIENT_ID']
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Slack()])
+installation_store = FileInstallationStore(
+    base_dir=os.environ['SLACK_INSTALLATION_DIR'],
+    client_id=os.environ['SLACK_CLIENT_ID'],
+)
 oauth_settings = AsyncOAuthSettings(
-    client_id=client_id,
+    client_id=os.environ['SLACK_CLIENT_ID'],
     client_secret=os.environ['SLACK_CLIENT_SECRET'],
     scopes=[
         'app_mentions:read',
@@ -174,246 +61,297 @@ oauth_settings = AsyncOAuthSettings(
         'chat:write',
         'groups:history',
         'im:history',
-        'im:write',
         'mpim:history',
     ],
-    user_scopes=sorted(slack.tools.required_user_scopes),
-    redirect_uri='https://agent.example/slack/oauth_redirect',
-    installation_store=SQLite3InstallationStore(database='slack-installations.db', client_id=client_id),
+    user_scopes=os.environ['SLACK_USER_SCOPES'],
+    redirect_uri=os.environ['SLACK_REDIRECT_URI'],
+    installation_store=installation_store,
+    installation_store_bot_only=False,
 )
+bolt = AsyncApp(oauth_settings=oauth_settings, signing_secret=os.environ['SLACK_SIGNING_SECRET'])
+SlackApp(agent, app=bolt, allowed_users={'T01234567': {'U01234567'}})
+```
 
-bolt = AsyncApp(oauth_settings=oauth_settings)
-slack_app = SlackApp(
+Serve the resulting Bolt app through `AsyncSlackRequestHandler` as shown in
+the [ASGI section](#asgi). Set `SLACK_INSTALLATION_DIR` to a caller-chosen
+directory with owner-only permissions because it contains OAuth credentials.
+Create it with mode `0700` and keep its files inaccessible to other users;
+`FileInstallationStore` persists the bot and per-user tokens there.
+`SLACK_USER_SCOPES` is a comma-separated list copied from Slack's current MCP
+guide. The [runnable example](../../examples/slack_agent.py) uses the same
+configuration and serves one ASGI worker.
+
+`SlackApp` registers Bolt listeners on the `AsyncApp` supplied by the caller.
+The caller then starts Socket Mode or serves the Bolt app through an ASGI
+adapter. `allowed_users` is workspace-qualified: the keys are Slack workspace
+IDs and each value is a set of user IDs. Use `{'T01234567': {'U01234567'}}`,
+not a bare user ID. `allowed_users='all'` allows every user who can reach the
+installed app, so use it only when that audience is intentional.
+
+## Configure Bolt and OAuth
+
+For a multi-user installation, the caller owns [Bolt OAuth](https://docs.slack.dev/tools/bolt-python/concepts/authenticating-oauth/) and must configure it
+to resolve a per-user OAuth token for each event. Use a user-keyed installation
+store and set `installation_store_bot_only=False`; bot-only installations do not
+provide the user token that Slack MCP needs. Keep the `AsyncApp` instance and
+its installation store in the caller's application.
+
+```python {test="skip"}
+import os
+
+from slack_bolt.app.async_app import AsyncApp
+from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
+from slack_sdk.oauth.installation_store.file import FileInstallationStore
+
+installation_store = FileInstallationStore(
+    base_dir=os.environ['SLACK_INSTALLATION_DIR'],
+    client_id=os.environ['SLACK_CLIENT_ID'],
+)
+oauth_settings = AsyncOAuthSettings(
+    client_id=os.environ['SLACK_CLIENT_ID'],
+    client_secret=os.environ['SLACK_CLIENT_SECRET'],
+    scopes=[
+        'app_mentions:read',
+        'assistant:write',
+        'channels:history',
+        'chat:write',
+        'groups:history',
+        'im:history',
+        'mpim:history',
+    ],
+    user_scopes=os.environ['SLACK_USER_SCOPES'],
+    redirect_uri=os.environ['SLACK_REDIRECT_URI'],
+    installation_store=installation_store,
+    installation_store_bot_only=False,
+)
+bolt = AsyncApp(oauth_settings=oauth_settings, signing_secret=os.environ['SLACK_SIGNING_SECRET'])
+SlackApp(
     agent,
     app=bolt,
-    access=SlackAccess.workspace(),
+    allowed_users={'T01234567': {'U01234567'}},
     install_url='https://agent.example/slack/install',
 )
-asgi_app = slack_app.http_app()
 ```
 
-Every user must visit the install URL and authorize the requested user scopes;
-Slack's MCP setup requires a separate user installation before it can query on
-that person's behalf. Bolt then resolves both identities for an authorized
-event: its Web API client delivers the response as the app, while
-the OAuth user token creates a new Slack MCP session for the invoking user. Set
-`install_url` or `SLACK_INSTALL_URL` so an unauthorized user receives the link
-instead of a generic configuration error.
+The exact user scopes are selected from Slack's current hosted MCP
+documentation and are real authorization: Harness does not turn them into a
+second policy or pretend to confine native MCP calls. Do not copy a catalog or
+schema into the application. Slack owns the catalog, schemas, result formats,
+and pagination behavior.
 
-In OAuth mode, a missing per-event user token fails closed rather than falling
-back to `SLACK_MCP_TOKEN`. Pass `mcp_token` explicitly only when the whole
-installation is intentionally meant to use one fixed user identity.
+The install URL is optional. If configured, it is included when an allowed
+event has no per-user OAuth token. If OAuth is configured without a user token,
+the run fails before the model request and the user receives a connection
+message. There is no fixed-token fallback. An unauthorized user is ignored by
+the event handler.
 
-Serve `asgi_app` directly so it receives `/slack/events`, `/slack/install`, and
-`/slack/oauth_redirect`. When combining it with FastAPI or Starlette, mount it
-at `/` after more specific application routes. Do not mount the handler at
-`/slack/events`: ASGI mounting strips that prefix before Bolt performs its
-exact path match.
+## Socket Mode
 
-## What each layer owns
+Socket Mode is started on the caller-owned Bolt app. The native asynchronous
+handler method is `start_async`; construct and close the handler inside the
+running event loop.
 
-| Layer | Responsibility |
-| --- | --- |
-| `SlackApp` and Bolt | Events, OAuth installations, request verification, conversation routing, and final-response delivery |
-| `Slack` and Slack MCP | Agent-selected search, channel and thread reads, user lookup, and explicitly enabled Slack actions |
-| Slack Web API client | Deterministic response delivery and approval UI that Slack MCP does not provide |
+```python {test="skip"}
+from slack_bolt.adapter.socket_mode.aiohttp import AsyncSocketModeHandler
 
-Composio and Pipedream can supply tools for other services used by the same
-agent. They are not required for the Slack conversation loop or Slack tools.
+async def serve_socket_mode() -> None:
+    handler = AsyncSocketModeHandler(bolt, 'xapp-your-app-level-token')
+    try:
+        await handler.start_async()
+    finally:
+        await handler.close_async()
+```
 
-## Conversation behavior
+Create an app-level token with `connections:write`. Socket Mode still needs
+OAuth HTTP routes for onboarding: authorization, installation storage, the
+install page, and the OAuth redirect are separate from the Socket Mode
+connection. Configure those routes in the caller's web service.
 
-`SlackApp` follows normal Slack expectations:
+## ASGI
 
-- A DM invokes the agent without a mention.
-- A group DM requires one mention to start; replies in its engaged thread do not.
-- One `@agent` mention starts a channel thread.
-- Later human replies in that engaged thread invoke the agent without another mention.
-- Top-level channel messages and unrelated threads are ignored.
-- Bot messages, edits, deletions, and Slack retry deliveries do not start duplicate runs.
-- User-authored file shares and thread broadcasts continue an engaged thread. Attached file IDs and metadata are typed,
-  and the default toolset can read only files attached to that invoking message.
-- A follow-up that needs the same file should include the attachment again. Harness does not infer file authority from
-  model-visible history.
-- Runs are serialized per thread, and each thread has separate Pydantic AI message history.
+For HTTP events, serve the installed Bolt ASGI adapter directly around the same
+caller-owned `AsyncApp`, with one worker:
 
-The default store is process memory. Pass a `ConversationStore` implementation
-for production persistence. In-memory event deduplication covers Slack's
-standard five-minute retry schedule. High-availability deployments should also
-deduplicate event IDs in their durable ingress queue.
+```python {test="skip"}
+from slack_bolt.adapter.asgi.async_handler import AsyncSlackRequestHandler
 
-## Typed tool selection
+SlackApp(
+    agent,
+    app=bolt,
+    allowed_users={'T01234567': {'U01234567'}},
+    install_url='https://agent.example/slack/install',
+)
+asgi_app = AsyncSlackRequestHandler(bolt, path='/slack/events')
+```
 
-The default is `SlackTools.current_conversation()`: user lookup, attached-file
-reads, and channel and thread reads. Runtime argument checks confine those reads
-to the invoking conversation, its active-view context, and its attached files.
-It handles questions like "How many messages did Aditya send in this channel?"
-without giving the model workspace search or unrelated private history. Exact
-aggregation over a channel too large for the model context should be provided as
-a deterministic application tool. Write tools are absent.
+Serve `asgi_app` directly at `/slack/events` and expose Bolt's configured
+`/slack/install` and `/slack/oauth_redirect` routes for OAuth onboarding. Do
+not mount it below another path that changes the request path. Events and OAuth
+onboarding are both required for a multi-user app. If you switch to Socket
+Mode, set `socket_mode_enabled` to `true` and run the Socket Mode handler, but
+continue serving the OAuth HTTP routes for onboarding.
 
-Select exact additions with `SlackTool` values:
+## Slack event configuration
 
-```python
-from pydantic_ai_harness.slack import Slack, SlackTool, SlackTools
+The app must be able to receive `app_mention`, supported `message` events, and
+`agent_session_stopped`. Subscribe to the message event families used by your
+deployment, such as `message.channels`, `message.groups`, `message.im`, and
+`message.mpim`. The app needs the corresponding history scopes and `chat:write`
+to post replies. `assistant:write` enables the native agent status and Stop
+behavior. Do not add approval subscriptions or active-context subscriptions.
+Removing a message event family also permits removing its corresponding bot
+history scope from the manifest and OAuth `scopes` list. User MCP scopes remain
+provider-configured by Slack.
 
-slack = Slack(
-    tools=(
-        SlackTools.read_only()
-        | SlackTools.of(SlackTool.SEND_MESSAGE, SlackTool.ADD_REACTION)
-    )
+This starting manifest keeps only the event and status behavior owned by
+`SlackApp`; replace the IDs and URLs and choose message families for your app:
+
+```json
+{
+  "display_information": {"name": "Pydantic AI Agent"},
+  "features": {
+    "agent_view": {"agent_description": "A Pydantic AI agent"},
+    "app_home": {"home_tab_enabled": false, "messages_tab_enabled": true, "messages_tab_read_only_enabled": false},
+    "bot_user": {"display_name": "pydantic-ai-agent", "always_online": true}
+  },
+  "oauth_config": {
+    "redirect_urls": ["https://agent.example/slack/oauth_redirect"],
+    "scopes": {
+      "bot": [
+        "app_mentions:read",
+        "assistant:write",
+        "channels:history",
+        "chat:write",
+        "groups:history",
+        "im:history",
+        "mpim:history"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://agent.example/slack/events",
+      "bot_events": [
+        "app_mention",
+        "message.channels",
+        "message.groups",
+        "message.im",
+        "message.mpim",
+        "agent_session_stopped"
+      ]
+    },
+    "is_mcp_enabled": true,
+    "socket_mode_enabled": false
+  }
+}
+```
+
+The [Slack agent guide](https://docs.slack.dev/ai/developing-agents/), [Bolt agent features](https://docs.slack.dev/tools/bolt-python/concepts/adding-agent-features/), and [agent sessions](https://docs.slack.dev/ai/agent-sessions/) guides, together with the
+[Slack app manifest reference](https://docs.slack.dev/reference/app-manifest/)
+define the provider-owned fields. Slack may change them independently of a
+Harness release.
+
+## Conversation and context
+
+A direct message invokes the agent without a mention. A channel or group-DM
+conversation starts when the app is mentioned; replies in the engaged thread
+continue the conversation. Unrelated top-level messages and threads are
+ignored. Within one running process, bot messages, edits, deletions, and
+duplicate retry deliveries do not start duplicate runs. This in-memory
+deduplication is lost on restart. The host posts the model's final output, so the agent must not
+send a duplicate ordinary answer through a Slack messaging tool. Slack status
+and Stop behavior use native [agent features](https://docs.slack.dev/tools/bolt-python/concepts/adding-agent-features/)
+and [agent sessions](https://docs.slack.dev/ai/agent-sessions/).
+
+Each run has a `SlackContext` with the workspace (`team_id`), channel
+(`channel_id`), thread (`thread_ts`), invoking message (`message_ts`), user
+(`user_id`), optional enterprise (`enterprise_id`), and files attached to the
+invoking message. `current_slack_context()` returns it while the run is active.
+This context is interpretive metadata for resolving the user's request. It is
+not a confinement or security boundary. OAuth authorization and Slack's native
+MCP authorization remain authoritative.
+
+For example, to answer “How many messages did Priya send in the current
+conversation?” the agent should use the current context to identify the
+workspace, channel, and thread, use native Slack discovery to resolve Priya,
+then use the native read or search tools with their current schemas. It must
+distinguish a channel-wide count from a thread-reply count, follow real
+pagination until the result is complete, and say when the available result is
+partial. The result format and pagination rules come from Slack MCP, not from a
+Harness catalog or wrapper.
+
+Files in the context are metadata from the invoking event. Native Slack MCP
+schemas and the invoking user's OAuth authorization decide whether a file can
+be read. Do not infer file authority from model-visible history.
+
+## History, stores, and execution limits
+
+Runs are serialized per Slack thread and the default store is in memory. Pass a
+`ConversationStore` implementation, or use `FileConversationStore`, when a
+single-process bot should retain thread history after restart:
+
+```python {test="skip"}
+from pydantic_ai_harness.slack import FileConversationStore
+
+SlackApp(
+    agent,
+    app=bolt,
+    allowed_users={'T01234567': {'U01234567'}},
+    store=FileConversationStore('~/.slack-agent'),
 )
 ```
 
-Call `.restrict_to_current_conversation()` on an exact selection when its
-channel, thread, and file reads should keep the default runtime boundary. Agent
-specs apply that boundary to exact selections by default; set
-`read_scope: workspace` only when unrestricted reads are intentional.
+`FileConversationStore` provides restart persistence for one process. It does
+not coordinate workers or make a deployment distributed. Keep `SlackApp` to a
+single process and one worker. Its in-memory locks, event deduplication,
+engagement state, cancellation, and per-event OAuth identity are process-local.
+The running process retains up to 30,000 event IDs per workspace for 10 minutes;
+those entries are lost on process restart.
 
-Use `SlackTools.workspace_read()` to add public workspace search,
-`SlackTools.read_only()` for every supported read surface including private
-search, or `SlackTools.of(...)` for the smallest exact set. Use
-`SlackTools.none()` when Slack only hosts the agent and no MCP tools are needed.
-Conversation restrictions are sticky under `|`, so adding a duplicate tool cannot
-widen its authority. Choose `workspace_read()`, `read_only()`, or an exact `of()`
-selection directly when broader reads are intended.
+Important: an invoking user's Slack read authorization does not authorize
+disclosure of that data to every participant in the thread. Shared thread
+history is an information-flow boundary to consider: every user
+who can participate in the same workspace, channel, and thread can cause the
+stored model history for that thread to be replayed. Do not put data in shared
+thread history that another participant must not see. A custom store can apply
+the application's own retention and isolation policy.
 
-Slack can publish a new MCP tool before Harness releases a matching enum value.
-Advanced users can describe its exact name and OAuth scopes explicitly:
+`SlackApp` does not support durable execution capabilities. There are no
+deferred Slack results. Native MCP tool errors are returned as retryable tool
+results so the model can recover when possible. Missing OAuth fails before the
+model request and produces the connection reply, including `install_url` when
+configured. Model failures and terminal host failures produce the generic
+error reply. If delivery succeeds but saving history fails, the host posts the
+history-save warning. These failures do not cause a second ordinary model
+reply.
 
-```python
-from pydantic_ai_harness.slack import Slack, SlackCustomTool, SlackTools
+## Dependencies
 
-canvas = SlackCustomTool('slack_create_canvas', user_scopes={'canvases:write'})
-slack = Slack(tools=SlackTools.custom(canvas))
-```
-
-The name is checked against Slack's discovered catalog, its scopes contribute to
-`required_user_scopes`, and `approval='writes'` requires approval because Harness
-has not classified the custom tool as read-only. Prefer `SlackTool` values once
-they are available.
-
-Tool names are checked against Slack's discovered MCP catalog on connection. A
-selected tool that Slack does not supply raises an error instead of disappearing
-from the model's toolset.
-
-The supported typed values are:
-
-- `SEARCH_PUBLIC`
-- `SEARCH_PUBLIC_AND_PRIVATE`
-- `SEARCH_CHANNELS`
-- `SEARCH_USERS`
-- `READ_CHANNEL`
-- `READ_THREAD`
-- `READ_FILE`
-- `READ_USER_PROFILE`
-- `LIST_CHANNEL_MEMBERS`
-- `SEND_MESSAGE`
-- `SCHEDULE_MESSAGE`
-- `ADD_REACTION`
-
-Slack may add tools to its hosted server independently. Harness adds a typed
-enum member after the tool and its behavior have been verified.
-
-## Approval policy
-
-Known write tools require Pydantic AI approval by default. `SlackApp` privately
-DMs each allowed approver the pending call and its complete arguments with Slack
-buttons, then resumes the run with the first valid decision. For channel and
-group-DM runs, approval details stay out of the invoking conversation. A run
-invoked in the approver's direct message necessarily uses that same private DM.
+`deps` supplies one dependency value to every run. `deps_factory` can derive a
+value from the typed Slack context; pass one or the other, not both.
 
 ```python {test="skip"}
-Slack(
-    tools=SlackTools.of(SlackTool.SEND_MESSAGE),
-    approval='writes',
-    approver_ids=['U01REVIEWER'],
+SlackApp(
+    agent,
+    app=bolt,
+    allowed_users={'T01234567': {'U01234567'}},
+    deps_factory=lambda context: make_dependencies(context.team_id, context.user_id),
 )
 ```
 
-Use `approval='all'` to review every selected Slack call, or
-`approval='none'` when authorization and confirmation are enforced elsewhere.
-Set `approval_timeout_seconds` when the default ten-minute decision window does
-not fit the deployment. A timeout denies the action.
-Approval is confirmation, not authentication. Slack OAuth scopes and the app's
-own authorization rules remain the access boundary.
+## Public exports
 
-## Identity and concurrency
+The Slack package has eight public exports:
 
-The bot token and MCP user token have different jobs and are not interchangeable:
+- `Slack` adds the native hosted Slack MCP toolset to an agent.
+- `SlackApp` registers the Slack event and stop handlers on a caller-owned Bolt app.
+- `SlackContext` describes the current Slack run metadata.
+- `SlackFile` describes a file attached to the invoking message.
+- `current_slack_context` reads the current context during a run.
+- `ConversationStore` is the protocol for thread-history storage.
+- `InMemoryConversationStore` stores history in the current process.
+- `FileConversationStore` stores history in private JSON files for restart persistence.
 
-- The bot token lets Bolt receive events and deliver app responses.
-- The user token lets Slack MCP act with the invoking user's Slack access.
-- The app token opens Socket Mode and never authorizes Web API or MCP calls.
-- The signing secret verifies HTTP requests and is not an API credential.
-
-`Slack` creates a new `MCPToolset` once per agent run. It does not cache a shared
-authenticated session, so overlapping runs cannot inherit another user's token.
-The current channel, thread, message, workspace, enterprise, and user IDs are
-available as `current_slack_context()` while the run executes. Tokens are
-kept in private run context and are not fields on `SlackContext`.
-
-## Slack MCP requirements
-
-As verified on 2026-09-05, Slack allows hosted MCP access for internal apps and apps published
-in the Slack Marketplace. Enable MCP for the Slack app and request the user
-OAuth scopes needed by the selected tools. Search, private search, files,
-history, profiles, messages, reactions, and other tool families use distinct
-scopes.
-
-Before changing the typed catalog, scopes, or manifest, re-check Slack's
-[hosted MCP guide](https://docs.slack.dev/ai/slack-mcp-server/),
-[agent guide](https://docs.slack.dev/ai/developing-agents/), and
-[app manifest reference](https://docs.slack.dev/reference/app-manifest/). Slack
-can change these provider-owned contracts independently of Harness releases.
-
-If no per-event user token, explicit `mcp_token`, or `SLACK_MCP_TOKEN` is
-available, the capability fails before the model request. `SlackApp` turns that
-failure into an actionable connection message instead of letting the agent
-claim that it cannot read Slack.
-
-## Existing agent dependencies
-
-`SlackApp` does not replace an agent's dependency type:
-
-```python {test="skip"}
-agent = Agent('openai:gpt-5.6-sol', deps_type=Warehouse, capabilities=[Slack()])
-
-SlackApp(agent, deps=Warehouse(dsn=DSN)).run()
-```
-
-Use `deps_factory` when dependencies vary by Slack thread:
-
-```python {test="skip"}
-SlackApp(agent, deps_factory=lambda thread: Warehouse(dsn=dsn_for(thread.channel_id))).run()
-```
-
-## Durable execution
-
-The `Slack` capability can be used by an agent that runs outside Slack with a
-fixed MCP token and an unrestricted selection such as `SlackTools.workspace_read()`.
-The default selection requires a `SlackApp`-bound conversation. The `SlackApp`
-conversation loop is process-local: the invoking
-OAuth identity, Bolt client, cancellation scope, and approval interaction are
-not replayable on another worker. Keep that adapter outside durable work and
-hand durable tasks to it through an explicit application boundary.
-
-A custom host with a fixed token can bind trusted conversation coordinates with
-`SlackContext.bind()` around `agent.run(...)`. This does not bind an OAuth token,
-a delivery client, or approval routing.
-
-## API reference
-
-::: pydantic_ai_harness.slack.Slack
-
-::: pydantic_ai_harness.slack.SlackApp
-
-::: pydantic_ai_harness.slack.SlackTools
-
-::: pydantic_ai_harness.slack.SlackCustomTool
-
-::: pydantic_ai_harness.slack.SlackAccess
-
-::: pydantic_ai_harness.slack.SlackContext
-
-::: pydantic_ai_harness.slack.SlackFile
+The native Slack MCP catalog is intentionally not re-exported or copied into
+Harness. Read Slack's [hosted MCP guide](https://docs.slack.dev/ai/slack-mcp-server/)
+for current tools, schemas, scopes, and pagination.
