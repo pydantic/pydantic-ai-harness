@@ -2191,6 +2191,21 @@ wheels = [
 ]
 
 [[package]]
+name = "islo"
+version = "0.3.19"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic", version = "2.12.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "pydantic", version = "2.13.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/45/87/7678bf4559e775c58e80df263faff46b9f1cef626540bc852dbb8157ff8f/islo-0.3.19.tar.gz", hash = "sha256:b3f9fa7b996551eb6e77b6c0202f3af0c1d21935eefd4933b0232b271a464612", size = 155588, upload-time = "2026-08-27T12:48:20.149Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c0/b5/a8ecdea027ccc20f5ab44042c8629cd22588ca7c33cc199c5f103f92ead4/islo-0.3.19-py3-none-any.whl", hash = "sha256:ab7e9bab5678e486e0bdfa8ed25e40fe2eef95c5748c3d666b5c6b1226354126", size = 372082, upload-time = "2026-08-27T12:48:18.582Z" },
+]
+
+[[package]]
 name = "jaraco-classes"
 version = "3.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3961,6 +3976,9 @@ dynamic-workflow = [
 exa = [
     { name = "exa-py" },
 ]
+islo = [
+    { name = "islo" },
+]
 logfire = [
     { name = "logfire" },
     { name = "pydantic-ai-slim", extra = ["spec"] },
@@ -4030,6 +4048,7 @@ requires-dist = [
     { name = "genai-prices", specifier = ">=0.0.71" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "idna", marker = "extra == 'playwright'", specifier = ">=3.4" },
+    { name = "islo", marker = "extra == 'islo'", specifier = ">=0.3.12,<0.4" },
     { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.0" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.61.0" },
@@ -4053,7 +4072,7 @@ requires-dist = [
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
     { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.1,<4" },
 ]
-provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "stackone", "temporal", "youdotcom"]
+provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "islo", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "stackone", "temporal", "youdotcom"]
 
 [package.metadata.requires-dev]
 dev = [
