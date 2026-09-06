@@ -212,7 +212,11 @@ class FakeSandboxesClient:
         parent = posixpath.dirname(path)
         while parent and parent != '/':
             self.directories.add(parent)
-            parent = posixpath.dirname(parent)
+            # `posixpath.dirname('//')` is `'//'`, so walk up only while the parent keeps
+            # shrinking; seeding the root would otherwise spin here forever.
+            parent, previous = posixpath.dirname(parent), parent
+            if parent == previous:
+                break
 
 
 class FakeAsyncIslo:

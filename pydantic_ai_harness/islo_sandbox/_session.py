@@ -512,7 +512,13 @@ class IsloSandboxSession:
         if result.stdout_truncated:
             raise IsloSandboxError(f'Directory listing for {target!r} exceeded the provider output limit.')
         entries: list[tuple[str, bool]] = []
-        for line in result.stdout.splitlines():
+        # Split on '\n' only, not str.splitlines(): the listing script delimits records with
+        # '\n', while splitlines() also breaks on '\r', '\v', '\f', and Unicode separators,
+        # which are legal in POSIX filenames and arrive verbatim inside a record.
+        lines = result.stdout.split('\n')
+        if lines[-1] == '':
+            lines.pop()  # the last record's terminator; an empty directory prints nothing at all
+        for line in lines:
             kind, separator, name = line.partition('\t')
             if separator != '\t' or kind not in {'d', 'f'}:
                 raise IsloSandboxError(f'Could not parse directory entry returned by Islo: {line!r}.')

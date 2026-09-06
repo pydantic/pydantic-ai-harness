@@ -296,6 +296,34 @@ class TestFiles:
         with pytest.raises(ValueError, match='positive integer'):
             await IsloSandboxSession().read_bytes('x', max_bytes=max_bytes)
 
+    def test_seeding_the_root_directory_terminates(self, fake_islo: FakeIslo) -> None:
+        # `posixpath.dirname('//')` is `'//'`, so a parent walk that only stops at `'/'`
+        # spins forever here and hangs the run with no failure to read.
+        fake_islo.add_directory('/')
+        fake_islo.put_file('/a/b/c.txt', b'x')
+        assert {'/a', '/a/b'} <= fake_islo.sandboxes.directories
+
+    async def test_listing_splits_records_on_newlines_only(self, fake_islo: FakeIslo) -> None:
+        async with IsloSandboxSession() as session:
+            # The listing script delimits records with '\n'. `\v`, `\r` and U+2028 are legal
+            # in POSIX filenames, and `str.splitlines()` would break records on all three.
+            fake_islo.sandboxes._directory_result = lambda target: FakeExecResult(  # type: ignore[method-assign]
+                stdout='f\ta\vb.txt\nd\tsub\r1\nf\tc\u2028d\n'
+            )
+            assert set(await session.list_files('.')) == {
+                ('a\vb.txt', False),
+                ('sub\r1', True),
+                ('c\u2028d', False),
+            }
+
+            # An empty directory prints nothing, so the split must not read '' as a record.
+            fake_islo.sandboxes._directory_result = lambda target: FakeExecResult(stdout='')  # type: ignore[method-assign]
+            assert await session.list_files('.') == []
+
+            # A final record with no terminator is still a record, not a dropped entry.
+            fake_islo.sandboxes._directory_result = lambda target: FakeExecResult(stdout='f\tlast')  # type: ignore[method-assign]
+            assert await session.list_files('.') == [('last', False)]
+
     async def test_listing_reports_timeout_exit_parse_and_truncation(self, fake_islo: FakeIslo) -> None:
         async with IsloSandboxSession() as session:
             fake_islo.sandboxes._directory_result = lambda target: FakeExecResult(status='timeout')  # type: ignore[method-assign]
