@@ -17,7 +17,7 @@ The three answers, and what picks between them:
 
 Declaring a default `id` is the whole policy: there is no `combine` to write unless the merge needs
 something the field-by-field default cannot express, such as a budget that should take the *smaller*
-value. None of this package's capabilities needs one.
+value. Slack also checks that repeated configurations use the same credential.
 
 The core half of this lives in `pydantic-ai`'s `tests/test_capability_combine.py`.
 
@@ -72,6 +72,7 @@ from pydantic_ai_harness import (
     SystemReminders,
     ToolOutputLimits,
 )
+from pydantic_ai_harness.slack import Slack
 from pydantic_ai_harness.system_reminders import Reminder
 
 pytestmark = pytest.mark.anyio
@@ -172,6 +173,10 @@ def _check_advisor(merged: Any) -> None:
 def _check_sub_agents(merged: Any) -> None:
     # Rosters union: an agent either side could reach stays reachable through one delegate tool.
     assert [entry.agent.name for entry in merged.agents] == ['alpha', 'beta']
+
+
+def _check_slack(merged: Any) -> None:
+    assert merged.id == 'slack'
 
 
 COMBINE_POLICY: dict[str, Policy] = {
@@ -292,6 +297,11 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'Slack': Combines(
+        'one native Slack MCP capability per agent; duplicate defaults merge only with identical credentials',
+        lambda: (Slack(token='test-token'), Slack(token='test-token')),
+        _check_slack,
+    ),
 }
 
 
