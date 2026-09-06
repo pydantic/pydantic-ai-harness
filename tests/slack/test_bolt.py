@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 
 import anyio
 import pytest
@@ -22,7 +22,7 @@ from slack_sdk.web.async_client import AsyncWebClient
 from pydantic_ai_harness.slack import SlackContext, current_slack_context, register_slack
 from tests._recording_durability import RecordingDurability  # pyright: ignore[reportMissingTypeStubs]
 
-pytestmark = pytest.mark.anyio
+pytestmark = [pytest.mark.anyio, pytest.mark.usefixtures('offline_mcp')]
 
 
 @pytest.fixture
@@ -69,7 +69,7 @@ class Harness:
         agent: Agent[object, str],
         *,
         authorization: AuthorizeResult | None = None,
-        deps_factory: Callable[[SlackContext], object] | None = None,
+        deps_factory: Callable[[SlackContext], object | Awaitable[object]] | None = None,
     ) -> None:
         self.posts: list[dict[str, object]] = []
         self.tokens: list[str | None] = []
@@ -630,7 +630,7 @@ async def test_dependency_factory_and_conversation_key(monkeypatch: pytest.Monke
     seen: list[tuple[object, str | None]] = []
     count = 0
 
-    def factory(ctx: SlackContext) -> object:
+    async def factory(ctx: SlackContext) -> object:
         nonlocal count
         count += 1
         assert current_slack_context() == ctx
@@ -654,6 +654,12 @@ async def test_dependency_factory_and_conversation_key(monkeypatch: pytest.Monke
     )
     assert seen[0][1] is not None
     assert len(h.posts) == 1
+    assert_post(h.posts[0], 'ok', None)
+
+
+async def test_sync_dependency_factory(monkeypatch: pytest.MonkeyPatch) -> None:
+    h = Harness(monkeypatch, Agent(TestModel(custom_output_text='ok')), deps_factory=lambda ctx: ctx)
+    await h.dispatch(event())
     assert_post(h.posts[0], 'ok', None)
 
 

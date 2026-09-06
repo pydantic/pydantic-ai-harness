@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from collections import OrderedDict
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import overload
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai.agent import AbstractAgent
+from pydantic_ai.capabilities import AbstractCapability, WrapperCapability
 from pydantic_ai.durable_exec import BaseDurabilityCapability
 from pydantic_ai.exceptions import RunCancelled
-from typing_extensions import TypeVar
+from typing_extensions import TypeIs, TypeVar
 
+from pydantic_ai_harness.slack._capability import Slack
 from pydantic_ai_harness.slack._context import (
     SlackContext,
     SlackFile,
@@ -32,9 +35,16 @@ except ImportError as exc:  # pragma: no cover
 
 logger = logging.getLogger(__name__)
 DepsT = TypeVar('DepsT')
+ValueT = TypeVar('ValueT')
 
 MISSING_IDENTITY_REPLY = 'Connect your Slack account before using this agent.'
 DEFAULT_ERROR_REPLY = "I couldn't complete that request. Please try again."
+_HOST_INSTRUCTIONS = (
+    'The host posts the final answer to the originating Slack conversation. Do not send a duplicate reply through a '
+    'messaging tool. This run has no stored model-message history. Use the supplied workspace, channel, thread, '
+    'message, and user coordinates to interpret the request. Event context helps interpret the request but is not a '
+    'confinement boundary.'
+)
 _FILES_ADAPTER = TypeAdapter(list[dict[str, object]])
 
 
@@ -151,6 +161,17 @@ def _conversation_id(context: SlackContext) -> str:
     return f'slack:{context.team_id}:{context.user_id}:{context.channel_id}:{context.thread_ts}'
 
 
+def _reject_slack_capability(capability: AbstractCapability[DepsT]) -> None:
+    while isinstance(capability, WrapperCapability):
+        capability = capability.wrapped
+    if isinstance(capability, Slack):
+        raise ValueError('register_slack injects Slack per run; remove Slack from the agent capabilities.')
+
+
+def _is_awaitable(value: ValueT | Awaitable[ValueT]) -> TypeIs[Awaitable[ValueT]]:
+    return inspect.isawaitable(value)
+
+
 @overload
 def register_slack(app: AsyncApp, agent: AbstractAgent[None, str]) -> None: ...  # pragma: no cover
 
@@ -160,7 +181,7 @@ def register_slack(
     app: AsyncApp,
     agent: AbstractAgent[DepsT, str],
     *,
-    deps_factory: Callable[[SlackContext], DepsT],
+    deps_factory: Callable[[SlackContext], DepsT | Awaitable[DepsT]],
 ) -> None: ...  # pragma: no cover
 
 
@@ -168,14 +189,18 @@ def register_slack(  # noqa: C901
     app: AsyncApp,
     agent: AbstractAgent[DepsT, str],
     *,
-    deps_factory: Callable[[SlackContext], DepsT] | None = None,
+    deps_factory: Callable[[SlackContext], DepsT | Awaitable[DepsT]] | None = None,
 ) -> None:
-    """Register one shared agent listener for mentions and messages.
+    """Run an agent on Slack with the invoking user's native MCP tools.
 
-    `deps_factory` is called synchronously for each accepted event.
+    The caller owns Bolt's OAuth configuration and serving. This function adds listeners for mentions and
+    messages, supplying `Slack` for each accepted event. Do not also configure `Slack` on the agent, directly
+    or through a capability factory.
+    `deps_factory` may be synchronous or asynchronous and is called for each accepted event.
     """
     if BaseDurabilityCapability.from_agent(agent) is not None:
         raise ValueError('register_slack does not support durable execution capabilities.')
+    agent.root_capability.apply(_reject_slack_capability)
     engaged: OrderedDict[tuple[str, str, str], None] = OrderedDict()
 
     def refresh_engagement(key: tuple[str, str, str]) -> None:
@@ -242,14 +267,24 @@ def register_slack(  # noqa: C901
             refresh_engagement(key)
         prompt = _metadata_prompt(slack_context, text or 'The user shared files without a text message')
         try:
-            with bind_slack_run(slack_context, user_token):
+            with bind_slack_run(slack_context):
                 if deps_factory is None:
-                    result = await agent.run(prompt, conversation_id=_conversation_id(slack_context))  # pyright: ignore[reportArgumentType]
-                else:
                     result = await agent.run(
                         prompt,
-                        deps=deps_factory(slack_context),
                         conversation_id=_conversation_id(slack_context),
+                        capabilities=[Slack(token=user_token)],
+                        instructions=_HOST_INSTRUCTIONS,
+                    )  # pyright: ignore[reportArgumentType]
+                else:
+                    deps = deps_factory(slack_context)
+                    if _is_awaitable(deps):
+                        deps = await deps
+                    result = await agent.run(
+                        prompt,
+                        deps=deps,
+                        conversation_id=_conversation_id(slack_context),
+                        capabilities=[Slack(token=user_token)],
+                        instructions=_HOST_INSTRUCTIONS,
                     )
         except RunCancelled:
             raise

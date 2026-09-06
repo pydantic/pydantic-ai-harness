@@ -1,9 +1,9 @@
 # Slack
 
-`Slack` gives an agent Slack's hosted MCP tools for the invoking user. It is
-host-only: use `register_slack` to run the agent through a caller-owned
-asynchronous Bolt app. A standalone agent should use Pydantic AI's
-`MCPToolset` directly with its own OAuth token.
+`Slack` gives an agent Slack's hosted MCP tools with an explicit user OAuth
+token. `register_slack` connects an ordinary string-output agent to a
+caller-owned asynchronous Bolt app and supplies the invoking user's token for
+each event.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/slack/)
 
@@ -20,20 +20,17 @@ Slack's hosted MCP server for it. Slack owns the MCP catalog, schemas, result
 formats, OAuth scopes, and pagination. Recheck the [hosted MCP guide](https://docs.slack.dev/ai/slack-mcp-server/)
 when changing those assumptions.
 
-For a standalone script or test, bind the user's token to Pydantic AI's core
-MCP toolset yourself:
+For a standalone script or test, pass the user's token to `Slack`:
 
 ```python
-from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPToolset
+import os
 
-slack_token = 'xoxp-user-token'
-slack_tools = MCPToolset(
-    'https://mcp.slack.com/mcp',
-    headers={'Authorization': f'Bearer {slack_token}'},
-    include_instructions=True,
-)
-agent = Agent('openai:gpt-5.6-sol', toolsets=[slack_tools])
+from pydantic_ai import Agent
+from pydantic_ai_harness.slack import Slack
+
+slack_token = os.environ['SLACK_USER_TOKEN']
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Slack(token=slack_token)])
+result = await agent.run('Summarize the discussion in #support')
 ```
 
 ## Quick start
@@ -52,9 +49,9 @@ from slack_bolt.app.async_app import AsyncApp
 from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
 from slack_sdk.oauth.installation_store.file import FileInstallationStore
 
-from pydantic_ai_harness.slack import Slack, register_slack
+from pydantic_ai_harness.slack import register_slack
 
-agent = Agent('openai:gpt-5.6-sol', capabilities=[Slack()])
+agent = Agent('openai:gpt-5.6-sol')
 installation_store = FileInstallationStore(
     base_dir=os.environ['SLACK_INSTALLATION_DIR'],
     client_id=os.environ['SLACK_CLIENT_ID'],
@@ -78,6 +75,14 @@ bolt = AsyncApp(oauth_settings=oauth_settings, signing_secret=os.environ['SLACK_
 register_slack(bolt, agent)
 asgi_app = AsyncSlackRequestHandler(bolt, path='/slack/events')
 ```
+
+Registration adds the per-event `Slack(token=...)` capability and host-specific
+instructions to each run. Do not configure `Slack` directly or through a
+capability factory on this hosted agent. Registration rejects a concrete
+`Slack` capability already present on the agent, so it cannot silently replace
+a configured credential. A dynamic factory result cannot be inspected during
+registration; core's run-level override applies to a factory result with the
+same capability ID.
 
 Serve `asgi_app` directly with one worker. Bolt's OAuth routes, normally
 `/slack/install` and `/slack/oauth_redirect`, must be served by the same HTTP
@@ -104,16 +109,16 @@ search, write, file, user, canvas, reaction, and list scopes. Group DMs
 (`mpim`) are not routed by this adapter, but a standalone MCP client can
 request the corresponding scope.
 
-For typed dependencies, the factory is synchronous and receives one
-`SlackContext` after an event is accepted. The agent's output type must be
-`str`:
+For typed dependencies, the factory receives one `SlackContext` after an event
+is accepted. It may be synchronous or asynchronous. The agent's output type
+must be `str`:
 
 ```python
 from dataclasses import dataclass
 
 from pydantic_ai import Agent
 
-from pydantic_ai_harness.slack import Slack, SlackContext, register_slack
+from pydantic_ai_harness.slack import SlackContext, register_slack
 
 @dataclass
 class Deps:
@@ -122,8 +127,43 @@ class Deps:
 def deps_factory(context: SlackContext) -> Deps:
     return Deps(slack=context)
 
-typed_agent: Agent[Deps, str] = Agent('openai:gpt-5.6-sol', capabilities=[Slack()])
+typed_agent: Agent[Deps, str] = Agent('openai:gpt-5.6-sol')
 register_slack(bolt, typed_agent, deps_factory=deps_factory)
+```
+
+An asynchronous factory can load user-specific dependencies before the run:
+
+```python {test="skip"}
+from dataclasses import dataclass
+
+@dataclass
+class AsyncDeps:
+    slack: SlackContext
+    user_name: str
+
+async def async_deps_factory(context: SlackContext) -> AsyncDeps:
+    user_name = await user_store.get_name(context.user_id)
+    return AsyncDeps(slack=context, user_name=user_name)
+```
+
+For a non-Slack multi-user application, use Pydantic AI's capability factory
+to look up a token from the run dependencies:
+
+```python {test="skip"}
+from dataclasses import dataclass
+
+from pydantic_ai import Agent, RunContext
+from pydantic_ai_harness.slack import Slack
+
+@dataclass
+class Deps:
+    user_id: str
+
+async def slack_for_user(ctx: RunContext[Deps]) -> Slack:
+    token = await token_store.get_user_token(ctx.deps.user_id)
+    return Slack(token=token)
+
+agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[slack_for_user])
 ```
 
 ## Events, OAuth, and Socket Mode
@@ -202,13 +242,13 @@ There are no locks, queues, event deduplication, exactly-once, distributed,
 or durable guarantees. Bolt middleware and matchers remain the caller's
 audience and routing controls.
 
-Each run receives a `SlackContext` with `team_id`, `channel_id`,
+Each hosted run receives a `SlackContext` with `team_id`, `channel_id`,
 `thread_ts`, `message_ts`, `user_id`, optional `enterprise_id`, and event
 file metadata. `current_slack_context()` reads it during the run. File
 metadata is not a file transfer or an access grant. Native MCP reads use the
 invoking user's token and current Slack permissions.
 
-The adapter puts event metadata and text in the model prompt. For an
+The host puts event metadata and text in the model prompt. For an
 unthreaded DM, the private conversation ID uses that message's timestamp, so
 each DM message starts its own conversation-keyed state. Code should use
 `current_slack_context()` or the `SlackContext` supplied by
@@ -222,7 +262,7 @@ authorize disclosing that data to every other thread participant. Slack
 permissions, retention, and the model's final disclosure remain the relevant
 limits.
 
-The adapter's conversation ID is private and identity-qualified. Consequently,
+The host's conversation ID is private and identity-qualified. Consequently,
 conversation-keyed capabilities such as `Memory` or `ConversationSearch` see
 one conversation per Slack participant in a thread. This keeps each user's
 state isolated. It does not turn the adapter into a history store or a Slack
@@ -238,4 +278,6 @@ This adapter does not provide stored model-message history or history files, a
 Harness transport wrapper, status/Stop handling, streaming, mpim/group-DM
 routing, locks, queues, deduplication, exactly-once, distributed, or durable
 execution. It does not copy Slack's MCP catalog, schemas, pagination, or
-user-scope policy.
+user-scope policy. `Slack` requires a non-empty token when constructed; token
+revocation, missing installations, insufficient scopes, and network failures
+remain run-time failures.

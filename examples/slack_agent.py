@@ -15,14 +15,14 @@ from slack_bolt.app.async_app import AsyncApp
 from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
 from slack_sdk.oauth.installation_store.file import FileInstallationStore
 
-from pydantic_ai_harness.slack import Slack, register_slack
+from pydantic_ai_harness.slack import register_slack
 
 DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'openai:gpt-5.6-sol')
 
 
 def build_agent(model: Model | str = DEFAULT_MODEL) -> Agent[None, str]:
-    """Build an agent with Slack's native hosted MCP capability."""
-    return Agent(model, capabilities=[Slack()])
+    """Build the ordinary agent registered on the Slack Bolt app."""
+    return Agent(model)
 
 
 def build_app() -> AsyncSlackRequestHandler:

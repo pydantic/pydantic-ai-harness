@@ -11,7 +11,7 @@ import httpx
 import pytest
 from mcp import types
 from pydantic_ai import Agent, RunContext, ToolDefinition
-from pydantic_ai.capabilities import PrepareTools
+from pydantic_ai.capabilities import PrefixTools, PrepareTools
 from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -170,7 +170,7 @@ async def _dispatch(
 
 class TestSlack:
     def test_capability_metadata(self) -> None:
-        capability = Slack(description='native Slack', defer_loading=True)
+        capability = Slack(token='xoxp-user', description='native Slack', defer_loading=True)
         assert capability.id == 'slack'
         assert capability.description == 'native Slack'
         assert capability.defer_loading is True
@@ -184,7 +184,7 @@ class TestSlack:
             structuredContent={'nested': {'number': 7}},
         )
         model = TestModel(call_tools=['future_slack_tool'])
-        posts = await _dispatch(monkeypatch, Agent(model, capabilities=[Slack()]), token='xoxp-a')
+        posts = await _dispatch(monkeypatch, Agent(model), token='xoxp-a')
 
         assert len(offline_mcp.calls) == 1
         assert offline_mcp.calls[0].name == 'future_slack_tool'
@@ -209,13 +209,30 @@ class TestSlack:
             captured.extend(messages)
             return ModelResponse(parts=[TextPart('done')])
 
-        await _dispatch(monkeypatch, Agent(FunctionModel(respond), capabilities=[Slack()]))
+        await _dispatch(monkeypatch, Agent(FunctionModel(respond)))
         assert any(
             isinstance(message, ModelRequest)
             and message.instructions is not None
             and 'Offline MCP server instructions.' in message.instructions
             for message in captured
         )
+
+    @pytest.mark.parametrize('hosted', [False, True])
+    async def test_reply_delivery_guidance_is_scoped_to_hosted_runs(
+        self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol, hosted: bool
+    ) -> None:
+        offline_mcp.tools = [_tool()]
+        model = TestModel(call_tools=[])
+        if hosted:
+            agent = Agent(model)
+            await _dispatch(monkeypatch, agent)
+        else:
+            agent = Agent(model, capabilities=[Slack(token='standalone-token')])
+            await agent.run('use Slack')
+        assert model.last_model_request_parameters is not None
+        parts = model.last_model_request_parameters.instruction_parts
+        assert parts is not None
+        assert any('The host posts the final answer' in part.content for part in parts) is hosted
 
     async def test_stateless_users_use_fresh_history_and_current_native_context(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
@@ -296,8 +313,7 @@ class TestSlack:
             request_verification_enabled=False,
             ignoring_self_events_enabled=False,
         )
-        slack = Slack()
-        agent = Agent(FunctionModel(respond), capabilities=[slack])
+        agent = Agent(FunctionModel(respond))
         register_slack(bolt_app, agent)
 
         async def dispatch(event_type: str, event: Mapping[str, object]) -> None:
@@ -380,7 +396,7 @@ class TestSlack:
         await _dispatch(
             monkeypatch,
             Agent[None, str](  # pyright: ignore[reportArgumentType, reportCallIssue]
-                FunctionModel(respond), capabilities=[Slack[None](), PrepareTools[None](prepare_tools)]
+                FunctionModel(respond), capabilities=[PrepareTools[None](prepare_tools)]
             ),
             token='xoxp-prepared',
         )
@@ -424,7 +440,7 @@ class TestSlack:
 
         posts = await _dispatch(
             monkeypatch,
-            Agent(FunctionModel(respond), capabilities=[Slack(), CodeMode()]),
+            Agent(FunctionModel(respond), capabilities=[CodeMode()]),
             token='xoxp-code-mode',
         )
         assert responses == 2
@@ -441,8 +457,7 @@ class TestSlack:
     ) -> None:
         offline_mcp.tools = [_tool()]
         offline_mcp.block_calls = True
-        slack = Slack()
-        agent = Agent(TestModel(call_tools=['future_slack_tool']), capabilities=[slack])
+        agent = Agent(TestModel(call_tools=['future_slack_tool']))
         async with anyio.create_task_group() as tg:
             tg.start_soon(partial(_dispatch, monkeypatch, agent, token='xoxp-first', user='U1', ts='1.1'))
             await offline_mcp.call_started.wait()
@@ -488,7 +503,7 @@ class TestSlack:
 
         offline_mcp.error = ModelRetry('server rejected the first call')
         offline_mcp.error_once = True
-        posts = await _dispatch(monkeypatch, Agent(FunctionModel(respond), capabilities=[Slack()]))
+        posts = await _dispatch(monkeypatch, Agent(FunctionModel(respond)))
         assert attempts == 3
         assert len(offline_mcp.calls) == 2
         assert [call.arguments['payload'] for call in offline_mcp.calls] == [
@@ -504,41 +519,53 @@ class TestSlack:
         offline_mcp.tools = [_tool()]
         model = TestModel(call_tools=['future_slack_tool'])
         agent = Agent.from_spec(
-            {'capabilities': [{'Slack': {'description': 'from spec'}}]},
+            {'capabilities': [{'Slack': {'token': 'xoxp-spec', 'description': 'from spec'}}]},
             custom_capability_types=[Slack],
             model=model,
         )
-        await _dispatch(monkeypatch, agent, token='xoxp-spec')  # pyright: ignore[reportArgumentType]
+        await agent.run('use Slack')
         assert len(offline_mcp.calls) == 1
         assert offline_mcp.calls[0].token == 'Bearer xoxp-spec'
 
-    async def test_two_defaults_combine_native_run(
-        self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
-    ) -> None:
-        offline_mcp.tools = [_tool()]
-        first = Slack()
-        second = Slack()
+    async def test_registration_rejects_preconfigured_slack(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        first = Slack(token='xoxp-user')
         model = TestModel(call_tools=['future_slack_tool'])
-        await _dispatch(monkeypatch, Agent(model, capabilities=[first, second]), token='xoxp-duplicate')
-        assert first.defer_loading is False
-        assert second.defer_loading is False
-        assert len(offline_mcp.calls) == 1
-        assert offline_mcp.calls[0].token == 'Bearer xoxp-duplicate'
+        with pytest.raises(ValueError, match='injects Slack per run'):
+            await _dispatch(monkeypatch, Agent(model, capabilities=[first]), token='xoxp-duplicate')
 
-    async def test_missing_user_token_is_a_public_error(self) -> None:
-        with pytest.raises(UserError, match='Run this agent through register_slack'):
-            await Agent(TestModel(), capabilities=[Slack()]).run('without a Slack host')
+    async def test_equal_tokens_combine_through_agent(self, offline_mcp: OfflineMCPProtocol) -> None:
+        offline_mcp.tools = [_tool()]
+        await Agent(
+            TestModel(call_tools=['future_slack_tool']),
+            capabilities=[Slack(token='xoxp-one'), Slack(token='xoxp-one')],
+        ).run('use Slack')
+        assert [call.token for call in offline_mcp.calls] == ['Bearer xoxp-one']
+
+    def test_different_tokens_rejected_by_agent(self) -> None:
+        with pytest.raises(UserError, match='different credentials'):
+            Agent(TestModel(), capabilities=[Slack(token='xoxp-one'), Slack(token='xoxp-two')])
+
+    @pytest.mark.parametrize('token', ['', ' ', '\t'])
+    def test_blank_token_rejected(self, token: str) -> None:
+        with pytest.raises(ValueError, match='non-blank'):
+            Slack(token=token)
+
+    def test_token_is_not_in_repr(self) -> None:
+        assert 'xoxp-secret' not in repr(Slack(token='xoxp-secret'))
+
+    async def test_registration_rejects_wrapped_slack(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with pytest.raises(ValueError, match='injects Slack per run'):
+            await _dispatch(
+                monkeypatch,
+                Agent(TestModel(), capabilities=[PrefixTools(wrapped=Slack(token='xoxp-one'), prefix='slack')]),
+            )
 
     async def test_defer_loading_exposes_capability_loader_until_revealed(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
     ) -> None:
         offline_mcp.tools = [_tool()]
         model = TestModel(call_tools=[])
-        await _dispatch(
-            monkeypatch,
-            Agent(model, capabilities=[Slack(defer_loading=True)]),
-            token='xoxp-deferred',
-        )
+        await Agent(model, capabilities=[Slack(token='xoxp-deferred', defer_loading=True)]).run('use Slack')
         assert model.last_model_request_parameters is not None
         assert [tool.name for tool in model.last_model_request_parameters.function_tools] == [
             'load_capability',
@@ -557,7 +584,7 @@ class TestSlack:
             contexts.append(current_slack_context())
             return ModelResponse(parts=[TextPart('done')])
 
-        await _dispatch(monkeypatch, Agent(FunctionModel(respond), capabilities=[Slack()]))
+        await _dispatch(monkeypatch, Agent(FunctionModel(respond)))
         assert contexts and contexts[-1] is not None
         assert current_slack_context() is None
         assert offline_mcp.http_clients
@@ -566,7 +593,7 @@ class TestSlack:
             contexts.append(current_slack_context())
             raise RuntimeError('boom')
 
-        await _dispatch(monkeypatch, Agent(FunctionModel(fail), capabilities=[Slack()]), ts='1.2')
+        await _dispatch(monkeypatch, Agent(FunctionModel(fail)), ts='1.2')
         assert contexts[-1] is not None
         assert current_slack_context() is None
         assert all(client.is_closed for client in offline_mcp.http_clients)
@@ -583,7 +610,7 @@ class TestSlack:
             contexts.append(('inner', context.user_id))
             return ModelResponse(parts=[TextPart('inner done')])
 
-        inner = Agent(FunctionModel(inner_respond), capabilities=[Slack()])
+        inner = Agent(FunctionModel(inner_respond))
 
         async def outer_respond(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
             context = current_slack_context()
@@ -597,7 +624,7 @@ class TestSlack:
 
         await _dispatch(
             monkeypatch,
-            Agent(FunctionModel(outer_respond), capabilities=[Slack()]),
+            Agent(FunctionModel(outer_respond)),
             token='xoxp-outer',
         )
         assert contexts == [('outer-before', 'U1'), ('inner', 'U2'), ('outer-after', 'U1')]
