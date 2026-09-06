@@ -185,6 +185,14 @@ class TestLifecycle:
         assert fake_islo.sandboxes.delete_calls == []
 
 
+_STALL = 10.0
+"""How long the fake control plane stalls in the deadline tests.
+
+Far above any plausible scheduling delay, so the elapsed-time bound below cannot be met by a
+slow worker: only a deadline that actually cancels the await gets under it.
+"""
+
+
 class TestExec:
     async def test_polls_and_normalizes_completed_result(self, fake_islo: FakeIslo) -> None:
         fake_islo.sandboxes.responder = lambda call: [
@@ -237,14 +245,18 @@ class TestExec:
 
     @pytest.mark.parametrize('stage', ['start', 'poll'])
     async def test_timeout_bounds_slow_control_plane_awaits(self, fake_islo: FakeIslo, stage: str) -> None:
+        # The control plane stalls for `_STALL`; the deadline is three orders of magnitude
+        # shorter. The elapsed bound sits between the two rather than near the deadline, so it
+        # separates "the await was cut short" from "this worker was busy": passing it by
+        # accident would take seconds of scheduling delay, not milliseconds.
         if stage == 'start':
-            fake_islo.sandboxes.exec_delay = 1
+            fake_islo.sandboxes.exec_delay = _STALL
         else:
-            fake_islo.sandboxes.poll_delays = [1]
+            fake_islo.sandboxes.poll_delays = [_STALL]
         started = time.monotonic()
         async with IsloSandboxSession(poll_interval=0.001) as session:
             result = await session.exec(['slow'], timeout=0.01)
-        assert time.monotonic() - started < 0.2
+        assert time.monotonic() - started < _STALL / 5
         assert result.status == 'client_timeout'
         assert result.remote_may_be_running is True
 
