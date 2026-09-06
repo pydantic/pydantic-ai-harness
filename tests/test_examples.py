@@ -42,8 +42,13 @@ def test_examples_present():
 
 def test_slack_example_uses_the_current_public_surface() -> None:
     source = (EXAMPLES_DIR / 'slack_agent.py').read_text(encoding='utf-8')
-    assert 'from pydantic_ai_harness.slack import FileConversationStore, Slack, SlackApp' in source
+    assert 'from pydantic_ai_harness.slack import Slack, register_slack' in source
     for deleted_name in (
+        'SlackApp',
+        'ConversationStore',
+        'FileConversationStore',
+        'allowed_users',
+        'install_url',
         'SlackAccess',
         'SlackTools',
         'SlackTool',
@@ -63,15 +68,16 @@ def test_unknown_slack_export_raises_attribute_error() -> None:
 def test_slack_public_surface_is_small_and_catalog_types_are_deleted() -> None:
     assert slack.__all__ == [
         'Slack',
-        'SlackApp',
         'SlackContext',
         'SlackFile',
+        'current_slack_context',
+        'register_slack',
+    ]
+    for name in (
+        'SlackApp',
         'ConversationStore',
         'InMemoryConversationStore',
         'FileConversationStore',
-        'current_slack_context',
-    ]
-    for name in (
         'SlackAccess',
         'SlackTools',
         'SlackTool',

@@ -1,8 +1,8 @@
-"""Run a Slack agent as a one-worker ASGI application.
+"""Build a one-worker ASGI Slack agent with caller-owned Bolt OAuth.
 
-Set ``SLACK_INSTALLATION_DIR`` to a private credential directory, then run the
-returned ASGI app with an ASGI server. Bolt serves ``/slack/install`` and
-``/slack/oauth_redirect`` alongside ``/slack/events`` for onboarding.
+Set `SLACK_INSTALLATION_DIR` to a private directory for OAuth credentials,
+then expose `build_app()` through an ASGI server. Bolt serves its OAuth
+install and redirect routes as well as `/slack/events`.
 """
 
 import os
@@ -15,18 +15,18 @@ from slack_bolt.app.async_app import AsyncApp
 from slack_bolt.oauth.async_oauth_settings import AsyncOAuthSettings
 from slack_sdk.oauth.installation_store.file import FileInstallationStore
 
-from pydantic_ai_harness.slack import FileConversationStore, Slack, SlackApp
+from pydantic_ai_harness.slack import Slack, register_slack
 
 DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'openai:gpt-5.6-sol')
 
 
 def build_agent(model: Model | str = DEFAULT_MODEL) -> Agent[None, str]:
-    """Build an agent with Slack's native hosted MCP toolset."""
+    """Build an agent with Slack's native hosted MCP capability."""
     return Agent(model, capabilities=[Slack()])
 
 
 def build_app() -> AsyncSlackRequestHandler:
-    """Build the one-worker ASGI application and its caller-owned Bolt app."""
+    """Build the caller-owned Bolt app as a one-worker ASGI handler."""
     installation_dir = Path(os.environ['SLACK_INSTALLATION_DIR']).expanduser()
     installation_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     installation_dir.chmod(0o700)
@@ -44,7 +44,6 @@ def build_app() -> AsyncSlackRequestHandler:
             'chat:write',
             'groups:history',
             'im:history',
-            'mpim:history',
         ],
         user_scopes=os.environ['SLACK_USER_SCOPES'],
         redirect_uri=os.environ['SLACK_REDIRECT_URI'],
@@ -52,13 +51,7 @@ def build_app() -> AsyncSlackRequestHandler:
         installation_store_bot_only=False,
     )
     bolt = AsyncApp(oauth_settings=oauth_settings, signing_secret=os.environ['SLACK_SIGNING_SECRET'])
-    SlackApp(
-        build_agent(),
-        app=bolt,
-        allowed_users={os.environ['SLACK_TEAM_ID']: {os.environ['SLACK_USER_ID']}},
-        store=FileConversationStore(os.environ['SLACK_CONVERSATION_DIR']),
-        install_url=os.environ.get('SLACK_INSTALL_URL'),
-    )
+    register_slack(bolt, build_agent())
     return AsyncSlackRequestHandler(bolt, path='/slack/events')
 
 

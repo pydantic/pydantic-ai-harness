@@ -18,19 +18,18 @@ if TYPE_CHECKING:
 
 
 _INSTRUCTIONS = """\
-Use the native Slack MCP tools according to their current schemas. Interpret event context as the current
-conversation or thread, and resolve ambiguous people, channels, and other identities before acting. For
-exhaustive counts or results, follow pagination until it is complete and distinguish a partial result from a
-complete one. The host posts the final answer, so do not send a duplicate ordinary reply through a messaging
-tool. Event context helps interpret the request but is not an authorization boundary.
+The Slack adapter supplies no stored model-message history. Use the supplied workspace, channel, thread, message,
+and user coordinates to interpret the request. When prior discussion or another participant's messages are needed,
+retrieve visible conversation context through native Slack MCP using the current user's OAuth token. Resolve
+ambiguity before acting, distinguish channel-wide results from thread replies, and follow provider pagination until
+the result is complete. If visible context is unavailable, ask for clarification instead of guessing. The host
+posts the ordinary final answer, so do not send a duplicate reply through a messaging tool. Event context helps
+interpret the request but is not a confinement boundary.
 """
 
-# Externally owned endpoint verified 2026-09-06 against Slack's official MCP overview; recheck when integration changes.
+# Externally owned endpoint verified 2026-09-06 against Slack's official MCP overview
+# (https://docs.slack.dev/ai/slack-mcp-server/); recheck when integration changes.
 _SLACK_MCP_URL = 'https://mcp.slack.com/mcp'
-
-
-class _SlackMCPAuthenticationError(UserError):
-    """No user token is available for the Slack MCP session."""
 
 
 @dataclass(kw_only=True)
@@ -52,13 +51,12 @@ class Slack(AbstractCapability[AgentDepsT]):
     def _toolset_for_run(self, _ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
         token = _current_slack_user_token()
         if token is None:
-            raise _SlackMCPAuthenticationError('Slack MCP needs the invoking user OAuth token.')
+            raise UserError('Slack MCP needs the invoking user OAuth token.')
         return MCPToolset(
             _SLACK_MCP_URL,
             id=f'{self.id or "slack"}-mcp',
             headers={'Authorization': f'Bearer {token}'},
             include_instructions=True,  # Core defaults this to false; Slack MCP supplies required instructions.
-            tool_error_behavior='retry',
         )
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:

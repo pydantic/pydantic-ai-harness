@@ -1,37 +1,19 @@
-"""Give an agent typed Slack MCP tools and serve it in Slack with Bolt."""
+"""Give an agent native Slack MCP access."""
 
 from typing import TYPE_CHECKING
 
 from pydantic_ai_harness.slack._capability import Slack
 from pydantic_ai_harness.slack._context import SlackContext, SlackFile, current_slack_context
-from pydantic_ai_harness.slack._store import (
-    ConversationStore,
-    FileConversationStore,
-    InMemoryConversationStore,
-)
 
 if TYPE_CHECKING:
-    from pydantic_ai_harness.slack._app import SlackApp
+    from pydantic_ai_harness.slack._bolt import register_slack
 
-__all__ = [
-    'Slack',
-    'SlackApp',
-    'SlackContext',
-    'SlackFile',
-    'ConversationStore',
-    'InMemoryConversationStore',
-    'FileConversationStore',
-    'current_slack_context',
-]
-
-_BOLT_EXPORTS = {'SlackApp'}
+__all__ = ['Slack', 'SlackContext', 'SlackFile', 'current_slack_context', 'register_slack']
 
 
 def __getattr__(name: str) -> object:
-    # Imported on demand so the rest of the package stays usable without
-    # `slack-bolt` installed.
-    if name in _BOLT_EXPORTS:
-        from pydantic_ai_harness.slack import _app
+    if name == 'register_slack':
+        from pydantic_ai_harness.slack._bolt import register_slack
 
-        return getattr(_app, name)
+        return register_slack
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')

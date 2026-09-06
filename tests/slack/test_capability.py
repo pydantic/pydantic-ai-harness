@@ -13,9 +13,10 @@ import pytest
 from mcp import types
 from pydantic_ai import Agent, RunContext, ToolDefinition
 from pydantic_ai.capabilities import PrepareTools
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.messages import (
     ModelMessage,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     RetryPromptPart,
@@ -31,7 +32,7 @@ from slack_bolt.request.async_request import AsyncBoltRequest
 from slack_sdk.web.async_client import AsyncWebClient
 
 from pydantic_ai_harness.code_mode import CodeMode
-from pydantic_ai_harness.slack import Slack, SlackApp, current_slack_context
+from pydantic_ai_harness.slack import Slack, current_slack_context, register_slack
 
 pytestmark = pytest.mark.anyio
 
@@ -57,6 +58,16 @@ _SCHEMA: dict[str, object] = {
     'required': ['payload', 'label'],
 }
 
+_VISIBLE_CONTEXT_SCHEMA: dict[str, object] = {
+    'type': 'object',
+    'properties': {
+        'team_id': {'type': 'string'},
+        'channel_id': {'type': 'string'},
+        'thread_ts': {'type': 'string'},
+    },
+    'required': ['team_id', 'channel_id', 'thread_ts'],
+}
+
 
 def _tool(*, output_schema: dict[str, object] | None = None) -> types.Tool:
     return types.Tool(
@@ -64,6 +75,14 @@ def _tool(*, output_schema: dict[str, object] | None = None) -> types.Tool:
         description='Future nested Slack tool',
         inputSchema=_SCHEMA,
         outputSchema=output_schema,
+    )
+
+
+def _visible_context_tool() -> types.Tool:
+    return types.Tool(
+        name='read_visible_context',
+        description='Read visible Slack discussion for the supplied coordinates.',
+        inputSchema=_VISIBLE_CONTEXT_SCHEMA,
     )
 
 
@@ -118,6 +137,7 @@ async def _dispatch(
             team_id=team,
             user_id=user,
             user_token=token,
+            bot_token='xoxb-test',
             bot_user_id='UBOT',
         )
 
@@ -126,12 +146,7 @@ async def _dispatch(
         posts.append(kwargs)
         return {'ok': True}
 
-    async def set_status(self: AsyncWebClient, **kwargs: object) -> Mapping[str, object]:
-        del self, kwargs
-        return {'ok': True}
-
     monkeypatch.setattr(AsyncWebClient, 'chat_postMessage', post_message)
-    monkeypatch.setattr(AsyncWebClient, 'agents_sessions_setStatus', set_status)
     bolt_app = AsyncApp(
         authorize=authorize,
         client=AsyncWebClient(token='xoxb-test'),
@@ -139,7 +154,7 @@ async def _dispatch(
         request_verification_enabled=False,
         ignoring_self_events_enabled=False,
     )
-    SlackApp(agent, app=bolt_app, allowed_users={team: {user}})
+    register_slack(bolt_app, agent)
     response = await bolt_app.async_dispatch(
         AsyncBoltRequest(
             body={
@@ -167,7 +182,9 @@ class TestSlack:
     def test_instructions_are_static_and_do_not_claim_authorization(self) -> None:
         instructions = Slack().get_instructions()
         assert isinstance(instructions, str)
-        assert 'authorization boundary' in instructions
+        assert 'confinement boundary' in instructions
+        assert 'The Slack adapter supplies no stored model-message history.' in instructions
+        assert 'current user' in instructions
         assert 'security boundary' not in instructions
 
     async def test_native_mcp_schema_args_result_instructions_and_cleanup(
@@ -223,6 +240,163 @@ class TestSlack:
             token='xoxp-text',
         )
         assert 'text-result' in str(posts[-1])
+
+    async def test_stateless_users_use_fresh_history_and_current_native_context(
+        self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
+    ) -> None:
+        secret = 'U1-PRIVATE-MCP-SECRET'
+        visible_result = 'visible discussion for U2'
+        offline_mcp.tools = [_tool(), _visible_context_tool()]
+        offline_mcp.result = types.CallToolResult(
+            content=[types.TextContent(type='text', text=secret)],
+            structuredContent={'secret': secret},
+        )
+        tokens = {'U1': 'xoxp-u1', 'U2': 'xoxp-u2'}
+        posts: list[Mapping[str, object]] = []
+        contexts: list[str] = []
+        u1_turns = 0
+        u2_turns = 0
+        u2_initial_messages: list[ModelMessage] = []
+        u1_later_messages: list[ModelMessage] = []
+
+        async def authorize(team_id: str | None, user_id: str | None) -> AuthorizeResult:
+            assert team_id == 'T1'
+            assert user_id in tokens
+            assert user_id is not None
+            return AuthorizeResult(
+                enterprise_id='E1',
+                team_id='T1',
+                user_id=user_id,
+                user_token=tokens[user_id],
+                bot_token='xoxb-test',
+                bot_user_id='UBOT',
+            )
+
+        async def post_message(self: AsyncWebClient, **kwargs: object) -> Mapping[str, object]:
+            del self
+            posts.append(kwargs)
+            return {'ok': True}
+
+        async def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            nonlocal u1_turns, u2_turns
+            context = current_slack_context()
+            assert context is not None
+            contexts.append(context.user_id)
+            if context.user_id == 'U1':
+                u1_turns += 1
+                if u1_turns == 1:
+                    return ModelResponse(
+                        parts=[
+                            ToolCallPart(
+                                'future_slack_tool',
+                                {'payload': {'items': [9], 'enabled': True}, 'label': 'private'},
+                            )
+                        ]
+                    )
+                if u1_turns == 2:
+                    offline_mcp.result = types.CallToolResult(
+                        content=[types.TextContent(type='text', text=visible_result)],
+                        structuredContent={'discussion': visible_result},
+                    )
+                    return ModelResponse(parts=[TextPart('U1 answer omits private data')])
+                u1_later_messages.extend(messages)
+                return ModelResponse(parts=[TextPart('U1 later fresh answer')])
+
+            u2_turns += 1
+            if u2_turns == 1:
+                u2_initial_messages.extend(messages)
+                return ModelResponse(
+                    parts=[
+                        ToolCallPart(
+                            'read_visible_context',
+                            {'team_id': 'T1', 'channel_id': 'C1', 'thread_ts': '1.1'},
+                        )
+                    ]
+                )
+            assert visible_result in ModelMessagesTypeAdapter.dump_json(messages).decode()
+            return ModelResponse(parts=[TextPart('U2 saw visible native context')])
+
+        monkeypatch.setattr(AsyncWebClient, 'chat_postMessage', post_message)
+        bolt_app = AsyncApp(
+            authorize=authorize,
+            client=AsyncWebClient(token='xoxb-test'),
+            process_before_response=True,
+            request_verification_enabled=False,
+            ignoring_self_events_enabled=False,
+        )
+        slack = Slack()
+        agent = Agent(FunctionModel(respond), capabilities=[slack])
+        register_slack(bolt_app, agent)
+
+        async def dispatch(event_type: str, event: Mapping[str, object]) -> None:
+            response = await bolt_app.async_dispatch(
+                AsyncBoltRequest(
+                    body={'type': 'event_callback', 'team_id': 'T1', 'event': {'type': event_type, **event}},
+                    mode='socket_mode',
+                )
+            )
+            assert response.status == 200
+
+        await dispatch(
+            'app_mention',
+            {'team': 'T1', 'user': 'U1', 'channel': 'C1', 'text': '<@UBOT> fetch private data', 'ts': '1.1'},
+        )
+        await dispatch(
+            'message',
+            {
+                'team': 'T1',
+                'user': 'U2',
+                'channel': 'C1',
+                'channel_type': 'channel',
+                'subtype': None,
+                'text': 'what did we discuss?',
+                'ts': '2.1',
+                'thread_ts': '1.1',
+            },
+        )
+        await dispatch(
+            'message',
+            {
+                'team': 'T1',
+                'user': 'U1',
+                'channel': 'C1',
+                'channel_type': 'channel',
+                'subtype': None,
+                'text': 'continue privately',
+                'ts': '3.1',
+                'thread_ts': '1.1',
+            },
+        )
+
+        u2_initial_serialized = ModelMessagesTypeAdapter.dump_json(u2_initial_messages).decode()
+        u1_later_serialized = ModelMessagesTypeAdapter.dump_json(u1_later_messages).decode()
+        assert secret not in u2_initial_serialized
+        assert secret not in u1_later_serialized
+        assert not any(
+            isinstance(part, (ToolCallPart, ToolReturnPart)) and part.tool_name == 'future_slack_tool'
+            for messages in (u2_initial_messages, u1_later_messages)
+            for message in messages
+            for part in message.parts
+        )
+        assert len(offline_mcp.calls) == 2
+        assert offline_mcp.calls[0].token == 'Bearer xoxp-u1'
+        assert offline_mcp.calls[0].name == 'future_slack_tool'
+        assert offline_mcp.calls[0].arguments == {
+            'payload': {'items': [9], 'enabled': True},
+            'label': 'private',
+        }
+        assert offline_mcp.calls[1].token == 'Bearer xoxp-u2'
+        assert offline_mcp.calls[1].name == 'read_visible_context'
+        assert offline_mcp.calls[1].arguments == {'team_id': 'T1', 'channel_id': 'C1', 'thread_ts': '1.1'}
+        assert contexts == ['U1', 'U1', 'U2', 'U2', 'U1']
+        assert [post['text'] for post in posts] == [
+            'U1 answer omits private data',
+            'U2 saw visible native context',
+            'U1 later fresh answer',
+        ]
+        assert offline_mcp.authorization_headers == ['Bearer xoxp-u1', 'Bearer xoxp-u2', 'Bearer xoxp-u1']
+        assert len({id(client) for client in offline_mcp.http_clients}) == 3
+        assert all(client.is_closed for client in offline_mcp.http_clients)
 
     async def test_prepare_tools_hides_native_slack_tool_from_model(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
@@ -320,7 +494,7 @@ class TestSlack:
             assert {'Bearer xoxp-first', 'Bearer xoxp-second'} <= set(offline_mcp.authorization_headers)
             offline_mcp.call_release.set()
         posts = await _dispatch(monkeypatch, agent, token=None, user='U3', ts='3.1')
-        assert posts[-1]['markdown_text'] == 'Connect your Slack account before using this agent.'
+        assert posts[-1]['text'] == 'Connect your Slack account before using this agent.'
         assert offline_mcp.authorization_headers.count('Bearer xoxp-first') == 1
         assert offline_mcp.authorization_headers.count('Bearer xoxp-second') == 1
         assert len(offline_mcp.authorization_headers) == 2
@@ -358,15 +532,14 @@ class TestSlack:
         posts = await _dispatch(monkeypatch, Agent(FunctionModel(respond), capabilities=[Slack()]))
         assert attempts == 3
         assert len(offline_mcp.calls) == 2
+        assert [call.arguments['payload'] for call in offline_mcp.calls] == [
+            {'items': [1], 'enabled': True},
+            {'items': [2], 'enabled': True},
+        ]
         assert offline_mcp.calls[-1].arguments['label'] == 'ok'
-        assert posts[-1]['markdown_text']
+        assert posts[-1]['text'] == 'done'
 
-    def test_agent_from_spec_defaults_and_legacy_keys_fail(self) -> None:
-        agent = Agent.from_spec(
-            {'model': 'test', 'capabilities': [{'Slack': {'description': 'from spec'}}]},
-            custom_capability_types=[Slack],
-        )
-        assert agent.name is None
+    def test_legacy_capability_keys_fail(self) -> None:
         with pytest.raises((AttributeError, TypeError, ValueError)):
             Slack.from_spec(tools=['search'])  # type: ignore[call-arg]
 
@@ -386,11 +559,23 @@ class TestSlack:
         assert offline_mcp.http_clients
         assert all(client.is_closed for client in offline_mcp.http_clients)
 
-    def test_two_defaults_combine_and_defer_loading_is_metadata(self) -> None:
+    async def test_two_defaults_combine_native_run(
+        self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
+    ) -> None:
+        offline_mcp.tools = [_tool()]
         first = Slack()
         second = Slack()
-        Agent(TestModel(), capabilities=[first, second])
+        model = TestModel(call_tools=['future_slack_tool'])
+        await _dispatch(monkeypatch, Agent(model, capabilities=[first, second]), token='xoxp-duplicate')
         assert first.defer_loading is False
+        assert second.defer_loading is False
+        assert len(offline_mcp.calls) == 1
+        assert offline_mcp.calls[0].token == 'Bearer xoxp-duplicate'
+        assert all(client.is_closed for client in offline_mcp.http_clients)
+
+    async def test_missing_user_token_is_a_public_error(self) -> None:
+        with pytest.raises(UserError, match='Slack MCP needs the invoking user OAuth token'):
+            await Agent(TestModel(), capabilities=[Slack()]).run('without a Slack host')
 
     async def test_defer_loading_exposes_capability_loader_until_revealed(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol

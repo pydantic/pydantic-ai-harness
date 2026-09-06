@@ -1,75 +1,82 @@
+import subprocess
+import sys
+import textwrap
+from dataclasses import fields
+
 import pytest
 
-from pydantic_ai_harness.slack import SlackContext, SlackFile, current_slack_context
+import pydantic_ai_harness.slack as slack
+from pydantic_ai_harness.slack import SlackContext, SlackFile
 
 
 def context() -> SlackContext:
     return SlackContext(team_id='T1', channel_id='C1', thread_ts='1.1', message_ts='1.2', user_id='U1')
 
 
-def test_context_defaults_and_conversation_id() -> None:
+def test_context_is_an_immutable_typed_snapshot() -> None:
     value = context()
+    assert tuple(field.name for field in fields(SlackContext)) == (
+        'team_id',
+        'channel_id',
+        'thread_ts',
+        'message_ts',
+        'user_id',
+        'enterprise_id',
+        'files',
+    )
     assert value.enterprise_id is None
     assert value.files == ()
-    assert value.conversation_id == 'T1:C1:1.1'
-    assert current_slack_context() is None
+    with pytest.raises(AttributeError):
+        value.user_id = 'U2'  # type: ignore[misc]
 
 
-def test_file_and_context_are_frozen() -> None:
+def test_file_is_an_immutable_typed_snapshot() -> None:
     value = SlackFile(file_id='F1', name='a.txt', mimetype='text/plain')
+    assert tuple(field.name for field in fields(SlackFile)) == ('file_id', 'name', 'mimetype')
     assert value == SlackFile(file_id='F1', name='a.txt', mimetype='text/plain')
     with pytest.raises(AttributeError):
         value.file_id = 'F2'  # type: ignore[misc]
 
 
-@pytest.mark.parametrize('field', ('team_id', 'channel_id', 'thread_ts', 'message_ts', 'user_id'))
-def test_required_ids_must_be_non_empty_strings(field: str) -> None:
-    values = {'team_id': 'T1', 'channel_id': 'C1', 'thread_ts': '1.1', 'message_ts': '1.2', 'user_id': 'U1'}
-    values[field] = ''
-    with pytest.raises(ValueError):
-        SlackContext(**values)  # pyright: ignore[reportArgumentType]
+def test_context_has_no_derived_public_api() -> None:
+    value = context()
+    assert not hasattr(value, 'thread_id')
+    assert not hasattr(value, 'conversation_id')
 
 
-@pytest.mark.parametrize('value', ('', 1, None))
-def test_file_id_must_be_non_empty_string(value: object) -> None:
-    with pytest.raises(ValueError):
-        SlackFile(file_id=value)  # type: ignore[arg-type]
+def test_register_slack_is_an_optional_lazy_export() -> None:
+    script = textwrap.dedent(
+        """\
+        import importlib.abc
+        import sys
+
+        class BlockSlackBolt(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == 'slack_bolt' or fullname.startswith('slack_bolt.'):
+                    raise ModuleNotFoundError('blocked slack_bolt')
+                return None
+
+        sys.meta_path.insert(0, BlockSlackBolt())
+        import pydantic_ai_harness.slack as slack
+        from pydantic_ai_harness.slack import Slack, SlackContext, SlackFile
+
+        assert Slack is not None
+        assert SlackContext is not None
+        assert SlackFile is not None
+        try:
+            slack.register_slack
+        except ImportError as exc:
+            assert str(exc) == (
+                'slack-bolt is required for register_slack. '
+                'Install it with: pip install "pydantic-ai-harness[slack]"'
+            )
+        else:
+            raise AssertionError('register_slack unexpectedly imported without slack-bolt')
+        """
+    )
+    subprocess.run([sys.executable, '-c', script], check=True, capture_output=True, text=True)
 
 
-@pytest.mark.parametrize('field', ('name', 'mimetype'))
-def test_file_optional_metadata_must_be_strings(field: str) -> None:
-    with pytest.raises(ValueError):
-        SlackFile(file_id='F1', **{field: 1})  # type: ignore[arg-type]
-
-
-def test_enterprise_id_must_be_string() -> None:
-    with pytest.raises(ValueError):
-        SlackContext(  # pyright: ignore[reportArgumentType]
-            team_id='T1',
-            channel_id='C1',
-            thread_ts='1.1',
-            message_ts='1.2',
-            user_id='U1',
-            enterprise_id=1,  # pyright: ignore[reportArgumentType]
-        )
-
-
-def test_files_must_be_tuple_of_slack_files() -> None:
-    with pytest.raises(ValueError):
-        SlackContext(  # pyright: ignore[reportArgumentType]
-            team_id='T1',
-            channel_id='C1',
-            thread_ts='1.1',
-            message_ts='1.2',
-            user_id='U1',
-            files=[SlackFile(file_id='F1')],  # pyright: ignore[reportArgumentType]
-        )  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        SlackContext(  # pyright: ignore[reportArgumentType]
-            team_id='T1',
-            channel_id='C1',
-            thread_ts='1.1',
-            message_ts='1.2',
-            user_id='U1',
-            files=('not-a-file',),  # pyright: ignore[reportArgumentType]
-        )  # type: ignore[arg-type]
+def test_unknown_names_fail() -> None:
+    with pytest.raises(AttributeError):
+        _ = slack.not_an_export  # type: ignore[attr-defined]

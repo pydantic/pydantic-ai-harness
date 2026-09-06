@@ -8,24 +8,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 
 
-def _require_non_empty_string(value: object, name: str) -> None:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f'{name} must be a non-empty string')
-
-
-def _require_optional_string(value: object, name: str) -> None:
-    if value is not None and not isinstance(value, str):
-        raise ValueError(f'{name} must be a string or None')
-
-
-def _require_files(value: object) -> None:
-    if not isinstance(value, tuple) or not all(  # pyright: ignore[reportUnknownVariableType]
-        isinstance(file, SlackFile)
-        for file in value  # pyright: ignore[reportUnknownVariableType]
-    ):
-        raise ValueError('files must be a tuple of SlackFile instances')
-
-
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SlackFile:
     """A file attached to the Slack message that started this run."""
@@ -33,11 +15,6 @@ class SlackFile:
     file_id: str
     name: str | None = None
     mimetype: str | None = None
-
-    def __post_init__(self) -> None:
-        _require_non_empty_string(self.file_id, 'file_id')
-        _require_optional_string(self.name, 'name')
-        _require_optional_string(self.mimetype, 'mimetype')
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -51,16 +28,6 @@ class SlackContext:
     user_id: str
     enterprise_id: str | None = None
     files: tuple[SlackFile, ...] = ()
-
-    def __post_init__(self) -> None:
-        for name in ('team_id', 'channel_id', 'thread_ts', 'message_ts', 'user_id'):
-            _require_non_empty_string(getattr(self, name), name)
-        _require_optional_string(self.enterprise_id, 'enterprise_id')
-        _require_files(self.files)
-
-    @property
-    def conversation_id(self) -> str:
-        return f'{self.team_id}:{self.channel_id}:{self.thread_ts}'
 
 
 @dataclass(frozen=True)
