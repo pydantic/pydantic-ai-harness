@@ -13,6 +13,8 @@ This is a sandbox capability, not a model provider. Islo supplies execution and
 filesystem isolation; the model configured on your Pydantic AI agent still
 performs inference.
 
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
+
 ## Quick start
 
 Install the extra and set an Islo API key:

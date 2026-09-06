@@ -16,6 +16,8 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage
 
+import pydantic_ai_harness
+import pydantic_ai_harness.islo_sandbox as islo_sandbox
 from pydantic_ai_harness.islo_sandbox import (
     IsloSandbox,
     IsloSandboxError,
@@ -302,9 +304,6 @@ class TestLifecycle:
 
 class TestCapability:
     def test_defaults_and_exports(self) -> None:
-        import pydantic_ai_harness
-        import pydantic_ai_harness.islo_sandbox as islo_sandbox
-
         capability = IsloSandbox()
         assert capability.image == 'ghcr.io/islo-labs/islo-runner:latest'
         assert capability.sandbox_timeout == 900
