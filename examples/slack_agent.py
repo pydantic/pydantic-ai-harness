@@ -48,7 +48,6 @@ def build_app() -> AsyncSlackRequestHandler:
         user_scopes=os.environ['SLACK_USER_SCOPES'],
         redirect_uri=os.environ['SLACK_REDIRECT_URI'],
         installation_store=installation_store,
-        installation_store_bot_only=False,
     )
     bolt = AsyncApp(oauth_settings=oauth_settings, signing_secret=os.environ['SLACK_SIGNING_SECRET'])
     register_slack(bolt, build_agent())

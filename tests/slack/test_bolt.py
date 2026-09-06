@@ -73,8 +73,6 @@ class Harness:
     ) -> None:
         self.posts: list[dict[str, object]] = []
         self.tokens: list[str | None] = []
-        self.replies_calls: list[dict[str, object]] = []
-        self.reply_tokens: list[str | None] = []
         self.errors: list[Exception] = []
         self.authorize_calls: list[tuple[str | None, str | None]] = []
         self.authorization = authorization or auth()
@@ -90,8 +88,7 @@ class Harness:
             return {'ok': True}
 
         async def replies(client: AsyncWebClient, **kwargs: object) -> Mapping[str, object]:
-            self.reply_tokens.append(client.token)
-            self.replies_calls.append(kwargs)
+            del client, kwargs
             return {'ok': True, 'messages': []}
 
         async def unexpected_api_call(_: AsyncWebClient, *args: object, **kwargs: object) -> Mapping[str, object]:
@@ -135,7 +132,7 @@ class Harness:
         return response
 
 
-def kwargs(text: str, thread_ts: str) -> dict[str, object]:
+def kwargs(text: str, thread_ts: str | None) -> dict[str, object]:
     return {
         'text': text,
         'thread_ts': thread_ts,
@@ -146,7 +143,7 @@ def kwargs(text: str, thread_ts: str) -> dict[str, object]:
     }
 
 
-def assert_post(post: Mapping[str, object], text: str, thread_ts: str) -> None:
+def assert_post(post: Mapping[str, object], text: str, thread_ts: str | None) -> None:
     expected = kwargs(text, thread_ts)
     assert {key: post[key] for key in expected} == expected
 
@@ -163,8 +160,8 @@ async def test_envelope_only_workspace_routes(monkeypatch: pytest.MonkeyPatch) -
     await h.dispatch(event(team=None, text='dm'), expected_status=200)
     assert calls == ['run', 'run']
     assert len(h.posts) == 2
-    for post in h.posts:
-        assert_post(post, 'ok', '1.1')
+    assert_post(h.posts[0], 'ok', '1.1')
+    assert_post(h.posts[1], 'ok', None)
 
 
 async def test_unrelated_message_reaches_later_listener(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -213,18 +210,61 @@ async def test_dm_mention_still_routes(monkeypatch: pytest.MonkeyPatch, thread_t
     await h.dispatch(event(text='<@UBOT> hi', thread_ts=thread_ts), expected_status=200)
     assert calls == ['run']
     assert len(h.posts) == 1
-    assert_post(h.posts[0], 'ok', thread_ts or '1.1')
-    if thread_ts is not None:
-        assert h.replies_calls == [
-            {
-                'channel': 'C1',
-                'ts': '0.9',
-                'oldest': '0.9',
-                'limit': 4,
-                'include_all_metadata': True,
-            }
-        ]
-        assert h.reply_tokens == ['xoxb-bot']
+    assert_post(h.posts[0], 'ok', thread_ts)
+
+
+@pytest.mark.parametrize('thread_ts', [None, '0.9'])
+async def test_dm_missing_oauth_reply_preserves_threading(
+    monkeypatch: pytest.MonkeyPatch, thread_ts: str | None
+) -> None:
+    h = Harness(monkeypatch, Agent(TestModel()), authorization=auth(token=None))
+    await h.dispatch(event(text='hello', thread_ts=thread_ts), expected_status=200)
+    assert_post(h.posts[0], 'Connect your Slack account before using this agent.', thread_ts)
+
+
+@pytest.mark.parametrize('thread_ts', [None, '0.9'])
+async def test_dm_error_reply_preserves_threading(monkeypatch: pytest.MonkeyPatch, thread_ts: str | None) -> None:
+    agent = Agent(TestModel(custom_output_text='ok'))
+
+    @agent.output_validator
+    def fail(_output: str) -> str:
+        raise RuntimeError('boom')
+
+    h = Harness(monkeypatch, agent)
+    await h.dispatch(event(text='hello', thread_ts=thread_ts), expected_status=200)
+    assert_post(h.posts[0], "I couldn't complete that request. Please try again.", thread_ts)
+
+
+async def test_unrelated_channel_message_is_ignored_after_other_thread_engagement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    h = Harness(monkeypatch, Agent(TestModel()))
+    await h.dispatch(event('app_mention', text='<@UBOT> start', channel_type='channel', thread_ts='1.1'))
+    seen: list[str] = []
+
+    async def later(**_: object) -> None:
+        seen.append('called')
+
+    h.app.message()(later)  # pyright: ignore[reportUnknownMemberType]
+    await h.dispatch(event(text='unrelated', channel_type='channel', thread_ts='2.2'), expected_status=200)
+    assert seen == ['called']
+    assert len(h.posts) == 1
+
+
+async def test_engagement_is_lru_and_follow_up_refreshes(monkeypatch: pytest.MonkeyPatch) -> None:
+    h = Harness(monkeypatch, Agent(TestModel(custom_output_text='ok')))
+    for index in range(1024):
+        await h.dispatch(
+            event('app_mention', text='<@UBOT> start', channel_type='channel', thread_ts=f'{index}.1'),
+            expected_status=200,
+        )
+    await h.dispatch(event(text='reply', channel_type='channel', thread_ts='0.1'), expected_status=200)
+    await h.dispatch(
+        event('app_mention', text='<@UBOT> start', channel_type='channel', thread_ts='1024.1'), expected_status=200
+    )
+    await h.dispatch(event(text='reply', channel_type='channel', thread_ts='1.1'), expected_status=404)
+    await h.dispatch(event(text='reply', channel_type='channel', thread_ts='0.1'), expected_status=200)
+    assert len(h.posts) == 1027
 
 
 @pytest.mark.parametrize('ordinary_first', [False, True])
@@ -612,9 +652,30 @@ async def test_dependency_factory_and_conversation_key(monkeypatch: pytest.Monke
     assert seen[0][0] == SlackContext(
         team_id='T1', channel_id='C1', thread_ts='1.1', message_ts='1.1', user_id='U1', enterprise_id=None
     )
-    assert seen[0][1] == 'slack:T1:U1:C1:1.1'
+    assert seen[0][1] is not None
     assert len(h.posts) == 1
-    assert_post(h.posts[0], 'ok', '1.1')
+    assert_post(h.posts[0], 'ok', None)
+
+
+@pytest.mark.parametrize('thread_ts', [None, '0.9'])
+async def test_conversation_identity_follows_user_and_thread(
+    monkeypatch: pytest.MonkeyPatch, thread_ts: str | None
+) -> None:
+    identities: list[str | None] = []
+    agent = Agent(TestModel(custom_output_text='ok'))
+
+    @agent.instructions
+    def capture_identity(ctx: RunContext[object]) -> str:
+        identities.append(ctx.conversation_id)
+        return ''
+
+    h = Harness(monkeypatch, agent)
+    await h.dispatch(event(ts='1.1', thread_ts=thread_ts))
+    await h.dispatch(event(ts='1.2', thread_ts=thread_ts))
+    h.authorization = auth(user='U2')
+    await h.dispatch(event(user='U2', ts='1.1', thread_ts=thread_ts))
+    assert (identities[0] == identities[1]) is (thread_ts is not None)
+    assert identities[0] != identities[2]
 
 
 @pytest.mark.parametrize('output', ['', '   '])

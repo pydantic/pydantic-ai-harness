@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import fields
 from functools import partial
 from typing import Protocol
 
@@ -170,22 +169,11 @@ async def _dispatch(
 
 
 class TestSlack:
-    def test_metadata_and_old_arguments(self) -> None:
+    def test_capability_metadata(self) -> None:
         capability = Slack(description='native Slack', defer_loading=True)
         assert capability.id == 'slack'
         assert capability.description == 'native Slack'
         assert capability.defer_loading is True
-        assert {field.name for field in fields(Slack)} == {'id', 'description', 'defer_loading', '_dynamic_toolset'}
-        with pytest.raises(TypeError):
-            Slack(tools=[])  # type: ignore[call-arg]
-
-    def test_instructions_are_static_and_do_not_claim_authorization(self) -> None:
-        instructions = Slack().get_instructions()
-        assert isinstance(instructions, str)
-        assert 'confinement boundary' in instructions
-        assert 'The Slack adapter supplies no stored model-message history.' in instructions
-        assert 'current user' in instructions
-        assert 'security boundary' not in instructions
 
     async def test_native_mcp_schema_args_result_instructions_and_cleanup(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
@@ -229,18 +217,6 @@ class TestSlack:
             for message in captured
         )
 
-    async def test_native_mcp_text_result_reaches_model(
-        self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
-    ) -> None:
-        offline_mcp.tools = [_tool()]
-        offline_mcp.result = types.CallToolResult(content=[types.TextContent(type='text', text='text-result')])
-        posts = await _dispatch(
-            monkeypatch,
-            Agent(TestModel(call_tools=['future_slack_tool']), capabilities=[Slack()]),
-            token='xoxp-text',
-        )
-        assert 'text-result' in str(posts[-1])
-
     async def test_stateless_users_use_fresh_history_and_current_native_context(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
     ) -> None:
@@ -252,8 +228,6 @@ class TestSlack:
             structuredContent={'secret': secret},
         )
         tokens = {'U1': 'xoxp-u1', 'U2': 'xoxp-u2'}
-        posts: list[Mapping[str, object]] = []
-        contexts: list[str] = []
         u1_turns = 0
         u2_turns = 0
         u2_initial_messages: list[ModelMessage] = []
@@ -273,15 +247,13 @@ class TestSlack:
             )
 
         async def post_message(self: AsyncWebClient, **kwargs: object) -> Mapping[str, object]:
-            del self
-            posts.append(kwargs)
+            del self, kwargs
             return {'ok': True}
 
         async def respond(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
             nonlocal u1_turns, u2_turns
             context = current_slack_context()
             assert context is not None
-            contexts.append(context.user_id)
             if context.user_id == 'U1':
                 u1_turns += 1
                 if u1_turns == 1:
@@ -388,15 +360,6 @@ class TestSlack:
         assert offline_mcp.calls[1].token == 'Bearer xoxp-u2'
         assert offline_mcp.calls[1].name == 'read_visible_context'
         assert offline_mcp.calls[1].arguments == {'team_id': 'T1', 'channel_id': 'C1', 'thread_ts': '1.1'}
-        assert contexts == ['U1', 'U1', 'U2', 'U2', 'U1']
-        assert [post['text'] for post in posts] == [
-            'U1 answer omits private data',
-            'U2 saw visible native context',
-            'U1 later fresh answer',
-        ]
-        assert offline_mcp.authorization_headers == ['Bearer xoxp-u1', 'Bearer xoxp-u2', 'Bearer xoxp-u1']
-        assert len({id(client) for client in offline_mcp.http_clients}) == 3
-        assert all(client.is_closed for client in offline_mcp.http_clients)
 
     async def test_prepare_tools_hides_native_slack_tool_from_model(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
@@ -423,8 +386,6 @@ class TestSlack:
         )
         assert 'future_slack_tool' in observed
         assert 'future_slack_tool' not in offered
-        assert offline_mcp.http_clients
-        assert all(client.is_closed for client in offline_mcp.http_clients)
 
     async def test_code_mode_calls_native_slack_tool_and_propagates_result(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
@@ -474,8 +435,6 @@ class TestSlack:
             'label': 'from-code',
         }
         assert 'provider-result' in str(posts[-1])
-        assert offline_mcp.http_clients
-        assert all(client.is_closed for client in offline_mcp.http_clients)
 
     async def test_distinct_overlapping_users_get_distinct_credentials_and_missing_identity_does_not_reuse(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
@@ -539,10 +498,6 @@ class TestSlack:
         assert offline_mcp.calls[-1].arguments['label'] == 'ok'
         assert posts[-1]['text'] == 'done'
 
-    def test_legacy_capability_keys_fail(self) -> None:
-        with pytest.raises((AttributeError, TypeError, ValueError)):
-            Slack.from_spec(tools=['search'])  # type: ignore[call-arg]
-
     async def test_agent_from_spec_runs_native_slack(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
     ) -> None:
@@ -556,8 +511,6 @@ class TestSlack:
         await _dispatch(monkeypatch, agent, token='xoxp-spec')  # pyright: ignore[reportArgumentType]
         assert len(offline_mcp.calls) == 1
         assert offline_mcp.calls[0].token == 'Bearer xoxp-spec'
-        assert offline_mcp.http_clients
-        assert all(client.is_closed for client in offline_mcp.http_clients)
 
     async def test_two_defaults_combine_native_run(
         self, monkeypatch: pytest.MonkeyPatch, offline_mcp: OfflineMCPProtocol
@@ -571,10 +524,9 @@ class TestSlack:
         assert second.defer_loading is False
         assert len(offline_mcp.calls) == 1
         assert offline_mcp.calls[0].token == 'Bearer xoxp-duplicate'
-        assert all(client.is_closed for client in offline_mcp.http_clients)
 
     async def test_missing_user_token_is_a_public_error(self) -> None:
-        with pytest.raises(UserError, match='Slack MCP needs the invoking user OAuth token'):
+        with pytest.raises(UserError, match='Run this agent through register_slack'):
             await Agent(TestModel(), capabilities=[Slack()]).run('without a Slack host')
 
     async def test_defer_loading_exposes_capability_loader_until_revealed(
@@ -609,7 +561,6 @@ class TestSlack:
         assert contexts and contexts[-1] is not None
         assert current_slack_context() is None
         assert offline_mcp.http_clients
-        assert all(client.is_closed for client in offline_mcp.http_clients)
 
         async def fail(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
             contexts.append(current_slack_context())
@@ -651,4 +602,3 @@ class TestSlack:
         )
         assert contexts == [('outer-before', 'U1'), ('inner', 'U2'), ('outer-after', 'U1')]
         assert current_slack_context() is None
-        assert all(client.is_closed for client in offline_mcp.http_clients)

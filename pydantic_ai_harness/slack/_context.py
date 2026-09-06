@@ -43,13 +43,13 @@ def _current_slack_run() -> _SlackRun | None:
     return _slack_run.get()
 
 
-def _current_slack_user_token() -> str | None:  # pyright: ignore[reportUnusedFunction]
+def current_slack_user_token() -> str | None:
     run = _current_slack_run()
     return None if run is None else run.user_token
 
 
 @contextmanager
-def _bind_slack_run(context: SlackContext, user_token: str | None = None) -> Generator[None]:  # pyright: ignore[reportUnusedFunction]
+def bind_slack_run(context: SlackContext, user_token: str | None = None) -> Generator[None]:
     token = _slack_run.set(_SlackRun(context=context, user_token=user_token))
     try:
         yield

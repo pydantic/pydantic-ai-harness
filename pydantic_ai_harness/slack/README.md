@@ -1,8 +1,9 @@
 # Slack
 
-Use `Slack` to give an agent the native Slack MCP tools for the invoking
-user. Use `register_slack` to register that agent on a caller-owned asynchronous
-Bolt app.
+`Slack` gives an agent Slack's hosted MCP tools for the invoking user. It is
+host-only: use `register_slack` to run the agent through a caller-owned
+asynchronous Bolt app. A standalone agent should use Pydantic AI's
+`MCPToolset` directly with its own OAuth token.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/slack/)
 
@@ -17,22 +18,30 @@ uv add "pydantic-ai-harness[slack]"
 Use an internal Slack app or an app published in Slack's directory, and enable
 Slack's hosted MCP server for it. Slack owns the MCP catalog, schemas, result
 formats, OAuth scopes, and pagination. Recheck the [hosted MCP guide](https://docs.slack.dev/ai/slack-mcp-server/)
-before changing those assumptions.
+when changing those assumptions.
 
-> External assumptions, verified 2026-09-06: the native endpoint is
-> `https://mcp.slack.com/mcp`; the installed Bolt APIs provide
-> `AsyncOAuthSettings`, `AsyncSlackRequestHandler`, and
-> `AsyncSocketModeHandler.start_async`/`close_async`. Recheck the endpoint and
-> installed signatures against the [hosted MCP guide](https://docs.slack.dev/ai/slack-mcp-server/),
-> [Bolt OAuth guide](https://docs.slack.dev/tools/bolt-python/concepts/authenticating-oauth/),
-> and [Bolt agent features](https://docs.slack.dev/tools/bolt-python/concepts/adding-agent-features/).
+For a standalone script or test, bind the user's token to Pydantic AI's core
+MCP toolset yourself:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.mcp import MCPToolset
+
+slack_token = 'xoxp-user-token'
+slack_tools = MCPToolset(
+    'https://mcp.slack.com/mcp',
+    headers={'Authorization': f'Bearer {slack_token}'},
+    include_instructions=True,
+)
+agent = Agent('openai:gpt-5.6-sol', toolsets=[slack_tools])
+```
 
 ## Quick start
 
 The caller configures Bolt OAuth and supplies a per-user token to each event.
-`FileInstallationStore` is a native Slack SDK async-compatible store. Its
-directory contains OAuth credentials, so create `SLACK_INSTALLATION_DIR` with
-owner-only (`0700`) permissions and keep its files private.
+`FileInstallationStore` stores OAuth credentials, so create
+`SLACK_INSTALLATION_DIR` with owner-only (`0700`) permissions and keep its
+files private.
 
 ```python
 import os
@@ -64,7 +73,6 @@ oauth_settings = AsyncOAuthSettings(
     user_scopes=os.environ['SLACK_USER_SCOPES'],
     redirect_uri=os.environ['SLACK_REDIRECT_URI'],
     installation_store=installation_store,
-    installation_store_bot_only=False,
 )
 bolt = AsyncApp(oauth_settings=oauth_settings, signing_secret=os.environ['SLACK_SIGNING_SECRET'])
 register_slack(bolt, agent)
@@ -73,14 +81,32 @@ asgi_app = AsyncSlackRequestHandler(bolt, path='/slack/events')
 
 Serve `asgi_app` directly with one worker. Bolt's OAuth routes, normally
 `/slack/install` and `/slack/oauth_redirect`, must be served by the same HTTP
-application so users can authorize the app. `SLACK_USER_SCOPES` is a
-comma-separated value selected from Slack's current MCP documentation. Those
-user scopes are the actual native read authorization; Harness does not add a
-second disclosure policy.
+application. Publish the full install URL, such as
+`https://agent.example/slack/install`, in the Slack app description or App
+Home so users who see the missing-identity reply know where to authorize.
+Leave Bolt's `installation_store_bot_only` default unchanged so authorization
+looks up the invoking user's OAuth installation alongside the bot installation.
 
-For typed dependencies, replace the quickstart `register_slack(bolt, agent)`
-call with a typed registration. The factory receives one `SlackContext` after
-an event is accepted, and the agent's output type must be `str`:
+`SLACK_USER_SCOPES` is comma-separated. A minimal read example for this
+adapter is:
+
+```bash
+export SLACK_USER_SCOPES='channels:history,groups:history,im:history'
+```
+
+Add scopes for the MCP tools your hosted agent may use. Slack exposes its
+provider tool catalog to the capability, and the user's OAuth scopes are the
+authoritative limit on those tools. Slack's [OAuth scopes needed on user
+token for different tools](https://docs.slack.dev/ai/slack-mcp-server/#oauth-scopes-needed-on-user-token-for-different-tools)
+table maps read channels and threads to `channels:history`,
+`groups:history`, `mpim:history`, and `im:history`, and lists the additional
+search, write, file, user, canvas, reaction, and list scopes. Group DMs
+(`mpim`) are not routed by this adapter, but a standalone MCP client can
+request the corresponding scope.
+
+For typed dependencies, the factory is synchronous and receives one
+`SlackContext` after an event is accepted. The agent's output type must be
+`str`:
 
 ```python
 from dataclasses import dataclass
@@ -105,8 +131,7 @@ register_slack(bolt, typed_agent, deps_factory=deps_factory)
 The embedded HTTP manifest uses `app_mention`, `message.channels`,
 `message.groups`, and `message.im`. The six bot scopes in the example match
 those routes and agent messaging requirements. Remove a message event family
-when it is not needed, and remove its corresponding history scope. User MCP
-scopes remain provider-configured by Slack.
+when it is not needed, and remove its corresponding history scope.
 
 ```json
 {
@@ -159,51 +184,58 @@ OAuth install and redirect flow.
 
 ## Conversation behavior and context
 
-Direct messages route without a mention. In public and private channels, an
-`app_mention` engages that thread for the lifetime of this registration, so
-later replies in the registered thread do not need another tag. Engagement is
-an in-memory set owned by the registration closure. It is lost on restart;
-there are no locks, queues, event
-deduplication, exactly-once, distributed, or durable guarantees. Bolt
-middleware and matchers remain the caller's audience and routing controls.
+Direct messages route without a mention. An unthreaded DM receives a flat
+reply. If the incoming DM is already threaded, the reply stays in that
+thread. In public and private channels, an `app_mention` engages that thread.
+Later human follow-ups in the engaged thread are accepted without another
+mention, and accepted authorized follow-ups refresh the engagement's position
+in a per-registration least-recently-used cache capped at 1,024 threads. The
+least-recently-used thread is evicted when the cache is full; restart clears
+the cache. Until eviction or restart, every valid human message in an engaged
+thread can trigger a model run. There is no disengage control.
 
-Each run receives a `SlackContext` with `team_id`, `channel_id`, `thread_ts`,
-`message_ts`, `user_id`, optional `enterprise_id`, and event file metadata.
-`current_slack_context()` reads it during the run. File metadata is not a file
-transfer or an access grant. Native MCP reads use the invoking user's token and
-current Slack permissions.
+Slack Connect events from an external team are ignored. Ordinary channel
+messages outside an engaged thread and group DMs are ignored, as are bot
+messages and invalid events. An `app_mention` can engage a new channel thread. After an engaged thread is evicted or the
+process restarts, a new `app_mention` is required.
+There are no locks, queues, event deduplication, exactly-once, distributed,
+or durable guarantees. Bolt middleware and matchers remain the caller's
+audience and routing controls.
 
-The adapter sends the event text and metadata to the agent, then delivers the
-model output with Bolt's native `say` using literal text. It does not store
-model-message history. Each event starts with fresh agent history. If prior
-discussion is needed, the model should retrieve visible messages through native
-MCP under the invoking user's token, using the current context to distinguish a
-channel from a thread and following Slack's real pagination. A user's read
-authorization does not authorize disclosing that data to every other thread
-participant. Slack permissions, retention, and the model's final disclosure
-remain the relevant limits.
+Each run receives a `SlackContext` with `team_id`, `channel_id`,
+`thread_ts`, `message_ts`, `user_id`, optional `enterprise_id`, and event
+file metadata. `current_slack_context()` reads it during the run. File
+metadata is not a file transfer or an access grant. Native MCP reads use the
+invoking user's token and current Slack permissions.
 
-The adapter's conversation ID is private and identity-qualified. It does not
-turn the adapter into a history store or a Slack access-control boundary. The
-core `RunContext.conversation_id` remains public.
+The adapter puts event metadata and text in the model prompt. For an
+unthreaded DM, the private conversation ID uses that message's timestamp, so
+each DM message starts its own conversation-keyed state. Code should use
+`current_slack_context()` or the `SlackContext` supplied by
+`deps_factory`. The adapter delivers the model output with Bolt's native
+`say` using literal text. It does not store model-message history. Each event
+starts with fresh agent history. If prior discussion is needed, the model
+should retrieve visible messages through native MCP under the invoking user's
+token, using the current context to distinguish a channel from a thread and
+following Slack's real pagination. A user's read authorization does not
+authorize disclosing that data to every other thread participant. Slack
+permissions, retention, and the model's final disclosure remain the relevant
+limits.
+
+The adapter's conversation ID is private and identity-qualified. Consequently,
+conversation-keyed capabilities such as `Memory` or `ConversationSearch` see
+one conversation per Slack participant in a thread. This keeps each user's
+state isolated. It does not turn the adapter into a history store or a Slack
+access-control boundary. The core `RunContext.conversation_id` remains public.
+
+With Pydantic AI core 2.38.0, cancelling a run under anyio level cancellation
+may leave its MCP client open. This is an unresolved core cleanup limitation
+when a Slack run is cancelled during an MCP operation.
 
 ## Unsupported behavior
 
-This adapter does not provide:
-
-- stored model-message history or history files;
-- `SlackApp`, `ConversationStore`, `allowed_users`, or `install_url` APIs;
-- a Harness transport wrapper, status/Stop handling, or streaming;
-- mpim/group-DM routing;
-- locks, queues, deduplication, exactly-once, distributed, or durable execution;
-- a copied Slack MCP catalog, schema, pagination implementation, or user-scope policy.
-
-## Public exports
-
-The package exports exactly five names:
-
-- `Slack` -- the native hosted Slack MCP capability;
-- `SlackContext` -- metadata for the current event;
-- `SlackFile` -- metadata for an event-attached file;
-- `current_slack_context` -- the current run's context getter;
-- `register_slack` -- the caller-owned Bolt registration function.
+This adapter does not provide stored model-message history or history files, a
+Harness transport wrapper, status/Stop handling, streaming, mpim/group-DM
+routing, locks, queues, deduplication, exactly-once, distributed, or durable
+execution. It does not copy Slack's MCP catalog, schemas, pagination, or
+user-scope policy.

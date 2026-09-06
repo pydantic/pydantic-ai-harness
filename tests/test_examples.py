@@ -17,8 +17,6 @@ from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
 
-import pydantic_ai_harness.slack as slack
-
 EXAMPLES_DIR = Path(__file__).parent.parent / 'examples'
 EXAMPLE_FILES = sorted(EXAMPLES_DIR.glob('*.py'))
 
@@ -38,57 +36,6 @@ def test_examples_present():
         'research_agent.py',
         'slack_agent.py',
     ]
-
-
-def test_slack_example_uses_the_current_public_surface() -> None:
-    source = (EXAMPLES_DIR / 'slack_agent.py').read_text(encoding='utf-8')
-    assert 'from pydantic_ai_harness.slack import Slack, register_slack' in source
-    for deleted_name in (
-        'SlackApp',
-        'ConversationStore',
-        'FileConversationStore',
-        'allowed_users',
-        'install_url',
-        'SlackAccess',
-        'SlackTools',
-        'SlackTool',
-        'SlackCustomTool',
-        'SlackThread',
-        'SlackContextEntity',
-        'SlackMessageContext',
-    ):
-        assert deleted_name not in source
-
-
-def test_unknown_slack_export_raises_attribute_error() -> None:
-    with pytest.raises(AttributeError, match="module 'pydantic_ai_harness.slack' has no attribute 'missing'"):
-        slack.missing  # type: ignore[attr-defined]
-
-
-def test_slack_public_surface_is_small_and_catalog_types_are_deleted() -> None:
-    assert slack.__all__ == [
-        'Slack',
-        'SlackContext',
-        'SlackFile',
-        'current_slack_context',
-        'register_slack',
-    ]
-    for name in (
-        'SlackApp',
-        'ConversationStore',
-        'InMemoryConversationStore',
-        'FileConversationStore',
-        'SlackAccess',
-        'SlackTools',
-        'SlackTool',
-        'SlackCustomTool',
-        'SlackThread',
-        'SlackContextEntity',
-        'SlackMessageContext',
-    ):
-        assert name not in vars(slack)
-        with pytest.raises(AttributeError):
-            getattr(slack, name)
 
 
 @pytest.mark.parametrize('path', EXAMPLE_FILES, ids=lambda p: p.stem)

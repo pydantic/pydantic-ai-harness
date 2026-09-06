@@ -11,7 +11,7 @@ from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness.slack._context import _current_slack_user_token  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.slack._context import current_slack_user_token
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
@@ -34,7 +34,7 @@ _SLACK_MCP_URL = 'https://mcp.slack.com/mcp'
 
 @dataclass(kw_only=True)
 class Slack(AbstractCapability[AgentDepsT]):
-    """Give an agent access to the invoking user's native Slack MCP tools."""
+    """Give a host-registered agent access to the invoking user's native Slack MCP tools."""
 
     id: str | None = 'slack'
     _dynamic_toolset: DynamicToolset[AgentDepsT] = field(init=False, repr=False, compare=False)
@@ -49,9 +49,9 @@ class Slack(AbstractCapability[AgentDepsT]):
         return self._dynamic_toolset
 
     def _toolset_for_run(self, _ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
-        token = _current_slack_user_token()
+        token = current_slack_user_token()
         if token is None:
-            raise UserError('Slack MCP needs the invoking user OAuth token.')
+            raise UserError('Slack MCP needs the invoking user OAuth token. Run this agent through register_slack.')
         return MCPToolset(
             _SLACK_MCP_URL,
             id=f'{self.id or "slack"}-mcp',

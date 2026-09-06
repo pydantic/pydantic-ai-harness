@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import overload
 
 from pydantic import TypeAdapter, ValidationError
@@ -13,10 +15,10 @@ from pydantic_ai.durable_exec import BaseDurabilityCapability
 from pydantic_ai.exceptions import RunCancelled
 from typing_extensions import TypeVar
 
-from pydantic_ai_harness.slack._context import (  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.slack._context import (
     SlackContext,
     SlackFile,
-    _bind_slack_run,  # pyright: ignore[reportPrivateUsage]
+    bind_slack_run,
 )
 
 try:
@@ -65,9 +67,15 @@ def _valid_event(event: Mapping[str, object]) -> bool:
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _Authorization:
+    bot_user_id: str
+    user_token: str | None
+
+
 def _authorization(
     slack_context: SlackContext, event: Mapping[str, object], context: AsyncBoltContext
-) -> tuple[str | None, str] | None:
+) -> _Authorization | None:
     auth_value = context.authorize_result
     if auth_value is None:  # pragma: no cover - Bolt authorizes these event types before listener dispatch
         return None
@@ -79,13 +87,13 @@ def _authorization(
         return None
     event_team = event_team_id or event_team
     if event_team is not None and event_team != slack_context.team_id:
-        logger.warning('Slack event team %s does not match native team %s', event_team, slack_context.team_id)
+        logger.debug('Slack event team %s does not match native team %s', event_team, slack_context.team_id)
         return None
     if actor_team is not None and actor_team != slack_context.team_id:
-        logger.warning('Slack actor team %s does not match native team %s', actor_team, slack_context.team_id)
+        logger.debug('Slack actor team %s does not match native team %s', actor_team, slack_context.team_id)
         return None
     if auth_value.team_id != slack_context.team_id:
-        logger.warning(
+        logger.debug(
             'Slack authorization team %s does not match native team %s', auth_value.team_id, slack_context.team_id
         )
         return None
@@ -99,8 +107,8 @@ def _authorization(
         return None
     user_token = _string(auth_value.user_token)
     if auth_value.user_id is None or user_token is None:
-        return None, bot_user_id
-    return user_token, bot_user_id
+        return _Authorization(bot_user_id=bot_user_id, user_token=None)
+    return _Authorization(bot_user_id=bot_user_id, user_token=user_token)
 
 
 def _slack_context(event: Mapping[str, object], context: AsyncBoltContext) -> SlackContext | None:
@@ -162,10 +170,19 @@ def register_slack(  # noqa: C901
     *,
     deps_factory: Callable[[SlackContext], DepsT] | None = None,
 ) -> None:
-    """Register one shared agent listener for mentions and messages."""
+    """Register one shared agent listener for mentions and messages.
+
+    `deps_factory` is called synchronously for each accepted event.
+    """
     if BaseDurabilityCapability.from_agent(agent) is not None:
         raise ValueError('register_slack does not support durable execution capabilities.')
-    engaged: set[tuple[str, str, str]] = set()
+    engaged: OrderedDict[tuple[str, str, str], None] = OrderedDict()
+
+    def refresh_engagement(key: tuple[str, str, str]) -> None:
+        engaged.pop(key, None)
+        engaged[key] = None
+        if len(engaged) > 1024:
+            engaged.popitem(last=False)
 
     async def is_agent_message(event: Mapping[str, object], context: AsyncBoltContext) -> bool:
         if not _valid_event(event):
@@ -177,6 +194,8 @@ def register_slack(  # noqa: C901
         bot_id = _string(context.bot_user_id)
         if bot_id is None:
             return False
+        # Slack delivers DM mentions only as message.im, not app_mention. Verified 2026-09-06:
+        # https://docs.slack.dev/reference/events/app_mention/#usage-info
         if channel_type == 'im':
             return True
         if channel_type not in {'channel', 'group'} or _string(event.get('thread_ts')) is None:
@@ -199,28 +218,31 @@ def register_slack(  # noqa: C901
         authorization = _authorization(slack_context, event, context)
         if authorization is None:
             return
-        user_token, bot_user_id = authorization
+        bot_user_id = authorization.bot_user_id
+        user_token = authorization.user_token
+        channel_type = _string(event.get('channel_type'))
+        reply_thread_ts = _string(event.get('thread_ts')) if channel_type == 'im' else slack_context.thread_ts
         if user_token is None:
             await say(
                 text=MISSING_IDENTITY_REPLY,
-                thread_ts=slack_context.thread_ts,
+                thread_ts=reply_thread_ts,
                 mrkdwn=False,
                 parse='none',
                 unfurl_links=False,
                 unfurl_media=False,
             )
             return
-        thread_ts = slack_context.thread_ts
         raw_text: object = event.get('text')  # pyright: ignore[reportUnknownMemberType]
         text = raw_text if isinstance(raw_text, str) else ''
         text = text.replace(f'<@{bot_user_id}>', '').strip()
         if not text and not slack_context.files:
             return
-        if mention:
-            engaged.add(_thread_key(slack_context))
+        key = _thread_key(slack_context)
+        if mention or key in engaged:
+            refresh_engagement(key)
         prompt = _metadata_prompt(slack_context, text or 'The user shared files without a text message')
         try:
-            with _bind_slack_run(slack_context, user_token):  # pyright: ignore[reportPrivateUsage]
+            with bind_slack_run(slack_context, user_token):
                 if deps_factory is None:
                     result = await agent.run(prompt, conversation_id=_conversation_id(slack_context))  # pyright: ignore[reportArgumentType]
                 else:
@@ -240,7 +262,7 @@ def register_slack(  # noqa: C901
             result_text = result.output if result.output.strip() else DEFAULT_ERROR_REPLY
         await say(
             text=result_text,
-            thread_ts=thread_ts,
+            thread_ts=reply_thread_ts,
             mrkdwn=False,
             parse='none',
             unfurl_links=False,
