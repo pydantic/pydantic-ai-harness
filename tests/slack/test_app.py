@@ -152,7 +152,7 @@ class BlockingStore(FakeStore):
             try:
                 await self._release_load.wait()
             except BaseException:
-                if self._load_cancelled is not None:
+                if self._load_cancelled is not None:  # pragma: no branch - cancellation tests supply the event
                     self._load_cancelled.set()
                 raise
         return list(self.histories.get(key, ()))
@@ -162,13 +162,13 @@ class CustomStringSet(Set[str]):
     def __init__(self, *values: str) -> None:
         self._values = frozenset(values)
 
-    def __contains__(self, value: object) -> bool:
+    def __contains__(self, value: object) -> bool:  # pragma: no cover - required by Set ABC, unused by tests
         return value in self._values
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._values)
 
-    def __len__(self) -> int:
+    def __len__(self) -> int:  # pragma: no cover - required by Set ABC, unused by tests
         return len(self._values)
 
 
@@ -215,7 +215,7 @@ def recording_agent(output: str = 'done', prompts: list[str] | None = None) -> A
             for message in messages:
                 if isinstance(message, ModelRequest):
                     for part in message.parts:
-                        if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                        if isinstance(part, UserPromptPart) and isinstance(part.content, str):  # pragma: no branch
                             prompts.append(part.content)
         return ModelResponse(parts=[TextPart(output)])
 
@@ -319,7 +319,7 @@ class TestConstructor:
         calls: list[str] = []
 
         def factory(_context: SlackContext) -> None:
-            calls.append('called')
+            calls.append('called')  # pragma: no cover - invalid configuration rejects before factory execution
 
         with pytest.raises(ValueError, match='not both'):
             build(recording_agent(), deps='fixed', deps_factory=factory)  # type: ignore[arg-type]
@@ -673,7 +673,7 @@ class TestPersistenceAndDelivery:
         )
         model_called = False
 
-        async def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        async def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:  # pragma: no cover
             nonlocal model_called
             model_called = True
             return ModelResponse(parts=[TextPart('done')])
@@ -912,7 +912,7 @@ class TestConcurrencyAndStops:
         async def model(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
             started.set()
             await release.wait()
-            return ModelResponse(parts=[TextPart('done')])
+            return ModelResponse(parts=[TextPart('done')])  # pragma: no cover - stop cancels before return
 
         _, app = build(Agent(FunctionModel(model)))
         client = FakeSlackClient()

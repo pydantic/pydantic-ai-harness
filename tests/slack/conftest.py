@@ -63,7 +63,7 @@ class OfflineMCP:
             del auth
             client_headers = headers or {}
             token = client_headers.get('Authorization')
-            if token is not None:
+            if token is not None:  # pragma: no branch - every fixture MCP client has Authorization
                 self.authorization_headers.append(token)
             client = httpx.AsyncClient(
                 transport=httpx.ASGITransport(app=self),
@@ -84,7 +84,7 @@ class OfflineMCP:
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
         assert self._stack is not None
         await self._terminate_sessions()
-        if self._task_group is not None:
+        if self._task_group is not None:  # pragma: no branch - __aenter__ initializes the task group
             self._task_group.cancel_scope.cancel()
         await self._stack.aclose()
         self._task_group = None
@@ -116,7 +116,7 @@ class OfflineMCP:
                 await self.call_release.wait()
             if self.error is not None:
                 error = self.error
-                if self.error_once:
+                if self.error_once:  # pragma: no branch - the fixture uses one-shot errors only
                     self.error = None
                 raise error
             if self.result is None:
