@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         OutputGuardrailFunc,
         ToolGuardrail,
     )
+    from .islo_sandbox import IsloSandbox
     from .localstack import LocalStack
     from .logfire import ManagedPrompt
     from .macroscope import Macroscope
@@ -80,6 +81,7 @@ __all__ = [
     'InputBlocked',
     'InputGuardrail',
     'InputGuardrailFunc',
+    'IsloSandbox',
     'LLM_API_KEY_ENV_PATTERNS',
     'LocalStack',
     'Macroscope',
@@ -130,6 +132,7 @@ _CAPABILITY_EXPORTS = {
     'ExaSearch': 'exa',
     'FallbackCompaction': 'compaction',
     'FileSystem': 'filesystem',
+    'IsloSandbox': 'islo_sandbox',
     'LocalStack': 'localstack',
     'Macroscope': 'macroscope',
     'ManagedPrompt': 'logfire',

@@ -26,7 +26,7 @@ export ISLO_API_KEY=...
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -59,7 +59,7 @@ the model does not call a sandbox tool.
 Attach to a sandbox managed elsewhere by name:
 
 ```python
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 IsloSandbox(sandbox_name='existing-sandbox')
 ```
@@ -69,7 +69,8 @@ enter a session yourself:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.islo_sandbox import IsloSandbox, IsloSandboxSession
+from pydantic_ai_harness import IsloSandbox
+from pydantic_ai_harness.islo_sandbox import IsloSandboxSession
 
 async with IsloSandboxSession(sandbox_timeout=1800) as session:
     agent = Agent(
@@ -127,14 +128,30 @@ If owned deletion fails, direct `IsloSandboxSession.close()` retains the
 control-plane handle so callers can retry cleanup. The lifecycle `delete_after`
 policy remains the final server-side backstop.
 
-The tool names overlap with Shell and FileSystem. Pydantic AI rejects duplicate
-tool names. Use `PrefixTools` and custom `instructions` when composing these
-capabilities because prefixing does not rewrite the default instructions.
+## Tool-name composition
+
+The tool names overlap with the Shell and FileSystem capabilities. Pydantic AI
+rejects duplicate names. Prefix this capability when composing them:
+
+```python
+from pydantic_ai.capabilities import PrefixTools
+from pydantic_ai_harness import IsloSandbox
+
+sandbox = PrefixTools(
+    wrapped=IsloSandbox(
+        instructions='Use the islo_-prefixed tools for work in the Islo sandbox.',
+    ),
+    prefix='islo',
+)
+```
+
+Prefixing does not rewrite default instructions, so provide instructions that
+name the prefixed tools.
 
 ## Configuration
 
 ```python
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 IsloSandbox(
     image='ghcr.io/islo-labs/islo-runner:latest',
@@ -162,8 +179,9 @@ IsloSandbox(
 
 Creation-only settings cannot be combined with `sandbox_name` or an injected
 `session`. `base_url` and `compute_url` apply to a capability-created client,
-including attach mode, and must be absolute HTTPS URLs. Configure them on an
-injected session instead. Set
+including attach mode, and must be absolute HTTPS URLs. Passing `base_url`,
+`compute_url`, or `poll_interval` alongside an injected `session` fails at
+construction rather than being ignored; configure them on the session. Set
 `instructions=''` to disable default model instructions.
 
 ## Agent specs
@@ -180,7 +198,7 @@ capabilities:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[IsloSandbox])
 ```
@@ -193,9 +211,6 @@ agent = Agent.from_file('agent.yaml', custom_capability_types=[IsloSandbox])
 - [Islo Python SDK](https://github.com/islo-labs/python-sdk)
 - [Islo Sandbox source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/islo_sandbox/)
 - [Pydantic AI Harness version policy](index.md#version-policy)
-
-The API may change between releases while Pydantic AI Harness is on 0.x
-versions.
 
 ::: pydantic_ai_harness.islo_sandbox.IsloSandbox
 

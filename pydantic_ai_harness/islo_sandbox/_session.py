@@ -1,6 +1,6 @@
 """Lifecycle and I/O for an Islo sandbox.
 
-External assumptions verified 2026-08-13:
+External assumptions verified 2026-09-06 against islo 0.3.19 (pinned `>=0.3.12,<0.4`):
 
 * `AsyncIslo` exposes create/get/delete, async exec polling, and streaming file
   download/upload. Re-check against https://github.com/islo-labs/python-sdk.
@@ -98,14 +98,31 @@ class IsloSandboxExecResult:
     """
 
     stdout: str
+    """The command's standard output, tail-truncated when `max_output_bytes` or `max_output_lines` applied."""
     stderr: str
+    """The command's standard error, tail-truncated when `max_output_bytes` or `max_output_lines` applied."""
     returncode: int
+    """The exit status reported by Islo, or `-1` when the client deadline expired before a result arrived."""
     status: str
+    """Islo's terminal exec state, or `client_timeout` when the Harness deadline expired first."""
     stdout_truncated: bool = False
+    """True when a limit dropped earlier stdout; `stdout` is the retained tail."""
     stderr_truncated: bool = False
+    """True when a limit dropped earlier stderr; `stderr` is the retained tail."""
     timed_out: bool = False
+    """True when a deadline ended the command, whether Islo reported it or the client deadline expired."""
     applied_timeout: int | None = None
+    """The whole-second deadline sent to Islo, or None if unbounded.
+
+    This is the quantized value actually applied, not the (possibly fractional) timeout the
+    caller requested, so the caller can report the exact deadline.
+    """
     remote_may_be_running: bool = False
+    """True when the client deadline expired rather than Islo confirming a timeout.
+
+    Islo exposes no per-exec cancellation, so the command may still be running remotely. A
+    provider-confirmed timeout leaves this False.
+    """
 
 
 def _tail_utf8(text: str, max_bytes: int | None) -> tuple[str, bool]:
@@ -446,10 +463,10 @@ class IsloSandboxSession:
                 remaining = max_bytes + 1 - len(data)
                 data.extend(chunk[:remaining])
                 if len(data) > max_bytes:
-                    raise IsloSandboxError(f'File exceeds the {max_bytes}-byte read limit.')
+                    # One byte past the cap is all the caller needs to refuse, so stop
+                    # rather than transfer the rest of an oversized file.
+                    break
             return bytes(data)
-        except IsloSandboxError:
-            raise
         except Exception as e:
             raise self._map_error(e, f'Could not read {target!r}', unavailable_on_404=False) from e
         finally:

@@ -9,6 +9,7 @@ from typing import Protocol, TypeGuard, runtime_checkable
 
 import pytest
 from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -18,6 +19,7 @@ from pydantic_ai.usage import RunUsage
 
 import pydantic_ai_harness
 import pydantic_ai_harness.islo_sandbox as islo_sandbox
+from pydantic_ai_harness.code_mode import CodeMode
 from pydantic_ai_harness.islo_sandbox import (
     IsloSandbox,
     IsloSandboxError,
@@ -186,7 +188,7 @@ class TestFiles:
     async def test_read_limit_and_missing_file_are_model_retries(self, fake_islo: FakeIslo) -> None:
         fake_islo.put_file('/workspace/large', b'123456')
         async with _toolset(max_read_bytes=5) as toolset:
-            with pytest.raises(ModelRetry, match='5-byte read limit'):
+            with pytest.raises(ModelRetry, match='Read just the part you need with a shell command'):
                 await toolset.read_file('large')
             with pytest.raises(ModelRetry, match='Could not read'):
                 await toolset.read_file('missing')
@@ -276,9 +278,11 @@ class TestLifecycle:
         assert fake_islo.sandboxes.delete_calls == []
 
     async def test_injected_open_session_is_reused(self, fake_islo: FakeIslo) -> None:
+        fake_islo.sandboxes.responder = lambda call: FakeExecResult(stdout='reused\n')
         async with IsloSandboxSession(poll_interval=0.001) as session:
             async with _toolset(session=session) as toolset:
-                assert await toolset.run_command('true')
+                assert await toolset.run_command('true') == '[stdout]\nreused'
+            assert fake_islo.sandboxes.exec_calls[0].sandbox_name == 'sandbox-owned'
             assert len(fake_islo.sandboxes.create_calls) == 1
             assert fake_islo.sandboxes.delete_calls == []
         assert fake_islo.sandboxes.delete_calls == ['sandbox-owned']
@@ -312,7 +316,8 @@ class TestCapability:
         assert IsloSandbox.get_serialization_name() == 'IsloSandbox'
         assert 'IsloSandbox' in islo_sandbox.__all__
         assert 'IsloSandboxToolset' not in islo_sandbox.__all__
-        assert 'IsloSandbox' not in pydantic_ai_harness.__all__
+        assert 'IsloSandbox' in pydantic_ai_harness.__all__
+        assert pydantic_ai_harness.IsloSandbox is IsloSandbox
 
     def test_configuration_is_keyword_only(self) -> None:
         parameters = inspect.signature(IsloSandbox).parameters.values()
@@ -418,3 +423,48 @@ class TestCapability:
         ]
         assert tool_returns == ['[stdout]\nhello']
         assert fake_islo.sandboxes.delete_calls == ['sandbox-owned']
+
+
+async def _tools_offered_to_model(*, islo_first: bool) -> dict[str, str | None]:
+    """Run an agent with IsloSandbox and CodeMode and return the tools the model was offered."""
+    offered: dict[str, str | None] = {}
+
+    def capture(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        offered.update({tool.name: tool.description for tool in info.function_tools})
+        return ModelResponse(parts=[TextPart('done')])
+
+    sandbox = IsloSandbox[object](poll_interval=0.001)
+    code_mode = CodeMode[object]()
+    capabilities: list[AbstractCapability[object]] = [sandbox, code_mode] if islo_first else [code_mode, sandbox]
+    agent: Agent[None, str] = Agent(FunctionModel(capture), capabilities=capabilities)
+    await agent.run('go')
+    return offered
+
+
+class TestCodeModeInterop:
+    """`run_command` takes a command line, so CodeMode leaves it native.
+
+    Folding it into `run_code` would make the model write a Monty script whose argument is a
+    shell script quoted as a Python string, running the outer script on the host and the inner
+    one in the Islo sandbox. The file tools carry no command line, so they stay sandboxed like
+    any other tool.
+    """
+
+    @pytest.mark.parametrize('islo_first', [True, False], ids=['islo-first', 'code-mode-first'])
+    async def test_run_command_stays_native(self, fake_islo: FakeIslo, islo_first: bool) -> None:
+        tools = await _tools_offered_to_model(islo_first=islo_first)
+
+        assert 'run_command' in tools
+        run_code_description = tools['run_code']
+        assert run_code_description is not None
+        assert 'async def run_command' not in run_code_description
+
+    @pytest.mark.parametrize('islo_first', [True, False], ids=['islo-first', 'code-mode-first'])
+    async def test_file_tools_are_still_sandboxed(self, fake_islo: FakeIslo, islo_first: bool) -> None:
+        tools = await _tools_offered_to_model(islo_first=islo_first)
+
+        run_code_description = tools['run_code']
+        assert run_code_description is not None
+        for name in ('read_file', 'write_file', 'list_directory'):
+            assert name not in tools
+            assert f'async def {name}' in run_code_description

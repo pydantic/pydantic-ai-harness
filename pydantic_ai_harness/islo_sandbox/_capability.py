@@ -49,28 +49,108 @@ class IsloSandbox(AbstractCapability[AgentDepsT]):
     runs. The capability provides bounded command, read, write, and listing
     tools; creation settings cover the image, workdir, environment, resources,
     network policy, and Islo endpoints.
+
+    Requires the `islo` extra (`uv add "pydantic-ai-harness[islo]"`) and an Islo API
+    key in `ISLO_API_KEY`.
+
+    ```python
+    from pydantic_ai import Agent
+    from pydantic_ai_harness import IsloSandbox
+
+    agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[IsloSandbox()])
+    result = agent.run_sync('Write a Python script that prints the first 10 primes and run it.')
+    print(result.output)
+    ```
     """
 
     image: str = _DEFAULT_IMAGE
+    """Container image for owned sandboxes, as a registry tag. Applies only when creating one."""
+
     sandbox_name: str | None = None
+    """Attach to an existing sandbox by name instead of creating one. Attached sandboxes are not deleted.
+
+    Use this to reuse a sandbox managed elsewhere. The settings that only apply when creating a
+    sandbox (`image`, `sandbox_timeout`, `workdir`, `env`, `vcpus`, `memory_mb`, `disk_gb`,
+    `internet_enabled`, `gateway_profile`) cannot be combined with `sandbox_name`.
+    """
+
     session: IsloSandboxSession | None = None
+    """Use a sandbox session you own and keep open across runs, instead of a per-run one.
+
+    Pass an already-entered `IsloSandboxSession` to reuse one sandbox across runs while
+    controlling its lifetime yourself: the capability uses it but never opens or closes it.
+    Cannot be combined with `sandbox_name`, the creation settings, `base_url`, `compute_url`,
+    or `poll_interval`, which the session already owns. A shared session is not
+    concurrency-safe across overlapping runs.
+    """
+
     sandbox_timeout: int = _DEFAULT_SANDBOX_TIMEOUT
+    """Lifetime ceiling in seconds for an owned sandbox, applied as Islo's `delete_after` policy.
+
+    This bounds the whole sandbox; `default_command_timeout` bounds a single command. Positive
+    integer.
+    """
+
     workdir: str | None = _DEFAULT_WORKDIR
+    """Working directory for commands, and the base that relative tool paths resolve against."""
+
     env: Mapping[str, str] | None = None
+    """Environment variables for the created sandbox. Copied at construction."""
+
     vcpus: int | None = None
+    """vCPUs for the created sandbox. Positive integer, or `None` for the Islo default."""
+
     memory_mb: int | None = None
+    """Memory in MiB for the created sandbox. Positive integer, or `None` for the Islo default."""
+
     disk_gb: int | None = None
+    """Disk in GiB for the created sandbox. Positive integer, or `None` for the Islo default."""
+
     internet_enabled: bool | None = None
+    """Whether the created sandbox reaches the internet. `None` leaves Islo's default policy."""
+
     gateway_profile: str | None = None
+    """Islo gateway profile governing egress for the created sandbox."""
+
     base_url: str | None = None
+    """Control-plane URL for an Islo-compatible deployment. Must be an absolute HTTPS URL.
+
+    Applies to a client the capability creates, including in attach mode. Passing it alongside
+    `session` raises: configure the endpoint on the session instead.
+    """
+
     compute_url: str | None = None
+    """Compute-plane URL for an Islo-compatible deployment. Must be an absolute HTTPS URL.
+
+    Same rules as `base_url`.
+    """
+
     default_command_timeout: float = 60.0
+    """Seconds a command may run when the model supplies no `timeout_seconds`. Positive and finite."""
+
     max_command_timeout: int | None = None
+    """Ceiling in seconds on a model-supplied `timeout_seconds`; requests above it are clamped.
+
+    Defaults to `sandbox_timeout` when unset, and may not exceed it for an owned sandbox.
+    """
+
     max_output_bytes: int = DEFAULT_MAX_BYTES
+    """Byte cap on rendered command output; longer output is tail-truncated. Positive integer."""
+
     max_output_lines: int = DEFAULT_MAX_LINES
+    """Line cap on rendered command output; longer output is tail-truncated. Positive integer."""
+
     max_read_bytes: int = _DEFAULT_MAX_READ_BYTES
+    """Byte cap on a single `read_file`. Reading past it asks the model to slice the file instead."""
+
     poll_interval: float = 0.5
+    """Seconds between polls while waiting for a sandbox to start or a command to finish.
+
+    Positive and finite. Passing it alongside `session` raises: set it on the session instead.
+    """
+
     instructions: str | None = None
+    """Replace the default model instructions. `''` supplies none; `None` keeps the defaults."""
 
     def __post_init__(self) -> None:
         """Validate limits and reject settings ignored by the selected lifecycle."""

@@ -13,7 +13,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from typing_extensions import Self
 
-from pydantic_ai_harness._sandbox_tool_output import render_file_window, truncate_output
+from pydantic_ai_harness._sandbox_tool_output import guard_read_size, render_file_window, truncate_output
 from pydantic_ai_harness.islo_sandbox._session import (
     IsloSandboxError,
     IsloSandboxSession,
@@ -71,7 +71,11 @@ class IsloSandboxToolset(FunctionToolset[AgentDepsT]):
         self._session: IsloSandboxSession | None = None
         self._run_scoped = _run_scoped
 
-        self.add_function(self.run_command, name='run_command')
+        self.add_function(
+            self.run_command,
+            name='run_command',
+            metadata={'code_arg_name': 'command', 'code_arg_language': 'shell'},
+        )
         self.add_function(self.read_file, name='read_file')
         self.add_function(self.write_file, name='write_file')
         self.add_function(self.list_directory, name='list_directory')
@@ -172,7 +176,19 @@ class IsloSandboxToolset(FunctionToolset[AgentDepsT]):
         )
 
     async def run_command(self, command: str, *, timeout_seconds: float | None = None) -> str:
-        """Run a shell command in Islo and return bounded stdout, stderr, and status."""
+        """Run a shell command in the sandbox and return its output.
+
+        The command runs through `sh -c`, so pipes, redirection, `&&`, and globs work. A
+        non-zero exit is reported, not raised, so you can react to it.
+
+        Args:
+            command: The shell command to run.
+            timeout_seconds: Maximum seconds to wait (default: the configured timeout),
+                clamped to the configured ceiling.
+
+        Returns:
+            Labelled stdout/stderr output, with an exit code on non-zero exit.
+        """
         session = self._require_session()
         try:
             result = await session.exec(
@@ -210,7 +226,18 @@ class IsloSandboxToolset(FunctionToolset[AgentDepsT]):
         offset: Annotated[int | None, Field(description='Line number to start reading from (1-indexed)')] = None,
         limit: Annotated[int | None, Field(description='Maximum number of lines to read')] = None,
     ) -> str:
-        """Read bounded UTF-8 text from a sandbox file."""
+        """Read a text file from the sandbox and return its contents.
+
+        Large files are truncated to a safety cap; the result ends with the next `offset`
+        to use to page through the rest. A file over the read limit is refused, with a
+        suggestion to slice it with a shell command instead.
+
+        Args:
+            path: Path to the file inside the sandbox. Relative paths are resolved
+                against the working directory used by `run_command`.
+            offset: Line number to start reading from (1-indexed).
+            limit: Maximum number of lines to read.
+        """
         session = self._require_session()
         try:
             data = await session.read_bytes(path, max_bytes=self._max_read_bytes)
@@ -218,6 +245,9 @@ class IsloSandboxToolset(FunctionToolset[AgentDepsT]):
             raise
         except IsloSandboxError as e:
             raise ModelRetry(f'Could not read {path!r}: {e}')
+        # `read_bytes` stops one byte past the cap, so this refuses an oversized file with
+        # the same message every sandbox backend uses.
+        guard_read_size(len(data), max_bytes=self._max_read_bytes)
         return render_file_window(
             data,
             offset=offset,
@@ -227,7 +257,13 @@ class IsloSandboxToolset(FunctionToolset[AgentDepsT]):
         )
 
     async def write_file(self, path: str, content: str) -> str:
-        """Write UTF-8 text to a sandbox file."""
+        """Write UTF-8 text to a file in the sandbox, replacing any existing contents.
+
+        Args:
+            path: Path to the file inside the sandbox. Relative paths are resolved
+                against the working directory used by `run_command`.
+            content: The text to write, encoded as UTF-8.
+        """
         session = self._require_session()
         try:
             data = content.encode('utf-8')
@@ -242,7 +278,12 @@ class IsloSandboxToolset(FunctionToolset[AgentDepsT]):
         return f'Wrote {len(data)} bytes to {path!r}.'
 
     async def list_directory(self, path: str = '.') -> str:
-        """List a sandbox directory with directories marked by `/`."""
+        """List the entries of a directory in the sandbox, with directories marked by `/`.
+
+        Args:
+            path: Path to the directory inside the sandbox. Relative paths are resolved
+                against the working directory used by `run_command`.
+        """
         session = self._require_session()
         try:
             entries = await session.list_files(path)

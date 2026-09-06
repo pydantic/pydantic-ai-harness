@@ -287,8 +287,8 @@ class TestFiles:
     async def test_read_limit_uses_sentinel_byte(self, fake_islo: FakeIslo) -> None:
         fake_islo.put_file('/workspace/large', b'123456')
         async with IsloSandboxSession() as session:
-            with pytest.raises(IsloSandboxError, match='5-byte read limit'):
-                await session.read_bytes('large', max_bytes=5)
+            # One byte past the cap: enough for the caller to refuse, without transferring the rest.
+            assert await session.read_bytes('large', max_bytes=5) == b'123456'[:6]
         assert fake_islo.sandboxes.download_closed == [('sandbox-owned', '/workspace/large')]
 
     @pytest.mark.parametrize('max_bytes', [0, -1, True])

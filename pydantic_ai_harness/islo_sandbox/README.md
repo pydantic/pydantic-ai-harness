@@ -7,6 +7,8 @@ must not execute on the application host.
 This is a sandbox capability, not a model provider. Islo supplies execution and
 filesystem isolation; your existing Pydantic AI model still performs inference.
 
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+
 ## Quick start
 
 Install the optional dependency and configure an Islo API key:
@@ -18,7 +20,7 @@ export ISLO_API_KEY=...
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
@@ -53,7 +55,7 @@ model cannot loop against an unusable environment.
 The default mode creates and owns one sandbox per agent run:
 
 ```python
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 IsloSandbox(
     image='ghcr.io/islo-labs/islo-runner:latest',
@@ -64,7 +66,7 @@ IsloSandbox(
 Attach to a sandbox managed elsewhere by name:
 
 ```python
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 IsloSandbox(sandbox_name='existing-sandbox')
 ```
@@ -76,7 +78,8 @@ To reuse an owned sandbox across several runs, enter a session yourself:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.islo_sandbox import IsloSandbox, IsloSandboxSession
+from pydantic_ai_harness import IsloSandbox
+from pydantic_ai_harness.islo_sandbox import IsloSandboxSession
 
 async with IsloSandboxSession(sandbox_timeout=1800) as session:
     agent = Agent(
@@ -125,7 +128,7 @@ Islo's Python SDK currently requires an asyncio event loop.
 ## Configuration
 
 ```python
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 IsloSandbox(
     image='ghcr.io/islo-labs/islo-runner:latest',
@@ -152,9 +155,11 @@ IsloSandbox(
 ```
 
 Use `base_url` and `compute_url` for an Islo-compatible deployment. They apply
-to a capability-created client, including attach mode, must be absolute HTTPS
-URLs, and do not apply to an injected session. Set `instructions=''` to disable
-the default model instructions.
+to a capability-created client, including attach mode, and must be absolute
+HTTPS URLs. Passing `base_url`, `compute_url`, or `poll_interval` alongside an
+injected `session` fails at construction rather than being ignored; configure
+them on the session. Set `instructions=''` to disable the default model
+instructions.
 
 ## Tool-name composition
 
@@ -163,7 +168,7 @@ rejects duplicate names. Prefix this capability when composing them:
 
 ```python
 from pydantic_ai.capabilities import PrefixTools
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 sandbox = PrefixTools(
     wrapped=IsloSandbox(
@@ -206,7 +211,7 @@ capabilities:
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai_harness.islo_sandbox import IsloSandbox
+from pydantic_ai_harness import IsloSandbox
 
 agent = Agent.from_file('agent.yaml', custom_capability_types=[IsloSandbox])
 ```
@@ -215,10 +220,8 @@ agent = Agent.from_file('agent.yaml', custom_capability_types=[IsloSandbox])
 
 - [Islo documentation](https://docs.islo.dev/)
 - [Islo Python SDK](https://github.com/islo-labs/python-sdk)
-- [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)
+- [Pydantic AI capabilities](https://pydantic.dev/docs/ai/core-concepts/capabilities/)
+- [Pydantic AI toolsets](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/)
 - [Unified Islo Sandbox docs](https://pydantic.dev/docs/ai/harness/islo-sandbox/)
 - [Islo Sandbox source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/islo_sandbox/)
 - [Pydantic AI Harness version policy](https://pydantic.dev/docs/ai/harness/#version-policy)
-
-The API may change between releases while Pydantic AI Harness is on 0.x
-versions.
