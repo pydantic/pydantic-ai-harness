@@ -155,6 +155,7 @@ _CAPABILITY_PAGE_META = {
     'spend.md': ('spend', 'Spend'),
     'localstack.md': ('localstack', 'LocalStack'),
     'stackone.md': ('stackone', 'StackOne'),
+    'slack.md': ('slack', 'Slack'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
 }
 
