@@ -56,6 +56,18 @@ Desktop and Cursor use. Tools carry their server name as a prefix, so safe outpu
 are reachable as `safeoutputs_create_issue` and so on. HTTP servers are carried
 over; CLI-mounted servers remain on the agent's `PATH` as executables.
 
+## gh-aw compatibility
+
+This definition requires the gh-aw action/runtime at
+[v0.86.3](https://github.com/github/gh-aw/releases/tag/v0.86.3) or newer. Its
+endpoint discovery uses `deriveBaseUrlFromModelsURL`, which that release exports for
+converting the reflected `/models` URL into the chat-completions base URL while
+preserving the firewall host bridge.
+
+Existing workflows must be recompiled with a compatible gh-aw pin and have their
+generated lockfile committed. Installing a newer `gh aw` CLI locally does not alter
+an already committed lockfile or the action/runtime it pins.
+
 ## Pointing the engine at your own endpoint
 
 `PAI_BASE_URL` in `engine.env` sends requests to any endpoint that speaks the
