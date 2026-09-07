@@ -37,7 +37,7 @@ def _is_deprecation_shim(package: Path) -> bool:
 # capability tables per review. `media` exports the content-addressed stores Step Persistence
 # uses; its docs placement is being reworked in
 # https://github.com/pydantic/pydantic-ai-harness/issues/625.
-_NOT_A_CAPABILITY = frozenset({'media'})
+_NOT_A_CAPABILITY = frozenset({'channels', 'media'})
 
 
 def _capability_packages() -> list[Path]:
@@ -139,6 +139,7 @@ _CAPABILITY_PAGE_META = {
     'youdotcom.md': ('youdotcom', 'You.com'),
     'macroscope.md': ('macroscope', 'Macroscope'),
     'browser-use.md': ('browser_use', 'Browser Use'),
+    'channels.md': ('channels', 'Channels'),
     'compaction.md': ('compaction', 'Compaction'),
     'tool-output-limits.md': ('tool_output_limits', 'Tool Output Limits'),
     'warn-on-cache-busts.md': ('warn_on_cache_busts', 'Warn On Cache Busts'),
