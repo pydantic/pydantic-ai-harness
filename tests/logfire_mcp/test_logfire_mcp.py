@@ -11,7 +11,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import Agent, UserError
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import DeferredToolRequests, ModelMessage, ModelRequest, ToolCallPart
+from pydantic_ai.messages import DeferredToolRequests, DeferredToolResults, ModelMessage, ModelRequest, ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import WrapperToolset
 
@@ -104,20 +104,38 @@ class TestLogfireMCP:
         assert _tool_call_names(result.all_messages()) == {'project_list', 'query_run'}
         assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
 
-    async def test_write_access_exposes_every_tool_and_requires_mutation_approval(self, logfire_server: FastMCP):
+    async def test_write_access_exposes_every_tool_and_requires_mutation_approval(
+        self, logfire_server: FastMCP, logfire_calls: Calls
+    ):
         capability = LogfireMCP(client=logfire_server, access='write')
-        result = await Agent(TestModel(), capabilities=[capability], output_type=[str, DeferredToolRequests]).run(
-            'Set up a dashboard'
-        )
+        agent = Agent(TestModel(), capabilities=[capability], output_type=[str, DeferredToolRequests])
 
-        assert _tool_call_names(result.all_messages()) == {
+        deferred = await agent.run('Set up a dashboard')
+
+        assert _tool_call_names(deferred.all_messages()) == {
             'project_list',
             'query_run',
             'dashboard_create',
             'unannotated_tool',
         }
-        assert isinstance(result.output, DeferredToolRequests)
-        assert {call.tool_name for call in result.output.approvals} == {'dashboard_create', 'unannotated_tool'}
+        assert isinstance(deferred.output, DeferredToolRequests)
+        assert {call.tool_name for call in deferred.output.approvals} == {'dashboard_create', 'unannotated_tool'}
+        assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
+
+        resumed = await agent.run(
+            message_history=deferred.all_messages(),
+            deferred_tool_results=DeferredToolResults(
+                approvals={call.tool_call_id: True for call in deferred.output.approvals}
+            ),
+        )
+
+        assert isinstance(resumed.output, str)
+        assert [name for name, _ in logfire_calls] == [
+            'project_list',
+            'query_run',
+            'dashboard_create',
+            'unannotated_tool',
+        ]
 
     def test_access_rejects_unknown_value(self):
         with pytest.raises(UserError, match='`access` must be `read` or `write`'):
