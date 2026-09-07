@@ -45,9 +45,9 @@ from pydantic_ai_harness.logfire_mcp import LogfireMCP
 
 agent = Agent(
     'openai:gpt-5.6-sol',
-    capabilities=[LogfireMCP(project='acme/production', auth=os.environ['LOGFIRE_API_KEY'])],
+    capabilities=[LogfireMCP(auth=os.environ['LOGFIRE_API_KEY'])],
 )
-result = agent.run_sync('Count exceptions by service in the last 30 minutes')
+result = agent.run_sync('Count exceptions by service in acme/production over the last 30 minutes')
 print(result.output)
 ```
 
@@ -60,9 +60,9 @@ print(result.output)
 
 ## Operational constraints
 
-- `project` is removed from the tool schemas the model sees and added to every call that takes one, so the model can
-  neither name nor change the project. Leave it unset to let the model choose among the projects the credential can
-  reach.
+- The model chooses the project. When the request does not name one, the instructions tell it to call
+  `project_list` first, which returns the projects the credential can reach. A project-scoped API key limits that
+  list to one entry.
 - `url` defaults to the US region. Use `LOGFIRE_EU_MCP_URL` for EU data, or your own `/mcp` URL for a self-hosted
   deployment.
 - `allowed_tools` narrows the exposed tools by exact name. It does not replace credential scopes.
@@ -73,7 +73,7 @@ print(result.output)
   from pydantic_ai import Agent
   from pydantic_ai_harness.logfire_mcp import LogfireMCP
 
-  logfire = LogfireMCP(project='acme/production')
+  logfire = LogfireMCP()
   agent = Agent(
       'openai:gpt-5.6-sol',
       instructions=logfire.get_instructions(),

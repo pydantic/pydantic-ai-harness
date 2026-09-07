@@ -36,15 +36,15 @@ def logfire_server(logfire_calls: list[tuple[str, dict[str, object]]]) -> FastMC
     server = FastMCP('logfire-fake')
 
     @server.tool()
-    def query_run(query: str, project: str) -> list[dict[str, object]]:
-        """Run SQL against Logfire telemetry."""
-        logfire_calls.append(('query_run', {'query': query, 'project': project}))
-        return [{'count': 3}]
+    def project_list() -> list[str]:
+        """List the projects this credential can reach."""
+        logfire_calls.append(('project_list', {}))
+        return ['acme/production']
 
     @server.tool()
-    def query_schema_reference() -> str:
-        """Return the Logfire query schema."""
-        logfire_calls.append(('query_schema_reference', {}))
-        return 'CREATE TABLE records (...)'
+    def query_run(query: str, project: str) -> list[dict[str, object]]:
+        """Run SQL against one Logfire project."""
+        logfire_calls.append(('query_run', {'query': query, 'project': project}))
+        return [{'count': 3}]
 
     return server
