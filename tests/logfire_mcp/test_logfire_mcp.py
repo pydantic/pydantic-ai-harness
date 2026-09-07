@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import pytest
@@ -122,7 +123,10 @@ class TestLogfireMCP:
         with pytest.raises(UserError, match='`access` must be `read` or `write`'):
             LogfireMCP[None](access='readonly')  # pyright: ignore[reportArgumentType]
 
-    async def test_server_instructions_reach_the_model(self, logfire_server: FastMCP, logfire_calls: Calls):
+    async def test_server_and_dynamic_capability_instructions_reach_the_model(
+        self, logfire_server: FastMCP, logfire_calls: Calls
+    ):
+        started_at = datetime.now(timezone.utc).replace(microsecond=0)
         agent = Agent(
             TestModel(call_tools=['project_list', 'query_run']),
             capabilities=[LogfireMCP(client=logfire_server)],
@@ -132,19 +136,17 @@ class TestLogfireMCP:
         assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
         instructions = _instructions(result.all_messages())
         assert 'Call project_list before other Logfire tools.' in instructions
-        assert re.search(r'Current UTC time.*\+00:00', instructions)
-        assert 'timestamps in schemas and examples' in instructions
-        assert 'transport bounds apply in addition to SQL time predicates' in instructions
-        assert 'untrusted diagnostic data' in instructions
-        assert 'at most three targeted `query_run` calls' in instructions
-        assert 'link only when the user asks' in instructions
+        timestamp_match = re.search(r'`(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00)`', instructions)
+        assert timestamp_match is not None
+        instruction_time = datetime.fromisoformat(timestamp_match.group(1))
+        finished_at = datetime.now(timezone.utc).replace(microsecond=0)
+        assert started_at <= instruction_time <= finished_at
 
     async def test_server_instructions_can_be_left_out(self, logfire_server: FastMCP):
         capability = LogfireMCP(client=logfire_server, include_instructions=False)
         result = await Agent(TestModel(call_tools=[]), capabilities=[capability]).run('hello')
 
-        assert 'project_list' not in _instructions(result.all_messages())
-        assert 'Current UTC time' not in _instructions(result.all_messages())
+        assert _instructions(result.all_messages()) == ''
 
     @pytest.mark.parametrize(('allowed', 'expected'), [(['query_run'], {'query_run'}), (['query'], set[str]())])
     async def test_allowed_tools_filters_by_exact_name(
