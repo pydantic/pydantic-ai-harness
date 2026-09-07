@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
 # Slack's hosted MCP server. It accepts user tokens only and answers a bot token with `invalid_token_type`.
@@ -28,17 +28,15 @@ class Slack(AbstractCapability[AgentDepsT]):
     """The Slack user token. Defaults to `SLACK_USER_TOKEN`."""
     id: str | None = 'slack'
 
-    async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
-        """Return a copy with the token resolved for this run."""
-        token = self.token or os.environ.get('SLACK_USER_TOKEN')
-        if not token:
+    def __post_init__(self) -> None:
+        self.token = self.token or os.environ.get('SLACK_USER_TOKEN')
+        if not self.token:
             raise UserError('Slack tools need a user token. Pass Slack(token=...) or set SLACK_USER_TOKEN.')
-        if token.startswith('xoxb-'):
+        if self.token.startswith('xoxb-'):
             raise UserError(
                 "Slack's MCP server accepts user tokens only, not bot tokens. "
                 'Add user token scopes to the app and use its `xoxp-` token; see https://docs.slack.dev/ai/slack-mcp-server/.'
             )
-        return replace(self, token=token)
 
     @classmethod
     def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
@@ -51,10 +49,8 @@ class Slack(AbstractCapability[AgentDepsT]):
                 raise UserError('Multiple Slack capabilities with different credentials cannot be combined.')
         return super().combine(capabilities)
 
-    def get_toolset(self) -> AbstractToolset[AgentDepsT] | None:
-        """Return the toolset for the resolved token, or `None` before a run resolves one."""
-        if self.token is None:
-            return None
+    def get_toolset(self) -> AbstractToolset[AgentDepsT]:
+        """Connect to Slack's hosted MCP server as the token's user."""
         return MCPToolset(
             _SLACK_MCP_URL,
             id=f'{self.id or "slack"}-mcp',

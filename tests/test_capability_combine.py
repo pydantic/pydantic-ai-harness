@@ -305,13 +305,6 @@ COMBINE_POLICY: dict[str, Policy] = {
 }
 
 
-def test_slack_capabilities_without_tokens_combine() -> None:
-    merged = Slack.combine([Slack(), Slack()])
-
-    assert isinstance(merged, Slack)
-    assert merged.token is None
-
-
 def _is_capability_class(obj: object) -> TypeGuard[type[AbstractCapability[Any]]]:
     """Whether `obj` is a capability class, and not something that merely looks like one.
 
