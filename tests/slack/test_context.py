@@ -1,6 +1,4 @@
-import subprocess
-import sys
-import textwrap
+from __future__ import annotations
 
 import pytest
 
@@ -27,27 +25,5 @@ def test_file_is_an_immutable_typed_snapshot() -> None:
         value.file_id = 'F2'  # type: ignore[misc]
 
 
-def test_bolt_is_required_only_for_hosting() -> None:
-    script = textwrap.dedent(
-        """\
-        import sys
-
-        sys.modules['slack_bolt'] = None
-        from pydantic_ai_harness.slack import Slack
-
-        Slack(token='test-user-token').get_toolset()
-        try:
-            from pydantic_ai_harness.slack import register_slack
-        except ImportError as exc:
-            assert 'slack-bolt is required for register_slack' in str(exc)
-        else:
-            raise AssertionError('hosting imported without Bolt')
-        """
-    )
-    result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stderr
-
-
-def test_unknown_export_raises_attribute_error() -> None:
-    with pytest.raises(AttributeError, match='has no attribute'):
-        getattr(slack, 'not_an_export')
+def test_public_exports_are_limited_to_slack_capability_and_context() -> None:
+    assert slack.__all__ == ['Slack', 'SlackContext', 'SlackFile', 'current_slack_context']
