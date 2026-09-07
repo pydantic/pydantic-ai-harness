@@ -1,6 +1,8 @@
 # Logfire MCP
 
-`LogfireMCP` lets an agent query telemetry and use explicitly selected observability tools in one Logfire project.
+`LogfireMCP` lets an agent query telemetry and work with dashboards, alerts, and issues through
+[Logfire's hosted MCP server](https://pydantic.dev/docs/logfire/guides/mcp-server/). Logfire enforces access:
+the credential's project and scopes decide what the agent can read or change.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
@@ -10,27 +12,25 @@
 uv add "pydantic-ai-harness[logfire-mcp]" "pydantic-ai-slim[openai]"
 ```
 
-## Set up Logfire
+The second package installs the OpenAI provider used by the example. For another model, install its matching provider
+extra instead.
 
-Choose the exact target shown in Logfire as `organization/project`, and set your model credential:
+## Set up credentials
 
-```bash
-export LOGFIRE_PROJECT='your-organization/your-project'
-export OPENAI_API_KEY='your-openai-api-key'
-```
-
-With no Logfire API key, the first connection opens browser OAuth. For a headless process, create an API key in the
-target organization or project settings with at least `project:read`, then set:
+For a headless agent, create an API key in the Logfire project's settings with the `project:read` scope, then set the
+Logfire and OpenAI credentials:
 
 ```bash
-export LOGFIRE_MCP_TOKEN='your-logfire-api-key'
+export LOGFIRE_API_KEY="your-logfire-api-key"
+export OPENAI_API_KEY="your-openai-api-key"
 ```
 
-The defaults need `project:read`. Additional tools require the scopes listed by Logfire: issue reads use
-`project:read_alert`, and `issue_set_states` uses `project:write_alert`. API keys are bearer credentials; keep them out
-of source control.
+A project-scoped key limits the agent to that project. Add write scopes only when the agent should change dashboards,
+alerts, or issues. To use interactive OAuth instead, omit `auth`; FastMCP opens a browser for Logfire authorization on
+the first run. Its token store is in memory, so a restart asks you to authorize again. A long-running deployment should
+inject a `client` configured with its own encrypted, per-user token storage.
 
-## Query recent errors
+## Run an agent
 
 ```python
 import os
@@ -40,48 +40,44 @@ from pydantic_ai_harness.logfire_mcp import LogfireMCP
 
 agent = Agent(
     'openai:gpt-5.6-sol',
-    capabilities=[
-        LogfireMCP(
-            project=os.environ['LOGFIRE_PROJECT'],
-        )
-    ],
+    capabilities=[LogfireMCP(project='acme/production', auth=os.environ['LOGFIRE_API_KEY'])],
 )
-
-result = agent.run_sync(
-    'Count exceptions by service in the last 30 minutes. Return at most 20 rows.'
-)
+result = agent.run_sync('Count exceptions by service in the last 30 minutes')
 print(result.output)
 ```
 
-## Requests you can make
+## What to ask
 
-- "Count exceptions by service in the last 30 minutes. Return at most 20 rows."
-- "Find recent exceptions whose stack traces include `app/api.py`."
-- "Show the Logfire query schema for spans and metrics."
-- "Create a Logfire link for trace `0123456789abcdef0123456789abcdef`."
+- Count or list recent exceptions, grouped by service or file.
+- Explain the query schema for spans, logs, and metrics.
+- Create a Logfire link for a trace.
+- List dashboards, alerts, and open issues, or change them when the credential has write scopes.
 
-## Constraints
+## Operational constraints
 
-- `project` is required in `organization/project` form. The capability supplies that value to each project-scoped call
-  and rejects a different value before the request reaches Logfire.
-- The default tools are read-only. `tools=` accepts supported names from Logfire's
-  [MCP inventory](https://pydantic.dev/docs/logfire/guides/mcp-server/#available-mcp-tools). Project operations are
-  pinned to `project`; the global schema-reference tool has no project argument. Account discovery, organization-wide
-  notification channels and schedules, and local bootstrap are excluded. Every selected mutation pauses for Pydantic
-  AI approval. A mutation error stops the run because its outcome may be unknown; inspect Logfire before trying again.
-  If token permissions hide a selected tool, setup fails with a configuration error. Without an approval handler,
-  mutation runs must include `DeferredToolRequests` in the agent's `output_type`; resume from `result.all_messages()`
-  with a `DeferredToolResults` approval. An approval handler can resolve the request inline. See
-  [human-in-the-loop tool approval](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/#human-in-the-loop-tool-approval).
-- `query_run` accepts one `SELECT` statement ending with a numeric `LIMIT` no greater than `max_query_rows` (100 by
-  default). Logfire defaults queries to 30 minutes and limits query ranges to 14 days. SQL comments are rejected.
-- Link tools force `handoff=false` and return durable links. They do not create OAuth handoff tickets.
-- The hosted US endpoint is the default. Use `region='eu'` for EU data or `mcp_url=` for the `/mcp` endpoint of a
-  self-hosted deployment. For headless self-hosted use, pass `api_key=` explicitly; `LOGFIRE_MCP_TOKEN` is forwarded
-  only to the hosted Logfire endpoints.
-- Use one `LogfireMCP` instance per agent. Multiple projects expose the same tool names and conflict.
-- OAuth tokens use FastMCP's in-memory storage by default. Pass a caller-owned `client=` configured with persistent
-  encrypted storage when tokens must survive process restarts.
-- Telemetry can contain user-controlled text. Treat tool results as diagnostic data, not instructions.
+- `project` is removed from the tool schemas the model sees and added to every call that takes one, so the model can
+  neither name nor change the project. Leave it unset to let the model choose among the projects the credential can
+  reach.
+- `url` defaults to the US region. Use `LOGFIRE_EU_MCP_URL` for EU data, or your own `/mcp` URL for a self-hosted
+  deployment.
+- `allowed_tools` narrows the exposed tools by exact name. It does not replace credential scopes.
+- Mutation tools do not require human approval automatically. When a person must approve calls, register the wrapped
+  toolset instead of the capability:
+
+  ```python
+  from pydantic_ai import Agent
+  from pydantic_ai_harness.logfire_mcp import LogfireMCP
+
+  logfire = LogfireMCP(project='acme/production')
+  agent = Agent(
+      'openai:gpt-5.6-sol',
+      instructions=logfire.get_instructions(),
+      toolsets=[logfire.get_toolset().approval_required()],
+  )
+  ```
+- Two `LogfireMCP` instances on one agent conflict because the server's tool names are fixed.
+- An injected `client` replaces `url`. `auth` still applies when the client is a URL, and is ignored for an
+  in-process server or a prebuilt FastMCP client.
+- Telemetry can contain user-controlled text. Treat tool results as data, not instructions.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire_mcp/)

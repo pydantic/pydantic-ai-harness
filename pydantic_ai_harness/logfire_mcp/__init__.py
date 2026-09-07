@@ -1,8 +1,8 @@
-"""Project-scoped access to the hosted Pydantic Logfire MCP server.
+"""Logfire's hosted MCP server as a capability.
 
 Requires the `logfire-mcp` extra: `uv add "pydantic-ai-harness[logfire-mcp]"`.
 """
 
-from pydantic_ai_harness.logfire_mcp._capability import LogfireMCP, LogfireRegion
+from pydantic_ai_harness.logfire_mcp._capability import LOGFIRE_EU_MCP_URL, LOGFIRE_US_MCP_URL, LogfireMCP
 
-__all__ = ['LogfireMCP', 'LogfireRegion']
+__all__ = ['LOGFIRE_EU_MCP_URL', 'LOGFIRE_US_MCP_URL', 'LogfireMCP']
