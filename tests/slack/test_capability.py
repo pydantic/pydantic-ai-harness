@@ -40,13 +40,15 @@ class TestSlack:
         monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-environment')
         assert transport_of(Slack()).headers == {'Authorization': 'Bearer xoxp-environment'}
 
-    def test_missing_token_fails_at_construction(self) -> None:
+    @pytest.mark.parametrize('token', [None, ''], ids=['omitted', 'empty'])
+    def test_missing_token_fails_at_construction(self, token: str | None) -> None:
         with pytest.raises(UserError, match=r'Pass Slack\(token=...\) or set SLACK_USER_TOKEN'):
-            Slack()
+            Slack(token=token)
 
-    def test_bot_token_is_rejected_because_slack_mcp_needs_a_user_token(self) -> None:
-        with pytest.raises(UserError, match='accepts user tokens only, not bot tokens'):
-            Slack(token='xoxb-bot')
+    def test_empty_token_does_not_fall_back_to_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-environment')
+        with pytest.raises(UserError):
+            Slack(token='')
 
     def test_server_instructions_are_forwarded_to_the_agent(self) -> None:
         toolset = Slack(token='xoxp-user').get_toolset()

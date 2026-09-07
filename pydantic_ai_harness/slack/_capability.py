@@ -12,8 +12,9 @@ from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-# Slack's hosted MCP server. It accepts user tokens only and answers a bot token with `invalid_token_type`.
-# Verified 2026-09-07 against https://docs.slack.dev/ai/slack-mcp-server/; recheck when the integration changes.
+# Slack's hosted MCP server. It decides whether a token is acceptable; a bot token or anything else it
+# does not recognise gets a 401 at run time. Verified 2026-09-07 against
+# https://docs.slack.dev/ai/slack-mcp-server/; recheck when the integration changes.
 _SLACK_MCP_URL = 'https://mcp.slack.com/mcp'
 
 
@@ -29,14 +30,10 @@ class Slack(AbstractCapability[AgentDepsT]):
     id: str | None = 'slack'
 
     def __post_init__(self) -> None:
-        self.token = self.token or os.environ.get('SLACK_USER_TOKEN')
+        if self.token is None:
+            self.token = os.environ.get('SLACK_USER_TOKEN')
         if not self.token:
             raise UserError('Slack tools need a user token. Pass Slack(token=...) or set SLACK_USER_TOKEN.')
-        if self.token.startswith('xoxb-'):
-            raise UserError(
-                "Slack's MCP server accepts user tokens only, not bot tokens. "
-                'Add user token scopes to the app and use its `xoxp-` token; see https://docs.slack.dev/ai/slack-mcp-server/.'
-            )
 
     @classmethod
     def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
