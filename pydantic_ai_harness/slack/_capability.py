@@ -12,13 +12,6 @@ from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset
 
-_INSTRUCTIONS = """\
-Slack tools act with the identity of the connected token.
-Before answering about discussion elsewhere in Slack, read the relevant thread or channel with these tools rather than guessing.
-Distinguish channel-wide results from thread replies.
-If you cannot find the needed context, say so instead of making it up.
-"""
-
 # Slack's hosted MCP server. It accepts user tokens only and answers a bot token with `invalid_token_type`.
 # Verified 2026-09-07 against https://docs.slack.dev/ai/slack-mcp-server/; recheck when the integration changes.
 _SLACK_MCP_URL = 'https://mcp.slack.com/mcp'
@@ -68,7 +61,3 @@ class Slack(AbstractCapability[AgentDepsT]):
             headers={'Authorization': f'Bearer {self.token}'},
             include_instructions=True,  # Core defaults this to false; Slack MCP supplies required instructions.
         )
-
-    def get_instructions(self) -> str:
-        """Return guidance for using Slack tools."""
-        return _INSTRUCTIONS
