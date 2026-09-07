@@ -26,13 +26,4 @@ print(result.output)
 
 `Slack` reads `SLACK_USER_TOKEN`, or you can pass `Slack(token=...)`. The tools come from Slack's hosted MCP server and act as the user the token belongs to. Slack's server accepts user tokens (`xoxp-`) only, not bot tokens, and offers MCP to internal or directory-published apps, as described in the [Slack MCP server documentation](https://docs.slack.dev/ai/slack-mcp-server/). To get a user token for an existing app, add user token scopes under OAuth & Permissions and reinstall it.
 
-For per-user credentials, add an async capability factory that receives the run context:
-
-```python
-from pydantic_ai import RunContext
-
-async def slack_for_user(ctx: RunContext[Deps]) -> Slack:
-    return Slack(token=lookup_token(ctx.deps.user_id))
-
-agent = Agent('anthropic:claude-fable-5', capabilities=[slack_for_user])
-```
+A token is one person's identity, so an agent serving many people needs a token per run: pass a function that returns `Slack(token=...)` for the run's context, as with any capability.
