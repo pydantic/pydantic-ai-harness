@@ -64,16 +64,18 @@ print(result.output)
 
 - The model chooses the project. The server's `project_list` tool returns the projects the credential can reach, and
   a project-scoped API key limits that list to one entry.
-- The capability adds no instructions of its own. `include_instructions` forwards the instructions the Logfire server
-  sends on connect; set it to `False` to leave them out.
+- `include_instructions` forwards the instructions the Logfire server sends on connect and adds fresh UTC time on each
+  model request. The added guidance tells the model that query transport bounds apply in addition to SQL predicates,
+  that concrete timestamps in schemas are examples rather than a clock, and that it should create links only when
+  asked. It also asks vague investigations to start with at most three targeted queries. Set `include_instructions` to
+  `False` to leave out both server and capability instructions.
 - `url` defaults to the US region. Use `LOGFIRE_EU_MCP_URL` for EU data, or your own `/mcp` URL for a self-hosted
   deployment.
 - `access` defaults to `'read'`, which exposes only the tools Logfire marks `readOnlyHint`. `access='write'` exposes
   every tool the credential can reach, including dashboard, alert, issue, and variable mutations.
 - `allowed_tools` narrows the exposed tools by exact name. It does not replace credential scopes.
-- In write mode, mutation tools do not require human approval automatically. When a person must approve calls,
-  register the wrapped toolset instead of the capability, add `DeferredToolRequests` to the output type, then approve
-  and resume the run as
+- In write mode, tools not marked read-only require human approval automatically. Add `DeferredToolRequests` to the
+  output type, then approve and resume the run as
   the [deferred tools guide](/ai/tools-toolsets/deferred-tools/) describes:
 
   ```python
@@ -82,12 +84,13 @@ print(result.output)
 
   agent = Agent(
       'openai:gpt-5.6-sol',
-      toolsets=[LogfireMCP(access='write').get_toolset().approval_required()],
+      capabilities=[LogfireMCP(access='write')],
       output_type=[str, DeferredToolRequests],
   )
   ```
 - Two `LogfireMCP` instances on one agent conflict because the server's tool names are fixed.
 - An injected `client` replaces `url` and `auth`. Configure authentication on the client itself.
-- Telemetry can contain user-controlled text. Add a guard when tool results must not influence other actions.
+- Telemetry can contain user-controlled text. The capability tells the model to treat it as diagnostic data rather than
+  instructions. Add a guard when tool results must not influence other actions.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire_mcp/)

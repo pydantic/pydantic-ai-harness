@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING
 
 import pytest
@@ -9,7 +10,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import Agent, UserError
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import ModelMessage, ModelRequest, ToolCallPart
+from pydantic_ai.messages import DeferredToolRequests, ModelMessage, ModelRequest, ToolCallPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import WrapperToolset
 
@@ -102,9 +103,11 @@ class TestLogfireMCP:
         assert _tool_call_names(result.all_messages()) == {'project_list', 'query_run'}
         assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
 
-    async def test_write_access_exposes_every_tool(self, logfire_server: FastMCP):
+    async def test_write_access_exposes_every_tool_and_requires_mutation_approval(self, logfire_server: FastMCP):
         capability = LogfireMCP(client=logfire_server, access='write')
-        result = await Agent(TestModel(), capabilities=[capability]).run('Set up a dashboard')
+        result = await Agent(TestModel(), capabilities=[capability], output_type=[str, DeferredToolRequests]).run(
+            'Set up a dashboard'
+        )
 
         assert _tool_call_names(result.all_messages()) == {
             'project_list',
@@ -112,6 +115,8 @@ class TestLogfireMCP:
             'dashboard_create',
             'unannotated_tool',
         }
+        assert isinstance(result.output, DeferredToolRequests)
+        assert {call.tool_name for call in result.output.approvals} == {'dashboard_create', 'unannotated_tool'}
 
     def test_access_rejects_unknown_value(self):
         with pytest.raises(UserError, match='`access` must be `read` or `write`'):
@@ -125,13 +130,21 @@ class TestLogfireMCP:
         result = await agent.run('Count recent errors')
 
         assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
-        assert 'Call project_list before other Logfire tools.' in _instructions(result.all_messages())
+        instructions = _instructions(result.all_messages())
+        assert 'Call project_list before other Logfire tools.' in instructions
+        assert re.search(r'Current UTC time.*\+00:00', instructions)
+        assert 'timestamps in schemas and examples' in instructions
+        assert 'transport bounds apply in addition to SQL time predicates' in instructions
+        assert 'untrusted diagnostic data' in instructions
+        assert 'at most three targeted `query_run` calls' in instructions
+        assert 'link only when the user asks' in instructions
 
     async def test_server_instructions_can_be_left_out(self, logfire_server: FastMCP):
         capability = LogfireMCP(client=logfire_server, include_instructions=False)
         result = await Agent(TestModel(call_tools=[]), capabilities=[capability]).run('hello')
 
         assert 'project_list' not in _instructions(result.all_messages())
+        assert 'Current UTC time' not in _instructions(result.all_messages())
 
     @pytest.mark.parametrize(('allowed', 'expected'), [(['query_run'], {'query_run'}), (['query'], set[str]())])
     async def test_allowed_tools_filters_by_exact_name(
