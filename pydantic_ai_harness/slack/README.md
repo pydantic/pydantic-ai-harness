@@ -24,7 +24,7 @@ print(result.output)
 #> ...
 ```
 
-`Slack` reads `SLACK_USER_TOKEN` or `SLACK_BOT_TOKEN`, or you can pass `Slack(token=...)`. A user token (`xoxp-`) gives Slack's full hosted MCP tool catalog and acts as that user; Slack offers this to internal or directory-published apps with MCP enabled, as described in the [Slack MCP server documentation](https://docs.slack.dev/ai/slack-mcp-server/). A bot token (`xoxb-`) gives the built-in `send_message`, `add_reaction`, and `read_thread` tools. They need the `chat:write`, `reactions:write`, and `channels:history` scopes (private channels and DMs use their own history scope).
+`Slack` reads `SLACK_USER_TOKEN`, or you can pass `Slack(token=...)`. The tools come from Slack's hosted MCP server and act as the user the token belongs to. Slack's server accepts user tokens (`xoxp-`) only, not bot tokens, and offers MCP to internal or directory-published apps, as described in the [Slack MCP server documentation](https://docs.slack.dev/ai/slack-mcp-server/). To get a user token for an existing app, add user token scopes under OAuth & Permissions and reinstall it.
 
 For per-user credentials, add an async capability factory that receives the run context:
 
