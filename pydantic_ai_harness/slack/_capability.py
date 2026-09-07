@@ -29,7 +29,7 @@ If you cannot find the needed context, say so instead of making it up.
 # (https://docs.slack.dev/ai/slack-mcp-server/); recheck when integration changes.
 _SLACK_MCP_URL = 'https://mcp.slack.com/mcp'
 
-_SLACK_MCP_ACCEPTS_MARKDOWN_TEXT = (
+_POST_MESSAGE_ACCEPTS_MARKDOWN_TEXT = (
     'markdown_text'
     in inspect.signature(
         AsyncWebClient.chat_postMessage  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
@@ -117,7 +117,7 @@ class Slack(AbstractCapability[AgentDepsT]):
         async def send_message(channel: str, text: str, thread_ts: str | None = None) -> str:
             """Send a message to a Slack channel."""
             try:
-                if _SLACK_MCP_ACCEPTS_MARKDOWN_TEXT:
+                if _POST_MESSAGE_ACCEPTS_MARKDOWN_TEXT:
                     response = _as_slack_response(
                         await client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                             channel=channel, markdown_text=text, thread_ts=thread_ts
@@ -156,7 +156,7 @@ class Slack(AbstractCapability[AgentDepsT]):
             except SlackApiError as error:
                 raise ModelRetry(f'Slack API error: {error}') from error
             return [
-                {'user': message.get('user', ''), 'ts': message['ts'], 'text': message.get('text', '')}
+                {'user': message.get('user', ''), 'ts': message.get('ts', ''), 'text': message.get('text', '')}
                 for message in response['messages']
             ]
 

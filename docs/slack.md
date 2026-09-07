@@ -29,7 +29,7 @@ print(result.output)
 #> ...
 ```
 
-`Slack` reads `SLACK_USER_TOKEN` or `SLACK_BOT_TOKEN`, or you can pass `Slack(token=...)`. A user token (`xoxp-`) gives Slack's full hosted MCP tool catalog and acts as that user; Slack offers this to internal or directory-published apps with MCP enabled, as described in the [Slack MCP server documentation](https://docs.slack.dev/ai/slack-mcp-server/). A bot token (`xoxb-`) gives the built-in `send_message`, `add_reaction`, and `read_thread` tools. These need `chat:write`, `reactions:write`, and the history scope for the channel type being read, respectively; for example, `channels:history` applies to public channels, while other channel types use their corresponding history scope.
+`Slack` reads `SLACK_USER_TOKEN` or `SLACK_BOT_TOKEN`, or you can pass `Slack(token=...)`. A user token (`xoxp-`) gives Slack's full hosted MCP tool catalog and acts as that user; Slack offers this to internal or directory-published apps with MCP enabled, as described in the [Slack MCP server documentation](https://docs.slack.dev/ai/slack-mcp-server/). A bot token (`xoxb-`) gives the built-in `send_message`, `add_reaction`, and `read_thread` tools. They need the `chat:write`, `reactions:write`, and `channels:history` scopes (private channels and DMs use their own history scope).
 
 For per-user credentials, add an async capability factory that receives the run context:
 
@@ -42,4 +42,4 @@ async def slack_for_user(ctx: RunContext[Deps]) -> Slack:
 agent = Agent('anthropic:claude-fable-5', capabilities=[slack_for_user])
 ```
 
-`current_slack_context()` returns the sender, channel, and thread when the run was started by `SlackApp`, otherwise `None`.
+`current_slack_context()` returns the sender, channel, and thread when the run was started from Slack, otherwise `None`.
