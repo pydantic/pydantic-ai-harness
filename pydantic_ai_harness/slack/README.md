@@ -37,8 +37,6 @@ async def slack_for_user(ctx: RunContext[Deps]) -> Slack:
 agent = Agent('anthropic:claude-fable-5', capabilities=[slack_for_user])
 ```
 
-`current_slack_context()` returns the sender, channel, and thread when the run was started from Slack, otherwise `None`.
-
 ## Put an agent on Slack
 
 `SlackApp` receives Slack messages, runs your agent, and posts the answer in the thread. It works with or without the `Slack` capability.
@@ -76,7 +74,7 @@ anyio.run(app.serve)
 - Shows "Thinking..." while the agent runs, then streams the reply into the thread as markdown.
 - Remembers each thread's conversation. The default store keeps 1,000 threads in memory for 24 hours; pass `history=` with your own `SlackHistory` implementation to persist it.
 - Handles one thread's messages in order and different threads at the same time. Ignores Slack's duplicate deliveries.
-- If the agent has a `Slack` capability, its tools act as the sender when the app was installed with user permissions, and as the bot otherwise.
+- A `Slack` capability on the same agent reads `SLACK_BOT_TOKEN`, so its tools act as the bot. To act as the sender instead, see [Installing in many workspaces](#installing-in-many-workspaces).
 
 Run one process per Slack app. History and duplicate detection are per process.
 
@@ -109,7 +107,7 @@ Create the app from this manifest at <https://api.slack.com/apps>. For Socket Mo
 
 ### Agents with dependencies
 
-Pass `deps_factory`. It receives a `SlackContext` with the workspace, channel, thread, sender, and any attached file names, and returns your deps:
+Pass `deps_factory`. It receives a `SlackContext` with the workspace, channel, thread, sender, and the tokens for that workspace, and returns your deps:
 
 ```python {test="skip"}
 from pydantic_ai_harness.slack import SlackContext
@@ -124,7 +122,22 @@ app = SlackApp(agent, deps_factory=make_deps)
 
 ### Installing in many workspaces
 
-Pass Bolt's `AsyncOAuthSettings` as `oauth_settings=` instead of a bot token. `SlackApp` then serves `/slack/install` and `/slack/oauth_redirect` too, and uses each workspace's own tokens. Add `user_scopes` there if you want the `Slack` capability's tools to act as the sender. See [Bolt's OAuth guide](https://docs.slack.dev/tools/bolt-python/concepts/authenticating-oauth/).
+Pass Bolt's `AsyncOAuthSettings` as `oauth_settings=` instead of a bot token. `SlackApp` then serves `/slack/install` and `/slack/oauth_redirect` too, and uses each workspace's own tokens. See [Bolt's OAuth guide](https://docs.slack.dev/tools/bolt-python/concepts/authenticating-oauth/).
+
+There is no single bot token in the environment then, so build the `Slack` capability from the tokens on the context. With `user_scopes` in the OAuth settings, `user_token` is set and the tools act as the sender:
+
+```python {test="skip"}
+from pydantic_ai import Agent, RunContext
+
+from pydantic_ai_harness.slack import Slack, SlackContext
+
+
+def slack_for_sender(ctx: RunContext[SlackContext]) -> Slack[SlackContext]:
+    return Slack(token=ctx.deps.user_token or ctx.deps.bot_token)
+
+
+agent = Agent('anthropic:claude-fable-5', deps_type=SlackContext, capabilities=[slack_for_sender])
+```
 
 ### Not included yet
 

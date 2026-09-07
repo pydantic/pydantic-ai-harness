@@ -9,7 +9,7 @@ import time
 from collections import OrderedDict
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Generic, Protocol
 
 import anyio
@@ -32,8 +32,6 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from typing_extensions import TypeIs, TypeVar
 
-from pydantic_ai_harness.slack._context import SlackContext, SlackFile, bind_slack_run
-
 logger = logging.getLogger(__name__)
 
 AgentDepsT = TypeVar('AgentDepsT')
@@ -43,6 +41,23 @@ _FILES_ADAPTER = TypeAdapter(list[dict[str, object]])
 _MAX_RECENT_EVENTS = 10_000
 _MAX_CONCURRENT_RUNS = 100
 _STREAM_FLUSH_SECONDS = 0.5
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SlackContext:
+    """Where a Slack message came from, and the tokens `SlackApp` holds for that workspace.
+
+    `deps_factory` receives one of these per message. `user_token` is set only when the app was
+    installed with user scopes.
+    """
+
+    team_id: str
+    channel_id: str
+    thread_ts: str
+    message_ts: str
+    user_id: str
+    bot_token: str | None = field(default=None, repr=False)
+    user_token: str | None = field(default=None, repr=False)
 
 
 class SlackHistory(Protocol):
@@ -111,16 +126,12 @@ def _string(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-def _files(event: Mapping[str, object]) -> tuple[SlackFile, ...]:
+def _file_names(event: Mapping[str, object]) -> list[str]:
     try:
         values = _FILES_ADAPTER.validate_python(event.get('files'))
     except ValidationError:
-        return ()
-    return tuple(
-        SlackFile(file_id=file_id, name=_string(value.get('name')), mimetype=_string(value.get('mimetype')))
-        for value in values
-        if (file_id := _string(value.get('id'))) is not None
-    )
+        return []
+    return [name for value in values if (name := _string(value.get('name')) or _string(value.get('id'))) is not None]
 
 
 def _is_awaitable(value: ValueT | Awaitable[ValueT]) -> TypeIs[Awaitable[ValueT]]:
@@ -236,7 +247,8 @@ class SlackApp(Generic[AgentDepsT]):
         text_value = event.get('text')
         text = text_value if isinstance(text_value, str) else ''
         text = text.replace(f'<@{bot_user_id}>', '').strip()
-        if not text and not slack_context.files:
+        file_names = _file_names(event)
+        if not text and not file_names:
             return
 
         event_id = _string(request.body.get('event_id'))
@@ -246,7 +258,6 @@ class SlackApp(Generic[AgentDepsT]):
         is_mention = event.get('type') == 'app_mention'
         channel_type = _string(event.get('channel_type'))
         thread_key = self._thread_key(slack_context)
-        token = context.user_token or context.bot_token
 
         async with self._ordered_thread(thread_key):
             try:
@@ -257,7 +268,7 @@ class SlackApp(Generic[AgentDepsT]):
                     await self._run(
                         slack_context,
                         text,
-                        token,
+                        file_names,
                         messages,
                         say,
                         context.say_stream,
@@ -303,8 +314,8 @@ class SlackApp(Generic[AgentDepsT]):
             thread_ts=_string(event.get('thread_ts')) or message_ts,
             message_ts=message_ts,
             user_id=user_id,
-            enterprise_id=_string(context.enterprise_id),
-            files=_files(event),
+            bot_token=_string(context.bot_token),
+            user_token=_string(context.user_token),
         )
 
     @staticmethod
@@ -342,7 +353,7 @@ class SlackApp(Generic[AgentDepsT]):
         self,
         context: SlackContext,
         text: str,
-        token: str | None,
+        file_names: Sequence[str],
         messages: Sequence[ModelMessage],
         say: AsyncSay,
         say_stream: AsyncSayStream | None,
@@ -356,14 +367,13 @@ class SlackApp(Generic[AgentDepsT]):
                     'Setting Slack thread status failed for team %s, channel %s', context.team_id, context.channel_id
                 )
 
-        prompt = self._prompt(text, context.files)
+        prompt = self._prompt(text, file_names)
         metadata = {
             'team_id': context.team_id,
             'channel_id': context.channel_id,
             'thread_ts': context.thread_ts,
             'message_ts': context.message_ts,
             'user_id': context.user_id,
-            'enterprise_id': context.enterprise_id,
         }
         deps_factory = self._deps_factory
         if deps_factory is None:
@@ -382,17 +392,15 @@ class SlackApp(Generic[AgentDepsT]):
                 deps=deps,
                 metadata=metadata,
             )
-        with bind_slack_run(context, token=token):
-            async with run as result:
-                await self._deliver(result, say, say_stream, context.thread_ts)
-                await self._history.save(self._thread_key(context), result.all_messages())
+        async with run as result:
+            await self._deliver(result, say, say_stream, context.thread_ts)
+            await self._history.save(self._thread_key(context), result.all_messages())
 
     @staticmethod
-    def _prompt(text: str, files: Sequence[SlackFile]) -> str:
-        if not files:
+    def _prompt(text: str, file_names: Sequence[str]) -> str:
+        if not file_names:
             return text
-        file_list = ', '.join(f'{file.name or "unnamed"} ({file.file_id})' for file in files)
-        attachment_text = f'Attached Slack files: {file_list}'
+        attachment_text = f'Attached Slack files: {", ".join(file_names)}'
         return f'{text}\n\n{attachment_text}' if text else attachment_text
 
     @staticmethod

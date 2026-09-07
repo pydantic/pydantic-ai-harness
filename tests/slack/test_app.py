@@ -6,8 +6,7 @@ import hmac
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Generator, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Sequence
 
 import anyio
 import httpx
@@ -406,7 +405,7 @@ class TestSlackApp:
             return ''
 
         async def stream(messages: list[ModelMessage], _info: AgentInfo) -> AsyncIterator[str]:
-            assert 'report.txt (F1)' in _latest_prompt(messages)
+            assert 'report.txt' in _latest_prompt(messages)
             yield 'received'
 
         agent = Agent(FunctionModel(stream_function=stream), deps_type=SlackContext, instructions=instructions)
@@ -433,11 +432,11 @@ class TestSlackApp:
                 thread_ts='4.1',
                 message_ts='4.1',
                 user_id='U1',
-                enterprise_id='E1',
-                files=contexts[0].files,
+                bot_token='xoxb-test',
+                user_token=None,
             )
         ]
-        assert contexts[0].files[0].file_id == 'F1'
+        assert 'xoxb-test' not in repr(contexts[0])
         assert metadata == [
             {
                 'team_id': 'T1',
@@ -445,22 +444,16 @@ class TestSlackApp:
                 'thread_ts': '4.1',
                 'message_ts': '4.1',
                 'user_id': 'U1',
-                'enterprise_id': 'E1',
             }
         ]
 
-    async def test_binds_user_token_for_oauth_and_bot_token_for_single_workspace(
+    async def test_context_carries_user_token_under_oauth_and_bot_token_otherwise(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        tokens: list[str | None] = []
+        contexts: list[SlackContext] = []
 
-        @contextmanager
-        def capture_token(context: SlackContext, *, token: str | None = None) -> Generator[None]:
-            del context
-            tokens.append(token)
-            yield
-
-        monkeypatch.setattr('pydantic_ai_harness.slack._app.bind_slack_run', capture_token)
+        def deps_factory(context: SlackContext) -> None:
+            contexts.append(context)
 
         oauth_client, oauth_fake = _fake_client(monkeypatch)
         oauth_settings = AsyncOAuthSettings(
@@ -476,16 +469,23 @@ class TestSlackApp:
             signing_secret=_SIGNING_SECRET,
             oauth_settings=oauth_settings,
             client=oauth_client,
+            deps_factory=deps_factory,
         )
         await _post(oauth_app, _event('oauth'), event_id='Ev-oauth')
         await _wait_for_calls(oauth_fake, 'chat.stopStream', 1)
 
         bot_client, bot_fake = _fake_client(monkeypatch)
-        bot_app = SlackApp(_text_agent('bot'), signing_secret=_SIGNING_SECRET, client=bot_client)
+        bot_app = SlackApp(
+            _text_agent('bot'), signing_secret=_SIGNING_SECRET, client=bot_client, deps_factory=deps_factory
+        )
         await _post(bot_app, _event('bot'), event_id='Ev-bot-token')
         await _wait_for_calls(bot_fake, 'chat.stopStream', 1)
 
-        assert tokens == ['xoxp-user', 'xoxb-test']
+        assert [(context.user_token, context.bot_token) for context in contexts] == [
+            ('xoxp-user', contexts[0].bot_token),
+            (None, 'xoxb-test'),
+        ]
+        assert contexts[0].bot_token is not None
 
     async def test_agent_failure_posts_error_once_and_does_not_save_history(
         self, monkeypatch: pytest.MonkeyPatch

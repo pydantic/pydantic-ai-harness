@@ -15,8 +15,6 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 
-from pydantic_ai_harness.slack._context import current_slack_token
-
 _INSTRUCTIONS = """\
 Slack tools act with the identity of the connected token.
 Before answering about discussion elsewhere in Slack, read the relevant thread or channel with these tools rather than guessing.
@@ -38,18 +36,12 @@ class Slack(AbstractCapability[AgentDepsT]):
     """
 
     token: str | None = field(default=None, repr=False)
-    """The Slack token. Defaults to the token bound by `SlackApp` for the current run, then `SLACK_USER_TOKEN`,
-    then `SLACK_BOT_TOKEN`."""
+    """The Slack token. Defaults to `SLACK_USER_TOKEN`, then `SLACK_BOT_TOKEN`."""
     id: str | None = 'slack'
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
         """Return a copy with the token resolved for this run."""
-        token = (
-            self.token
-            or current_slack_token()
-            or os.environ.get('SLACK_USER_TOKEN')
-            or os.environ.get('SLACK_BOT_TOKEN')
-        )
+        token = self.token or os.environ.get('SLACK_USER_TOKEN') or os.environ.get('SLACK_BOT_TOKEN')
         if not token:
             raise UserError(
                 'Slack tools need a token. Pass Slack(token=...) or set SLACK_USER_TOKEN or SLACK_BOT_TOKEN.'
