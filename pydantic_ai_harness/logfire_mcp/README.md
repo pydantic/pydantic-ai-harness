@@ -63,20 +63,21 @@ print(result.output)
   deployment.
 - `allowed_tools` narrows the exposed tools by exact name. It does not replace credential scopes.
 - Mutation tools do not require human approval automatically. When a person must approve calls, register the wrapped
-  toolset instead of the capability:
+  toolset instead of the capability, add `DeferredToolRequests` to the output type, then approve and resume the run as
+  the [deferred tools guide](https://ai.pydantic.dev/deferred-tools/) describes:
 
   ```python
-  from pydantic_ai import Agent
+  from pydantic_ai import Agent, DeferredToolRequests
   from pydantic_ai_harness.logfire_mcp import LogfireMCP
 
   agent = Agent(
       'openai:gpt-5.6-sol',
       toolsets=[LogfireMCP().get_toolset().approval_required()],
+      output_type=[str, DeferredToolRequests],
   )
   ```
 - Two `LogfireMCP` instances on one agent conflict because the server's tool names are fixed.
-- An injected `client` replaces `url`. `auth` still applies when the client is a URL, and is ignored for an
-  in-process server or a prebuilt FastMCP client.
+- An injected `client` replaces `url` and `auth`. Configure authentication on the client itself.
 - Telemetry can contain user-controlled text. Add a guard when tool results must not influence other actions.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire_mcp/)

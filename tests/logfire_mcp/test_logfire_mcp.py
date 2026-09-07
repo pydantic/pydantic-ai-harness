@@ -81,6 +81,13 @@ class TestLogfireMCP:
         assert transport.auth is not None
         assert 'secret-key' not in repr(capability)
 
+    def test_injected_client_ignores_auth(self):
+        transport = StreamableHttpTransport('https://logfire.acme.example/mcp')
+        toolset = LogfireMCP[None](client=transport, auth='ignored-key').get_toolset()
+
+        assert isinstance(toolset, MCPToolset)
+        assert toolset.client.transport is transport
+
     async def test_server_instructions_reach_the_model(self, logfire_server: FastMCP, logfire_calls: Calls):
         agent = Agent(
             TestModel(call_tools=['project_list', 'query_run']),

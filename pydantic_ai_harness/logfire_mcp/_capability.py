@@ -15,9 +15,8 @@ authentication sections before changing connection behavior.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import KW_ONLY, dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
@@ -25,12 +24,18 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
 try:
-    from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
+    from pydantic_ai.mcp import MCPToolset
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
         'MCP support is required for the Logfire MCP capability. '
         'Install it with: uv add "pydantic-ai-harness[logfire-mcp]"'
     ) from _import_error
+
+if TYPE_CHECKING:
+    from fastmcp import Client as FastMCPClient
+    from fastmcp import FastMCP
+    from fastmcp.client.transports import ClientTransport
+    from mcp.server.fastmcp import FastMCP as FastMCP1Server
 
 LOGFIRE_US_MCP_URL = 'https://logfire-us.pydantic.dev/mcp'
 """Logfire's hosted MCP endpoint for the US data region."""
@@ -64,19 +69,22 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
     auth: Auth | Literal['oauth'] | str | None = field(default='oauth', repr=False)
     """`'oauth'` for browser login, a Logfire API key for headless use, a custom `httpx.Auth`, or `None`."""
 
-    allowed_tools: Sequence[str] | None = None
+    allowed_tools: list[str] | None = None
     """Exact MCP tool names to expose. `None` exposes every tool the server returns."""
 
     include_instructions: bool = True
     """Add the instructions the Logfire server sends on connect to the agent's instructions."""
 
-    client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Injected MCP client or in-process server, used instead of `url`."""
+    client: FastMCPClient[Any] | ClientTransport | FastMCP | FastMCP1Server | None = field(default=None, repr=False)
+    """Prebuilt FastMCP client or transport, or an in-process server, used instead of `url`.
+
+    It carries its own authentication, so `auth` is ignored.
+    """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the Logfire MCP toolset, with an exact-name filter when configured."""
         client = self.client if self.client is not None else self.url
-        auth = self.auth if str(client).startswith(('http://', 'https://')) else None
+        auth = self.auth if self.client is None else None
         toolset: AbstractToolset[AgentDepsT] = MCPToolset(
             client, id=self.id or 'logfire-mcp', auth=auth, include_instructions=self.include_instructions
         )
@@ -94,7 +102,7 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
         defer_loading: bool = False,
         url: str = LOGFIRE_US_MCP_URL,
         auth: Literal['oauth'] | str | None = 'oauth',
-        allowed_tools: Sequence[str] | None = None,
+        allowed_tools: list[str] | None = None,
         include_instructions: bool = True,
     ) -> LogfireMCP[AgentDepsT]:
         """Construct from serializable options, excluding runtime client injection."""
