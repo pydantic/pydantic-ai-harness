@@ -55,5 +55,5 @@ class Slack(AbstractCapability[AgentDepsT]):
             _SLACK_MCP_URL,
             id=f'{self.id or "slack"}-mcp',
             headers={'Authorization': f'Bearer {self.token}'},
-            include_instructions=True,  # Core defaults this to false; Slack MCP supplies required instructions.
+            include_instructions=True,  # Core defaults to False; forward the guidance Slack's server sends.
         )

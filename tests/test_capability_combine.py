@@ -298,7 +298,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
     'Slack': Combines(
-        'one native Slack MCP capability per agent; duplicate defaults merge only with identical credentials',
+        'one Slack MCP connection per agent; duplicate defaults merge only with identical credentials',
         lambda: (Slack(token='test-token'), Slack(token='test-token')),
         _check_slack,
     ),

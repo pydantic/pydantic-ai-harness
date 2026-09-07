@@ -5,13 +5,11 @@ description: Give a Pydantic AI agent Slack tools.
 
 # Slack
 
-`Slack` gives an agent tools to read and write Slack. It works in any agent run and does not connect the agent to incoming Slack messages.
+`Slack` gives an agent Slack's hosted MCP tools. It does not connect the agent to incoming Slack messages.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/slack/)
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
-
-## Slack tools
 
 Install the capability with:
 
