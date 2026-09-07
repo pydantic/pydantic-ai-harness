@@ -8,7 +8,7 @@ from dataclasses import dataclass
 import anyio
 import pytest
 from mcp import types
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
@@ -16,7 +16,6 @@ from pydantic_ai.models.test import TestModel
 from slack_sdk.errors import SlackApiError
 
 from pydantic_ai_harness.slack import Slack
-from pydantic_ai_harness.slack._context import SlackContext, bind_slack_run
 from tests.slack.conftest import OfflineMCP  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
@@ -25,10 +24,6 @@ pytestmark = pytest.mark.anyio
 @pytest.fixture
 def anyio_backend() -> str:
     return 'asyncio'
-
-
-def _context(user_id: str = 'U1') -> SlackContext:
-    return SlackContext(team_id='T1', channel_id='C1', thread_ts='1.1', message_ts='1.2', user_id=user_id)
 
 
 @dataclass
@@ -68,27 +63,20 @@ class FakeAsyncWebClient:
         )
 
 
-async def _run_hosted_lookup(agent: Agent[None, str], token: str, user_id: str = 'U1') -> None:
-    with bind_slack_run(_context(user_id), token=token):
-        await agent.run('lookup')
-
-
 class TestSlack:
     @pytest.mark.parametrize(
-        ('explicit', 'bound', 'user_token', 'bot_token', 'expected'),
+        ('explicit', 'user_token', 'bot_token', 'expected'),
         [
-            ('xoxp-explicit', 'xoxp-bound', 'xoxp-user', 'xoxb-bot', 'xoxp-explicit'),
-            (None, 'xoxp-bound', 'xoxp-user', 'xoxb-bot', 'xoxp-bound'),
-            (None, None, 'xoxp-user', 'xoxb-bot', 'xoxp-user'),
+            ('xoxp-explicit', 'xoxp-user', 'xoxb-bot', 'xoxp-explicit'),
+            (None, 'xoxp-user', 'xoxb-bot', 'xoxp-user'),
         ],
-        ids=['explicit-over-bound', 'bound-over-environment', 'user-environment-over-bot-environment'],
+        ids=['explicit-over-environment', 'user-environment-over-bot-environment'],
     )
     async def test_token_resolution_precedence(
         self,
         monkeypatch: pytest.MonkeyPatch,
         offline_mcp: OfflineMCP,
         explicit: str | None,
-        bound: str | None,
         user_token: str | None,
         bot_token: str | None,
         expected: str,
@@ -104,8 +92,7 @@ class TestSlack:
             monkeypatch.setenv('SLACK_BOT_TOKEN', bot_token)
 
         agent = Agent(TestModel(call_tools=['lookup']), capabilities=[Slack(token=explicit)])
-        with bind_slack_run(_context(), token=bound):
-            await agent.run('lookup')
+        await agent.run('lookup')
 
         assert offline_mcp.authorization_headers[-1] == f'Bearer {expected}'
 
@@ -200,25 +187,23 @@ class TestSlack:
         assert offline_mcp.authorization_headers == ['Bearer xoxp-hosted']
         assert [call.name for call in offline_mcp.calls] == ['lookup']
 
-    async def test_shared_capability_resolves_independent_bound_tokens(
-        self, offline_mcp: OfflineMCP, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.delenv('SLACK_USER_TOKEN', raising=False)
-        monkeypatch.delenv('SLACK_BOT_TOKEN', raising=False)
+    async def test_capability_factory_gives_each_run_its_own_token(self, offline_mcp: OfflineMCP) -> None:
         offline_mcp.tools = [types.Tool(name='lookup', inputSchema={'type': 'object', 'properties': {}})]
-        capability = Slack()
-        agent = Agent(TestModel(call_tools=['lookup']), capabilities=[capability])
+        tokens = {'U1': 'xoxp-first', 'U2': 'xoxp-second'}
 
-        async def run_for_user(user_id: str, token: str) -> None:
-            with bind_slack_run(_context(user_id), token=token):
-                await agent.run('lookup')
+        def slack_for_user(ctx: RunContext[str]) -> Slack[str]:
+            return Slack(token=tokens[ctx.deps])
+
+        agent = Agent(TestModel(call_tools=['lookup']), deps_type=str, capabilities=[slack_for_user])
+
+        async def run_as(user_id: str) -> None:
+            await agent.run('lookup', deps=user_id)
 
         async with anyio.create_task_group() as task_group:
-            task_group.start_soon(run_for_user, 'U1', 'xoxp-first')
-            task_group.start_soon(run_for_user, 'U2', 'xoxp-second')
+            task_group.start_soon(run_as, 'U1')
+            task_group.start_soon(run_as, 'U2')
 
         assert set(offline_mcp.authorization_headers) == {'Bearer xoxp-first', 'Bearer xoxp-second'}
-        assert capability.token is None
 
     def test_combine_rejects_different_tokens_and_merges_equal_or_missing_tokens(self) -> None:
         with pytest.raises(

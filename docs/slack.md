@@ -41,5 +41,3 @@ async def slack_for_user(ctx: RunContext[Deps]) -> Slack:
 
 agent = Agent('anthropic:claude-fable-5', capabilities=[slack_for_user])
 ```
-
-`current_slack_context()` returns the sender, channel, and thread when the run was started from Slack, otherwise `None`.
