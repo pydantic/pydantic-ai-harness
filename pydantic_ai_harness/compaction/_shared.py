@@ -78,10 +78,24 @@ def _collect_message_text(messages: Sequence[ModelMessage]) -> list[str]:
     `FilePart` is deliberately absent: its payload is binary, and counting its length as
     characters would be a number with no relation to what the provider bills.
     """
+    # Core omits earlier updates after an instruction baseline is replaced. The attribute
+    # guard keeps this compatible with core releases that predate instruction updates.
+    baseline_index = max(
+        (
+            index
+            for index, message in enumerate(messages)
+            if isinstance(message, ModelRequest)
+            and hasattr(message, 'instruction_baseline')
+            and message.instruction_baseline is not None  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]  # pragma: lax no cover
+        ),
+        default=0,
+    )
     segments: list[str] = []
-    for msg in messages:
+    for index, msg in enumerate(messages):
         if isinstance(msg, ModelRequest):
             for request_part in msg.parts:
+                if request_part.part_kind == 'instruction-delta' and index < baseline_index:  # pyright: ignore[reportUnnecessaryComparison]
+                    continue  # pragma: lax no cover
                 segments.extend(_request_part_text(request_part))
         else:
             for response_part in msg.parts:

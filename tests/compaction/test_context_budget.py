@@ -1384,6 +1384,24 @@ class TestManualCompactionSemantics:
 
 @pytest.mark.skipif(not hasattr(messages_module, 'InstructionDeltaPart'), reason='requires core instruction updates')
 class TestInstructionDeltaCounting:
+    def test_superseded_updates_do_not_count(self) -> None:  # pragma: lax no cover
+        history = ModelMessagesTypeAdapter.validate_python(
+            [
+                {
+                    'kind': 'request',
+                    'parts': [{'part_kind': 'instruction-delta', 'id': 'agent:state', 'content': 'B' * 400}],
+                },
+                {'kind': 'response', 'parts': [{'part_kind': 'text', 'content': 'done'}]},
+                {
+                    'kind': 'request',
+                    'parts': [{'part_kind': 'user-prompt', 'content': 'Continue.'}],
+                    'instruction_baseline': {},
+                    'instructions': 'C',
+                },
+            ]
+        )
+        assert estimate_token_count(history, len) == estimate_token_count(TestModel().prepare_messages(history), len)
+
     @pytest.mark.parametrize(
         ('content', 'rendered'),
         [
