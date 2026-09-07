@@ -6,11 +6,12 @@ from typing import TYPE_CHECKING
 
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
-from pydantic_ai import Agent
+from pydantic_ai import Agent, UserError
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelMessage, ModelRequest, ToolCallPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import WrapperToolset
 
 from pydantic_ai_harness.logfire_mcp import LOGFIRE_EU_MCP_URL, LOGFIRE_US_MCP_URL, LogfireMCP
 
@@ -32,10 +33,16 @@ def _instructions(messages: list[ModelMessage]) -> str:
     return first.instructions or ''
 
 
-def _http_transport(capability: LogfireMCP[None]) -> StreamableHttpTransport:
+def _mcp_toolset(capability: LogfireMCP[None]) -> MCPToolset[None]:
     toolset = capability.get_toolset()
+    while isinstance(toolset, WrapperToolset):
+        toolset = toolset.wrapped
     assert isinstance(toolset, MCPToolset)
-    transport = toolset.client.transport
+    return toolset
+
+
+def _http_transport(capability: LogfireMCP[None]) -> StreamableHttpTransport:
+    transport = _mcp_toolset(capability).client.transport
     assert isinstance(transport, StreamableHttpTransport)
     return transport
 
@@ -45,7 +52,7 @@ class TestLogfireMCP:
         schema = AgentSpec.model_json_schema_with_capabilities([LogfireMCP])
         properties = schema['$defs']['spec_params_LogfireMCP']['properties']
         assert 'client' not in properties
-        assert {'url', 'auth', 'allowed_tools'} <= set(properties)
+        assert {'url', 'auth', 'access', 'allowed_tools'} <= set(properties)
         assert LogfireMCP.get_serialization_name() == 'LogfireMCP'
 
     def test_from_spec_forwards_serializable_options(self):
@@ -55,6 +62,7 @@ class TestLogfireMCP:
             defer_loading=True,
             url=LOGFIRE_EU_MCP_URL,
             auth='token',
+            access='write',
             allowed_tools=['query_run'],
             include_instructions=False,
         )
@@ -63,6 +71,7 @@ class TestLogfireMCP:
         assert capability.defer_loading is True
         assert capability.url == LOGFIRE_EU_MCP_URL
         assert capability.auth == 'token'
+        assert capability.access == 'write'
         assert capability.allowed_tools == ['query_run']
         assert capability.include_instructions is False
 
@@ -83,10 +92,30 @@ class TestLogfireMCP:
 
     def test_injected_client_ignores_auth(self):
         transport = StreamableHttpTransport('https://logfire.acme.example/mcp')
-        toolset = LogfireMCP[None](client=transport, auth='ignored-key').get_toolset()
+        toolset = _mcp_toolset(LogfireMCP[None](client=transport, auth='ignored-key'))
 
-        assert isinstance(toolset, MCPToolset)
         assert toolset.client.transport is transport
+
+    async def test_read_access_hides_tools_not_marked_read_only(self, logfire_server: FastMCP, logfire_calls: Calls):
+        result = await Agent(TestModel(), capabilities=[LogfireMCP(client=logfire_server)]).run('Set up a dashboard')
+
+        assert _tool_call_names(result.all_messages()) == {'project_list', 'query_run'}
+        assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
+
+    async def test_write_access_exposes_every_tool(self, logfire_server: FastMCP):
+        capability = LogfireMCP(client=logfire_server, access='write')
+        result = await Agent(TestModel(), capabilities=[capability]).run('Set up a dashboard')
+
+        assert _tool_call_names(result.all_messages()) == {
+            'project_list',
+            'query_run',
+            'dashboard_create',
+            'unannotated_tool',
+        }
+
+    def test_access_rejects_unknown_value(self):
+        with pytest.raises(UserError, match='`access` must be `read` or `write`'):
+            LogfireMCP[None](access='readonly')  # pyright: ignore[reportArgumentType]
 
     async def test_server_instructions_reach_the_model(self, logfire_server: FastMCP, logfire_calls: Calls):
         agent = Agent(

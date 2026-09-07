@@ -243,7 +243,7 @@ Outside the loop: how runs persist, survive failures, and get observed and confi
 | [AWS Lambda durability](pydantic_ai_harness/aws_lambda/) | Harness | Checkpoint model requests and tool calls into AWS Lambda durable function steps |
 | [Step Persistence](pydantic_ai_harness/step_persistence/) | Harness | Save, restore, resume (`continue_run`), and fork (`fork_run`) runs; file/SQLite/Mongo backends |
 | [Instrumentation](https://ai.pydantic.dev/capabilities/instrumentation/) | Core | OpenTelemetry GenAI spans for every model and tool call; the raw material for [Logfire](https://pydantic.dev/logfire) traces |
-| [Logfire MCP](pydantic_ai_harness/logfire_mcp/) | Harness | Query Logfire telemetry and manage dashboards, alerts, and issues through the hosted MCP server |
+| [Logfire MCP](pydantic_ai_harness/logfire_mcp/) | Harness | Query Logfire telemetry through the hosted MCP server, read-only by default; opt in to manage dashboards, alerts, and issues |
 | [Managed Prompt](pydantic_ai_harness/logfire/) | Harness | Back instructions with a [Logfire](https://pydantic.dev/logfire)-managed prompt; version and roll out without redeploying |
 | [Thread Executor](https://ai.pydantic.dev/capabilities/thread-executor/) | Core | Run sync tools on a shared thread pool |
 

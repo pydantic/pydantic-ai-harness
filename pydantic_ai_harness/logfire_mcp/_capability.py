@@ -8,6 +8,8 @@ Provider contract, verified 2026-09-07:
   and Logfire checks them on every request.
 - `project_list` returns the projects the credential can reach; project tools take a `project`
   argument in `organization/project` form.
+- Every tool carries MCP `readOnlyHint` and `destructiveHint` annotations, set by `_tool_scope` in
+  `logfire_mcp_capabilities.catalog` (pydantic/platform). `access='read'` filters on `readOnlyHint`.
 
 Source: https://pydantic.dev/docs/logfire/guides/mcp-server/. Re-check the endpoint and
 authentication sections before changing connection behavior.
@@ -15,12 +17,14 @@ authentication sections before changing connection behavior.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.exceptions import UserError
+from pydantic_ai.tools import AgentDepsT, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
 
 try:
@@ -43,16 +47,26 @@ LOGFIRE_US_MCP_URL = 'https://logfire-us.pydantic.dev/mcp'
 LOGFIRE_EU_MCP_URL = 'https://logfire-eu.pydantic.dev/mcp'
 """Logfire's hosted MCP endpoint for the EU data region."""
 
-_DEFAULT_DESCRIPTION = 'Query Logfire telemetry and manage dashboards, alerts, and issues.'
+_DEFAULT_DESCRIPTION = 'Query Logfire telemetry and, with write access, manage dashboards, alerts, and issues.'
+
+
+def _is_read_only(tool_def: ToolDefinition) -> bool:
+    """Whether Logfire marked the tool `readOnlyHint`; an unannotated tool counts as a write."""
+    metadata: dict[str, Any] = tool_def.metadata or {}
+    annotations = metadata.get('annotations')
+    if not isinstance(annotations, Mapping):
+        return False
+    return annotations.get('readOnlyHint') is True  # pyright: ignore[reportUnknownMemberType]
 
 
 @dataclass
 class LogfireMCP(AbstractCapability[AgentDepsT]):
     """Query Logfire telemetry and manage observability resources through Logfire's hosted MCP server.
 
-    Logfire enforces access: an API key's project and scopes decide what the agent can read
-    or change. The server's own tool descriptions and instructions guide the model; pass
-    `allowed_tools` to narrow what it sees.
+    Only tools Logfire marks read-only are exposed unless `access='write'`. Logfire enforces
+    access: an API key's project and scopes decide what the agent can read or change. The
+    server's own tool descriptions and instructions guide the model; pass `allowed_tools` to
+    narrow what it sees.
     """
 
     _: KW_ONLY
@@ -69,8 +83,11 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
     auth: Auth | Literal['oauth'] | str | None = field(default='oauth', repr=False)
     """`'oauth'` for browser login, a Logfire API key for headless use, a custom `httpx.Auth`, or `None`."""
 
+    access: Literal['read', 'write'] = 'read'
+    """`'read'` exposes only tools Logfire marks read-only; `'write'` exposes every tool the credential can reach."""
+
     allowed_tools: list[str] | None = None
-    """Exact MCP tool names to expose. `None` exposes every tool the server returns."""
+    """Exact MCP tool names to expose. `None` exposes every tool `access` allows."""
 
     include_instructions: bool = True
     """Add the instructions the Logfire server sends on connect to the agent's instructions."""
@@ -81,17 +98,23 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
     It carries its own authentication, so `auth` is ignored.
     """
 
+    def __post_init__(self):
+        if self.access not in ('read', 'write'):
+            raise UserError('`access` must be `read` or `write`.')
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the Logfire MCP toolset, with an exact-name filter when configured."""
+        """Build the Logfire MCP toolset and apply the access policy and exact-name filter."""
         client = self.client if self.client is not None else self.url
         auth = self.auth if self.client is None else None
         toolset: AbstractToolset[AgentDepsT] = MCPToolset(
             client, id=self.id or 'logfire-mcp', auth=auth, include_instructions=self.include_instructions
         )
-        if self.allowed_tools is None:
-            return toolset
-        allowed_tools = frozenset(self.allowed_tools)
-        return toolset.filtered(lambda _ctx, tool: tool.name in allowed_tools)
+        if self.access == 'read':
+            toolset = toolset.filtered(lambda _ctx, tool_def: _is_read_only(tool_def))
+        if self.allowed_tools is not None:
+            allowed_tools = frozenset(self.allowed_tools)
+            toolset = toolset.filtered(lambda _ctx, tool_def: tool_def.name in allowed_tools)
+        return toolset
 
     @classmethod
     def from_spec(
@@ -102,6 +125,7 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
         defer_loading: bool = False,
         url: str = LOGFIRE_US_MCP_URL,
         auth: Literal['oauth'] | str | None = 'oauth',
+        access: Literal['read', 'write'] = 'read',
         allowed_tools: list[str] | None = None,
         include_instructions: bool = True,
     ) -> LogfireMCP[AgentDepsT]:
@@ -112,6 +136,7 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
             defer_loading=defer_loading,
             url=url,
             auth=auth,
+            access=access,
             allowed_tools=allowed_tools,
             include_instructions=include_instructions,
         )

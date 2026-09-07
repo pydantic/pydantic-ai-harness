@@ -1,13 +1,14 @@
 ---
 title: Logfire MCP
-description: Let a Pydantic AI agent query Logfire telemetry and manage dashboards, alerts, and issues through the hosted MCP server.
+description: Let a Pydantic AI agent query Logfire telemetry through the hosted MCP server, read-only by default, with opt-in write access to dashboards, alerts, and issues.
 ---
 
 # Logfire MCP
 
 `LogfireMCP` lets an agent query telemetry and work with dashboards, alerts, and issues through
-[Logfire's hosted MCP server](https://pydantic.dev/docs/logfire/guides/mcp-server/). Logfire enforces access:
-the credential's project and scopes decide what the agent can read or change.
+[Logfire's hosted MCP server](https://pydantic.dev/docs/logfire/guides/mcp-server/). By default only the tools
+Logfire marks read-only are exposed. Logfire enforces access: the credential's project and scopes decide what
+the agent can read or change.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -30,8 +31,8 @@ export LOGFIRE_API_KEY="your-logfire-api-key"
 export OPENAI_API_KEY="your-openai-api-key"
 ```
 
-A project-scoped key limits the agent to that project. Add write scopes only when the agent should change dashboards,
-alerts, or issues. To use interactive OAuth instead, omit `auth`; FastMCP opens a browser for Logfire authorization on
+A project-scoped key limits the agent to that project. Add write scopes, and pass `access='write'`, only when the
+agent should change dashboards, alerts, or issues. To use interactive OAuth instead, omit `auth`; FastMCP opens a browser for Logfire authorization on
 the first run. Its token store is in memory, so a restart asks you to authorize again. A long-running deployment should
 inject a `client` configured with its own encrypted, per-user token storage.
 
@@ -56,7 +57,8 @@ print(result.output)
 - Count or list recent exceptions, grouped by service or file.
 - Explain the query schema for spans, logs, and metrics.
 - Create a Logfire link for a trace.
-- List dashboards, alerts, and open issues, or change them when the credential has write scopes.
+- List dashboards, alerts, and open issues, or change them with `access='write'` and a credential that has write
+  scopes.
 
 ## Operational constraints
 
@@ -66,9 +68,12 @@ print(result.output)
   sends on connect; set it to `False` to leave them out.
 - `url` defaults to the US region. Use `LOGFIRE_EU_MCP_URL` for EU data, or your own `/mcp` URL for a self-hosted
   deployment.
+- `access` defaults to `'read'`, which exposes only the tools Logfire marks `readOnlyHint`. `access='write'` exposes
+  every tool the credential can reach, including dashboard, alert, issue, and variable mutations.
 - `allowed_tools` narrows the exposed tools by exact name. It does not replace credential scopes.
-- Mutation tools do not require human approval automatically. When a person must approve calls, register the wrapped
-  toolset instead of the capability, add `DeferredToolRequests` to the output type, then approve and resume the run as
+- In write mode, mutation tools do not require human approval automatically. When a person must approve calls,
+  register the wrapped toolset instead of the capability, add `DeferredToolRequests` to the output type, then approve
+  and resume the run as
   the [deferred tools guide](/ai/tools-toolsets/deferred-tools/) describes:
 
   ```python
@@ -77,7 +82,7 @@ print(result.output)
 
   agent = Agent(
       'openai:gpt-5.6-sol',
-      toolsets=[LogfireMCP().get_toolset().approval_required()],
+      toolsets=[LogfireMCP(access='write').get_toolset().approval_required()],
       output_type=[str, DeferredToolRequests],
   )
   ```
