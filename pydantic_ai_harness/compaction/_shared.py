@@ -102,6 +102,9 @@ def _request_part_text(part: ModelRequestPart) -> list[str]:
         return [_user_prompt_text_for_counting(part)]
     elif isinstance(part, SystemPromptPart):
         return [part.content]
+    # Match the discriminator so this remains importable before the new core part is released.
+    elif part.part_kind == 'instruction-delta':  # pyright: ignore[reportUnnecessaryComparison]
+        return [part.render()]  # pragma: lax no cover - requires core instruction updates
     elif isinstance(part, (ToolReturnPart, RetryPromptPart)):
         # Both are sent in full. The tool-search and capability-load returns subclass
         # `ToolReturnPart`, so they arrive here too.
