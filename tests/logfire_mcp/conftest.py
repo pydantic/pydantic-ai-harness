@@ -33,7 +33,7 @@ def logfire_server(logfire_calls: list[tuple[str, dict[str, object]]]) -> FastMC
     from mcp.server.fastmcp.server import FastMCP, Settings
 
     Settings.model_rebuild()
-    server = FastMCP('logfire-fake')
+    server = FastMCP('logfire-fake', instructions='Call project_list before other Logfire tools.')
 
     @server.tool()
     def project_list() -> list[str]:

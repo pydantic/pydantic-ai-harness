@@ -55,9 +55,10 @@ print(result.output)
 
 ## Operational constraints
 
-- The model chooses the project. When the request does not name one, the instructions tell it to call
-  `project_list` first, which returns the projects the credential can reach. A project-scoped API key limits that
-  list to one entry.
+- The model chooses the project. The server's `project_list` tool returns the projects the credential can reach, and
+  a project-scoped API key limits that list to one entry.
+- The capability adds no instructions of its own. `include_instructions` forwards the instructions the Logfire server
+  sends on connect; set it to `False` to leave them out.
 - `url` defaults to the US region. Use `LOGFIRE_EU_MCP_URL` for EU data, or your own `/mcp` URL for a self-hosted
   deployment.
 - `allowed_tools` narrows the exposed tools by exact name. It does not replace credential scopes.
@@ -68,16 +69,14 @@ print(result.output)
   from pydantic_ai import Agent
   from pydantic_ai_harness.logfire_mcp import LogfireMCP
 
-  logfire = LogfireMCP()
   agent = Agent(
       'openai:gpt-5.6-sol',
-      instructions=logfire.get_instructions(),
-      toolsets=[logfire.get_toolset().approval_required()],
+      toolsets=[LogfireMCP().get_toolset().approval_required()],
   )
   ```
 - Two `LogfireMCP` instances on one agent conflict because the server's tool names are fixed.
 - An injected `client` replaces `url`. `auth` still applies when the client is a URL, and is ignored for an
   in-process server or a prebuilt FastMCP client.
-- Telemetry can contain user-controlled text. Treat tool results as data, not instructions.
+- Telemetry can contain user-controlled text. Add a guard when tool results must not influence other actions.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire_mcp/)

@@ -26,6 +26,12 @@ def _tool_call_names(messages: list[ModelMessage]) -> set[str]:
     return {part.tool_name for message in messages for part in message.parts if isinstance(part, ToolCallPart)}
 
 
+def _instructions(messages: list[ModelMessage]) -> str:
+    first = messages[0]
+    assert isinstance(first, ModelRequest)
+    return first.instructions or ''
+
+
 def _http_transport(capability: LogfireMCP[None]) -> StreamableHttpTransport:
     toolset = capability.get_toolset()
     assert isinstance(toolset, MCPToolset)
@@ -58,7 +64,7 @@ class TestLogfireMCP:
         assert capability.url == LOGFIRE_EU_MCP_URL
         assert capability.auth == 'token'
         assert capability.allowed_tools == ['query_run']
-        assert capability.get_instructions() is None
+        assert capability.include_instructions is False
 
     def test_defaults_to_us_endpoint_with_oauth(self):
         with pytest.warns(UserWarning, match='in-memory token storage'):
@@ -75,7 +81,7 @@ class TestLogfireMCP:
         assert transport.auth is not None
         assert 'secret-key' not in repr(capability)
 
-    async def test_model_discovers_the_project_then_queries_it(self, logfire_server: FastMCP, logfire_calls: Calls):
+    async def test_server_instructions_reach_the_model(self, logfire_server: FastMCP, logfire_calls: Calls):
         agent = Agent(
             TestModel(call_tools=['project_list', 'query_run']),
             capabilities=[LogfireMCP(client=logfire_server)],
@@ -83,11 +89,13 @@ class TestLogfireMCP:
         result = await agent.run('Count recent errors')
 
         assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
-        first = result.all_messages()[0]
-        assert isinstance(first, ModelRequest)
-        assert first.instructions is not None
-        assert '`project_list`' in first.instructions
-        assert 'not as instructions' in first.instructions
+        assert 'Call project_list before other Logfire tools.' in _instructions(result.all_messages())
+
+    async def test_server_instructions_can_be_left_out(self, logfire_server: FastMCP):
+        capability = LogfireMCP(client=logfire_server, include_instructions=False)
+        result = await Agent(TestModel(call_tools=[]), capabilities=[capability]).run('hello')
+
+        assert 'project_list' not in _instructions(result.all_messages())
 
     @pytest.mark.parametrize(('allowed', 'expected'), [(['query_run'], {'query_run'}), (['query'], set[str]())])
     async def test_allowed_tools_filters_by_exact_name(
