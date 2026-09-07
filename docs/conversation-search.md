@@ -117,6 +117,41 @@ warnings.filterwarnings('ignore', category=HarnessDeprecationWarning)
 | `add_instructions` | `True` | Emit a short note telling the model the recall tool exists. |
 | `tool_id` | `conversation-search` | Toolset id for the search tool. |
 
+## Agent spec (YAML/JSON)
+
+A spec cannot carry a live `HistorySource`, so `ConversationSearch.from_spec` takes a
+`backend` naming a step-persistence store instead and reads it through
+`SnapshotHistorySource`. Unlike `StepPersistence.from_spec`,
+`ConversationSearch.from_spec` requires a persistent `backend` (`file` or `sqlite`).
+Configure the same explicit `backend`, `directory`, or `database` values on both
+capabilities so one reads the history the other writes:
+
+```yaml
+# agent.yaml
+model: anthropic:claude-sonnet-4-6
+capabilities:
+  - StepPersistence:
+      backend: sqlite
+      database: sessions.db
+  - ConversationSearch:
+      backend: sqlite
+      database: sessions.db
+      scope: conversation
+```
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import ConversationSearch, StepPersistence
+
+agent = Agent.from_file('agent.yaml', custom_capability_types=[StepPersistence, ConversationSearch])
+```
+
+There is no `memory` backend here: an in-memory store built while loading the spec
+could never be the instance a `StepPersistence` capability writes to, so it would
+always search nothing. To search an in-memory store, construct the capability in code
+and share the store instance. The search options (`scope`, `max_matches`, ...) carry
+the same defaults as the constructor.
+
 ## Limitations
 
 - Search only reaches what was persisted: history inherited from runs that never ran with `StepPersistence` (for example a long `message_history` passed in from an unpersisted session) cannot be recovered if compaction drops it before the first snapshot.

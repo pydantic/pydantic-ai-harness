@@ -286,6 +286,11 @@ from pydantic_ai_harness import ModalSandbox
 agent = Agent.from_file('agent.yaml', custom_capability_types=[ModalSandbox])
 ```
 
+Every option except `session` can appear in the spec. `session` takes a live,
+already-entered `ModalSandboxSession`, which no spec can carry, so a spec naming it is
+rejected rather than dropped: set `sandbox_id` to attach to an existing sandbox, or
+construct the capability in code to inject a session.
+
 ## Further reading
 
 - [Modal sandboxes](https://modal.com/docs/guide/sandbox)

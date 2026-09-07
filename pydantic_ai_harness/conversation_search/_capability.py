@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any, Literal
 
 from pydantic_ai.agent.abstract import AgentInstructions
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AgentToolset
 
 from pydantic_ai_harness._warn import warn_default_changed
-from pydantic_ai_harness.conversation_search._source import HistorySource
+from pydantic_ai_harness.conversation_search._source import HistorySource, SnapshotHistorySource
 from pydantic_ai_harness.conversation_search._toolset import (
     SCOPE_DEFAULT_CHANGE_IMPACT,
     ConversationSearchToolset,
@@ -144,6 +146,80 @@ class ConversationSearch(AbstractCapability[AgentDepsT]):
     def effective_scope(self) -> SearchScope:
         """The scope actually applied: the caller's choice, or `conversation` when unset."""
         return 'conversation' if self.scope is None else self.scope
+
+    @classmethod
+    def from_spec(
+        cls,
+        backend: Literal['file', 'sqlite'],
+        *,
+        directory: str = '.step-persistence',
+        database: str = '.step-persistence.db',
+        scope: SearchScope | None = None,
+        tool_id: str = 'conversation-search',
+        max_matches: int = 10,
+        context_lines: int = 5,
+        bm25_k1: float = 1.5,
+        bm25_b: float = 0.75,
+        add_instructions: bool = True,
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
+        **unsupported: Any,
+    ) -> ConversationSearch[Any]:
+        """Build from an agent spec, covering the fields a spec can express.
+
+        Every parameter is named because this signature is what core reads to generate the
+        spec's JSON schema, and the bare `source` field has no JSON representation, which
+        would otherwise erase the whole `ConversationSearch` entry from that schema.
+
+        A spec cannot carry a live `HistorySource`, so `backend` names a step-persistence
+        store instead and the source becomes a `SnapshotHistorySource` over it. `backend`,
+        `directory`, and `database` mirror `StepPersistence.from_spec`, so a spec that
+        declares both capabilities with the same values reads the history the other
+        writes. There is no `memory` backend here: a store built from this spec could
+        never be the instance a `StepPersistence` capability writes to, so an in-memory
+        corpus would always search nothing. Share a store instance in code for that.
+        """
+        if 'source' in unsupported:
+            raise UserError(
+                'ConversationSearch cannot be built from a spec with `source`: it takes a live '
+                '`HistorySource`. Pass `backend` (with `directory` or `database`) to read a '
+                'step-persistence store, or construct the capability in code.'
+            )
+        if unsupported:
+            raise UserError(f'ConversationSearch has no spec field(s) {sorted(unsupported)}.')
+        if backend != 'file' and directory != '.step-persistence':
+            raise UserError('directory is only valid with backend="file"')
+        if backend != 'sqlite' and database != '.step-persistence.db':
+            raise UserError('database is only valid with backend="sqlite"')
+        if backend == 'file':
+            from pydantic_ai_harness.step_persistence import FileStepStore
+
+            source: HistorySource = SnapshotHistorySource(FileStepStore(directory))
+        elif backend == 'sqlite':
+            from pydantic_ai_harness.step_persistence import SqliteStepStore
+
+            source = SnapshotHistorySource(SqliteStepStore(database=database))
+        else:
+            raise UserError(
+                f'unknown backend {backend!r}; expected `file` or `sqlite`. There is no `memory` '
+                'backend: an in-memory store built here could never be the one a `StepPersistence` '
+                'capability writes to, so it would always search nothing. To search an in-memory '
+                'store, construct the capability in code and share the store instance.'
+            )
+        return cls(
+            source=source,
+            scope=scope,
+            tool_id=tool_id,
+            max_matches=max_matches,
+            context_lines=context_lines,
+            bm25_k1=bm25_k1,
+            bm25_b=bm25_b,
+            add_instructions=add_instructions,
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
+        )
 
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
         """Provide the `search_conversation_history` tool over the source."""
