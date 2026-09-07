@@ -25,5 +25,13 @@ def test_file_is_an_immutable_typed_snapshot() -> None:
         value.file_id = 'F2'  # type: ignore[misc]
 
 
-def test_public_exports_are_limited_to_slack_capability_and_context() -> None:
-    assert slack.__all__ == ['Slack', 'SlackContext', 'SlackFile', 'current_slack_context']
+def test_public_exports_are_the_tools_capability_the_app_and_their_context() -> None:
+    assert slack.__all__ == [
+        'InMemorySlackHistory',
+        'Slack',
+        'SlackApp',
+        'SlackContext',
+        'SlackFile',
+        'SlackHistory',
+        'current_slack_context',
+    ]
