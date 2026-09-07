@@ -15,7 +15,6 @@ from pydantic_ai.messages import (
     AgentStreamEvent,
     ModelMessage,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -123,7 +122,7 @@ def _delegate_returns(result: Any) -> list[str]:
         str(part.content)
         for message in result.all_messages()
         for part in message.parts
-        if isinstance(part, ToolReturnPart) and part.tool_name == 'delegate_task'
+        if isinstance(part, ToolReturnPart) and part.tool_name == 'delegate_task' and part.outcome != 'retried'
     ]
 
 
@@ -241,13 +240,13 @@ class TestDelegation:
         )
         result = await parent.run('go')
         assert result.output == 'all done'
-        # The bogus delegation produced a retry prompt naming the unknown agent and
+        # The bogus delegation produced a retry naming the unknown agent and
         # listing the valid ones, sorted and comma-separated.
         retries = [
             part.content
             for message in result.all_messages()
             for part in message.parts
-            if isinstance(part, RetryPromptPart) and part.tool_name == 'delegate_task'
+            if isinstance(part, ToolReturnPart) and part.tool_name == 'delegate_task' and part.outcome == 'retried'
         ]
         assert any(
             "Unknown sub-agent 'ghost'" in str(r) and 'Available sub-agents: helper, worker' in str(r) for r in retries
@@ -449,7 +448,7 @@ class TestDelegation:
             part.content
             for message in result.all_messages()
             for part in message.parts
-            if isinstance(part, RetryPromptPart) and part.tool_name == 'delegate_task'
+            if isinstance(part, ToolReturnPart) and part.tool_name == 'delegate_task' and part.outcome == 'retried'
         ]
         assert any("Sub-agent 'boomer' failed" in str(r) for r in retries)
 
@@ -606,12 +605,12 @@ class TestRunControls:
         )
         result = await parent.run('go')
         assert result.output == 'all done'
-        # on_failure returns a normal tool result, so there is no RetryPrompt.
+        # on_failure returns a normal tool result, so there is no retry.
         retries = [
             part
             for message in result.all_messages()
             for part in message.parts
-            if isinstance(part, RetryPromptPart) and part.tool_name == 'delegate_task'
+            if isinstance(part, ToolReturnPart) and part.tool_name == 'delegate_task' and part.outcome == 'retried'
         ]
         assert retries == []
         assert _delegate_returns(result) == ['steer: use existing evidence']
@@ -685,12 +684,12 @@ def _crash(message: str = 'provider down') -> FunctionModel:
 
 
 def _delegate_retries(result: Any) -> list[str]:
-    """The `delegate_task` retry-prompt contents from a run result, in order."""
+    """The `delegate_task` retry contents from a run result, in order."""
     return [
         str(part.content)
         for message in result.all_messages()
         for part in message.parts
-        if isinstance(part, RetryPromptPart) and part.tool_name == 'delegate_task'
+        if isinstance(part, ToolReturnPart) and part.tool_name == 'delegate_task' and part.outcome == 'retried'
     ]
 
 

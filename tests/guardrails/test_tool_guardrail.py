@@ -19,7 +19,6 @@ from pydantic_ai.exceptions import ApprovalRequired, ModelRetry, SkipToolExecuti
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
-    RetryPromptPart,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -536,7 +535,10 @@ class TestResultGuardOnAFailedTool:
 
         result = await agent.run('hi')
         retries = [
-            part for message in result.all_messages() for part in message.parts if isinstance(part, RetryPromptPart)
+            part
+            for message in result.all_messages()
+            for part in message.parts
+            if isinstance(part, ToolReturnPart) and part.outcome == 'retried'
         ]
 
         assert [part.content for part in retries] == ['narrow the query']
@@ -610,7 +612,11 @@ class TestHiddenTools:
         """Withholding the definition is only half of it; the name must not resolve either."""
 
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            if any(isinstance(part, RetryPromptPart) for message in messages for part in message.parts):
+            if any(
+                isinstance(part, ToolReturnPart) and part.outcome == 'retried'
+                for message in messages
+                for part in message.parts
+            ):
                 return ModelResponse(parts=[TextPart(content='gave up')])
             return ModelResponse(parts=[ToolCallPart(tool_name='danger', args={}, tool_call_id='c1')])
 
@@ -625,7 +631,12 @@ class TestHiddenTools:
             return 'ok'
 
         result = await agent.run('hi')
-        retries = [p for m in result.all_messages() for p in m.parts if isinstance(p, RetryPromptPart)]
+        retries = [
+            p
+            for m in result.all_messages()
+            for p in m.parts
+            if isinstance(p, ToolReturnPart) and p.outcome == 'retried'
+        ]
 
         assert result.output == 'gave up'
         assert "Unknown tool name: 'danger'" in str(retries[0].content)
