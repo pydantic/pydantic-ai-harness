@@ -48,7 +48,7 @@ agent = Agent(
     'openai:gpt-5.6-sol',
     capabilities=[LogfireMCP(auth=os.environ['LOGFIRE_API_KEY'])],
 )
-result = agent.run_sync('Count exceptions by service in acme/production over the last 30 minutes')
+result = agent.run_sync('Count exceptions by service over the last 30 minutes')
 print(result.output)
 ```
 
@@ -62,13 +62,12 @@ print(result.output)
 
 ## Operational constraints
 
-- The model chooses the project. The server's `project_list` tool returns the projects the credential can reach, and
-  a project-scoped API key limits that list to one entry.
-- `include_instructions` forwards the instructions the Logfire server sends on connect and adds fresh UTC time on each
-  model request. The added guidance tells the model that query transport bounds apply in addition to SQL predicates,
-  that concrete timestamps in schemas are examples rather than a clock, and that it should create links only when
-  asked. It also asks vague investigations to start with at most three targeted queries. Set `include_instructions` to
-  `False` to leave out both server and capability instructions.
+- The model chooses the project. The server's `project_list` tool returns the projects the credential can reach. Pass
+  the returned project identifier unchanged to project tools. A project-scoped API key limits the list to one entry.
+- `include_instructions` forwards the instructions the Logfire server sends on connect and adds UTC time anchored to
+  the user prompt, so it stays fixed across model requests in one run. The added guidance explains that query
+  transport bounds apply in addition to SQL predicates, that schema timestamps are not a clock, and that links should
+  only be created when asked. Set `include_instructions=False` to leave out both server and capability instructions.
 - `url` defaults to the US region. Use `LOGFIRE_EU_MCP_URL` for EU data, or your own `/mcp` URL for a self-hosted
   deployment.
 - `access` defaults to `'read'`, which exposes only the tools Logfire marks `readOnlyHint`. `access='write'` exposes
@@ -90,7 +89,11 @@ print(result.output)
   ```
 - Two `LogfireMCP` instances on one agent conflict because the server's tool names are fixed.
 - An injected `client` replaces `url` and `auth`. Configure authentication on the client itself.
-- Telemetry can contain user-controlled text. The capability tells the model to treat it as diagnostic data rather than
-  instructions. Add a guard when tool results must not influence other actions.
+- For a hard limit on investigation fan-out, pass
+  [`UsageLimits(tool_calls_limit=...)`](/ai/api/pydantic-ai/usage/#pydantic_ai.usage.UsageLimits) when running the agent.
+  Compose [`ClearToolResults`](compaction.md) when large schema or query results should be removed from later model
+  requests.
+- Telemetry can contain user-controlled text. Compose [`PromptInjectionDefender`](prompt-injection-defender.md) or a
+  [`ToolGuardrail`](guardrails.md) when tool results need an enforced policy.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire_mcp/)

@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import re
-from datetime import datetime, timezone
+from datetime import timezone
 from typing import TYPE_CHECKING
 
 import pytest
@@ -11,7 +10,14 @@ from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import Agent, UserError
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import DeferredToolRequests, DeferredToolResults, ModelMessage, ModelRequest, ToolCallPart
+from pydantic_ai.messages import (
+    DeferredToolRequests,
+    DeferredToolResults,
+    ModelMessage,
+    ModelRequest,
+    ToolCallPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import WrapperToolset
 
@@ -50,32 +56,30 @@ def _http_transport(capability: LogfireMCP[None]) -> StreamableHttpTransport:
 
 
 class TestLogfireMCP:
-    def test_agent_spec_schema_excludes_runtime_client(self):
+    def test_agent_spec_schema_excludes_runtime_client_and_loads_capability(self):
         schema = AgentSpec.model_json_schema_with_capabilities([LogfireMCP])
         properties = schema['$defs']['spec_params_LogfireMCP']['properties']
         assert 'client' not in properties
         assert {'url', 'auth', 'access', 'allowed_tools'} <= set(properties)
         assert LogfireMCP.get_serialization_name() == 'LogfireMCP'
-
-    def test_from_spec_forwards_serializable_options(self):
-        capability = LogfireMCP.from_spec(
-            id='prod-logfire',
-            description='Production telemetry',
-            defer_loading=True,
-            url=LOGFIRE_EU_MCP_URL,
-            auth='token',
-            access='write',
-            allowed_tools=['query_run'],
-            include_instructions=False,
+        agent = Agent.from_spec(
+            {
+                'capabilities': [
+                    {
+                        'LogfireMCP': {
+                            'url': LOGFIRE_EU_MCP_URL,
+                            'auth': None,
+                            'access': 'write',
+                            'allowed_tools': ['query_run'],
+                            'include_instructions': False,
+                        }
+                    }
+                ]
+            },
+            custom_capability_types=[LogfireMCP],
+            model=TestModel(),
         )
-        assert capability.id == 'prod-logfire'
-        assert capability.description == 'Production telemetry'
-        assert capability.defer_loading is True
-        assert capability.url == LOGFIRE_EU_MCP_URL
-        assert capability.auth == 'token'
-        assert capability.access == 'write'
-        assert capability.allowed_tools == ['query_run']
-        assert capability.include_instructions is False
+        assert isinstance(agent, Agent)
 
     def test_defaults_to_us_endpoint_with_oauth(self):
         with pytest.warns(UserWarning, match='in-memory token storage'):
@@ -141,24 +145,32 @@ class TestLogfireMCP:
         with pytest.raises(UserError, match='`access` must be `read` or `write`'):
             LogfireMCP[None](access='readonly')  # pyright: ignore[reportArgumentType]
 
-    async def test_server_and_dynamic_capability_instructions_reach_the_model(
+    async def test_instructions_keep_static_guidance_separate_from_run_time(
         self, logfire_server: FastMCP, logfire_calls: Calls
     ):
-        started_at = datetime.now(timezone.utc).replace(microsecond=0)
+        model = TestModel(call_tools=['project_list', 'query_run'])
         agent = Agent(
-            TestModel(call_tools=['project_list', 'query_run']),
+            model,
             capabilities=[LogfireMCP(client=logfire_server)],
         )
         result = await agent.run('Count recent errors')
 
         assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
-        instructions = _instructions(result.all_messages())
-        assert 'Call project_list before other Logfire tools.' in instructions
-        timestamp_match = re.search(r'`(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00)`', instructions)
-        assert timestamp_match is not None
-        instruction_time = datetime.fromisoformat(timestamp_match.group(1))
-        finished_at = datetime.now(timezone.utc).replace(microsecond=0)
-        assert started_at <= instruction_time <= finished_at
+        requests = [message for message in result.all_messages() if isinstance(message, ModelRequest)]
+        assert len(requests) == 2
+        assert requests[0].instructions == requests[1].instructions
+
+        user_prompt = next(part for part in requests[0].parts if isinstance(part, UserPromptPart))
+        expected_time = user_prompt.timestamp.astimezone(timezone.utc).isoformat(timespec='seconds')
+        request_parameters = model.last_model_request_parameters
+        assert request_parameters is not None
+        instruction_parts = request_parameters.instruction_parts
+        assert instruction_parts is not None
+        dynamic_parts = [part for part in instruction_parts if part.dynamic]
+        static_parts = [part for part in instruction_parts if not part.dynamic]
+        assert [part.content for part in dynamic_parts] == [f'Current UTC time for this run is `{expected_time}`.']
+        assert len(static_parts) == 2
+        assert any(part.content == 'Call project_list before other Logfire tools.' for part in static_parts)
 
     async def test_server_instructions_can_be_left_out(self, logfire_server: FastMCP):
         capability = LogfireMCP(client=logfire_server, include_instructions=False)
