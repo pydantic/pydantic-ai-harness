@@ -24,7 +24,7 @@ print(result.output)
 
 `Slack` reads `SLACK_USER_TOKEN`, or you can pass `Slack(token=...)`. The token must be a user token: in your app's settings under OAuth & Permissions, add user token scopes, reinstall the app, and copy the User OAuth Token, which starts with `xoxp-`. The Bot User OAuth Token on the same page (`xoxb-`) does not work; Slack's MCP server answers it, or any other invalid token, with a 401 at run time. Slack offers MCP to internal or directory-published apps, as described in the [Slack MCP server documentation](https://docs.slack.dev/ai/slack-mcp-server/).
 
-The tools run directly as the token's user, including the ones that post messages, add reactions, create channels, and edit canvases, so grant only the [scopes](https://docs.slack.dev/reference/scopes/) the agent needs.
+The tools run directly as the token's user, including the ones that post messages, add reactions, create channels, and edit canvases, so grant only the [scopes](https://docs.slack.dev/reference/scopes/) the agent needs. `Slack(read_only=True)` keeps only the tools Slack marks read-only.
 
 A token is one person's identity, so an agent serving many people needs a token per run: pass a function that returns `Slack(token=...)` for the run's context, as with any capability.
 

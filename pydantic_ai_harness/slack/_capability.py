@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
 
 # Slack's hosted MCP server. It decides whether a token is acceptable; a bot token or anything else it
@@ -27,6 +27,8 @@ class Slack(AbstractCapability[AgentDepsT]):
 
     token: str | None = field(default=None, repr=False)
     """The Slack user token. Defaults to `SLACK_USER_TOKEN`."""
+    read_only: bool = False
+    """Expose only the tools Slack marks read-only, dropping the ones that post, react, or edit as the token's user."""
     id: str | None = 'slack'
 
     def __post_init__(self) -> None:
@@ -48,9 +50,21 @@ class Slack(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Connect to Slack's hosted MCP server as the token's user."""
-        return MCPToolset(
+        toolset: AbstractToolset[AgentDepsT] = MCPToolset(
             _SLACK_MCP_URL,
             id=f'{self.id or "slack"}-mcp',
             headers={'Authorization': f'Bearer {self.token}'},
-            include_instructions=True,  # Core defaults to False; forward the guidance Slack's server sends.
+            include_instructions=True,  # Slack sends none as of 2026-09-07; forwarded if that changes.
         )
+        if self.read_only:
+            toolset = toolset.filtered(_slack_marks_read_only)
+        return toolset
+
+
+def _slack_marks_read_only(ctx: RunContext[AgentDepsT], tool: ToolDefinition) -> bool:
+    """Slack annotates every tool with the MCP `readOnlyHint`; core copies the annotations into tool metadata."""
+    annotations: object = (tool.metadata or {}).get('annotations')
+    if not isinstance(annotations, dict):
+        return False
+    typed: dict[object, object] = annotations  # pyright: ignore[reportUnknownVariableType]
+    return typed.get('readOnlyHint') is True
