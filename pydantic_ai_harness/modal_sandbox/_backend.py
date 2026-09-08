@@ -156,7 +156,7 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
     Building one does no I/O. It holds settings plus, optionally, the identity of a sandbox that
     already exists; the first operation creates or attaches, once, and everything after that
     reuses the same environment. Reach the live `modal.Sandbox` through
-    [`get_sandbox`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.get_sandbox], which creates or attaches on first use.
+    [`sandbox`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.sandbox], which creates or attaches on first use.
 
     Nothing here terminates a sandbox on its own. Modal reaps one at the `sandbox_timeout` it
     was created with; call [`close`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.close]
@@ -212,8 +212,15 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
         self._created_timeout: int | None = None
         self._lock = anyio.Lock()
 
-    async def get_sandbox(self) -> modal.Sandbox:
-        """Create or attach once and return the live Modal SDK sandbox."""
+    @property
+    def sandbox(self) -> Awaitable[modal.Sandbox]:
+        """The native SDK sandbox, created or attached when awaited.
+
+        Await this property before using SDK methods, including after the sandbox has been resolved.
+        """
+        return self._resolve()
+
+    async def _resolve(self) -> modal.Sandbox:
         async with self._lock:
             if self._live is None:
                 try:
@@ -248,39 +255,39 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
             raise await self.operation_error(e, f'Could not access {path!r} in the sandbox') from e
 
     async def read_bytes(self, path: str) -> bytes:
-        sandbox = await self.get_sandbox()
+        sandbox = await self.sandbox
         async with self._translated_filesystem_error(path):
             return await sandbox.filesystem.read_bytes.aio(path)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Modal takes the data first, creates missing parents, and replaces existing contents.
-        sandbox = await self.get_sandbox()
+        sandbox = await self.sandbox
         async with self._translated_filesystem_error(path):
             await sandbox.filesystem.write_bytes.aio(data, path)
 
     async def stat(self, path: str) -> FileEntry:
-        sandbox = await self.get_sandbox()
+        sandbox = await self.sandbox
         async with self._translated_filesystem_error(path):
             return _file_entry(await sandbox.filesystem.stat.aio(path), path)
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        sandbox = await self.get_sandbox()
+        sandbox = await self.sandbox
         async with self._translated_filesystem_error(path):
             entries = await sandbox.filesystem.list_files.aio(path)
         return [_file_entry(entry, posixpath.join(path, entry.name)) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
-        sandbox = await self.get_sandbox()
+        sandbox = await self.sandbox
         async with self._translated_filesystem_error(path):
             await sandbox.filesystem.make_directory.aio(path)
 
     async def remove(self, path: str) -> None:
-        sandbox = await self.get_sandbox()
+        sandbox = await self.sandbox
         async with self._translated_filesystem_error(path):
             await sandbox.filesystem.remove.aio(path, recursive=True)
 
     async def exists(self, path: str) -> bool:
-        sandbox = await self.get_sandbox()
+        sandbox = await self.sandbox
         import modal
 
         try:
@@ -391,7 +398,7 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
     def _describe(self) -> str:
         """How to name this sandbox in an error.
 
-        Every caller runs after `get_sandbox`, which sets `ref` alongside the live handle, so the
+        Every caller runs after `sandbox`, which sets `ref` alongside the live handle, so the
         other two spellings are only reachable if that ever stops being true. `lax no cover`
         for the same reason: they are a fallback, not a path tests should have to reach.
         """
@@ -451,7 +458,7 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
         # change, so the probe is an idempotent read: overlapping first calls may each run
         # their own `pwd`, get the same answer, and the cache converges. No lock needed.
         if self._working_dir is None:
-            await self.get_sandbox()
+            await self.sandbox
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.strip()
             # Only an absolute path is an answer. Caching whatever else the environment
@@ -494,7 +501,7 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
         started_at = time.monotonic()
         try:
             with anyio.fail_after(timeout):
-                sandbox = await self.get_sandbox()
+                sandbox = await self.sandbox
         except TimeoutError as error:
             raise SandboxTimeoutError('Timed out before the command could start.', timeout=timeout) from error
         import modal
@@ -582,7 +589,7 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
         import modal
 
         try:
-            sandbox = await self.get_sandbox()
+            sandbox = await self.sandbox
             finished = await sandbox.poll.aio()
         except modal.exception.AuthError:
             return ModalSandboxAuthError(_AUTH_MESSAGE)

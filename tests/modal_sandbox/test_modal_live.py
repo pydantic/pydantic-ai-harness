@@ -75,7 +75,7 @@ def _unique(prefix: str) -> str:
 async def _owned(**settings: object) -> AsyncGenerator[ModalSandboxBackend]:
     """Create a sandbox and terminate it on the way out, as the capability's hooks do."""
     backend = ModalSandboxBackend(image=_IMAGE, **settings)  # type: ignore[arg-type]
-    await backend.get_sandbox()
+    await backend.sandbox
     try:
         yield backend
     finally:
@@ -285,7 +285,7 @@ class TestRealLifecycle:
         attempts = 8
         for attempt in range(attempts):
             try:
-                await ModalSandboxBackend(ref=ref).get_sandbox()
+                await ModalSandboxBackend(ref=ref).sandbox
             except ModalSandboxUnavailableError:
                 became_unavailable = True
                 break
@@ -302,7 +302,7 @@ class TestRealLifecycle:
             await owner.write_bytes(marker, b'shared')
 
             attached = ModalSandboxBackend(ref=owner.ref)
-            await attached.get_sandbox()
+            await attached.sandbox
             assert attached.ref == owner.ref
             assert await attached.read_bytes(marker) == b'shared'
             await attached.close(terminate=False)

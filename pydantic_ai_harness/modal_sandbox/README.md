@@ -96,8 +96,11 @@ Pass `ref=SandboxRef(sandbox_id=...)` to attach to one specific sandbox, or `nam
 attach to a running sandbox with that name and create it only if there is none. A `ref` whose
 sandbox is gone raises rather than quietly providing an empty replacement.
 
-Use `await backend.get_sandbox()` to access the live `modal.Sandbox` for provider-specific operations.
+Use `await backend.sandbox` to access the live `modal.Sandbox` for provider-specific operations.
 `sandbox_timeout` is a maximum lifetime, not an idle timeout.
+
+The property remains awaitable after the native handle is cached. Await it before accessing SDK
+methods; type checkers reject using the awaitable as the native sandbox.
 
 ## Limits and errors
 
@@ -119,7 +122,7 @@ apply their own byte or line limits.
 
 This backend uses asyncio. After `close()`, use a new backend with the saved `ref`
 if further access or a termination retry is needed. Before retrying termination, call
-`await replacement.get_sandbox()` to attach the new handle, then
+`await replacement.sandbox` to attach the new handle, then
 `await replacement.close(terminate=True)`.
 
 ## Configuration
