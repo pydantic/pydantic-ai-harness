@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import time
 from collections.abc import AsyncGenerator, AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 
@@ -861,6 +862,51 @@ class TestEagerCodeMode:
             await asyncio.wait_for(started.wait(), timeout=5)
 
         assert cancelled.is_set()
+
+    async def test_late_restart_abandons_a_pump_held_by_a_non_cooperative_tool(self, monkeypatch: pytest.MonkeyPatch):
+        """Discarding an in-flight call waits for the cancelled pump only within the budget.
+        A nested tool that swallows the cancellation is abandoned, and the statements queued
+        behind it never run."""
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._eager.PUMP_CANCEL_TIMEOUT_SECONDS', 0.25)
+        started = asyncio.Event()
+        calls: list[str] = []
+
+        async def stubborn() -> str:
+            calls.append('stubborn')
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                # Swallow the cancellation and keep working past the cleanup budget.
+                await asyncio.sleep(2)
+            return 'late'
+
+        async def victim() -> str:
+            calls.append('victim')
+            return 'never'
+
+        async with prepared_eager_toolset([Tool(stubborn), Tool(victim)]) as (capability, _, ctx, _):
+            code = 'await stubborn()\nawait victim()\n"ok"'
+            await observe(
+                capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1')
+                    )
+                ],
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            # Without the budget, the restart would wait out the 2 second non-cooperative linger.
+            discard_start = time.monotonic()
+            await observe(
+                capability,
+                ctx,
+                [PartDeltaEvent(index=0, delta=ToolCallPartDelta(args_delta={'restart': True}, tool_call_id='c1'))],
+            )
+
+            assert time.monotonic() - discard_start < 1.5
+            assert calls == ['stubborn']
 
     async def test_output_matches_normal_code_mode_across_fragments(self):
         def blob(size: int) -> str:

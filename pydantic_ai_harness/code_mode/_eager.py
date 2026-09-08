@@ -21,6 +21,12 @@ from ._toolset import CodeModeToolset, RunCodeExecution
 MAX_SCAN_WORK_CHARS = 1 << 20
 """Cumulative characters a streamed call may hand to host parsers."""
 
+PUMP_CANCEL_TIMEOUT_SECONDS = 5.0
+"""How long to wait for a cancelled pump to release a non-cooperative nested tool before
+abandoning it. Abandoning is safe: the pump's feed aborts with the cancellation, and the
+executor cancels the in-flight nested calls, so an abandoned pump starts no further
+tool calls."""
+
 
 def in_durable_execution(ctx: RunContext[object]) -> bool:
     """Whether a durable executor is active, where eager streaming must stay disabled."""
@@ -148,6 +154,11 @@ class EagerCoordinator(Generic[AgentDepsT]):
                 await self.discard(call)
                 return False
             if isinstance(code, str) and len(code) > MAX_SCAN_CHARS:
+                # A dict replacement is the complete code, so unlike the string and cumulative
+                # limits (which fire mid-stream, before the final code is known) we can check
+                # whether the already-run prefix still holds. When it does, the queued-but-
+                # unrun statements are still a valid continuation, so they are kept; a diverged
+                # prefix discards them.
                 call.halted = True
                 if call.fed_prefix and code != call.fed_prefix and not code.startswith(f'{call.fed_prefix}\n'):
                     await self.discard(call)
@@ -269,10 +280,9 @@ class EagerCoordinator(Generic[AgentDepsT]):
     @staticmethod
     async def cancel_pump(pump: asyncio.Task[None]) -> None:
         pump.cancel()
-        try:
-            await pump
-        except (asyncio.CancelledError, Exception):
-            pass
+        # A nested tool that swallows the cancellation can hold the pump past the budget;
+        # waiting without a deadline would let one such tool hang run teardown.
+        await asyncio.wait({pump}, timeout=PUMP_CANCEL_TIMEOUT_SECONDS)
 
     async def close(self) -> None:
         """Cancel all background work owned by this run."""

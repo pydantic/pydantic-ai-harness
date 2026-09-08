@@ -279,12 +279,19 @@ Keep these limitations in mind:
 - If the model later requests `restart: true`, some work may run again.
 - If the model changes an earlier line while streaming, `CodeMode` resets the REPL and asks
   the model to send the code again.
+- Eager mode trusts that the provider preserves the streamed `run_code` part and its tool
+  name. If a provider removes or renames the part, the work that already ran cannot be
+  undone.
 - Eager execution is used only when `run_code` is the first tool call in a model response.
   Later tool calls wait for normal dispatch so they run in the order the model requested.
 - Eager mode is disabled when using durable execution such as Temporal or DBOS.
 - Eager mode needs asyncio, like the rest of the sandbox executor.
 - If a statement is interrupted before it finishes, for example because the call failed
   validation, the session restarts and the next snippet must recreate its state.
+- Nested tools called from eager statements must cooperate with asyncio cancellation. When
+  a run ends or a streamed call is invalidated, `CodeMode` cancels the in-flight work and
+  waits a bounded time (currently 5 seconds) for it to release. Work that does not release
+  in time is abandoned; it cannot start further tool calls.
 - Tools called from statements that ran early are traced before the `run_code` span opens.
 
 ## Temporal durability
