@@ -239,11 +239,13 @@ async def test_missing_modal_package_is_named(monkeypatch: pytest.MonkeyPatch, e
         await entry_point()
 
 
-class TestClose:
-    async def test_an_unused_backend_has_nothing_to_close(self, fake_modal: FakeModal) -> None:
-        # Building one does no I/O, so closing it must not reach Modal either -- resolving here
-        # would create the very sandbox being released.
-        await ModalSandboxBackend().close(terminate=True)
+class TestLifecycle:
+    async def test_an_unused_backend_has_nothing_to_destroy_or_disconnect(self, fake_modal: FakeModal) -> None:
+        # Building one does no I/O, so lifecycle methods must not resolve it -- doing so would
+        # create the very sandbox being released.
+        backend = ModalSandboxBackend()
+        await backend.destroy()
+        await backend.disconnect()
 
         assert fake_modal.sandboxes == []
         assert fake_modal.create_kwargs == []
@@ -255,38 +257,90 @@ class TestClose:
         assert await second.sandbox is await first.sandbox
         assert fake_modal.attach_ids == ['sb-keep', 'sb-keep']
 
-    async def test_terminates_and_detaches_when_owned(self, fake_modal: FakeModal) -> None:
+    async def test_destroy_terminates_and_detaches_when_owned(self, fake_modal: FakeModal) -> None:
         backend = await started()
-        await backend.close(terminate=True)
+        await backend.destroy()
         assert fake_modal.sandboxes[0].terminated is True
         assert fake_modal.sandboxes[0].detached is True
 
-    async def test_detaches_without_terminating(self, fake_modal: FakeModal) -> None:
+    async def test_disconnect_detaches_without_terminating(self, fake_modal: FakeModal) -> None:
         backend = await started(ref=SandboxRef(sandbox_id='sb-keep'))
-        await backend.close(terminate=False)
+        await backend.disconnect()
         assert fake_modal.sandboxes[0].terminated is False
         assert fake_modal.sandboxes[0].detached is True
 
-    async def test_terminate_failure_still_detaches(self, fake_modal: FakeModal) -> None:
+    async def test_disconnect_clears_cached_working_dir_and_reattaches(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: ('/srv\n', '', 0)
+        backend = await started()
+        ref = backend.ref
+        assert await backend.working_dir() == '/srv'
+
+        await backend.disconnect()
+
+        assert backend.ref == ref
+        assert await backend.working_dir() == '/srv'
+        assert fake_modal.attach_ids == ['sb-owned']
+        assert [call.argv for call in fake_modal.sandboxes[0].exec_calls] == [['pwd', '-P'], ['pwd', '-P']]
+
+    async def test_destroy_before_first_use_attaches_by_id_without_polling(self, fake_modal: FakeModal) -> None:
+        owner = await started()
+        backend = ModalSandboxBackend(ref=owner.ref)
+
+        await backend.destroy()
+
+        assert fake_modal.attach_ids == ['sb-owned']
+        assert fake_modal.sandboxes[0].poll_calls == 0
+        assert fake_modal.sandboxes[0].terminated is True
+        assert fake_modal.sandboxes[0].detached is True
+
+    async def test_destroy_before_first_use_bounds_id_lookup(
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
+        fake_modal.module.Sandbox.from_id = _HangingCall()
+        backend = ModalSandboxBackend(ref=SandboxRef(sandbox_id='sb-keep'))
+
+        with anyio.fail_after(5):
+            with pytest.raises(ModalSandboxError, match='Timed out'):
+                await backend.destroy()
+
+        assert backend.ref == SandboxRef(sandbox_id='sb-keep')
+
+    async def test_destroy_before_first_use_accepts_missing_id(self, fake_modal: FakeModal) -> None:
+        fake_modal.attach_error = fake_modal.unavailable_type('already gone')
+        backend = ModalSandboxBackend(ref=SandboxRef(sandbox_id='sb-gone'))
+
+        await backend.destroy()
+
+        assert fake_modal.attach_ids == ['sb-gone']
+        assert fake_modal.create_kwargs == []
+
+    async def test_destroy_terminate_failure_still_detaches_and_retries(self, fake_modal: FakeModal) -> None:
         backend = await started()
         fake_modal.sandboxes[0].terminate_error = RuntimeError('terminate boom')
         with pytest.raises(ModalSandboxError, match='terminate boom'):
-            await backend.close(terminate=True)
+            await backend.destroy()
         assert fake_modal.sandboxes[0].detached is True
+        assert backend.ref == SandboxRef(sandbox_id='sb-owned')
+
+        fake_modal.sandboxes[0].terminate_error = None
+        await backend.destroy()
+        assert fake_modal.attach_ids == ['sb-owned']
+        assert fake_modal.sandboxes[0].terminated is True
 
     async def test_already_gone_sandbox_is_not_an_error(self, fake_modal: FakeModal) -> None:
         # An owned run that outlived its `sandbox_timeout` self-terminates; the teardown
         # terminate then hits "already gone", which is success, not a failure to raise.
         backend = await started()
         fake_modal.sandboxes[0].terminate_error = fake_modal.sandbox_terminated_type('already terminated')
-        await backend.close(terminate=True)
+        await backend.destroy()
         assert fake_modal.sandboxes[0].detached is True
 
     async def test_detach_failure_is_visible(self, fake_modal: FakeModal) -> None:
         backend = await started()
         fake_modal.sandboxes[0].detach_error = RuntimeError('detach boom')
         with pytest.raises(ModalSandboxError, match='detach boom'):
-            await backend.close(terminate=True)
+            await backend.destroy()
         assert fake_modal.sandboxes[0].terminated is True
 
     async def test_first_failure_wins_when_both_calls_fail(self, fake_modal: FakeModal) -> None:
@@ -294,14 +348,14 @@ class TestClose:
         fake_modal.sandboxes[0].terminate_error = RuntimeError('terminate boom')
         fake_modal.sandboxes[0].detach_error = RuntimeError('detach boom')
         with pytest.raises(ModalSandboxError, match='terminate boom'):
-            await backend.close(terminate=True)
+            await backend.destroy()
 
-    async def test_auth_failure_during_close_is_typed(self, fake_modal: FakeModal) -> None:
+    async def test_auth_failure_during_destroy_is_typed(self, fake_modal: FakeModal) -> None:
         backend = await started()
         fake_modal.sandboxes[0].terminate_error = fake_modal.auth_type('unauthenticated')
 
         with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
-            await backend.close(terminate=True)
+            await backend.destroy()
 
         assert fake_modal.sandboxes[0].detached is True
 
@@ -313,7 +367,7 @@ class TestClose:
         fake_modal.sandboxes[0].terminate = _HangingCall()
         with anyio.fail_after(5):
             with pytest.raises(ModalSandboxError, match='Timed out'):
-                await backend.close(terminate=True)
+                await backend.destroy()
         assert fake_modal.sandboxes[0].detached is True
 
     async def test_hanging_detach_is_bounded(self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -324,7 +378,7 @@ class TestClose:
         fake_modal.sandboxes[0].detach = _HangingCall()
         with anyio.fail_after(5):
             with pytest.raises(ModalSandboxError, match='Timed out'):
-                await backend.close(terminate=True)
+                await backend.destroy()
         assert fake_modal.sandboxes[0].terminated is True
 
 
@@ -484,7 +538,7 @@ class TestRun:
         # The same ambiguous ConflictError against a sandbox this process terminated: the
         # poll finds it exited, so the failure is terminal rather than a transient abort.
         backend = await started()
-        await backend.close(terminate=True)
+        await backend.destroy()
         fake_modal.exec_error = fake_modal.conflict_type('Sandbox already finished')
         with pytest.raises(ModalSandboxUnavailableError):
             await backend.run(['x'])
@@ -707,5 +761,5 @@ async def test_cleanup_error_retains_sdk_traceback(fake_modal: FakeModal) -> Non
     original = RuntimeError('terminate failed')
     fake_modal.sandboxes[0].terminate_error = original
     with pytest.raises(ModalSandboxError) as caught:
-        await backend.close(terminate=True)
+        await backend.destroy()
     assert caught.value.__cause__ is original

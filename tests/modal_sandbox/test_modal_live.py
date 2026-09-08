@@ -73,13 +73,13 @@ def _unique(prefix: str) -> str:
 
 @asynccontextmanager
 async def _owned(**settings: object) -> AsyncGenerator[ModalSandboxBackend]:
-    """Create a sandbox and terminate it on the way out, as the capability's hooks do."""
+    """Create a sandbox and terminate it on the way out."""
     backend = ModalSandboxBackend(image=_IMAGE, **settings)  # type: ignore[arg-type]
     await backend.sandbox
     try:
         yield backend
     finally:
-        await backend.close(terminate=True)
+        await backend.destroy()
 
 
 @pytest.fixture(scope='module')
@@ -275,8 +275,8 @@ class TestRealFilesystem:
 class TestRealLifecycle:
     """Teardown and attach semantics in Modal's real control plane."""
 
-    async def test_terminate_actually_destroys_the_container(self) -> None:
-        """Validates the fake-encoded assumption that closing an owned sandbox destroys the real one."""
+    async def test_destroy_actually_destroys_the_container(self) -> None:
+        """Validates that destroying an owned sandbox removes it from the control plane."""
         async with _owned(sandbox_timeout=120) as owner:
             ref = owner.ref
         assert ref is not None
@@ -305,6 +305,6 @@ class TestRealLifecycle:
             await attached.sandbox
             assert attached.ref == owner.ref
             assert await attached.read_bytes(marker) == b'shared'
-            await attached.close(terminate=False)
+            await attached.disconnect()
 
             assert (await owner.run(['cat', marker], timeout=15)).stdout == 'shared'

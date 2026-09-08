@@ -48,7 +48,7 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     """Registry image used for an owned sandbox."""
 
     sandbox_id: str | None = None
-    """Existing Modal sandbox ID to attach to without terminating it."""
+    """Existing Modal sandbox ID to attach to without automatic termination."""
 
     app_name: str = DEFAULT_APP_NAME
     """Deployed Modal app that owns named sandboxes."""
