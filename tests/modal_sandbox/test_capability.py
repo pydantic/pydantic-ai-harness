@@ -35,7 +35,7 @@ async def _resolved(capability: ModalSandbox[None], ctx: RunContext[None], ref: 
     """Ask the capability for a backend and touch it, so the create-or-attach actually happens."""
     backend = capability.get_sandbox(ctx, ref=ref)
     assert isinstance(backend, ModalSandboxBackend)
-    await backend.sandbox
+    await backend.get_sandbox()
     return backend
 
 
@@ -64,7 +64,7 @@ class TestLifecycle:
         assert result.output == 'done'
         assert len(fake_modal.sandboxes) == 1
         # Nothing terminates it: the conversation may continue in another run, and Modal reaps
-        # an idle sandbox at its own `sandbox_timeout`.
+        # a sandbox at its maximum `sandbox_timeout`.
         assert fake_modal.sandboxes[0].terminated is False
 
     async def test_building_a_backend_does_no_io(self, fake_modal: FakeModal) -> None:
@@ -176,3 +176,20 @@ class TestConfiguration:
 
     def test_serialization_name(self) -> None:
         assert ModalSandbox.get_serialization_name() == 'ModalSandbox'
+
+
+async def test_agent_followup_reuses_conversation_workspace(fake_modal: FakeModal) -> None:
+    agent = Agent(TestModel(), deps_type=type(None), capabilities=[ModalSandbox[None]()])
+
+    @agent.tool
+    async def workspace(ctx: RunContext[None]) -> str:
+        if await ctx.sandbox.exists('/note'):
+            return (await ctx.sandbox.read_bytes('/note')).decode()
+        await ctx.sandbox.write_bytes('/note', b'kept')
+        return 'created'
+
+    first = await agent.run('Begin.')
+    second = await agent.run('Continue.', conversation_id=first.conversation_id)
+
+    assert 'kept' in second.output
+    assert len(fake_modal.sandboxes) == 1
