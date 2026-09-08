@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
-from pydantic_ai import Agent, UserError
+from pydantic_ai import Agent
 from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import (
@@ -60,7 +60,7 @@ class TestLogfireMCP:
         schema = AgentSpec.model_json_schema_with_capabilities([LogfireMCP])
         properties = schema['$defs']['spec_params_LogfireMCP']['properties']
         assert 'client' not in properties
-        assert {'url', 'auth', 'access', 'allowed_tools'} <= set(properties)
+        assert {'url', 'auth', 'read_only', 'allowed_tools'} <= set(properties)
         assert LogfireMCP.get_serialization_name() == 'LogfireMCP'
         agent = Agent.from_spec(
             {
@@ -69,7 +69,7 @@ class TestLogfireMCP:
                         'LogfireMCP': {
                             'url': LOGFIRE_EU_MCP_URL,
                             'auth': None,
-                            'access': 'write',
+                            'read_only': True,
                             'allowed_tools': ['query_run'],
                             'include_instructions': False,
                         }
@@ -102,16 +102,17 @@ class TestLogfireMCP:
 
         assert toolset.client.transport is transport
 
-    async def test_read_access_hides_tools_not_marked_read_only(self, logfire_server: FastMCP, logfire_calls: Calls):
-        result = await Agent(TestModel(), capabilities=[LogfireMCP(client=logfire_server)]).run('Set up a dashboard')
+    async def test_read_only_hides_tools_not_marked_read_only(self, logfire_server: FastMCP, logfire_calls: Calls):
+        capability = LogfireMCP(client=logfire_server, read_only=True)
+        result = await Agent(TestModel(), capabilities=[capability]).run('Set up a dashboard')
 
         assert _tool_call_names(result.all_messages()) == {'project_list', 'query_run'}
         assert [name for name, _ in logfire_calls] == ['project_list', 'query_run']
 
-    async def test_write_access_exposes_every_tool_and_requires_mutation_approval(
+    async def test_default_exposes_every_tool_and_requires_mutation_approval(
         self, logfire_server: FastMCP, logfire_calls: Calls
     ):
-        capability = LogfireMCP(client=logfire_server, access='write')
+        capability = LogfireMCP(client=logfire_server)
         agent = Agent(TestModel(), capabilities=[capability], output_type=[str, DeferredToolRequests])
 
         deferred = await agent.run('Set up a dashboard')
@@ -140,10 +141,6 @@ class TestLogfireMCP:
             'dashboard_create',
             'unannotated_tool',
         ]
-
-    def test_access_rejects_unknown_value(self):
-        with pytest.raises(UserError, match='`access` must be `read` or `write`'):
-            LogfireMCP[None](access='readonly')  # pyright: ignore[reportArgumentType]
 
     async def test_instructions_keep_static_guidance_separate_from_run_time(
         self, logfire_server: FastMCP, logfire_calls: Calls
@@ -186,3 +183,13 @@ class TestLogfireMCP:
         result = await Agent(TestModel(), capabilities=[capability]).run('Count errors')
 
         assert _tool_call_names(result.all_messages()) == expected
+
+    async def test_allowed_write_tool_still_requires_approval(self, logfire_server: FastMCP, logfire_calls: Calls):
+        capability = LogfireMCP(client=logfire_server, allowed_tools=['dashboard_create'])
+        agent = Agent(TestModel(), capabilities=[capability], output_type=[str, DeferredToolRequests])
+
+        deferred = await agent.run('Set up a dashboard')
+
+        assert isinstance(deferred.output, DeferredToolRequests)
+        assert [call.tool_name for call in deferred.output.approvals] == ['dashboard_create']
+        assert logfire_calls == []

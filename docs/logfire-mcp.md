@@ -1,14 +1,15 @@
 ---
 title: Logfire MCP
-description: Let a Pydantic AI agent query Logfire telemetry through the hosted MCP server, read-only by default, with opt-in write access to dashboards, alerts, and issues.
+description: Let a Pydantic AI agent query Logfire telemetry and manage dashboards, alerts, and issues through the hosted MCP server, with approval on changes and an opt-in read-only mode.
 ---
 
 # Logfire MCP
 
 `LogfireMCP` lets an agent query telemetry and work with dashboards, alerts, and issues through
-[Logfire's hosted MCP server](https://pydantic.dev/docs/logfire/guides/mcp-server/). By default only the tools
-Logfire marks read-only are exposed. Logfire enforces access: the credential's project and scopes decide what
-the agent can read or change.
+[Logfire's hosted MCP server](https://pydantic.dev/docs/logfire/guides/mcp-server/). Every tool the credential
+can reach is exposed, and tools Logfire does not mark read-only require approval before they run. Pass
+`read_only=True` to expose only the read-only tools. Logfire enforces access: the credential's project and scopes
+decide what the agent can read or change.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
@@ -31,9 +32,9 @@ export LOGFIRE_API_KEY="your-logfire-api-key"
 export OPENAI_API_KEY="your-openai-api-key"
 ```
 
-A project-scoped key limits the agent to that project. Add write scopes, and pass `access='write'`, only when the
-agent should change dashboards, alerts, or issues. To use interactive OAuth instead, omit `auth`; FastMCP opens a browser for Logfire authorization on
-the first run. Its token store is in memory, so a restart asks you to authorize again. A long-running deployment should
+A project-scoped key limits the agent to that project. Add write scopes only when the agent should change
+dashboards, alerts, or issues; pass `read_only=True` to hide the tools that change them. To use interactive OAuth
+instead, omit `auth`; FastMCP opens a browser for Logfire authorization on the first run. Its token store is in memory, so a restart asks you to authorize again. A long-running deployment should
 inject a `client` configured with its own encrypted, per-user token storage.
 
 ## Run an agent
@@ -57,8 +58,7 @@ print(result.output)
 - Count or list recent exceptions, grouped by service or file.
 - Explain the query schema for spans, logs, and metrics.
 - Create a Logfire link for a trace.
-- List dashboards, alerts, and open issues, or change them with `access='write'` and a credential that has write
-  scopes.
+- List dashboards, alerts, and open issues, or change them with a credential that has write scopes.
 
 ## Operational constraints
 
@@ -70,11 +70,11 @@ print(result.output)
   only be created when asked. Set `include_instructions=False` to leave out both server and capability instructions.
 - `url` defaults to the US region. Use `LOGFIRE_EU_MCP_URL` for EU data, or your own `/mcp` URL for a self-hosted
   deployment.
-- `access` defaults to `'read'`, which exposes only the tools Logfire marks `readOnlyHint`. `access='write'` exposes
-  every tool the credential can reach, including dashboard, alert, issue, and variable mutations.
+- By default every tool the credential can reach is exposed, including dashboard, alert, issue, and variable
+  mutations. `read_only=True` exposes only the tools Logfire marks `readOnlyHint`.
 - `allowed_tools` narrows the exposed tools by exact name. It does not replace credential scopes.
-- In write mode, tools not marked read-only require human approval automatically. Add `DeferredToolRequests` to the
-  output type, then approve and resume the run as
+- Unless `read_only=True`, tools not marked read-only require human approval automatically. Add
+  `DeferredToolRequests` to the output type, then approve and resume the run as
   the [deferred tools guide](/ai/tools-toolsets/deferred-tools/) describes:
 
   ```python
@@ -83,7 +83,7 @@ print(result.output)
 
   agent = Agent(
       'openai:gpt-5.6-sol',
-      capabilities=[LogfireMCP(access='write')],
+      capabilities=[LogfireMCP()],
       output_type=[str, DeferredToolRequests],
   )
   ```
