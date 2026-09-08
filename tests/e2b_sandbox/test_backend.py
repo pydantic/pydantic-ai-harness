@@ -37,14 +37,21 @@ async def started(**settings: Any) -> E2BSandboxBackend:
     """Build a backend and resolve it now.
 
     Constructing one does no I/O, so a test that wants to assert on what creating or attaching
-    did has to touch the sandbox first. Awaiting `get_sandbox()` is that touch.
+    did has to touch the sandbox first. Awaiting `sandbox` is that touch.
     """
     backend = E2BSandboxBackend(**settings)
-    await backend.get_sandbox()
+    await backend.sandbox
     return backend
 
 
 class TestConformance:
+    async def test_sandbox_property_is_lazy_and_reuses_handle(self, fake_e2b: FakeE2B) -> None:
+        backend = E2BSandboxBackend()
+        pending = backend.sandbox
+        assert not fake_e2b.sandboxes
+        sandbox = await pending
+        assert await backend.sandbox is sandbox
+
     async def test_backend_implements_run_and_filesystem_protocols(self, fake_e2b: FakeE2B) -> None:
         # Protocol inheritance also checks signatures statically.
         backend = await started()
@@ -54,7 +61,7 @@ class TestConformance:
     async def test_identity_is_e2b_sandbox_id(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         assert backend.ref == SandboxRef(sandbox_id='sbx-1')
-        assert await backend.get_sandbox() is fake_e2b.sandboxes[0]
+        assert await backend.sandbox is fake_e2b.sandboxes[0]
 
     async def test_shared_command_validation(self, fake_e2b: FakeE2B) -> None:
         await check_command_validation(started)
