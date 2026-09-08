@@ -150,7 +150,8 @@ def _sketch_sequence(items: Sequence[object]) -> str:
 def truncate_text(text: str, max_chars: int, strategy: TruncationStrategy) -> str:
     """Limit `text` to `max_chars`, including the truncation marker.
 
-    Keep the selected slice without a marker if no content and complete marker fit.
+    If the budget cannot fit both retained content and a complete marker, return the
+    selected slice without a marker.
     """
     if max_chars <= 0:
         return ''

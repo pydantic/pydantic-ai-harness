@@ -38,9 +38,9 @@ class Truncate:
     """Clamp the stringified return to `max_chars`, including the truncation marker.
 
     Lossy, zero-cost, no read-back. `max_chars` is always characters, independent of the
-    capability's `over_tokens` size unit. A cap too small for content and a complete marker
-    keeps only the selected slice. A non-positive cap returns an empty string. Falls back
-    to `then` for binary payloads, which cannot be stringify-truncated.
+    capability's `over_tokens` size unit. If the budget cannot fit both retained content and
+    a complete marker, truncation keeps only the selected slice. A non-positive cap returns
+    an empty string. Falls back to `then` for binary payloads, which cannot be stringify-truncated.
     """
 
     strategy: TruncationStrategy = TruncationStrategy.head_tail

@@ -170,8 +170,9 @@ again, unless the store fails. The spill preview shows both ends and the model c
 
 Spilling preserves only the result received from Shell. It cannot recover content already
 removed by the native cap. A preview can contain both spill and native truncation notices;
-a native notice describes the stored result, not the shorter preview. `Spill.preview_chars`
-controls the preview's content budget; its header and omission marker add to that length.
+a native notice describes the stored result, not the shorter preview. A positive
+`Spill.preview_chars` value controls the preview's content budget; its header and omission
+marker add to that length.
 
 ## Both `return_value` and `content` are reduced
 
@@ -187,10 +188,10 @@ Thresholds are measured in characters by default. Set `over_tokens=True` to meas
 estimated tokens (the same ~4-chars-per-token heuristic as [compaction](compaction.md)); pass a
 `tokenizer` callable for accuracy. `Truncate.max_chars` is always characters -- truncation is a
 character operation regardless of the threshold unit. The cap includes the truncation marker
-and applies separately to each reduced text value. If no content and complete marker fit,
-truncation keeps the selected slice without a marker; a non-positive cap returns an empty
-string. Set `strip_ansi=True` to strip ANSI escape sequences from text returns before
-measuring and reducing.
+and applies separately to each reduced text value. If the budget cannot fit both retained
+content and a complete marker, truncation keeps the selected slice without a marker. A
+non-positive cap returns an empty string. Set `strip_ansi=True` to strip ANSI escape sequences
+from text returns before measuring and reducing.
 
 ## Pageable structured spills
 
