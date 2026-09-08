@@ -36,11 +36,15 @@ engine:
 Read the issue and summarize what changed.
 ```
 
-To freeze the definition instead, import `@v0.26.0` -- a release tag of this
-repository -- or a commit SHA; gh-aw resolves the ref at compile time, so `@main`
-re-resolves on every recompile while a tag or SHA does not. A workflow's own
-`engine: version:` overrides the package version the definition pins: gh-aw applies
-the imported definition's version only when the workflow left it empty
+To freeze the definition instead, import a commit SHA that contains this file, or a
+release tag of this repository cut after the definition landed on `main`; gh-aw
+resolves the ref at compile time, so `@main` re-resolves on every recompile while a
+tag or SHA does not. The ref has to be one that carries the file: `v0.26.0` and
+every earlier tag predate it, so an import naming one has nothing to fetch. The two
+pins are separate: the ref decides which definition compiles, and `engine.version`
+inside it decides which harness release runs. A workflow's own `engine: version:`
+overrides the package version the definition pins, because gh-aw applies the
+imported definition's version only when the workflow left it empty
 (`applyEngineImportDefaults` in `pkg/workflow/compiler_orchestrator_engine.go`).
 
 `model` is required and must be `provider/model`. gh-aw accepts `copilot`,
