@@ -58,7 +58,11 @@ engine:
       const { join } = require("path");
       const { fetchAWFReflect, resolveProviderEndpointFromReflect, deriveBaseUrlFromModelsURL } = require("./awf_reflect.cjs");
 
-      const [command, ...commandArgs] = process.argv.slice(2);
+      // gh-aw passes `execution.command-name` (or a workflow's `engine.command`)
+      // first, then `execution.args`. The name is not spawned -- the CLI is started
+      // by the interpreter that owns the install, see LAUNCHER below -- so only the
+      // arguments after it are forwarded.
+      const commandArgs = process.argv.slice(3);
       const log = message => process.stderr.write(`[pydantic-ai] ${message}\n`);
 
       // `pai -a` takes one target, either an import path or a JSON/YAML agent
@@ -79,7 +83,53 @@ engine:
       agent = Agent(name="coder", capabilities=[Coder()])
       `;
       const DEFAULT_AGENT = "gh_aw_agent:agent";
-      const SPEC_SUFFIXES = [".yml", ".yaml", ".json"];
+
+      // The CLI runs inside the interpreter that owns the install rather than as a
+      // separate `pai` process, so the agent module is imported once, in the process
+      // that runs it. Three things follow from that.
+      //
+      // `pai` reduces any failed `-a` load to one line naming the target, so an
+      // agent that raises on import would reach the step log without its traceback.
+      // The import here happens before the CLI starts, and an unhandled exception is
+      // the step's failure, traceback included.
+      //
+      // `pydantic_ai._cli.load_agent` prepends the working directory -- the checkout
+      // -- to sys.path before resolving the target, ahead of PYTHONPATH. A
+      // repository file named `gh_aw_agent.py` would therefore be loaded in place of
+      // the generated module. Importing the target first settles which file the name
+      // means, because an import of a module already in sys.modules does not search
+      // the path again.
+      //
+      // A separate preflight process could do neither: it would import the module in
+      // one interpreter and leave the CLI to import it again in another, running any
+      // module-level work in the agent twice.
+      //
+      // The residual is `load_agent`'s insert itself: everything the agent imports
+      // after that point still sees the checkout first on sys.path. That is the
+      // CLI's documented behavior for its own users, and not something this file
+      // can change from the outside.
+      //
+      // `-P` keeps the `-c` invocation from putting the working directory on
+      // sys.path on its own account; PYTHONPATH below is what makes the agent
+      // importable. A spec file, and the dotted `module.attribute` form the CLI also
+      // accepts, are left to the CLI as before.
+      const LAUNCHER = `import runpy
+      import sys
+
+      target, *cli_args = sys.argv[1:]
+      module, separator, attribute = target.rpartition(":")
+      if separator and not target.lower().endswith((".yml", ".yaml", ".json")):
+          import importlib
+
+          from pydantic_ai import Agent
+
+          loaded = getattr(importlib.import_module(module), attribute)
+          if not isinstance(loaded, Agent):
+              raise TypeError(f"{target} is {type(loaded).__name__}, not pydantic_ai.Agent")
+
+      sys.argv = ["pai", *cli_args]
+      runpy.run_module("pydantic_ai", run_name="__main__", alter_sys=True)
+      `;
 
       const main = async () => {
         const workspace = process.env.GITHUB_WORKSPACE;
@@ -191,32 +241,6 @@ engine:
         // itself without one.
         env.OPENAI_API_KEY = "awf-copilot-proxy";
 
-        // `pai` reports a failed `-a` load as a single line naming the target and
-        // nothing else, so the target is imported here first: a missing install or
-        // an agent module that raises then surfaces as the real Python traceback
-        // instead of "Could not load agent from".
-        //
-        // Only the `module:variable` form is reproducible this cheaply. A spec
-        // file goes through `Agent.from_file`, and `pai` also accepts a dotted
-        // `module.attribute` path; both are left to the CLI rather than
-        // reimplemented here, so those keep the terse message.
-        const separator = agentTarget.lastIndexOf(":");
-        const isSpecFile = SPEC_SUFFIXES.some(suffix => agentTarget.toLowerCase().endsWith(suffix));
-        if (!isSpecFile && separator > 0) {
-          const [module, attribute] = [agentTarget.slice(0, separator), agentTarget.slice(separator + 1)];
-          const preflight = spawnSync(
-            python,
-            ["-c", `import ${module} as _agent_module; from pydantic_ai import Agent; assert isinstance(_agent_module.${attribute}, Agent)`],
-            { cwd: workspace, env, encoding: "utf8" }
-          );
-          if (preflight.error) throw preflight.error;
-          if (preflight.status !== 0) {
-            throw new Error(
-              `Could not load the Pydantic AI agent ${agentTarget} with ${python}:\n${preflight.stderr || preflight.stdout || `it exited with code ${preflight.status ?? "unknown"}`}`
-            );
-          }
-        }
-
         // `pai` sends the model name verbatim, minus the `openai-chat:` provider
         // marker that selects its OpenAI-compatible client, so the bare model ID
         // reaches the api-proxy — which steers to the configured provider by the
@@ -245,18 +269,21 @@ engine:
         // An explicit `-m` also replaces the model a loaded agent declares, so a
         // `PAI_AGENT` agent runs on the workflow's `engine.model` whatever it was
         // constructed with. That is what routes it through the endpoint above.
-        const args = [...commandArgs, "-a", agentTarget];
+        const cliArgs = [...commandArgs, "-a", agentTarget];
         // The config adapter writes this file only for a workflow that configures
         // MCP tools, and `--mcp-config` fails on a path that is not there, so its
         // absence has to mean "no servers" rather than an error.
         const mcpConfig = join(agentDir, "mcp.json");
-        if (existsSync(mcpConfig)) args.push("--mcp-config", mcpConfig);
-        args.push("-m", `openai-chat:${model}`, readFileSync(promptFile, "utf8"));
+        if (existsSync(mcpConfig)) cliArgs.push("--mcp-config", mcpConfig);
+        cliArgs.push("-m", `openai-chat:${model}`, readFileSync(promptFile, "utf8"));
         log(
           `provider=${configuredBaseUrl ? "(PAI_BASE_URL)" : provider} model=${model} baseUrl=${baseUrl}` +
             (configuredAgent ? ` agent=${configuredAgent}` : "")
         );
-        const result = spawnSync(command, args, { cwd: workspace, env, stdio: "inherit" });
+        // The target is passed twice on purpose: once for LAUNCHER, which imports it
+        // and hands the CLI a module already in sys.modules, and once as the `-a`
+        // the CLI parses for itself.
+        const result = spawnSync(python, ["-P", "-c", LAUNCHER, agentTarget, ...cliArgs], { cwd: workspace, env, stdio: "inherit" });
         if (result.error) throw result.error;
         if (result.status !== 0) {
           const error = new Error(`Pydantic AI execution failed with exit code ${result.status ?? "unknown"}`);
@@ -417,9 +444,17 @@ sub-agent, with the harness's own context-management guardrails. `pai -a` accept
 a single target and its JSON agent-spec format cannot name harness capabilities,
 so the harness script writes that composition as a Python module at
 `.pydantic-ai/gh_aw_agent.py`, puts the directory on `PYTHONPATH`, and passes
-`-a gh_aw_agent:agent`. Because `pai` reduces a failed load to a single line
-naming the target, the harness imports the module itself first and fails the step
-with the underlying Python traceback.
+`-a gh_aw_agent:agent`.
+
+The CLI is started by the interpreter that owns the install -- `python -P -c`
+importing the target and then `runpy.run_module("pydantic_ai")` -- rather than as
+a separate `pai` process. The module is imported exactly once, in the process
+that runs it: an agent that raises on import fails the step with its traceback
+rather than the one line `pai` prints for a failed `-a` load, and the CLI's own
+`load_agent`, which prepends the checkout to `sys.path` before resolving the
+target, finds the module already in `sys.modules` instead of a repository file of
+the same name. That insert still applies to everything imported after it, which
+is the CLI's documented behavior for its own users.
 
 `PAI_AGENT` in `engine.env` replaces that target with an agent the repository
 defines, in the same `module:variable` or spec-file form `pai -a` takes. The

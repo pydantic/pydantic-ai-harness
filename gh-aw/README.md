@@ -60,6 +60,16 @@ dependencies are installed before the agent starts, with
 refuses a pull request whose pin is not on PyPI. The `2.36.0` floor is the first
 pydantic-ai release carrying `pai --mcp-config`.
 
+The CLI itself is started by the interpreter that owns that install, which imports
+the agent target and then runs `pydantic_ai` as `__main__`, rather than by spawning
+`pai`. The agent module is therefore imported exactly once, in the process that
+runs it. Two things follow. An agent that raises on import fails the step with its
+traceback, instead of the single line `pai` prints for a failed `-a` load. And
+`load_agent`, which prepends the checkout to `sys.path` before it resolves the
+target, finds the module already in `sys.modules`, so a repository file named
+`gh_aw_agent.py` cannot stand in for the generated one. That insert still applies to
+everything imported after it, which is how the CLI behaves for all of its users.
+
 MCP servers arrive as `.pydantic-ai/mcp.json` in the `mcpServers` shape Claude
 Desktop and Cursor use, and the engine hands that file to `pai --mcp-config`, which
 loads it with `pydantic_ai.mcp.load_mcp_toolsets` and passes the toolsets into the
@@ -129,9 +139,11 @@ Five things to know.
   discovery and the `provider/` prefix behave exactly as they do for the coder
   agent, described below.
 
-A `module:variable` target is imported before `pai` starts, and an agent that fails
-to import or is not an `Agent` fails the step with the Python traceback. A spec file
-is left to `pai`, which reports its own error.
+A `module:variable` target is imported once, by the process that goes on to run the
+CLI, so module-level work in your agent runs once too. An agent that fails to import
+or is not an `Agent` fails the step with the Python traceback. A spec file, and the
+dotted `module.attribute` form `pai` also accepts, are left to the CLI, which reports
+its own error.
 
 ## gh-aw compatibility
 
