@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Sequence
-from dataclasses import replace
-from inspect import signature
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +16,6 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
 
-from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.subagents import (
     MINIMUM_EFFORT_FLOOR,
     AgentOverride,
@@ -174,19 +171,38 @@ class TestResolveFolders:
 
 
 class TestDiskLoading:
-    def test_auto_loads_from_convention_by_default(self) -> None:
-        # The isolation fixture points the home root at an empty dir; populate its
-        # conventional folder and the default `SubAgents()` picks it up with no config.
-        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        cap: SubAgents[object] = SubAgents()
-        assert 'planner' in cap._by_name
+    @pytest.mark.parametrize('explicit', [False, True])
+    def test_no_folder_access_without_opt_in(self, monkeypatch: pytest.MonkeyPatch, explicit: bool) -> None:
+        def unexpected_access(cls: type[Path]) -> Path:
+            pytest.fail('Folder discovery was not requested')
 
-    def test_replaced_capability_stays_in_discovery_mode(self) -> None:
+        monkeypatch.setattr(Path, 'home', classmethod(unexpected_access))
+        monkeypatch.setattr(Path, 'cwd', classmethod(unexpected_access))
+        worker = Agent(TestModel(), name='worker')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            capability = SubAgents(agents=[SubAgent(worker)]) if explicit else SubAgents[object]()
+        assert (capability.get_toolset() is not None) is explicit
+
+    def test_empty_roster_does_not_discover_agents(self) -> None:
         _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        original: SubAgents[object] = SubAgents()
-        copied = replace(original)
-        assert list(original._by_name) == ['planner']
-        assert list(copied._by_name) == ['planner']
+        assert SubAgents(agents=[]).get_toolset() is None
+
+    def test_explicit_agents_combine_with_requested_folders(self) -> None:
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        worker = Agent(TestModel(), name='worker')
+        capability = SubAgents(agents=[SubAgent(worker)], agent_folders='agents')
+        instructions = capability.get_instructions()
+        assert isinstance(instructions, str)
+        assert '- worker' in instructions
+        assert '- planner' in instructions
+
+    def test_loads_from_convention_when_requested(self) -> None:
+        # The isolation fixture points the home root at an empty dir; populate its
+        # conventional folder and the explicit `agent_folders='agents'` loads it.
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        cap: SubAgents[object] = SubAgents(agent_folders='agents')
+        assert 'planner' in cap._by_name
 
     def test_cwd_equal_home_loads_once_without_shadow_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # When the project root equals the home root, the project and home convention
@@ -201,7 +217,7 @@ class TestDiskLoading:
         _write_agent(root / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            cap: SubAgents[object] = SubAgents()
+            cap: SubAgents[object] = SubAgents(agent_folders='agents')
         assert 'planner' in cap._by_name
 
     def test_none_disables_loading(self) -> None:
@@ -243,76 +259,6 @@ class TestDiskLoading:
         instructions = cap.get_instructions()
         assert isinstance(instructions, str)
         assert '- r: Researches' in instructions
-
-
-class TestExplicitAgentsDiskDefault:
-    """An unset `agent_folders` loads from disk only in discovery mode (issue #607).
-
-    Programmatic composition (`SubAgents(agents=[...])`) previously had to pass
-    `agent_folders=None` or it also picked up markdown definitions from the
-    conventional folders. Now an explicit `agents` list turns disk loading off,
-    and the change announces itself only when it actually drops definitions.
-    """
-
-    def test_unset_agents_is_visible_in_signature(self) -> None:
-        assert repr(signature(SubAgents).parameters['agents'].default) == '...'
-
-    def test_explicit_agents_skip_convention_and_warn(self) -> None:
-        # The surprise from #607: this construction used to load `planner` too.
-        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        explicit = Agent(TestModel(), name='worker')
-        with pytest.warns(HarnessDeprecationWarning) as record:
-            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)])
-        assert list(cap._by_name) == ['worker']
-        message = str(record[0].message)
-        assert "agent_folders='agents'" in message
-        assert 'agent_folders=None' in message
-
-    def test_explicit_empty_agents_skip_convention_and_warn(self) -> None:
-        # An explicitly empty roster is still composition, not discovery.
-        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        with pytest.warns(HarnessDeprecationWarning):
-            cap: SubAgents[object] = SubAgents(agents=[])
-        assert cap._by_name == {}
-        assert cap.get_toolset() is None
-
-    def test_explicit_agents_with_no_disk_definitions_stay_silent(self) -> None:
-        # An existing-but-empty convention folder means behavior did not change,
-        # so the composing caller the fix is for gets no warning to silence.
-        (Path.home() / '.agents' / 'agents').mkdir(parents=True)
-        explicit = Agent(TestModel(), name='worker')
-        with warnings.catch_warnings():
-            warnings.simplefilter('error')  # any warning at all fails this test
-            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)])
-        assert list(cap._by_name) == ['worker']
-
-    def test_unreadable_disk_definition_does_not_warn(self) -> None:
-        folder = Path.home() / '.agents' / 'agents'
-        folder.mkdir(parents=True)
-        (folder / 'broken.md').write_bytes(b'\xff\xfe not utf-8')
-        explicit = Agent(TestModel(), name='worker')
-        with warnings.catch_warnings():
-            warnings.simplefilter('error')
-            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)])
-        assert list(cap._by_name) == ['worker']
-
-    def test_explicit_agent_folders_still_combines_with_agents(self) -> None:
-        # Choosing the convention explicitly keeps both sources, without a warning.
-        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        explicit = Agent(TestModel(), name='worker')
-        with warnings.catch_warnings():
-            warnings.simplefilter('error')
-            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)], agent_folders='agents')
-        assert list(cap._by_name) == ['worker', 'planner']
-
-    def test_explicit_none_stays_silent(self) -> None:
-        # `agent_folders=None` is the other explicit choice; neither warns.
-        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        explicit = Agent(TestModel(), name='worker')
-        with warnings.catch_warnings():
-            warnings.simplefilter('error')
-            cap: SubAgents[object] = SubAgents(agents=[SubAgent(explicit)], agent_folders=None)
-        assert list(cap._by_name) == ['worker']
 
 
 class TestPrecedence:

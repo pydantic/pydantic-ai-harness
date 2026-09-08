@@ -145,7 +145,7 @@ The sub-agents are listed in the system prompt via `get_instructions`, using eac
 
 ## Loading sub-agents from disk
 
-A repo's markdown agent definitions become delegates without writing any `Agent` code. When no explicit `agents` are passed, every `*.md` file under the conventional folders is loaded as a sub-agent.
+A repo's markdown agent definitions become delegates without writing any `Agent` code. Set `agent_folders='agents'` to load every `*.md` file under the conventional folders alongside any explicitly-passed `agents`.
 
 ```python
 from pydantic_ai import Agent
@@ -153,17 +153,15 @@ from pydantic_ai_harness import SubAgents
 
 orchestrator = Agent(
     'anthropic:claude-opus-4-7',
-    capabilities=[SubAgents(inherit_tools=True)],  # auto-loads ./.agents/agents/ and ~/.agents/agents/
+    capabilities=[SubAgents(agent_folders='agents', inherit_tools=True)],  # auto-loads ./.agents/agents/ and ~/.agents/agents/
 )
 ```
 
-`agent_folders` controls where definitions come from. Left unset, the conventional `'agents'` layout applies only when `agents` is also unset: an explicit sequence, including an empty one, means you are composing a known roster, so nothing is pulled from disk. To combine both sources, set the option explicitly:
+`agent_folders` is optional and defaults to `None`, so no folders are scanned unless explicitly configured. Pass `'agents'` to load the conventional layout:
 
-- A folder-name `str` (`'agents'` is the conventional layout): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
+- A folder-name `str` (for example, `'agents'`): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
 - A sequence of paths loads from exactly those folders, in order.
 - `None` disables disk loading, exposing only the explicitly-passed `agents`.
-
-Earlier releases auto-loaded the conventional layout even when `agents` were passed. A construction that would have loaded definitions under that behavior emits a `HarnessDeprecationWarning`: pass `agent_folders='agents'` to keep loading them alongside your `agents`, or `agent_folders=None` to keep the new behavior and silence it.
 
 ### Definition format
 
@@ -219,13 +217,15 @@ SubAgents(agent_folders='agents', tool_resolver=resolve)
 
 When the same name appears in more than one source, the higher-precedence one wins and the others are skipped with a warning: explicitly-passed `agents` first, then the project folder, then the home folder (and, for an explicit path sequence, earlier paths before later ones). A duplicate name within the explicitly-passed `agents` list is still an error.
 
+Earlier releases loaded the conventional folders by default. Pass `agent_folders='agents'` to retain that behavior. `SubAgents()` and `SubAgents(agents=[])` now expose no agents; `SubAgents(agents=[worker])` exposes only the supplied agents. Combine both sources explicitly with `SubAgents(agents=[worker], agent_folders='agents')`.
+
 ## Configuration
 
 ```python
 SubAgents(
-    agents=...,            # unset (discover from disk) | Sequence[SubAgent[AgentDepsT]] (an empty sequence is an empty roster)
+    agents=(),             # Sequence[SubAgent[AgentDepsT]] -- each pairs an agent with its run controls
     models={},             # Mapping[str, Model | str | ModelOption] -- per-delegation model menu (off when empty)
-    agent_folders=...,     # unset (convention 'agents' when agents is unset) | folder-name str | Sequence[Path] | None (disable)
+    agent_folders=None,    # folder-name str (convention) | Sequence[Path] | None (disable)
     agent_overrides={},    # Mapping[str, AgentOverride] -- per-disk-agent model/effort override
     tool_resolver=None,    # Callable[[str], Sequence[AgentToolset[object]] | None] -- disk-agent tool mapping
     forward_usage=True,    # share the parent's usage with sub-agent runs
