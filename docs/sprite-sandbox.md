@@ -75,6 +75,8 @@ Ending a run does not delete or disconnect the Sprite. Sprites preserve their fi
 idle periods; application code owns permanent deletion. Do not treat a cached SDK
 object as proof that remote compute is still available.
 
+For a backend creating a Sprite by name, cancellation during first acquisition can leave the remote result unknown while `ref` remains unset. Retry `await backend.sandbox` to recover the same deterministic name; it attaches if creation succeeded and creates if the name is absent. `destroy()` has no remote target until `ref` is known, so it cannot clean up an uncertain acquisition.
+
 ## Backend behavior
 
 Import `SpriteSandboxBackend` for direct use. Await `backend.sandbox` to obtain
