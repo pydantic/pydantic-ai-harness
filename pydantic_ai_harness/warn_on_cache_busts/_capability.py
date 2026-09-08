@@ -15,6 +15,7 @@ lives at the wire level in `tests/` (VCR cassette prefix assertion), not here.
 
 from __future__ import annotations
 
+import math
 import time
 import warnings
 from dataclasses import dataclass, field, replace
@@ -74,6 +75,7 @@ class _RunState:
     """Per-run observation state: this run's step counter over its conversation's shared marks."""
 
     conversation: _ConversationState
+    conversation_id: str | None
     step: int = 0
 
 
@@ -196,10 +198,14 @@ class WarnOnCacheBusts(AbstractCapability[AgentDepsT]):
     _conversations: dict[str, _ConversationState] = field(
         init=False, default_factory=dict[str, _ConversationState], compare=False, repr=False
     )
+    _swept_at: float | None = field(init=False, default=None, compare=False, repr=False)
     # Private marks, in case a hook runs on this instance rather than on the copy `for_run` binds.
     # They never enter `_conversations`, so their `seen_at` is never consulted for eviction.
     _state: _RunState = field(
-        init=False, default_factory=lambda: _RunState(_ConversationState(seen_at=0.0)), compare=False, repr=False
+        init=False,
+        default_factory=lambda: _RunState(_ConversationState(seen_at=0.0), None),
+        compare=False,
+        repr=False,
     )
 
     def __post_init__(self) -> None:
@@ -207,8 +213,8 @@ class WarnOnCacheBusts(AbstractCapability[AgentDepsT]):
             raise ValueError('collapse_ratio must be greater than 0.0 and at most 1.0')
         if self.min_prefix_tokens < 0:
             raise ValueError('min_prefix_tokens must be non-negative')
-        if self.cache_ttl_seconds <= 0:
-            raise ValueError('cache_ttl_seconds must be positive')
+        if not (math.isfinite(self.cache_ttl_seconds) and self.cache_ttl_seconds > 0):
+            raise ValueError('cache_ttl_seconds must be positive and finite')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
         """Bind this run to its conversation's marks, forgetting conversations whose cache has expired.
@@ -218,17 +224,26 @@ class WarnOnCacheBusts(AbstractCapability[AgentDepsT]):
         gets private marks and is judged alone.
         """
         now = _now()
-        for conversation_id, conversation in list(self._conversations.items()):
-            if now - conversation.seen_at > self.cache_ttl_seconds:
-                self._conversations.pop(conversation_id, None)
+        conversations = self._conversations
+        # This run's own conversation is checked for staleness exactly, below. The sweep over
+        # everyone else's is what bounds memory, and it only needs to run about once per TTL:
+        # doing it on every run would make a burst of fresh conversations quadratic.
+        if self._swept_at is None or now - self._swept_at > self.cache_ttl_seconds:
+            for conversation_id, conversation in list(conversations.items()):
+                if now - conversation.seen_at > self.cache_ttl_seconds:
+                    conversations.pop(conversation_id, None)
+            self._swept_at = now
 
         if ctx.conversation_id is None:
             conversation = _ConversationState(seen_at=now)
         else:
-            conversation = self._conversations.setdefault(ctx.conversation_id, _ConversationState(seen_at=now))
+            conversation = conversations.get(ctx.conversation_id)
+            if conversation is None or now - conversation.seen_at > self.cache_ttl_seconds:
+                conversation = conversations[ctx.conversation_id] = _ConversationState(seen_at=now)
 
         run = replace(self)
-        run._state = _RunState(conversation)
+        run._conversations = conversations
+        run._state = _RunState(conversation, ctx.conversation_id)
         return run
 
     async def after_model_request(
@@ -278,4 +293,8 @@ class WarnOnCacheBusts(AbstractCapability[AgentDepsT]):
             max(established, read + usage.cache_write_tokens), now, ctx.run_id, is_collapse
         )
         conversation.seen_at = now
+        if state.conversation_id is not None:
+            # The sweep may have dropped this conversation while the run sat in a long tool call;
+            # re-register it so the marks this run goes on to establish reach the next run.
+            self._conversations.setdefault(state.conversation_id, conversation)
         return response

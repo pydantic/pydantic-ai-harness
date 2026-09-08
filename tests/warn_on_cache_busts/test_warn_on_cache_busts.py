@@ -288,6 +288,65 @@ async def test_other_idle_conversations_are_forgotten_when_a_run_starts(monkeypa
     assert set(monitor._conversations) == {second_id}  # pyright: ignore[reportPrivateUsage]
 
 
+async def test_sweep_is_amortized_but_own_conversation_is_judged_exactly(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Other conversations are swept about once per TTL; a run's own conversation is checked on every start.
+
+    A at 0 and 100, B at 301 (sweep due: A was last seen 201s ago, so it stays), A again at 450:
+    no sweep is due (149s since the last one), but A's own gap of 350s exceeds the TTL, so A must
+    still start from a clean mark rather than compare against an expired cache.
+    """
+    _install_clock(monkeypatch, [0.0, 0.0, 100.0, 100.0, 301.0, 301.0, 450.0, 450.0])
+    monitor = WarnOnCacheBusts[None]()
+    agent = _agent_for_runs(
+        [[_usage(read=0, write=8000)], [_usage(read=8000)], [_usage(read=0, write=8000)], [_usage(read=100)]],
+        monitor,
+    )
+    a1 = await agent.run('a1')
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', CacheBustWarning)
+        a2 = await agent.run('a2', message_history=a1.all_messages())
+        b1 = await agent.run('b1')
+        await agent.run('a3', message_history=a2.all_messages())
+    a_id, b_id = a1.all_messages()[-1].conversation_id, b1.all_messages()[-1].conversation_id
+    assert set(monitor._conversations) == {a_id, b_id}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_marks_established_after_a_sweep_still_reach_the_next_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run swept out mid-flight re-registers its conversation, so what it establishes afterwards is kept.
+
+    Run A of conversation X sits in a tool call long enough for a run of another conversation to
+    sweep X out (400s idle). A then re-establishes a prefix; the next run of X must be judged
+    against it, not start from a clean mark because A was writing into an orphaned state.
+    """
+    # A starts (0), A step 1 (0), B starts inside A's tool (400), B step 1 (400), A step 2 (401), C starts (402), C step 1 (402).
+    _install_clock(monkeypatch, [0.0, 0.0, 400.0, 400.0, 401.0, 402.0, 402.0])
+    responses = [
+        ModelResponse(parts=[ToolCallPart('nested', {})], usage=_usage(read=0, write=8000)),  # A step 1
+        ModelResponse(parts=[TextPart('done')], usage=_usage(read=0, write=8000)),  # B step 1, a new conversation
+        ModelResponse(parts=[TextPart('done')], usage=_usage(read=8000, write=200)),  # A step 2, after the sweep
+        ModelResponse(parts=[TextPart('done')], usage=_usage(read=100)),  # C step 1, continuing A's conversation
+    ]
+    state = {'i': 0}
+
+    def fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        i = state['i']
+        state['i'] += 1
+        return responses[i]
+
+    agent: Agent[None, str] = Agent(FunctionModel(fn), deps_type=type(None), capabilities=[WarnOnCacheBusts()])
+
+    @agent.tool_plain
+    async def nested() -> str:
+        await agent.run('b')
+        return 'ok'
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('error', CacheBustWarning)
+        a = await agent.run('a')
+    with pytest.warns(CacheBustWarning, match='an earlier run of this conversation established ~8200'):
+        await agent.run('c', message_history=a.all_messages())
+
+
 async def test_conversation_within_ttl_is_remembered(monkeypatch: pytest.MonkeyPatch) -> None:
     """A conversation resumed inside the TTL keeps its mark, and the gap is short enough to hedge generically."""
     _install_clock(monkeypatch, [0.0, 0.0, 0.0, 200.0, 200.0])
@@ -485,6 +544,12 @@ def test_invalid_config_rejected() -> None:
         WarnOnCacheBusts[None](min_prefix_tokens=-1)
     with pytest.raises(ValueError, match='cache_ttl_seconds'):
         WarnOnCacheBusts[None](cache_ttl_seconds=-1.0)
+    # `nan` compares false against everything and `inf` never elapses: either would keep every
+    # conversation forever, so both are rejected rather than silently disabling eviction.
+    with pytest.raises(ValueError, match='cache_ttl_seconds'):
+        WarnOnCacheBusts[None](cache_ttl_seconds=float('nan'))
+    with pytest.raises(ValueError, match='cache_ttl_seconds'):
+        WarnOnCacheBusts[None](cache_ttl_seconds=float('inf'))
 
 
 def test_config_boundaries() -> None:
