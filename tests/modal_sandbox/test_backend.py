@@ -57,7 +57,7 @@ async def started(**settings: Any) -> ModalSandboxBackend:
     did has to touch the sandbox first. Awaiting the property is that touch.
     """
     backend = ModalSandboxBackend(**settings)
-    await backend.get_sandbox()
+    await backend.sandbox
     return backend
 
 
@@ -73,6 +73,13 @@ def anyio_backend() -> str:
 
 
 class TestConformance:
+    async def test_sandbox_property_is_lazy_and_reuses_handle(self, fake_modal: FakeModal) -> None:
+        backend = ModalSandboxBackend()
+        pending = backend.sandbox
+        assert not fake_modal.sandboxes
+        sandbox = await pending
+        assert await backend.sandbox is sandbox
+
     async def test_backend_implements_run_and_filesystem_protocols(self, fake_modal: FakeModal) -> None:
         backend = await started()
         assert isinstance(backend, SandboxBackend)
@@ -81,7 +88,7 @@ class TestConformance:
     async def test_identity_is_modal_object_id(self, fake_modal: FakeModal) -> None:
         backend = await started()
         assert backend.ref == SandboxRef(sandbox_id='sb-owned')
-        assert await backend.get_sandbox() is fake_modal.sandboxes[0]
+        assert await backend.sandbox is fake_modal.sandboxes[0]
 
     async def test_shared_command_validation(self, fake_modal: FakeModal) -> None:
         await check_command_validation(started)
@@ -161,7 +168,7 @@ class TestCreate:
 
         second = await started(name='stable')
 
-        assert await second.get_sandbox() is await first.get_sandbox()
+        assert await second.sandbox is await first.sandbox
         assert len(fake_modal.sandboxes) == 1
 
 
@@ -202,7 +209,7 @@ class TestConnectName:
 
         connected = await started(app_name='pydantic-ai-harness', name='stable')
 
-        assert await connected.get_sandbox() is await created.get_sandbox()
+        assert await connected.sandbox is await created.sandbox
 
     async def test_finished_named_sandbox_is_unavailable(self, fake_modal: FakeModal) -> None:
         await started(name='finished')
@@ -245,7 +252,7 @@ class TestClose:
         first = await started(ref=SandboxRef(sandbox_id='sb-keep'))
         second = await started(ref=SandboxRef(sandbox_id='sb-keep'))
 
-        assert await second.get_sandbox() is await first.get_sandbox()
+        assert await second.sandbox is await first.sandbox
         assert fake_modal.attach_ids == ['sb-keep', 'sb-keep']
 
     async def test_terminates_and_detaches_when_owned(self, fake_modal: FakeModal) -> None:
