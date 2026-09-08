@@ -185,6 +185,7 @@ class TestLifecycle:
         assert fake_e2b.sandboxes[0].killed is True
 
     async def test_pause_before_first_use_uses_class_api_without_connecting(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('other')
         fake_e2b.new_sandbox('sbx-keep')
         backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
 
@@ -212,6 +213,14 @@ class TestLifecycle:
         await backend.stop()
         assert fake_e2b.pause_calls[-1] == ('sbx-2', False)
 
+    async def test_pause_failure_on_attached_handle_is_retryable(self, fake_e2b: FakeE2B) -> None:
+        backend = await started()
+        fake_e2b.pause_error = RuntimeError('pause boom')
+        with pytest.raises(E2BSandboxError, match='pause boom'):
+            await backend.pause()
+        fake_e2b.pause_error = None
+        await backend.pause()
+
     async def test_stop_keeps_an_attached_sandbox_filesystem(self, fake_e2b: FakeE2B) -> None:
         backend = await started(ref=SandboxRef(sandbox_id='sbx-keep'))
         await backend.stop()
@@ -235,6 +244,15 @@ class TestLifecycle:
             with pytest.raises(E2BSandboxError, match='Timed out'):
                 await backend.pause()
 
+    async def test_hanging_pause_by_id_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
+        fake_e2b.new_sandbox('sbx-keep')
+        fake_e2b.pause_hangs = True
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+        with anyio.fail_after(5):
+            with pytest.raises(E2BSandboxError, match='Timed out'):
+                await backend.pause()
+
     async def test_destroy_failure_is_visible_and_retryable(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.kill_error = RuntimeError('kill boom')
@@ -246,11 +264,21 @@ class TestLifecycle:
         assert fake_e2b.sandboxes[0].killed is True
 
     async def test_already_gone_sandbox_is_not_an_error(self, fake_e2b: FakeE2B) -> None:
-        # An owned run that outlived its `sandbox_timeout` self-terminates; the teardown kill
-        # then hits "already gone", which is success, not a failure to raise.
         backend = await started()
         fake_e2b.kill_error = fake_e2b.sandbox_gone_type('already gone')
         await backend.destroy()
+
+    async def test_already_gone_saved_ref_is_not_an_error(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('sbx-keep').killed = True
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+        await backend.destroy()
+
+    async def test_pause_failure_before_first_use_is_translated(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('sbx-keep')
+        fake_e2b.pause_error = RuntimeError('pause boom')
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+        with pytest.raises(E2BSandboxError, match='pause boom'):
+            await backend.pause()
 
     async def test_pause_missing_sandbox_is_typed(self, fake_e2b: FakeE2B) -> None:
         backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-gone'))
@@ -268,11 +296,86 @@ class TestLifecycle:
         # Teardown runs shielded, so a hanging kill would be uncancellable; its own deadline
         # is the only bound between a wedged control plane and a hung process.
         monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
+        fake_e2b.new_sandbox('sbx-keep')
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+        fake_e2b.kill_hangs = True
+        with anyio.fail_after(5):
+            with pytest.raises(E2BSandboxError, match='Timed out'):
+                await backend.destroy()
+
+    async def test_hanging_attached_destroy_is_bounded(
+        self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
         backend = await started()
         fake_e2b.kill_hangs = True
         with anyio.fail_after(5):
             with pytest.raises(E2BSandboxError, match='Timed out'):
                 await backend.destroy()
+
+    async def test_destroy_cleanup_survives_cancellation(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('sbx-keep')
+        fake_e2b.kill_gate = anyio.Event()
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+        cancel_scope: list[anyio.CancelScope] = []
+        finished = anyio.Event()
+        outcomes: list[BaseException] = []
+
+        async def destroy() -> None:
+            with anyio.CancelScope() as scope:
+                cancel_scope.append(scope)
+                try:
+                    await backend.destroy()
+                except BaseException as error:
+                    outcomes.append(error)
+                finally:
+                    finished.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(destroy)
+            with anyio.fail_after(5):
+                while not fake_e2b.kill_started:
+                    await anyio.wait_all_tasks_blocked()
+            cancel_scope[0].cancel()
+            fake_e2b.kill_gate.set()
+            with anyio.fail_after(5):
+                await finished.wait()
+
+        assert outcomes == []
+        assert fake_e2b.sandboxes[0].killed is True
+
+    async def test_destroy_cancellation_wins_over_cleanup_error(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('sbx-keep')
+        fake_e2b.kill_gate = anyio.Event()
+        fake_e2b.kill_error = RuntimeError('kill boom')
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+        cancel_scope: list[anyio.CancelScope] = []
+        finished = anyio.Event()
+        outcomes: list[BaseException] = []
+
+        async def destroy() -> None:
+            with anyio.CancelScope() as scope:
+                cancel_scope.append(scope)
+                try:
+                    await backend.destroy()
+                except BaseException as error:
+                    outcomes.append(error)
+                finally:
+                    finished.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(destroy)
+            with anyio.fail_after(5):
+                while not fake_e2b.kill_started:
+                    await anyio.wait_all_tasks_blocked()
+            cancel_scope[0].cancel()
+            fake_e2b.kill_gate.set()
+            with anyio.fail_after(5):
+                await finished.wait()
+
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], anyio.get_cancelled_exc_class())
+        assert fake_e2b.sandboxes[0].killed is False
 
 
 class TestRun:

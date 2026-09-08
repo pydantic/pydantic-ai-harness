@@ -577,10 +577,12 @@ class TestRun:
 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(acquire)
-            while not fake_modal.create_started:
-                await anyio.sleep(0)
+            with anyio.fail_after(5):
+                while not fake_modal.create_started:
+                    await anyio.wait_all_tasks_blocked()
+            assert fake_modal.create_started
             task_group.start_soon(destroy)
-            await anyio.sleep(0)
+            await anyio.wait_all_tasks_blocked()
             assert not destroyed.is_set()
             fake_modal.create_gate.set()
             await acquired.wait()
