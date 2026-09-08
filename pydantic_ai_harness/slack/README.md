@@ -34,7 +34,7 @@ print(result.output)
 
 - The token's scopes are the only boundary: the agent can do anything the token can, posting
   included. To put a person in front of the writes, use the
-  [approval recipe](../stackone/README.md#require-approval).
+  [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval).
 - `Slack(read_only=True)` keeps only the tools Slack marks read-only, so anything Slack leaves
   unannotated is dropped.
 - A token is one person's identity, so an agent serving many people needs a token per run: pass a
