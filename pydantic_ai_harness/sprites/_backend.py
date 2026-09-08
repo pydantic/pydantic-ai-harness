@@ -164,7 +164,7 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
                 return SpriteSandboxAuthError('Sprites rejected the credentials; check SPRITE_TOKEN or token=.')
             if error.response.status_code == 404:
                 return SpriteSandboxUnavailableError('The requested Sprite no longer exists.')
-        return SpriteSandboxError(f'{context}: {error}')
+        return SpriteSandboxError(f'{context}: {type(error).__name__}: {error}')
 
     async def working_dir(self) -> str:
         if self._canonical_working_dir is None:
@@ -199,7 +199,6 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
         stdout: bytes,
         stderr: bytes,
         timeout: float | None,
-        context: str = 'Could not execute Sprite command',
     ) -> NoReturn:
         if sprite is not None:
             cleanup_error = await self._cancel_remote(sprite, control)
@@ -215,7 +214,7 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
         if isinstance(error, SandboxError):
             raise error
         if isinstance(error, Exception):
-            raise self._error(error, context) from error
+            raise self._error(error, 'Could not execute Sprite command') from error
         raise error
 
     async def run(
@@ -273,10 +272,13 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
 
         if close_error is not None:
             if isinstance(close_error, TimeoutError):
-                raise SpriteSandboxError(
-                    'Could not close Sprite command connection within the cleanup bound.'
-                ) from close_error
-            raise self._error(close_error, 'Could not close Sprite command connection') from close_error
+                await raise_after_cleanup(
+                    SpriteSandboxError('Could not close Sprite command connection within the cleanup bound.'),
+                    cause=close_error,
+                )
+            await raise_after_cleanup(
+                self._error(close_error, 'Could not close Sprite command connection'), cause=close_error
+            )
         return CommandResult(
             exit_code=code,
             stdout=stdout.decode('utf-8', errors='replace'),

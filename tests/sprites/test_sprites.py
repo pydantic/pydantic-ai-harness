@@ -44,6 +44,7 @@ class FakeOperation:
         self.args = args
         self.stdout = b''
         self.stderr = b''
+        self.exit_override = transport.run_exit_override if len(args) == 6 else transport.cancel_exit_override
         self._task = asyncio.create_task(asyncio.to_thread(self._execute))
 
     def _execute(self) -> int:
@@ -79,7 +80,10 @@ class FakeOperation:
         return code
 
     async def wait(self) -> int:
-        return await asyncio.shield(self._task)
+        result = await asyncio.shield(self._task)
+        if len(self.args) == 6 and self.transport.run_stderr:
+            self.stderr = self.transport.run_stderr
+        return self.exit_override if self.exit_override is not None else result
 
     def get_stdout(self) -> bytes:
         return self.stdout
@@ -93,7 +97,7 @@ class FakeControlConnection:
 
     def __init__(self, sprite: Sprite) -> None:
         self.sprite = sprite
-        self.close_error: Exception | None = None
+        self.close_error = self.transport.control_close_error
         self.closed = False
 
     async def connect(self) -> None:
@@ -133,6 +137,9 @@ class SpriteTransport:
         self.connect_error: Exception | None = None
         self.control_close_error: Exception | None = None
         self.control_close_hang = False
+        self.run_exit_override: int | None = None
+        self.cancel_exit_override: int | None = None
+        self.run_stderr = b''
         self.started = threading.Event()
         self.release_start: threading.Event | None = None
 
@@ -378,6 +385,53 @@ class TestSpriteSandbox:
             await backend.run(['true'])
         assert isinstance(caught.value.__cause__, TimeoutError)
         assert 'cleanup bound' in str(caught.value)
+
+    @pytest.mark.parametrize('run_stderr', [b'connection closed', b''])
+    async def test_transport_loss_preserves_cause_and_requests_cancel(
+        self, transport: SpriteTransport, run_stderr: bytes
+    ) -> None:
+        backend = SpriteSandboxBackend()
+        await backend.sandbox
+        error = RuntimeError('control connection lost')
+        transport.run_exit_override = -1
+        transport.run_stderr = run_stderr
+        transport.control_close_error = error
+        with pytest.raises(SpriteSandboxError) as caught:
+            await backend.run(['true'])
+        assert caught.value.__cause__ is error
+        if run_stderr:
+            assert run_stderr.decode() in str(caught.value)
+        assert any(len(command) == 5 for command in transport.commands)
+
+    @pytest.mark.parametrize(
+        'lookup_error,expected_type',
+        [
+            (SpriteError('lookup failed'), SpriteSandboxError),
+            (AuthenticationError('bad token'), SpriteSandboxAuthError),
+        ],
+    )
+    async def test_run_acquisition_error_preserves_type(
+        self, transport: SpriteTransport, lookup_error: SpriteError, expected_type: type[SpriteSandboxError]
+    ) -> None:
+        transport.get_error = lookup_error
+        backend = SpriteSandboxBackend()
+        with pytest.raises(expected_type) as caught:
+            await backend.run(['true'])
+        assert caught.value.__cause__ is lookup_error
+        if expected_type is SpriteSandboxError:
+            assert type(lookup_error).__name__ in str(caught.value)
+
+    async def test_cancel_failure_and_primary_error_are_both_reported(
+        self, transport: SpriteTransport, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        backend = SpriteSandboxBackend()
+        await backend.sandbox
+        transport.cancel_exit_override = 1
+        transport.control_close_error = RuntimeError('close failed')
+        with pytest.raises(SandboxTimeoutError):
+            await backend.run('sleep 1', shell=True, timeout=0.01)
+        assert 'Could not confirm remote Sprite command termination' in caplog.text
+        assert 'Could not close Sprite cancellation connection' in caplog.text
 
     async def test_argv_shell_environment_and_nonzero_exit(self, transport: SpriteTransport) -> None:
         backend = SpriteSandboxBackend()
