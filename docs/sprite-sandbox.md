@@ -93,7 +93,8 @@ group do not outlive the call. Processes that deliberately create a different
 session can escape that group. If the cleanup request cannot reach the Sprite,
 termination cannot be confirmed and a warning is logged. Cancellation before
 remote startup leaves a cancellation marker so a delayed request cannot start the
-command; if that request never arrives, the marker directory may remain in `/tmp`.
+command; if that request never arrives, or the command finishes just before cancellation arrives,
+the marker directory may remain in `/tmp`.
 
 The synchronous SDK client is used in worker threads for short HTTP requests. Commands use one
 public asyncio `ControlConnection` per command, and the connection is closed after success,

@@ -487,11 +487,15 @@ class TestSpriteSandbox:
         await backend.sandbox
         transport.release_start = threading.Event()
         task = asyncio.create_task(backend.run(['touch', 'escaped']))
-        await anyio.to_thread.run_sync(transport.started.wait)
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-        transport.release_start.set()
+        try:
+            assert await anyio.to_thread.run_sync(transport.started.wait, 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            transport.release_start.set()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
         await anyio.sleep(0.2)
         assert not (transport.root / 'escaped').exists()
 
