@@ -691,6 +691,7 @@ class TestOrdering:
                 return False
 
         error = ReportingError('reporting failed')
+        assert not error
 
         def reject_snapshot(snapshot: SpendSnapshot) -> None:
             raise error
