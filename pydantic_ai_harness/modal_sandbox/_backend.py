@@ -45,6 +45,7 @@ from pydantic_ai.sandboxes import (
 )
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
+from pydantic_ai_harness.sandbox import LazySandbox
 
 if TYPE_CHECKING:
     import modal
@@ -148,7 +149,7 @@ def _file_entry(entry: modal.types.FileInfo, path: str) -> FileEntry:
     return FileEntry(name=entry.name, path=path, is_dir=is_dir, size=None if is_dir else entry.size)
 
 
-class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
+class ModalSandboxBackend(LazySandbox['modal.Sandbox'], SandboxBackend, SupportsFilesystem):
     """A [Modal](https://modal.com) sandbox as a Pydantic AI [`SandboxBackend`][pydantic_ai.sandboxes.SandboxBackend].
 
     Commands and file operations run inside a Modal container, so the host is never exposed.
@@ -198,7 +199,7 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
         workdir: str | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
-        self._live = sandbox
+        super().__init__(sandbox)
         self._ref = ref if sandbox is None else SandboxRef(sandbox_id=sandbox.object_id)
         self._name = name
         self._image = image
@@ -210,32 +211,21 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
         self._working_dir: str | None = None
         # Set once the sandbox exists, so an expiry message can say which lifetime ran out.
         self._created_timeout: int | None = None
-        self._lock = anyio.Lock()
 
-    @property
-    def sandbox(self) -> Awaitable[modal.Sandbox]:
-        """The native SDK sandbox, created or attached when awaited.
-
-        Await this property before using SDK methods, including after the sandbox has been resolved.
-        """
-        return self._resolve()
-
-    async def _resolve(self) -> modal.Sandbox:
-        async with self._lock:
-            if self._live is None:
-                try:
-                    # Guarded once, here: everything that touches Modal runs after this.
-                    importlib.import_module('modal')
-                except ImportError as e:
-                    raise ModalSandboxError(_MISSING_MODAL) from e
-                if self._ref is not None:
-                    self._live = await self._attach(self._ref.sandbox_id)
-                elif self._name is not None:
-                    self._live = await self._create_or_attach_by_name(self._name)
-                else:
-                    self._live = await self._create()
-                self._ref = SandboxRef(sandbox_id=self._live.object_id)
-        return self._live
+    async def create_or_attach(self) -> modal.Sandbox:
+        """Acquire the native Modal sandbox and record its identity."""
+        try:
+            importlib.import_module('modal')
+        except ImportError as e:
+            raise ModalSandboxError(_MISSING_MODAL) from e
+        if self._ref is not None:
+            sandbox = await self._attach(self._ref.sandbox_id)
+        elif self._name is not None:
+            sandbox = await self._create_or_attach_by_name(self._name)
+        else:
+            sandbox = await self._create()
+        self._ref = SandboxRef(sandbox_id=sandbox.object_id)
+        return sandbox
 
     @property
     def ref(self) -> SandboxRef | None:

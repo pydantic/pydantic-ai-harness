@@ -113,6 +113,10 @@ creating or attaching on first use.
 The property remains awaitable after the native handle is cached. Await it before accessing SDK
 methods; type checkers reject using the awaitable as the native sandbox.
 
+`E2BSandboxBackend` inherits this behavior from `LazySandbox`. Its `create_or_attach()`
+hook contains the E2B-specific acquisition and identity handling; the shared helper owns
+coordination and caching. See [writing sandbox backends](sandbox-backends.md) for the authoring contract.
+
 ## Limits and cancellation
 
 E2B's SDK timeout stops consuming its event stream but does not stop the remote

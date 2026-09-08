@@ -49,6 +49,7 @@ from pydantic_ai.sandboxes import (
 )
 
 from pydantic_ai_harness._sandbox_provider import absolute_path
+from pydantic_ai_harness.sandbox import LazySandbox
 
 if TYPE_CHECKING:
     from pydantic_ai.sandboxes import SandboxCommand
@@ -158,7 +159,7 @@ def _file_entry(entry: e2b.EntryInfo) -> FileEntry:
     return FileEntry(name=entry.name, path=entry.path, is_dir=is_dir, size=None if is_dir else entry.size)
 
 
-class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
+class E2BSandboxBackend(LazySandbox['e2b.AsyncSandbox'], SandboxBackend, SupportsFilesystem):
     """An [E2B](https://e2b.dev) sandbox as a Pydantic AI [`SandboxBackend`][pydantic_ai.sandboxes.SandboxBackend].
 
     Commands and file operations run inside an E2B microVM, so the host is never exposed.
@@ -215,7 +216,7 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
         metadata: Mapping[str, str] | None = None,
         allow_internet_access: bool = True,
     ) -> None:
-        self._live = sandbox
+        super().__init__(sandbox)
         self._ref = ref if sandbox is None else SandboxRef(sandbox_id=sandbox.sandbox_id)
         self._identity = dict(identity) if identity is not None else None
         self._template = template
@@ -228,27 +229,17 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
         # Set once this backend creates the sandbox, so an expiry message can name the lifetime
         # that ran out rather than one this process only configured.
         self._created_timeout: int | None = None
-        self._lock = anyio.Lock()
 
-    @property
-    def sandbox(self) -> Awaitable[e2b.AsyncSandbox]:
-        """The native SDK sandbox, created or attached when awaited.
-
-        Await this property before using SDK methods, including after the sandbox has been resolved.
-        """
-        return self._resolve()
-
-    async def _resolve(self) -> e2b.AsyncSandbox:
-        async with self._lock:
-            if self._live is None:
-                if self._ref is not None:
-                    self._live = await self._attach(self._ref.sandbox_id)
-                elif self._identity is not None:
-                    self._live = await self._create_or_attach_by_identity(self._identity)
-                else:
-                    self._live = await self._create()
-                self._ref = SandboxRef(sandbox_id=self._live.sandbox_id)
-        return self._live
+    async def create_or_attach(self) -> e2b.AsyncSandbox:
+        """Acquire the native E2B sandbox and record its identity."""
+        if self._ref is not None:
+            sandbox = await self._attach(self._ref.sandbox_id)
+        elif self._identity is not None:
+            sandbox = await self._create_or_attach_by_identity(self._identity)
+        else:
+            sandbox = await self._create()
+        self._ref = SandboxRef(sandbox_id=sandbox.sandbox_id)
+        return sandbox
 
     @property
     def ref(self) -> SandboxRef | None:
