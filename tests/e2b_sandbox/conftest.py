@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 import types
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -39,7 +38,7 @@ def _no_real_e2b(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
     if 'e2b_live' in request.keywords:  # pragma: no cover - live tier runs without coverage
         yield
         return
-    monkeypatch.setitem(sys.modules, 'e2b', _PoisonedE2B('e2b'))
+    monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend.e2b', _PoisonedE2B('e2b'))
     yield
 
 
@@ -49,5 +48,5 @@ if _HAS_E2B:  # pragma: no branch - the fixture cannot be defined without its SD
     def fake_e2b(monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeE2B]:
         """Inject a fake `e2b` module and yield its control surface."""
         control = FakeE2B()
-        monkeypatch.setitem(sys.modules, 'e2b', control.module)
+        monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend.e2b', control.module)
         yield control

@@ -285,7 +285,7 @@ class TestRealLifecycle:
         attempts = 8
         for attempt in range(attempts):
             try:
-                await ModalSandboxBackend(ref=ref).sandbox
+                await ModalSandboxBackend(ref=ref).get_sandbox()
             except ModalSandboxUnavailableError:
                 became_unavailable = True
                 break
@@ -302,7 +302,7 @@ class TestRealLifecycle:
             await owner.write_bytes(marker, b'shared')
 
             attached = ModalSandboxBackend(ref=owner.ref)
-            await attached.sandbox
+            await attached.get_sandbox()
             assert attached.ref == owner.ref
             assert await attached.read_bytes(marker) == b'shared'
             await attached.close(terminate=False)

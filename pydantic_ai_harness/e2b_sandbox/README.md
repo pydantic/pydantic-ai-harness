@@ -6,6 +6,8 @@ consume `ctx.sandbox` for the model-facing interface you want.
 
 [Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/e2b_sandbox/)
 
+> The API may change between minor releases while Harness is on 0.x. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+
 ## Install and authenticate
 
 ```bash
@@ -38,66 +40,84 @@ explicitly in the tool schema.
 
 ## Lifecycle
 
-For an owned sandbox, acquisition stores the logical run ID in E2B metadata. A
-retry searches for the oldest running or paused match before creating. After a
-create, it checks again and kills the new sandbox if another creator won the
-race. The serialized `SandboxRef` contains only the provider and sandbox ID;
-later workers reconnect by ID and never create from `get_sandbox`. Release sends
-a bounded, cancellation-shielded kill directly by ID without reconnecting or
-resuming a paused sandbox, so it works in a different worker and is safe to
-retry. An already missing sandbox counts as successfully released.
+Asking the capability for a sandbox does no I/O. It hands back a backend holding settings
+plus, when there is one, the identity of a sandbox that already exists; the first command or
+file operation creates or attaches, once.
 
-The metadata key `pydantic-ai-run-id` is reserved for this lifecycle identity.
-Other metadata is preserved. E2B does not enforce metadata uniqueness, so the
-post-create canonicalization is best-effort under control-plane propagation
-delay; `sandbox_timeout` remains the server-side cleanup backstop.
+An owned sandbox carries the conversation id in E2B metadata, so a follow-up run finds the
+sandbox the previous one used and continues in the same workspace. The first use searches for
+the oldest running or paused match before creating, which is also what makes a durable retry
+attach rather than provision a second sandbox. After a create it checks again and kills the new
+sandbox if another creator won the race.
+
+The metadata key `pydantic-ai-conversation-id` is reserved for that identity. Other metadata is
+preserved. E2B does not enforce metadata uniqueness, so the post-create canonicalization is
+best-effort under control-plane propagation delay.
+
+Sandboxes remain available after a run. A conversation can span many runs, so the end of a run is not the
+end of the workspace; E2B reaps a sandbox at `sandbox_timeout`. If E2B has already reaped
+a conversation's sandbox, the next run gets a fresh, empty one and the old files are gone;
+raise `sandbox_timeout` when a conversation needs to outlive it, or kill the sandbox yourself
+with `E2BSandboxBackend.kill_by_id`, which is bounded, shielded from cancellation, and safe to
+retry.
 
 Attach to a sandbox managed elsewhere by ID when the capability must not own its
 lifetime:
 
 ```python
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox
+
 E2BSandbox(sandbox_id='sbx-abc123', workdir='/workspace')
 ```
 
-Creation-only settings cannot be combined with `sandbox_id`. Attached sandboxes
-are not killed at run end, and concurrent runs share their filesystem and process
-space. E2B resumes a paused sandbox when connecting to it. The SDK also extends
-the sandbox's remaining lifetime to at least its 300-second default on connect,
-even when no explicit timeout is passed.
+Creation-only settings cannot be combined with `sandbox_id`. Concurrent runs on the same
+sandbox share its filesystem and process space. E2B resumes a paused sandbox when connecting to
+it, so attaching to one restarts it. The SDK applies its default 300-second connection
+lifetime when no timeout is supplied, extending a shorter remaining lifetime.
 
 ## Direct backend use
 
-`E2BSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and its
-filesystem and process-start opt-ins:
+`E2BSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and its optional
+filesystem. Building one does no I/O; the first operation creates the sandbox:
 
 ```python
+import anyio
+
 from pydantic_ai_harness.e2b_sandbox import E2BSandboxBackend
 
-backend = await E2BSandboxBackend.create(
-    template='base',
-    sandbox_timeout=1800,
-)
-try:
-    result = await backend.run(['python', '--version'], timeout=60)
-    print(result.stdout)
-finally:
-    await backend.close(terminate=True)
+
+async def main() -> None:
+    backend = E2BSandboxBackend(template='base', sandbox_timeout=1800)
+    try:
+        result = await backend.run(['python', '--version'], timeout=60)
+        print(result.stdout)
+    finally:
+        await backend.close(terminate=True)
+
+
+anyio.run(main)
 ```
 
-Use `connect(sandbox_id)` when you need a fresh handle to an existing sandbox;
-it never provisions a replacement, but it can extend the existing sandbox's
-remaining lifetime as described above.
+Pass `ref=SandboxRef(sandbox_id=...)` to attach to one specific sandbox, or `identity={...}` to
+reuse the oldest sandbox carrying that metadata and create one only if there is none. A `ref`
+whose sandbox is gone raises rather than quietly providing an empty replacement.
+
+`await backend.get_sandbox()` returns the live `e2b.AsyncSandbox` for E2B-specific operations,
+creating or attaching on first use.
 
 ## Limits and cancellation
 
 E2B's SDK timeout stops consuming its event stream but does not stop the remote
 command. The backend therefore enforces deadlines client-side and sends SIGKILL
-when a command times out or the caller is cancelled. Background children may
+when a command times out or the caller is cancelled, if E2B has returned its process ID.
+Cancellation during command startup can leave a command running until the sandbox expires.
+Background children may
 outlive the killed command until the sandbox itself is killed.
 
-Command results are buffered by E2B and returned in full. Tools should enforce
-their own byte or line budget, and commands that may produce very large output
-should bound it at the source.
+Command results are buffered by E2B and returned in full. The backend does not
+invent a model-output policy or pretend the transport is bounded. Tools that put
+output into model context should enforce their own byte or line budget, and
+commands that may produce very large output should bound it at the source.
 
 The public error surface is deliberately narrow:
 
@@ -113,6 +133,8 @@ Filesystem misses use the built-in `FileNotFoundError` contract.
 ## Configuration
 
 ```python
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox
+
 E2BSandbox(
     template=None,
     sandbox_id=None,

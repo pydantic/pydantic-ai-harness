@@ -27,9 +27,9 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
     an existing match also makes creation safe to retry across durable workers: a retry attaches
     to the sandbox the first attempt made rather than provisioning a second one.
 
-    Nothing here kills a sandbox. A conversation can span many runs, so the end of a run is not
-    the end of the workspace; E2B reaps an idle sandbox at `sandbox_timeout`. Raise that for
-    longer work, or kill one yourself through `result.sandbox`.
+    Sandboxes remain available after a run. A conversation can span many runs, so the end of a run is not
+    the end of the workspace; E2B reaps a sandbox at `sandbox_timeout`. Raise that for
+    longer work, or kill one yourself with `E2BSandboxBackend.kill_by_id`.
 
     Set `sandbox_id` to attach to an environment managed elsewhere instead.
 
