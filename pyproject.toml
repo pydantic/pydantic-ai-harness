@@ -45,12 +45,12 @@ cli = [
 ]
 code-mode = [
     "pydantic-ai-slim[duckduckgo]>=2.38.0",
-    "pydantic-monty>=0.0.19",
+    "pydantic-monty>=0.0.23",
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 codemode = [
     "pydantic-ai-slim[duckduckgo]>=2.38.0",
-    "pydantic-monty>=0.0.19",
+    "pydantic-monty>=0.0.23",
 ]
 researcher = [
     "pydantic-ai-slim[duckduckgo,web-fetch]>=2.38.0",
@@ -69,7 +69,7 @@ modal = [
     "modal>=1.5.0",
 ]
 dynamic-workflow = [
-    "pydantic-monty>=0.0.19",
+    "pydantic-monty>=0.0.23",
 ]
 acp = [
     # The SDK breaks across minors, so cap per minor.
@@ -77,6 +77,10 @@ acp = [
 ]
 exa = [
     "exa-py>=2.16.0",
+]
+aws-lambda = [
+    "aws-durable-execution-sdk-python>=1.7.0 ; python_full_version >= '3.11'",
+    "pydantic-ai-slim>=2.38.0",
 ]
 youdotcom = [
     "youdotcom>=3.1.1,<4",
@@ -126,7 +130,7 @@ dev = [
     'inline-snapshot>=0.32.5',
     "pydantic-ai-slim[anthropic]",
     "pydantic-ai-slim[openai]",
-    "pydantic-ai-slim[spec]>=2.18.0",
+    "pydantic-ai-slim[mcp,spec]>=2.18.0",
     "pytest-examples>=0.0.18",
     "pytest-recording>=0.13.4",
     "mongomock-motor>=0.0.36",
