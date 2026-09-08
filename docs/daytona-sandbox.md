@@ -104,6 +104,9 @@ for provider-specific operations. Direct users close the SDK client with
 `await backend.close(terminate=False)`. With `terminate=True`, it also deletes a sandbox
 created by that backend. Attached sandboxes remain available.
 
+The property remains awaitable after the native handle is cached. Await it before accessing SDK
+methods; type checkers reject using the awaitable as the native sandbox.
+
 ## Process and output behavior
 
 Daytona process sessions provide separate stdout and stderr callbacks. The
@@ -133,9 +136,6 @@ Provider request timeouts raise `DaytonaSandboxError`. Expiry of the explicit
 `run(timeout=...)` deadline raises `SandboxTimeoutError`, including during setup.
 
 Filesystem misses use the built-in `FileNotFoundError` contract.
-
-The property remains awaitable after the native handle is cached. Await it before accessing SDK
-methods; type checkers reject using the awaitable as the native sandbox.
 
 ## Configuration
 
