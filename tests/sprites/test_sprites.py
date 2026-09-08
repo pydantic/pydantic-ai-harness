@@ -421,6 +421,14 @@ class TestSpriteSandbox:
         if expected_type is SpriteSandboxError:
             assert type(lookup_error).__name__ in str(caught.value)
 
+    async def test_timeout_cancels_before_original_close_finishes(self, transport: SpriteTransport) -> None:
+        backend = SpriteSandboxBackend()
+        await backend.sandbox
+        transport.control_close_hang = True
+        with pytest.raises(SandboxTimeoutError):
+            await backend.run('sleep .1; touch escaped', shell=True, timeout=0.01)
+        assert not (transport.root / 'escaped').exists()
+
     async def test_cancel_failure_and_primary_error_are_both_reported(
         self, transport: SpriteTransport, caplog: pytest.LogCaptureFixture
     ) -> None:

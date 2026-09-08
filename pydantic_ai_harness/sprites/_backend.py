@@ -194,16 +194,10 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
     async def _raise_run_failure(
         self,
         error: BaseException,
-        sprite: Sprite | None,
-        control: str,
         stdout: bytes,
         stderr: bytes,
         timeout: float | None,
     ) -> NoReturn:
-        if sprite is not None:
-            cleanup_error = await self._cancel_remote(sprite, control)
-            if cleanup_error is not None:
-                logger.warning('Could not confirm remote Sprite command termination: %s', cleanup_error)
         if isinstance(error, TimeoutError):
             raise SandboxTimeoutError(
                 'Sprite command deadline expired.',
@@ -263,12 +257,16 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
             if operation is not None:
                 stdout = operation.get_stdout()
                 stderr = operation.get_stderr()
+            if sprite is not None:
+                cleanup_error = await self._cancel_remote(sprite, control)
+                if cleanup_error is not None:
+                    logger.warning('Could not confirm remote Sprite command termination: %s', cleanup_error)
         finally:
             if connection is not None:
                 close_error = await cleanup_call(connection.close, timeout=_CONTROL_TIMEOUT)
 
         if command_error is not None:
-            await self._raise_run_failure(command_error, sprite, control, stdout, stderr, timeout)
+            await self._raise_run_failure(command_error, stdout, stderr, timeout)
 
         if close_error is not None:
             if isinstance(close_error, TimeoutError):
