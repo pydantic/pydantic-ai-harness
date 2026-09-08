@@ -157,7 +157,7 @@ class TestCommands:
     ) -> None:
         backend = await started()
         fake_daytona.sandboxes[0].process_create_gate = asyncio.Event()
-        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._CREATE_TIMEOUT', 0.01)
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._REQUEST_TIMEOUT', 0.01)
         with pytest.raises(DaytonaSandboxError, match='session setup timed out') as exc_info:
             await backend.run(['true'])
         assert not isinstance(exc_info.value, SandboxTimeoutError)
@@ -393,11 +393,21 @@ class TestLifecycle:
         fake_daytona.sandboxes[0].pause_error = None
         await backend.pause()
 
-    async def test_stop_refresh_failure_is_translated(self, fake_daytona: FakeDaytona) -> None:
+    @pytest.mark.parametrize(
+        'refresh_error,expected_type',
+        [
+            (RuntimeError('refresh failed'), DaytonaSandboxError),
+            (DaytonaNotFoundError('gone'), DaytonaSandboxUnavailableError),
+        ],
+    )
+    async def test_stop_refresh_failure_is_translated(
+        self, fake_daytona: FakeDaytona, refresh_error: Exception, expected_type: type[DaytonaSandboxError]
+    ) -> None:
         backend = await started()
-        fake_daytona.sandboxes[0].refresh_error = RuntimeError('refresh failed')
+        fake_daytona.sandboxes[0].refresh_error = refresh_error
 
-        with pytest.raises(DaytonaSandboxError, match='refresh failed'):
+        expected_match = 'does not exist' if isinstance(refresh_error, DaytonaNotFoundError) else str(refresh_error)
+        with pytest.raises(expected_type, match=expected_match):
             await backend.stop()
 
     async def test_pause_missing_sandbox_is_unavailable(self, fake_daytona: FakeDaytona) -> None:

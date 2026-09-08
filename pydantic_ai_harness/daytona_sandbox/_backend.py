@@ -518,7 +518,9 @@ class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, Support
                 if refresh_error is not None:
                     await raise_after_cleanup(
                         self.operation_error(
-                            refresh_error, f'Could not inspect Daytona sandbox {self._describe()} before stopping'
+                            refresh_error,
+                            f'Could not inspect Daytona sandbox {self._describe()} before stopping',
+                            unavailable=self._is_not_found(refresh_error),
                         ),
                         cause=refresh_error,
                     )
