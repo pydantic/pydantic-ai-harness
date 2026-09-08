@@ -10,6 +10,9 @@ External assumptions last verified 2026-08-31 against E2B Python SDK 2.34.0 (the
 * `AsyncSandbox.create` / `connect` / `kill` provide the owned and attached lifecycle, and
   `connect` resumes a paused sandbox and substitutes its 300-second default when `timeout=None`:
   https://github.com/e2b-dev/E2B/blob/main/packages/python-sdk/e2b/sandbox_async/main.py
+* `AsyncSandbox.pause` supports `keep_memory` and has a class-method-by-ID variant in the
+  dependency floor; it returns `False` when the sandbox is already paused:
+  https://github.com/e2b-dev/E2B/blob/main/packages/python-sdk/e2b/sandbox_async/main.py
 * `AsyncSandbox.list` accepts `query`, `limit`, and `next_token` but not `order`, and each
   `SandboxInfo` exposes `started_at`:
   https://github.com/e2b-dev/E2B/blob/main/packages/python-sdk/e2b/sandbox_async/main.py
