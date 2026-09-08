@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import httpx
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
@@ -9,7 +11,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPToolset
-from pydantic_ai.messages import ModelRequest
+from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.logfire_mcp import LogfireMCP
@@ -95,10 +97,6 @@ class TestLogfireMCP:
             assert transport(LogfireMCP()).auth is not None
 
     async def test_current_time_with_old_message_history(self, server: FastMCP) -> None:
-        from datetime import datetime, timezone
-
-        from pydantic_ai.messages import UserPromptPart
-
         history = [
             ModelRequest(parts=[UserPromptPart('Recent errors', timestamp=datetime(2020, 1, 1, tzinfo=timezone.utc))])
         ]
