@@ -12,7 +12,10 @@ pre-agent-steps:
       #
       # 2.36.0 is the first pydantic-ai-slim release carrying `pai --mcp-config`,
       # which is how the gateway's MCP servers reach the agent.
-      python3 -P -m pip install --quiet --user --disable-pip-version-check "pydantic-ai-harness[cli]==$GH_AW_ENGINE_VERSION" "pydantic-ai-slim[openai,mcp]>=2.36.0"
+      #
+      # The anthropic extra is what an `anthropic/` model runs on: that backend of
+      # the api-proxy serves the Messages API, not Chat Completions.
+      python3 -P -m pip install --quiet --user --disable-pip-version-check "pydantic-ai-harness[cli]==$GH_AW_ENGINE_VERSION" "pydantic-ai-slim[anthropic,openai,mcp]>=2.36.0"
       "$HOME/.local/bin/pai" --version
       python3 -P -c "from pydantic_ai_harness import Coder"
 engine:
@@ -181,24 +184,54 @@ engine:
         delete env.COPILOT_GITHUB_TOKEN;
 
         const provider = process.env.GH_AW_LLM_PROVIDER;
+        const configuredBaseUrl = process.env.PAI_BASE_URL;
+
+        // `pai` sends the model name verbatim, minus the provider marker that
+        // selects one of its clients, so the bare model ID reaches the api-proxy —
+        // which steers to the configured provider by the port it is reached on, not
+        // by a prefix in the model name: Copilot rejects `copilot/<model>` with
+        // `model_not_supported`.
+        // Only the first segment is the provider. Stripping greedily would eat an
+        // org namespace out of ids like `meta-llama/Llama-3.1`, so this mirrors the
+        // `SplitN(model, "/", 2)` gh-aw itself uses to read the provider off.
+        if (!env.PAI_MODEL) throw new Error("PAI_MODEL is required");
+        const modelProvider = env.PAI_MODEL.split("/", 1)[0].trim().toLowerCase();
+        const requestedModel = env.PAI_MODEL.replace(/^[^/]*\//, "");
+        // The api-proxy's Anthropic backend forwards the request path to
+        // api.anthropic.com unchanged and rewrites Messages-shaped bodies; it does
+        // not translate Chat Completions into Messages. So `anthropic/` is addressed
+        // with the Messages API: `anthropic:` on `-m`, and ANTHROPIC_BASE_URL for
+        // the endpoint. The Copilot and Codex backends are OpenAI-shaped and stay on
+        // Chat Completions, and `PAI_BASE_URL` names a Chat Completions endpoint by
+        // definition, so it keeps every provider there too.
+        const useMessagesAPI = !configuredBaseUrl && modelProvider === "anthropic";
+        // The dotted-alias rewrite describes the api-proxy's Copilot backend,
+        // which publishes Copilot's Claude models under dotted IDs. Every other
+        // destination — the anthropic and openai backends, or an endpoint named
+        // by PAI_BASE_URL — gets the id the workflow wrote: a model actually
+        // called `claude-sonnet-4-5` there has to arrive as that.
+        const model = !configuredBaseUrl && modelProvider === "copilot"
+          ? requestedModel.replace(/^(claude-(?:haiku|sonnet|opus)-\d+)-(\d+)$/, "$1.$2")
+          : requestedModel;
+
         // `PAI_BASE_URL` points the engine at an OpenAI-compatible endpoint of the
         // workflow's choosing instead of the AWF api-proxy. Two constraints shape
         // it.
         //
-        // It has to be a variable of this definition's own, because AWF sets
-        // OPENAI_BASE_URL on this step itself (to the api-proxy on
-        // host.docker.internal) whenever the firewall is enabled, so its presence
+        // It has to be a variable of this definition's own, because AWF sets the
+        // backend's own base URL variable on this step itself (OPENAI_BASE_URL, or
+        // ANTHROPIC_BASE_URL for the anthropic backend), pointing at the api-proxy
+        // on host.docker.internal whenever the firewall is enabled, so its presence
         // cannot carry the workflow's intent, and reading it as intent is what
         // made the pre-#52843 definition pick the wrong endpoint.
         //
         // There is deliberately no matching key knob. gh-aw excludes any
         // `engine.env` value holding a secret from the agent sandbox
         // (`awf --exclude-env`), so a credential cannot be delivered here at all
-        // and OPENAI_API_KEY below stays the placeholder. The endpoint therefore
+        // and the API key below stays the placeholder. The endpoint therefore
         // has to accept that placeholder, or be fronted by something upstream of
         // the agent that adds the real credential.
-        const configuredBaseUrl = process.env.PAI_BASE_URL;
-        let baseUrl = configuredBaseUrl || process.env.OPENAI_BASE_URL;
+        let baseUrl = configuredBaseUrl || (useMessagesAPI ? process.env.ANTHROPIC_BASE_URL : process.env.OPENAI_BASE_URL);
         if (!configuredBaseUrl) {
           // Only /reflect discovery needs the provider: it selects which of the
           // api-proxy's configured endpoints to use. A caller-supplied base URL
@@ -222,44 +255,37 @@ engine:
             const reflectedEndpoint = result.reflectData.endpoints?.find(
               entry => entry?.configured === true && entry.provider === endpoint.endpointProvider
             );
-            if (typeof reflectedEndpoint?.models_url === "string") {
+            if (!useMessagesAPI && typeof reflectedEndpoint?.models_url === "string") {
               // `endpoint.baseUrl` is the models-listing origin, while the
               // OpenAI-compatible client posts to `<base>/chat/completions`, so the
               // path prefix carried by models_url (`/v1` on some providers) has to
               // come along — and this helper applies the same api-proxy ->
               // host.docker.internal rewrite.
+              //
+              // The Anthropic client keeps the origin instead: it appends
+              // `/v1/messages` itself, so carrying the prefix over would post to
+              // `/v1/v1/messages`.
               baseUrl = deriveBaseUrlFromModelsURL(reflectedEndpoint.models_url);
             }
           }
         }
         if (!baseUrl) {
-          throw new Error("Pydantic AI requires AWF endpoint discovery, PAI_BASE_URL or OPENAI_BASE_URL");
+          throw new Error(
+            `Pydantic AI requires AWF endpoint discovery, PAI_BASE_URL or ${useMessagesAPI ? "ANTHROPIC_BASE_URL" : "OPENAI_BASE_URL"}`
+          );
         }
-        env.OPENAI_BASE_URL = baseUrl;
         // The AWF api-proxy injects the real upstream credentials and ignores the
-        // inbound key, but the OpenAI-compatible client refuses to construct
-        // itself without one.
-        env.OPENAI_API_KEY = "awf-copilot-proxy";
+        // inbound key, but neither client constructs itself without one. Setting it
+        // also replaces whatever key this step inherited, so the agent process holds
+        // the placeholder rather than a provider credential.
+        if (useMessagesAPI) {
+          env.ANTHROPIC_BASE_URL = baseUrl;
+          env.ANTHROPIC_API_KEY = "awf-anthropic-proxy";
+        } else {
+          env.OPENAI_BASE_URL = baseUrl;
+          env.OPENAI_API_KEY = "awf-copilot-proxy";
+        }
 
-        // `pai` sends the model name verbatim, minus the `openai-chat:` provider
-        // marker that selects its OpenAI-compatible client, so the bare model ID
-        // reaches the api-proxy — which steers to the configured provider by the
-        // port it is reached on, not by a prefix in the model name: Copilot
-        // rejects `copilot/<model>` with `model_not_supported`.
-        // Only the first segment is the provider. Stripping greedily would eat an
-        // org namespace out of ids like `meta-llama/Llama-3.1`, so this mirrors the
-        // `SplitN(model, "/", 2)` gh-aw itself uses to read the provider off.
-        if (!env.PAI_MODEL) throw new Error("PAI_MODEL is required");
-        const modelProvider = env.PAI_MODEL.split("/", 1)[0].trim().toLowerCase();
-        const requestedModel = env.PAI_MODEL.replace(/^[^/]*\//, "");
-        // The dotted-alias rewrite describes the api-proxy's Copilot backend,
-        // which publishes Copilot's Claude models under dotted IDs. Every other
-        // destination — the anthropic and openai backends, or an endpoint named
-        // by PAI_BASE_URL — gets the id the workflow wrote: a model actually
-        // called `claude-sonnet-4-5` there has to arrive as that.
-        const model = !configuredBaseUrl && modelProvider === "copilot"
-          ? requestedModel.replace(/^(claude-(?:haiku|sonnet|opus)-\d+)-(\d+)$/, "$1.$2")
-          : requestedModel;
         // `-m` is always passed: the composed agent carries no model, and without
         // the flag `pai` silently falls back to its own `openai:gpt-5` default,
         // billing a model the workflow never asked for. gh-aw validates
@@ -275,7 +301,7 @@ engine:
         // absence has to mean "no servers" rather than an error.
         const mcpConfig = join(agentDir, "mcp.json");
         if (existsSync(mcpConfig)) cliArgs.push("--mcp-config", mcpConfig);
-        cliArgs.push("-m", `openai-chat:${model}`, readFileSync(promptFile, "utf8"));
+        cliArgs.push("-m", `${useMessagesAPI ? "anthropic" : "openai-chat"}:${model}`, readFileSync(promptFile, "utf8"));
         log(
           `provider=${configuredBaseUrl ? "(PAI_BASE_URL)" : provider} model=${model} baseUrl=${baseUrl}` +
             (configuredAgent ? ` agent=${configuredAgent}` : "")
@@ -479,22 +505,29 @@ as executables on `PATH`.
 the AWF api-proxy's backends handles the request; `copilot`, `anthropic`,
 `openai` and `codex` are the values gh-aw accepts. Requests are routed through
 that proxy, whose endpoint is discovered from `/reflect` at run time, so the
-first segment is dropped and the rest of the model ID is passed with
-`-m openai-chat:<model>`
-(`openai-chat:` selects the Pydantic AI OpenAI-compatible client and is not part
-of the model name sent upstream). Only the first segment goes, so an ID carrying
-an org namespace such as `openai/meta-llama/Llama-3.1` keeps it. When the provider
-segment is `copilot`, Claude aliases such as `claude-sonnet-4-5` are normalized
-to the dotted model IDs the proxy's Copilot backend exposes, such as
-`claude-sonnet-4.5`; every other destination — the `anthropic` and `openai`
-backends, or a `PAI_BASE_URL` endpoint — receives the ID as written. `-m` is always passed, because a workflow that
-declares no model would otherwise inherit the CLI's own `openai:gpt-5` default
-silently.
+first segment is dropped and the rest of the model ID is passed with `-m`, under
+the marker for the wire API that backend serves: `anthropic:<model>` against
+`ANTHROPIC_BASE_URL` for `anthropic/`, whose backend forwards the path to
+api.anthropic.com unchanged and does not translate Chat Completions into
+Messages, and `openai-chat:<model>` against `OPENAI_BASE_URL` for the rest. The
+marker selects a Pydantic AI client and is not part of the model name sent
+upstream. The two base URLs differ by a segment: the Anthropic client appends
+`/v1/messages` to the endpoint's origin, the OpenAI-compatible client appends
+`/chat/completions` to the `/v1` prefix the reflected `models_url` carries.
+Only the first segment of the model goes, so an ID carrying an org namespace such
+as `openai/meta-llama/Llama-3.1` keeps it. When the provider segment is
+`copilot`, Claude aliases such as `claude-sonnet-4-5` are normalized to the dotted
+model IDs the proxy's Copilot backend exposes, such as `claude-sonnet-4.5`; every
+other destination — the `anthropic` and `openai` backends, or a `PAI_BASE_URL`
+endpoint — receives the ID as written. `-m` is always passed, because a workflow
+that declares no model would otherwise inherit the CLI's own `openai:gpt-5`
+default silently.
 
 Setting `PAI_BASE_URL` in `engine.env` sends requests to that URL instead of the
 proxy, for any endpoint speaking the OpenAI Chat Completions API. `/reflect`
-discovery is skipped and the provider segment of `model` becomes a formality, so
-write `openai/<model-id>` and the bare ID reaches the endpoint. There is no
+discovery is skipped and the provider segment of `model` becomes a formality --
+including `anthropic/`, which stays on Chat Completions under `PAI_BASE_URL` --
+so write `openai/<model-id>` and the bare ID reaches the endpoint. There is no
 matching key setting: gh-aw keeps `engine.env` values holding secrets out of the
 agent sandbox, so the endpoint has to accept the placeholder bearer token or sit
 behind something that adds the real credential. See `README.md` next to this file
@@ -510,6 +543,6 @@ counts only from any JSON lines the run happens to emit.
 
 The CLI and the coder capabilities are installed before the agent runs with
 `pip install --user "pydantic-ai-harness[cli]==<engine version>"
-"pydantic-ai-slim[openai,mcp]>=2.36.0"`, into `~/.local` because the runner tool
-cache holding `uv` is not writable from inside the sandbox.
+"pydantic-ai-slim[anthropic,openai,mcp]>=2.36.0"`, into `~/.local` because the
+runner tool cache holding `uv` is not writable from inside the sandbox.
 -->

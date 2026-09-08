@@ -46,7 +46,10 @@ the imported definition's version only when the workflow left it empty
 `model` is required and must be `provider/model`. gh-aw accepts `copilot`,
 `anthropic`, `openai` and `codex` as the provider segment; it selects which backend
 of the AWF api-proxy serves the request. The proxy holds the credentials, so a
-workflow supplies none.
+workflow supplies none. `anthropic/` is served over the Anthropic Messages API,
+because that backend forwards the request path to `api.anthropic.com` unchanged and
+does not translate Chat Completions into Messages; the other three are
+OpenAI-shaped and use Chat Completions.
 
 ## What actually runs
 
@@ -55,10 +58,11 @@ capabilities, so the engine writes the composition as a Python module at
 `.pydantic-ai/gh_aw_agent.py` and passes `-a gh_aw_agent:agent`. The CLI and its
 dependencies are installed before the agent starts, with
 `pip install --user "pydantic-ai-harness[cli]==<engine version>"
-"pydantic-ai-slim[openai,mcp]>=2.36.0"`. The pinned harness version is
+"pydantic-ai-slim[anthropic,openai,mcp]>=2.36.0"`. The pinned harness version is
 `engine.version` in `pydantic.md`, and it always names a published release: lint
 refuses a pull request whose pin is not on PyPI. The `2.36.0` floor is the first
-pydantic-ai release carrying `pai --mcp-config`.
+pydantic-ai release carrying `pai --mcp-config`, and the `anthropic` extra is what
+an `anthropic/` model runs on.
 
 The CLI itself is started by the interpreter that owns that install, which imports
 the agent target and then runs `pydantic_ai` as `__main__`, rather than by spawning
@@ -183,7 +187,9 @@ Three things to get right:
 - **Keep the `provider/` prefix on `model`.** gh-aw requires it and only accepts its
   four known providers, but the engine strips it before calling the endpoint. Write
   `openai/<model-id>`, and `<model-id>` is what goes upstream. `openai` here means
-  "OpenAI-compatible", not OpenAI the company.
+  "OpenAI-compatible", not OpenAI the company. `PAI_BASE_URL` keeps Chat Completions
+  whichever prefix is written, `anthropic/` included: it names an endpoint of that
+  shape by definition.
 
 `PAI_BASE_URL` is a variable of this engine's own rather than `OPENAI_BASE_URL`,
 because gh-aw sets `OPENAI_BASE_URL` itself, pointing at the proxy. It is always
