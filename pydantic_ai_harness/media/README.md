@@ -15,9 +15,9 @@
 >
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-Content-addressed stores and walker helpers that move large binary and text payloads out of message history and put them back on demand.
+The storage plumbing that [`StepPersistence`](../step_persistence/) uses to keep run snapshots small: content-addressed stores and walker helpers that move large binary and text payloads out of message history and put them back on demand.
 
-These are building blocks, not a capability. There is no class you add to `Agent(capabilities=[...])` yet. [`StepPersistence`](../step_persistence/) uses them to keep snapshots small when messages carry `BinaryContent` or large text (e.g. a big tool-return string). A forthcoming `MediaExternalizer` capability ([#254](https://github.com/pydantic/pydantic-ai-harness/issues/254)) will reuse the same stores to rewrite `BinaryContent` into URL parts before the model sees them.
+This package does not define an agent capability.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/media/)
 
@@ -59,6 +59,8 @@ full = await restore_media(lean, media_store=store)
 `externalize_media` externalizes both large `BinaryContent` and large text: any message part whose string `content` is at least `threshold_bytes` UTF-8 bytes (`TextPart`, `ThinkingPart`, a string-returning `ToolReturnPart`, a string-valued `UserPromptPart`), plus any `TextContent` element travelling inside a `UserPromptPart.content` sequence or a `ToolReturn`. The same `threshold_bytes` governs both; there is no separate text knob. Payloads below the threshold stay inline, and `restore_media` re-inlines binary and text symmetrically. `media_uri_for` and `parse_media_uri` give you the raw URI round-trip if you need to key media yourself.
 
 The current reader restores binary markers written before text externalization. That compatibility is upgrade-only: a release that predates text externalization treats every marker as binary, so it cannot validate a snapshot containing an externalized text marker. Keep a current reader for persisted snapshots that contain those markers.
+
+If a payload uses the same namespaced keys as the marker format, the writer moves those values into a versioned reserved mapping and the current reader restores them. A marker written before this escaping format was added still restores. The reader treats the reserved keys as its own only when the reserved mapping has the shape the writer produces and the version key carries a stamp from the format's own namespace, so a payload that happened to carry either or both is left alone. A marker carrying both, stamped with a version this reader does not know, is rejected rather than restored with the reserved values stripped. Compatibility the other way is upgrade-only. A reader that predates the escaping format re-inlines the externalized field correctly, but it leaves the caller's values in the reserved mapping instead of restoring them to their own keys, and leaves the two reserved keys in the payload. Keep a current reader for persisted snapshots that contain escaped markers.
 
 ## API
 
