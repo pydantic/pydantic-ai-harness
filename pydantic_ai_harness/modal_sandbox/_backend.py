@@ -424,6 +424,7 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
             calls.append(('terminate', terminate_call))
         calls.append(('detach', detach_call))
         first_error: ModalSandboxError | None = None
+        first_cause: Exception | None = None
         for operation, call in calls:
             error = await cleanup_call(call, timeout=_TEARDOWN_TIMEOUT)
             if error is None or isinstance(error, _unavailable_sandbox_exc_types()):
@@ -438,10 +439,10 @@ class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
             else:
                 translated = ModalSandboxError(f'Could not {operation} Modal sandbox {self._describe()}: {error}')
             if first_error is None:
-                translated.__cause__ = error
+                first_cause = error
                 first_error = translated
         if first_error is not None:
-            await raise_after_cleanup(first_error)
+            await raise_after_cleanup(first_error, cause=first_cause)
 
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""
