@@ -693,3 +693,12 @@ async def test_filesystem_first_use_preserves_acquisition_auth_error(fake_modal:
     fake_modal.create_error = fake_modal.auth_type('denied')
     with pytest.raises(ModalSandboxAuthError):
         await ModalSandboxBackend().read_bytes('/file')
+
+
+async def test_cleanup_error_retains_sdk_traceback(fake_modal: FakeModal) -> None:
+    backend = await started()
+    original = RuntimeError('terminate failed')
+    fake_modal.sandboxes[0].terminate_error = original
+    with pytest.raises(ModalSandboxError) as caught:
+        await backend.close(terminate=True)
+    assert caught.value.__cause__ is original
