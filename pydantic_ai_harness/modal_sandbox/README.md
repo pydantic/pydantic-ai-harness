@@ -102,6 +102,10 @@ Use `await backend.sandbox` to access the live `modal.Sandbox` for provider-spec
 The property remains awaitable after the native handle is cached. Await it before accessing SDK
 methods; type checkers reject using the awaitable as the native sandbox.
 
+`ModalSandboxBackend` inherits this behavior from `LazySandbox`. Its `create_or_attach()`
+hook contains the Modal-specific acquisition and identity handling; the shared helper owns
+coordination and caching. See [writing sandbox backends](../../docs/sandbox-backends.md) for the authoring contract.
+
 ## Limits and errors
 
 Modal exposes no per-command kill operation, so a command runs to its own deadline. Set
