@@ -1,7 +1,6 @@
 """A controllable fake `e2b` SDK for E2BSandbox tests.
 
-Tests never reach real E2B: a fake `e2b` module is injected into `sys.modules` (via the
-`fake_e2b` fixture in `conftest.py`), so the lazy `import e2b` inside the backend returns it.
+Tests never reach real E2B: the `fake_e2b` fixture replaces the backend's SDK module with a fake.
 The fake records calls and lets each test decide what a command returns.
 
 Fidelity to the real SDK is the point. The exception classes, `FileType`, `CommandResult`,

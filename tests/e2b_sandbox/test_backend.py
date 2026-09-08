@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import builtins
-import functools
+import subprocess
 import sys
-from collections.abc import Awaitable, Callable
 from typing import Any
 
 import anyio
@@ -34,43 +32,21 @@ from ..sandbox_conformance import (
 )
 from .fake_e2b import FakeE2B
 
-_EntryPoint = Callable[[], Awaitable[object]]
-
 
 async def started(**settings: Any) -> E2BSandboxBackend:
     """Build a backend and resolve it now.
 
     Constructing one does no I/O, so a test that wants to assert on what creating or attaching
-    did has to touch the sandbox first. Awaiting the property is that touch.
+    did has to touch the sandbox first. Awaiting `get_sandbox()` is that touch.
     """
     backend = E2BSandboxBackend(**settings)
-    await backend.sandbox
+    await backend.get_sandbox()
     return backend
-
-
-_CREATE: _EntryPoint = functools.partial(started)
-_CONNECT: _EntryPoint = functools.partial(started, ref=SandboxRef(sandbox_id='sbx-keep'))
-_CREATE_OR_CONNECT: _EntryPoint = functools.partial(started, identity={'k': 'v'})
-_KILL_BY_ID: _EntryPoint = functools.partial(E2BSandboxBackend.kill_by_id, 'missing')
-
-
-def _hide_e2b(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make `import e2b` fail, as it does without the extra installed."""
-    real_import = builtins.__import__
-
-    def no_e2b(name: str, *args: object, **kwargs: object) -> object:
-        if name == 'e2b':
-            raise ImportError('No module named e2b')
-        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.delitem(sys.modules, 'e2b', raising=False)
-    monkeypatch.setattr(builtins, '__import__', no_e2b)
 
 
 class TestConformance:
     async def test_backend_implements_run_and_filesystem_protocols(self, fake_e2b: FakeE2B) -> None:
-        # `isinstance` is shallow (member presence only); the signature half is pinned
-        # statically by the `if TYPE_CHECKING` block in `_backend.py`.
+        # Protocol inheritance also checks signatures statically.
         backend = await started()
         assert isinstance(backend, SandboxBackend)
         assert isinstance(backend, SupportsFilesystem)
@@ -78,7 +54,7 @@ class TestConformance:
     async def test_identity_is_e2b_sandbox_id(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         assert backend.ref == SandboxRef(sandbox_id='sbx-1')
-        assert await backend.sandbox is fake_e2b.sandboxes[0]
+        assert await backend.get_sandbox() is fake_e2b.sandboxes[0]
 
     async def test_shared_command_validation(self, fake_e2b: FakeE2B) -> None:
         await check_command_validation(started)
@@ -151,10 +127,8 @@ class TestConnect:
         assert fake_e2b.connect_calls == [('sbx-keep', None)]
         assert backend.ref == SandboxRef(sandbox_id='sbx-keep')
 
-    async def test_attaching_leaves_the_lifetime_alone(self, fake_e2b: FakeE2B) -> None:
-        # E2B substitutes its own 300-second default when `timeout` is `None` at connect time,
-        # which would silently extend a shorter remaining lifetime just by looking at the
-        # sandbox. Attaching asks for no timeout at all, so nothing about the lifetime moves.
+    async def test_attaching_uses_the_sdk_default_lifetime(self, fake_e2b: FakeE2B) -> None:
+        # The SDK owns its default connection lifetime.
         await started(ref=SandboxRef(sandbox_id='sbx-keep'))
 
         assert fake_e2b.connect_calls == [('sbx-keep', None)]
@@ -198,8 +172,9 @@ class TestClose:
     async def test_kill_failure_is_visible(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.kill_error = RuntimeError('kill boom')
-        with pytest.raises(E2BSandboxError, match='kill boom'):
+        with pytest.raises(E2BSandboxError, match='kill boom') as exc:
             await backend.close(terminate=True)
+        assert exc.value.__cause__ is fake_e2b.kill_error
 
     async def test_already_gone_sandbox_is_not_an_error(self, fake_e2b: FakeE2B) -> None:
         # An owned run that outlived its `sandbox_timeout` self-terminates; the teardown kill
@@ -224,17 +199,6 @@ class TestClose:
         with anyio.fail_after(5):
             with pytest.raises(E2BSandboxError, match='Timed out'):
                 await backend.close(terminate=True)
-
-
-@pytest.mark.parametrize(
-    'entry_point',
-    [_CREATE, _CONNECT, _CREATE_OR_CONNECT, _KILL_BY_ID],
-    ids=['create', 'connect', 'create_or_connect', 'kill_by_id'],
-)
-async def test_missing_e2b_package_is_named(monkeypatch: pytest.MonkeyPatch, entry_point: _EntryPoint) -> None:
-    _hide_e2b(monkeypatch)
-    with pytest.raises(E2BSandboxError, match="The 'e2b' package is required"):
-        await entry_point()
 
 
 class TestRun:
@@ -410,17 +374,19 @@ class TestRun:
 
 
 class TestWorkingDir:
-    async def test_a_configured_working_dir_needs_no_probe(self, fake_e2b: FakeE2B) -> None:
-        backend = await started(working_dir='/work')
-        assert await backend.working_dir() == '/work'
-        assert fake_e2b.sandboxes[0].commands.calls == []
+    async def test_a_configured_working_dir_is_resolved_and_initializes_ref(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.responder = lambda command, timeout: ('/real/work\n', '', 0)
+        backend = E2BSandboxBackend(working_dir='/work')
+        assert await backend.working_dir() == '/real/work'
+        assert backend.ref is not None
+        assert fake_e2b.sandboxes[0].commands.calls[0].cwd == '/work'
 
     async def test_probed_once_and_cached(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.responder = lambda command, timeout: ('/home/user\n', '', 0)
         backend = await started()
         assert await backend.working_dir() == '/home/user'
         assert await backend.working_dir() == '/home/user'
-        assert [call.command for call in fake_e2b.sandboxes[0].commands.calls] == ['pwd']
+        assert [call.command for call in fake_e2b.sandboxes[0].commands.calls] == ['pwd -P']
 
     async def test_the_probe_carries_a_deadline(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         # The probe is a command like any other, so it is bounded and killed rather than left
@@ -537,3 +503,41 @@ class TestFilesystem:
         fake_e2b.fs_error = fake_e2b.error_type('Permission denied')
         with pytest.raises(E2BSandboxError, match='Permission denied'):
             await backend.exists('/root/x')
+
+
+def test_missing_e2b_extra_has_an_install_hint() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            '-c',
+            "import sys; sys.modules['e2b'] = None; import pydantic_ai_harness.e2b_sandbox",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert 'Install `pydantic-ai-harness[e2b]`' in result.stderr
+
+
+async def test_command_timeout_bounds_initial_provisioning(fake_e2b: FakeE2B) -> None:
+    fake_e2b.create_hangs = True
+    backend = E2BSandboxBackend()
+    with anyio.fail_after(1):
+        with pytest.raises(SandboxTimeoutError) as exc:
+            await backend.run(['echo', 'ready'], timeout=0.01)
+    assert exc.value.timeout == 0.01
+    assert exc.value.stdout == ''
+
+
+async def test_direct_identity_is_recorded_and_reused(fake_e2b: FakeE2B) -> None:
+    first = await started(identity={'workspace': 'one'})
+    second = await started(identity={'workspace': 'one'})
+    assert first.ref == second.ref
+    assert len(fake_e2b.create_calls) == 1
+
+
+async def test_filesystem_first_use_preserves_auth_error(fake_e2b: FakeE2B) -> None:
+    fake_e2b.create_error = fake_e2b.auth_type('denied')
+    with pytest.raises(E2BSandboxAuthError):
+        await E2BSandboxBackend().read_bytes('/file')

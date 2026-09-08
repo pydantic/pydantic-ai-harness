@@ -6,6 +6,7 @@ import inspect
 
 import anyio
 import pytest
+from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.sandboxes import SandboxRef, SandboxUnavailableError
 from pydantic_ai.tools import RunContext
@@ -28,7 +29,7 @@ async def _resolved(
     """Ask the capability for a backend and touch it, so the create-or-attach actually happens."""
     backend = capability.get_sandbox(ctx, ref=ref)
     assert isinstance(backend, E2BSandboxBackend)
-    await backend.sandbox
+    await backend.get_sandbox()
     return backend
 
 
@@ -209,8 +210,8 @@ class TestConfiguration:
         with pytest.raises(ValueError, match='absolute'):
             E2BSandbox(workdir='repo')
 
-    def test_normalizes_absolute_workdir(self) -> None:
-        assert E2BSandbox(workdir='/workspace/../repo').workdir == '/repo'
+    def test_preserves_absolute_workdir(self) -> None:
+        assert E2BSandbox(workdir='/workspace/../repo').workdir == '/workspace/../repo'
 
     def test_reserves_the_conversation_metadata_key(self) -> None:
         with pytest.raises(ValueError, match='reserved'):
@@ -252,3 +253,19 @@ class TestConfiguration:
 
     def test_serialization_name(self) -> None:
         assert E2BSandbox.get_serialization_name() == 'E2BSandbox'
+
+
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+async def test_agent_command_exposes_the_created_sandbox(fake_e2b: FakeE2B) -> None:
+    agent = Agent(TestModel(), deps_type=type(None), capabilities=[E2BSandbox[None]()])
+
+    @agent.tool
+    async def command(ctx: RunContext[None]) -> str:
+        result = await ctx.sandbox.run(['echo', 'ready'])
+        return result.stdout
+
+    result = await agent.run('Run the command')
+    assert 'echo ready' in result.output
+    assert result.sandbox is not None
+    assert result.sandbox.ref == SandboxRef(sandbox_id=fake_e2b.sandboxes[0].sandbox_id)
+    assert len(fake_e2b.create_calls) == 1

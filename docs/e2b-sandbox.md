@@ -11,6 +11,8 @@ consume `ctx.sandbox` for the model-facing interface you want.
 
 [Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/e2b_sandbox/)
 
+> The API may change between minor releases while Harness is on 0.x. See the [version policy](index.md#version-policy).
+
 ## Install and authenticate
 
 ```bash
@@ -57,9 +59,9 @@ The metadata key `pydantic-ai-conversation-id` is reserved for that identity. Ot
 preserved. E2B does not enforce metadata uniqueness, so the post-create canonicalization is
 best-effort under control-plane propagation delay.
 
-Nothing here kills a sandbox. A conversation can span many runs, so the end of a run is not the
-end of the workspace; E2B reaps an idle sandbox at `sandbox_timeout`. If E2B has already reaped
-a conversation's sandbox, the next run gets a fresh, empty one and the old files are gone —
+Sandboxes remain available after a run. A conversation can span many runs, so the end of a run is not the
+end of the workspace; E2B reaps a sandbox at `sandbox_timeout`. If E2B has already reaped
+a conversation's sandbox, the next run gets a fresh, empty one and the old files are gone;
 raise `sandbox_timeout` when a conversation needs to outlive it, or kill the sandbox yourself
 with `E2BSandboxBackend.kill_by_id`, which is bounded, shielded from cancellation, and safe to
 retry.
@@ -68,12 +70,15 @@ Attach to a sandbox managed elsewhere by ID when the capability must not own its
 lifetime:
 
 ```python
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox
+
 E2BSandbox(sandbox_id='sbx-abc123', workdir='/workspace')
 ```
 
 Creation-only settings cannot be combined with `sandbox_id`. Concurrent runs on the same
 sandbox share its filesystem and process space. E2B resumes a paused sandbox when connecting to
-it, so attaching to one restarts it.
+it, so attaching to one restarts it. The SDK applies its default 300-second connection
+lifetime when no timeout is supplied, extending a shorter remaining lifetime.
 
 ## Direct backend use
 
@@ -81,28 +86,37 @@ it, so attaching to one restarts it.
 filesystem. Building one does no I/O; the first operation creates the sandbox:
 
 ```python
+import anyio
+
 from pydantic_ai_harness.e2b_sandbox import E2BSandboxBackend
 
-backend = E2BSandboxBackend(template='base', sandbox_timeout=1800)
-try:
-    result = await backend.run(['python', '--version'], timeout=60)
-    print(result.stdout)
-finally:
-    await backend.close(terminate=True)
+
+async def main() -> None:
+    backend = E2BSandboxBackend(template='base', sandbox_timeout=1800)
+    try:
+        result = await backend.run(['python', '--version'], timeout=60)
+        print(result.stdout)
+    finally:
+        await backend.close(terminate=True)
+
+
+anyio.run(main)
 ```
 
 Pass `ref=SandboxRef(sandbox_id=...)` to attach to one specific sandbox, or `identity={...}` to
 reuse the oldest sandbox carrying that metadata and create one only if there is none. A `ref`
 whose sandbox is gone raises rather than quietly providing an empty replacement.
 
-`backend.sandbox` is the live `e2b.AsyncSandbox`, for anything E2B-specific. You can only await
-it, so no code path can reach a sandbox that has not been created yet.
+`await backend.get_sandbox()` returns the live `e2b.AsyncSandbox` for E2B-specific operations,
+creating or attaching on first use.
 
 ## Limits and cancellation
 
 E2B's SDK timeout stops consuming its event stream but does not stop the remote
 command. The backend therefore enforces deadlines client-side and sends SIGKILL
-when a command times out or the caller is cancelled. Background children may
+when a command times out or the caller is cancelled, if E2B has returned its process ID.
+Cancellation during command startup can leave a command running until the sandbox expires.
+Background children may
 outlive the killed command until the sandbox itself is killed.
 
 Command results are buffered by E2B and returned in full. The backend does not
@@ -124,6 +138,8 @@ Filesystem misses use the built-in `FileNotFoundError` contract.
 ## Configuration
 
 ```python
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox
+
 E2BSandbox(
     template=None,
     sandbox_id=None,
