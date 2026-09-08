@@ -1,3 +1,8 @@
+---
+title: Modal Sandbox
+description: Run commands and access files in a Modal sandbox.
+---
+
 # Modal Sandbox
 
 `ModalSandbox` supplies a Modal container as the run's `ctx.sandbox`. It owns
@@ -50,10 +55,10 @@ continues in the same workspace and a durable retry attaches to the sandbox the 
 made rather than provisioning a second one.
 
 Nothing here terminates a sandbox. A conversation can span many runs, so the end of a run is
-not the end of the workspace; Modal reaps an idle sandbox at `sandbox_timeout`. If Modal has
+not the end of the workspace; Modal reaps a sandbox at `sandbox_timeout`. If Modal has
 already reaped a conversation's sandbox, the next run gets a fresh, empty one under the same
-name and the old files are gone — raise `sandbox_timeout` when a conversation needs to outlive
-it, or terminate the sandbox yourself through `result.sandbox`.
+name and the old files are gone -- raise `sandbox_timeout` when a conversation needs to outlive
+it, or terminate it explicitly with `await backend.close(terminate=True)`.
 
 Attach to a sandbox managed elsewhere when the capability must not own its lifetime:
 
@@ -95,8 +100,8 @@ Pass `ref=SandboxRef(sandbox_id=...)` to attach to one specific sandbox, or `nam
 attach to a running sandbox with that name and create it only if there is none. A `ref` whose
 sandbox is gone raises rather than quietly providing an empty replacement.
 
-`backend.sandbox` is the live `modal.Sandbox`, for anything Modal-specific. You can only await
-it, so no code path can reach a sandbox that has not been created yet.
+Use `await backend.get_sandbox()` to access the live `modal.Sandbox` for provider-specific operations.
+`sandbox_timeout` is a maximum lifetime, not an idle timeout.
 
 ## Limits and errors
 
@@ -115,6 +120,11 @@ apply their own byte or line limits.
 - Command deadlines raise core `SandboxTimeoutError`, including partial `stdout` and
   `stderr`.
 - Missing filesystem paths raise `FileNotFoundError`.
+
+This backend uses asyncio. After `close()`, use a new backend with the saved `ref`
+if further access or a termination retry is needed. Before retrying termination, call
+`await replacement.get_sandbox()` to attach the new handle, then
+`await replacement.close(terminate=True)`.
 
 ## Configuration
 

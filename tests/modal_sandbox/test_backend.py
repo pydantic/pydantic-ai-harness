@@ -57,7 +57,7 @@ async def started(**settings: Any) -> ModalSandboxBackend:
     did has to touch the sandbox first. Awaiting the property is that touch.
     """
     backend = ModalSandboxBackend(**settings)
-    await backend.sandbox
+    await backend.get_sandbox()
     return backend
 
 
@@ -74,8 +74,6 @@ def anyio_backend() -> str:
 
 class TestConformance:
     async def test_backend_implements_run_and_filesystem_protocols(self, fake_modal: FakeModal) -> None:
-        # `isinstance` is shallow (member presence only); the signature half is pinned
-        # statically by the `if TYPE_CHECKING` block in `_backend.py`.
         backend = await started()
         assert isinstance(backend, SandboxBackend)
         assert isinstance(backend, SupportsFilesystem)
@@ -83,7 +81,7 @@ class TestConformance:
     async def test_identity_is_modal_object_id(self, fake_modal: FakeModal) -> None:
         backend = await started()
         assert backend.ref == SandboxRef(sandbox_id='sb-owned')
-        assert await backend.sandbox is fake_modal.sandboxes[0]
+        assert await backend.get_sandbox() is fake_modal.sandboxes[0]
 
     async def test_shared_command_validation(self, fake_modal: FakeModal) -> None:
         await check_command_validation(started)
@@ -150,10 +148,10 @@ class TestCreate:
         with pytest.raises(ValueError, match='workdir must be an absolute sandbox path'):
             await started(workdir='repo')
 
-    async def test_normalizes_parent_segments_in_workdir(self, fake_modal: FakeModal) -> None:
+    async def test_preserves_parent_segments_in_workdir(self, fake_modal: FakeModal) -> None:
         await started(workdir='/linked/../target')
 
-        assert fake_modal.create_kwargs[-1]['workdir'] == '/target'
+        assert fake_modal.create_kwargs[-1]['workdir'] == '/linked/../target'
 
     async def test_a_named_create_that_loses_the_race_attaches_instead(self, fake_modal: FakeModal) -> None:
         # Two workers can race to create the same named sandbox -- a durable retry is the
@@ -163,7 +161,7 @@ class TestCreate:
 
         second = await started(name='stable')
 
-        assert await second.sandbox is await first.sandbox
+        assert await second.get_sandbox() is await first.get_sandbox()
         assert len(fake_modal.sandboxes) == 1
 
 
@@ -204,7 +202,7 @@ class TestConnectName:
 
         connected = await started(app_name='pydantic-ai-harness', name='stable')
 
-        assert await connected.sandbox is await created.sandbox
+        assert await connected.get_sandbox() is await created.get_sandbox()
 
     async def test_finished_named_sandbox_is_unavailable(self, fake_modal: FakeModal) -> None:
         await started(name='finished')
@@ -247,7 +245,7 @@ class TestClose:
         first = await started(ref=SandboxRef(sandbox_id='sb-keep'))
         second = await started(ref=SandboxRef(sandbox_id='sb-keep'))
 
-        assert await second.sandbox is await first.sandbox
+        assert await second.get_sandbox() is await first.get_sandbox()
         assert fake_modal.attach_ids == ['sb-keep', 'sb-keep']
 
     async def test_terminates_and_detaches_when_owned(self, fake_modal: FakeModal) -> None:
@@ -355,12 +353,12 @@ class TestRun:
         with pytest.raises(ValueError, match='cwd must be an absolute sandbox path'):
             await backend.run(['pwd'], cwd='repo')
 
-    async def test_normalizes_parent_segments_in_cwd(self, fake_modal: FakeModal) -> None:
+    async def test_preserves_parent_segments_in_cwd(self, fake_modal: FakeModal) -> None:
         backend = await started()
 
         await backend.run(['pwd'], cwd='/linked/../target')
 
-        assert fake_modal.sandboxes[0].exec_calls[-1].workdir == '/target'
+        assert fake_modal.sandboxes[0].exec_calls[-1].workdir == '/linked/../target'
 
     @pytest.mark.parametrize(
         ('command', 'shell', 'message'),
@@ -547,17 +545,18 @@ class TestRun:
 
 
 class TestWorkingDir:
-    async def test_created_workdir_needs_no_probe(self, fake_modal: FakeModal) -> None:
-        backend = await started(workdir='/work')
-        assert await backend.working_dir() == '/work'
-        assert fake_modal.sandboxes[0].exec_calls == []
+    async def test_configured_workdir_is_resolved_before_first_operation(self, fake_modal: FakeModal) -> None:
+        fake_modal.responder = lambda argv, timeout: ('/canonical/work\n', '', 0)
+        backend = ModalSandboxBackend(workdir='/alias')
+        assert await backend.working_dir() == '/canonical/work'
+        assert backend.ref is not None
 
     async def test_probed_once_and_cached(self, fake_modal: FakeModal) -> None:
         fake_modal.responder = lambda argv, timeout: ('/srv\n', '', 0)
         backend = await started()
         assert await backend.working_dir() == '/srv'
         assert await backend.working_dir() == '/srv'
-        assert [call.argv for call in fake_modal.sandboxes[0].exec_calls] == [['pwd']]
+        assert [call.argv for call in fake_modal.sandboxes[0].exec_calls] == [['pwd', '-P']]
 
     async def test_the_probe_carries_a_deadline(self, fake_modal: FakeModal) -> None:
         # Modal has no per-command kill, so even the internal probe is bounded.
@@ -679,3 +678,18 @@ class TestFilesystem:
         fake_modal.sandboxes[0].fs_error = fake_modal.auth_type('unauthenticated')
         with pytest.raises(ModalSandboxAuthError, match='Modal rejected the credentials'):
             await backend.make_dir('/x')
+
+
+async def test_command_timeout_includes_first_sandbox_acquisition(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(fake_modal.module.App, 'lookup', _HangingCall())
+    with pytest.raises(SandboxTimeoutError, match='before the command could start'):
+        await ModalSandboxBackend().run(['echo', 'late'], timeout=0.01)
+    assert fake_modal.sandboxes == []
+
+
+async def test_filesystem_first_use_preserves_acquisition_auth_error(fake_modal: FakeModal) -> None:
+    fake_modal.create_error = fake_modal.auth_type('denied')
+    with pytest.raises(ModalSandboxAuthError):
+        await ModalSandboxBackend().read_bytes('/file')

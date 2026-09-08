@@ -42,11 +42,19 @@ that behavior explicit.
 
 ## Lifecycle
 
-An owned sandbox gets a deterministic name derived from the logical run ID. A retry
-reconnects to the running sandbox with that name before creating one. Acquisition
-detaches the initial handle and stores only the provider and sandbox ID in the
-`SandboxRef`; later workers reconnect by ID. Release reconnects, terminates the
-sandbox, and detaches. An already missing sandbox counts as released.
+Asking the capability for a sandbox does no I/O. It hands back a backend holding settings
+plus, when there is one, the identity of a sandbox that already exists; the first command or
+file operation creates or attaches, once.
+
+An owned sandbox gets a deterministic name derived from the conversation, so a follow-up run
+continues in the same workspace and a durable retry attaches to the sandbox the first attempt
+made rather than provisioning a second one.
+
+Nothing here terminates a sandbox. A conversation can span many runs, so the end of a run is
+not the end of the workspace; Modal reaps a sandbox at `sandbox_timeout`. If Modal has
+already reaped a conversation's sandbox, the next run gets a fresh, empty one under the same
+name and the old files are gone -- raise `sandbox_timeout` when a conversation needs to outlive
+it, or terminate it explicitly with `await backend.close(terminate=True)`.
 
 Attach to a sandbox managed elsewhere when the capability must not own its lifetime:
 
@@ -63,8 +71,8 @@ if cancellation interrupts sandbox creation before the provider returns its ID.
 
 ## Direct backend use
 
-`ModalSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and its
-filesystem, process start, and streaming opt-ins:
+`ModalSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and its optional
+filesystem. Building one does no I/O; the first operation creates the sandbox:
 
 ```python
 import anyio
@@ -73,10 +81,7 @@ from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 
 
 async def main() -> None:
-    backend = await ModalSandboxBackend.create(
-        image='python:3.12-slim',
-        sandbox_timeout=1800,
-    )
+    backend = ModalSandboxBackend(image='python:3.12-slim', sandbox_timeout=1800)
     try:
         result = await backend.run(['python', '--version'], timeout=60)
         print(result.stdout)
@@ -87,13 +92,17 @@ async def main() -> None:
 anyio.run(main)
 ```
 
-Use `connect(sandbox_id)` or `connect_name(app_name, name)` for a running sandbox.
-Neither method provisions a replacement.
+Pass `ref=SandboxRef(sandbox_id=...)` to attach to one specific sandbox, or `name=...` to
+attach to a running sandbox with that name and create it only if there is none. A `ref` whose
+sandbox is gone raises rather than quietly providing an empty replacement.
+
+Use `await backend.get_sandbox()` to access the live `modal.Sandbox` for provider-specific operations.
+`sandbox_timeout` is a maximum lifetime, not an idle timeout.
 
 ## Limits and errors
 
-Modal exposes no per-command kill operation, so `process.kill()` raises
-`NotImplementedError`. Set `timeout=` when starting commands. Modal accepts whole
+Modal exposes no per-command kill operation, so a command runs to its own deadline. Set
+`timeout=` when starting commands. Modal accepts whole
 seconds, so fractional timeouts round up. Cancelling a wait does not kill the remote
 command; it can continue until its command deadline or the sandbox lifetime ends.
 
@@ -107,6 +116,11 @@ apply their own byte or line limits.
 - Command deadlines raise core `SandboxTimeoutError`, including partial `stdout` and
   `stderr`.
 - Missing filesystem paths raise `FileNotFoundError`.
+
+This backend uses asyncio. After `close()`, use a new backend with the saved `ref`
+if further access or a termination retry is needed. Before retrying termination, call
+`await replacement.get_sandbox()` to attach the new handle, then
+`await replacement.close(terminate=True)`.
 
 ## Configuration
 

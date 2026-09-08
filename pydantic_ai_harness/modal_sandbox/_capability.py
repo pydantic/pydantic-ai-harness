@@ -35,8 +35,8 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     first attempt made rather than provisioning a second one.
 
     Nothing here terminates a sandbox. A conversation can span many runs, so the end of a run is
-    not the end of the workspace; Modal reaps an idle sandbox at `sandbox_timeout`. Raise that
-    for longer work, or terminate one yourself through `result.sandbox`.
+    not the end of the workspace; Modal reaps a sandbox at `sandbox_timeout`. Raise that
+    for longer work, or terminate one yourself through `result.sandbox.backend`.
 
     Set `sandbox_id` to attach to an existing sandbox instead.
 
