@@ -2,8 +2,9 @@
 
 `pydantic.md` in this directory is the engine definition that
 [GitHub Agentic Workflows](https://github.com/github/gh-aw) (gh-aw) uses for its
-`pydantic-ai` engine. This directory is the source; the `gh-aw-engine` branch of
-this repository is what ships, and workflows import the file from that branch.
+`pydantic-ai` engine. It is what gh-aw consumes, read from this repository's `main`
+branch: there is no separate published copy, and a merge here reaches every workflow
+that recompiles afterwards.
 
 A workflow has to write the `imports:` line itself. gh-aw's engine catalog maps
 the `pydantic-ai` id to this path, but only to suggest it: naming the engine
@@ -24,7 +25,7 @@ on:
 permissions:
   contents: read
 imports:
-  - pydantic/pydantic-ai-harness/gh-aw/pydantic.md@gh-aw-engine
+  - pydantic/pydantic-ai-harness/gh-aw/pydantic.md@main
 engine:
   id: pydantic-ai
   model: copilot/claude-sonnet-4-5
@@ -34,6 +35,13 @@ engine:
 
 Read the issue and summarize what changed.
 ```
+
+To freeze the definition instead, import `@v0.26.0` -- a release tag of this
+repository -- or a commit SHA; gh-aw resolves the ref at compile time, so `@main`
+re-resolves on every recompile while a tag or SHA does not. A workflow's own
+`engine: version:` overrides the package version the definition pins: gh-aw applies
+the imported definition's version only when the workflow left it empty
+(`applyEngineImportDefaults` in `pkg/workflow/compiler_orchestrator_engine.go`).
 
 `model` is required and must be `provider/model`. gh-aw accepts `copilot`,
 `anthropic`, `openai` and `codex` as the provider segment; it selects which backend
@@ -48,8 +56,8 @@ capabilities, so the engine writes the composition as a Python module at
 its dependencies are installed before the agent starts, with
 `pip install --user "pydantic-ai-harness[cli]==<engine version>"
 "pydantic-ai-slim[openai,mcp]"`. The pinned version is `engine.version` in
-`pydantic.md`, and it always names a published release: CI refuses to move the
-`gh-aw-engine` branch to a commit pinning a version that is not on PyPI.
+`pydantic.md`, and it always names a published release: lint refuses a pull request
+whose pin is not on PyPI.
 
 MCP servers arrive as `.pydantic-ai/mcp.json` in the `mcpServers` shape Claude
 Desktop and Cursor use. Tools carry their server name as a prefix, so safe outputs
@@ -167,7 +175,12 @@ see the credentials section.
 
 ## Changing this file
 
-`pydantic.md` is the published artifact. Editing it here does not ship it: CI moves
-the `gh-aw-engine` branch, either after a release whose tag matches the pinned
-`engine.version`, or through the `gh-aw engine ref` workflow for changes that do not
-need a release. Both refuse to move the branch backwards.
+`pydantic.md` is the published artifact, and merging to `main` is what ships it:
+every consumer importing `@main` picks the change up the next time they recompile.
+Consumers pinned to a tag or a SHA stay where they are until they move the ref.
+
+A harness release does not move the engine. `engine.version` is an ordinary line in
+the file, so a new release reaches consumers only once a pull request bumps it --
+and lint refuses a pin that is not on PyPI, so that pull request is green only after
+the release is published. The release workflow opens an issue when the tag it just
+published and the pinned version differ.

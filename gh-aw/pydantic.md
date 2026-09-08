@@ -371,7 +371,7 @@ this file and set `engine: id: pydantic-ai` to use it:
 
 ```yaml
 imports:
-  - pydantic/pydantic-ai-harness/gh-aw/pydantic.md@gh-aw-engine
+  - pydantic/pydantic-ai-harness/gh-aw/pydantic.md@main
 engine:
   id: pydantic-ai
   model: copilot/claude-sonnet-4-5

@@ -4,26 +4,31 @@
 # ///
 """Validate `gh-aw/pydantic.md` and print the `pydantic-ai-harness` version its engine pins.
 
-GitHub Agentic Workflows resolves its `pydantic-ai` engine from that file on this
-repository's `gh-aw-engine` branch, so the frontmatter is a published contract rather
+GitHub Agentic Workflows resolves the imported definition at compile time and vendors its
+frontmatter into the workflow it generates, so those fields are a published contract rather
 than repo-local config: `engine.id` keys the entry in gh-aw's engine catalog, and
-`engine.version` is the release the generated workflow installs from PyPI at run time.
-A renamed field breaks the catalog entry, and a version that was never published breaks
-every run of it at install time.
+`engine.version` is the release the generated workflow installs from PyPI at run time. A
+renamed field breaks the catalog entry, and a version that was never published breaks every
+run of it at install time.
 
-The lint job and the two jobs that verify a commit before `gh-aw-engine` advances to it
-(`verify-gh-aw-engine` in `main.yml` and `verify` in `gh-aw-engine.yml`) call this, which
-is why the checks live here rather than inlined three times as shell. The advancing jobs
-check out nothing and never run it.
+Consumers import the file from `main`, so a merge reaches them on their next compile and
+nothing downstream re-checks it. `--published` is therefore part of the pull request gate
+rather than a release step: it asks PyPI the one question the file cannot answer about
+itself.
+
+The lint job and the release reminder job both call this, which is why the checks live here
+rather than inlined as shell twice.
 
 Inline dependency metadata, so `uv run --script scripts/gh_aw_engine_version.py` works
-without a project sync: a verify job needs no other part of the harness.
+without a project sync: neither caller needs any other part of the harness.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Literal
 
@@ -32,7 +37,10 @@ from packaging.version import InvalidVersion, Version
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 DEFINITION = Path(__file__).resolve().parent.parent / 'gh-aw' / 'pydantic.md'
-ENGINE_REF = 'gh-aw-engine'
+# Bounds each socket operation rather than the whole request, which is enough to keep a
+# connection that is accepted but never answered from holding a runner until the job
+# default.
+PYPI_TIMEOUT_SECONDS = 30
 
 
 class _Engine(BaseModel):
@@ -47,7 +55,7 @@ class _Engine(BaseModel):
     @classmethod
     def _pep_440(cls, value: str) -> str:
         # gh-aw interpolates this into `pydantic-ai-harness[cli]==<version>`, and the
-        # dispatch workflow interpolates it into a PyPI URL. Anything that is not a
+        # publication check below interpolates it into a PyPI URL. Anything that is not a
         # version is a broken install for consumers, and a value carrying `/` or `?`
         # reaches a different PyPI endpoint than the one the check means to ask about.
         #
@@ -81,20 +89,42 @@ def _frontmatter(text: str) -> str:
 
 
 def engine_version() -> str:
-    """Return `engine.version` once the fields gh-aw and the release jobs read are known good."""
+    """Return `engine.version` once the fields gh-aw and its consumers read are known good."""
     parsed: object = yaml.safe_load(_frontmatter(DEFINITION.read_text(encoding='utf-8')))
     return _Frontmatter.model_validate(parsed).engine.version
+
+
+def unpublished_reason(version: str) -> str | None:
+    """Return why PyPI does not serve `version` as a release, or `None` when it does."""
+    url = f'https://pypi.org/pypi/pydantic-ai-harness/{version}/json'
+    try:
+        with urllib.request.urlopen(url, timeout=PYPI_TIMEOUT_SECONDS) as response:
+            status: int = response.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+    except OSError as exc:
+        # A failed request is not evidence that the version is missing, so it is reported
+        # as the network error it is rather than as an unpublished pin.
+        return f'Could not ask PyPI whether pydantic-ai-harness {version} is published: {exc}'
+
+    if status != 200:
+        return (
+            f'{DEFINITION} pins `engine.version: {version}`, which PyPI does not serve '
+            f'(HTTP {status}). gh-aw installs that version at run time, so a workflow '
+            f'compiled against this definition would fail before the agent starts.'
+        )
+    return None
 
 
 def main() -> int:
     """Print the pinned version, or explain on stderr why the definition cannot be trusted."""
     parser = argparse.ArgumentParser(description='Validate the gh-aw engine definition.')
     parser.add_argument(
-        '--expect',
-        metavar='VERSION',
-        help=f'also require `engine.version` to equal VERSION before `{ENGINE_REF}` may advance',
+        '--published',
+        action='store_true',
+        help='also require the pinned version to be a release PyPI serves',
     )
-    expected: str | None = parser.parse_args().expect
+    published: bool = parser.parse_args().published
 
     try:
         version = engine_version()
@@ -102,14 +132,8 @@ def main() -> int:
         print(f'{DEFINITION} is not a usable gh-aw engine definition: {exc}', file=sys.stderr)
         return 1
 
-    if expected is not None and version != expected:
-        print(
-            f'{DEFINITION} pins `engine.version: {version}` but the release is {expected}, so '
-            f'`{ENGINE_REF}` was not advanced and gh-aw keeps serving the definition pinned to '
-            f'{version}. The package release itself is unaffected. Bump `engine.version` on main '
-            f'and run the `{ENGINE_REF}` dispatch, or pin it before cutting the next tag.',
-            file=sys.stderr,
-        )
+    if published and (reason := unpublished_reason(version)) is not None:
+        print(reason, file=sys.stderr)
         return 1
 
     print(version)
