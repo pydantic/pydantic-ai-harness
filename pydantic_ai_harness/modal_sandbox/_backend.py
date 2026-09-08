@@ -499,15 +499,12 @@ class ModalSandboxBackend(LazySandbox['modal.Sandbox'], SandboxBackend, Supports
             if first_error is None:
                 first_cause = error
                 first_error = translated
+        # A failed detach keeps the live handle so a retry can release it.
+        if not detach_failed:
+            self._live = None
+            self._working_dir = None
         if first_error is not None:
-            # Keep the live handle when detach failed so a retry can release it; a successful
-            # detach below invalidates both caches even when termination itself failed.
-            if not detach_failed:
-                self._live = None
-                self._working_dir = None
             await raise_after_cleanup(first_error, cause=first_cause)
-        self._live = None
-        self._working_dir = None
 
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""

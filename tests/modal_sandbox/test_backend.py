@@ -315,6 +315,21 @@ class TestLifecycle:
         assert fake_modal.attach_ids == ['sb-gone']
         assert fake_modal.create_kwargs == []
 
+    @pytest.mark.parametrize('error_type', ['auth_type', 'error_type'])
+    async def test_destroy_before_first_use_translates_lookup_failure_with_cause(
+        self, fake_modal: FakeModal, error_type: str
+    ) -> None:
+        original = getattr(fake_modal, error_type)('lookup failed')
+        fake_modal.attach_error = original
+        backend = ModalSandboxBackend(ref=SandboxRef(sandbox_id='sb-lookup'))
+        expected = ModalSandboxAuthError if error_type == 'auth_type' else ModalSandboxError
+
+        with pytest.raises(expected) as caught:
+            await backend.destroy()
+
+        assert caught.value.__cause__ is original
+        assert fake_modal.create_kwargs == []
+
     async def test_destroy_terminate_failure_still_detaches_and_retries(self, fake_modal: FakeModal) -> None:
         backend = await started()
         fake_modal.sandboxes[0].terminate_error = RuntimeError('terminate boom')
@@ -342,6 +357,11 @@ class TestLifecycle:
         with pytest.raises(ModalSandboxError, match='detach boom'):
             await backend.destroy()
         assert fake_modal.sandboxes[0].terminated is True
+
+        fake_modal.sandboxes[0].detach_error = None
+        await backend.destroy()
+        assert fake_modal.attach_ids == []
+        assert fake_modal.sandboxes[0].detached is True
 
     async def test_first_failure_wins_when_both_calls_fail(self, fake_modal: FakeModal) -> None:
         backend = await started()
@@ -534,14 +554,40 @@ class TestRun:
         with pytest.raises(ModalSandboxUnavailableError, match='sandbox_timeout of 300s'):
             await backend.run(['x'])
 
-    async def test_a_terminated_sandbox_is_terminal(self, fake_modal: FakeModal) -> None:
-        # The same ambiguous ConflictError against a sandbox this process terminated: the
-        # poll finds it exited, so the failure is terminal rather than a transient abort.
+    async def test_a_destroyed_sandbox_is_unavailable_after_cache_clear(self, fake_modal: FakeModal) -> None:
         backend = await started()
         await backend.destroy()
-        fake_modal.exec_error = fake_modal.conflict_type('Sandbox already finished')
         with pytest.raises(ModalSandboxUnavailableError):
             await backend.run(['x'])
+        assert fake_modal.sandboxes[0].exec_calls == []
+
+    async def test_destroy_waits_for_in_flight_acquisition(self, fake_modal: FakeModal) -> None:
+        fake_modal.create_gate = anyio.Event()
+        backend = ModalSandboxBackend()
+        acquired = anyio.Event()
+        destroyed = anyio.Event()
+
+        async def acquire() -> None:
+            await backend.sandbox
+            acquired.set()
+
+        async def destroy() -> None:
+            await backend.destroy()
+            destroyed.set()
+
+        async with anyio.create_task_group() as task_group:
+            task_group.start_soon(acquire)
+            while not fake_modal.create_started:
+                await anyio.sleep(0)
+            task_group.start_soon(destroy)
+            await anyio.sleep(0)
+            assert not destroyed.is_set()
+            fake_modal.create_gate.set()
+            await acquired.wait()
+            await destroyed.wait()
+
+        assert fake_modal.sandboxes[0].terminated is True
+        assert fake_modal.sandboxes[0].detached is True
 
     async def test_transient_conflict_stays_recoverable(self, fake_modal: FakeModal) -> None:
         backend = await started()
