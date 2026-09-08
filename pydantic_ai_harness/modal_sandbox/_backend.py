@@ -160,8 +160,9 @@ class ModalSandboxBackend(LazySandbox['modal.Sandbox'], SandboxBackend, Supports
     [`sandbox`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.sandbox], which creates or attaches on first use.
 
     Nothing here terminates a sandbox on its own. Modal reaps one at the `sandbox_timeout` it
-    was created with; call [`close`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.close]
-    with `terminate=True` to end it sooner.
+    was created with; call [`destroy`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.destroy]
+    to end it sooner, or [`disconnect`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.disconnect]
+    to release only this local connection.
 
     Commands run as one-shot operations, with complete output returned after they finish.
     Modal enforces `timeout=` itself, so a command is bounded by the deadline applied to its
@@ -396,19 +397,76 @@ class ModalSandboxBackend(LazySandbox['modal.Sandbox'], SandboxBackend, Supports
             return repr(self._ref.sandbox_id)
         return f'named {self._name!r}' if self._name is not None else 'that was never started'  # pragma: lax no cover
 
-    async def close(self, *, terminate: bool) -> None:
-        """Release this handle, terminating the sandbox with it when we own its lifetime.
+    async def destroy(self) -> None:
+        """Terminate the identified sandbox, then release this local connection.
 
-        Each teardown call is shielded from cancellation and bounded so a stalled control
-        plane cannot wedge the caller.
+        An unused backend with a saved `ref` attaches by ID for this operation; an unused
+        backend without one is a no-op. Each cleanup call is shielded from cancellation and
+        bounded so a stalled control plane cannot wedge the caller. The saved `ref` remains
+        available when a cleanup call fails, allowing a later retry. The caller must finish
+        in-flight commands before destroying their sandbox.
         """
         import modal
 
-        sandbox = self._live
-        if sandbox is None:
-            # Never used, so there is nothing to terminate and nothing to detach from.
-            # Resolving one here just to close it would create the very sandbox being released.
-            return
+        async with self._lock:
+            sandbox = self._live
+            if sandbox is None:
+                if self._ref is None:
+                    # Never used and no saved identity, so resolving one here would create the
+                    # very sandbox being released.
+                    return
+                ref = self._ref
+                attached: modal.Sandbox | None = None
+
+                async def attach_call() -> object:
+                    nonlocal attached
+                    # Destruction must not poll first: a handle can still be terminated even
+                    # when Modal reports it as finished, and from_id itself does not create.
+                    attached = await modal.Sandbox.from_id.aio(ref.sandbox_id)
+                    return attached
+
+                error = await cleanup_call(attach_call, timeout=_TEARDOWN_TIMEOUT)
+                if error is not None and isinstance(error, _unavailable_sandbox_exc_types()):
+                    # Already gone is a successful destroy. There is no local handle to detach.
+                    self._working_dir = None
+                    return
+                if error is not None:
+                    if isinstance(error, modal.exception.AuthError):
+                        failure = ModalSandboxAuthError(_AUTH_MESSAGE)
+                    elif isinstance(error, TimeoutError):
+                        failure = ModalSandboxError(
+                            f'Timed out after {_TEARDOWN_TIMEOUT}s while trying to connect '
+                            f'Modal sandbox {self._describe()} for destruction.'
+                        )
+                    else:
+                        failure = ModalSandboxError(
+                            f'Could not connect to Modal sandbox {self._describe()} for destruction: {error}'
+                        )
+                    await raise_after_cleanup(failure, cause=error)
+                assert attached is not None, 'Modal returned no sandbox handle from from_id'
+                sandbox = attached
+                self._live = sandbox
+
+            await self._teardown(sandbox, terminate=True)
+
+    async def disconnect(self) -> None:
+        """Release this local connection without terminating the remote sandbox.
+
+        A backend that has not acquired a native handle has nothing to disconnect. A successful
+        disconnect clears the cached handle and working directory, while retaining `ref` so the
+        next operation can attach to the same sandbox. Each teardown call is shielded from
+        cancellation and bounded so a stalled control plane cannot wedge the caller. The caller
+        must finish in-flight commands before disconnecting their sandbox.
+        """
+        async with self._lock:
+            sandbox = self._live
+            if sandbox is None:
+                return
+            await self._teardown(sandbox, terminate=False)
+
+    async def _teardown(self, sandbox: modal.Sandbox, *, terminate: bool) -> None:
+        """Run bounded cleanup against an already identified native handle."""
+        import modal
 
         async def terminate_call() -> object:
             return await sandbox.terminate.aio(wait=True)
@@ -422,10 +480,13 @@ class ModalSandboxBackend(LazySandbox['modal.Sandbox'], SandboxBackend, Supports
         calls.append(('detach', detach_call))
         first_error: ModalSandboxError | None = None
         first_cause: Exception | None = None
+        detach_failed = False
         for operation, call in calls:
             error = await cleanup_call(call, timeout=_TEARDOWN_TIMEOUT)
             if error is None or isinstance(error, _unavailable_sandbox_exc_types()):
                 continue
+            if operation == 'detach':
+                detach_failed = True
             if isinstance(error, modal.exception.AuthError):
                 translated = ModalSandboxAuthError(_AUTH_MESSAGE)
             elif isinstance(error, TimeoutError):
@@ -439,7 +500,14 @@ class ModalSandboxBackend(LazySandbox['modal.Sandbox'], SandboxBackend, Supports
                 first_cause = error
                 first_error = translated
         if first_error is not None:
+            # Keep the live handle when detach failed so a retry can release it; a successful
+            # detach below invalidates both caches even when termination itself failed.
+            if not detach_failed:
+                self._live = None
+                self._working_dir = None
             await raise_after_cleanup(first_error, cause=first_cause)
+        self._live = None
+        self._working_dir = None
 
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""

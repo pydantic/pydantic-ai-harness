@@ -244,6 +244,7 @@ class FakeSandbox:
         self.fs_error: Exception | None = None
         self.poll_result: int | None = None
         self.poll_error: Exception | None = None
+        self.poll_calls = 0
         self._filesystem = _FakeFilesystem(self)
 
     @property
@@ -288,6 +289,7 @@ class FakeSandbox:
         self.detached = True
 
     def _poll(self) -> int | None:
+        self.poll_calls += 1
         if self.poll_error is not None:
             raise self.poll_error
         if self.poll_result is not None:
