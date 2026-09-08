@@ -11,12 +11,12 @@ from typing_extensions import Never
 
 
 def absolute_path(name: str, value: str | None) -> str | None:
-    """Normalize an absolute POSIX path, preserving `None`."""
+    """Validate an absolute POSIX path without changing symlink traversal."""
     if value is None:
         return None
     if not posixpath.isabs(value):
         raise ValueError(f'{name} must be an absolute sandbox path or None, got {value!r}.')
-    return posixpath.normpath(value)
+    return value
 
 
 async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float) -> Exception | None:
@@ -38,7 +38,7 @@ async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float)
     return error
 
 
-async def raise_after_cleanup(error: Exception) -> Never:
+async def raise_after_cleanup(error: Exception, *, cause: Exception | None = None) -> Never:
     """Deliver pending cancellation before raising a cleanup error."""
     await checkpoint()
-    raise error
+    raise error from cause

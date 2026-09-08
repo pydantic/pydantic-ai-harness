@@ -41,15 +41,15 @@ from pydantic_ai.sandboxes import (
     SandboxRef,
     SandboxTimeoutError,
     SandboxUnavailableError,
+    SupportsFilesystem,
 )
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
 
 if TYPE_CHECKING:
     import modal
-    import modal.container_process
     import modal.io_streams
-    from pydantic_ai.sandboxes import SandboxCommand, SupportsFilesystem
+    from pydantic_ai.sandboxes import SandboxCommand
 
 __all__ = (
     'ModalSandboxAuthError',
@@ -97,7 +97,7 @@ _RESULT_GRACE = 30
 
 
 class ModalSandboxError(SandboxError):
-    """A recoverable Modal provider operation failed."""
+    """A Modal provider operation failed."""
 
 
 class ModalSandboxUnavailableError(ModalSandboxError, SandboxUnavailableError):
@@ -141,77 +141,6 @@ def _command_argv(command: SandboxCommand, shell: bool) -> Sequence[str]:
     return command
 
 
-class _ModalProcess:
-    """Private command result helper used by `ModalSandboxBackend.run`."""
-
-    def __init__(
-        self,
-        process: modal.container_process.ContainerProcess[bytes],
-        *,
-        backend: ModalSandboxBackend,
-        deadline: int | None,
-        started_at: float,
-    ) -> None:
-        self._process = process
-        self._backend = backend
-        self._deadline = deadline
-        self._started_at = started_at
-
-    async def wait(self) -> CommandResult:
-        """Wait for the command and return its result."""
-        return await self._settle()
-
-    async def _settle(self) -> CommandResult:
-        async def read(reader: modal.io_streams.StreamReader[bytes]) -> str:
-            return (await reader.read.aio()).decode('utf-8', errors='replace')
-
-        tasks = (
-            asyncio.create_task(read(self._process.stdout)),
-            asyncio.create_task(read(self._process.stderr)),
-            asyncio.create_task(self._process.wait.aio()),
-        )
-        gather = asyncio.gather(*tasks)
-        try:
-            if self._deadline is None:
-                stdout, stderr, exit_code = await gather
-            else:
-                remaining = max(0.0, self._started_at + self._deadline - time.monotonic())
-                stdout, stderr, exit_code = await asyncio.wait_for(gather, remaining + _RESULT_GRACE)
-        except BaseException as error:
-            # Cancelling the gather cancels its children; awaiting them reaps the cancellations.
-            gather.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            if isinstance(error, Exception):  # cancellation is BaseException-only and re-raises below
-                raise await self._backend.operation_error(
-                    error, 'Could not read the command result (the command may still run until its deadline)'
-                ) from error
-            raise
-
-        elapsed = time.monotonic() - self._started_at
-        # A wait first called long after the deadline can misdate an organic 137 as a timeout.
-        if self._timed_out(exit_code, elapsed):
-            assert self._deadline is not None
-            raise SandboxTimeoutError(
-                f'Command timed out after {self._deadline} seconds and was killed.',
-                stdout=stdout,
-                stderr=stderr,
-                timeout=self._deadline,
-            )
-        return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
-
-    def _timed_out(self, exit_code: int, elapsed: float) -> bool:
-        if self._deadline is None:
-            return False
-        if exit_code == _CLIENT_DEADLINE_EXIT:
-            return True
-        # A command can exit 137 on its own account (an OOM kill, a `kill -9` it asked for), so
-        # that exit only means "the deadline killed it" once the whole window has elapsed. The
-        # window is measured from before the exec call, which makes it a superset of the one
-        # Modal's own timer runs -- the platform starts counting when the command starts, inside
-        # that round trip -- so a deadline kill always lands inside it and an earlier exit does not.
-        return exit_code == _SIGKILL_EXIT and elapsed >= self._deadline
-
-
 def _file_entry(entry: modal.types.FileInfo, path: str) -> FileEntry:
     is_dir = entry.is_dir()
     # A directory's reported size is an implementation detail of the underlying filesystem
@@ -219,7 +148,7 @@ def _file_entry(entry: modal.types.FileInfo, path: str) -> FileEntry:
     return FileEntry(name=entry.name, path=path, is_dir=is_dir, size=None if is_dir else entry.size)
 
 
-class ModalSandboxBackend(SandboxBackend):
+class ModalSandboxBackend(SandboxBackend, SupportsFilesystem):
     """A [Modal](https://modal.com) sandbox as a Pydantic AI [`SandboxBackend`][pydantic_ai.sandboxes.SandboxBackend].
 
     Commands and file operations run inside a Modal container, so the host is never exposed.
@@ -227,8 +156,7 @@ class ModalSandboxBackend(SandboxBackend):
     Building one does no I/O. It holds settings plus, optionally, the identity of a sandbox that
     already exists; the first operation creates or attaches, once, and everything after that
     reuses the same environment. Reach the live `modal.Sandbox` through
-    [`sandbox`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.sandbox], which you can
-    only await — so no operation can run against a sandbox that does not exist yet.
+    [`get_sandbox`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.get_sandbox], which creates or attaches on first use.
 
     Nothing here terminates a sandbox on its own. Modal reaps one at the `sandbox_timeout` it
     was created with; call [`close`][pydantic_ai_harness.modal_sandbox.ModalSandboxBackend.close]
@@ -279,23 +207,13 @@ class ModalSandboxBackend(SandboxBackend):
         self._sandbox_timeout = sandbox_timeout
         self._workdir = absolute_path('workdir', workdir)
         self._env = dict(env) if env is not None else None
-        # Known up front only when this backend will create the sandbox with an explicit
-        # `workdir`; otherwise it is the image's, discovered with `pwd` on first use.
-        self._working_dir = self._workdir if (sandbox is None and ref is None) else None
+        self._working_dir: str | None = None
         # Set once the sandbox exists, so an expiry message can say which lifetime ran out.
         self._created_timeout: int | None = None
         self._lock = anyio.Lock()
 
-    @property
-    def sandbox(self) -> Awaitable[modal.Sandbox]:
-        """The live `modal.Sandbox`, created or attached on first use.
-
-        Awaitable and never a plain value: every operation has to go through the step that
-        makes the sandbox exist, so none of them can skip it.
-        """
-        return self._resolve()
-
-    async def _resolve(self) -> modal.Sandbox:
+    async def get_sandbox(self) -> modal.Sandbox:
+        """Create or attach once and return the live Modal SDK sandbox."""
         async with self._lock:
             if self._live is None:
                 try:
@@ -330,36 +248,43 @@ class ModalSandboxBackend(SandboxBackend):
             raise await self.operation_error(e, f'Could not access {path!r} in the sandbox') from e
 
     async def read_bytes(self, path: str) -> bytes:
+        sandbox = await self.get_sandbox()
         async with self._translated_filesystem_error(path):
-            return await (await self.sandbox).filesystem.read_bytes.aio(path)
+            return await sandbox.filesystem.read_bytes.aio(path)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Modal takes the data first, creates missing parents, and replaces existing contents.
+        sandbox = await self.get_sandbox()
         async with self._translated_filesystem_error(path):
-            await (await self.sandbox).filesystem.write_bytes.aio(data, path)
+            await sandbox.filesystem.write_bytes.aio(data, path)
 
     async def stat(self, path: str) -> FileEntry:
+        sandbox = await self.get_sandbox()
         async with self._translated_filesystem_error(path):
-            return _file_entry(await (await self.sandbox).filesystem.stat.aio(path), path)
+            return _file_entry(await sandbox.filesystem.stat.aio(path), path)
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
+        sandbox = await self.get_sandbox()
         async with self._translated_filesystem_error(path):
-            entries = await (await self.sandbox).filesystem.list_files.aio(path)
+            entries = await sandbox.filesystem.list_files.aio(path)
         return [_file_entry(entry, posixpath.join(path, entry.name)) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
+        sandbox = await self.get_sandbox()
         async with self._translated_filesystem_error(path):
-            await (await self.sandbox).filesystem.make_directory.aio(path)
+            await sandbox.filesystem.make_directory.aio(path)
 
     async def remove(self, path: str) -> None:
+        sandbox = await self.get_sandbox()
         async with self._translated_filesystem_error(path):
-            await (await self.sandbox).filesystem.remove.aio(path, recursive=True)
+            await sandbox.filesystem.remove.aio(path, recursive=True)
 
     async def exists(self, path: str) -> bool:
+        sandbox = await self.get_sandbox()
         import modal
 
         try:
-            await (await self.sandbox).filesystem.stat.aio(path)
+            await sandbox.filesystem.stat.aio(path)
         except (
             modal.exception.SandboxFilesystemNotFoundError,
             modal.exception.SandboxFilesystemNotADirectoryError,
@@ -422,7 +347,7 @@ class ModalSandboxBackend(SandboxBackend):
 
         Modal hands back a handle for a sandbox it still knows about even after that sandbox
         has terminated, so this polls: a `SandboxRef` must not resolve to a dead environment.
-        Nothing is recreated in its place — a run that expected files there must be told they
+        Nothing is recreated in its place -- a run that expected files there must be told they
         are gone, not handed an empty workspace.
         """
         import modal
@@ -466,7 +391,7 @@ class ModalSandboxBackend(SandboxBackend):
     def _describe(self) -> str:
         """How to name this sandbox in an error.
 
-        Every caller runs after `_resolve`, which sets `ref` alongside the live handle, so the
+        Every caller runs after `get_sandbox`, which sets `ref` alongside the live handle, so the
         other two spellings are only reachable if that ever stops being true. `lax no cover`
         for the same reason: they are a fallback, not a path tests should have to reach.
         """
@@ -513,6 +438,7 @@ class ModalSandboxBackend(SandboxBackend):
             else:
                 translated = ModalSandboxError(f'Could not {operation} Modal sandbox {self._describe()}: {error}')
             if first_error is None:
+                translated.__cause__ = error
                 first_error = translated
         if first_error is not None:
             await raise_after_cleanup(first_error)
@@ -524,7 +450,8 @@ class ModalSandboxBackend(SandboxBackend):
         # change, so the probe is an idempotent read: overlapping first calls may each run
         # their own `pwd`, get the same answer, and the cache converges. No lock needed.
         if self._working_dir is None:
-            result = await self.run(['pwd'], timeout=_INTERNAL_EXEC_TIMEOUT)
+            await self.get_sandbox()
+            result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.strip()
             # Only an absolute path is an answer. Caching whatever else the environment
             # printed would hand every later `resolve()` a working directory that is not
@@ -552,21 +479,6 @@ class ModalSandboxBackend(SandboxBackend):
         command running until its `timeout` deadline. Pass a finite `timeout` so an abandoned
         command cannot run on indefinitely.
         """
-        process = await self._start(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
-        return await process.wait()
-
-    async def _start(
-        self,
-        command: SandboxCommand,
-        *,
-        shell: bool = False,
-        cwd: str | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> _ModalProcess:
-        """Start the private command helper used by `run`."""
-        import modal
-
         argv = _command_argv(command, shell)
         cwd = absolute_path('cwd', cwd)
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
@@ -580,13 +492,58 @@ class ModalSandboxBackend(SandboxBackend):
         variables: dict[str, str | None] | None = dict(env) if env is not None else None
         started_at = time.monotonic()
         try:
-            # Modal's text mode decodes strictly, so read bytes and decode with replacement:
-            # a command printing invalid UTF-8 must not abort the run.
-            sandbox = await self.sandbox
+            with anyio.fail_after(timeout):
+                sandbox = await self.get_sandbox()
+        except TimeoutError as error:
+            raise SandboxTimeoutError('Timed out before the command could start.', timeout=timeout) from error
+        import modal
+
+        if timeout is not None:
+            deadline = max(1, math.ceil(timeout - (time.monotonic() - started_at)))
+        started_at = time.monotonic()
+        try:
+            # Read bytes: Modal's text mode uses strict decoding.
             process = await sandbox.exec.aio(*argv, timeout=deadline, workdir=cwd, env=variables, text=False)
-        except modal.exception.Error as e:
-            raise await self.operation_error(e, 'Command could not run in the sandbox') from e
-        return _ModalProcess(process, backend=self, deadline=deadline, started_at=started_at)
+        except modal.exception.Error as error:
+            raise await self.operation_error(error, 'Command could not run in the sandbox') from error
+
+        async def read(reader: modal.io_streams.StreamReader[bytes]) -> str:
+            return (await reader.read.aio()).decode('utf-8', errors='replace')
+
+        tasks = (
+            asyncio.create_task(read(process.stdout)),
+            asyncio.create_task(read(process.stderr)),
+            asyncio.create_task(process.wait.aio()),
+        )
+        gather = asyncio.gather(*tasks)
+        try:
+            if deadline is None:
+                stdout, stderr, exit_code = await gather
+            else:
+                remaining = max(0.0, started_at + deadline - time.monotonic())
+                stdout, stderr, exit_code = await asyncio.wait_for(gather, remaining + _RESULT_GRACE)
+        except BaseException as error:
+            # Cancelling the gather cancels its children; awaiting them reaps the cancellations.
+            gather.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            if isinstance(error, Exception):  # cancellation is BaseException-only and re-raises below
+                raise await self.operation_error(
+                    error, 'Could not read the command result (the command may still run until its deadline)'
+                ) from error
+            raise
+
+        elapsed = time.monotonic() - started_at
+        # Exit 137 also means OOM or an explicit SIGKILL, so classify it only after the deadline.
+        if deadline is not None and (
+            exit_code == _CLIENT_DEADLINE_EXIT or (exit_code == _SIGKILL_EXIT and elapsed >= deadline)
+        ):
+            raise SandboxTimeoutError(
+                f'Command timed out after {deadline} seconds and was killed.',
+                stdout=stdout,
+                stderr=stderr,
+                timeout=deadline,
+            )
+        return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
     def _unavailable_message(self) -> str:
         if self._created_timeout is None:
@@ -624,7 +581,7 @@ class ModalSandboxBackend(SandboxBackend):
         import modal
 
         try:
-            sandbox = await self.sandbox
+            sandbox = await self.get_sandbox()
             finished = await sandbox.poll.aio()
         except modal.exception.AuthError:
             return ModalSandboxAuthError(_AUTH_MESSAGE)
@@ -645,12 +602,3 @@ def _attached_gone_message(described: str) -> str:
         '(it does not exist, was terminated, or expired at its configured lifetime). '
         'Attach to a live sandbox, or create a new one.'
     )
-
-
-if TYPE_CHECKING:
-    # Pins full structural conformance -- signatures included -- which `isinstance` cannot
-    # check. `__new__` rather than a call, because neither SDK object can be constructed
-    # without a live sandbox behind it; this block never runs.
-    _backend = ModalSandboxBackend()
-    _backend_conforms: SandboxBackend = _backend
-    _filesystem_backend_conforms: SupportsFilesystem = _backend

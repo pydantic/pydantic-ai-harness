@@ -12,7 +12,7 @@ pytestmark = pytest.mark.anyio
 
 @pytest.mark.parametrize(
     ('value', 'expected'),
-    [(None, None), ('/', '/'), ('/work/../repo', '/repo'), ('/work//src', '/work/src')],
+    [(None, None), ('/', '/'), ('/work/../repo', '/work/../repo'), ('/work//src', '/work//src')],
 )
 def test_absolute_path(value: str | None, expected: str | None) -> None:
     assert absolute_path('workdir', value) == expected
@@ -74,3 +74,10 @@ async def test_raise_after_cleanup_prefers_cancellation() -> None:
         scope.cancel()
         await raise_after_cleanup(RuntimeError('cleanup failed'))
     assert scope.cancelled_caught is True
+
+
+async def test_cleanup_error_preserves_sdk_cause() -> None:
+    original = RuntimeError('SDK failure')
+    with pytest.raises(ValueError) as exc:
+        await raise_after_cleanup(ValueError('cleanup failed'), cause=original)
+    assert exc.value.__cause__ is original

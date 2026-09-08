@@ -75,7 +75,7 @@ def _unique(prefix: str) -> str:
 async def _owned(**settings: object) -> AsyncGenerator[ModalSandboxBackend]:
     """Create a sandbox and terminate it on the way out, as the capability's hooks do."""
     backend = ModalSandboxBackend(image=_IMAGE, **settings)  # type: ignore[arg-type]
-    await backend.sandbox
+    await backend.get_sandbox()
     try:
         yield backend
     finally:
