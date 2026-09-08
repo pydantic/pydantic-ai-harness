@@ -52,7 +52,7 @@ print(result.output)
 - `url` defaults to the US region. Use `https://logfire-eu.pydantic.dev/mcp` for EU data, or your own `/mcp` URL for a
   self-hosted deployment.
 - To hold writes for human confirmation, apply the
-  [approval recipe](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/stackone#require-approval)
+  [tool approval](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/#requiring-tool-approval)
   to the toolset.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire_mcp/)
