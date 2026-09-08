@@ -217,7 +217,7 @@ SubAgents(agent_folders='agents', tool_resolver=resolve)
 
 When the same name appears in more than one source, the higher-precedence one wins and the others are skipped with a warning: explicitly-passed `agents` first, then the project folder, then the home folder (and, for an explicit path sequence, earlier paths before later ones). A duplicate name within the explicitly-passed `agents` list is still an error.
 
-Earlier releases loaded the conventional folders by default. Pass `agent_folders='agents'` to retain that behavior. `SubAgents()` and `SubAgents(agents=[])` now expose no agents; `SubAgents(agents=[worker])` exposes only the supplied agents. Combine both sources explicitly with `SubAgents(agents=[worker], agent_folders='agents')`.
+Earlier releases loaded the conventional folders by default. Pass `agent_folders='agents'` to retain that behavior. `SubAgents()` and `SubAgents(agents=[])` now expose no agents; `SubAgents(agents=[SubAgent(worker)])` exposes only the supplied agent. Import `SubAgent` from `pydantic_ai_harness.subagents` to wrap a worker `Agent`. Combine both sources explicitly with `SubAgents(agents=[SubAgent(worker)], agent_folders='agents')`.
 
 ## Configuration
 
