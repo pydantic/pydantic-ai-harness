@@ -103,6 +103,10 @@ created by that backend. Attached sandboxes remain available.
 The property remains awaitable after the native handle is cached. Await it before accessing SDK
 methods; type checkers reject using the awaitable as the native sandbox.
 
+`DaytonaSandboxBackend` inherits this behavior from `LazySandbox`. Its `create_or_attach()`
+hook contains the Daytona-specific acquisition and identity handling; the shared helper owns
+coordination and caching. See [writing sandbox backends](https://ai.pydantic.dev/sandbox/#supply-a-sandbox-from-a-capability) for the authoring contract.
+
 ## Process and output behavior
 
 Daytona process sessions provide separate stdout and stderr callbacks. The

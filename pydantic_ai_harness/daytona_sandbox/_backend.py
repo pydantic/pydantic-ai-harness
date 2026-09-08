@@ -26,7 +26,7 @@ import math
 import posixpath
 import shlex
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -35,6 +35,7 @@ import anyio
 from pydantic_ai.sandboxes import (
     CommandResult,
     FileEntry,
+    LazySandbox,
     SandboxBackend,
     SandboxError,
     SandboxRef,
@@ -167,7 +168,7 @@ async def _kill_quietly(process: _DaytonaProcess) -> None:
         pass
 
 
-class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
+class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, SupportsFilesystem):
     """A Daytona sandbox behind Pydantic AI's `SandboxBackend` protocol.
 
     Building one does no I/O. It holds settings plus, optionally, the identity of a sandbox that
@@ -211,6 +212,7 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
         env: Mapping[str, str] | None = None,
         network_block_all: bool = False,
     ) -> None:
+        super().__init__()
         self._ref = ref
         self._name = name
         self._snapshot = snapshot
@@ -220,30 +222,19 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
         self._canonical_working_dir: str | None = None
         self._working_dir = absolute_path('working_dir', working_dir)
         self._client: AsyncDaytona | None = None
-        self._live: AsyncSandbox | None = None
         self._owned = False
         self._closed = False
-        self._lock = anyio.Lock()
 
-    @property
-    def sandbox(self) -> Awaitable[AsyncSandbox]:
-        """The native SDK sandbox, created or attached when awaited.
-
-        Await this property before using SDK methods, including after the sandbox has been resolved.
-        """
-        return self._resolve()
-
-    async def _resolve(self) -> AsyncSandbox:
-        async with self._lock:
-            if self._live is None:
-                if self._ref is not None:
-                    self._live = await self._attach(self._ref.sandbox_id)
-                elif self._name is not None:
-                    self._live = await self._create_or_attach_by_name(self._name)
-                else:
-                    self._live = await self._create()
-                self._ref = SandboxRef(sandbox_id=self._live.id)
-        return self._live
+    async def create_or_attach(self) -> AsyncSandbox:
+        """Acquire the native Daytona sandbox and record its identity."""
+        if self._ref is not None:
+            sandbox = await self._attach(self._ref.sandbox_id)
+        elif self._name is not None:
+            sandbox = await self._create_or_attach_by_name(self._name)
+        else:
+            sandbox = await self._create()
+        self._ref = SandboxRef(sandbox_id=sandbox.id)
+        return sandbox
 
     @property
     def ref(self) -> SandboxRef | None:
