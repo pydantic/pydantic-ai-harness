@@ -16,7 +16,7 @@ from pydantic_ai.tools import AgentDepsT
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as exc:  # pragma: no cover
-    raise ImportError('Install MCP support with: uv add "pydantic-ai-slim[mcp]"') from exc
+    raise ImportError('Install Composio support with: uv add "pydantic-ai-harness[composio]"') from exc
 
 
 @dataclass(kw_only=True)

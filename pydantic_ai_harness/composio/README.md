@@ -7,8 +7,10 @@ Give an agent access to connected applications through a Composio session. Compo
 ## Install and connect
 
 ```bash
-uv add pydantic-ai-harness "pydantic-ai-slim[mcp,openai]" "composio>=0.21.1"
+uv add "pydantic-ai-harness[composio]" "pydantic-ai-slim[openai]"
 ```
+
+The `composio` extra installs the Composio SDK and MCP support. The model provider is installed separately.
 
 Set `COMPOSIO_API_KEY` for Composio and `OPENAI_API_KEY` for the model. Create a session for a stable user ID from your application, and pass both connection values returned by Composio:
 
