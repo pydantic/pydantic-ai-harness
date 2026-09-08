@@ -12,9 +12,6 @@ from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
 
-# Slack's hosted MCP server. It decides whether a token is acceptable; a bot token or anything else it
-# does not recognise gets a 401 at run time. Verified 2026-09-07 against
-# https://docs.slack.dev/ai/slack-mcp-server/; recheck when the integration changes.
 _SLACK_MCP_URL = 'https://mcp.slack.com/mcp'
 
 
@@ -25,17 +22,17 @@ class Slack(AbstractCapability[AgentDepsT]):
     Slack's MCP server accepts user tokens (`xoxp-`) only. A bot token cannot be used here.
     """
 
-    token: str | None = field(default=None, repr=False)
+    auth: str | None = field(default=None, repr=False)
     """The Slack user token. Defaults to `SLACK_USER_TOKEN`."""
     read_only: bool = False
     """Expose only the tools Slack marks read-only, dropping the ones that post, react, or edit as the token's user."""
     id: str | None = 'slack'
 
     def __post_init__(self) -> None:
-        if self.token is None:
-            self.token = os.environ.get('SLACK_USER_TOKEN')
-        if not self.token:
-            raise UserError('Slack tools need a user token. Pass Slack(token=...) or set SLACK_USER_TOKEN.')
+        if self.auth is None:
+            self.auth = os.environ.get('SLACK_USER_TOKEN')
+        if not self.auth:
+            raise UserError('Slack tools need a user token. Pass Slack(auth=...) or set SLACK_USER_TOKEN.')
 
     @classmethod
     def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
@@ -44,7 +41,7 @@ class Slack(AbstractCapability[AgentDepsT]):
         assert isinstance(first, cls)
         for capability in capabilities[1:]:
             assert isinstance(capability, cls)
-            if capability.token != first.token:
+            if capability.auth != first.auth:
                 raise UserError('Multiple Slack capabilities with different credentials cannot be combined.')
         return super().combine(capabilities)
 
@@ -53,8 +50,8 @@ class Slack(AbstractCapability[AgentDepsT]):
         toolset: AbstractToolset[AgentDepsT] = MCPToolset(
             _SLACK_MCP_URL,
             id=f'{self.id or "slack"}-mcp',
-            headers={'Authorization': f'Bearer {self.token}'},
-            include_instructions=True,  # Slack sends none as of 2026-09-07; forwarded if that changes.
+            headers={'Authorization': f'Bearer {self.auth}'},
+            include_instructions=True,
         )
         if self.read_only:
             toolset = toolset.filtered(_slack_marks_read_only)

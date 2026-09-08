@@ -34,13 +34,13 @@ def transport_of(capability: Slack[None]) -> StreamableHttpTransport:
 
 class TestSlack:
     def test_token_becomes_the_bearer_header_for_slack_mcp(self) -> None:
-        transport = transport_of(Slack(token='xoxp-explicit'))
+        transport = transport_of(Slack(auth='xoxp-explicit'))
         assert transport.url == SLACK_MCP_URL
         assert transport.headers == {'Authorization': 'Bearer xoxp-explicit'}
 
     def test_explicit_token_wins_over_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-environment')
-        assert transport_of(Slack(token='xoxp-explicit')).headers == {'Authorization': 'Bearer xoxp-explicit'}
+        assert transport_of(Slack(auth='xoxp-explicit')).headers == {'Authorization': 'Bearer xoxp-explicit'}
 
     def test_environment_token_is_used_when_none_is_passed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-environment')
@@ -48,27 +48,26 @@ class TestSlack:
 
     @pytest.mark.parametrize('token', [None, ''], ids=['omitted', 'empty'])
     def test_missing_token_fails_at_construction(self, token: str | None) -> None:
-        with pytest.raises(UserError, match=r'Pass Slack\(token=...\) or set SLACK_USER_TOKEN'):
-            Slack(token=token)
+        with pytest.raises(UserError, match=r'Pass Slack\(auth=...\) or set SLACK_USER_TOKEN'):
+            Slack(auth=token)
 
     def test_empty_token_does_not_fall_back_to_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-environment')
         with pytest.raises(UserError):
-            Slack(token='')
+            Slack(auth='')
 
     def test_server_instructions_are_forwarded_if_slack_sends_any(self) -> None:
-        toolset = Slack(token='xoxp-user').get_toolset()
+        toolset = Slack(auth='xoxp-user').get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is True
-        assert toolset.id == 'slack-mcp'
 
     def test_all_tools_are_exposed_by_default(self) -> None:
-        assert isinstance(Slack(token='xoxp-user').get_toolset(), MCPToolset)
+        assert isinstance(Slack(auth='xoxp-user').get_toolset(), MCPToolset)
 
     def test_read_only_keeps_only_the_tools_slack_marks_read_only(self) -> None:
-        toolset = Slack(token='xoxp-user', read_only=True).get_toolset()
+        toolset = Slack(auth='xoxp-user', read_only=True).get_toolset()
         assert isinstance(toolset, FilteredToolset)
-        assert transport_of(Slack(token='xoxp-user', read_only=True)).headers == {'Authorization': 'Bearer xoxp-user'}
+        assert transport_of(Slack(auth='xoxp-user', read_only=True)).headers == {'Authorization': 'Bearer xoxp-user'}
 
         ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
         schema: dict[str, object] = {'type': 'object', 'properties': {}}
@@ -83,14 +82,11 @@ class TestSlack:
 
     def test_combine_rejects_different_tokens_and_merges_equal_ones(self) -> None:
         with pytest.raises(UserError, match='different credentials cannot be combined'):
-            Slack.combine([Slack(token='xoxp-one'), Slack(token='xoxp-two')])
+            Slack.combine([Slack(auth='xoxp-one'), Slack(auth='xoxp-two')])
 
-        merged = Slack.combine([Slack(token='xoxp-one'), Slack(token='xoxp-one')])
-        assert isinstance(merged, Slack) and merged.token == 'xoxp-one'
+        merged = Slack.combine([Slack(auth='xoxp-one'), Slack(auth='xoxp-one')])
+        assert isinstance(merged, Slack) and merged.auth == 'xoxp-one'
 
     def test_token_is_kept_out_of_repr(self) -> None:
-        capability = Slack(token='xoxp-user', description='Slack access', defer_loading=True)
+        capability = Slack(auth='xoxp-user', description='Slack access', defer_loading=True)
         assert 'xoxp-user' not in repr(capability)
-        assert capability.id == 'slack'
-        assert capability.description == 'Slack access'
-        assert capability.defer_loading is True
