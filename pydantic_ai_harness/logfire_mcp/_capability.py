@@ -1,19 +1,4 @@
-"""Logfire hosted MCP capability.
-
-Provider contract, verified 2026-09-07:
-
-- `https://logfire-us.pydantic.dev/mcp` and `https://logfire-eu.pydantic.dev/mcp` are the hosted
-  Streamable HTTP endpoints.
-- OAuth and API-key bearer tokens are both accepted. API keys carry scopes such as `project:read`,
-  and Logfire checks them on every request.
-- `project_list` returns the projects the credential can reach; pass the returned project identifier
-  unchanged to project tools.
-- Every tool carries MCP `readOnlyHint` and `destructiveHint` annotations, set by `_tool_scope` in
-  `logfire_mcp_capabilities.catalog` (pydantic/platform). `read_only=True` filters on `readOnlyHint`.
-
-Source: https://pydantic.dev/docs/logfire/guides/mcp-server/. Re-check the endpoint and
-authentication sections before changing connection behavior.
-"""
+"""Logfire hosted MCP capability."""
 
 from __future__ import annotations
 
