@@ -45,6 +45,11 @@ Do not copy `CodeMode` mechanically. Use it to understand package shape,
 testing depth, docs placement, and how a harness capability composes with
 Pydantic AI toolsets.
 
+## Sandbox Backend Authors
+
+Read [writing sandbox backends](../docs/sandbox-backends.md) when implementing a native SDK backend.
+`LazySandbox` owns acquisition coordination and caching; providers implement `create_or_attach()`.
+
 ## Pydantic AI References
 
 - Capabilities: <https://pydantic.dev/docs/ai/capabilities/overview/>
