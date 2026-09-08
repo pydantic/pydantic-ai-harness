@@ -124,6 +124,55 @@ agent = Agent(
 schemas), `tail` (keep the last characters, good for build and test output where errors land
 last), and `head_tail` (keep both ends, elide the middle -- the default).
 
+## Layering with Shell
+
+Keep Shell's native `max_output_chars` above the `ToolOutputLimits` thresholds. Use
+`tail` truncation for moderate command output and `Spill` for large output:
+
+```python
+from pydantic_ai import Agent
+
+from pydantic_ai_harness.shell import Shell
+from pydantic_ai_harness.tool_output_limits import (
+    Band,
+    Spill,
+    ToolOutputLimits,
+    Truncate,
+    TruncationStrategy,
+)
+
+tail = Truncate(max_chars=4_000, strategy=TruncationStrategy.tail)
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    capabilities=[
+        Shell(allowed_commands=['git', 'rg', 'pytest'], max_output_chars=100_000),
+        ToolOutputLimits(
+            bands=[],
+            per_tool={
+                'run_command': [
+                    Band(over=20_000, action=Spill(then=tail)),
+                    Band(over=4_000, action=tail),
+                ],
+            },
+        ),
+    ],
+)
+```
+
+Only `run_command` uses these bands; `bands=[]` leaves other tools to their native limits.
+A tail slice retains an exit-code trailer when it fits in the retained suffix. It does not
+guarantee that an entire line survives a small budget; `head` can remove the trailer.
+
+Shell applies its native cap before `ToolOutputLimits` sees the result. With the spill
+threshold below that cap, a natively truncated result is stored instead of being truncated
+again, unless the store fails. The spill preview shows both ends and the model can use
+`read_tool_result` to inspect the stored text.
+
+Spilling preserves only the result received from Shell. It cannot recover content already
+removed by the native cap. A preview can contain both spill and native truncation notices;
+a native notice describes the stored result, not the shorter preview. `Spill.preview_chars`
+controls the preview's content budget; its header and omission marker add to that length.
+
 ## Both `return_value` and `content` are reduced
 
 A `ToolReturn` carries a `return_value` and an optional `content` that core renders as a
