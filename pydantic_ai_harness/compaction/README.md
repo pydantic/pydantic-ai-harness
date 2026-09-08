@@ -32,6 +32,8 @@ alternative: they work with every model and keep the compaction logic (and its c
 
 ## Triggers
 
+Instruction replacement and withdrawal records contribute their full rendered system text to token estimates. Superseded updates before a new instruction baseline are excluded.
+
 Every size-based strategy triggers on `max_messages`, `max_tokens` (estimated), or `max_fraction`.
 Token counts anchor on the provider-reported usage of the most recent model response when one is
 available: its `input_tokens` measured the whole request that produced it (instructions, tool
@@ -179,20 +181,25 @@ window, and only observes:
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness import ReportContextUsage, SummarizingCompaction
+from pydantic_ai_harness.compaction import ContextUsageEvent
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
         SummarizingCompaction(max_fraction=0.9, keep_messages=20),
-        ReportContextUsage(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
+        ReportContextUsage(),
     ],
 )
+
+@agent.on_event(ContextUsageEvent)
+async def show(ctx, event):
+    print(f'{event.fraction:.0%}')
 ```
 
 Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the
 fallback rather than the model's real one, so a gauge can show that the percentage is a guess.
-`on_usage` may be a coroutine function, so a gauge that pushes over a socket does not need a sync
-bridge.
+Migration: `on_usage` remains supported but is deprecated. Move its callback body to a
+`ContextUsageEvent` subscription.
 
 Order matters: register the monitor *after* a compaction capability to observe the corrected current
 history after same-cycle compaction, or before it to see what triggered the compaction.
@@ -378,7 +385,31 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
 running agent's model. Its nested summary run inherits the parent usage limits and reserves one request from a
-finite request limit for the pending parent request.
+finite request limit for the pending parent request. Pass `model_settings` to give the dedicated summary call
+settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
+without mutating the model or the settings dictionary.
+
+The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch
+the summary as it is written, or pass `drain_summary_events` to take the streaming request path
+without handling the events -- which is what a summarizer endpoint that rejects non-streaming
+requests needs:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction, drain_summary_events
+
+agent = Agent(
+    'openai:gpt-5.6-terra',
+    capabilities=[
+        SummarizingCompaction(max_messages=60, event_stream_handler=drain_summary_events),
+    ],
+)
+```
+
+Neither transport works everywhere, which is why this is a choice rather than a default: some
+endpoints reject non-streaming requests and others reject streaming ones. The handler receives the
+summary run's own `RunContext` and event stream; the outer `Agent.run(...)` handler is not inherited
+and never sees the summary token deltas.
 
 By default `incremental=True` updates the newest existing summary from a prior compaction as an
 anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier
@@ -399,6 +430,12 @@ request count consistent (a model request that didn't count as one would be the 
 `UsageLimits` request limit catch a runaway compaction. The nested run receives the other parent limits unchanged;
 the finite request limit is reduced by one so it cannot spend the slot already approved for the parent request.
 A run-request / iteration limiter will therefore see compaction calls among its requests.
+
+With a durable-execution capability attached, the summary call runs as a contributed durable
+operation, so replay uses the recorded summary instead of calling the model again. When `model` is
+not set, the operation uses the run's model. The capability carries a stable default `id`, which
+durable execution uses to recover the operation by the same identity. Overriding it with a custom
+value orphans recorded operations for in-flight workflows, so keep it fixed once a workflow is live.
 
 ## `DeduplicateFileReads.file_key`
 
@@ -441,6 +478,11 @@ to keep span cardinality low. Attributes:
 harness-specific. Token counts use the strategy's `tokenizer` when set, otherwise the
 ~4-chars-per-token heuristic.
 Raw message content is not recorded.
+
+`SummarizingCompaction` runs its summarizer as a nested `Agent` named `summarizing_compaction`,
+so under `Agent.instrument_all()` (or `logfire.instrument_pydantic_ai()`) its runs carry
+`agent_name = summarizing_compaction`. Filter on that to track summarization usage and cost
+separately from the parent agent.
 
 ## Compaction receipts
 

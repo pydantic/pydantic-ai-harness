@@ -7,6 +7,7 @@ from pydantic_ai import Agent
 from pydantic_ai.capabilities import Capability
 from pydantic_ai.models.test import TestModel
 
+import pydantic_ai_harness.coder
 from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS, Coder, coder_agent
 from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.filesystem import FileSystem
@@ -27,7 +28,12 @@ def test_coder_agent_is_model_less_and_composed() -> None:
     assert isinstance(coder_agent, Agent)
     assert coder_agent.model is None
     assert coder_agent.name == 'coder'
-    assert coder_agent._instructions == ['You are a coding agent built on Pydantic AI.']
+    # Pydantic AI attributes each instruction to the source that contributed it. Assert the base prompt
+    # is still the agent's own rather than dropping the check: `'agent'` is the key an application
+    # overriding this prompt addresses it by, and it would go silently missing if attribution changed.
+    assert [(instruction.instruction, str(instruction.id)) for instruction in coder_agent._instructions] == [
+        ('You are a coding agent built on Pydantic AI.', 'agent')
+    ]
     assert any(isinstance(capability, FileSystem) for capability in coder_agent.root_capability.capabilities)
 
 
@@ -48,7 +54,6 @@ def test_coder_agent_export_is_lazy() -> None:
 
 
 def test_coder_unknown_export() -> None:
-    import pydantic_ai_harness.coder
 
     with pytest.raises(AttributeError, match='has no attribute'):
         pydantic_ai_harness.coder.__getattr__('missing')

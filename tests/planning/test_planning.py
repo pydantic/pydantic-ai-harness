@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic_ai import Agent
@@ -46,8 +46,12 @@ from pydantic_ai_harness.planning._toolset import (
     status_icon,
     validate_hierarchy,
 )
+from tests._recording_durability import RecordingDurability  # pyright: ignore[reportMissingTypeStubs]
 
-pytestmark = pytest.mark.anyio
+pytestmark = [
+    pytest.mark.anyio,
+    pytest.mark.filterwarnings('ignore::pydantic_ai_harness.HarnessDeprecationWarning'),
+]
 
 
 @pytest.fixture
@@ -56,12 +60,37 @@ def anyio_backend() -> str:
 
 
 def _ctx() -> RunContext[None]:
-    return cast(RunContext[None], MagicMock())
+    ctx = MagicMock()
+
+    async def emit(event: object) -> object:
+        return event
+
+    ctx.emit = AsyncMock(side_effect=emit)
+    return cast(RunContext[None], ctx)
 
 
 def _toolset(*, subtasks: bool = False, store: InMemoryPlanStore | None = None) -> PlanningToolset[None]:
     cap = Planning[None](store=store or InMemoryPlanStore(), enable_subtasks=subtasks)
     return PlanningToolset[None](cap)
+
+
+async def test_plan_read_dispatches_as_durable_operation() -> None:
+    store = InMemoryPlanStore()
+    await store.set_items([PlanItem(id='1', content='journal the plan')])
+    durability = RecordingDurability()
+    planning = Planning(store=store)
+    assert planning.id == 'planning'
+    agent = Agent(
+        TestModel(),
+        name='planning',
+        capabilities=[planning, durability],
+    )
+
+    await agent.run('continue')
+
+    bound = RecordingDurability.from_agent(agent)
+    assert bound is not None
+    assert 'planning__capability__planning.read_plan' in {name for name, _ in bound.calls}
 
 
 # --- Types ------------------------------------------------------------------
