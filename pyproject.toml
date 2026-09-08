@@ -152,7 +152,7 @@ lint = [
 ]
 
 [tool.uv.sources]
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "d5ccde50574c4a16e00e886e9e7b94fa15dfd39d" }
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "076c11f8536e799d96bdbbf9349f8b825d437405" }
 
 [tool.hatch.version]
 source = 'uv-dynamic-versioning'
