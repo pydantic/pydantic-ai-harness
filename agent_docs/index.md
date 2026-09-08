@@ -47,7 +47,7 @@ Pydantic AI toolsets.
 
 ## Sandbox Backend Authors
 
-Read [writing sandbox backends](../docs/sandbox-backends.md) when implementing a native SDK backend.
+Read [writing sandbox backends](https://ai.pydantic.dev/sandbox/#supply-a-sandbox-from-a-capability) when implementing a native SDK backend.
 `LazySandbox` owns acquisition coordination and caching; providers implement `create_or_attach()`.
 
 ## Pydantic AI References

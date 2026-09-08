@@ -40,6 +40,7 @@ from anyio.lowlevel import checkpoint
 from pydantic_ai.sandboxes import (
     CommandResult,
     FileEntry,
+    LazySandbox,
     SandboxBackend,
     SandboxError,
     SandboxRef,
@@ -49,7 +50,6 @@ from pydantic_ai.sandboxes import (
 )
 
 from pydantic_ai_harness._sandbox_provider import absolute_path
-from pydantic_ai_harness.sandbox import LazySandbox
 
 if TYPE_CHECKING:
     from pydantic_ai.sandboxes import SandboxCommand

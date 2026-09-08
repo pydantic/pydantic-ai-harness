@@ -115,7 +115,7 @@ methods; type checkers reject using the awaitable as the native sandbox.
 
 `E2BSandboxBackend` inherits this behavior from `LazySandbox`. Its `create_or_attach()`
 hook contains the E2B-specific acquisition and identity handling; the shared helper owns
-coordination and caching. See [writing sandbox backends](sandbox-backends.md) for the authoring contract.
+coordination and caching. See [writing sandbox backends](https://ai.pydantic.dev/sandbox/#supply-a-sandbox-from-a-capability) for the authoring contract.
 
 ## Limits and cancellation
 
