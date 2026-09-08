@@ -9,7 +9,10 @@ pre-agent-steps:
       # directory, before the AWF sandbox exists. -P keeps that directory off
       # sys.path, so a repo-local pip.py or pydantic_ai_harness/ cannot be
       # imported in place of the installed packages.
-      python3 -P -m pip install --quiet --user --disable-pip-version-check "pydantic-ai-harness[cli]==$GH_AW_ENGINE_VERSION" "pydantic-ai-slim[openai,mcp]"
+      #
+      # 2.36.0 is the first pydantic-ai-slim release carrying `pai --mcp-config`,
+      # which is how the gateway's MCP servers reach the agent.
+      python3 -P -m pip install --quiet --user --disable-pip-version-check "pydantic-ai-harness[cli]==$GH_AW_ENGINE_VERSION" "pydantic-ai-slim[openai,mcp]>=2.36.0"
       "$HOME/.local/bin/pai" --version
       python3 -P -c "from pydantic_ai_harness import Coder"
 engine:
@@ -50,7 +53,7 @@ engine:
       provider-env-mode: universal-llm-consumer
     harness-script: |
       const { spawnSync } = require("child_process");
-      const { chmodSync, mkdirSync, readFileSync, writeFileSync } = require("fs");
+      const { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } = require("fs");
       const { homedir } = require("os");
       const { join } = require("path");
       const { fetchAWFReflect, resolveProviderEndpointFromReflect, deriveBaseUrlFromModelsURL } = require("./awf_reflect.cjs");
@@ -58,30 +61,25 @@ engine:
       const [command, ...commandArgs] = process.argv.slice(2);
       const log = message => process.stderr.write(`[pydantic-ai] ${message}\n`);
 
-      // `pai -a` takes one target — either a `module:variable` import path or a
-      // JSON/YAML agent spec — and the spec format resolves capability names
-      // through a closed registry that the harness capabilities are not part of,
-      // so "coder tools plus these MCP servers" cannot be expressed as a spec.
-      // The agent is composed in Python instead: `Coder()` supplies the
-      // filesystem, shell, planning and sub-agent tools, and the gateway's
-      // servers arrive as toolsets read from the Claude-shaped `mcp.json` the
-      // config adapter writes next to this module. `load_mcp_toolsets` expands
-      // `${VAR}` references in that file, which is how header credentials reach
-      // the servers; the servers are optional so the module still imports when
-      // a workflow configures no MCP tools at all.
-      const AGENT_MODULE = `from pathlib import Path
-
-      from pydantic_ai import Agent
-      from pydantic_ai.mcp import load_mcp_toolsets
+      // `pai -a` takes one target, either an import path or a JSON/YAML agent
+      // spec, and the spec format resolves capability names through a closed
+      // registry that the harness capabilities are not part of, so the coder
+      // composition cannot be expressed as a spec. It is written as a Python
+      // module instead: `Coder()` supplies the filesystem, shell, planning and
+      // sub-agent tools.
+      //
+      // The gateway's MCP servers are deliberately not part of the module.
+      // `pai --mcp-config` reads the same Claude-shaped `mcp.json` through the
+      // same `pydantic_ai.mcp.load_mcp_toolsets`, `${VAR}` expansion included, so
+      // routing them through the CLI is what lets a `PAI_AGENT` agent receive
+      // them on identical terms.
+      const AGENT_MODULE = `from pydantic_ai import Agent
       from pydantic_ai_harness import Coder
 
-      _mcp_config = Path(__file__).with_name("mcp.json")
-      agent = Agent(
-          name="coder",
-          capabilities=[Coder()],
-          toolsets=load_mcp_toolsets(_mcp_config) if _mcp_config.exists() else [],
-      )
+      agent = Agent(name="coder", capabilities=[Coder()])
       `;
+      const DEFAULT_AGENT = "gh_aw_agent:agent";
+      const SPEC_SUFFIXES = [".yml", ".yaml", ".json"];
 
       const main = async () => {
         const workspace = process.env.GITHUB_WORKSPACE;
@@ -91,9 +89,17 @@ engine:
 
         const agentDir = join(workspace, ".pydantic-ai");
         mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-        const agentModulePath = join(agentDir, "gh_aw_agent.py");
-        writeFileSync(agentModulePath, AGENT_MODULE, { mode: 0o600 });
-        chmodSync(agentModulePath, 0o600);
+
+        // `PAI_AGENT` runs an agent the repository defines, in whichever form
+        // `pai -a` accepts. The generated module is not written in that case:
+        // nothing would load it, and a stale copy on disk is worse than none.
+        const configuredAgent = process.env.PAI_AGENT;
+        const agentTarget = configuredAgent || DEFAULT_AGENT;
+        if (!configuredAgent) {
+          const agentModulePath = join(agentDir, "gh_aw_agent.py");
+          writeFileSync(agentModulePath, AGENT_MODULE, { mode: 0o600 });
+          chmodSync(agentModulePath, 0o600);
+        }
 
         const env = { ...process.env };
         // `pip install --user` puts `pai` here. The runner tool cache that holds
@@ -116,7 +122,12 @@ engine:
         // reached through PYTHONPATH rather than by importing it as a package
         // from the workspace root. Prepending keeps a caller-supplied
         // PYTHONPATH usable.
-        env.PYTHONPATH = process.env.PYTHONPATH ? `${agentDir}:${process.env.PYTHONPATH}` : agentDir;
+        //
+        // The checkout itself joins the path only under `PAI_AGENT`. That is the
+        // opt-in: it makes repository code importable, which is the whole point
+        // of running your own agent, and it is exactly what `-P` on the install
+        // step keeps off the path for the default composition.
+        env.PYTHONPATH = [agentDir, configuredAgent ? workspace : "", process.env.PYTHONPATH || ""].filter(Boolean).join(":");
         delete env.COPILOT_GITHUB_TOKEN;
 
         const provider = process.env.GH_AW_LLM_PROVIDER;
@@ -181,19 +192,29 @@ engine:
         env.OPENAI_API_KEY = "awf-copilot-proxy";
 
         // `pai` reports a failed `-a` load as a single line naming the target and
-        // nothing else, so the module is imported here first: a missing install,
-        // an unreadable mcp.json or an unresolvable `${VAR}` in it then surfaces
-        // as the real Python traceback instead of "Could not load agent from".
-        const preflight = spawnSync(
-          python,
-          ["-c", "import gh_aw_agent; from pydantic_ai import Agent; assert isinstance(gh_aw_agent.agent, Agent)"],
-          { cwd: workspace, env, encoding: "utf8" }
-        );
-        if (preflight.error) throw preflight.error;
-        if (preflight.status !== 0) {
-          throw new Error(
-            `Could not load the Pydantic AI coder agent with ${python}:\n${preflight.stderr || preflight.stdout || `it exited with code ${preflight.status ?? "unknown"}`}`
+        // nothing else, so the target is imported here first: a missing install or
+        // an agent module that raises then surfaces as the real Python traceback
+        // instead of "Could not load agent from".
+        //
+        // Only the `module:variable` form is reproducible this cheaply. A spec
+        // file goes through `Agent.from_file`, and `pai` also accepts a dotted
+        // `module.attribute` path; both are left to the CLI rather than
+        // reimplemented here, so those keep the terse message.
+        const separator = agentTarget.lastIndexOf(":");
+        const isSpecFile = SPEC_SUFFIXES.some(suffix => agentTarget.toLowerCase().endsWith(suffix));
+        if (!isSpecFile && separator > 0) {
+          const [module, attribute] = [agentTarget.slice(0, separator), agentTarget.slice(separator + 1)];
+          const preflight = spawnSync(
+            python,
+            ["-c", `import ${module} as _agent_module; from pydantic_ai import Agent; assert isinstance(_agent_module.${attribute}, Agent)`],
+            { cwd: workspace, env, encoding: "utf8" }
           );
+          if (preflight.error) throw preflight.error;
+          if (preflight.status !== 0) {
+            throw new Error(
+              `Could not load the Pydantic AI agent ${agentTarget} with ${python}:\n${preflight.stderr || preflight.stdout || `it exited with code ${preflight.status ?? "unknown"}`}`
+            );
+          }
         }
 
         // `pai` sends the model name verbatim, minus the `openai-chat:` provider
@@ -220,8 +241,21 @@ engine:
         // billing a model the workflow never asked for. gh-aw validates
         // `provider/model` at compile time, so PAI_MODEL is set for every compiled
         // workflow, and the throw above covers any other invocation.
-        const args = [...commandArgs, "-a", "gh_aw_agent:agent", "-m", `openai-chat:${model}`, readFileSync(promptFile, "utf8")];
-        log(`provider=${configuredBaseUrl ? "(PAI_BASE_URL)" : provider} model=${model} baseUrl=${baseUrl}`);
+        //
+        // An explicit `-m` also replaces the model a loaded agent declares, so a
+        // `PAI_AGENT` agent runs on the workflow's `engine.model` whatever it was
+        // constructed with. That is what routes it through the endpoint above.
+        const args = [...commandArgs, "-a", agentTarget];
+        // The config adapter writes this file only for a workflow that configures
+        // MCP tools, and `--mcp-config` fails on a path that is not there, so its
+        // absence has to mean "no servers" rather than an error.
+        const mcpConfig = join(agentDir, "mcp.json");
+        if (existsSync(mcpConfig)) args.push("--mcp-config", mcpConfig);
+        args.push("-m", `openai-chat:${model}`, readFileSync(promptFile, "utf8"));
+        log(
+          `provider=${configuredBaseUrl ? "(PAI_BASE_URL)" : provider} model=${model} baseUrl=${baseUrl}` +
+            (configuredAgent ? ` agent=${configuredAgent}` : "")
+        );
         const result = spawnSync(command, args, { cwd: workspace, env, stdio: "inherit" });
         if (result.error) throw result.error;
         if (result.status !== 0) {
@@ -241,8 +275,8 @@ engine:
       config-adapter: |
         // Renders the MCP gateway's configuration as the Claude-style
         // `mcpServers` document that `pydantic_ai.mcp.load_mcp_toolsets` reads,
-        // written next to the generated agent module so the module can find it by
-        // name. Only HTTP entries are carried: `load_mcp_toolsets` can host stdio
+        // which the harness script hands to `pai --mcp-config`. Only HTTP entries
+        // are carried: `load_mcp_toolsets` can host stdio
         // servers too, but the gateway already fronts every configured server
         // over HTTP, and CLI-mounted servers are excluded because the agent
         // reaches those as executables on PATH instead.
@@ -379,26 +413,32 @@ engine:
 
 The agent is a `pydantic_ai.Agent` composed from the harness `Coder`
 capability — filesystem, shell, planning, repository context and an explorer
-sub-agent, with the harness's own context-management guardrails — plus one
-toolset per MCP server the gateway exposes. `pai -a` accepts a single target and
-its JSON agent-spec format cannot name harness capabilities, so the harness
-script writes that composition as a Python module at
-`.pydantic-ai/gh_aw_agent.py`, puts the directory on `PYTHONPATH`, and always
-passes `-a gh_aw_agent:agent`. Because `pai` reduces a failed load to a single
-line naming the target, the harness imports the module itself first and fails
-the step with the underlying Python traceback. Once
-[pydantic/pydantic-ai#1374](https://github.com/pydantic/pydantic-ai/pull/1374)
-ships `--mcp-config`, the module becomes unnecessary:
-`-a pydantic_ai_harness.coder:coder_agent --mcp-config .pydantic-ai/mcp.json`
-composes the same agent, because the CLI loads the same `mcpServers` document
-and passes the toolsets into the run.
+sub-agent, with the harness's own context-management guardrails. `pai -a` accepts
+a single target and its JSON agent-spec format cannot name harness capabilities,
+so the harness script writes that composition as a Python module at
+`.pydantic-ai/gh_aw_agent.py`, puts the directory on `PYTHONPATH`, and passes
+`-a gh_aw_agent:agent`. Because `pai` reduces a failed load to a single line
+naming the target, the harness imports the module itself first and fails the step
+with the underlying Python traceback.
+
+`PAI_AGENT` in `engine.env` replaces that target with an agent the repository
+defines, in the same `module:variable` or spec-file form `pai -a` takes. The
+generated module is then not written, and `GITHUB_WORKSPACE` joins `PYTHONPATH` so
+a module in the repository imports. That is opt-in because it puts repository code
+on the import path. `-m` is still passed, so the agent runs on the workflow's
+`engine.model` rather than any model it was constructed with. See `README.md` next
+to this file.
 
 MCP servers are rendered into `.pydantic-ai/mcp.json` in the same `mcpServers`
-shape Claude Desktop and Cursor use, which `pydantic_ai.mcp.load_mcp_toolsets`
-reads (including `${VAR}` expansion of header values). Tools are prefixed with
-their server name, so safe outputs are reachable as `safeoutputs_create_issue`
-and the like. Only HTTP servers are carried over; CLI-mounted servers stay
-available to the agent's shell as executables on `PATH`.
+shape Claude Desktop and Cursor use, and reach the agent through
+`pai --mcp-config`, which loads them with `pydantic_ai.mcp.load_mcp_toolsets`
+(including `${VAR}` expansion of header values) and passes the toolsets into the
+run. Routing them through the CLI rather than the generated module is what gives a
+`PAI_AGENT` agent the same servers. That flag arrived in pydantic-ai 2.36.0, which
+is the floor on the install line. Tools are prefixed with their server name, so
+safe outputs are reachable as `safeoutputs_create_issue` and the like. Only HTTP
+servers are carried over; CLI-mounted servers stay available to the agent's shell
+as executables on `PATH`.
 
 `model` must use `provider/model` format. The provider segment selects which of
 the AWF api-proxy's backends handles the request; `copilot`, `anthropic`,
@@ -435,6 +475,6 @@ counts only from any JSON lines the run happens to emit.
 
 The CLI and the coder capabilities are installed before the agent runs with
 `pip install --user "pydantic-ai-harness[cli]==<engine version>"
-"pydantic-ai-slim[openai,mcp]"`, into `~/.local` because the runner tool cache
-holding `uv` is not writable from inside the sandbox.
+"pydantic-ai-slim[openai,mcp]>=2.36.0"`, into `~/.local` because the runner tool
+cache holding `uv` is not writable from inside the sandbox.
 -->

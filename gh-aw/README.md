@@ -52,17 +52,86 @@ workflow supplies none.
 
 `pai -a` takes one target and its agent-spec format cannot name harness
 capabilities, so the engine writes the composition as a Python module at
-`.pydantic-ai/gh_aw_agent.py` and always passes `-a gh_aw_agent:agent`. The CLI and
-its dependencies are installed before the agent starts, with
+`.pydantic-ai/gh_aw_agent.py` and passes `-a gh_aw_agent:agent`. The CLI and its
+dependencies are installed before the agent starts, with
 `pip install --user "pydantic-ai-harness[cli]==<engine version>"
-"pydantic-ai-slim[openai,mcp]"`. The pinned version is `engine.version` in
-`pydantic.md`, and it always names a published release: lint refuses a pull request
-whose pin is not on PyPI.
+"pydantic-ai-slim[openai,mcp]>=2.36.0"`. The pinned harness version is
+`engine.version` in `pydantic.md`, and it always names a published release: lint
+refuses a pull request whose pin is not on PyPI. The `2.36.0` floor is the first
+pydantic-ai release carrying `pai --mcp-config`.
 
 MCP servers arrive as `.pydantic-ai/mcp.json` in the `mcpServers` shape Claude
-Desktop and Cursor use. Tools carry their server name as a prefix, so safe outputs
-are reachable as `safeoutputs_create_issue` and so on. HTTP servers are carried
-over; CLI-mounted servers remain on the agent's `PATH` as executables.
+Desktop and Cursor use, and the engine hands that file to `pai --mcp-config`, which
+loads it with `pydantic_ai.mcp.load_mcp_toolsets` and passes the toolsets into the
+run alongside whatever the agent already carries. Tools carry their server name as
+a prefix, so safe outputs are reachable as `safeoutputs_create_issue` and so on.
+HTTP servers are carried over; CLI-mounted servers remain on the agent's `PATH` as
+executables.
+
+## Running your own agent
+
+`PAI_AGENT` in `engine.env` replaces the composed coder agent with one your
+repository defines. It takes exactly what `pai -a` takes: a `module:variable`
+import path, or a `.yml`, `.yaml` or `.json` agent spec file.
+
+```yaml
+---
+on:
+  issues:
+    types: [opened]
+permissions:
+  contents: read
+imports:
+  - pydantic/pydantic-ai-harness/gh-aw/pydantic.md@main
+engine:
+  id: pydantic-ai
+  model: copilot/claude-sonnet-4-5
+  env:
+    PAI_AGENT: my_agent:agent
+steps:
+  - name: Install the agent's dependencies
+    run: python3 -P -m pip install --quiet --user --disable-pip-version-check httpx
+---
+
+# Triage
+
+Read the issue and summarize what changed.
+```
+
+`my_agent.py` lives at the root of your repository:
+
+```python
+from pydantic_ai import Agent
+
+agent = Agent(name='triage', instructions='Answer briefly.')
+```
+
+Five things to know.
+
+- **The repository joins `PYTHONPATH`.** Only when `PAI_AGENT` is set: making
+  repository code importable is the point of running your own agent, and it is what
+  the engine otherwise keeps off the import path for its own composition. The
+  generated `gh_aw_agent.py` is not written at all in this mode.
+- **Dependencies go in a workflow-level `steps:` block.** Those steps run on the
+  host runner, after gh-aw's `Setup Python` and before both the engine's install
+  step and the agent, so a `--user` install lands in the same `$HOME/.local` the
+  sandbox exposes and belongs to the same interpreter (`compiler_yaml_main_job.go`
+  emits `generateRuntimeAndWorkspaceSetupSteps` before
+  `generateEngineInstallAndPreAgentSteps`). `-P` keeps the checkout off `sys.path`
+  for the install itself.
+- **MCP tools arrive the same way they do for the coder agent.** The engine passes
+  `--mcp-config` whenever the gateway wrote a config, so the gateway's servers are
+  added to your agent's own toolsets. Your agent does not load `mcp.json` itself.
+- **The engine always passes `-m`.** An explicit `-m` replaces the model a loaded
+  agent declares, so your agent runs on the workflow's `engine.model` whatever it
+  was constructed with. Configure the model in the workflow, not in the agent.
+- **Endpoint and provider handling are unchanged.** `PAI_BASE_URL`, `/reflect`
+  discovery and the `provider/` prefix behave exactly as they do for the coder
+  agent, described below.
+
+A `module:variable` target is imported before `pai` starts, and an agent that fails
+to import or is not an `Agent` fails the step with the Python traceback. A spec file
+is left to `pai`, which reports its own error.
 
 ## gh-aw compatibility
 
