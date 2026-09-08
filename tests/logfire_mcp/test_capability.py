@@ -16,6 +16,11 @@ from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.logfire_mcp import LogfireMCP
 
+# MCP's test server leaves its lifespan annotation unresolved with pydantic-settings 2.15.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Field 'lifespan' has an incomplete definition:UserWarning:pydantic_settings.sources.utils"
+)
+
 
 @pytest.fixture
 def anyio_backend() -> str:
