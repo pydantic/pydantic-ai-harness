@@ -132,6 +132,7 @@ _CAPABILITY_PAGE_META = {
     'daytona-sandbox.md': ('daytona_sandbox', 'Daytona Sandbox'),
     'modal-sandbox.md': ('modal_sandbox', 'Modal Sandbox'),
     'e2b-sandbox.md': ('e2b_sandbox', 'E2B Sandbox'),
+    'sprite-sandbox.md': ('sprites', 'Sprite Sandbox'),
     'repo-context.md': ('repo_context', 'Repo Context'),
     'researcher.md': ('researcher', 'Researcher'),
     'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),

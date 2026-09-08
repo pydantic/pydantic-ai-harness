@@ -152,6 +152,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 | [Daytona Sandbox](daytona-sandbox.md) | Harness | A [Daytona](https://www.daytona.io) backend for `ctx.sandbox` |
 | [Modal Sandbox](modal-sandbox.md) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
 | [E2B Sandbox](e2b-sandbox.md) | Harness | An [E2B](https://e2b.dev) backend for `ctx.sandbox` |
+| [Sprite Sandbox](sprite-sandbox.md) | Harness | A [Fly.io Sprites](https://sprites.dev) backend for `ctx.sandbox` |
 
 ### Tools & native abilities
 

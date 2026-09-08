@@ -121,6 +121,9 @@ prompt-injection-defender-ml = [
 daytona = [
     "daytona>=0.198.0,<0.199.0",
 ]
+sprites = [
+    "sprites-py>=0.6.0,<0.7",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'
