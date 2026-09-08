@@ -50,7 +50,9 @@ async def _run_and_collect(
         async for event in stream:
             events.append(event)
 
-    capability = FileSystem(root_dir=root, denied_patterns=denied_patterns or [])
+    # Named explicitly: an anonymous capability gets a run-local synthetic id
+    # on newer pydantic-ai, which the event assertions could not pin down.
+    capability = FileSystem(root_dir=root, denied_patterns=denied_patterns or [], id='file_system')
     await Agent(_tool_model(tool_name, json_args), capabilities=[capability]).run('go', event_stream_handler=handler)
     return events
 
