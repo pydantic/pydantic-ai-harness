@@ -42,7 +42,7 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
     read_only: bool = False
     """Expose only tools the server marks read-only; unmarked tools are omitted."""
     include_instructions: bool = True
-    """Forward the server's instructions to the agent."""
+    """Include server instructions, query guidance, and the current UTC time."""
     client: MCPToolsetClient | None = field(default=None, repr=False)
     """Override the connection with a caller-configured MCP client or transport.
 
