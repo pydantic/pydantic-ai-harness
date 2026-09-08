@@ -32,6 +32,8 @@ alternative: they work with every model and keep the compaction logic (and its c
 
 ## Triggers
 
+Instruction replacement and withdrawal records contribute their full rendered system text to token estimates. Superseded updates before a new instruction baseline are excluded.
+
 Every size-based strategy triggers on `max_messages`, `max_tokens` (estimated), or `max_fraction`.
 Token counts anchor on the provider-reported usage of the most recent model response when one is
 available: its `input_tokens` measured the whole request that produced it (instructions, tool
@@ -382,6 +384,28 @@ finite request limit for the pending parent request. Pass `model_settings` to gi
 settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
 without mutating the model or the settings dictionary.
 
+The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch
+the summary as it is written, or pass `drain_summary_events` to take the streaming request path
+without handling the events -- which is what a summarizer endpoint that rejects non-streaming
+requests needs:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction, drain_summary_events
+
+agent = Agent(
+    'openai:gpt-5.6-terra',
+    capabilities=[
+        SummarizingCompaction(max_messages=60, event_stream_handler=drain_summary_events),
+    ],
+)
+```
+
+Neither transport works everywhere, which is why this is a choice rather than a default: some
+endpoints reject non-streaming requests and others reject streaming ones. The handler receives the
+summary run's own `RunContext` and event stream; the outer `Agent.run(...)` handler is not inherited
+and never sees the summary token deltas.
+
 By default `incremental=True` updates the newest existing summary from a prior compaction as an
 anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier
 releases; set `incremental=False` to retain the prior regeneration behavior. `preserve_first_user_message=True` keeps the original task turn even
@@ -449,6 +473,11 @@ to keep span cardinality low. Attributes:
 harness-specific. Token counts use the strategy's `tokenizer` when set, otherwise the
 ~4-chars-per-token heuristic.
 Raw message content is not recorded.
+
+`SummarizingCompaction` runs its summarizer as a nested `Agent` named `summarizing_compaction`,
+so under `Agent.instrument_all()` (or `logfire.instrument_pydantic_ai()`) its runs carry
+`agent_name = summarizing_compaction`. Filter on that to track summarization usage and cost
+separately from the parent agent.
 
 ## Compaction receipts
 
