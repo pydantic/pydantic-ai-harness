@@ -193,6 +193,7 @@ class TestLifecycle:
 
         assert fake_e2b.pause_ids == [('sbx-keep', True)]
         assert fake_e2b.connect_calls == []
+        assert backend.ref == SandboxRef(sandbox_id='sbx-keep')
 
     async def test_stop_before_first_use_drops_memory_without_connecting(self, fake_e2b: FakeE2B) -> None:
         fake_e2b.new_sandbox('sbx-keep')
@@ -202,6 +203,7 @@ class TestLifecycle:
 
         assert fake_e2b.pause_ids == [('sbx-keep', False)]
         assert fake_e2b.connect_calls == []
+        assert backend.ref == SandboxRef(sandbox_id='sbx-keep')
 
     async def test_pause_and_stop_use_attached_handle(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
@@ -319,17 +321,12 @@ class TestLifecycle:
         backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
         cancel_scope: list[anyio.CancelScope] = []
         finished = anyio.Event()
-        outcomes: list[BaseException] = []
 
         async def destroy() -> None:
             with anyio.CancelScope() as scope:
                 cancel_scope.append(scope)
-                try:
-                    await backend.destroy()
-                except BaseException as error:
-                    outcomes.append(error)
-                finally:
-                    finished.set()
+                await backend.destroy()
+                finished.set()
 
         async with anyio.create_task_group() as task_group:
             task_group.start_soon(destroy)
@@ -341,7 +338,6 @@ class TestLifecycle:
             with anyio.fail_after(5):
                 await finished.wait()
 
-        assert outcomes == []
         assert fake_e2b.sandboxes[0].killed is True
 
     async def test_destroy_cancellation_wins_over_cleanup_error(self, fake_e2b: FakeE2B) -> None:
