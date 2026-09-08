@@ -72,7 +72,6 @@ from pydantic_ai_harness import (
     SystemReminders,
     ToolOutputLimits,
 )
-from pydantic_ai_harness.slack import Slack
 from pydantic_ai_harness.system_reminders import Reminder
 
 pytestmark = pytest.mark.anyio
@@ -297,11 +296,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
-    'Slack': Combines(
-        'one Slack MCP connection per agent; duplicate defaults merge only with identical credentials',
-        lambda: (Slack(auth='test-token'), Slack(auth='test-token')),
-        _check_slack,
-    ),
+    'Slack': Collides('provider connections expose fixed tool names; use PrefixTools for multiple connections'),
 }
 
 

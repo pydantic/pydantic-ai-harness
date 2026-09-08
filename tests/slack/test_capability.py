@@ -1,100 +1,90 @@
-"""Tests for the Slack capability: which token it uses and what it hands to the MCP toolset."""
+"""Test Slack's connection settings and tool selection through an agent."""
 
 from __future__ import annotations
 
 import httpx
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
-from pydantic_ai.exceptions import UserError
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
+from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPToolset
+from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import RunContext, ToolDefinition
-from pydantic_ai.toolsets import FilteredToolset
-from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.slack import Slack
 
-SLACK_MCP_URL = 'https://mcp.slack.com/mcp'
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return 'asyncio'
 
 
-@pytest.fixture(autouse=True)
-def no_slack_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv('SLACK_USER_TOKEN', raising=False)
+@pytest.fixture
+def server() -> FastMCP:
+    server = FastMCP('provider', instructions='Provider instructions.')
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    def read_resource() -> str:
+        return 'read'
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+    def write_resource() -> str:
+        return 'written'
+
+    @server.tool()
+    def unmarked_resource() -> str:
+        return 'unmarked'
+
+    return server
 
 
-def transport_of(capability: Slack[None]) -> StreamableHttpTransport:
-    """Return the HTTP transport the capability's toolset was built with."""
+def transport(capability: Slack[None]) -> StreamableHttpTransport:
     toolset = capability.get_toolset()
-    if isinstance(toolset, FilteredToolset):
-        toolset = toolset.wrapped
     assert isinstance(toolset, MCPToolset)
-    transport = toolset.client.transport
-    assert isinstance(transport, StreamableHttpTransport)
-    return transport
-
-
-def authorization_header(capability: Slack[None]) -> str:
-    auth = transport_of(capability).auth
-    assert isinstance(auth, httpx.Auth)
-    request = next(auth.auth_flow(httpx.Request('POST', SLACK_MCP_URL)))
-    return request.headers['Authorization']
+    result = toolset.client.transport
+    assert isinstance(result, StreamableHttpTransport)
+    return result
 
 
 class TestSlack:
-    def test_token_becomes_the_bearer_header_for_slack_mcp(self) -> None:
-        transport = transport_of(Slack(auth='xoxp-explicit'))
-        assert transport.url == SLACK_MCP_URL
-        assert authorization_header(Slack(auth='xoxp-explicit')) == 'Bearer xoxp-explicit'
+    @pytest.mark.parametrize(
+        ('read_only', 'expected'),
+        [
+            (False, '{"read_resource":"read","write_resource":"written","unmarked_resource":"unmarked"}'),
+            (True, '{"read_resource":"read"}'),
+        ],
+    )
+    async def test_agent_executes_selected_tools(self, server: FastMCP, read_only: bool, expected: str) -> None:
+        agent = Agent(TestModel(), capabilities=[Slack(client=server, read_only=read_only)])
+        result = await agent.run('Use the tools')
+        assert result.output == expected
 
-    def test_explicit_token_wins_over_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-environment')
-        assert authorization_header(Slack(auth='xoxp-explicit')) == 'Bearer xoxp-explicit'
+    @pytest.mark.parametrize('include', [True, False])
+    async def test_server_instructions(self, server: FastMCP, include: bool) -> None:
+        agent = Agent(TestModel(call_tools=[]), capabilities=[Slack(client=server, include_instructions=include)])
+        result = await agent.run('Hello')
+        request = result.all_messages()[0]
+        assert isinstance(request, ModelRequest)
+        assert ('Provider instructions.' in (request.instructions or '')) is include
 
-    def test_environment_token_is_used_when_none_is_passed(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-environment')
-        assert authorization_header(Slack()) == 'Bearer xoxp-environment'
+    def test_custom_client_owns_authentication(self) -> None:
+        client = StreamableHttpTransport('https://example.com/mcp', auth=httpx.BasicAuth('user', 'secret'))
+        assert transport(Slack(client=client, auth='ignored')).auth is client.auth
 
-    @pytest.mark.parametrize('token', [None, ''], ids=['omitted', 'empty'])
-    def test_missing_token_fails_at_construction(self, token: str | None) -> None:
-        with pytest.raises(UserError, match=r'Pass Slack\(auth=...\) or set SLACK_USER_TOKEN'):
-            Slack(auth=token)
-
-    def test_empty_token_does_not_fall_back_to_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-environment')
-        with pytest.raises(UserError):
-            Slack(auth='')
-
-    def test_server_instructions_are_forwarded_if_slack_sends_any(self) -> None:
-        toolset = Slack(auth='xoxp-user').get_toolset()
-        assert isinstance(toolset, MCPToolset)
-        assert toolset.include_instructions is True
-
-    def test_custom_auth_reaches_transport(self) -> None:
+    def test_auth_reaches_default_connection(self) -> None:
         auth = httpx.BasicAuth('user', 'secret')
-        assert transport_of(Slack(auth=auth)).auth is auth
+        assert transport(Slack(auth=auth)).auth is auth
 
-    def test_read_only_keeps_only_the_tools_slack_marks_read_only(self) -> None:
-        toolset = Slack(auth='xoxp-user', read_only=True).get_toolset()
-        assert isinstance(toolset, FilteredToolset)
+    def test_credential_is_not_in_repr(self) -> None:
+        assert 'secret-token' not in repr(Slack(auth='secret-token'))
 
-        ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
-        schema: dict[str, object] = {'type': 'object', 'properties': {}}
+    def test_environment_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('SLACK_USER_TOKEN', 'environment-token')
+        auth = transport(Slack()).auth
+        assert isinstance(auth, httpx.Auth)
+        request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
+        assert request.headers['Authorization'] == 'Bearer environment-token'
 
-        def tool(name: str, annotations: dict[str, bool] | None) -> ToolDefinition:
-            return ToolDefinition(name=name, parameters_json_schema=schema, metadata={'annotations': annotations})
-
-        keeps = toolset.filter_func
-        assert keeps(ctx, tool('slack_read_thread', {'readOnlyHint': True})) is True
-        assert keeps(ctx, tool('slack_send_message', {'readOnlyHint': False})) is False
-        assert keeps(ctx, tool('unannotated', None)) is False
-
-    def test_combine_rejects_different_tokens_and_merges_equal_ones(self) -> None:
-        with pytest.raises(UserError, match='different credentials cannot be combined'):
-            Slack.combine([Slack(auth='xoxp-one'), Slack(auth='xoxp-two')])
-
-        merged = Slack.combine([Slack(auth='xoxp-one'), Slack(auth='xoxp-one')])
-        assert isinstance(merged, Slack) and merged.auth == 'xoxp-one'
-
-    def test_token_is_kept_out_of_repr(self) -> None:
-        capability = Slack(auth='xoxp-user', description='Slack access', defer_loading=True)
-        assert 'xoxp-user' not in repr(capability)
+    def test_hosted_endpoint(self) -> None:
+        assert transport(Slack(auth='token')).url == 'https://mcp.slack.com/mcp'
