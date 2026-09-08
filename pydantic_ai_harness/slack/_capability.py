@@ -6,6 +6,7 @@ import os
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
@@ -22,8 +23,8 @@ class Slack(AbstractCapability[AgentDepsT]):
     Slack's MCP server accepts user tokens (`xoxp-`) only. A bot token cannot be used here.
     """
 
-    auth: str | None = field(default=None, repr=False)
-    """The Slack user token. Defaults to `SLACK_USER_TOKEN`."""
+    auth: str | Auth | None = field(default=None, repr=False)
+    """The Slack user token or an `httpx.Auth` that supplies it. Defaults to `SLACK_USER_TOKEN`."""
     read_only: bool = False
     """Expose only the tools Slack marks read-only, dropping the ones that post, react, or edit as the token's user."""
     id: str | None = 'slack'
@@ -50,7 +51,7 @@ class Slack(AbstractCapability[AgentDepsT]):
         toolset: AbstractToolset[AgentDepsT] = MCPToolset(
             _SLACK_MCP_URL,
             id=f'{self.id or "slack"}-mcp',
-            headers={'Authorization': f'Bearer {self.auth}'},
+            auth=self.auth,
             include_instructions=True,
         )
         if self.read_only:
