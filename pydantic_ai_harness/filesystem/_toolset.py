@@ -11,7 +11,7 @@ import re
 import stat
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Concatenate, ParamSpec
+from typing import Concatenate, ParamSpec, TypedDict
 
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -54,6 +54,13 @@ _OUTSIDE_WORKSPACE = '<outside-workspace>'
 
 _NOT_A_PATH = '<not-a-path>'
 """Shown when an error's `filename` is not a path value at all."""
+
+
+class _EventLocation(TypedDict):
+    """The `path` and `root_dir` fields shared by every filesystem event."""
+
+    path: str
+    root_dir: str
 
 
 def _model_safe_filename(filename: str | bytes, real_root: Path) -> str:
@@ -310,6 +317,18 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Canonical path of a resolved location relative to the real root."""
         return str(resolved.relative_to(self._real_root))
 
+    def _event_location(self, resolved: Path) -> _EventLocation:
+        """Path fields for an event about `resolved`.
+
+        `path` is relative to the real root and `root_dir` is that root, so a
+        subscriber rooted elsewhere can rebuild the absolute location instead
+        of assuming the event came from its own root.
+        """
+        return _EventLocation(
+            path=_model_safe_filename(os.fspath(resolved), self._real_root),
+            root_dir=os.fspath(self._real_root),
+        )
+
     def _safe_resolve(self, path: str, *, write: bool = False, check_allowed: bool = True) -> Path:
         """Resolve and access-check a path in one step.
 
@@ -358,20 +377,21 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if _is_binary(raw):
             size = len(raw)
             if ctx is not None:
-                safe_path = _model_safe_filename(os.fspath(resolved), self._real_root)
                 content_hash = hashlib.sha256(raw).hexdigest()[:12]
-                await ctx.emit(FileReadEvent(path=safe_path, content_hash=content_hash))
+                await ctx.emit(FileReadEvent(**self._event_location(resolved), content_hash=content_hash))
             return f'[Binary file: {size} bytes. Use a binary-aware tool to inspect.]'
 
         text = raw.decode('utf-8', errors='replace')
         lines = text.splitlines(keepends=True)
         content_hash = _content_hash(text)
-        safe_path = _model_safe_filename(os.fspath(resolved), self._real_root)
+        # Format before emitting: an out-of-range offset is a failed read, and
+        # a failed read must not look like a successful one to subscribers.
+        body = _format_lines(lines, offset, limit)
         if ctx is not None:
-            await ctx.emit(FileReadEvent(path=safe_path, content_hash=content_hash))
+            await ctx.emit(FileReadEvent(**self._event_location(resolved), content_hash=content_hash))
 
         header = f'[{path} | {len(lines)} lines | hash:{content_hash}]\n'
-        return header + _format_lines(lines, offset, limit)
+        return header + body
 
     async def write_file(self, path: str, content: str, *, expected_hash: str | None = None) -> str:
         """Write a text file directly, outside an agent run."""
@@ -478,9 +498,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         new_hash = _content_hash(content)
         lines = len(content.splitlines())
-        safe_path = _model_safe_filename(os.fspath(resolved), self._real_root)
         if ctx is not None:
-            await ctx.emit(FileWrittenEvent(path=safe_path, content_hash=new_hash))
+            await ctx.emit(FileWrittenEvent(**self._event_location(resolved), content_hash=new_hash))
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
 
     async def edit_file(self, path: str, old_text: str, new_text: str, *, expected_hash: str | None = None) -> str:
@@ -549,9 +568,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         new_content = text.replace(old_text, new_text, 1)
         resolved.write_text(new_content, encoding='utf-8')
         new_hash = _content_hash(new_content)
-        safe_path = _model_safe_filename(os.fspath(resolved), self._real_root)
         if ctx is not None:
-            await ctx.emit(FileWrittenEvent(path=safe_path, content_hash=new_hash))
+            await ctx.emit(FileWrittenEvent(**self._event_location(resolved), content_hash=new_hash))
         return f'Edited {path}. [hash:{new_hash}]'
 
     async def list_directory(self, path: str = '.') -> str:
@@ -611,9 +629,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 break
             entries.append(line)
             entry_count += 1
-        safe_path = _model_safe_filename(os.fspath(resolved), self._real_root)
         if ctx is not None:
-            await ctx.emit(DirectoryListedEvent(path=safe_path, entry_count=entry_count))
+            await ctx.emit(DirectoryListedEvent(**self._event_location(resolved), entry_count=entry_count))
         return '\n'.join(entries) if entries else '(empty directory)'
 
     @_recoverable

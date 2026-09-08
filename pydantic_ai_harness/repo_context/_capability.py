@@ -191,11 +191,19 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     async def _on_file_traversal(
         self, ctx: RunContext[AgentDepsT], event: FileReadEvent | DirectoryListedEvent
     ) -> None:
-        """Enqueue nested context after an authorized filesystem traversal."""
+        """Enqueue nested context after an authorized filesystem traversal.
+
+        The event's `path` is relative to the emitting filesystem's `root_dir`,
+        which need not be `workspace_dir`. Traversals that resolve outside the
+        workspace are ignored: this strategy surfaces nested context, and a
+        directory elsewhere on the host is not nested in anything it knows.
+        """
         if not self.nested_traversal:
             return
-        path = self.workspace_dir / event.path
+        path = Path(event.root_dir) / event.path
         directory = path.parent if isinstance(event, FileReadEvent) else path
+        if not directory.resolve().is_relative_to(self.workspace_dir.resolve()):
+            return
         await self._enqueue_context(ctx, directory)
 
     async def _enqueue_context(self, ctx: RunContext[AgentDepsT], directory: Path) -> None:

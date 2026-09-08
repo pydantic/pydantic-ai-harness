@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections.abc import AsyncIterable, AsyncIterator
 from pathlib import Path
 
@@ -58,6 +59,10 @@ def _hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:12]
 
 
+def _root(path: Path) -> str:
+    return os.path.realpath(path)
+
+
 class TestFileSystemEvents:
     async def test_read_emits_normalized_path_and_hash(self, tmp_path: Path) -> None:
         content = 'hello\n'
@@ -68,6 +73,7 @@ class TestFileSystemEvents:
         assert [event for event in events if isinstance(event, FileReadEvent)] == [
             FileReadEvent(
                 path='target.txt',
+                root_dir=_root(tmp_path),
                 content_hash=_hash(content),
                 capability_id='file_system',
                 tool_call_id='call_1',
@@ -97,6 +103,7 @@ class TestFileSystemEvents:
         assert [event for event in events if isinstance(event, DirectoryListedEvent)] == [
             DirectoryListedEvent(
                 path='sub',
+                root_dir=_root(tmp_path),
                 entry_count=2,
                 capability_id='file_system',
                 tool_call_id='call_1',
@@ -125,12 +132,33 @@ class TestFileSystemEvents:
         assert [event for event in events if isinstance(event, FileWrittenEvent)] == [
             FileWrittenEvent(
                 path='target.txt',
+                root_dir=_root(tmp_path),
                 content_hash=_hash(content),
                 capability_id='file_system',
                 tool_call_id='call_1',
                 tool_name=tool_name,
             )
         ]
+
+    async def test_subdirectory_root_is_carried_on_the_event(self, tmp_path: Path) -> None:
+        project = tmp_path / 'project'
+        project.mkdir()
+        (project / 'code.py').write_text('x = 1\n')
+
+        events = await _run_and_collect(project, 'read_file', '{"path":"code.py"}')
+
+        read_events = [event for event in events if isinstance(event, FileReadEvent)]
+        assert len(read_events) == 1
+        assert read_events[0].path == 'code.py'
+        assert read_events[0].root_dir == _root(project)
+        assert Path(read_events[0].root_dir, read_events[0].path).read_text() == 'x = 1\n'
+
+    async def test_read_rejected_for_out_of_range_offset_emits_no_event(self, tmp_path: Path) -> None:
+        (tmp_path / 'short.txt').write_text('one\ntwo\n')
+
+        events = await _run_and_collect(tmp_path, 'read_file', '{"path":"short.txt","offset":2}')
+
+        assert not any(isinstance(event, FileReadEvent) for event in events)
 
     async def test_denied_operation_emits_no_capability_event(self, tmp_path: Path) -> None:
         (tmp_path / 'secret.txt').write_text('hidden')

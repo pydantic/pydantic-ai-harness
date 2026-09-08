@@ -54,7 +54,7 @@ Rename the tool with `inventory_tool_name`, or scope which roots it scans with
 
 When the model lists or reads a directory, surface that directory's
 `CLAUDE.md`/`AGENTS.md`. This strategy subscribes to `FileReadEvent` and
-`DirectoryListedEvent`, so it receives normalized, authorization-checked paths
+`DirectoryListedEvent`, so it receives normalized, containment-checked paths
 instead of inspecting raw tool arguments. It remains opt-in:
 
 ```python
@@ -82,7 +82,13 @@ before the next model request. Each directory is surfaced at most once per run.
 
 `FileSystem` emits these events directly. Hosts with other file tools can emit
 the same types by importing `FileReadEvent` and `DirectoryListedEvent` from
-`pydantic_ai_harness.filesystem`.
+`pydantic_ai_harness.filesystem`; set `root_dir` to the directory the event's
+`path` is relative to.
+
+The traversed location is `root_dir / path`, so a `FileSystem` rooted at a
+subdirectory of `workspace_dir` still surfaces the right directory. A
+traversal that resolves outside `workspace_dir` is ignored: it is not nested in
+the workspace, so there is no nested context to surface.
 
 `traversal_tool_names` and `traversal_path_arg` are deprecated. Setting either
 to a non-default value emits `HarnessDeprecationWarning` and keeps the old

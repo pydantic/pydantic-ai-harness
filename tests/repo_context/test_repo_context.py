@@ -278,6 +278,62 @@ class TestNestedTraversal:
             ],
         ).run('go')
 
+    async def test_filesystem_rooted_below_the_workspace_resolves_against_its_own_root(self, tmp_path: Path) -> None:
+        project = tmp_path / 'project'
+        _write(project / 'sub' / 'AGENTS.md', 'NESTED BODY')
+        _write(project / 'sub' / 'one.py', 'one')
+        # A decoy at the path the event would name if it were wrongly rebased onto the workspace.
+        _write(tmp_path / 'sub' / 'AGENTS.md', 'DECOY BODY')
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _tool_returns(messages) == 0:
+                yield {0: DeltaToolCall(name='read_file', json_args='{"path":"sub/one.py"}', tool_call_id='one')}
+            else:
+                notes = _repo_notes(messages)
+                assert len(notes) == 1
+                assert 'project/sub/AGENTS.md' in notes[0]
+                yield 'done'
+
+        await Agent(
+            FunctionModel(stream_function=stream),
+            capabilities=[
+                FileSystem(root_dir=project),
+                RepoContext(
+                    workspace_dir=tmp_path,
+                    autoload_instructions=False,
+                    expose_inventory_tool=False,
+                    nested_traversal=True,
+                ),
+            ],
+        ).run('go')
+
+    async def test_filesystem_rooted_outside_the_workspace_enqueues_nothing(self, tmp_path: Path) -> None:
+        workspace = tmp_path / 'workspace'
+        workspace.mkdir()
+        elsewhere = tmp_path / 'elsewhere'
+        _write(elsewhere / 'AGENTS.md', 'OUTSIDE BODY')
+        _write(elsewhere / 'one.py', 'one')
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _tool_returns(messages) == 0:
+                yield {0: DeltaToolCall(name='list_directory', json_args='{"path":"."}', tool_call_id='list')}
+            else:
+                assert _repo_notes(messages) == []
+                yield 'done'
+
+        await Agent(
+            FunctionModel(stream_function=stream),
+            capabilities=[
+                FileSystem(root_dir=elsewhere),
+                RepoContext(
+                    workspace_dir=workspace,
+                    autoload_instructions=False,
+                    expose_inventory_tool=False,
+                    nested_traversal=True,
+                ),
+            ],
+        ).run('go')
+
     async def test_customized_sniff_fallback_warns_and_supports_non_event_tool(self, tmp_path: Path) -> None:
         _write(tmp_path / 'sub' / 'AGENTS.md', 'NESTED BODY')
 
