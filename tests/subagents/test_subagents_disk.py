@@ -173,7 +173,7 @@ class TestResolveFolders:
 class TestDiskLoading:
     @pytest.mark.parametrize('explicit', [False, True])
     def test_no_folder_access_without_opt_in(self, monkeypatch: pytest.MonkeyPatch, explicit: bool) -> None:
-        def unexpected_access(cls: type[Path]) -> Path:
+        def unexpected_access(cls: type[Path]) -> Path:  # pragma: no cover
             pytest.fail('Folder discovery was not requested')
 
         monkeypatch.setattr(Path, 'home', classmethod(unexpected_access))
