@@ -1,95 +1,58 @@
 # Logfire MCP
 
-`LogfireMCP` lets an agent query telemetry and work with dashboards, alerts, and issues through
-[Logfire's hosted MCP server](https://pydantic.dev/docs/logfire/guides/mcp-server/). Every tool the credential
-can reach is exposed, and tools Logfire does not mark read-only require approval before they run. Pass
-`read_only=True` to expose only the read-only tools. Logfire enforces access: the credential's project and scopes
-decide what the agent can read or change.
+Query Logfire telemetry and manage observability resources. `LogfireMCP` connects an agent to the provider's hosted MCP server. By default it exposes the tools the server offers, including write tools. Provider credentials and server settings determine what those tools may access.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-## Install
+## Install and connect
 
 ```bash
 uv add "pydantic-ai-harness[logfire-mcp]" "pydantic-ai-slim[openai]"
 ```
 
-The second package installs the OpenAI provider used by the example. For another model, install its matching provider
-extra instead.
-
-## Set up credentials
-
-For a headless agent, create an API key in the Logfire project's settings with the `project:read` scope, then set the
-Logfire and OpenAI credentials:
-
-```bash
-export LOGFIRE_API_KEY="your-logfire-api-key"
-export OPENAI_API_KEY="your-openai-api-key"
-```
-
-A project-scoped key limits the agent to that project. Add write scopes only when the agent should change
-dashboards, alerts, or issues; pass `read_only=True` to hide the tools that change them. To use interactive OAuth
-instead, omit `auth`; FastMCP opens a browser for Logfire authorization on the first run. Its token store is in memory, so a restart asks you to authorize again. A long-running deployment should
-inject a `client` configured with its own encrypted, per-user token storage.
-
-## Run an agent
+Set `LOGFIRE_API_KEY` to a Logfire API key, or pass `auth=...`. When neither is supplied, the connection starts browser OAuth. `auth` accepts an `httpx.Auth` for caller-managed authentication. See the [provider setup](https://pydantic.dev/docs/logfire/guides/mcp-server/).
 
 ```python
-import os
-
 from pydantic_ai import Agent
 from pydantic_ai_harness.logfire_mcp import LogfireMCP
 
-agent = Agent(
-    'openai:gpt-5.6-sol',
-    capabilities=[LogfireMCP(auth=os.environ['LOGFIRE_API_KEY'])],
-)
-result = agent.run_sync('Count exceptions by service over the last 30 minutes')
+agent = Agent('openai:gpt-5.6-sol', capabilities=[LogfireMCP()])
+result = agent.run_sync('Summarize the resources I can access')
 print(result.output)
 ```
 
-## What to ask
+## Provider settings
 
-- Count or list recent exceptions, grouped by service or file.
-- Explain the query schema for spans, logs, and metrics.
-- Create a Logfire link for a trace.
-- List dashboards, alerts, and open issues, or change them with a credential that has write scopes.
+The default endpoint is `https://logfire-us.pydantic.dev/mcp`. Set `url=LOGFIRE_EU_MCP_URL` for EU data, or provide a self-hosted MCP URL. API-key scopes determine access to projects and operations.
 
-## Operational constraints
+The capability supplies the current UTC time and brief query guidance: schema timestamps are not a clock, transport time bounds also constrain SQL, and links are created only when requested. `include_instructions=False` disables both this guidance and server instructions. Logfire owns query semantics, time windows, and result schemas.
 
-- The model chooses the project. The server's `project_list` tool returns the projects the credential can reach. Pass
-  the returned project identifier unchanged to project tools. A project-scoped API key limits the list to one entry.
-- `include_instructions` forwards the instructions the Logfire server sends on connect and adds UTC time anchored to
-  the user prompt, so it stays fixed across model requests in one run. The added guidance explains that query
-  transport bounds apply in addition to SQL predicates, that schema timestamps are not a clock, and that links should
-  only be created when asked. Set `include_instructions=False` to leave out both server and capability instructions.
-- `url` defaults to the US region. Use `LOGFIRE_EU_MCP_URL` for EU data, or your own `/mcp` URL for a self-hosted
-  deployment.
-- By default every tool the credential can reach is exposed, including dashboard, alert, issue, and variable
-  mutations. `read_only=True` exposes only the tools Logfire marks `readOnlyHint`.
-- `allowed_tools` narrows the exposed tools by exact name. It does not replace credential scopes.
-- Unless `read_only=True`, tools not marked read-only require human approval automatically. Add
-  `DeferredToolRequests` to the output type, then approve and resume the run as
-  the [deferred tools guide](https://ai.pydantic.dev/deferred-tools/) describes:
+## Tool selection and approval
 
-  ```python
-  from pydantic_ai import Agent, DeferredToolRequests
-  from pydantic_ai_harness.logfire_mcp import LogfireMCP
+`read_only=True` keeps only tools explicitly marked `readOnlyHint: true`; unmarked tools are omitted. This can leave no tools when a server does not annotate its read operations. Credentials remain the access-control boundary.
 
-  agent = Agent(
-      'openai:gpt-5.6-sol',
-      capabilities=[LogfireMCP()],
-      output_type=[str, DeferredToolRequests],
-  )
-  ```
-- Two `LogfireMCP` instances on one agent conflict because the server's tool names are fixed.
-- An injected `client` replaces `url` and `auth`. Configure authentication on the client itself.
-- For a hard limit on investigation fan-out, pass
-  [`UsageLimits(tool_calls_limit=...)`](https://pydantic.dev/docs/ai/api/pydantic-ai/usage/#pydantic_ai.usage.UsageLimits)
-  when running the agent. Compose [`ClearToolResults`](https://pydantic.dev/docs/ai/harness/compaction/) when large
-  schema or query results should be removed from later model requests.
-- Telemetry can contain user-controlled text. Compose
-  [`PromptInjectionDefender`](https://pydantic.dev/docs/ai/harness/prompt-injection-defender/) or a
-  [`ToolGuardrail`](https://pydantic.dev/docs/ai/harness/guardrails/) when tool results need an enforced policy.
+For application-level filtering or approval, compose the existing [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/). For example, this requires approval before every tool call:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.messages import DeferredToolRequests
+from pydantic_ai_harness.logfire_mcp import LogfireMCP
+
+capability = LogfireMCP()
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    toolsets=[capability.get_toolset().approval_required()],
+    instructions=capability.get_instructions(),
+    output_type=[str, DeferredToolRequests],
+)
+```
+
+Handle the resulting requests using the [deferred tools workflow](https://pydantic.dev/docs/ai/tools-toolsets/deferred-tools/). Output limits can be composed with [Tool Output Limits](https://pydantic.dev/docs/ai/harness/tool-output-limits/).
+
+## Connection customization
+
+Pass `client` to use a configured FastMCP client or transport, including custom OAuth token storage and MCP handlers. That client owns its URL, authentication, and server configuration; configure those on it instead of the capability. `read_only=True` applies the same annotation filter to custom clients.
+
+`include_instructions` controls whether server instructions reach the model. Keep authenticated connections separate for different users. To combine connections with overlapping tool names, give them distinct IDs and compose [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire_mcp/)
