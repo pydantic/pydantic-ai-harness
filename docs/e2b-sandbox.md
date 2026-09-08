@@ -107,8 +107,11 @@ Pass `ref=SandboxRef(sandbox_id=...)` to attach to one specific sandbox, or `ide
 reuse the oldest sandbox carrying that metadata and create one only if there is none. A `ref`
 whose sandbox is gone raises rather than quietly providing an empty replacement.
 
-`await backend.get_sandbox()` returns the live `e2b.AsyncSandbox` for E2B-specific operations,
+`await backend.sandbox` returns the live `e2b.AsyncSandbox` for E2B-specific operations,
 creating or attaching on first use.
+
+The property remains awaitable after the native handle is cached. Await it before accessing SDK
+methods; type checkers reject using the awaitable as the native sandbox.
 
 ## Limits and cancellation
 

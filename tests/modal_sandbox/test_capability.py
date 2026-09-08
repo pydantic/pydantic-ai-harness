@@ -35,7 +35,7 @@ async def _resolved(capability: ModalSandbox[None], ctx: RunContext[None], ref: 
     """Ask the capability for a backend and touch it, so the create-or-attach actually happens."""
     backend = capability.get_sandbox(ctx, ref=ref)
     assert isinstance(backend, ModalSandboxBackend)
-    await backend.get_sandbox()
+    await backend.sandbox
     return backend
 
 

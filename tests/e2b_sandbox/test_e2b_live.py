@@ -62,7 +62,7 @@ def _unique(prefix: str) -> str:
 async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
     """Create a sandbox and kill it on the way out, so a live run leaves nothing behind."""
     backend = E2BSandboxBackend(**settings)  # type: ignore[arg-type]
-    await backend.get_sandbox()
+    await backend.sandbox
     try:
         yield backend
     finally:
@@ -314,7 +314,7 @@ class TestRealLifecycle:
         assert ref is not None
 
         with pytest.raises(E2BSandboxUnavailableError):
-            await E2BSandboxBackend(ref=ref).get_sandbox()
+            await E2BSandboxBackend(ref=ref).sandbox
 
     async def test_connect_reuses_state_and_leaves_the_sandbox_running(self) -> None:
         """Validates the fake-encoded assumption that connecting reuses state and does not take ownership."""
@@ -323,7 +323,7 @@ class TestRealLifecycle:
             await owner.write_bytes(marker, b'shared')
 
             attached = E2BSandboxBackend(ref=owner.ref)
-            assert (await attached.get_sandbox()).sandbox_id == (await owner.get_sandbox()).sandbox_id
+            assert (await attached.sandbox).sandbox_id == (await owner.sandbox).sandbox_id
             assert await attached.read_bytes(marker) == b'shared'
             await attached.close(terminate=False)
 
@@ -333,12 +333,12 @@ class TestRealLifecycle:
         """Pins the documented behavior that attaching to a paused sandbox restarts it.
 
         This is the E2B-specific half of attach mode: a paused sandbox is not gone, and the
-        capability's `get_sandbox` brings it back rather than failing.
+        backend's awaited `sandbox` property brings it back rather than failing.
         """
         marker = f'/tmp/{_unique("paused")}.txt'
         async with _owned(sandbox_timeout=120) as owner:
             await owner.write_bytes(marker, b'before-pause')
-            await (await owner.get_sandbox()).beta_pause()
+            await (await owner.sandbox).beta_pause()
 
             attached = E2BSandboxBackend(ref=owner.ref)
             assert await attached.read_bytes(marker) == b'before-pause'

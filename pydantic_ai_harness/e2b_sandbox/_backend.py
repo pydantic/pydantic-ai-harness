@@ -166,7 +166,7 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
     Building one does no I/O. It holds settings plus, optionally, the identity of a sandbox that
     already exists; the first operation creates or attaches, once, and everything after that
     reuses the same environment. Reach the live `e2b.AsyncSandbox` through
-    [`get_sandbox`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.get_sandbox], by awaiting `get_sandbox()`.
+    [`sandbox`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.sandbox], by awaiting `sandbox`.
 
     Nothing here kills a sandbox. E2B reaps one at the `sandbox_timeout` it was created with;
     call [`close`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.close] with
@@ -230,8 +230,15 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
         self._created_timeout: int | None = None
         self._lock = anyio.Lock()
 
-    async def get_sandbox(self) -> e2b.AsyncSandbox:
-        """Create or attach on first use and return the live E2B SDK sandbox."""
+    @property
+    def sandbox(self) -> Awaitable[e2b.AsyncSandbox]:
+        """The native SDK sandbox, created or attached when awaited.
+
+        Await this property before using SDK methods, including after the sandbox has been resolved.
+        """
+        return self._resolve()
+
+    async def _resolve(self) -> e2b.AsyncSandbox:
         async with self._lock:
             if self._live is None:
                 if self._ref is not None:
@@ -262,32 +269,32 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
 
     async def read_bytes(self, path: str) -> bytes:
         async with self._translated_filesystem_error(path):
-            return bytes(await (await self.get_sandbox()).files.read(path, 'bytes'))
+            return bytes(await (await self.sandbox).files.read(path, 'bytes'))
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         async with self._translated_filesystem_error(path):
-            await (await self.get_sandbox()).files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
+            await (await self.sandbox).files.write(path, data)  # pyright: ignore[reportUnknownMemberType]
 
     async def stat(self, path: str) -> FileEntry:
         async with self._translated_filesystem_error(path):
-            return _file_entry(await (await self.get_sandbox()).files.get_info(path))
+            return _file_entry(await (await self.sandbox).files.get_info(path))
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         async with self._translated_filesystem_error(path):
-            entries = await (await self.get_sandbox()).files.list(path, depth=1)
+            entries = await (await self.sandbox).files.list(path, depth=1)
         return [_file_entry(entry) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
         async with self._translated_filesystem_error(path):
-            await (await self.get_sandbox()).files.make_dir(path)
+            await (await self.sandbox).files.make_dir(path)
 
     async def remove(self, path: str) -> None:
         async with self._translated_filesystem_error(path):
-            await (await self.get_sandbox()).files.remove(path)
+            await (await self.sandbox).files.remove(path)
 
     async def exists(self, path: str) -> bool:
         async with self._translated_filesystem_error(path):
-            return await (await self.get_sandbox()).files.exists(path)
+            return await (await self.sandbox).files.exists(path)
 
     async def _create(self) -> e2b.AsyncSandbox:
         """Provision a fresh E2B sandbox."""
@@ -369,7 +376,7 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
     def _describe(self) -> str:
         """How to name this sandbox in an error.
 
-        Every caller runs after `get_sandbox`, which sets `ref` alongside the live handle, so the
+        Every caller runs after `sandbox`, which sets `ref` alongside the live handle, so the
         other two spellings are only reachable if that ever stops being true. `lax no cover`
         for the same reason: they are a fallback, not a path tests should have to reach.
         """
@@ -406,7 +413,7 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""
         if self._canonical_working_dir is None:
-            await self.get_sandbox()
+            await self.sandbox
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.strip()
             if result.exit_code != 0 or not posixpath.isabs(printed):
@@ -436,7 +443,7 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
         result: e2b.CommandResult | None = None
         try:
             with anyio.move_on_after(timeout):
-                sandbox = await self.get_sandbox()
+                sandbox = await self.sandbox
                 handle = await sandbox.commands.run(
                     line,
                     background=True,
@@ -511,7 +518,7 @@ class E2BSandboxBackend(SandboxBackend, SupportsFilesystem):
         error keeps the extra round trip off successful operations.
         """
         try:
-            sandbox = await self.get_sandbox()
+            sandbox = await self.sandbox
             running = await sandbox.is_running()
         except Exception:
             # The classifying probe can itself fail, including with a raw transport error; fall
