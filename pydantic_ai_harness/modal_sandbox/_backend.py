@@ -36,6 +36,7 @@ import anyio
 from pydantic_ai.sandboxes import (
     CommandResult,
     FileEntry,
+    LazySandbox,
     SandboxBackend,
     SandboxError,
     SandboxRef,
@@ -45,7 +46,6 @@ from pydantic_ai.sandboxes import (
 )
 
 from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
-from pydantic_ai_harness.sandbox import LazySandbox
 
 if TYPE_CHECKING:
     import modal
