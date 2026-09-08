@@ -20,18 +20,20 @@ idea the rest of the setup exists, so it can neither honor it nor translate it.
 from pathlib import Path
 
 from pydantic_ai import Agent
+from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import RepoContext
 
 agent = Agent(
     'anthropic:claude-sonnet-4-6',
-    capabilities=[RepoContext(workspace_dir=Path('/workspace'), home_dir=Path('/home/agent'))],
+    capabilities=[RepoContext(workspace_dir=Path.cwd(), home_dir=Path.home())],
 )
+result = agent.run_sync('Summarize the coding-assistant setup in this repo.', workspace=LocalWorkspace(root=Path.cwd()))
 ```
 
-All configured paths and discovered files refer to the run sandbox. Relative paths use its
-working directory, and `~` is not expanded -- use an absolute sandbox path or one relative to
-the sandbox working directory. The capability needs a sandbox attached to the run; without one
-it raises an error that says how to attach one (`sandbox=LocalSandbox(root=...)` for the agent
+All configured paths and discovered files refer to the run workspace. Relative paths use its
+working directory, and `~` is not expanded -- use an absolute workspace path or one relative to
+the workspace working directory. The capability needs a workspace attached to the run; without one
+it raises an error that says how to attach one (`workspace=LocalWorkspace(root=...)` for the agent
 process's own filesystem).
 
 ### 1. Walk-up instruction autoload (on by default)
@@ -43,7 +45,7 @@ hash, so a symlinked `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical
 content load once.
 
 When `home_dir` is `None` (the default), only `workspace_dir` is scanned -- no
-walk-up. Pass the sandbox home path explicitly to walk up to it.
+walk-up. Pass the workspace home path explicitly to walk up to it.
 
 ### 2. Asset inventory (on by default)
 
@@ -55,18 +57,20 @@ does not parse them, leaving translation to the orchestrator.
 
 Rename the tool with `inventory_tool_name`, or scope which roots it scans with
 `asset_roots`.
-Roots must be relative to `workspace_dir`.
+Relative asset roots are resolved from `workspace_dir`. Skill discovery visits up to eight nested directories to bound traversal through symlink cycles.
 
 ### 3. Nested-on-traversal (off by default)
 
 When the model lists or reads a directory, surface that directory's
-`CLAUDE.md`/`AGENTS.md`. This couples to the host's list/read tools, so it is
-opt-in and configurable:
+`CLAUDE.md`/`AGENTS.md`. This strategy subscribes to `FileReadEvent` and
+`DirectoryListedEvent`, so it receives normalized, containment-checked paths
+instead of inspecting raw tool arguments. It remains opt-in:
 
 ```python
 from pathlib import Path
 
 from pydantic_ai import Agent
+from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import FileSystem, RepoContext
 
 agent = Agent(
@@ -76,17 +80,32 @@ agent = Agent(
         RepoContext(
             workspace_dir=Path('.'),
             nested_traversal=True,
-            traversal_tool_names=frozenset({'list_directory', 'read_file'}),  # the FileSystem tool names to hook
-            traversal_path_arg='path',                                   # the path arg key
-            nested_inject='pointer',                                     # or 'contents'
+            nested_inject='pointer',  # or 'contents'
         )
     ],
 )
+result = agent.run_sync('List the source directory.', workspace=LocalWorkspace(root=Path.cwd()))
 ```
 
-`nested_inject='pointer'` (default) appends a one-line note pointing at the file;
-`'contents'` inlines the file body. Each directory is surfaced at most once per
-run.
+`nested_inject='pointer'` (default) enqueues a one-line note pointing at the
+file; `'contents'` enqueues the file body. The note reaches message history
+before the next model request. Each directory is surfaced at most once per run.
+
+`FileSystem` emits these events directly. Hosts with other file tools can emit
+the same types by importing `FileReadEvent` and `DirectoryListedEvent` from
+`pydantic_ai_harness.filesystem`; set `root_dir` to the directory the event's
+`path` is relative to.
+
+The traversed location is `root_dir / path`, so a `FileSystem` rooted at a
+subdirectory of `workspace_dir` still surfaces the right directory. A
+traversal that resolves outside `workspace_dir` is ignored: it is not nested in
+the workspace, so there is no nested context to surface.
+
+`traversal_tool_names` and `traversal_path_arg` are deprecated. Setting either
+to a non-default value emits `HarnessDeprecationWarning` and keeps the old
+tool-name and argument sniffing path active for hosts that do not emit events.
+With the defaults, sniffing is disabled, so a `FileSystem` event cannot deliver
+the same note twice.
 
 ## Cache cost
 
@@ -97,12 +116,12 @@ cache-relevant paths separate:
 - Strategy 1 reads its files **once at run start** and injects them as static
   system instructions, so the cached prefix stays byte-identical across turns.
 - Strategy 3 is volatile (it depends on which directory was just touched), so its
-  note is appended to the **tool result** in the message tail -- never to the
-  system prompt -- and cannot invalidate the cached prefix.
+  note is enqueued in the message tail, never in the system prompt, and cannot
+  invalidate the cached prefix.
 
 ## Configuration
 
-```python
+```python {test="skip"}
 RepoContext(
     workspace_dir,                  # Path -- the deepest dir the agent works in (required)
     home_dir=None,                  # Path | None -- shallowest dir to stop walk-up at, inclusive
@@ -112,8 +131,8 @@ RepoContext(
     inventory_tool_name='inventory_agent_context',
     nested_traversal=False,         # Strategy 3
     nested_inject='pointer',        # 'pointer' | 'contents'
-    traversal_tool_names=frozenset({'list_directory', 'read_file'}),
-    traversal_path_arg='path',
+    traversal_tool_names=frozenset({'list_directory', 'read_file'}),  # deprecated fallback
+    traversal_path_arg='path',                                       # deprecated fallback
     asset_roots=('.claude', '.agents', '.codex', '.grok'),
 )
 ```

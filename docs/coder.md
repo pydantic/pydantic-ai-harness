@@ -15,21 +15,23 @@ It is a regular [combined capability](https://pydantic.dev/docs/ai/capabilities/
 Hand the agent a task directly:
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
-from pydantic_ai.sandboxes import LocalSandbox
+from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import Coder
 
 agent = Agent('anthropic:claude-fable-5', capabilities=[Coder('.')])
 
 result = agent.run_sync(
     'Find out why tests/test_parser.py fails and fix the bug it caught.',
-    sandbox=LocalSandbox('.'),  # the run needs a sandbox; this one is the local checkout
+    workspace=LocalWorkspace(root=Path.cwd()),
 )
 print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-Every run needs a sandbox attached: `LocalSandbox('.')` works on the checkout itself, and a [`ModalSandbox`](modal-sandbox.md) capability supplies a remote one. Interfaces that start runs for you accept `sandbox=` too, so pass it to [`agent.to_cli_sync(sandbox=...)`](https://pydantic.dev/docs/ai/cli/) or [`agent.to_web(sandbox=...)`](https://pydantic.dev/docs/ai/web/) the same way you pass it to `run()`.
+Programmatic callers pass a workspace explicitly. Coder's Shell and FileSystem tools operate on the host; attaching another workspace does not redirect those tools. Interfaces that start runs for you accept `workspace=` too, so pass it to [`agent.to_cli_sync(workspace=...)`](https://pydantic.dev/docs/ai/cli/) or [`agent.to_web(workspace=...)`](https://pydantic.dev/docs/ai/web/) the same way you pass it to `run()`.
 
 Or skip the file entirely and run the exported [`coder_agent`](#api-reference) with [`clai`](https://pydantic.dev/docs/ai/cli/#custom-agents) (the Pydantic AI CLI), via [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
@@ -37,8 +39,7 @@ Or skip the file entirely and run the exported [`coder_agent`](#api-reference) w
 uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
 ```
 
-The `clai` command does not currently expose a `sandbox` option; use
-`agent.to_cli_sync(sandbox=...)` when the CLI-launched run needs one.
+The bundled `coder_agent` supplies the current checkout as a local workspace when no explicit reference is supplied.
 
 ## What's inside
 
@@ -59,7 +60,7 @@ Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries
 
 `Coder` ships with **no default instructions**: modern models don't need procedural coaching ("work step by step", "run the tests"), and each composed capability already contributes its own tool guidance. Pass `instructions='...'` to add your own (identity, tone, or house rules) and it becomes a regular instructions capability at the front of the composition. The exported `coder_agent` separately carries the identity instruction `You are a coding agent built on Pydantic AI.`
 
-The command allowlist is a guardrail against accidents, not a security boundary. Validation checks only the first token, and allowlisted commands such as `python`, `git`, `uv`, and `make` can spawn arbitrary processes, so a model that wants to work around the allowlist can. For untrusted work, run the agent inside an OS-level sandbox such as [`ModalSandbox`](modal-sandbox.md) or a container.
+The command allowlist is a guardrail against accidents, not a security boundary. Validation checks only the first token, and allowlisted commands such as `python`, `git`, `uv`, and `make` can spawn arbitrary processes, so a model that wants to work around the allowlist can. For untrusted work, run the agent process inside a container or another OS-level sandbox.
 
 ### Not included by default
 
@@ -94,7 +95,7 @@ To remove or replace one of the built-in components instead, start from the blow
 
 ## Blown-out equivalent
 
-This is the exact agent the exported `coder_agent` gives you (plus an explicit model), written out block by block:
+This expands the capabilities used by `coder_agent`. Pass a local workspace when running this agent, as in the example above:
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
