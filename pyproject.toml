@@ -118,8 +118,6 @@ Issues = 'https://github.com/pydantic/pydantic-ai-harness/issues'
 [dependency-groups]
 dev = [
     'pydantic-ai-harness[code-mode]',
-    # The Slack tests import `pydantic_ai.mcp`, so every test job installs the extra.
-    'pydantic-ai-harness[slack]',
     # Floors selected to keep the `test-floor` job (using `--resolution lowest-direct`)
     # working: `anyio>=4.11.0` is when the pytest plugin started registering the
     # `anyio_mode` ini option. `pytest-anyio` has only version 0.0.0 on PyPI, so no
