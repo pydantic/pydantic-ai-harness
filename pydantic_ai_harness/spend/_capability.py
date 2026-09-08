@@ -388,7 +388,12 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
             if error is None:
                 error = UserError(f'`SpendLimits.price` {price_error} for a response.')
 
-        if not priced and self.on_unpriced == 'zero' and any(budget.usd is not None for budget in self.budgets):
+        if (
+            not priced
+            and self.on_unpriced == 'zero'
+            and error is None
+            and any(budget.usd is not None for budget in self.budgets)
+        ):
             # Only this combination is silent: the response adds nothing in dollars, so a
             # USD ceiling can never be reached by requests the registry cannot price. A
             # token ceiling still holds, so it is not warned about.

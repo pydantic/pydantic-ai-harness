@@ -726,6 +726,24 @@ class TestOrdering:
         assert caught.value is error
         assert (await guard.status())[0].spent.requests == 1
 
+    @pytest.mark.parametrize('callback_fails', [False, True])
+    async def test_unpriced_warning_does_not_hide_an_existing_error(self, callback_fails: bool):
+        def record(snapshot: SpendSnapshot) -> None:
+            if callback_fails:
+                raise LookupError('callback failed')
+
+        guard = SpendLimits(
+            budgets=[Budget(window='total', usd=Decimal('10'))],
+            price=lambda response: Decimal('-1'),
+            on_spend=record,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', UnpricedModelWarning)
+            with pytest.raises(LookupError if callback_fails else UserError):
+                await Agent(TestModel(), capabilities=[guard]).run('hello')
+
+        assert (await guard.status())[0].spent.requests == 1
+
     async def test_a_failed_request_outranks_an_accrual_error(self):
         """A retryable rejection keeps propagating; a reporting error must not turn it into a dead run."""
 

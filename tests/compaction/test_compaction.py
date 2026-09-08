@@ -4024,3 +4024,47 @@ class TestStructuralFeaturesThroughAgent:
         assert len(prompts) == 2
         assert '<previous-summary>\nTHE SUMMARY\n</previous-summary>' in prompts[1]
         assert _UPDATE_ANCHOR in prompts[1]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('anyio_backend', ['asyncio'])
+@pytest.mark.parametrize('inject_first', [False, True])
+@pytest.mark.parametrize('clamp', [False, True])
+async def test_compaction_replaces_earlier_request_only_edits(inject_first: bool, clamp: bool):
+    class InjectTemporary(AbstractCapability[object]):
+        async def before_model_request(
+            self, ctx: RunContext[object], request_context: ModelRequestContext
+        ) -> ModelRequestContext:
+            return dataclasses.replace(
+                request_context,
+                messages=[*request_context.messages, ModelRequest(parts=[UserPromptPart('TEMP')])],
+            )
+
+    captured: list[str] = []
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        captured.extend(
+            part.content
+            for message in messages
+            for part in message.parts
+            if isinstance(part, (UserPromptPart, TextPart)) and isinstance(part.content, str)
+        )
+        return ModelResponse(parts=[TextPart('done')])
+
+    compactor = (
+        ClampOversizedMessages(max_part_chars=100)
+        if clamp
+        else SlidingWindowCompaction(max_messages=2, keep_messages=2, preserve_first_user_message=False)
+    )
+    injector = InjectTemporary()
+    agent = Agent(
+        FunctionModel(respond),
+        capabilities=[injector, compactor] if inject_first else [compactor, injector],
+    )
+    await agent.run(
+        'new',
+        message_history=[ModelRequest(parts=[UserPromptPart('old')]), ModelResponse(parts=[TextPart('reply')])],
+    )
+
+    expected = ['old', 'reply', 'new'] if clamp else ['reply', 'new']
+    assert captured == (expected if inject_first else [*expected, 'TEMP'])
