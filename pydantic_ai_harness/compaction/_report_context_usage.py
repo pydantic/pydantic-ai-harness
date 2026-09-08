@@ -16,6 +16,7 @@ from pydantic_ai_harness.compaction._shared import (
     estimate_context_tokens,
     get_compaction_reclaim,
     has_context_usage_anchor,
+    reset_compaction_reclaim,
 )
 
 if TYPE_CHECKING:
@@ -104,6 +105,10 @@ class ReportContextUsage(AbstractCapability[AgentDepsT]):
             raise ValueError('context_window must be positive.')
         if self.fallback_context_window < 1:
             raise ValueError('fallback_context_window must be positive.')
+
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Reset the request correction even when the caller reuses a run ID."""
+        reset_compaction_reclaim()
 
     def _measure(self, ctx: RunContext[AgentDepsT], request_context: ModelRequestContext) -> ContextUsage:
         """Build a reading for the request as it stands."""

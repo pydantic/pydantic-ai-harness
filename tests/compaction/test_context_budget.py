@@ -8,12 +8,14 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
+import pydantic_ai.messages as messages_module
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer, get_tracer
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     SpeechPart,
@@ -415,6 +417,33 @@ class TestThroughAnAgentRun:
         # These run a real `agent.run`; trio hits a TestModel event-loop quirk in core
         # unrelated to compaction.
         return 'asyncio'
+
+    @pytest.mark.parametrize('stream', [False, True])
+    async def test_reused_run_id_does_not_reuse_compaction_reclaim(self, stream: bool):
+        seen: list[ContextUsage] = []
+        agent = Agent(
+            TestModel(),
+            capabilities=[
+                SlidingWindowCompaction(max_messages=3, keep_messages=2, preserve_first_user_message=False),
+                ReportContextUsage(on_usage=seen.append, context_window=20_000),
+            ],
+        )
+        history: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart(content='x' * 4_000)]),
+            ModelResponse(parts=[TextPart(content='old reply')]),
+            ModelRequest(parts=[UserPromptPart(content='recent prompt')]),
+            ModelResponse(parts=[TextPart(content='done')], usage=RequestUsage(input_tokens=10_000)),
+        ]
+
+        for messages, run_id in [(history, 'reused'), (history[-2:], 'reused'), (history[-2:], 'fresh')]:
+            if stream:
+                async with agent.run_stream('go', message_history=messages, run_id=run_id) as result:
+                    await result.get_output()
+            else:
+                await agent.run('go', message_history=messages, run_id=run_id)
+
+        assert seen[0].used_tokens < seen[2].used_tokens
+        assert seen[1] == seen[2]
 
     async def test_a_fraction_compacts_a_real_run(self):
         history = _history(6)
@@ -1471,6 +1500,45 @@ class TestManualCompactionSemantics:
 # ---------------------------------------------------------------------------
 # Realtime models (#585)
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not hasattr(messages_module, 'InstructionDeltaPart'), reason='requires core instruction updates')
+class TestInstructionDeltaCounting:
+    def test_superseded_updates_do_not_count(self) -> None:  # pragma: lax no cover
+        history = ModelMessagesTypeAdapter.validate_python(
+            [
+                {
+                    'kind': 'request',
+                    'parts': [{'part_kind': 'instruction-delta', 'id': 'agent:state', 'content': 'B' * 400}],
+                },
+                {'kind': 'response', 'parts': [{'part_kind': 'text', 'content': 'done'}]},
+                {
+                    'kind': 'request',
+                    'parts': [{'part_kind': 'user-prompt', 'content': 'Continue.'}],
+                    'instruction_baseline': {},
+                    'instructions': 'C',
+                },
+            ]
+        )
+        assert estimate_token_count(history, len) == estimate_token_count(TestModel().prepare_messages(history), len)
+
+    @pytest.mark.parametrize(
+        ('content', 'rendered'),
+        [
+            ('New state', "Instruction block 'agent:state' is replaced from this point onward by:\n\nNew state"),
+            (None, "Instruction block 'agent:state' is withdrawn. Its previous instructions no longer apply."),
+        ],
+    )
+    def test_rendered_updates_count(self, content: str | None, rendered: str) -> None:  # pragma: lax no cover
+        history = ModelMessagesTypeAdapter.validate_python(
+            [
+                {
+                    'kind': 'request',
+                    'parts': [{'part_kind': 'instruction-delta', 'id': 'agent:state', 'content': content}],
+                }
+            ]
+        )
+        assert estimate_token_count(history, len) == len(rendered)
 
 
 class TestSpeechPartCounting:

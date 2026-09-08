@@ -684,6 +684,29 @@ class TestOrdering:
 
         assert (await guard.status())[0].spent.requests == 2
 
+    @pytest.mark.parametrize('invalid_price', [False, True])
+    async def test_falsy_callback_error_outranks_pricing_error(self, invalid_price: bool):
+        class ReportingError(Exception):
+            def __bool__(self) -> bool:
+                return False
+
+        error = ReportingError('reporting failed')
+
+        def reject_snapshot(snapshot: SpendSnapshot) -> None:
+            raise error
+
+        guard = SpendLimits(
+            budgets=[Budget(window='total')],
+            price=lambda response: Decimal('-1') if invalid_price else None,
+            on_unpriced='raise',
+            on_spend=reject_snapshot,
+        )
+        with pytest.raises(ReportingError) as caught:
+            await _record(guard, model_name='unknown:model')
+
+        assert caught.value is error
+        assert (await guard.status())[0].spent.requests == 1
+
     async def test_a_failed_request_outranks_an_accrual_error(self):
         """A retryable rejection keeps propagating; a reporting error must not turn it into a dead run."""
 

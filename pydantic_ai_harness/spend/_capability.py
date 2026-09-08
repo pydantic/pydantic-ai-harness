@@ -383,7 +383,8 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
             # otherwise report a broken pricing function as an unknown model. Raising from
             # a wrapper rather than from `after_model_request` does not change that: the
             # accrual is already committed above.
-            error = error or UserError(f'`SpendLimits.price` {price_error} for a response.')
+            if error is None:
+                error = UserError(f'`SpendLimits.price` {price_error} for a response.')
 
         if not priced and self.on_unpriced == 'zero' and any(budget.usd is not None for budget in self.budgets):
             # Only this combination is silent: the response adds nothing in dollars, so a
@@ -400,13 +401,13 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
                     stacklevel=2,
                 )
 
-        if not priced and self.on_unpriced == 'raise':
+        if not priced and self.on_unpriced == 'raise' and error is None:
             # Raised last, after the store is updated and `on_spend` has seen the
             # response. The request happened and its tokens were really spent, so
             # dropping them would leave a token ceiling understating what the
             # model was asked to do, and an audit that skipped exactly the
             # unpriced responses would be missing the ones worth knowing about.
-            error = error or UnpricedModelError(
+            error = UnpricedModelError(
                 f'No price for model {response.model_name or "<unnamed>"}. Supply `SpendLimits.price`, '
                 "or set on_unpriced='zero' to count the request as free."
             )
