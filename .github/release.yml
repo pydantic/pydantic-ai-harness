@@ -1,15 +1,18 @@
 changelog:
   exclude:
     labels:
+      - docs
       - chore
-      - documentation
   categories:
+    - title: ⚠️ Compatibility Notes
+      labels:
+        - compatibility impact
     - title: 🚀 Features
       labels:
-        - enhancement
+        - feature
     - title: 🐛 Bug Fixes
       labels:
         - bug
-    - title: Other Changes
+    - title: 📦 Dependencies
       labels:
-        - '*'
+        - dependency

@@ -1,0 +1,130 @@
+# Category jobs copied from pydantic/pydantic-ai at 62f1e8302a356d09962c55117f41a282cf1eb243.
+name: PR Categories
+
+on:
+  # zizmor: ignore[dangerous-triggers] -- pull_request_target is needed for fork PRs; inputs are validated before use
+  pull_request_target:
+    types: [opened, synchronize, labeled]
+
+permissions: {}
+
+concurrency:
+  group: pr-categories-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event.action == 'synchronize' }}
+
+jobs:
+  # Security: The classify job runs the LLM with READ-ONLY permissions and no label API access.
+  # The LLM's output is validated against an allowlist before the apply job takes any write action.
+  # This prevents prompt injection from adding arbitrary labels (e.g. 'douwebot' to trigger the review job).
+  category-classify:
+    name: Category Classify
+    if: github.event.action != 'labeled'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      category: ${{ steps.extract.outputs.category }}
+      skip: ${{ steps.check-label.outputs.has_label }}
+    steps:
+      - name: Check if category label already exists
+        id: check-label
+        run: |
+          LABELS=$(gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --json labels --jq '.labels[].name')
+          CATEGORY_LABELS=("bug" "feature" "docs" "chore" "dependency")
+
+          for label in "${CATEGORY_LABELS[@]}"; do
+            if echo "$LABELS" | grep -q "^${label}$"; then
+              echo "has_label=true" >> $GITHUB_OUTPUT
+              echo "PR already has category label: $label"
+              exit 0
+            fi
+          done
+
+          echo "has_label=false" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Checkout repository
+        if: steps.check-label.outputs.has_label == 'false'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install bubblewrap
+        if: steps.check-label.outputs.has_label == 'false'
+        run: sudo apt-get install -y bubblewrap
+
+      - name: Classify PR with Claude Code
+        if: steps.check-label.outputs.has_label == 'false'
+        id: classify
+        uses: anthropics/claude-code-action@428971d2ecd6e3a7cb0ee0da2a3a8b33fdb3678d # v1.0.157
+        # Category labels feed the changelog, so keep this small required job independent
+        # of the custom gateway used by the optional reviewer below.
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          github_token: ${{ github.token }}
+          allowed_non_write_users: '*'
+          allowed_bots: 'pydanty'
+          claude_args: |
+            --allowedTools "Bash(gh pr view:*),Bash(gh pr diff:*)"
+            --json-schema '{"type":"object","properties":{"category":{"type":"string"}},"required":["category"]}'
+          prompt: |
+            Classify PR #${{ github.event.pull_request.number }} in ${{ github.repository }}.
+
+            Run `gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }}` for the title and description.
+            Run `gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }} --name-only` for the changed files.
+
+            Categories:
+            - bug: Fixes broken behavior
+            - feature: New functionality
+            - docs: Documentation-only (no code changes)
+            - chore: CI, refactoring, dev dependencies, tests-only
+            - dependency: Production dependency updates
+
+            When both code and docs change, prefer `feature` or `bug` over `docs`.
+            If pyproject.toml files changed, run `gh pr diff ${{ github.event.pull_request.number }} --repo ${{ github.repository }}` to see the full diff and distinguish production deps (`dependency`) from dev-only deps in `[dependency-groups]` (`chore`).
+
+            Return your classification as JSON with a "category" field set to one of: bug, feature, docs, chore, dependency.
+
+      - name: Extract and validate category
+        if: steps.check-label.outputs.has_label == 'false'
+        id: extract
+        run: |
+          CATEGORY=$(echo "$STRUCTURED_OUTPUT" | jq -r .category | tr -d '[:space:]')
+          ALLOWED="bug feature docs chore dependency"
+          if ! echo "$ALLOWED" | grep -Fqw "$CATEGORY"; then
+            echo "::error::Invalid category '$CATEGORY' from Claude -- must be one of: $ALLOWED"
+            exit 1
+          fi
+          echo "category=$CATEGORY" >> $GITHUB_OUTPUT
+          echo "Classified as: $CATEGORY"
+        env:
+          STRUCTURED_OUTPUT: ${{ steps.classify.outputs.structured_output }}
+
+  category-apply:
+    name: Category Apply
+    needs: category-classify
+    if: needs.category-classify.outputs.skip != 'true' && needs.category-classify.outputs.category != ''
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: Validate and apply category label
+        run: |
+          CATEGORY="${NEEDS_CATEGORY_CLASSIFY_OUTPUTS_CATEGORY}"
+          ALLOWED="bug feature docs chore dependency"
+
+          if ! echo "$ALLOWED" | grep -Fqw "$CATEGORY"; then
+            echo "::error::Invalid category '$CATEGORY' -- must be one of: $ALLOWED"
+            exit 1
+          fi
+
+          gh api "repos/${{ github.repository }}/issues/${{ github.event.pull_request.number }}/labels" \
+            --method POST -f "labels[]=$CATEGORY"
+          echo "Applied label: $CATEGORY"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEEDS_CATEGORY_CLASSIFY_OUTPUTS_CATEGORY: ${{ needs.category-classify.outputs.category }}
