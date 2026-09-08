@@ -63,7 +63,7 @@ jobs:
         # Category labels feed the changelog, so keep this small required job independent
         # of the custom gateway used by the optional reviewer below.
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }} # zizmor: ignore[secrets-outside-env] -- matches Pydantic AI; base-ref checkout, read-only token, sandboxed classifier
           github_token: ${{ github.token }}
           allowed_non_write_users: '*'
           allowed_bots: 'pydanty'
