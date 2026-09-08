@@ -27,7 +27,6 @@ Re-check these sources before changing lifecycle, command, or filesystem assumpt
 
 from __future__ import annotations
 
-import functools
 import math
 import posixpath
 import shlex
@@ -77,8 +76,9 @@ _AUTH_MESSAGE = 'E2B rejected the credentials. Set a valid E2B_API_KEY in the en
 _CREATE_TIMEOUT = 120
 
 # Teardown runs shielded from cancellation, so an unreachable E2B control plane could otherwise
-# hang the caller forever. Bound the kill so a stalled request gives up rather than wedging the
-# process; an owned sandbox is still reaped server-side by its own `sandbox_timeout`.
+# hang the caller forever. Bound each lifecycle request so a stalled operation gives up rather
+# than wedging the process; an owned sandbox is still reaped server-side by its own
+# `sandbox_timeout`.
 _TEARDOWN_TIMEOUT = 30
 
 # Bounds the internal `pwd` probe behind `working_dir()` and the best-effort kills.
@@ -90,15 +90,23 @@ _INTERNAL_EXEC_TIMEOUT = 10
 _SDK_STREAM_UNBOUNDED = 0
 
 
-async def _kill_sandbox(sandbox_id: str, kill: Callable[[], Awaitable[object]]) -> None:
-    """Run an E2B kill to completion without letting cleanup replace cancellation."""
+async def _run_lifecycle_call(
+    sandbox_id: str,
+    operation: str,
+    call: Callable[[], Awaitable[object]],
+    *,
+    unavailable_is_success: bool,
+) -> None:
+    """Run a bounded lifecycle operation without letting cleanup replace cancellation."""
     error: Exception | None = None
     with anyio.CancelScope(shield=True):
         try:
             with anyio.fail_after(_TEARDOWN_TIMEOUT):
-                await kill()
-        except e2b.SandboxNotFoundException:
-            return
+                await call()
+        except e2b.SandboxNotFoundException as exc:
+            if unavailable_is_success:
+                return
+            error = exc
         except Exception as exc:
             error = exc
     if error is None:
@@ -108,9 +116,11 @@ async def _kill_sandbox(sandbox_id: str, kill: Callable[[], Awaitable[object]]) 
         raise E2BSandboxAuthError(_AUTH_MESSAGE) from error
     if isinstance(error, TimeoutError):
         raise E2BSandboxError(
-            f'Timed out after {_TEARDOWN_TIMEOUT}s while trying to kill E2B sandbox {sandbox_id!r}.'
+            f'Timed out after {_TEARDOWN_TIMEOUT}s while trying to {operation} E2B sandbox {sandbox_id!r}.'
         ) from error
-    raise E2BSandboxError(f'Could not kill E2B sandbox {sandbox_id!r}: {error}') from error
+    if isinstance(error, e2b.SandboxNotFoundException):
+        raise E2BSandboxUnavailableError(_attached_gone_message(repr(sandbox_id))) from error
+    raise E2BSandboxError(f'Could not {operation} E2B sandbox {sandbox_id!r}: {error}') from error
 
 
 class E2BSandboxError(SandboxError):
@@ -169,9 +179,10 @@ class E2BSandboxBackend(LazySandbox['e2b.AsyncSandbox'], SandboxBackend, Support
     reuses the same environment. Reach the live `e2b.AsyncSandbox` through
     [`sandbox`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.sandbox], by awaiting `sandbox`.
 
-    Nothing here kills a sandbox. E2B reaps one at the `sandbox_timeout` it was created with;
-    call [`close`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.close] with
-    `terminate=True` to end it sooner.
+    Nothing here changes a sandbox's remote state on its own. E2B reaps one at the
+    `sandbox_timeout` it was created with; call [`destroy`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.destroy]
+    to end it, [`pause`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.pause] to preserve its memory,
+    or [`stop`][pydantic_ai_harness.e2b_sandbox.E2BSandboxBackend.stop] to persist only its filesystem.
 
     Commands run as one-shot operations, with complete output returned after they finish.
 
@@ -326,7 +337,7 @@ class E2BSandboxBackend(LazySandbox['e2b.AsyncSandbox'], SandboxBackend, Support
         canonical_id = await self._find_id(identity)
         if canonical_id is None or canonical_id == created.sandbox_id:
             return created
-        await _kill_sandbox(created.sandbox_id, created.kill)
+        await _run_lifecycle_call(created.sandbox_id, 'kill', created.kill, unavailable_is_success=True)
         self._created_timeout = None
         return await self._attach(canonical_id)
 
@@ -377,29 +388,74 @@ class E2BSandboxBackend(LazySandbox['e2b.AsyncSandbox'], SandboxBackend, Support
             f'for {self._identity!r}' if self._identity is not None else 'that was never started'
         )  # pragma: lax no cover
 
-    async def close(self, *, terminate: bool) -> None:
-        """Release this handle, killing the sandbox with it when we own its lifetime.
+    async def destroy(self) -> None:
+        """Kill the identified sandbox without creating or resuming a remote sandbox.
 
-        Runs shielded from cancellation, since a run that is being torn down must still get its
-        kill request out, bounded so a stalled control plane cannot wedge the caller. E2B has
-        no client-side connection to release, so releasing an attached sandbox does nothing.
+        An unused backend with a saved `ref` uses E2B's class-level kill by ID; an unused
+        backend without one is a no-op. Cleanup is shielded from cancellation and bounded, and
+        the saved `ref` remains available for a retry. Finish in-flight commands before calling
+        this method.
         """
-        if not terminate:
-            return
-        sandbox = self._live
-        if sandbox is None or self._ref is None:
-            # Never used, so there is nothing to kill. Resolving one here just to close it
-            # would create the very sandbox being released.
-            return
-        await _kill_sandbox(self._ref.sandbox_id, sandbox.kill)
+        async with self._lock:
+            sandbox = self._live
+            if sandbox is None:
+                if self._ref is None:
+                    return
+                sandbox_id = self._ref.sandbox_id
 
-    @staticmethod
-    async def kill_by_id(sandbox_id: str) -> None:
-        """Kill a sandbox by ID without reconnecting to it first.
+                async def kill_remote() -> object:
+                    return await e2b.AsyncSandbox.kill(sandbox_id)
 
-        Applications can use this to end a sandbox explicitly; avoiding reconnect also avoids resuming a paused sandbox.
+                call = kill_remote
+            else:
+                sandbox_id = sandbox.sandbox_id
+                call = sandbox.kill
+            await _run_lifecycle_call(sandbox_id, 'kill', call, unavailable_is_success=True)
+            self._live = None
+            self._canonical_working_dir = None
+
+    async def pause(self) -> None:
+        """Pause the identified sandbox while preserving its memory snapshot.
+
+        An unused backend with a saved `ref` uses E2B's class-level pause by ID, avoiding a
+        connect that would resume it. A missing sandbox is reported as unavailable. Finish
+        in-flight commands before calling this method.
         """
-        await _kill_sandbox(sandbox_id, functools.partial(e2b.AsyncSandbox.kill, sandbox_id))
+        await self._pause_or_stop(keep_memory=True, operation='pause')
+
+    async def stop(self) -> None:
+        """Request a pause without retaining a memory snapshot (`keep_memory=False`).
+
+        An unused backend with a saved `ref` uses E2B's class-level pause by ID, avoiding a
+        connect that would resume it. E2B may return that the sandbox was already paused without
+        changing its existing snapshot. A missing sandbox is reported as unavailable. Finish
+        in-flight commands before calling this method.
+        """
+        await self._pause_or_stop(keep_memory=False, operation='stop')
+
+    async def _pause_or_stop(self, *, keep_memory: bool, operation: str) -> None:
+        async with self._lock:
+            sandbox = self._live
+            if sandbox is None:
+                if self._ref is None:
+                    return
+                sandbox_id = self._ref.sandbox_id
+
+                async def pause_by_id() -> object:
+                    return await e2b.AsyncSandbox.pause(sandbox_id, keep_memory=keep_memory)
+
+                call = pause_by_id
+            else:
+                sandbox_id = sandbox.sandbox_id
+                attached_sandbox = sandbox
+
+                async def pause_attached() -> object:
+                    return await attached_sandbox.pause(keep_memory=keep_memory)  # pyright: ignore[reportUnknownVariableType, reportGeneralTypeIssues]
+
+                call = pause_attached
+            await _run_lifecycle_call(sandbox_id, operation, call, unavailable_is_success=False)
+            self._live = None
+            self._canonical_working_dir = None
 
     async def working_dir(self) -> str:
         """The sandbox's default working directory (absolute POSIX path)."""

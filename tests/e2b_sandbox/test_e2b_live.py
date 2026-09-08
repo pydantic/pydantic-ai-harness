@@ -60,13 +60,13 @@ def _unique(prefix: str) -> str:
 
 @asynccontextmanager
 async def _owned(**settings: object) -> AsyncGenerator[E2BSandboxBackend]:
-    """Create a sandbox and kill it on the way out, so a live run leaves nothing behind."""
+    """Create a sandbox and destroy it on the way out, so a live run leaves nothing behind."""
     backend = E2BSandboxBackend(**settings)  # type: ignore[arg-type]
     await backend.sandbox
     try:
         yield backend
     finally:
-        await backend.close(terminate=True)
+        await backend.destroy()
 
 
 @pytest.fixture(scope='module')
@@ -307,8 +307,8 @@ class TestRealFilesystem:
 class TestRealLifecycle:
     """Teardown and attach semantics in E2B's real control plane."""
 
-    async def test_kill_actually_destroys_the_sandbox(self) -> None:
-        """Validates the fake-encoded assumption that closing an owned sandbox destroys the real one."""
+    async def test_destroy_actually_destroys_the_sandbox(self) -> None:
+        """Validates that destroying an owned sandbox removes it from the control plane."""
         async with _owned(sandbox_timeout=120) as owner:
             ref = owner.ref
         assert ref is not None
@@ -325,7 +325,6 @@ class TestRealLifecycle:
             attached = E2BSandboxBackend(ref=owner.ref)
             assert (await attached.sandbox).sandbox_id == (await owner.sandbox).sandbox_id
             assert await attached.read_bytes(marker) == b'shared'
-            await attached.close(terminate=False)
 
             assert (await owner.run(['cat', marker], timeout=30)).stdout == 'shared'
 

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import inspect
 
-import anyio
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
@@ -14,7 +13,7 @@ from pydantic_ai.usage import RunUsage
 
 import pydantic_ai_harness
 import pydantic_ai_harness.e2b_sandbox as e2b_sandbox
-from pydantic_ai_harness.e2b_sandbox import E2BSandbox, E2BSandboxAuthError, E2BSandboxBackend
+from pydantic_ai_harness.e2b_sandbox import E2BSandbox, E2BSandboxBackend
 
 from .fake_e2b import FakeE2B
 
@@ -122,69 +121,6 @@ class TestLifecycle:
 
         assert fake_e2b.kill_ids == []
         assert fake_e2b.sandboxes[0].killed is False
-
-
-class TestKillById:
-    """`kill_by_id` is how an application ends a sandbox itself, without reconnecting first."""
-
-    async def test_kills_without_reconnecting(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.new_sandbox('owned')
-
-        await E2BSandboxBackend.kill_by_id('owned')
-
-        assert fake_e2b.kill_ids == ['owned']
-        assert fake_e2b.connect_calls == []
-        assert fake_e2b.sandboxes[0].killed is True
-
-    async def test_is_idempotent_when_the_sandbox_is_gone(self, fake_e2b: FakeE2B) -> None:
-        await E2BSandboxBackend.kill_by_id('gone')
-
-        assert fake_e2b.kill_ids == ['gone']
-
-    async def test_is_idempotent_when_the_sandbox_was_already_killed(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.new_sandbox('owned')
-
-        await E2BSandboxBackend.kill_by_id('owned')
-        await E2BSandboxBackend.kill_by_id('owned')
-
-        assert fake_e2b.kill_ids == ['owned', 'owned']
-
-    async def test_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
-        fake_e2b.kill_hangs = True
-
-        with pytest.raises(e2b_sandbox.E2BSandboxError, match='Timed out'):
-            await E2BSandboxBackend.kill_by_id('sbx-hung')
-
-    async def test_auth_failure_is_terminal(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.kill_error = fake_e2b.auth_type('bad key')
-
-        with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
-            await E2BSandboxBackend.kill_by_id('sbx-owned')
-
-    async def test_completes_under_cancellation(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.new_sandbox('sbx-owned')
-        fake_e2b.kill_gate = anyio.Event()
-
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(E2BSandboxBackend.kill_by_id, 'sbx-owned')
-            while not fake_e2b.kill_started:
-                await anyio.sleep(0)
-            task_group.cancel_scope.cancel()
-            fake_e2b.kill_gate.set()
-
-        assert fake_e2b.sandboxes[0].killed is True
-
-    async def test_failure_does_not_replace_cancellation(self, fake_e2b: FakeE2B) -> None:
-        fake_e2b.kill_gate = anyio.Event()
-        fake_e2b.kill_error = RuntimeError('cleanup failed')
-
-        async with anyio.create_task_group() as task_group:
-            task_group.start_soon(E2BSandboxBackend.kill_by_id, 'sbx-owned')
-            while not fake_e2b.kill_started:
-                await anyio.sleep(0)
-            task_group.cancel_scope.cancel()
-            fake_e2b.kill_gate.set()
 
 
 class TestConfiguration:

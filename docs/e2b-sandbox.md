@@ -62,9 +62,12 @@ best-effort under control-plane propagation delay.
 Sandboxes remain available after a run. A conversation can span many runs, so the end of a run is not the
 end of the workspace; E2B reaps a sandbox at `sandbox_timeout`. If E2B has already reaped
 a conversation's sandbox, the next run gets a fresh, empty one and the old files are gone;
-raise `sandbox_timeout` when a conversation needs to outlive it, or kill the sandbox yourself
-with `E2BSandboxBackend.kill_by_id`, which is bounded, shielded from cancellation, and safe to
-retry.
+raise `sandbox_timeout` when a conversation needs to outlive it, or call `destroy()`, `pause()`,
+or `stop()` on the backend yourself. These methods do not run automatically at the end of a
+run. `destroy()` removes the remote sandbox. `pause()` requests a memory-preserving pause;
+`stop()` requests `keep_memory=False`, which preserves the filesystem while allowing a cold
+resume. E2B returns `False` when a sandbox is already paused, so `stop()` does not change an
+existing paused snapshot.
 
 Attach to a sandbox managed elsewhere by ID when the capability must not own its
 lifetime:
@@ -97,7 +100,7 @@ async def main() -> None:
         result = await backend.run(['python', '--version'], timeout=60)
         print(result.stdout)
     finally:
-        await backend.close(terminate=True)
+        await backend.destroy()
 
 
 anyio.run(main)
@@ -109,6 +112,13 @@ whose sandbox is gone raises rather than quietly providing an empty replacement.
 
 `await backend.sandbox` returns the live `e2b.AsyncSandbox` for E2B-specific operations,
 creating or attaching on first use.
+
+`destroy()`, `pause()`, and `stop()` do not create a sandbox when the backend has no saved `ref`.
+With a saved `ref` before first use, they call E2B by ID without connecting, so a paused sandbox
+is not resumed just to change its state. Successful state changes clear the cached native handle
+and working-directory probe; the saved `ref` remains for a later retry or attachment. A missing
+sandbox is success for `destroy()` and an `E2BSandboxUnavailableError` for `pause()` or `stop()`.
+Finish in-flight commands before calling any lifecycle method.
 
 The property remains awaitable after the native handle is cached. Await it before accessing SDK
 methods; type checkers reject using the awaitable as the native sandbox.
