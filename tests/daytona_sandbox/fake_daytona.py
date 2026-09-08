@@ -175,12 +175,12 @@ class FakeSandbox:
         self.start_gate: asyncio.Event | None = None
         self.paused = False
         self.pause_calls: list[float | None] = []
-        self.pause_gate: asyncio.Event | None = None
         self.pause_error: Exception | None = None
         self.stop_calls: list[float | None] = []
-        self.stop_gate: asyncio.Event | None = None
-        self.stop_error: Exception | None = None
         self.auto_delete_interval: int | None = -1
+        self.remote_auto_delete_interval: int | None = -1
+        self.refresh_data_calls = 0
+        self.refresh_error: Exception | None = None
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
         self.exec_error: Exception | None = None
@@ -215,8 +215,6 @@ class FakeSandbox:
 
     async def pause(self, timeout: float = 60) -> None:
         self.pause_calls.append(timeout)
-        if self.pause_gate is not None:
-            await self.pause_gate.wait()
         if self.pause_error is not None:
             raise self.pause_error
         self.paused = True
@@ -224,11 +222,14 @@ class FakeSandbox:
     async def stop(self, timeout: float | None = 60, force: bool = False) -> None:
         del force
         self.stop_calls.append(timeout)
-        if self.stop_gate is not None:
-            await self.stop_gate.wait()
-        if self.stop_error is not None:
-            raise self.stop_error
         self.started = False
+
+    async def refresh_data(self, request_timeout: float | None = None) -> None:
+        del request_timeout
+        self.refresh_data_calls += 1
+        if self.refresh_error is not None:
+            raise self.refresh_error
+        self.auto_delete_interval = self.remote_auto_delete_interval
 
 
 class FakeClient:

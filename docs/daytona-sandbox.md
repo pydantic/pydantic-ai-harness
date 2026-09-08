@@ -101,8 +101,8 @@ for provider-specific operations. `await backend.destroy()` deletes the referenc
 without starting it, including one attached from elsewhere. `await backend.disconnect()` closes
 the SDK client while leaving the remote sandbox unchanged. Both methods require callers to finish
 in-flight operations first. `pause()` is available only for Daytona sandbox classes that support
-VM pause, and `stop()` rejects sandboxes with `auto_delete_interval=0` because their disk may be
-deleted after stopping. Stopping preserves disk for the persistent sandboxes this backend creates.
+VM pause, and `stop()` rejects sandboxes with `auto_delete_interval=0` because stopping deletes
+their disk. Stopping preserves disk for the persistent sandboxes this backend creates.
 
 The property remains awaitable after the native handle is cached. Await it before accessing SDK
 methods; type checkers reject using the awaitable as the native sandbox.

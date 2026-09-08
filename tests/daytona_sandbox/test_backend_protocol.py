@@ -157,7 +157,7 @@ class TestCommands:
     ) -> None:
         backend = await started()
         fake_daytona.sandboxes[0].process_create_gate = asyncio.Event()
-        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._REQUEST_TIMEOUT', 0.01)
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._CREATE_TIMEOUT', 0.01)
         with pytest.raises(DaytonaSandboxError, match='session setup timed out') as exc_info:
             await backend.run(['true'])
         assert not isinstance(exc_info.value, SandboxTimeoutError)
@@ -280,6 +280,8 @@ class TestLifecycle:
         backend = DaytonaSandboxBackend()
         await backend.destroy()
         await backend.disconnect()
+        await backend.pause()
+        await backend.stop()
 
         assert fake_daytona.sandboxes == []
         assert fake_daytona.close_calls == 0
@@ -300,7 +302,7 @@ class TestLifecycle:
 
         fake_daytona.delete_error = None
         fake_daytona.close_error = RuntimeError('close failed')
-        with pytest.raises(DaytonaSandboxError, match='close failed'):
+        with pytest.raises(DaytonaSandboxError, match='SDK connection cleanup failed.*close failed'):
             await backend.destroy()
 
     async def test_pause_and_stop_keep_the_client_for_reacquisition(self, fake_daytona: FakeDaytona) -> None:
@@ -327,23 +329,28 @@ class TestLifecycle:
 
     async def test_stop_rejects_ephemeral_sandbox(self, fake_daytona: FakeDaytona) -> None:
         sandbox = fake_daytona.sandbox()
-        sandbox.auto_delete_interval = 0
         backend = await started(ref=SandboxRef(sandbox_id=sandbox.id))
+        sandbox.remote_auto_delete_interval = 0
 
         with pytest.raises(DaytonaSandboxError, match='ephemeral'):
             await backend.stop()
+        assert sandbox.refresh_data_calls == 1
         assert sandbox.stop_calls == []
 
     async def test_destroy_waits_for_acquisition(self, fake_daytona: FakeDaytona) -> None:
         fake_daytona.create_gate = asyncio.Event()
         backend = DaytonaSandboxBackend()
-        acquire = asyncio.create_task(backend.sandbox)
+
+        async def acquire() -> object:
+            return await backend.sandbox
+
+        acquire_task = asyncio.create_task(acquire())
         await asyncio.sleep(0)
         destroy = asyncio.create_task(backend.destroy())
         await asyncio.sleep(0)
         assert not destroy.done()
         fake_daytona.create_gate.set()
-        await asyncio.gather(acquire, destroy)
+        await asyncio.gather(acquire_task, destroy)
         assert fake_daytona.sandboxes[0].deleted is True
 
     async def test_destroy_lookup_timeout_is_bounded(
@@ -351,13 +358,30 @@ class TestLifecycle:
     ) -> None:
         sandbox = fake_daytona.sandbox()
         fake_daytona.get_gate = asyncio.Event()
-        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._CREATE_TIMEOUT', 0.01)
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._REQUEST_TIMEOUT', 0.01)
         backend = DaytonaSandboxBackend(ref=SandboxRef(sandbox_id=sandbox.id))
 
         with pytest.raises(DaytonaSandboxError, match='lookup did not complete'):
             await backend.destroy()
         assert sandbox.deleted is False
         assert sandbox.start_calls == []
+
+    async def test_destroy_lookup_failure_closes_client_and_keeps_ref(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.get_error = RuntimeError('lookup failed')
+        backend = DaytonaSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+
+        with pytest.raises(DaytonaSandboxError, match='lookup failed'):
+            await backend.destroy()
+        assert backend.ref == SandboxRef(sandbox_id='sbx-keep')
+        assert fake_daytona.close_calls == 1
+
+    async def test_missing_destroy_lookup_reports_client_close_failure(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.get_error = DaytonaNotFoundError('gone')
+        fake_daytona.close_error = RuntimeError('close failed')
+        backend = DaytonaSandboxBackend(ref=SandboxRef(sandbox_id='sbx-gone'))
+
+        with pytest.raises(DaytonaSandboxError, match='close failed'):
+            await backend.destroy()
 
     async def test_pause_failure_can_be_retried(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
@@ -368,6 +392,13 @@ class TestLifecycle:
         assert caught.value.__cause__ is cause
         fake_daytona.sandboxes[0].pause_error = None
         await backend.pause()
+
+    async def test_stop_refresh_failure_is_translated(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        fake_daytona.sandboxes[0].refresh_error = RuntimeError('refresh failed')
+
+        with pytest.raises(DaytonaSandboxError, match='refresh failed'):
+            await backend.stop()
 
     async def test_pause_missing_sandbox_is_unavailable(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
