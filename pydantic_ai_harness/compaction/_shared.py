@@ -516,6 +516,8 @@ async def compact_with_span(
             uses the same ~4 characters-per-token heuristic as `estimate_token_count`.
         emits: Whether to emit lifecycle events. Disable this outside an agent run.
     """
+    # Snapshotted so a strategy that edits `messages` in place still gets a span.
+    before = list(messages)
     token = open_receipt_scope()
     try:
         compacted = await compact_with_events(
@@ -529,7 +531,7 @@ async def compact_with_span(
         receipts = drain_receipts()
     finally:
         reset_receipt_scope(token)
-    if not _history_changed(messages, compacted):
+    if not _history_changed(before, compacted):
         return messages
     with ctx.tracer.start_as_current_span(_SPAN_NAME) as span:
         if span.is_recording():
@@ -538,9 +540,9 @@ async def compact_with_span(
                     # GenAI semconv flag; the convention says set `true` only, never `false`.
                     'gen_ai.conversation.compacted': True,
                     'compaction.strategy': strategy,
-                    'compaction.messages_before': len(messages),
+                    'compaction.messages_before': len(before),
                     'compaction.messages_after': len(compacted),
-                    'compaction.tokens_before': estimate_token_count(messages, tokenizer),
+                    'compaction.tokens_before': estimate_token_count(before, tokenizer),
                     'compaction.tokens_after': estimate_token_count(compacted, tokenizer),
                 }
             )
@@ -566,18 +568,23 @@ async def compact_with_events(
     tokenizer: Callable[[str], int] | None = None,
     emits: bool | None = None,
 ) -> list[ModelMessage]:
-    """Run one strategy attempt with a cancellable start event and a changed-only end event."""
+    """Run one strategy attempt with a cancellable start event and a changed-only end event.
+
+    The before-state is snapshotted first: a strategy may edit the list it was handed in place
+    and return it, and the end event still has to report what that list held before the attempt.
+    """
     enabled = _COMPACTION_EVENTS_ENABLED.get() if emits is None else emits
     token = _COMPACTION_EVENTS_ENABLED.set(enabled)
     try:
         if not enabled:
             return await compact()
 
-        tokens_before = estimate_token_count(messages, tokenizer)
+        before = list(messages)
+        tokens_before = estimate_token_count(before, tokenizer)
         start_event = await ctx.emit(
             CompactionStartEvent(
                 strategy=strategy,
-                messages_before=len(messages),
+                messages_before=len(before),
                 tokens_before=tokens_before,
             )
         )
@@ -585,12 +592,12 @@ async def compact_with_events(
             return messages
 
         compacted = await compact()
-        if not _history_changed(messages, compacted):
+        if not _history_changed(before, compacted):
             return messages
         await ctx.emit(
             CompactionEndEvent(
                 strategy=strategy,
-                messages_before=len(messages),
+                messages_before=len(before),
                 messages_after=len(compacted),
                 tokens_before=tokens_before,
                 tokens_after=estimate_token_count(compacted, tokenizer),

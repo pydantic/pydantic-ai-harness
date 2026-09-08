@@ -84,7 +84,7 @@ async def test_cancelled_attempt_retries_and_then_emits_end() -> None:
     assert f'({dropped_messages} messages,' in second.all_messages_json().decode()
 
 
-async def test_app_hook_can_cancel_compaction() -> None:
+async def test_hooks_capability_can_cancel_compaction() -> None:
     hooks = Hooks[Any]()
 
     @hooks.on.event(CompactionStartEvent)
@@ -100,6 +100,92 @@ async def test_app_hook_can_cancel_compaction() -> None:
     serialized = result.all_messages_json().decode()
     assert 'old one' in serialized
     assert 'old two' in serialized
+
+
+async def test_agent_listener_can_cancel_compaction() -> None:
+    """The docs' application-side path: `@agent.on_event`, no capability of its own."""
+    agent = Agent(
+        TestModel(custom_output_text='ok'),
+        capabilities=[SlidingWindowCompaction(max_messages=1, keep_messages=1)],
+    )
+    seen: list[str] = []
+
+    @agent.on_event(CompactionStartEvent)
+    async def hold(ctx: RunContext[None], event: CompactionStartEvent) -> None:
+        seen.append(event.strategy)
+        event.cancel('application is mid-activity')
+
+    result = await agent.run('trigger', message_history=_history('old one', 'old two'))
+
+    assert seen == ['sliding_window']
+    serialized = result.all_messages_json().decode()
+    assert 'old one' in serialized
+    assert 'old two' in serialized
+
+
+@dataclass
+class _RecordAll(AbstractCapability[Any]):
+    events: list[CompactionStartEvent | CompactionEndEvent]
+
+    @on_event(CompactionStartEvent, CompactionEndEvent)
+    async def record(self, ctx: RunContext[Any], event: CompactionStartEvent | CompactionEndEvent) -> None:
+        self.events.append(event)
+
+
+def _ten_per_char(text: str) -> int:
+    return len(text) * 10
+
+
+async def test_tier_events_measure_with_the_configured_tokenizer() -> None:
+    events: list[CompactionStartEvent | CompactionEndEvent] = []
+    tiered = TieredCompaction(
+        tiers=[SlidingWindowCompaction(max_messages=1, keep_messages=1, preserve_first_user_message=False)],
+        target_tokens=1,
+        tokenizer=_ten_per_char,
+    )
+    agent = Agent(TestModel(custom_output_text='ok'), capabilities=[tiered, _RecordAll(events)])
+
+    await agent.run('trigger', message_history=_history('old one', 'old two'))
+
+    assert [(type(event).__name__, event.strategy) for event in events] == [
+        ('CompactionStartEvent', 'tiered'),
+        ('CompactionStartEvent', 'sliding_window'),
+        ('CompactionEndEvent', 'sliding_window'),
+        ('CompactionEndEvent', 'tiered'),
+    ]
+    tiered_start, tier_start, tier_end, tiered_end = events
+    # The outer event is measured with the configured tokenizer; the per-tier events must
+    # agree with it rather than fall back to the four-characters-per-token heuristic.
+    assert tier_start.tokens_before == tiered_start.tokens_before
+    assert isinstance(tier_end, CompactionEndEvent)
+    assert isinstance(tiered_end, CompactionEndEvent)
+    assert tier_end.tokens_after == tiered_end.tokens_after
+    assert tiered_start.tokens_before is not None and tiered_start.tokens_before % 10 == 0
+
+
+class _InPlaceStrategy:
+    async def compact(self, messages: list[ModelMessage], ctx: RunContext[Any]) -> list[ModelMessage]:
+        messages.pop(0)
+        return messages
+
+
+async def test_in_place_strategy_reports_its_end_event() -> None:
+    events: list[CompactionStartEvent | CompactionEndEvent] = []
+    tiered = TieredCompaction(tiers=[_InPlaceStrategy()], target_tokens=1)
+    agent = Agent(TestModel(custom_output_text='ok'), capabilities=[tiered, _RecordAll(events)])
+
+    result = await agent.run('trigger', message_history=_history('old one', 'old two'))
+
+    assert [(type(event).__name__, event.strategy) for event in events] == [
+        ('CompactionStartEvent', 'tiered'),
+        ('CompactionStartEvent', 'in_place_strategy'),
+        ('CompactionEndEvent', 'in_place_strategy'),
+        ('CompactionEndEvent', 'tiered'),
+    ]
+    for end in events[2:]:
+        assert isinstance(end, CompactionEndEvent)
+        assert (end.messages_before, end.messages_after) == (2, 1)
+    assert 'old one' not in result.all_messages_json().decode()
 
 
 @dataclass

@@ -2784,6 +2784,22 @@ class TestCompactionSpan:
         assert spans[0]['attributes']['compaction.strategy'] == 'tiered'
 
     @pytest.mark.anyio
+    async def test_span_measures_before_an_in_place_tier_edits_the_list(self, capfire: CaptureLogfire) -> None:
+        class InPlace:
+            async def compact(self, messages: list[ModelMessage], ctx: RunContext[None]) -> list[ModelMessage]:
+                messages.pop(0)
+                return messages
+
+        comp: TieredCompaction[None] = TieredCompaction(tiers=[InPlace()], target_tokens=1)
+        messages: list[ModelMessage] = [_user('first'), _assistant('a'), _user('second'), _assistant('b')]
+        await comp.before_model_request(_make_ctx_with_tracer(), _make_request_context(messages))
+
+        spans = _compact_spans(capfire)
+        assert len(spans) == 1
+        attrs = spans[0]['attributes']
+        assert (attrs['compaction.messages_before'], attrs['compaction.messages_after']) == (4, 3)
+
+    @pytest.mark.anyio
     async def test_no_span_when_compaction_is_noop(self, capfire: CaptureLogfire) -> None:
         # DeduplicateFileReads has no threshold, so its trigger always fires, but with no
         # superseded reads `compact` returns the history unchanged and no span should be emitted.

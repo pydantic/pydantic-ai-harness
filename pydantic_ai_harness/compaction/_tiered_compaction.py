@@ -167,6 +167,7 @@ class TieredCompaction(AbstractCapability[AgentDepsT]):
                 strategy=strategy_id(tier),
                 messages=tier_messages,
                 compact=lambda: tier.compact(tier_messages, ctx),
+                tokenizer=self.tokenizer,
             )
             # Before the next stop decision, so escalation measures the history it would return.
             messages = reinject_pinned(original, messages)
