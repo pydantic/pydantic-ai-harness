@@ -29,7 +29,7 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
 
     Sandboxes remain available after a run. A conversation can span many runs, so the end of a run is not
     the end of the workspace; E2B reaps a sandbox at `sandbox_timeout`. Raise that for
-    longer work, or kill one yourself with `E2BSandboxBackend.kill_by_id`.
+    longer work, or call `destroy()`, `pause()`, or `stop()` on the backend yourself.
 
     Set `sandbox_id` to attach to an environment managed elsewhere instead.
 
@@ -42,7 +42,7 @@ class E2BSandbox(AbstractCapability[AgentDepsT]):
     """E2B template name or ID for an owned sandbox."""
 
     sandbox_id: str | None = None
-    """Existing E2B sandbox ID to attach to without killing it."""
+    """Existing E2B sandbox ID to attach to without automatic lifecycle changes."""
 
     sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT
     """Server-side lifetime backstop for an owned sandbox, in seconds."""

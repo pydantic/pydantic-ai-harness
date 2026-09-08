@@ -321,6 +321,15 @@ class FakeSandbox:
         self.killed = True
         return True
 
+    async def pause(self, keep_memory: bool = True) -> bool:
+        await anyio.lowlevel.checkpoint()
+        if self._control.pause_hangs:
+            await anyio.sleep_forever()
+        self._control.pause_calls.append((self.sandbox_id, keep_memory))
+        if self._control.pause_error is not None:
+            raise self._control.pause_error
+        return True
+
     async def is_running(self, request_timeout: float | None = None) -> bool:
         del request_timeout
         await anyio.lowlevel.checkpoint()
@@ -377,6 +386,18 @@ class FakeAsyncSandboxFactory:
                 return True
         return False
 
+    async def pause(self, sandbox_id: str, keep_memory: bool = True) -> bool:
+        self._control.pause_ids.append((sandbox_id, keep_memory))
+        await anyio.lowlevel.checkpoint()
+        if self._control.pause_hangs:
+            await anyio.sleep_forever()
+        if self._control.pause_error is not None:
+            raise self._control.pause_error
+        for sandbox in self._control.sandboxes:
+            if sandbox.sandbox_id == sandbox_id and not sandbox.killed:
+                return await sandbox.pause(keep_memory=keep_memory)
+        raise SandboxNotFoundException(sandbox_id)
+
     def list(
         self,
         query: FakeSandboxQuery | None = None,
@@ -428,6 +449,8 @@ class FakeE2B:
     create_calls: list[FakeCreateCall] = field(default_factory=list[FakeCreateCall])
     connect_calls: list[tuple[str, int | None]] = field(default_factory=list[tuple[str, 'int | None']])
     kill_ids: list[str] = field(default_factory=list[str])
+    pause_ids: list[tuple[str, bool]] = field(default_factory=list[tuple[str, bool]])
+    pause_calls: list[tuple[str, bool]] = field(default_factory=list[tuple[str, bool]])
     list_calls: list[tuple[dict[str, str] | None, int | None]] = field(
         default_factory=list[tuple[dict[str, str] | None, int | None]]
     )
@@ -437,6 +460,8 @@ class FakeE2B:
     create_hangs: bool = False
     connect_error: Exception | None = None
     kill_error: Exception | None = None
+    pause_error: Exception | None = None
+    pause_hangs: bool = False
     kill_hangs: bool = False
     kill_gate: anyio.Event | None = None
     kill_started: bool = False

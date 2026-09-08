@@ -157,47 +157,114 @@ class TestConnect:
         assert not isinstance(exc.value, SandboxUnavailableError)
 
 
-class TestClose:
-    async def test_an_unused_backend_has_nothing_to_close(self, fake_e2b: FakeE2B) -> None:
-        # Building one does no I/O, so closing it must not reach E2B either -- resolving here
-        # would create the very sandbox being released.
-        await E2BSandboxBackend().close(terminate=True)
+class TestLifecycle:
+    async def test_an_unused_backend_has_nothing_to_destroy_pause_or_stop(self, fake_e2b: FakeE2B) -> None:
+        # Building one does no I/O, so lifecycle methods must not resolve it -- doing so would
+        # create the very sandbox being released.
+        backend = E2BSandboxBackend()
+        await backend.destroy()
+        await backend.pause()
+        await backend.stop()
 
         assert fake_e2b.sandboxes == []
         assert fake_e2b.kill_ids == []
 
-    async def test_kills_when_owned(self, fake_e2b: FakeE2B) -> None:
+    async def test_destroy_kills_when_owned(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
-        await backend.close(terminate=True)
+        await backend.destroy()
         assert fake_e2b.sandboxes[0].killed is True
 
-    async def test_leaves_an_attached_sandbox_running(self, fake_e2b: FakeE2B) -> None:
+    async def test_destroy_before_first_use_kills_by_id_without_connecting(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('sbx-keep')
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+
+        await backend.destroy()
+
+        assert fake_e2b.kill_ids == ['sbx-keep']
+        assert fake_e2b.connect_calls == []
+        assert fake_e2b.sandboxes[0].killed is True
+
+    async def test_pause_before_first_use_uses_class_api_without_connecting(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('sbx-keep')
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+
+        await backend.pause()
+
+        assert fake_e2b.pause_ids == [('sbx-keep', True)]
+        assert fake_e2b.connect_calls == []
+
+    async def test_stop_before_first_use_drops_memory_without_connecting(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.new_sandbox('sbx-keep')
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-keep'))
+
+        await backend.stop()
+
+        assert fake_e2b.pause_ids == [('sbx-keep', False)]
+        assert fake_e2b.connect_calls == []
+
+    async def test_pause_and_stop_use_attached_handle(self, fake_e2b: FakeE2B) -> None:
+        backend = await started()
+        await backend.pause()
+        assert fake_e2b.pause_ids == []
+        assert fake_e2b.pause_calls == [('sbx-1', True)]
+
+        backend = await started()
+        await backend.stop()
+        assert fake_e2b.pause_calls[-1] == ('sbx-2', False)
+
+    async def test_stop_keeps_an_attached_sandbox_filesystem(self, fake_e2b: FakeE2B) -> None:
         backend = await started(ref=SandboxRef(sandbox_id='sbx-keep'))
-        await backend.close(terminate=False)
+        await backend.stop()
         assert fake_e2b.sandboxes[0].killed is False
 
-    async def test_kill_failure_is_visible(self, fake_e2b: FakeE2B) -> None:
+    async def test_pause_clears_working_dir_and_next_operation_reconnects(self, fake_e2b: FakeE2B) -> None:
+        fake_e2b.responder = lambda command, timeout: ('/srv\n', '', 0)
+        backend = await started()
+        assert await backend.working_dir() == '/srv'
+
+        await backend.pause()
+
+        assert await backend.working_dir() == '/srv'
+        assert fake_e2b.connect_calls == [('sbx-1', None)]
+
+    async def test_hanging_pause_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
+        backend = await started()
+        fake_e2b.pause_hangs = True
+        with anyio.fail_after(5):
+            with pytest.raises(E2BSandboxError, match='Timed out'):
+                await backend.pause()
+
+    async def test_destroy_failure_is_visible_and_retryable(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.kill_error = RuntimeError('kill boom')
         with pytest.raises(E2BSandboxError, match='kill boom') as exc:
-            await backend.close(terminate=True)
+            await backend.destroy()
         assert exc.value.__cause__ is fake_e2b.kill_error
+        fake_e2b.kill_error = None
+        await backend.destroy()
+        assert fake_e2b.sandboxes[0].killed is True
 
     async def test_already_gone_sandbox_is_not_an_error(self, fake_e2b: FakeE2B) -> None:
         # An owned run that outlived its `sandbox_timeout` self-terminates; the teardown kill
         # then hits "already gone", which is success, not a failure to raise.
         backend = await started()
         fake_e2b.kill_error = fake_e2b.sandbox_gone_type('already gone')
-        await backend.close(terminate=True)
+        await backend.destroy()
 
-    async def test_auth_failure_during_kill_is_typed(self, fake_e2b: FakeE2B) -> None:
+    async def test_pause_missing_sandbox_is_typed(self, fake_e2b: FakeE2B) -> None:
+        backend = E2BSandboxBackend(ref=SandboxRef(sandbox_id='sbx-gone'))
+        with pytest.raises(E2BSandboxUnavailableError, match="'sbx-gone'"):
+            await backend.pause()
+
+    async def test_auth_failure_during_destroy_is_typed(self, fake_e2b: FakeE2B) -> None:
         backend = await started()
         fake_e2b.kill_error = fake_e2b.auth_type('bad key')
 
         with pytest.raises(E2BSandboxAuthError, match='E2B rejected the credentials'):
-            await backend.close(terminate=True)
+            await backend.destroy()
 
-    async def test_hanging_kill_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_hanging_destroy_is_bounded(self, fake_e2b: FakeE2B, monkeypatch: pytest.MonkeyPatch) -> None:
         # Teardown runs shielded, so a hanging kill would be uncancellable; its own deadline
         # is the only bound between a wedged control plane and a hung process.
         monkeypatch.setattr('pydantic_ai_harness.e2b_sandbox._backend._TEARDOWN_TIMEOUT', 0.05)
@@ -205,7 +272,7 @@ class TestClose:
         fake_e2b.kill_hangs = True
         with anyio.fail_after(5):
             with pytest.raises(E2BSandboxError, match='Timed out'):
-                await backend.close(terminate=True)
+                await backend.destroy()
 
 
 class TestRun:

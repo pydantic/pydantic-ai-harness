@@ -54,7 +54,13 @@ Nothing here terminates a sandbox. A conversation can span many runs, so the end
 not the end of the workspace; Modal reaps a sandbox at `sandbox_timeout`. If Modal has
 already reaped a conversation's sandbox, the next run gets a fresh, empty one under the same
 name and the old files are gone -- raise `sandbox_timeout` when a conversation needs to outlive
-it, or terminate it explicitly with `await backend.close(terminate=True)`.
+it, or terminate it explicitly with `await backend.destroy()`.
+
+`await backend.disconnect()` releases only the local connection and does not terminate the remote
+sandbox. The backend retains its `ref`, so its next operation can attach to the same sandbox if
+it is still available.
+Both methods wait for acquisition to finish, but they do not wait for commands already running;
+finish those commands before disconnecting or destroying the sandbox.
 
 Attach to a sandbox managed elsewhere when the capability must not own its lifetime:
 
@@ -86,7 +92,7 @@ async def main() -> None:
         result = await backend.run(['python', '--version'], timeout=60)
         print(result.stdout)
     finally:
-        await backend.close(terminate=True)
+        await backend.destroy()
 
 
 anyio.run(main)
@@ -124,10 +130,11 @@ apply their own byte or line limits.
   `stderr`.
 - Missing filesystem paths raise `FileNotFoundError`.
 
-This backend uses asyncio. After `close()`, use a new backend with the saved `ref`
-if further access or a termination retry is needed. Before retrying termination, call
-`await replacement.sandbox` to attach the new handle, then
-`await replacement.close(terminate=True)`.
+This backend uses asyncio. After `disconnect()`, the same backend tries to reattach with its saved
+`ref` on the next operation. If `destroy()` reports a cleanup failure, retry it on the same
+backend; its saved `ref` remains available for that retry. A backend constructed with a saved
+`ref` can destroy the remote sandbox before its first normal operation, without creating a new
+one. Both methods treat an already-gone sandbox as successfully released.
 
 ## Configuration
 
