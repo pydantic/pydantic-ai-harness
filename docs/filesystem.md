@@ -67,12 +67,21 @@ the root you give it.
 
 | Event | Operation | Payload |
 |---|---|---|
-| `FileReadEvent` | `read_file` | `path`, `content_hash` |
-| `DirectoryListedEvent` | `list_directory` | `path`, `entry_count` |
-| `FileWrittenEvent` | `write_file`, `edit_file` | `path`, `content_hash` |
+| `FileReadEvent` | `read_file` | `path`, `root_dir`, `content_hash` |
+| `DirectoryListedEvent` | `list_directory` | `path`, `root_dir`, `entry_count` |
+| `FileWrittenEvent` | `write_file`, `edit_file` | `path`, `root_dir`, `content_hash` |
 
-Event paths are normalized, authorization-checked, relative to `root_dir`, and
-never absolute host paths. A denied or failed operation emits no event.
+`path` is the normalized, symlink-resolved location relative to `root_dir`,
+never an absolute host path, so it is safe to echo to the model or a UI.
+`root_dir` is the emitting filesystem's resolved root, so a subscriber rooted
+elsewhere can locate the file as `Path(root_dir) / path` instead of assuming
+it shares the emitter's root.
+
+Every event path has passed the containment check and the denied patterns. A
+`DirectoryListedEvent` names the listing root, which is not gated by
+`allowed_patterns` (see [Security model](#security-model)); only its entries
+are. A denied or failed operation emits no event, including a `read_file`
+whose `offset` is past the end of the file.
 
 Other capabilities can subscribe with `@on_event`, and application code with
 `@agent.on_event`. A host with its own file
