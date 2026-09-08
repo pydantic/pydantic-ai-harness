@@ -81,18 +81,6 @@ class TestLifecycle:
         assert fake_daytona.sandboxes[0].deleted is False
 
 
-class TestDeleteById:
-    """`delete_by_id` is how an application ends a sandbox itself, without starting it first."""
-
-    async def test_deletes_without_starting(self, fake_daytona: FakeDaytona) -> None:
-        sandbox = fake_daytona.sandbox('owned')
-
-        await DaytonaSandboxBackend.delete_by_id('owned')
-
-        assert sandbox.start_calls == []
-        assert sandbox.deleted is True
-
-
 class TestConfiguration:
     def test_defaults_and_path_preservation(self) -> None:
         capability = DaytonaSandbox(workdir='/workspace/../repo')

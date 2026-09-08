@@ -192,10 +192,10 @@ class TestLifecycle:
             'stable',
             'python',
             15,
-            0,
+            -1,
         )
         assert (params.env_vars, params.network_block_all) == ({'A': 'b'}, True)
-        await backend.close(terminate=True)
+        await backend.destroy()
         assert fake_daytona.sandboxes[0].deleted is True
         assert fake_daytona.closed_clients == 2
 
@@ -205,8 +205,8 @@ class TestLifecycle:
         backend = await started(ref=SandboxRef(sandbox_id='stable'))
         assert backend.ref == SandboxRef(sandbox_id='sb-id')
         assert sandbox.started is True
-        await backend.close(terminate=True)
-        assert sandbox.deleted is False
+        await backend.destroy()
+        assert sandbox.deleted is True
         assert fake_daytona.closed_clients == 1
 
     async def test_create_or_connect_connects_first(self, fake_daytona: FakeDaytona) -> None:
@@ -266,40 +266,114 @@ class TestLifecycle:
             await started(name='stable')
         assert exc_info.value is create_error
 
-    async def test_delete_by_id_does_not_start_and_not_found_succeeds(self, fake_daytona: FakeDaytona) -> None:
+    async def test_destroy_known_ref_does_not_start_and_not_found_succeeds(self, fake_daytona: FakeDaytona) -> None:
         sandbox = fake_daytona.sandbox()
-        await DaytonaSandboxBackend.delete_by_id(sandbox.id)
+        backend = DaytonaSandboxBackend(ref=SandboxRef(sandbox_id=sandbox.id))
+        await backend.destroy()
         assert sandbox.start_calls == []
         assert sandbox.deleted is True
-        await DaytonaSandboxBackend.delete_by_id('missing')
+        await DaytonaSandboxBackend(ref=SandboxRef(sandbox_id='missing')).destroy()
 
-    async def test_an_unused_backend_has_nothing_to_close(self, fake_daytona: FakeDaytona) -> None:
-        # Building one does no I/O, so closing it must not open a client either -- resolving
+    async def test_an_unused_backend_has_nothing_to_destroy_or_disconnect(self, fake_daytona: FakeDaytona) -> None:
+        # Building one does no I/O, so releasing it must not open a client either -- resolving
         # here would create the very sandbox being released.
-        await DaytonaSandboxBackend().close(terminate=True)
+        backend = DaytonaSandboxBackend()
+        await backend.destroy()
+        await backend.disconnect()
 
         assert fake_daytona.sandboxes == []
         assert fake_daytona.close_calls == 0
 
-    async def test_close_is_idempotent_and_not_found_delete_succeeds(self, fake_daytona: FakeDaytona) -> None:
+    async def test_destroy_is_idempotent_and_not_found_delete_succeeds(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         fake_daytona.delete_error = DaytonaNotFoundError('gone')
-        await backend.close(terminate=True)
-        await backend.close(terminate=True)
-        assert fake_daytona.close_calls == 1
+        await backend.destroy()
+        await backend.destroy()
+        assert fake_daytona.close_calls == 2
 
-    async def test_close_and_delete_failures_are_translated(self, fake_daytona: FakeDaytona) -> None:
+    async def test_destroy_and_disconnect_failures_are_translated(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         fake_daytona.delete_error = RuntimeError('delete failed')
         with pytest.raises(DaytonaSandboxError, match='delete failed'):
-            await backend.close(terminate=True)
+            await backend.destroy()
         assert fake_daytona.close_calls == 1
 
         fake_daytona.delete_error = None
         fake_daytona.close_error = RuntimeError('close failed')
         with pytest.raises(DaytonaSandboxError, match='close failed'):
-            assert backend.ref is not None
-            await DaytonaSandboxBackend.delete_by_id(backend.ref.sandbox_id)
+            await backend.destroy()
+
+    async def test_pause_and_stop_keep_the_client_for_reacquisition(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+
+        await backend.pause()
+        assert sandbox.pause_calls == [60.0]
+        await backend.sandbox
+        await backend.stop()
+        assert sandbox.stop_calls == [60.0]
+        await backend.sandbox
+        assert sandbox.start_calls == [60.0, 60.0]
+
+    async def test_disconnect_keeps_remote_sandbox_and_reconnects(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+
+        await backend.disconnect()
+
+        assert sandbox.deleted is False
+        await backend.sandbox
+        assert sandbox.start_calls == [60.0]
+
+    async def test_stop_rejects_ephemeral_sandbox(self, fake_daytona: FakeDaytona) -> None:
+        sandbox = fake_daytona.sandbox()
+        sandbox.auto_delete_interval = 0
+        backend = await started(ref=SandboxRef(sandbox_id=sandbox.id))
+
+        with pytest.raises(DaytonaSandboxError, match='ephemeral'):
+            await backend.stop()
+        assert sandbox.stop_calls == []
+
+    async def test_destroy_waits_for_acquisition(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.create_gate = asyncio.Event()
+        backend = DaytonaSandboxBackend()
+        acquire = asyncio.create_task(backend.sandbox)
+        await asyncio.sleep(0)
+        destroy = asyncio.create_task(backend.destroy())
+        await asyncio.sleep(0)
+        assert not destroy.done()
+        fake_daytona.create_gate.set()
+        await asyncio.gather(acquire, destroy)
+        assert fake_daytona.sandboxes[0].deleted is True
+
+    async def test_destroy_lookup_timeout_is_bounded(
+        self, fake_daytona: FakeDaytona, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sandbox = fake_daytona.sandbox()
+        fake_daytona.get_gate = asyncio.Event()
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._CREATE_TIMEOUT', 0.01)
+        backend = DaytonaSandboxBackend(ref=SandboxRef(sandbox_id=sandbox.id))
+
+        with pytest.raises(DaytonaSandboxError, match='lookup did not complete'):
+            await backend.destroy()
+        assert sandbox.deleted is False
+        assert sandbox.start_calls == []
+
+    async def test_pause_failure_can_be_retried(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        cause = RuntimeError('pause failed')
+        fake_daytona.sandboxes[0].pause_error = cause
+        with pytest.raises(DaytonaSandboxError) as caught:
+            await backend.pause()
+        assert caught.value.__cause__ is cause
+        fake_daytona.sandboxes[0].pause_error = None
+        await backend.pause()
+
+    async def test_pause_missing_sandbox_is_unavailable(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        fake_daytona.sandboxes[0].pause_error = DaytonaNotFoundError('gone')
+        with pytest.raises(DaytonaSandboxUnavailableError):
+            await backend.pause()
 
 
 class TestErrorsAndFilesystem:
@@ -438,10 +512,10 @@ class TestLazyOperations:
         cause = RuntimeError('delete failed')
         fake_daytona.delete_error = cause
         with pytest.raises(DaytonaSandboxError) as caught:
-            await backend.close(terminate=True)
+            await backend.destroy()
         assert caught.value.__cause__ is cause
         fake_daytona.delete_error = None
-        await backend.close(terminate=True)
+        await backend.destroy()
         assert fake_daytona.sandboxes[0].deleted
 
 
@@ -466,10 +540,10 @@ async def test_client_cleanup_failure_can_be_retried(fake_daytona: FakeDaytona) 
     error = RuntimeError('client close failed')
     fake_daytona.close_error = error
     with pytest.raises(DaytonaSandboxError) as caught:
-        await backend.close(terminate=False)
+        await backend.disconnect()
     assert caught.value.__cause__ is error
     fake_daytona.close_error = None
-    await backend.close(terminate=False)
+    await backend.disconnect()
     assert fake_daytona.closed_clients == 1
 
 

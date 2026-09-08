@@ -173,6 +173,14 @@ class FakeSandbox:
         self.started = False
         self.start_calls: list[float | None] = []
         self.start_gate: asyncio.Event | None = None
+        self.paused = False
+        self.pause_calls: list[float | None] = []
+        self.pause_gate: asyncio.Event | None = None
+        self.pause_error: Exception | None = None
+        self.stop_calls: list[float | None] = []
+        self.stop_gate: asyncio.Event | None = None
+        self.stop_error: Exception | None = None
+        self.auto_delete_interval: int | None = -1
         self.files: dict[str, bytes] = {}
         self.directories: set[str] = set()
         self.exec_error: Exception | None = None
@@ -205,6 +213,23 @@ class FakeSandbox:
             await self.start_gate.wait()
         self.started = True
 
+    async def pause(self, timeout: float = 60) -> None:
+        self.pause_calls.append(timeout)
+        if self.pause_gate is not None:
+            await self.pause_gate.wait()
+        if self.pause_error is not None:
+            raise self.pause_error
+        self.paused = True
+
+    async def stop(self, timeout: float | None = 60, force: bool = False) -> None:
+        del force
+        self.stop_calls.append(timeout)
+        if self.stop_gate is not None:
+            await self.stop_gate.wait()
+        if self.stop_error is not None:
+            raise self.stop_error
+        self.started = False
+
 
 class FakeClient:
     def __init__(self, owner: FakeDaytona) -> None:
@@ -223,8 +248,12 @@ class FakeClient:
         return sandbox
 
     async def get(self, sandbox_id: str, request_timeout: float | None = None) -> FakeSandbox:
+        if self.owner.get_gate is not None:
+            await self.owner.get_gate.wait()
+        if self.owner.get_error is not None:
+            raise self.owner.get_error
         for sandbox in self.owner.sandboxes:
-            if sandbox.id == sandbox_id or sandbox.name == sandbox_id:
+            if (sandbox.id == sandbox_id or sandbox.name == sandbox_id) and not sandbox.deleted:
                 sandbox.client = self
                 return sandbox
         raise DaytonaNotFoundError(f'no sandbox: {sandbox_id}')
@@ -253,6 +282,8 @@ class FakeDaytona:
         self.close_error: Exception | None = None
         self.close_calls = 0
         self.create_gate: asyncio.Event | None = None
+        self.get_gate: asyncio.Event | None = None
+        self.get_error: Exception | None = None
 
     def client(self) -> FakeClient:
         return FakeClient(self)

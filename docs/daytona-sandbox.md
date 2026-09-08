@@ -54,11 +54,8 @@ made rather than provisioning a second one. If creation races, a failed create i
 one attach to the winner.
 
 Runs leave the sandbox available. A conversation can span many runs, so the end of a run is not
-the end of the workspace; Daytona stops an idle sandbox after `auto_stop_minutes` and deletes it
-immediately after. If it has already done so, the next run gets a fresh, empty sandbox under the
-same name and the old files are gone -- raise `auto_stop_minutes` when a conversation needs to
-outlive it, or delete the sandbox yourself with `DaytonaSandboxBackend.delete_by_id`, which
-resolves it by ID without starting it first.
+the end of the workspace; Daytona stops an idle sandbox after `auto_stop_minutes` and keeps its
+disk until an explicit `destroy()` or another storage policy removes it.
 
 Attach to a sandbox managed elsewhere by ID or name when the capability must not
 own its lifetime:
@@ -89,7 +86,7 @@ async def main() -> None:
         result = await backend.run(['python', '--version'], timeout=60)
         print(result.stdout)
     finally:
-        await backend.close(terminate=True)
+        await backend.destroy()
 
 
 anyio.run(main)
@@ -100,9 +97,12 @@ by name and create it only if there is none. A `ref` whose sandbox is gone raise
 quietly providing an empty replacement.
 
 `await backend.sandbox` creates or attaches and returns the native Daytona sandbox
-for provider-specific operations. Direct users close the SDK client with
-`await backend.close(terminate=False)`. With `terminate=True`, it also deletes a sandbox
-created by that backend. Attached sandboxes remain available.
+for provider-specific operations. `await backend.destroy()` deletes the referenced sandbox
+without starting it, including one attached from elsewhere. `await backend.disconnect()` closes
+the SDK client while leaving the remote sandbox unchanged. Both methods require callers to finish
+in-flight operations first. `pause()` is available only for Daytona sandbox classes that support
+VM pause, and `stop()` rejects sandboxes with `auto_delete_interval=0` because their disk may be
+deleted after stopping. Stopping preserves disk for the persistent sandboxes this backend creates.
 
 The property remains awaitable after the native handle is cached. Await it before accessing SDK
 methods; type checkers reject using the awaitable as the native sandbox.

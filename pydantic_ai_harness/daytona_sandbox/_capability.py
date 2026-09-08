@@ -32,9 +32,8 @@ class DaytonaSandbox(AbstractCapability[AgentDepsT]):
     first attempt made rather than provisioning a second one.
 
     Nothing here deletes a sandbox. A conversation can span many runs, so the end of a run is not
-    the end of the workspace; Daytona stops an idle sandbox after `auto_stop_minutes` and deletes
-    it immediately after that. Raise `auto_stop_minutes` for longer work, or delete one yourself
-    with `DaytonaSandboxBackend.delete_by_id`.
+    the end of the workspace; Daytona stops an idle sandbox after `auto_stop_minutes` and keeps
+    its disk until an explicit destroy or storage policy removes it.
 
     Set `sandbox_id` to attach to a sandbox managed elsewhere instead.
     """

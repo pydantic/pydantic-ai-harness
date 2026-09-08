@@ -10,9 +10,12 @@ External assumptions last verified 2026-09-08 against Daytona Python SDK 0.198.0
   https://www.daytona.io/docs/en/python-sdk/async/async-process/
 * `sandbox.fs` provides metadata, byte upload/download, and directory operations:
   https://www.daytona.io/docs/en/python-sdk/async/async-file-system/
-* `auto_stop_interval` together with `auto_delete_interval=0` provides the server-side
-  backstop for abandoned owned sandboxes:
+* `auto_stop_interval` and `auto_delete_interval=-1` keep an owned sandbox stopped but
+  available until explicit deletion:
   https://www.daytona.io/docs/en/python-sdk/async/async-daytona/
+* `AsyncSandbox.pause` is supported only by VM sandbox classes; `stop` retains disk according
+  to the sandbox's configured auto-delete policy:
+  https://www.daytona.io/docs/en/python-sdk/async/async-sandbox/
 
 Re-check those sources and the installed 0.198.0 signatures before changing lifecycle,
 command, or filesystem handling.
@@ -177,10 +180,9 @@ class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, Support
     [`sandbox`][pydantic_ai_harness.daytona_sandbox.DaytonaSandboxBackend.sandbox], which you
     await to create or attach before using it.
 
-    The backend owns its `AsyncDaytona` client. Nothing here deletes a sandbox on its own:
-    Daytona stops an idle one after `auto_stop_minutes` and deletes it immediately after that.
-    Call [`close`][pydantic_ai_harness.daytona_sandbox.DaytonaSandboxBackend.close] with
-    `terminate=True` to end one sooner.
+    The backend owns its `AsyncDaytona` client. Daytona stops an idle owned sandbox after
+    `auto_stop_minutes`; its disk remains available until `destroy()` or another storage policy
+    removes it.
 
     Daytona delivers output through callbacks, so complete command results are buffered while a
     command runs.
@@ -195,7 +197,7 @@ class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, Support
             rather than provision a second sandbox. Ignored when `ref` is given.
         snapshot: Daytona snapshot a newly created sandbox starts from.
         auto_stop_minutes: How long Daytona leaves a newly created sandbox idle before stopping
-            it; it is deleted immediately after.
+            it; its disk remains until explicit destruction or another storage policy.
         working_dir: Directory commands run in; the sandbox's own default when `None`.
         env: Environment variables set on a newly created sandbox.
         network_block_all: Whether a newly created sandbox is cut off from the network.
@@ -222,8 +224,6 @@ class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, Support
         self._canonical_working_dir: str | None = None
         self._working_dir = absolute_path('working_dir', working_dir)
         self._client: AsyncDaytona | None = None
-        self._owned = False
-        self._closed = False
 
     async def create_or_attach(self) -> AsyncSandbox:
         """Acquire the native Daytona sandbox and record its identity."""
@@ -310,16 +310,16 @@ class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, Support
         return True
 
     async def _new_client(self) -> AsyncDaytona:
-        client = daytona.AsyncDaytona()
-        self._client = client
-        return client
+        if self._client is None:
+            self._client = daytona.AsyncDaytona()
+        return self._client
 
     async def _create(self, name: str | None = None) -> AsyncSandbox:
-        """Create a sandbox with Daytona's automatic stop and delete backstop."""
+        """Create a sandbox with Daytona's automatic stop backstop."""
         client = await self._new_client()
         try:
-            # Cancellation can orphan a sandbox until the paired auto-stop and immediate
-            # auto-delete settings reap it. A stable name lets a retry reconnect meanwhile.
+            # Cancellation can leave a sandbox without its local handle. A stable name lets a
+            # retry reconnect meanwhile.
             with anyio.fail_after(_CREATE_TIMEOUT):
                 sandbox = await client.create(
                     daytona.CreateSandboxFromSnapshotParams(
@@ -327,7 +327,7 @@ class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, Support
                         snapshot=self._snapshot,
                         env_vars=dict(self._env) if self._env is not None else None,
                         auto_stop_interval=self._auto_stop_minutes,
-                        auto_delete_interval=0,
+                        auto_delete_interval=-1,
                         network_block_all=self._network_block_all,
                     ),
                     timeout=_LIFECYCLE_TIMEOUT,
@@ -342,7 +342,6 @@ class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, Support
             if isinstance(error, Exception):
                 raise self.operation_error(error, 'Could not create Daytona sandbox') from error
             raise  # pragma: no cover - cancellation propagates after bounded client cleanup
-        self._owned = True
         return sandbox
 
     async def _attach(self, sandbox_id_or_name: str) -> AsyncSandbox:
@@ -396,61 +395,124 @@ class DaytonaSandboxBackend(LazySandbox['AsyncSandbox'], SandboxBackend, Support
             return repr(self._ref.sandbox_id)
         return f'named {self._name!r}' if self._name is not None else 'that was never started'  # pragma: lax no cover
 
-    async def close(self, *, terminate: bool) -> None:
-        """Close the SDK client, deleting the sandbox first when this backend owns it."""
-        client, sandbox = self._client, self._live
-        if self._closed or sandbox is None:
-            # Never used, so there is no client to close and no sandbox to delete. Resolving one
-            # here just to close it would create the very sandbox being released.
-            return
-        reconnect = client is None
-        if client is None:
-            client = await self._new_client()
-        deletion_error: Exception | None = None
-        if terminate and self._owned:
+    async def _lifecycle_target(self, *, missing_ok: bool = False) -> tuple[AsyncDaytona, AsyncSandbox] | None:
+        if self._ref is None and self._live is None:
+            return None
+        client = await self._new_client()
+        if self._live is not None:
+            return client, self._live
+        assert self._ref is not None
+        sandbox_id = self._ref.sandbox_id
+        sandbox: AsyncSandbox | None = None
 
-            async def delete() -> None:
-                # SDK sandbox handles retain their original client. A retry needs a fresh handle.
-                target = await client.get(sandbox.id, request_timeout=_REQUEST_TIMEOUT) if reconnect else sandbox
-                await client.delete(target, timeout=_LIFECYCLE_TIMEOUT, wait=True)
+        async def lookup() -> None:
+            nonlocal sandbox
+            sandbox = await client.get(sandbox_id, request_timeout=_REQUEST_TIMEOUT)
 
-            deletion_error = await cleanup_call(delete, timeout=_TEARDOWN_TIMEOUT)
-            if self._is_not_found(deletion_error):
-                deletion_error = None
+        error = await cleanup_call(lookup, timeout=_CREATE_TIMEOUT)
+        if error is not None:
+            close_error = await cleanup_call(client.close, timeout=_TEARDOWN_TIMEOUT)
+            if close_error is None:
+                self._client = None
+            if self._is_not_found(error) and missing_ok:
+                if close_error is not None:
+                    await raise_after_cleanup(
+                        self.operation_error(close_error, f'Could not close Daytona sandbox {self._describe()}'),
+                        cause=close_error,
+                    )
+                return None
+            if isinstance(error, TimeoutError):
+                translated = DaytonaSandboxError(f'Daytona sandbox lookup did not complete within {_CREATE_TIMEOUT}s.')
+            else:
+                translated = self.operation_error(
+                    error, f'Could not find Daytona sandbox {sandbox_id!r}', unavailable=True
+                )
+            await raise_after_cleanup(translated, cause=error)
+        assert sandbox is not None
+        return client, sandbox
+
+    async def _finish_lifecycle(
+        self,
+        client: AsyncDaytona,
+        error: Exception | None,
+        context: str,
+    ) -> None:
         close_error = await cleanup_call(client.close, timeout=_TEARDOWN_TIMEOUT)
         if close_error is None:
             self._client = None
-        self._closed = deletion_error is None and close_error is None
-        error = deletion_error or close_error
+            if error is not None:
+                self._live = None
+                self._canonical_working_dir = None
+        if error is None:
+            error = close_error
         if error is not None:
-            await raise_after_cleanup(
-                self.operation_error(error, f'Could not close Daytona sandbox {self._describe()}'), cause=error
-            )
+            await raise_after_cleanup(self.operation_error(error, context), cause=error)
 
-    @staticmethod
-    async def delete_by_id(sandbox_id: str) -> None:
-        """Delete a sandbox by ID without starting it."""
-        client = daytona.AsyncDaytona()
-        operation_error: Exception | None = None
-        try:
-            with anyio.fail_after(_REQUEST_TIMEOUT):
-                sandbox = await client.get(sandbox_id, request_timeout=_REQUEST_TIMEOUT)
-            operation_error = await cleanup_call(
+    async def destroy(self) -> None:
+        """Delete the referenced sandbox without starting it, then close this client."""
+        async with self._lock:
+            target_info = await self._lifecycle_target(missing_ok=True)
+            if target_info is None:
+                return
+            client, sandbox = target_info
+            error = await cleanup_call(
                 functools.partial(client.delete, sandbox, timeout=_LIFECYCLE_TIMEOUT, wait=True),
                 timeout=_TEARDOWN_TIMEOUT,
             )
-        except Exception as error:
-            operation_error = error
-        finally:
-            close_error = await cleanup_call(client.close, timeout=_TEARDOWN_TIMEOUT)
-        if DaytonaSandboxBackend._is_not_found(operation_error):
-            operation_error = None
-        error = operation_error or close_error
-        if error is not None:
-            await raise_after_cleanup(
-                DaytonaSandboxBackend.operation_error(error, f'Could not delete Daytona sandbox {sandbox_id!r}'),
-                cause=error,
-            )
+            if error is not None and self._is_not_found(error):
+                error = None
+            if error is None:
+                self._live = None
+                self._canonical_working_dir = None
+            await self._finish_lifecycle(client, error, f'Could not destroy Daytona sandbox {self._describe()}')
+
+    async def disconnect(self) -> None:
+        """Close this backend's SDK client without changing the remote sandbox."""
+        async with self._lock:
+            client = self._client
+            if client is None:
+                return
+            error = await cleanup_call(client.close, timeout=_TEARDOWN_TIMEOUT)
+            if error is None:
+                self._client = None
+                self._live = None
+                self._canonical_working_dir = None
+            if error is not None:
+                await raise_after_cleanup(
+                    self.operation_error(error, f'Could not disconnect from Daytona sandbox {self._describe()}'),
+                    cause=error,
+                )
+
+    async def _change_state(self, action: str) -> None:
+        async with self._lock:
+            target_info = await self._lifecycle_target()
+            if target_info is None:
+                return
+            _, sandbox = target_info
+            if action == 'stop' and sandbox.auto_delete_interval == 0:
+                raise DaytonaSandboxError(
+                    f'Cannot stop ephemeral Daytona sandbox {self._describe()}; stopping may delete its disk.'
+                )
+            method = sandbox.pause if action == 'pause' else sandbox.stop
+            error = await cleanup_call(functools.partial(method, timeout=_LIFECYCLE_TIMEOUT), timeout=_TEARDOWN_TIMEOUT)
+            if error is None:
+                self._live = None
+                self._canonical_working_dir = None
+            if error is not None:
+                translated = self.operation_error(
+                    error,
+                    f'Could not {action} Daytona sandbox {self._describe()}',
+                    unavailable=self._is_not_found(error),
+                )
+                await raise_after_cleanup(translated, cause=error)
+
+    async def pause(self) -> None:
+        """Pause the sandbox using Daytona's VM-only pause operation."""
+        await self._change_state('pause')
+
+    async def stop(self) -> None:
+        """Stop the sandbox while preserving its disk for a later explicit destroy."""
+        await self._change_state('stop')
 
     async def working_dir(self) -> str:
         """Return the filesystem-canonical default directory inside the sandbox."""
