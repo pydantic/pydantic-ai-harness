@@ -30,13 +30,14 @@ from pydantic_ai.sandboxes import (
     SandboxUnavailableError,
 )
 
-from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call
+from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
 from pydantic_ai_harness.sprites._process import CANCEL, RUN
 
 try:
     from sprites import Sprite, SpritesClient
     from sprites.control import ControlConnection
     from sprites.exceptions import AuthenticationError, NotFoundError, SpriteError
+    from websockets.exceptions import InvalidStatus
 except ImportError as exc:
     raise ImportError('Install `pydantic-ai-harness[sprites]` to use SpriteSandbox.') from exc
 
@@ -49,7 +50,7 @@ class SpriteSandboxError(SandboxError):
     """A Fly.io Sprites operation failed."""
 
 
-class SpriteSandboxAuthError(SpriteSandboxError):
+class SpriteSandboxAuthError(SpriteSandboxError, SandboxUnavailableError):
     """The Sprites token is missing or was rejected."""
 
 
@@ -158,6 +159,11 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
             return SpriteSandboxAuthError('Sprites rejected the credentials; check SPRITE_TOKEN or token=.')
         if isinstance(error, NotFoundError):
             return SpriteSandboxUnavailableError('The requested Sprite no longer exists.')
+        if isinstance(error, InvalidStatus):
+            if error.response.status_code == 401:
+                return SpriteSandboxAuthError('Sprites rejected the credentials; check SPRITE_TOKEN or token=.')
+            if error.response.status_code == 404:
+                return SpriteSandboxUnavailableError('The requested Sprite no longer exists.')
         return SpriteSandboxError(f'{context}: {error}')
 
     async def working_dir(self) -> str:
@@ -261,22 +267,16 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
         finally:
             if connection is not None:
                 close_error = await cleanup_call(connection.close, timeout=_CONTROL_TIMEOUT)
-                if close_error is None:
-                    close_error = connection.close_error
 
         if command_error is not None:
             await self._raise_run_failure(command_error, sprite, control, stdout, stderr, timeout)
 
         if close_error is not None:
-            await self._raise_run_failure(
-                close_error,
-                sprite,
-                control,
-                stdout,
-                stderr,
-                timeout,
-                context='Could not close Sprite command connection',
-            )
+            if isinstance(close_error, TimeoutError):
+                raise SpriteSandboxError(
+                    'Could not close Sprite command connection within the cleanup bound.'
+                ) from close_error
+            raise self._error(close_error, 'Could not close Sprite command connection') from close_error
         return CommandResult(
             exit_code=code,
             stdout=stdout.decode('utf-8', errors='replace'),
@@ -302,7 +302,9 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
             if isinstance(error, NotFoundError):
                 error = None
             if error is not None:
-                raise self._error(error, f'Could not destroy Sprite {ref.sandbox_id!r}') from error
+                await raise_after_cleanup(
+                    self._error(error, f'Could not destroy Sprite {ref.sandbox_id!r}'), cause=error
+                )
             self._live = None
             self._canonical_working_dir = None
 
@@ -325,7 +327,9 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
                 return
             error = await cleanup_call(lambda: _call(client.close), timeout=self._api_timeout)
             if error is not None:
-                raise self._error(error, 'Could not disconnect from Sprite SDK client') from error
+                await raise_after_cleanup(
+                    self._error(error, 'Could not disconnect from Sprite SDK client'), cause=error
+                )
             self._client = None
             self._live = None
             self._canonical_working_dir = None

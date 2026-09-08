@@ -103,9 +103,9 @@ Command stdout and stderr are buffered separately and are not truncated. Use
 bounded commands or redirect large output to files and read a window through core.
 The SDK uses a fixed 120-second creation HTTP timeout independently of `api_timeout`.
 
-SDK authentication and missing-Sprite failures reported by SDK HTTP calls become
-`SpriteSandboxAuthError` and `SpriteSandboxUnavailableError`, retaining their original cause.
-Command transport errors preserve their cause. Command nonzero exits remain ordinary results;
+SDK authentication and missing-Sprite failures reported by SDK HTTP calls or control handshakes
+become `SpriteSandboxAuthError` and `SpriteSandboxUnavailableError`, retaining their original cause.
+Other command transport errors preserve their cause. Command nonzero exits remain ordinary results;
 deadlines raise core `SandboxTimeoutError`.
 
 ## Explicit lifecycle

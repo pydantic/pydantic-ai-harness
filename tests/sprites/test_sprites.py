@@ -14,10 +14,13 @@ import anyio.to_thread
 import pytest
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import Sandbox, SandboxRef, SandboxTimeoutError
+from pydantic_ai.sandboxes import Sandbox, SandboxRef, SandboxTimeoutError, SandboxUnavailableError
 from pydantic_ai.usage import RunUsage
 from sprites import Sprite, SpritesClient
 from sprites.exceptions import AuthenticationError, NotFoundError, SpriteError
+from websockets.datastructures import Headers
+from websockets.exceptions import InvalidStatus
+from websockets.http11 import Response
 
 from pydantic_ai_harness.sprites import (
     SpriteSandbox,
@@ -94,7 +97,8 @@ class FakeControlConnection:
         self.closed = False
 
     async def connect(self) -> None:
-        return None
+        if self.transport.connect_error is not None:
+            raise self.transport.connect_error
 
     async def start_op(self, op: str, *, cmd: list[str], stdin: bool) -> FakeOperation:
         assert op == 'exec'
@@ -102,6 +106,10 @@ class FakeControlConnection:
         return FakeOperation(self.transport, cmd)
 
     async def close(self) -> None:
+        if self.transport.control_close_hang:
+            await anyio.sleep(1)
+        if self.transport.control_close_error is not None:
+            raise self.transport.control_close_error
         self.closed = True
 
 
@@ -122,6 +130,9 @@ class SpriteTransport:
         self.destroy_error: SpriteError | None = None
         self.close_error: Exception | None = None
         self.close_calls = 0
+        self.connect_error: Exception | None = None
+        self.control_close_error: Exception | None = None
+        self.control_close_hang = False
         self.started = threading.Event()
         self.release_start: threading.Event | None = None
 
@@ -322,6 +333,51 @@ class TestSpriteSandbox:
         await backend.disconnect()
         assert transport.close_calls == 0
         assert (await backend.sandbox).name == 'owned-by-caller'
+
+    @pytest.mark.parametrize(
+        'status_code,expected_type',
+        [
+            (401, SpriteSandboxAuthError),
+            (404, SpriteSandboxUnavailableError),
+            (500, SpriteSandboxError),
+        ],
+    )
+    async def test_cached_control_handshake_errors_are_typed(
+        self, transport: SpriteTransport, status_code: int, expected_type: type[SpriteSandboxError]
+    ) -> None:
+        backend = SpriteSandboxBackend()
+        await backend.sandbox
+        error = InvalidStatus(Response(status_code, 'status', Headers()))
+        transport.connect_error = error
+        with pytest.raises(expected_type) as caught:
+            await backend.run(['true'])
+        assert caught.value.__cause__ is error
+        if status_code in (401, 404):
+            assert isinstance(caught.value, SandboxUnavailableError)
+        else:
+            assert not isinstance(caught.value, (SpriteSandboxAuthError, SpriteSandboxUnavailableError))
+
+    async def test_control_close_failure_after_exit_preserves_cause(self, transport: SpriteTransport) -> None:
+        backend = SpriteSandboxBackend()
+        await backend.sandbox
+        error = RuntimeError('close failed')
+        transport.control_close_error = error
+        with pytest.raises(SpriteSandboxError) as caught:
+            await backend.run(['true'])
+        assert caught.value.__cause__ is error
+        assert 'close Sprite command connection' in str(caught.value)
+
+    async def test_control_close_timeout_is_provider_error(
+        self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        backend = SpriteSandboxBackend()
+        await backend.sandbox
+        transport.control_close_hang = True
+        monkeypatch.setattr('pydantic_ai_harness.sprites._backend._CONTROL_TIMEOUT', 0.01)
+        with pytest.raises(SpriteSandboxError) as caught:
+            await backend.run(['true'])
+        assert isinstance(caught.value.__cause__, TimeoutError)
+        assert 'cleanup bound' in str(caught.value)
 
     async def test_argv_shell_environment_and_nonzero_exit(self, transport: SpriteTransport) -> None:
         backend = SpriteSandboxBackend()
