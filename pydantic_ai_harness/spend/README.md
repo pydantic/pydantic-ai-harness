@@ -255,7 +255,7 @@ State lives across runs deliberately, so `for_run` is not overridden: a daily bu
 
 `defer_loading=True` is refused. A deferred capability's hooks do not run until the model loads it, so an exhausted budget would not stop a request and the requests made meanwhile would go uncounted -- a brake the thing being braked decides when to apply.
 
-When Pydantic AI exposes `ModelRequestContext.usage_responses`, `SpendLimits` accrues the provider responses whose usage core committed, even if a later hook or wrapper rejects them. Continuation responses are priced individually. A cache response that never reached a provider is not charged.
+When Pydantic AI exposes `ModelRequestContext.usage_responses`, `SpendLimits` accrues the provider responses whose usage core committed, even if a later hook or wrapper rejects them. Core merges a successful continuation chain into one response, so `price` and `on_spend` each run once for its combined usage. If core records multiple accounting responses during a lifecycle, each recorded response is accrued separately. A cache response that never reached a provider is not charged.
 
 On older supported Pydantic AI releases, `SpendLimits` accrues the response returned by its inner handler. A cache response may therefore be priced, and continuation segments are priced as one merged response. An inner wrapper that rejects a billed response before returning it can hide that response from the counter. `SpendLimits` retains its innermost placement and emits `SpendCompositionWarning` for detectable arrangements with that risk; list it last among innermost capabilities. The warning is unnecessary on core versions with provider-response accounting.
 
