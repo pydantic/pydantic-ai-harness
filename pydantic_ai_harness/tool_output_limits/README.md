@@ -104,8 +104,11 @@ agent = Agent(
 Thresholds are measured in characters by default. Set `over_tokens=True` to measure in
 estimated tokens (the same ~4-chars-per-token heuristic as `compaction`); pass a `tokenizer`
 callable for accuracy. `Truncate.max_chars` is always characters -- truncation is a
-character operation regardless of the threshold unit. Set `strip_ansi=True` to strip ANSI
-escape sequences from text returns before measuring and reducing.
+character operation regardless of the threshold unit. The cap includes the truncation marker
+and applies separately to each reduced text value. If no content and complete marker fit,
+truncation keeps the selected slice without a marker; a non-positive cap returns an empty
+string. Set `strip_ansi=True` to strip ANSI escape sequences from text returns before
+measuring and reducing.
 
 ## Pageable structured spills
 
