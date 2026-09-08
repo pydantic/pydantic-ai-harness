@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import sys
 import types
 from collections.abc import Iterator
 from typing import TYPE_CHECKING
@@ -29,7 +28,7 @@ class _PoisonedDaytona(types.ModuleType):
 @pytest.fixture(autouse=True)
 def _no_real_daytona(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Poison lazy `daytona` imports unless a test explicitly installs the fake."""
-    monkeypatch.setitem(sys.modules, 'daytona', _PoisonedDaytona('daytona'))
+    monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend.daytona', _PoisonedDaytona('daytona'))
     yield
 
 
@@ -43,6 +42,6 @@ if _HAS_DAYTONA:  # pragma: no branch - the fixture requires the SDK-backed fake
     @pytest.fixture
     def fake_daytona(monkeypatch: pytest.MonkeyPatch) -> FakeDaytona:
         fake = FakeDaytona()
-        monkeypatch.setitem(sys.modules, 'daytona', daytona)
+        monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend.daytona', daytona)
         monkeypatch.setattr(daytona, 'AsyncDaytona', fake.client)
         return fake

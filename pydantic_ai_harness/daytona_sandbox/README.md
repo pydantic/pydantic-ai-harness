@@ -6,6 +6,7 @@ consume `ctx.sandbox` for the model-facing interface you want.
 
 [Source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/daytona_sandbox/)
 
+> [!NOTE]
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
 ## Install and authenticate
@@ -39,18 +40,21 @@ exposes shell syntax.
 
 ## Lifecycle
 
-Owned acquisition derives a Daytona-safe name from the logical run ID. A durable
-retry first reconnects by that name. If creation races, a failed create is
-followed by one reconnect to the winner. The serialized `SandboxRef` contains the
-provider and sandbox ID; later workers reconnect by ID and never create from
-`get_sandbox`. Acquisition closes its SDK client after recording the ref, and
-release opens a fresh client, resolves the sandbox by ID without starting it,
-deletes it, and closes the client again.
+Asking the capability for a sandbox does no I/O. It hands back a backend holding settings
+plus, when there is one, the identity of a sandbox that already exists; the first command or
+file operation creates or attaches, once.
 
-An already missing sandbox counts as successfully released. Unexpected delete or
-client-close failures are surfaced. Owned sandboxes use `auto_stop_minutes`
-together with Daytona's immediate delete-after-stop setting as the server-side
-backstop for cancellation during creation and other abandoned lifecycles.
+An owned sandbox gets a Daytona-safe name derived from the conversation, so a follow-up run
+continues in the same workspace and a durable retry attaches to the sandbox the first attempt
+made rather than provisioning a second one. If creation races, a failed create is followed by
+one attach to the winner.
+
+Runs leave the sandbox available. A conversation can span many runs, so the end of a run is not
+the end of the workspace; Daytona stops an idle sandbox after `auto_stop_minutes` and deletes it
+immediately after. If it has already done so, the next run gets a fresh, empty sandbox under the
+same name and the old files are gone -- raise `auto_stop_minutes` when a conversation needs to
+outlive it, or delete the sandbox yourself with `DaytonaSandboxBackend.delete_by_id`, which
+resolves it by ID without starting it first.
 
 Attach to a sandbox managed elsewhere by ID or name when the capability must not
 own its lifetime:
@@ -61,14 +65,13 @@ from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 DaytonaSandbox(sandbox_id='existing', workdir='/workspace')
 ```
 
-Creation-only settings cannot be combined with `sandbox_id`. Attached sandboxes
-are not deleted at run end, and concurrent runs share their filesystem and
-process space.
+Creation-only settings cannot be combined with `sandbox_id`. Concurrent runs on the same
+sandbox share its filesystem and process space.
 
 ## Direct backend use
 
-`DaytonaSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and
-its filesystem and process-start opt-ins:
+`DaytonaSandboxBackend` implements Pydantic AI's `SandboxBackend` protocol and its optional
+filesystem. Building one does no I/O; the first operation creates the sandbox:
 
 ```python
 import anyio
@@ -77,10 +80,7 @@ from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
 
 
 async def main() -> None:
-    backend = await DaytonaSandboxBackend.create(
-        snapshot='base',
-        auto_stop_minutes=60,
-    )
+    backend = DaytonaSandboxBackend(snapshot='base', auto_stop_minutes=60)
     try:
         result = await backend.run(['python', '--version'], timeout=60)
         print(result.stdout)
@@ -91,23 +91,30 @@ async def main() -> None:
 anyio.run(main)
 ```
 
-Use `connect(sandbox_id_or_name)` for a fresh handle to an existing sandbox; it
-never provisions a replacement.
+Import `SandboxRef` from `pydantic_ai.sandboxes` and pass `ref=SandboxRef(sandbox_id=...)` to attach to one specific sandbox, or `name=...` to attach
+by name and create it only if there is none. A `ref` whose sandbox is gone raises rather than
+quietly providing an empty replacement.
+
+`await backend.get_sandbox()` creates or attaches and returns the native Daytona sandbox
+for provider-specific operations. Direct users close the SDK client with
+`await backend.close(terminate=False)`. With `terminate=True`, it also deletes a sandbox
+created by that backend. Attached sandboxes remain available.
 
 ## Process and output behavior
 
 Daytona process sessions provide separate stdout and stderr callbacks. The
 backend preserves that separation and joins each stream once when the complete
 result is requested. Log collection and the final exit-status RPC use one deadline
-measured from `start()`. A command deadline raises
+measured from `run()`, including acquisition and session setup. A command deadline raises
 `pydantic_ai.sandboxes.SandboxTimeoutError` with the stdout and stderr collected
 before expiry. Timeout or caller cancellation attempts to delete the remote
 process session before returning. A failed best-effort deletion does not replace
 the command's original outcome; the sandbox lifetime remains the cleanup backstop.
 
-Complete command output is buffered in memory. Model-facing tools should apply their
-own byte or line budget, and commands that can produce very large output should bound
-it at the source.
+Complete command output is buffered in memory. The backend does not add a second
+presentation policy or claim that transport is bounded. Model-facing tools should
+apply their own byte or line budget, and commands that can produce very large
+output should bound it at the source.
 
 The public error surface is deliberately narrow:
 
@@ -118,8 +125,8 @@ The public error surface is deliberately narrow:
 - `pydantic_ai.sandboxes.SandboxTimeoutError` for command deadlines, with the partial
   `stdout`, `stderr`, and enforced `timeout`.
 
-Sandbox creation, connection, and process-session setup timeouts are provider
-operation failures, not command deadlines, and raise `DaytonaSandboxError`.
+Provider request timeouts raise `DaytonaSandboxError`. Expiry of the explicit
+`run(timeout=...)` deadline raises `SandboxTimeoutError`, including during setup.
 
 Filesystem misses use the built-in `FileNotFoundError` contract.
 

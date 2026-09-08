@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 
 import pytest
+from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.sandboxes import SandboxRef
 from pydantic_ai.tools import RunContext
@@ -29,7 +30,7 @@ async def _resolved(
     """Ask the capability for a backend and touch it, so the create-or-attach actually happens."""
     backend = capability.get_sandbox(ctx, ref=ref)
     assert isinstance(backend, DaytonaSandboxBackend)
-    await backend.sandbox
+    await backend.get_sandbox()
     return backend
 
 
@@ -93,12 +94,12 @@ class TestDeleteById:
 
 
 class TestConfiguration:
-    def test_defaults_and_normalization(self) -> None:
+    def test_defaults_and_path_preservation(self) -> None:
         capability = DaytonaSandbox(workdir='/workspace/../repo')
         assert capability.snapshot is None
         assert capability.auto_stop_minutes == 60
         assert capability.network_block_all is False
-        assert capability.workdir == '/repo'
+        assert capability.workdir == '/workspace/../repo'
 
     def test_configuration_is_keyword_only(self) -> None:
         assert all(
@@ -144,3 +145,19 @@ class TestConfiguration:
             'DaytonaSandboxUnavailableError',
         }
         assert DaytonaSandbox.get_serialization_name() == 'DaytonaSandbox'
+
+
+async def test_agent_reuses_conversation_workspace(fake_daytona: FakeDaytona) -> None:
+    agent = Agent(TestModel(), deps_type=type(None), capabilities=[DaytonaSandbox[None]()])
+
+    @agent.tool
+    async def remember(ctx: RunContext[None]) -> str:
+        if await ctx.sandbox.exists('/note'):
+            return (await ctx.sandbox.read_bytes('/note')).decode()
+        await ctx.sandbox.write_bytes('/note', b'saved')
+        return 'created'
+
+    first = await agent.run('Remember this.')
+    second = await agent.run('Continue.', conversation_id=first.conversation_id)
+    assert 'saved' in second.output
+    assert len(fake_daytona.sandboxes) == 1

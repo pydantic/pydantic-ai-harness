@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import builtins
+import subprocess
 import sys
 from typing import Any
 from unittest.mock import AsyncMock
@@ -27,7 +27,6 @@ from pydantic_ai_harness.daytona_sandbox import (
     DaytonaSandboxError,
     DaytonaSandboxUnavailableError,
 )
-from pydantic_ai_harness.daytona_sandbox._backend import _command_context, _command_line
 
 from ..sandbox_conformance import (
     check_command_validation,
@@ -39,18 +38,6 @@ from .fake_daytona import FakeDaytona
 pytestmark = pytest.mark.anyio(backends=['asyncio'])
 
 
-def _hide_daytona(monkeypatch: pytest.MonkeyPatch) -> None:
-    real_import = builtins.__import__
-
-    def no_daytona(name: str, *args: object, **kwargs: object) -> object:
-        if name == 'daytona':
-            raise ImportError('No module named daytona')
-        return real_import(name, *args, **kwargs)  # type: ignore[arg-type]
-
-    monkeypatch.delitem(sys.modules, 'daytona', raising=False)
-    monkeypatch.setattr(builtins, '__import__', no_daytona)
-
-
 async def started(**settings: Any) -> DaytonaSandboxBackend:
     """Build a backend and resolve it now.
 
@@ -58,7 +45,7 @@ async def started(**settings: Any) -> DaytonaSandboxBackend:
     did has to touch the sandbox first. Awaiting the property is that touch.
     """
     backend = DaytonaSandboxBackend(**settings)
-    await backend.sandbox
+    await backend.get_sandbox()
     return backend
 
 
@@ -90,11 +77,6 @@ class TestConformance:
 
 
 class TestCommands:
-    def test_command_forms_and_context(self) -> None:
-        assert _command_line(['printf', 'a b'], False) == "printf 'a b'"
-        assert _command_line('printf ok', True) == 'printf ok'
-        assert _command_context('run', '/work dir', {'A': 'x y'}) == ("cd -- '/work dir' && env -- 'A=x y' sh -c run")
-
     async def test_argv_output_and_context(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         sandbox = fake_daytona.sandboxes[0]
@@ -189,15 +171,6 @@ class TestCommands:
 
 
 class TestLifecycle:
-    async def test_missing_package_is_named(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        _hide_daytona(monkeypatch)
-        with pytest.raises(DaytonaSandboxError, match='daytona.*required'):
-            await started()
-        with pytest.raises(DaytonaSandboxError, match='daytona.*required'):
-            await started(ref=SandboxRef(sandbox_id='sandbox'))
-        with pytest.raises(DaytonaSandboxError, match='daytona.*required'):
-            await DaytonaSandboxBackend.delete_by_id('sandbox')
-
     async def test_create_passes_configuration(self, fake_daytona: FakeDaytona) -> None:
         backend = await started(
             name='stable',
@@ -251,7 +224,7 @@ class TestLifecycle:
         monkeypatch.setattr(
             DaytonaSandboxBackend,
             '_attach',
-            AsyncMock(side_effect=[DaytonaSandboxUnavailableError('missing'), await connected.sandbox]),
+            AsyncMock(side_effect=[DaytonaSandboxUnavailableError('missing'), await connected.get_sandbox()]),
         )
         monkeypatch.setattr(DaytonaSandboxBackend, '_create', AsyncMock(side_effect=DaytonaSandboxError('race')))
         assert (await started(name='stable')).ref == SandboxRef(sandbox_id='winner')
@@ -338,21 +311,6 @@ class TestErrorsAndFilesystem:
         assert isinstance(recoverable.value, SandboxError)
         assert not isinstance(recoverable.value, SandboxUnavailableError)
 
-    async def test_concurrent_waits_share_one_outcome(self, fake_daytona: FakeDaytona) -> None:
-        # A second waiter arriving mid-settle parks on the lock and receives the first
-        # settle's cached result object -- the protocol's concurrent-wait promise. Without
-        # the lock it would run its own settle against internals the first one cleans up.
-        backend = await started()
-        sandbox = fake_daytona.sandboxes[0]
-        sandbox.process_status_gate = asyncio.Event()
-        first = asyncio.create_task(backend.run(['true']))
-        await anyio.wait_all_tasks_blocked()  # first is suspended at the status poll, mid-settle
-        second = asyncio.create_task(backend.run(['true']))
-        await anyio.wait_all_tasks_blocked()
-        sandbox.process_status_gate.set()
-        one, two = await asyncio.gather(first, second)
-        assert one == two
-
     async def test_concurrent_first_probes_converge(self, fake_daytona: FakeDaytona) -> None:
         # The probe is an idempotent read, so overlapping first calls are allowed to
         # duplicate it: both get the same answer and the cache settles.
@@ -369,10 +327,10 @@ class TestErrorsAndFilesystem:
         assert await asyncio.gather(first, second) == ['/srv/repo', '/srv/repo']
         assert sandbox.workdir_calls == 2
 
-    async def test_configured_working_dir_needs_no_probe(self, fake_daytona: FakeDaytona) -> None:
+    async def test_configured_working_dir_is_probed(self, fake_daytona: FakeDaytona) -> None:
         backend = await started(working_dir='/work')
         assert await backend.working_dir() == '/work'
-        assert fake_daytona.sandboxes[0].workdir_calls == 0
+        assert fake_daytona.sandboxes[0].workdir_calls == 1
 
     async def test_working_dir_error_is_translated(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
@@ -432,3 +390,89 @@ class TestErrorsAndFilesystem:
         backend = await started()
         with pytest.raises(FileNotFoundError):
             await backend.stat('/missing')
+
+
+class TestLazyOperations:
+    async def test_default_cwd_is_applied_to_commands(self, fake_daytona: FakeDaytona) -> None:
+        backend = DaytonaSandboxBackend(working_dir='/work dir')
+        await backend.run(['true'])
+        assert fake_daytona.sandboxes[0].process_command == "cd -- '/work dir' && true"
+
+    async def test_working_dir_initializes_identity(self, fake_daytona: FakeDaytona) -> None:
+        backend = DaytonaSandboxBackend(working_dir='/workspace')
+        assert await backend.working_dir() == '/workspace'
+        assert backend.ref is not None
+
+    @pytest.mark.parametrize('operation', ['read_bytes', 'exists', 'working_dir'])
+    async def test_missing_sandbox_remains_terminal(self, fake_daytona: FakeDaytona, operation: str) -> None:
+        backend = DaytonaSandboxBackend(ref=SandboxRef(sandbox_id='missing'))
+        with pytest.raises(DaytonaSandboxUnavailableError):
+            if operation == 'read_bytes':
+                await backend.read_bytes('/note')
+            elif operation == 'exists':
+                await backend.exists('/note')
+            else:
+                await backend.working_dir()
+
+    async def test_deadline_bounds_acquisition(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.create_gate = asyncio.Event()
+        with pytest.raises(SandboxTimeoutError):
+            await DaytonaSandboxBackend().run(['true'], timeout=0.01)
+        assert fake_daytona.closed_clients == 1
+
+    async def test_deadline_bounds_session_setup(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        fake_daytona.sandboxes[0].process_create_gate = asyncio.Event()
+        with pytest.raises(SandboxTimeoutError):
+            await backend.run(['true'], timeout=0.01)
+
+    async def test_delete_can_be_retried_after_failure(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        cause = RuntimeError('delete failed')
+        fake_daytona.delete_error = cause
+        with pytest.raises(DaytonaSandboxError) as caught:
+            await backend.close(terminate=True)
+        assert caught.value.__cause__ is cause
+        fake_daytona.delete_error = None
+        await backend.close(terminate=True)
+        assert fake_daytona.sandboxes[0].deleted
+
+
+def test_missing_daytona_extra_has_an_install_hint() -> None:
+    result = subprocess.run(
+        [sys.executable, '-c', "import sys; sys.modules['daytona'] = None; import pydantic_ai_harness.daytona_sandbox"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert 'Install `pydantic-ai-harness[daytona]`' in result.stderr
+
+
+async def test_argv_rejects_shell_mode(fake_daytona: FakeDaytona) -> None:
+    with pytest.raises(TypeError, match='argv sequence'):
+        await DaytonaSandboxBackend().run(['true'], shell=True)
+
+
+async def test_client_cleanup_failure_can_be_retried(fake_daytona: FakeDaytona) -> None:
+    backend = await started()
+    error = RuntimeError('client close failed')
+    fake_daytona.close_error = error
+    with pytest.raises(DaytonaSandboxError) as caught:
+        await backend.close(terminate=False)
+    assert caught.value.__cause__ is error
+    fake_daytona.close_error = None
+    await backend.close(terminate=False)
+    assert fake_daytona.closed_clients == 1
+
+
+async def test_working_directory_is_cached(fake_daytona: FakeDaytona) -> None:
+    backend = DaytonaSandboxBackend()
+    first = await backend.working_dir()
+    fake_daytona.sandboxes[0].workdir = '/changed'
+    assert await backend.working_dir() == first
+
+
+async def test_shell_command_is_passed_to_the_session(fake_daytona: FakeDaytona) -> None:
+    await DaytonaSandboxBackend().run('printf hello | cat', shell=True)
+    assert fake_daytona.sandboxes[0].process_command == 'printf hello | cat'

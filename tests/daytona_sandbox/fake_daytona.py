@@ -30,7 +30,14 @@ class FakeProcess:
         env: dict[str, str] | None = None,
         timeout: int | None = None,
     ) -> SimpleNamespace:
-        # The backend only uses one-shot exec for `write_bytes`'s parent-directory creation.
+        if command == 'pwd -P':
+            self.owner.workdir_calls += 1
+            self.owner.workdir_started.set()
+            if self.owner.workdir_gate is not None:
+                await self.owner.workdir_gate.wait()
+            if self.owner.workdir_error is not None:
+                raise self.owner.workdir_error
+            return SimpleNamespace(result=(cwd or self.owner.workdir) + '\n', exit_code=0)
         assert command.startswith('mkdir -p -- ')
         return SimpleNamespace(result='', exit_code=self.owner.mkdir_exit_code)
 
@@ -159,6 +166,7 @@ class FakeFileSystem:
 
 class FakeSandbox:
     def __init__(self, sandbox_id: str, name: str | None = None) -> None:
+        self.client: FakeClient | None = None
         self.id = sandbox_id
         self.name = name or sandbox_id
         self.deleted = False
@@ -197,15 +205,6 @@ class FakeSandbox:
             await self.start_gate.wait()
         self.started = True
 
-    async def get_work_dir(self) -> str:
-        self.workdir_calls += 1
-        self.workdir_started.set()
-        if self.workdir_gate is not None:
-            await self.workdir_gate.wait()
-        if self.workdir_error is not None:
-            raise self.workdir_error
-        return self.workdir
-
 
 class FakeClient:
     def __init__(self, owner: FakeDaytona) -> None:
@@ -218,6 +217,7 @@ class FakeClient:
         if self.owner.create_error is not None:
             raise self.owner.create_error
         sandbox = FakeSandbox(f'sb-{len(self.owner.sandboxes) + 1}', params.name)
+        sandbox.client = self
         self.owner.sandboxes.append(sandbox)
         self.owner.create_params.append(params)
         return sandbox
@@ -225,10 +225,12 @@ class FakeClient:
     async def get(self, sandbox_id: str, request_timeout: float | None = None) -> FakeSandbox:
         for sandbox in self.owner.sandboxes:
             if sandbox.id == sandbox_id or sandbox.name == sandbox_id:
+                sandbox.client = self
                 return sandbox
         raise DaytonaNotFoundError(f'no sandbox: {sandbox_id}')
 
     async def delete(self, sandbox: FakeSandbox, timeout: float, wait: bool) -> None:
+        assert sandbox.client is not None and not sandbox.client.closed
         if self.owner.delete_error is not None:
             raise self.owner.delete_error
         sandbox.deleted = True
