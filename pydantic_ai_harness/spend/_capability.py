@@ -314,9 +314,9 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
             else:
                 usage_responses = usage_responses[usage_response_offset:]
             first_error: Exception | None = None
-            for usage_response in usage_responses:
+            for response_index, usage_response in enumerate(usage_responses, start=usage_response_offset or 0):
                 try:
-                    error = await self._accrue_response(ctx, usage_response)
+                    error = await self._accrue_response(ctx, usage_response, response_index)
                 except Exception as exc:
                     error = exc
                 if first_error is None:
@@ -330,10 +330,12 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
         assert response is not None
         return response
 
-    async def _accrue_response(self, ctx: RunContext[AgentDepsT], response: ModelResponse) -> Exception | None:
+    async def _accrue_response(
+        self, ctx: RunContext[AgentDepsT], response: ModelResponse, response_index: int
+    ) -> Exception | None:
         usd, priced, price_error = self._price_of(response)
         keyed = await self._keyed(ctx)
-        token = self._dedup_token(ctx, response)
+        token = self._dedup_token(ctx, response, response_index)
         entries: dict[str, SpendEntry] = {}
         for budget, key in keyed:
             # Budgets sharing a name, window, and scope share a counter, which is
@@ -574,7 +576,7 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
             raise UserError(f"Budget {budget.name!r} uses window='{budget.window}', which needs a run.")
         return store_key(budget, bucket_id, scope_key(budget, ctx, scope))
 
-    def _dedup_token(self, ctx: RunContext[AgentDepsT], response: ModelResponse) -> str:
+    def _dedup_token(self, ctx: RunContext[AgentDepsT], response: ModelResponse, response_index: int) -> str:
         """Identify one response from replay-stable run and response data.
 
         Durable execution journals `_accrue`, so ordinary replay returns its recorded totals
@@ -605,7 +607,9 @@ class SpendLimits(AbstractCapability[AgentDepsT]):
             provider_details=None,
         )
         digest = sha256(ModelMessagesTypeAdapter.dump_json([stable_response])).hexdigest()
-        return delimited(ctx.run_id or '', str(ctx.run_step), digest)
+        token = delimited(ctx.run_id or '', str(ctx.run_step), digest)
+        # Preserve existing single-response replay keys; distinguish subsequent provider responses.
+        return delimited(token, str(response_index)) if response_index else token
 
     def _check(self, budget: Budget[AgentDepsT], spent: Spent, ctx: RunContext[AgentDepsT]) -> None:
         """Raise if `spent` has reached either of the budget's ceilings."""

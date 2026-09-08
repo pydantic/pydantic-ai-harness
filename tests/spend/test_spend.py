@@ -645,6 +645,24 @@ class TestOrdering:
         assert spent.requests == 2
         assert spent.tokens == 33
 
+    async def test_identical_provider_responses_accrue_separately_and_replay_once(self):
+        guard = SpendLimits(budgets=[Budget(window='total')], price=lambda response: Decimal('1'))
+        first = _response()
+        second = replace(first)
+        request_context: Any = _UsageRequestContext()
+
+        async def handler(request_context: ModelRequestContext) -> ModelResponse:
+            setattr(request_context, 'usage_responses', (first, second))
+            return second
+
+        for _ in range(2):
+            request_context = _UsageRequestContext()
+            await guard.wrap_model_request(_run_ctx(), request_context=request_context, handler=handler)
+
+        spent = (await guard.status())[0].spent
+        assert spent.requests == 2
+        assert spent.usd == Decimal('2')
+
     async def test_every_committed_response_accrues_before_the_first_policy_error_is_raised(self):
         guard = SpendLimits(budgets=[Budget(window='total')], on_unpriced='raise')
         first = _response(model_name='unknown:first', provider_response_id='first')
