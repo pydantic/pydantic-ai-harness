@@ -426,7 +426,7 @@ class TestSpriteSandbox:
         await backend.sandbox
         transport.control_close_hang = True
         with pytest.raises(SandboxTimeoutError):
-            await backend.run('sleep .1; touch escaped', shell=True, timeout=0.01)
+            await backend.run('sleep .5; touch escaped', shell=True, timeout=0.01)
         assert not (transport.root / 'escaped').exists()
 
     async def test_cancel_failure_and_primary_error_are_both_reported(
@@ -440,6 +440,7 @@ class TestSpriteSandbox:
             await backend.run('sleep 1', shell=True, timeout=0.01)
         assert 'Could not confirm remote Sprite command termination' in caplog.text
         assert 'Could not close Sprite cancellation connection' in caplog.text
+        assert 'Could not close original Sprite command connection' in caplog.text
 
     async def test_argv_shell_environment_and_nonzero_exit(self, transport: SpriteTransport) -> None:
         backend = SpriteSandboxBackend()

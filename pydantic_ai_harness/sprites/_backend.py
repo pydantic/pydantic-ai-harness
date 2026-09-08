@@ -1,8 +1,23 @@
 """Fly.io Sprites backend for the core sandbox protocol.
 
-The command transport uses the public asynchronous `ControlConnection` API from
-sprites-py 0.6. The integration is asyncio-only because that API owns asyncio
-tasks for each control connection.
+External assumptions last verified 2026-09-08 against sprites-py 0.6.0 source and a local
+WebSocket transport probe, with no live cloud calls:
+
+* `SpritesClient` accepts token, base URL, and HTTP timeout; sprite creation uses the SDK's
+  fixed 120-second request timeout, while `close` only closes the local HTTP client and
+  `destroy_sprite` deletes the remote Sprite:
+  https://github.com/superfly/sprites-py/blob/v0.6.0/src/sprites/client.py
+* `ControlConnection` is asyncio-based and exposes `connect`, `start_op`, and `close`; an
+  operation provides `wait`, `get_stdout`, and `get_stderr`:
+  https://github.com/superfly/sprites-py/blob/v0.6.0/src/sprites/control.py
+* A control WebSocket disconnect does not kill the remote command, so the backend's RUN/CANCEL
+  process supervision is required:
+  https://sprites.dev/api/sprites/exec
+* Provider retention and explicit destruction are separate from local client disconnect:
+  https://docs.sprites.dev/concepts/lifecycle/
+
+Re-check these sources, the installed signatures, and the local transport probe before changing
+lifecycle or command transport behavior. The integration is asyncio-only.
 """
 
 from __future__ import annotations
@@ -266,6 +281,8 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
                 close_error = await cleanup_call(connection.close, timeout=_CONTROL_TIMEOUT)
 
         if command_error is not None:
+            if close_error is not None:
+                logger.warning('Could not close original Sprite command connection: %s', close_error)
             await self._raise_run_failure(command_error, stdout, stderr, timeout)
 
         if close_error is not None:
