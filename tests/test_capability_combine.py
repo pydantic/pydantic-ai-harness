@@ -17,7 +17,7 @@ The three answers, and what picks between them:
 
 Declaring a default `id` is the whole policy: there is no `combine` to write unless the merge needs
 something the field-by-field default cannot express, such as a budget that should take the *smaller*
-value. Slack also checks that repeated configurations use the same credential.
+value.
 
 The core half of this lives in `pydantic-ai`'s `tests/test_capability_combine.py`.
 
@@ -172,10 +172,6 @@ def _check_advisor(merged: Any) -> None:
 def _check_sub_agents(merged: Any) -> None:
     # Rosters union: an agent either side could reach stays reachable through one delegate tool.
     assert [entry.agent.name for entry in merged.agents] == ['alpha', 'beta']
-
-
-def _check_slack(merged: Any) -> None:
-    assert merged.id == 'slack'
 
 
 COMBINE_POLICY: dict[str, Policy] = {
