@@ -26,7 +26,7 @@ import math
 import posixpath
 import shlex
 import uuid
-from collections.abc import AsyncGenerator, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -173,7 +173,7 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
     Building one does no I/O. It holds settings plus, optionally, the identity of a sandbox that
     already exists; the first operation creates or attaches, once, and everything after that
     reuses the same environment. Reach the live Daytona sandbox through
-    [`get_sandbox`][pydantic_ai_harness.daytona_sandbox.DaytonaSandboxBackend.get_sandbox], which you
+    [`sandbox`][pydantic_ai_harness.daytona_sandbox.DaytonaSandboxBackend.sandbox], which you
     await to create or attach before using it.
 
     The backend owns its `AsyncDaytona` client. Nothing here deletes a sandbox on its own:
@@ -225,8 +225,15 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
         self._closed = False
         self._lock = anyio.Lock()
 
-    async def get_sandbox(self) -> AsyncSandbox:
-        """Create or attach on first use and return the native Daytona sandbox."""
+    @property
+    def sandbox(self) -> Awaitable[AsyncSandbox]:
+        """The native SDK sandbox, created or attached when awaited.
+
+        Await this property before using SDK methods, including after the sandbox has been resolved.
+        """
+        return self._resolve()
+
+    async def _resolve(self) -> AsyncSandbox:
         async with self._lock:
             if self._live is None:
                 if self._ref is not None:
@@ -256,22 +263,22 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
 
     async def read_bytes(self, path: str) -> bytes:
         async with self._translated_filesystem_error(path):
-            return await (await self.get_sandbox()).fs.download_file(path, _REQUEST_TIMEOUT)
+            return await (await self.sandbox).fs.download_file(path, _REQUEST_TIMEOUT)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         parent = posixpath.dirname(path)
         async with self._translated_filesystem_error(path):
             if parent not in ('', '.', '/'):
-                mkdir = await (await self.get_sandbox()).process.exec(
+                mkdir = await (await self.sandbox).process.exec(
                     f'mkdir -p -- {shlex.quote(parent)}', timeout=_REQUEST_TIMEOUT
                 )
                 if mkdir.exit_code != 0:
                     raise DaytonaSandboxError(mkdir.result or f'Could not create {parent!r}.')
-            await (await self.get_sandbox()).fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
+            await (await self.sandbox).fs.upload_file(data, path, timeout=_REQUEST_TIMEOUT)
 
     async def stat(self, path: str) -> FileEntry:
         async with self._translated_filesystem_error(path):
-            entry = await (await self.get_sandbox()).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
+            entry = await (await self.sandbox).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
         return FileEntry(
             name=posixpath.basename(path.rstrip('/')),
             path=path,
@@ -281,7 +288,7 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         async with self._translated_filesystem_error(path):
-            entries = await (await self.get_sandbox()).fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
+            entries = await (await self.sandbox).fs.list_files(path, request_timeout=_REQUEST_TIMEOUT)
         return [
             FileEntry(
                 name=entry.name,
@@ -294,15 +301,15 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
 
     async def make_dir(self, path: str) -> None:
         async with self._translated_filesystem_error(path):
-            await (await self.get_sandbox()).fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
+            await (await self.sandbox).fs.create_folder(path, '755', request_timeout=_REQUEST_TIMEOUT)
 
     async def remove(self, path: str) -> None:
         async with self._translated_filesystem_error(path):
-            await (await self.get_sandbox()).fs.delete_file(path, recursive=True, request_timeout=_REQUEST_TIMEOUT)
+            await (await self.sandbox).fs.delete_file(path, recursive=True, request_timeout=_REQUEST_TIMEOUT)
 
     async def exists(self, path: str) -> bool:
         try:
-            await (await self.get_sandbox()).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
+            await (await self.sandbox).fs.get_file_info(path, request_timeout=_REQUEST_TIMEOUT)
         except daytona.DaytonaNotFoundError:
             return False
         except SandboxError:
@@ -390,7 +397,7 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
     def _describe(self) -> str:
         """How to name this sandbox in an error.
 
-        Every caller runs after `get_sandbox`, which sets `ref` alongside the live handle, so the
+        Every caller runs after `sandbox`, which sets `ref` alongside the live handle, so the
         other two spellings are only reachable if that ever stops being true. `lax no cover`
         for the same reason: they are a fallback, not a path tests should have to reach.
         """
@@ -457,7 +464,7 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
     async def working_dir(self) -> str:
         """Return the filesystem-canonical default directory inside the sandbox."""
         if self._canonical_working_dir is None:
-            sandbox = await self.get_sandbox()
+            sandbox = await self.sandbox
             try:
                 result = await sandbox.process.exec('pwd -P', cwd=self._working_dir, timeout=_REQUEST_TIMEOUT)
             except Exception as error:
@@ -509,7 +516,7 @@ class DaytonaSandboxBackend(SandboxBackend, SupportsFilesystem):
             _command_line(command, shell), absolute_path('cwd', cwd) if cwd is not None else self._working_dir, env
         )
         session_id = f'pydantic-ai-{uuid.uuid4().hex}'
-        process = (await self.get_sandbox()).process
+        process = (await self.sandbox).process
         created = False
         try:
             with anyio.fail_after(_REQUEST_TIMEOUT):

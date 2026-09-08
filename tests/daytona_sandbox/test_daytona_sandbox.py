@@ -30,7 +30,7 @@ async def _resolved(
     """Ask the capability for a backend and touch it, so the create-or-attach actually happens."""
     backend = capability.get_sandbox(ctx, ref=ref)
     assert isinstance(backend, DaytonaSandboxBackend)
-    await backend.get_sandbox()
+    await backend.sandbox
     return backend
 
 

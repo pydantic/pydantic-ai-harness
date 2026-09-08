@@ -45,11 +45,18 @@ async def started(**settings: Any) -> DaytonaSandboxBackend:
     did has to touch the sandbox first. Awaiting the property is that touch.
     """
     backend = DaytonaSandboxBackend(**settings)
-    await backend.get_sandbox()
+    await backend.sandbox
     return backend
 
 
 class TestConformance:
+    async def test_sandbox_property_is_lazy_and_reuses_handle(self, fake_daytona: FakeDaytona) -> None:
+        backend = DaytonaSandboxBackend()
+        pending = backend.sandbox
+        assert not fake_daytona.sandboxes
+        sandbox = await pending
+        assert await backend.sandbox is sandbox
+
     async def test_run_and_filesystem_protocols(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         assert isinstance(backend, SandboxBackend)
@@ -224,7 +231,7 @@ class TestLifecycle:
         monkeypatch.setattr(
             DaytonaSandboxBackend,
             '_attach',
-            AsyncMock(side_effect=[DaytonaSandboxUnavailableError('missing'), await connected.get_sandbox()]),
+            AsyncMock(side_effect=[DaytonaSandboxUnavailableError('missing'), await connected.sandbox]),
         )
         monkeypatch.setattr(DaytonaSandboxBackend, '_create', AsyncMock(side_effect=DaytonaSandboxError('race')))
         assert (await started(name='stable')).ref == SandboxRef(sandbox_id='winner')

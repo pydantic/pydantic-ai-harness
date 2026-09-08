@@ -95,7 +95,7 @@ Import `SandboxRef` from `pydantic_ai.sandboxes` and pass `ref=SandboxRef(sandbo
 by name and create it only if there is none. A `ref` whose sandbox is gone raises rather than
 quietly providing an empty replacement.
 
-`await backend.get_sandbox()` creates or attaches and returns the native Daytona sandbox
+`await backend.sandbox` creates or attaches and returns the native Daytona sandbox
 for provider-specific operations. Direct users close the SDK client with
 `await backend.close(terminate=False)`. With `terminate=True`, it also deletes a sandbox
 created by that backend. Attached sandboxes remain available.
@@ -129,6 +129,9 @@ Provider request timeouts raise `DaytonaSandboxError`. Expiry of the explicit
 `run(timeout=...)` deadline raises `SandboxTimeoutError`, including during setup.
 
 Filesystem misses use the built-in `FileNotFoundError` contract.
+
+The property remains awaitable after the native handle is cached. Await it before accessing SDK
+methods; type checkers reject using the awaitable as the native sandbox.
 
 ## Configuration
 
