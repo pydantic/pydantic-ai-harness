@@ -67,6 +67,21 @@ class _AioCallable:
         return self._fn(*args, **kwargs)
 
 
+class _GatedCreate(_AioCallable):
+    """A create call whose control-plane response can be held for lock-race tests."""
+
+    def __init__(self, fn: Callable[..., Any], control: FakeModal) -> None:
+        super().__init__(fn)
+        self._control = control
+
+    async def aio(self, *args: Any, **kwargs: Any) -> Any:
+        await anyio.lowlevel.checkpoint()
+        self._control.create_started = True
+        if self._control.create_gate is not None:
+            await self._control.create_gate.wait()
+        return self._fn(*args, **kwargs)
+
+
 class _HangingAioCall:
     """An `.aio` that never returns, for tests that cancel a pending call."""
 
@@ -317,6 +332,8 @@ class FakeModal:
         self.name_lookup_misses = 0
         self.owned_creates = 0
         self.create_error: Exception | None = None
+        self.create_gate: anyio.Event | None = None
+        self.create_started = False
         self.attach_error: Exception | None = None
         self.attach_poll_result: int | None = None
         self.exec_error: Exception | None = None
@@ -428,7 +445,7 @@ class FakeModal:
             from_registry = staticmethod(image_from_registry)
 
         class Sandbox:
-            create = _AioCallable(sandbox_create)
+            create = _GatedCreate(sandbox_create, control)
             from_id = _AioCallable(sandbox_from_id)
             from_name = _AioCallable(sandbox_from_name)
 
