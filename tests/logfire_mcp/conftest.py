@@ -1,20 +1,26 @@
-"""Shared fixtures for the Logfire MCP capability tests."""
+"""Fixtures for the Logfire MCP capability tests.
+
+Logfire's hosted server is stood in for by a FastMCP server on real HTTP, so the credential and the
+tool annotations travel the same path they do in production. Each fake tool reports the
+`Authorization` header it was called with.
+"""
 
 from __future__ import annotations
 
-import importlib.util
-from typing import TYPE_CHECKING
+import threading
+import time
+from collections.abc import Callable, Iterator
 
 import pytest
 
-if TYPE_CHECKING:
-    from mcp.server.fastmcp import FastMCP
+# `fastmcp-slim` imports but raises ImportError for server support, so widen the skip.
+pytest.importorskip('fastmcp.server', exc_type=ImportError)
+pytest.importorskip('mcp')
 
-collect_ignore = (
-    ['test_logfire_mcp.py']
-    if importlib.util.find_spec('mcp') is None or importlib.util.find_spec('fastmcp') is None
-    else []
-)
+import uvicorn
+from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_http_request
+from mcp.types import ToolAnnotations
 
 
 @pytest.fixture
@@ -22,44 +28,37 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-@pytest.fixture
-def logfire_calls() -> list[tuple[str, dict[str, object]]]:
-    return []
+def _tool(name: str) -> Callable[[], dict[str, str | None]]:
+    def tool() -> dict[str, str | None]:
+        """A Logfire tool that reports the credential it was called with."""
+        return {'tool': name, 'authorization': get_http_request().headers.get('authorization')}
+
+    tool.__name__ = name
+    return tool
 
 
-@pytest.fixture
-def logfire_server(logfire_calls: list[tuple[str, dict[str, object]]]) -> FastMCP:
-    """In-process stand-in for Logfire's hosted MCP endpoint."""
-    from mcp.server.fastmcp.server import FastMCP, Settings
-    from mcp.types import ToolAnnotations
-
-    Settings.model_rebuild()
-    server = FastMCP('logfire-fake', instructions='Call project_list before other Logfire tools.')
-    read = ToolAnnotations(readOnlyHint=True, destructiveHint=False)
-    write = ToolAnnotations(readOnlyHint=False, destructiveHint=False)
-
-    @server.tool(annotations=read)
-    def project_list() -> list[str]:
-        """List the projects this credential can reach."""
-        logfire_calls.append(('project_list', {}))
-        return ['acme/production']
-
-    @server.tool(annotations=read)
-    def query_run(query: str, project: str) -> list[dict[str, object]]:
-        """Run SQL against one Logfire project."""
-        logfire_calls.append(('query_run', {'query': query, 'project': project}))
-        return [{'count': 3}]
-
-    @server.tool(annotations=write)
-    def dashboard_create(name: str, project: str) -> str:
-        """Create a dashboard in one Logfire project."""
-        logfire_calls.append(('dashboard_create', {'name': name, 'project': project}))
-        return 'dash_1'
-
-    @server.tool()
-    def unannotated_tool() -> str:
-        """A tool the server forgot to annotate."""
-        logfire_calls.append(('unannotated_tool', {}))
-        return 'ok'
-
-    return server
+@pytest.fixture(scope='session')
+def logfire_url() -> Iterator[str]:
+    """Serve a stand-in Logfire MCP server on localhost and yield its `/mcp` URL."""
+    server = FastMCP('logfire-fake')
+    server.tool(_tool('query_run'), annotations=ToolAnnotations(readOnlyHint=True, destructiveHint=False))
+    server.tool(_tool('dashboard_create'), annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True))
+    server.tool(_tool('unannotated_tool'))
+    # A JSON response per request, rather than an SSE stream, so no session outlives the server.
+    http = uvicorn.Server(
+        uvicorn.Config(
+            server.http_app(path='/mcp', stateless_http=True, json_response=True),
+            host='127.0.0.1',
+            port=0,
+            log_level='error',
+        )
+    )
+    thread = threading.Thread(target=http.run, daemon=True)
+    thread.start()
+    while not http.started:
+        time.sleep(0.01)
+    try:
+        yield f'http://127.0.0.1:{http.servers[0].sockets[0].getsockname()[1]}/mcp'
+    finally:
+        http.should_exit = True
+        thread.join(timeout=5)

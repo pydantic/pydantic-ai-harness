@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     )
     from .localstack import LocalStack
     from .logfire import ManagedPrompt
+    from .logfire_mcp import LogfireMCP
     from .macroscope import Macroscope
     from .memory import Memory
     from .modal_sandbox import ModalSandbox
@@ -82,6 +83,7 @@ __all__ = [
     'InputGuardrailFunc',
     'LLM_API_KEY_ENV_PATTERNS',
     'LocalStack',
+    'LogfireMCP',
     'Macroscope',
     'ManagedPrompt',
     'Memory',
@@ -131,6 +133,7 @@ _CAPABILITY_EXPORTS = {
     'FallbackCompaction': 'compaction',
     'FileSystem': 'filesystem',
     'LocalStack': 'localstack',
+    'LogfireMCP': 'logfire_mcp',
     'Macroscope': 'macroscope',
     'ManagedPrompt': 'logfire',
     'Memory': 'memory',
