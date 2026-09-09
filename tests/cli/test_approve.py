@@ -7,9 +7,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, RetryPromptPart, ToolReturnPart
+from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
+from pydantic_ai.models.test import TestModel
 from termflow.ansi import DIM_ON, visible  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_ai_harness.cli import (
@@ -23,7 +26,7 @@ from pydantic_ai_harness.cli import (
     Verdict,
     allow_all,
 )
-from pydantic_ai_harness.shell import Shell, ShellCommandRequestEvent
+from pydantic_ai_harness.shell import Shell, ShellCommandEndEvent, ShellCommandRequestEvent
 
 pytestmark = pytest.mark.anyio
 
@@ -126,6 +129,40 @@ class TestShellRendering:
         lines = visible(buffer.getvalue()).splitlines()
         assert any(line.startswith('exit 0 (') and line.endswith('s, output truncated)') for line in lines)
         assert any(line.startswith('timed out (') for line in lines)
+
+    async def test_a_stopped_command_from_a_hook_renders_without_a_tool_call(self) -> None:
+        buffer = io.StringIO()
+        agent = Agent(
+            TestModel(custom_output_text='done'),
+            deps_type=type(None),
+            capabilities=[_StoppedInHook(), CliBridge(output=buffer, width=80)],
+        )
+
+        await agent.run('go')
+
+        assert 'stopped (1.5s)' in visible(buffer.getvalue())
+
+
+class _StoppedInHook(AbstractCapability[None]):
+    """A host-side emitter: an end event with no exit code and no tool call behind it."""
+
+    async def before_model_request(
+        self, ctx: RunContext[None], request_context: ModelRequestContext
+    ) -> ModelRequestContext:
+        await ctx.emit(
+            ShellCommandEndEvent(
+                command_id='bg1',
+                command='sleep 60',
+                background=True,
+                exit_code=None,
+                timed_out=False,
+                duration_seconds=1.5,
+                stdout='',
+                stderr='',
+                truncated=False,
+            )
+        )
+        return request_context
 
 
 class TestLinesAsk:
