@@ -32,6 +32,19 @@ async def test_hyphenated_agent_name() -> None:
     assert [variable.name for variable in capability._variables_by_agent.values()] == ['agent__pydanty_explorer']
 
 
+async def test_a_nameless_prompt_on_a_nameless_agent_raises() -> None:
+    """`ManagedPrompt` has no construction-time guard, so its refusal lands on the first run.
+
+    `AgentControl` refuses an agent with no `name` of its own where it is wired up (below), because
+    a config an agent reads should not move when a local is renamed. `ManagedPrompt` predates that
+    and still derives from whatever name the run ends up with, so the base's own check is what
+    catches an agent that has none at all.
+    """
+    agent = Agent(TestModel(), capabilities=[ManagedPrompt(default='hello')])
+    with pytest.raises(UserError, match='without an explicit `name`'):
+        await agent.run('hello', infer_name=False)
+
+
 def test_an_inferred_agent_name_is_refused_at_construction() -> None:
     """An agent with no `name` of its own is refused, not silently given the inferred one.
 
