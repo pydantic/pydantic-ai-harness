@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
 from dataclasses import is_dataclass
 from typing import Any
@@ -12,7 +14,7 @@ import anyio
 import pytest
 from pydantic import ValidationError
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, UseThreadExecutor
 from pydantic_ai.exceptions import UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
     BinaryContent,
@@ -239,6 +241,37 @@ class TestJudgeInstructions:
         await run_cap.wrap_run(ctx, handler=handler)
 
         assert seen == ['handler']
+
+    async def test_evaluation_inherits_a_nested_thread_executor(self) -> None:
+        thread_names: list[str] = []
+        delivered = anyio.Event()
+
+        def judge_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            thread_names.append(threading.current_thread().name)
+            return _all_good_response()
+
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix='judge-bounded') as executor:
+            agent = Agent(
+                TestModel(),
+                capabilities=[
+                    TrajectoryJudge(
+                        model=FunctionModel(judge_fn),
+                        every=1,
+                        on_verdict=lambda _: delivered.set(),
+                    ),
+                    UseThreadExecutor(executor),
+                ],
+            )
+
+            @agent.tool_plain
+            async def wait_for_judge() -> str:
+                await delivered.wait()
+                return 'done'
+
+            await agent.run('Review this run.')
+
+        assert len(thread_names) == 1
+        assert thread_names[0].startswith('judge-bounded')
 
 
 class TestSteering:
