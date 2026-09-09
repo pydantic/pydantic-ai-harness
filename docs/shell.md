@@ -69,6 +69,12 @@ line on non-zero exit. When it exceeds `max_output_chars` the **tail** is kept
 which all land at the end -- survive truncation. Background command status and
 exit metadata follow the captured output so they remain in the retained tail.
 
+Commands run with stdin closed: a command that reads it (`cat`, `wc`) sees end
+of file and exits instead of waiting on the host's terminal. Each command
+starts its own process group, and cancelling the run kills the whole group
+(`SIGTERM`, then `SIGKILL` after a short grace period), so a shell's children
+do not outlive the run.
+
 ## Command controls
 
 Two mutually exclusive lists decide which executables may run, plus filters for
@@ -95,10 +101,10 @@ denylist. Pass `denied_commands=[]` to disable command-name filtering.
 A denied command surfaces to the model as a
 [`ModelRetry`](/ai/tools-toolsets/tools-advanced/#tool-retries), not a hard error:
 the run continues and the model can pick an allowed command instead. So does
-every other failure the model can act on: a working directory an earlier command
-deleted or replaced with a file, and a command the operating system refuses to
-spawn because it holds a NUL byte or contains a character the operating system
-cannot encode. Failures
+every other failure the model can act on: an empty or whitespace-only command,
+a working directory an earlier command deleted or replaced with a file, and a
+command the operating system refuses to spawn because it holds a NUL byte or
+contains a character the operating system cannot encode. Failures
 the model can do nothing about still abort the run: a host that cannot allocate
 a process, an argument or environment that exceeds the platform's combined
 size limit, and an invalid character in an application-supplied `env`.
@@ -220,7 +226,7 @@ show a command as it runs, or veto it, without parsing tool arguments:
 
 | Event | Dispatch | When | Payload |
 |---|---|---|---|
-| `ShellCommandRequestEvent` | immediate | before a command is checked against the policy and spawned | `command`, `cwd`, `timeout`, `background`; `cancel(reason)`, `rewrite(command, reason=...)` |
+| `ShellCommandRequestEvent` | immediate | after a command passes the policy checks and before it is spawned | `command`, `cwd`, `timeout`, `background`; `cancel(reason)`, `rewrite(command, reason=...)` |
 | `ShellCommandStartEvent` | stream | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
 | `ShellOutputLineEvent` | stream | a foreground command wrote a line | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
 | `ShellCommandEndEvent` | stream | the command exited, timed out, or was stopped | `command_id`, `command`, `background`, `exit_code`, `timed_out`, `duration_seconds`, `stdout`, `stderr`, `truncated` |
@@ -229,8 +235,11 @@ show a command as it runs, or veto it, without parsing tool arguments:
 stops the command before it runs; the model gets the reason as the tool result.
 A listener that calls `rewrite(command, reason=...)` replaces the command; the
 rewrite goes through the same allow and deny checks as the original, and the
-model is told the command was rewritten and why. The other three are
-notifications.
+model is told the command was rewritten and why, whether the rewrite ran or
+the policy refused it. A command the policy refuses emits no request, so a
+listener cannot approve what the configuration denies. Listeners run in
+registration order: the last rewrite wins, and a cancel from any listener
+beats every rewrite. The other three events are notifications.
 
 `command_id` ties a command's lines and its end to its start when several run
 at once. For a background command it is the same ID `check_command` and
