@@ -700,9 +700,8 @@ class TestCoverageOfRemainingPaths:
         assert 'a__model.cancel_suspended_response' in ctx.step_names
 
 
-def shutdown(loop: asyncio.AbstractEventLoop, thread: threading.Thread | None) -> None:
+def shutdown(loop: asyncio.AbstractEventLoop, thread: threading.Thread) -> None:
     """Stop a bridge loop and wait for its owning thread to finish closing it."""
-    assert thread is not None
     try:
         loop.call_soon_threadsafe(loop.stop)
     except RuntimeError:
@@ -923,6 +922,8 @@ class TestBridgeFailureModes:
         # The handler returned while the abandoned run still holds `abandoned`, so the next
         # invocation must not be handed that loop.
         replacement = loops.get()
+        replacement_thread = loops._thread
+        assert replacement_thread is not None
         assert replacement is not abandoned
 
         started_waiting = time.monotonic()
@@ -933,7 +934,7 @@ class TestBridgeFailureModes:
         assert abandoned.is_closed()
         assert not abandoned_thread.is_alive()
         assert time.monotonic() - started_waiting < 0.5
-        shutdown(replacement, loops._thread)
+        shutdown(replacement, replacement_thread)
         gc.collect()
 
     def test_retirement_drains_cleanup_scheduled_when_the_main_task_finishes(
@@ -1095,16 +1096,19 @@ class TestBridgeFailureModes:
         loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
         stopped = loops.get()
         stopped_thread = loops._thread
+        assert stopped_thread is not None
         stopped.call_soon_threadsafe(stopped.stop)
         deadline = time.monotonic() + 5
         while stopped.is_running() and time.monotonic() < deadline:  # pragma: no branch - stops promptly
             time.sleep(0.01)
 
         replacement = loops.get()
+        replacement_thread = loops._thread
+        assert replacement_thread is not None
 
         assert replacement is not stopped
         assert replacement.is_running()
-        shutdown(replacement, loops._thread)
+        shutdown(replacement, replacement_thread)
         shutdown(stopped, stopped_thread)
 
     def test_retiring_an_unexpectedly_stopped_loop_finds_it_closed(self) -> None:
@@ -1123,13 +1127,15 @@ class TestBridgeFailureModes:
     def test_retiring_a_loop_that_was_already_replaced_leaves_the_current_one_alone(self) -> None:
         loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
         live = loops.get()
+        live_thread = loops._thread
+        assert live_thread is not None
         foreign = asyncio.new_event_loop()
 
         loops.retire(foreign, None)
 
         assert loops.get() is live
         foreign.close()
-        shutdown(live, loops._thread)
+        shutdown(live, live_thread)
 
 
 class TestRuntimeToolsets:
