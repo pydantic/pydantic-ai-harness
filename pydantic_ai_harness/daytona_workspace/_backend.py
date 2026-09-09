@@ -32,7 +32,6 @@ import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from functools import cached_property
 from typing import TYPE_CHECKING
 
 import anyio
@@ -193,38 +192,44 @@ class DaytonaWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
         self._network_block_all = network_block_all
         self._canonical_working_dir: str | None = None
         self._working_dir = absolute_path('working_dir', working_dir)
+        self._lock = anyio.Lock()
 
     @property
     def workspace(self) -> Awaitable[AsyncSandbox]:
-        return self._get_workspace()
-
-    async def _get_workspace(self) -> AsyncSandbox:
-        if self._workspace is None:
-            async with self._lock:
-                if self._workspace is None:
-                    self._workspace = await self._create_or_attach(self._ref)
-                    self._ref = WorkspaceRef(provider='daytona', id=self._workspace.id)
-        assert self._workspace is not None
-        return self._workspace
-
-    @cached_property
-    def _lock(self) -> anyio.Lock:
-        return anyio.Lock()
+        return self._create_or_attach()
 
     @property
     def ref(self) -> WorkspaceRef | None:
         return self._ref
 
-    async def _new_client(self) -> AsyncDaytona:
-        if self._client is None:
-            self._client = daytona.AsyncDaytona()
-            self._owns_client = True
-        return self._client
+    async def _create_or_attach(self) -> AsyncSandbox:
+        """Hydrate the client and the sandbox on first use, once.
 
-    async def _create_or_attach(self, ref: WorkspaceRef | None) -> AsyncSandbox:
-        if ref is not None:
-            return await self._attach(ref.id)
-        return await self._create()
+        The only place `_client` and `_workspace` are read, so nothing can reach an
+        unhydrated one: both stay optional and every other method comes through here.
+        The lock serializes concurrent first uses -- two callers each creating a sandbox
+        would leave the loser billed and unreferenced. A failed acquisition releases a
+        client this backend owns, so a retry starts from a clean one.
+        """
+        async with self._lock:
+            if (workspace := self._workspace) is not None:
+                return workspace
+
+            client = self._client
+            if client is None:
+                client = daytona.AsyncDaytona()
+                self._client = client
+
+            ref = self._ref
+            try:
+                workspace = await self._attach(client, ref.id) if ref is not None else await self._create(client)
+            except BaseException:
+                await self._close_owned_client()
+                raise
+
+            self._workspace = workspace
+            self._ref = WorkspaceRef(provider='daytona', id=workspace.id)
+            return workspace
 
     @asynccontextmanager
     async def _translated_filesystem_error(self, path: str) -> AsyncGenerator[None]:
@@ -294,8 +299,7 @@ class DaytonaWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
             raise self._operation_error(error, f'Could not access {path!r} in the sandbox') from error
         return True
 
-    async def _create(self) -> AsyncSandbox:
-        client = await self._new_client()
+    async def _create(self, client: AsyncDaytona) -> AsyncSandbox:
         try:
             with anyio.fail_after(_CREATE_TIMEOUT):
                 return await client.create(
@@ -310,7 +314,6 @@ class DaytonaWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
                     timeout=_LIFECYCLE_TIMEOUT,
                 )
         except BaseException as error:
-            await self._close_owned_client()
             if isinstance(error, TimeoutError):
                 raise WorkspaceTimeoutError(
                     f'Daytona workspace creation did not complete within {_CREATE_TIMEOUT}s.', timeout=_CREATE_TIMEOUT
@@ -319,15 +322,13 @@ class DaytonaWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
                 raise self._operation_error(error, 'Could not create Daytona workspace') from error
             raise
 
-    async def _attach(self, workspace_id: str) -> AsyncSandbox:
-        client = await self._new_client()
+    async def _attach(self, client: AsyncDaytona, workspace_id: str) -> AsyncSandbox:
         try:
             with anyio.fail_after(_CREATE_TIMEOUT):
                 sandbox = await client.get(workspace_id, request_timeout=_REQUEST_TIMEOUT)
                 await sandbox.start(timeout=_LIFECYCLE_TIMEOUT)
                 return sandbox
         except BaseException as error:
-            await self._close_owned_client()
             if isinstance(error, TimeoutError):
                 raise WorkspaceTimeoutError(
                     f'Daytona workspace connection did not complete within {_CREATE_TIMEOUT}s.', timeout=_CREATE_TIMEOUT
