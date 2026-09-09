@@ -29,6 +29,10 @@ engine:
     name: github
   behaviors:
     secret-strategy: universal-llm-consumer
+    # Repository paths gh-aw treats as this engine's configuration: it protects them
+    # from pull-request modification and derives the inline sub-agent and skill
+    # directories from the first prefix (.pydantic-ai/agents, .pydantic-ai/skills).
+    # The engine itself writes nothing into the checkout.
     manifest:
       files:
         - AGENTS.md
@@ -56,8 +60,8 @@ engine:
       provider-env-mode: universal-llm-consumer
     harness-script: |
       const { spawnSync } = require("child_process");
-      const { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } = require("fs");
-      const { homedir } = require("os");
+      const { chmodSync, existsSync, mkdtempSync, readFileSync, writeFileSync } = require("fs");
+      const { homedir, tmpdir } = require("os");
       const { join } = require("path");
       const { fetchAWFReflect, resolveProviderEndpointFromReflect, deriveBaseUrlFromModelsURL } = require("./awf_reflect.cjs");
 
@@ -76,7 +80,7 @@ engine:
       // sub-agent tools.
       //
       // The gateway's MCP servers are deliberately not part of the module.
-      // `pai --mcp-config` reads the same Claude-shaped `mcp.json` through the
+      // `pai --mcp-config` reads the same Claude-shaped config file through the
       // same `pydantic_ai.mcp.load_mcp_toolsets`, `${VAR}` expansion included, so
       // routing them through the CLI is what lets a `PAI_AGENT` agent receive
       // them on identical terms.
@@ -140,16 +144,24 @@ engine:
         const promptFile = process.env.GH_AW_PROMPT;
         if (!promptFile) throw new Error("GH_AW_PROMPT is required");
 
-        const agentDir = join(workspace, ".pydantic-ai");
-        mkdirSync(agentDir, { recursive: true, mode: 0o700 });
-
+        // Neither the generated module nor the gateway's MCP config is written into
+        // the checkout. A file committed at a path the engine reads is
+        // repository-controlled input to a process that runs with the gateway's
+        // credentials: an `mcp.json` there can name a stdio server for the CLI to
+        // spawn, and a package there shadows an installed one for the whole run. The
+        // module goes to a private directory created inside the sandbox; the config
+        // adapter writes on the host into the `${RUNNER_TEMP}/gh-aw` tree that the
+        // agent step mounts read-only, where gh-aw's own Claude and Codex converters
+        // write theirs.
+        //
         // `PAI_AGENT` runs an agent the repository defines, in whichever form
         // `pai -a` accepts. The generated module is not written in that case:
         // nothing would load it, and a stale copy on disk is worse than none.
         const configuredAgent = process.env.PAI_AGENT;
         const agentTarget = configuredAgent || DEFAULT_AGENT;
-        if (!configuredAgent) {
-          const agentModulePath = join(agentDir, "gh_aw_agent.py");
+        const moduleDir = configuredAgent ? "" : mkdtempSync(join(tmpdir(), "gh-aw-pydantic-ai-"));
+        if (moduleDir) {
+          const agentModulePath = join(moduleDir, "gh_aw_agent.py");
           writeFileSync(agentModulePath, AGENT_MODULE, { mode: 0o600 });
           chmodSync(agentModulePath, 0o600);
         }
@@ -171,16 +183,14 @@ engine:
         const pythonBin = process.env.pythonLocation ? join(process.env.pythonLocation, "bin") : "";
         const python = pythonBin ? join(pythonBin, "python3") : "python3";
         env.PATH = [join(homedir(), ".local", "bin"), pythonBin, process.env.PATH || ""].filter(Boolean).join(":");
-        // `.pydantic-ai` is not a legal package name, so the generated module is
-        // reached through PYTHONPATH rather than by importing it as a package
-        // from the workspace root. Prepending keeps a caller-supplied
-        // PYTHONPATH usable.
+        // The module is reached through PYTHONPATH rather than by importing it as a
+        // package, and prepending keeps a caller-supplied PYTHONPATH usable.
         //
         // The checkout itself joins the path only under `PAI_AGENT`. That is the
         // opt-in: it makes repository code importable, which is the whole point
         // of running your own agent, and it is exactly what `-P` on the install
         // step keeps off the path for the default composition.
-        env.PYTHONPATH = [agentDir, configuredAgent ? workspace : "", process.env.PYTHONPATH || ""].filter(Boolean).join(":");
+        env.PYTHONPATH = [moduleDir, configuredAgent ? workspace : "", process.env.PYTHONPATH || ""].filter(Boolean).join(":");
         delete env.COPILOT_GITHUB_TOKEN;
 
         const provider = process.env.GH_AW_LLM_PROVIDER;
@@ -298,8 +308,10 @@ engine:
         const cliArgs = [...commandArgs, "-a", agentTarget];
         // The config adapter writes this file only for a workflow that configures
         // MCP tools, and `--mcp-config` fails on a path that is not there, so its
-        // absence has to mean "no servers" rather than an error.
-        const mcpConfig = join(agentDir, "mcp.json");
+        // absence has to mean "no servers" rather than an error. The
+        // `RUNNER_TEMP || "/tmp"` fallback is the one gh-aw's own converters use, and
+        // the adapter resolves this path by the same expression.
+        const mcpConfig = join(process.env.RUNNER_TEMP || "/tmp", "gh-aw", "mcp-config", "mcp-servers.json");
         if (existsSync(mcpConfig)) cliArgs.push("--mcp-config", mcpConfig);
         cliArgs.push("-m", `${useMessagesAPI ? "anthropic" : "openai-chat"}:${model}`, readFileSync(promptFile, "utf8"));
         log(
@@ -324,7 +336,7 @@ engine:
         process.exitCode = typeof error?.exitCode === "number" && error.exitCode !== 0 ? error.exitCode : 1;
       });
     mcp:
-      config-path: .pydantic-ai/mcp.json
+      config-path: ${RUNNER_TEMP}/gh-aw/mcp-config/mcp-servers.json
       config-adapter: |
         // Renders the MCP gateway's configuration as the Claude-style
         // `mcpServers` document that `pydantic_ai.mcp.load_mcp_toolsets` reads,
@@ -343,7 +355,6 @@ engine:
         };
 
         const gatewayOutputPath = requireEnvVar("MCP_GATEWAY_OUTPUT");
-        const workspace = requireEnvVar("GITHUB_WORKSPACE");
         const gatewayDomain = process.env.MCP_GATEWAY_DOMAIN || "host.docker.internal";
         const gatewayPort = requireEnvVar("MCP_GATEWAY_PORT");
         const gatewayURL = `http://${gatewayDomain}:${gatewayPort}`;
@@ -371,7 +382,14 @@ engine:
           mcpServers[name] = server;
         }
 
-        const configPath = path.join(workspace, ".pydantic-ai", "mcp.json");
+        // This script runs on the host runner, in the Start MCP Gateway step, so it
+        // writes where that step already created a directory and where the agent step
+        // mounts `${RUNNER_TEMP}/gh-aw` read-only -- the same file the built-in Claude
+        // converter produces, which is also the path gh-aw's log redaction scans for
+        // the gateway bearer token. The harness script resolves it by the same
+        // expression. Keeping it out of the checkout is what stops a committed
+        // `mcp.json` from reaching `pai --mcp-config`; see the harness script.
+        const configPath = path.join(process.env.RUNNER_TEMP || "/tmp", "gh-aw", "mcp-config", "mcp-servers.json");
         fs.mkdirSync(path.dirname(configPath), { recursive: true, mode: 0o700 });
         fs.writeFileSync(configPath, JSON.stringify({ mcpServers }, null, 2), { mode: 0o600 });
         fs.chmodSync(configPath, 0o600);
@@ -468,9 +486,11 @@ The agent is a `pydantic_ai.Agent` composed from the harness `Coder`
 capability — filesystem, shell, planning, repository context and an explorer
 sub-agent, with the harness's own context-management guardrails. `pai -a` accepts
 a single target and its JSON agent-spec format cannot name harness capabilities,
-so the harness script writes that composition as a Python module at
-`.pydantic-ai/gh_aw_agent.py`, puts the directory on `PYTHONPATH`, and passes
-`-a gh_aw_agent:agent`.
+so the harness script writes that composition as `gh_aw_agent.py` in a private
+directory it creates inside the sandbox, puts that directory on `PYTHONPATH`, and
+passes `-a gh_aw_agent:agent`. The module is deliberately not written into the
+checkout: a directory the engine puts on `PYTHONPATH` would otherwise let a
+package committed to the repository shadow an installed one for the whole run.
 
 The CLI is started by the interpreter that owns the install -- `python -P -c`
 importing the target and then `runpy.run_module("pydantic_ai")` -- rather than as
@@ -490,8 +510,10 @@ on the import path. `-m` is still passed, so the agent runs on the workflow's
 `engine.model` rather than any model it was constructed with. See `README.md` next
 to this file.
 
-MCP servers are rendered into `.pydantic-ai/mcp.json` in the same `mcpServers`
-shape Claude Desktop and Cursor use, and reach the agent through
+MCP servers are rendered into `${RUNNER_TEMP}/gh-aw/mcp-config/mcp-servers.json` in
+the same `mcpServers` shape Claude Desktop and Cursor use -- written on the host
+runner, into the tree the agent step mounts read-only, so a file committed to the
+repository cannot stand in for it -- and reach the agent through
 `pai --mcp-config`, which loads them with `pydantic_ai.mcp.load_mcp_toolsets`
 (including `${VAR}` expansion of header values) and passes the toolsets into the
 run. Routing them through the CLI rather than the generated module is what gives a

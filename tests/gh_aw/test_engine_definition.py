@@ -65,7 +65,8 @@ import os
 import sys
 from pathlib import Path
 
-Path(os.environ['GH_AW_TEST_RECORD']).write_text(json.dumps({'argv': sys.argv[1:], 'env': dict(os.environ)}))
+record = {'argv': sys.argv[1:], 'env': dict(os.environ), 'cwd': os.getcwd()}
+Path(os.environ['GH_AW_TEST_RECORD']).write_text(json.dumps(record))
 """
 
 AGENT_MODULE = """import os
@@ -119,6 +120,7 @@ class _Invocation(BaseModel):
 
     argv: list[str]
     env: dict[str, str]
+    cwd: str
 
     @property
     def target(self) -> str:
@@ -131,6 +133,10 @@ class _Invocation(BaseModel):
     @property
     def program(self) -> str:
         return self.argv[2]
+
+    @property
+    def python_path(self) -> list[Path]:
+        return [Path(entry) for entry in self.env['PYTHONPATH'].split(':')]
 
 
 def harness_script() -> str:
@@ -160,6 +166,14 @@ def launch(tmp_path: Path, env: dict[str, str]) -> _Invocation:
 
     workspace = tmp_path / 'workspace'
     workspace.mkdir(parents=True, exist_ok=True)
+    # gh-aw's config adapter writes the MCP config into this tree on the host runner,
+    # and the agent step mounts it into the sandbox read-only.
+    runner_temp = tmp_path / 'runner-temp'
+    runner_temp.mkdir(parents=True, exist_ok=True)
+    # `os.tmpdir()`, where the harness script puts the generated module. Pointing it
+    # into the test's own directory keeps that write out of the real /tmp.
+    sandbox_tmp = tmp_path / 'sandbox-tmp'
+    sandbox_tmp.mkdir(parents=True, exist_ok=True)
     prompt = tmp_path / 'prompt.md'
     prompt.write_text(PROMPT, encoding='utf-8')
     record = tmp_path / 'record.json'
@@ -169,6 +183,8 @@ def launch(tmp_path: Path, env: dict[str, str]) -> _Invocation:
         env={
             'PATH': os.environ['PATH'],
             'HOME': str(tmp_path / 'home'),
+            'TMPDIR': str(sandbox_tmp),
+            'RUNNER_TEMP': str(runner_temp),
             'GITHUB_WORKSPACE': str(workspace),
             'GH_AW_PROMPT': str(prompt),
             'GH_AW_TEST_RECORD': str(record),
@@ -181,6 +197,11 @@ def launch(tmp_path: Path, env: dict[str, str]) -> _Invocation:
     )
     assert completed.returncode == 0, completed.stderr
     return _Invocation.model_validate_json(record.read_text(encoding='utf-8'))
+
+
+def gateway_config(tmp_path: Path) -> Path:
+    """The config adapter's output path, as the harness script resolves it."""
+    return tmp_path / 'runner-temp' / 'gh-aw' / 'mcp-config' / 'mcp-servers.json'
 
 
 def proxy_env(provider: str, model: str) -> dict[str, str]:
@@ -202,10 +223,25 @@ def test_the_default_target_is_the_generated_module(tmp_path: Path) -> None:
     assert invocation.argv[:2] == ['-P', '-c']
     assert invocation.target == 'gh_aw_agent:agent'
     assert invocation.cli_args == ['-a', 'gh_aw_agent:agent', '-m', 'openai-chat:claude-sonnet-4.5', PROMPT]
-    assert (tmp_path / 'workspace' / '.pydantic-ai' / 'gh_aw_agent.py').read_text().startswith('from pydantic_ai')
+    # The module is written to a private directory under `os.tmpdir()`, never into the
+    # checkout: a package committed under a directory the engine puts on PYTHONPATH
+    # would shadow an installed one for the whole run.
+    (module_dir,) = invocation.python_path
+    assert module_dir.parent == tmp_path / 'sandbox-tmp'
+    assert (module_dir / 'gh_aw_agent.py').read_text().startswith('from pydantic_ai')
+    assert not (tmp_path / 'workspace' / '.pydantic-ai').exists()
     # gh-aw sets this for the copilot backend; the proxy holds the real credential,
     # so the agent has no use for it.
     assert 'COPILOT_GITHUB_TOKEN' not in invocation.env
+
+
+def test_the_checkout_is_off_the_import_path_without_pai_agent(tmp_path: Path) -> None:
+    invocation = launch(tmp_path, proxy_env('openai', 'openai/gpt-5'))
+
+    workspace = tmp_path / 'workspace'
+    assert not any(entry == workspace or workspace in entry.parents for entry in invocation.python_path)
+    # The CLI still runs in the checkout, which is what the agent reads and writes.
+    assert invocation.cwd == str(workspace)
 
 
 def test_pai_agent_replaces_the_target_and_puts_the_checkout_on_the_path(tmp_path: Path) -> None:
@@ -214,10 +250,9 @@ def test_pai_agent_replaces_the_target_and_puts_the_checkout_on_the_path(tmp_pat
     workspace = tmp_path / 'workspace'
     assert invocation.target == 'my_agent:agent'
     assert invocation.cli_args[:2] == ['-a', 'my_agent:agent']
-    assert not (workspace / '.pydantic-ai' / 'gh_aw_agent.py').exists()
-    # The generated module still comes first: the checkout is added for the agent, not
-    # in place of anything the engine writes.
-    assert invocation.env['PYTHONPATH'] == f'{workspace / ".pydantic-ai"}:{workspace}'
+    # No module is generated, so the checkout is the whole path.
+    assert invocation.python_path == [workspace]
+    assert list((tmp_path / 'sandbox-tmp').iterdir()) == []
 
 
 def test_a_spec_file_target_reaches_the_cli_unchanged(tmp_path: Path) -> None:
@@ -232,12 +267,28 @@ def test_mcp_config_is_passed_only_when_the_gateway_wrote_one(tmp_path: Path) ->
 
     assert '--mcp-config' not in without.cli_args
 
-    agent_dir = tmp_path / 'with' / 'workspace' / '.pydantic-ai'
-    agent_dir.mkdir(parents=True)
-    (agent_dir / 'mcp.json').write_text('{"mcpServers": {}}', encoding='utf-8')
+    config = gateway_config(tmp_path / 'with')
+    config.parent.mkdir(parents=True)
+    config.write_text('{"mcpServers": {}}', encoding='utf-8')
     with_config = launch(tmp_path / 'with', proxy_env('openai', 'openai/gpt-5'))
 
-    assert with_config.cli_args[2:4] == ['--mcp-config', str(agent_dir / 'mcp.json')]
+    assert with_config.cli_args[2:4] == ['--mcp-config', str(config)]
+
+
+def test_a_committed_mcp_config_is_not_passed_to_the_cli(tmp_path: Path) -> None:
+    """Only the host-written config reaches `--mcp-config`.
+
+    `load_mcp_toolsets` starts a stdio server the config names, so a file the
+    repository can commit must not be a candidate for the flag.
+    """
+    committed = tmp_path / 'workspace' / '.pydantic-ai' / 'mcp.json'
+    committed.parent.mkdir(parents=True)
+    committed.write_text('{"mcpServers": {"local": {"command": "python3", "args": ["x.py"]}}}', encoding='utf-8')
+
+    invocation = launch(tmp_path, proxy_env('openai', 'openai/gpt-5'))
+
+    assert '--mcp-config' not in invocation.cli_args
+    assert str(committed) not in invocation.cli_args
 
 
 def test_the_anthropic_backend_is_addressed_with_the_messages_api(tmp_path: Path) -> None:
@@ -285,14 +336,15 @@ class TestLauncherProgram:
 
     @staticmethod
     def run(tmp_path: Path, target: str, *cli_args: str) -> subprocess.CompletedProcess[str]:
-        """Run the launcher over an agent directory that a checkout file shadows."""
+        """Run the launcher over a module directory that a checkout file shadows."""
         program = TestLauncherProgram.program(tmp_path)
-        agent_dir = tmp_path / 'workspace' / '.pydantic-ai'
-        agent_dir.mkdir(parents=True, exist_ok=True)
+        module_dir = tmp_path / 'module'
+        module_dir.mkdir(parents=True, exist_ok=True)
         workspace = tmp_path / 'workspace'
+        workspace.mkdir(parents=True, exist_ok=True)
         imports = tmp_path / 'imports.txt'
 
-        (agent_dir / 'gh_aw_agent.py').write_text(AGENT_MODULE.replace('NAME', 'agent-directory'), encoding='utf-8')
+        (module_dir / 'gh_aw_agent.py').write_text(AGENT_MODULE.replace('NAME', 'module-directory'), encoding='utf-8')
         # `load_agent` prepends the working directory to `sys.path`, so this is the
         # file the CLI would reach on its own.
         (workspace / 'gh_aw_agent.py').write_text(AGENT_MODULE.replace('NAME', 'checkout'), encoding='utf-8')
@@ -303,7 +355,7 @@ class TestLauncherProgram:
             env={
                 'PATH': os.environ['PATH'],
                 'HOME': str(tmp_path / 'home'),
-                'PYTHONPATH': str(agent_dir),
+                'PYTHONPATH': str(module_dir),
                 'GH_AW_TEST_IMPORTS': str(imports),
                 'PYTHONIOENCODING': 'utf-8',
             },
@@ -317,15 +369,14 @@ class TestLauncherProgram:
         completed = self.run(tmp_path, 'gh_aw_agent:agent', '-a', 'gh_aw_agent:agent', '-m', 'test', 'hello')
 
         assert completed.returncode == 0, completed.stderr
-        # One line, from the agent directory: the CLI reused the module the launcher
+        # One line, from the module directory: the CLI reused the module the launcher
         # imported rather than importing anything a second time or reaching the
         # checkout copy.
-        assert (tmp_path / 'imports.txt').read_text(encoding='utf-8') == 'agent-directory\n'
+        assert (tmp_path / 'imports.txt').read_text(encoding='utf-8') == 'module-directory\n'
 
     def test_a_target_that_is_not_an_agent_names_what_it_found(self, tmp_path: Path) -> None:
-        (tmp_path / 'workspace').mkdir(parents=True, exist_ok=True)
-        (tmp_path / 'workspace' / '.pydantic-ai').mkdir(parents=True, exist_ok=True)
-        (tmp_path / 'workspace' / '.pydantic-ai' / 'not_an_agent.py').write_text('agent = 1\n', encoding='utf-8')
+        (tmp_path / 'module').mkdir(parents=True, exist_ok=True)
+        (tmp_path / 'module' / 'not_an_agent.py').write_text('agent = 1\n', encoding='utf-8')
 
         completed = self.run(tmp_path, 'not_an_agent:agent', '-a', 'not_an_agent:agent', '-m', 'test', 'hello')
 
@@ -333,8 +384,8 @@ class TestLauncherProgram:
         assert 'TypeError: not_an_agent:agent is int, not pydantic_ai.Agent' in completed.stderr
 
     def test_an_agent_that_raises_on_import_fails_with_its_traceback(self, tmp_path: Path) -> None:
-        (tmp_path / 'workspace' / '.pydantic-ai').mkdir(parents=True, exist_ok=True)
-        (tmp_path / 'workspace' / '.pydantic-ai' / 'broken_agent.py').write_text(
+        (tmp_path / 'module').mkdir(parents=True, exist_ok=True)
+        (tmp_path / 'module' / 'broken_agent.py').write_text(
             "raise RuntimeError('the agent could not be built')\n", encoding='utf-8'
         )
 

@@ -58,8 +58,9 @@ OpenAI-shaped and use Chat Completions.
 ## What actually runs
 
 `pai -a` takes one target and its agent-spec format cannot name harness
-capabilities, so the engine writes the composition as a Python module at
-`.pydantic-ai/gh_aw_agent.py` and passes `-a gh_aw_agent:agent`. The CLI and its
+capabilities, so the engine writes the composition as `gh_aw_agent.py` in a
+private directory it creates inside the sandbox, puts that directory on
+`PYTHONPATH`, and passes `-a gh_aw_agent:agent`. The CLI and its
 dependencies are installed before the agent starts, with
 `pip install --user "pydantic-ai-harness[cli]==<engine version>"
 "pydantic-ai-slim[anthropic,openai,mcp]>=2.36.0"`. The pinned harness version is
@@ -78,13 +79,23 @@ target, finds the module already in `sys.modules`, so a repository file named
 `gh_aw_agent.py` cannot stand in for the generated one. That insert still applies to
 everything imported after it, which is how the CLI behaves for all of its users.
 
-MCP servers arrive as `.pydantic-ai/mcp.json` in the `mcpServers` shape Claude
-Desktop and Cursor use, and the engine hands that file to `pai --mcp-config`, which
-loads it with `pydantic_ai.mcp.load_mcp_toolsets` and passes the toolsets into the
-run alongside whatever the agent already carries. Tools carry their server name as
-a prefix, so safe outputs are reachable as `safeoutputs_create_issue` and so on.
-HTTP servers are carried over; CLI-mounted servers remain on the agent's `PATH` as
-executables.
+MCP servers arrive as `${RUNNER_TEMP}/gh-aw/mcp-config/mcp-servers.json` in the
+`mcpServers` shape Claude Desktop and Cursor use, and the engine hands that file to
+`pai --mcp-config`, which loads it with `pydantic_ai.mcp.load_mcp_toolsets` and
+passes the toolsets into the run alongside whatever the agent already carries. Tools
+carry their server name as a prefix, so safe outputs are reachable as
+`safeoutputs_create_issue` and so on. HTTP servers are carried over; CLI-mounted
+servers remain on the agent's `PATH` as executables. gh-aw's config adapter writes
+that file in the `Start MCP Gateway` step on the host runner, next to the file the
+built-in Claude engine gets, and the agent step mounts `${RUNNER_TEMP}/gh-aw`
+read-only.
+
+Neither file is in the checkout, and that is deliberate. A file committed at a path
+the engine reads is repository-controlled input to a process that runs with the
+gateway's credentials: an MCP config could name a stdio server for the CLI to spawn,
+and a package under a directory the engine puts on `PYTHONPATH` would shadow an
+installed one for the whole run. Repository code reaches the agent only through
+`PAI_AGENT`, below.
 
 ## Running your own agent
 
@@ -139,7 +150,8 @@ Five things to know.
   for the install itself.
 - **MCP tools arrive the same way they do for the coder agent.** The engine passes
   `--mcp-config` whenever the gateway wrote a config, so the gateway's servers are
-  added to your agent's own toolsets. Your agent does not load `mcp.json` itself.
+  added to your agent's own toolsets. Your agent does not load the config itself,
+  and does not need to know where it is.
 - **The engine always passes `-m`.** An explicit `-m` replaces the model a loaded
   agent declares, so your agent runs on the workflow's `engine.model` whatever it
   was constructed with. Configure the model in the workflow, not in the agent.
