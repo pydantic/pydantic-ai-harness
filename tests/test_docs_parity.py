@@ -157,6 +157,7 @@ _CAPABILITY_PAGE_META = {
     'prompt-injection-defender.md': ('prompt_injection_defender', 'Prompt Injection Defender'),
     'spend.md': ('spend', 'Spend'),
     'localstack.md': ('localstack', 'LocalStack'),
+    'composio.md': ('composio', 'Composio'),
     'stackone.md': ('stackone', 'StackOne'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
 }
