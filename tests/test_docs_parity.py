@@ -132,6 +132,7 @@ _CAPABILITY_PAGE_META = {
     'shell.md': ('shell', 'Shell'),
     'managed-prompt.md': ('logfire', 'Managed Prompt'),
     'memory.md': ('memory', 'Memory'),
+    'daytona-workspace.md': ('daytona_workspace', 'Daytona Workspace'),
     'modal-sandbox.md': ('modal_sandbox', 'Modal Sandbox'),
     'modal-workspace.md': ('modal_workspace', 'Modal Workspace'),
     'e2b-workspace.md': ('e2b_workspace', 'E2B Workspace'),
