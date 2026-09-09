@@ -174,9 +174,18 @@ the branch. Each item names its acceptance check.
 - [ ] 1.1d When #851 merges: rebase `puppy/shell-events` on `main`, answer pydanty's floor
       finding on #845 with the merged PR, mark #845 ready for review, and merge `main` into
       `feat/experimental-cli` so the CLI lock picks up the floor.
-- [ ] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`): `FileChangeRequestEvent`,
-      `FileEditedEvent`, `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and
-      grep results, answers the request event.
+- [x] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`, worktree
+      `../harness-filesystem-change-events`): `FileChangeRequestEvent`, `FileEditedEvent`,
+      `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and search counts,
+      answers the request event. PR #853 (draft, CI green including coverage, pydanty labelled);
+      bridge half merged into `feat/experimental-cli` at 9cd783c7.
+- [ ] 1.2b Work pydanty's review of #853 (`gh pr view 853 --comments`; the label
+      `pydanty:is-working` clears when it lands), address the findings in
+      `../harness-filesystem-change-events`, merge the fixes into `feat/experimental-cli`, then
+      mark #853 ready for review. Ask Douwe on the PR whether `FileEditedEvent` as a
+      `FileWrittenEvent` subclass is the shape he wants (the events plan's open question).
+- [ ] 1.2c When #853 merges: merge `main` into `feat/experimental-cli` and drop the
+      `puppy/filesystem-change-events` worktree.
 - [ ] 1.3 `subagents` events PR (`puppy/subagents-events`): `DelegationStartEvent`,
       `DelegationEndEvent`. Bridge renders nested invocation panels.
 - [ ] 1.4 `skills` events PR (`puppy/skills-events`): `SkillsLoadedEvent`, `SkillActivatedEvent`.
@@ -431,6 +440,57 @@ Append-only. Date, item, decision, why.
   maintainer adds it, and a dependency PR approving its own dependency change is the one label
   the loop must not touch. Ticked on the draft plus the pydanty label; 1.1d holds the
   post-merge follow-through.
+
+- 2026-09-09, loop: a "when X merges" item whose X has not merged is not the first unchecked
+  item for this iteration; the loop re-checks its gate every iteration and takes the next
+  unchecked box. 1.1d was skipped this way because #851 still lacks `dependencies:approved`.
+- 2026-09-09, 1.2: `FileEditedEvent` subclasses `FileWrittenEvent` (core registers it under its
+  own kind, `file_system.file_edited`, and `@on_event` matches with `isinstance`), so every
+  existing `FileWrittenEvent` listener keeps seeing edits and a listener that wants the diff
+  filters on the subclass. Chosen over extending `FileWrittenEvent` with `diff` because hosts
+  emit that event themselves and a new required field would break them; a defaulted field is
+  the neutered-validation smell. The events plan's open question is put to Douwe on #853.
+- 2026-09-09, 1.2: the write request fires after the access and parent checks and before the
+  descriptor is opened, because `_write_file` opens with `O_CREAT | O_EXCL` and a cancelled
+  write must not leave an empty file behind. The edit request fires after the conflict and
+  uniqueness checks. The docs say exactly that rather than one rule for both.
+- 2026-09-09, 1.2: `kind` is the event envelope's discriminator on `CapabilityEvent`, so the
+  search event's field is `search: Literal['find', 'grep']`, not the `kind` the events plan
+  wrote. Pyright's `reportIncompatibleVariableOverride` is what caught it; core would have
+  silently mis-tagged the payload.
+- 2026-09-09, 1.2: `create_directory` on an existing directory emits neither the request nor
+  `DirectoryCreatedEvent`: nothing changes, so there is nothing to approve. Its return string
+  stays `Created directory: ...` because `test_create_existing_ok` pins it; renaming that is a
+  separate change.
+- 2026-09-09, 1.2: `search_files`, `find_files`, and `create_directory` took the
+  `_x_tool(ctx, ...)` / public `x(...)` / `_x(ctx | None, ...)` split the other tools already
+  use; the model-facing docstring moves to the `_tool` method. A direct call outside a run
+  (`ctx is None`) asks nobody, consistent with the other events.
+- 2026-09-09, 1.2: the open-with-retry loop in `_write_file` moved to a module-level
+  `_open_for_write` to stay under ruff's complexity cap. `_toolset.py` is now about 900 lines;
+  splitting its pure helpers into `_helpers.py` is deferred because `tests/filesystem` imports
+  several of them from `_toolset` (against `AGENTS.md`) and that cleanup deserves its own PR.
+- 2026-09-09, 1.2: `main` moved twice during the iteration (#846, #847, #849); #847 changed the
+  same lines of `_edit_file` and `_write_file` (CRLF hashes). Rebased before pushing; the
+  diff's before-image reads with `newline=''` like #847's canonical view but with lenient
+  decoding, since it is for display and the hash check reads strictly through the descriptor.
+- 2026-09-09, 1.2: per-worktree setup is `uv sync --all-extras --python 3.12` (the default
+  picks 3.14 and `--no-sync` then warns on every command) and pyright from the main checkout,
+  `../pydantic-ai-harness/.venv/bin/pyright --pythonpath .venv/bin/python <paths>`.
+- 2026-09-09, 1.2: focused coverage on one interpreter reports two misses in `_toolset.py` and
+  `test_filesystem.py` that `main` has too (a 3.13+ `ELOOP` branch and a 3.14 monkeypatch);
+  CI combines the matrix and passed at 100%. Do not chase those two locally.
+- 2026-09-09, loop: `git stash` on a clean worktree is a no-op and the following `git stash pop`
+  pops the repository's shared `stash@{0}`, which was the 480-line CLI skeleton this plan says
+  to mine for 3.4. It was re-pushed intact (8 files, 482 insertions) as `stash@{0}` with the
+  message "WIP on main: d004ad6a CLI skeleton (...); mine for 3.4 provider auth", now based on
+  `puppy/filesystem-change-events`. Rule: `git stash list` first, and only `git stash push -m`.
+- 2026-09-09, 1.2 bridge: the diff renders before the approver is asked, so the user decides on
+  what they can see; additions green, removals red, hunk headers cyan, headers and context
+  plain, plus a dimmed `(diff truncated)` note. `FilesSearchedEvent` replaces the generic
+  result line with a match count the way a shell end event does. `FileWrittenEvent`,
+  `FileEditedEvent`, and `DirectoryCreatedEvent` get no handler: the generic `< tool` line
+  already says what happened, and the diff was shown at request time.
 
 ## Open questions for Mike
 
