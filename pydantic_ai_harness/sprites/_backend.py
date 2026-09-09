@@ -1,11 +1,10 @@
-"""Fly.io Sprites backend for the core sandbox protocol.
+"""Fly.io Sprites backend for Pydantic AI's `WorkspaceBackend` protocol.
 
 External assumptions last verified 2026-09-08 against sprites-py 0.6.0 source and a local
 WebSocket transport probe, with no live cloud calls:
 
 * `SpritesClient` accepts token, base URL, and HTTP timeout; sprite creation uses the SDK's
-  fixed 120-second request timeout, while `close` only closes the local HTTP client and
-  `destroy_sprite` deletes the remote Sprite:
+  fixed 120-second request timeout, while `close` only closes the local HTTP client:
   https://github.com/superfly/sprites-py/blob/v0.6.0/src/sprites/client.py
 * `ControlConnection` is asyncio-based and exposes `connect`, `start_op`, and `close`; an
   operation provides `wait`, `get_stdout`, and `get_stderr`:
@@ -13,11 +12,12 @@ WebSocket transport probe, with no live cloud calls:
 * A control WebSocket disconnect does not kill the remote command, so the backend's RUN/CANCEL
   process supervision is required:
   https://sprites.dev/api/sprites/exec
-* Provider retention and explicit destruction are separate from local client disconnect:
+* Provider retention is separate from local client disconnect:
   https://docs.sprites.dev/concepts/lifecycle/
 
 Re-check these sources, the installed signatures, and the local transport probe before changing
-lifecycle or command transport behavior. The integration is asyncio-only.
+lifecycle or command transport behavior. The integration is asyncio-only, and the synchronous SDK
+calls run in a worker thread that a cancelled caller cannot abort.
 """
 
 from __future__ import annotations
@@ -28,24 +28,24 @@ import math
 import os
 import posixpath
 import uuid
-from collections.abc import Callable, Mapping
-from functools import partial
+from collections.abc import Awaitable, Callable, Mapping
+from functools import cached_property
 from typing import NoReturn, TypeVar
 
 import anyio
 import anyio.to_thread
-from pydantic_ai.sandboxes import (
+from anyio.lowlevel import checkpoint
+from pydantic_ai.workspaces import (
     CommandResult,
-    LazySandbox,
-    SandboxBackend,
-    SandboxCommand,
-    SandboxError,
-    SandboxRef,
-    SandboxTimeoutError,
-    SandboxUnavailableError,
+    WorkspaceBackend,
+    WorkspaceCommand,
+    WorkspaceError,
+    WorkspaceRef,
+    WorkspaceTimeoutError,
+    WorkspaceUnavailableError,
 )
 
-from pydantic_ai_harness._sandbox_provider import absolute_path, cleanup_call, raise_after_cleanup
+from pydantic_ai_harness._workspace_provider import absolute_path
 from pydantic_ai_harness.sprites._process import CANCEL, RUN
 
 try:
@@ -53,31 +53,45 @@ try:
     from sprites.control import ControlConnection
     from sprites.exceptions import AuthenticationError, NotFoundError, SpriteError
     from websockets.exceptions import InvalidStatus
-except ImportError as exc:
-    raise ImportError('Install `pydantic-ai-harness[sprites]` to use SpriteSandbox.') from exc
+except ImportError as exc:  # pragma: no cover - exercised by the isolated missing-extra test
+    raise ImportError('Install `pydantic-ai-harness[sprites]` to use SpriteWorkspace.') from exc
 
 logger = logging.getLogger(__name__)
 T = TypeVar('T')
 _CONTROL_TIMEOUT = 6.0
-
-
-class SpriteSandboxError(SandboxError):
-    """A Fly.io Sprites operation failed."""
-
-
-class SpriteSandboxAuthError(SpriteSandboxError, SandboxUnavailableError):
-    """The Sprites token is missing or was rejected."""
-
-
-class SpriteSandboxUnavailableError(SpriteSandboxError, SandboxUnavailableError):
-    """The requested Sprite no longer exists."""
+_AUTH_MESSAGE = 'Sprites rejected the credentials. Set SPRITE_TOKEN or pass token= and try again.'
 
 
 async def _call(call: Callable[[], T]) -> T:
     return await anyio.to_thread.run_sync(call, abandon_on_cancel=True)
 
 
-def _command_args(command: SandboxCommand, shell: bool) -> list[str]:
+async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float) -> Exception | None:
+    """Run one teardown RPC shielded from cancellation and bounded by `timeout`.
+
+    Returns the failure instead of raising so the caller owns translation; a bare `TimeoutError`
+    means the bound expired. Shielded because teardown must still go out while a run is being
+    cancelled; bounded so a wedged control plane cannot hang teardown.
+    """
+    error: Exception | None = None
+    with anyio.CancelScope(shield=True):
+        with anyio.move_on_after(timeout) as scope:
+            try:
+                await call()
+            except Exception as exc:
+                error = exc
+        if scope.cancel_called:
+            return TimeoutError()
+    return error
+
+
+async def raise_after_cleanup(error: Exception, *, cause: Exception | None = None) -> NoReturn:
+    """Deliver pending cancellation before raising a cleanup error."""
+    await checkpoint()
+    raise error from cause
+
+
+def _command_args(command: WorkspaceCommand, shell: bool) -> list[str]:
     if shell:
         if not isinstance(command, str):
             raise TypeError('an argv sequence cannot be combined with shell=True; pass a command string')
@@ -90,103 +104,108 @@ def _command_args(command: SandboxCommand, shell: bool) -> list[str]:
     return args
 
 
-class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
-    """A lazy Sprite with commands and core-derived filesystem operations.
+def _operation_error(error: Exception, context: str) -> WorkspaceError:
+    if isinstance(error, AuthenticationError):
+        return WorkspaceUnavailableError(_AUTH_MESSAGE)
+    if isinstance(error, InvalidStatus):
+        if error.response.status_code == 401:
+            return WorkspaceUnavailableError(_AUTH_MESSAGE)
+        if error.response.status_code == 404:
+            return WorkspaceUnavailableError('The requested Sprite no longer exists.')
+    if isinstance(error, NotFoundError):
+        return WorkspaceUnavailableError('The requested Sprite no longer exists.')
+    return WorkspaceError(f'{context}: {type(error).__name__}: {error}')
 
-    Construction does no I/O. Await `sandbox` to obtain the native SDK object. Every command
+
+class SpriteWorkspaceBackend(WorkspaceBackend):
+    """A Fly.io Sprite behind the Pydantic AI `WorkspaceBackend` protocol.
+
+    Construction does no I/O. Await `workspace` to obtain the native SDK object. Every command
     gets its own asyncio control connection, which is closed before the result is returned.
-    Callers finish in-flight commands before invoking lifecycle methods. `destroy` deletes a
-    saved remote Sprite, while `disconnect` only detaches this backend's owned SDK client. Neither
-    method creates a Sprite, and no lifecycle method is called automatically by core.
+    Callers finish in-flight commands before invoking `disconnect`, which only detaches this
+    backend's owned SDK client and never touches the remote Sprite. No lifecycle method is called
+    automatically by core.
     """
 
     def __init__(
         self,
         *,
-        token: str | None = None,
-        ref: SandboxRef | None = None,
+        workspace: Sprite | None = None,
+        client: SpritesClient | None = None,
+        ref: WorkspaceRef | None = None,
         name: str | None = None,
+        token: str | None = None,
         base_url: str = 'https://api.sprites.dev',
         api_timeout: float = 30.0,
         runtime: str | None = None,
         working_dir: str | None = None,
-        client: SpritesClient | None = None,
     ) -> None:
-        super().__init__()
-        self._token = token
-        self._ref = ref
+        if ref is not None and ref.provider != 'sprites':
+            raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'sprites'")
+        if workspace is not None and ref is not None:
+            raise ValueError('pass either `workspace` or `ref`, not both')
+        self._workspace = workspace
+        self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
         self._name = name or f'pydantic-ai-{uuid.uuid4().hex}'
+        self._token = token
         self._base_url = base_url
-        if not math.isfinite(api_timeout) or api_timeout <= 0:
-            raise ValueError('api_timeout must be positive and finite.')
         self._api_timeout = api_timeout
         self._runtime = runtime
         self._working_dir = absolute_path('working_dir', working_dir)
         self._canonical_working_dir: str | None = None
         self._client = client
-        self._client_owned = client is None
+        self._owns_client = client is None
 
     @property
-    def ref(self) -> SandboxRef | None:
-        """Provider name, known immediately for an explicit reference."""
+    def workspace(self) -> Awaitable[Sprite]:
+        return self._get_workspace()
+
+    async def _get_workspace(self) -> Sprite:
+        if self._workspace is None:
+            async with self._lock:
+                if self._workspace is None:
+                    self._workspace = await self._create_or_attach(self._ref)
+                    self._ref = WorkspaceRef(provider='sprites', id=self._workspace.name)
+        assert self._workspace is not None
+        return self._workspace
+
+    @cached_property
+    def _lock(self) -> anyio.Lock:
+        return anyio.Lock()
+
+    @property
+    def ref(self) -> WorkspaceRef | None:
         return self._ref
 
     def _ensure_client(self) -> SpritesClient:
         if self._client is None:
             token = self._token or os.getenv('SPRITE_TOKEN')
             if not token:
-                raise SpriteSandboxAuthError('Set SPRITE_TOKEN or pass token= to SpriteSandbox.')
+                raise WorkspaceUnavailableError(_AUTH_MESSAGE)
             self._client = SpritesClient(token=token, base_url=self._base_url, timeout=self._api_timeout)
-            self._client_owned = True
+            self._owns_client = True
         return self._client
 
-    async def create_or_attach(self) -> Sprite:
+    async def _create_or_attach(self, ref: WorkspaceRef | None) -> Sprite:
         """Acquire once; a missing explicit reference never creates a replacement."""
         client = self._ensure_client()
 
         def acquire() -> Sprite:
-            if self._ref is not None:
-                return client.get_sprite(self._ref.sandbox_id)
-            try:
-                return client.get_sprite(self._name)
-            except NotFoundError:
-                pass
-            try:
-                return client.create_sprite(self._name, runtime=self._runtime)
-            except AuthenticationError:
-                raise
-            except SpriteError as creation_error:
-                try:
-                    return client.get_sprite(self._name)
-                except NotFoundError:
-                    raise creation_error
+            if ref is not None:
+                return client.get_sprite(ref.id)
+            return client.create_sprite(self._name, runtime=self._runtime)
 
         try:
-            sprite = await _call(acquire)
+            return await _call(acquire)
         except SpriteError as error:
-            raise self._error(error) from error
-        self._ref = SandboxRef(sandbox_id=sprite.name)
-        return sprite
-
-    @staticmethod
-    def _error(error: Exception, context: str = 'Sprites operation failed') -> SpriteSandboxError:
-        if isinstance(error, AuthenticationError):
-            return SpriteSandboxAuthError('Sprites rejected the credentials; check SPRITE_TOKEN or token=.')
-        if isinstance(error, NotFoundError):
-            return SpriteSandboxUnavailableError('The requested Sprite no longer exists.')
-        if isinstance(error, InvalidStatus):
-            if error.response.status_code == 401:
-                return SpriteSandboxAuthError('Sprites rejected the credentials; check SPRITE_TOKEN or token=.')
-            if error.response.status_code == 404:
-                return SpriteSandboxUnavailableError('The requested Sprite no longer exists.')
-        return SpriteSandboxError(f'{context}: {type(error).__name__}: {error}')
+            raise _operation_error(error, 'Could not acquire Sprite') from error
 
     async def working_dir(self) -> str:
         if self._canonical_working_dir is None:
             result = await self.run(['pwd', '-P'], timeout=30)
             directory = result.stdout.removesuffix('\n')
             if result.exit_code != 0 or not posixpath.isabs(directory):
-                raise SpriteSandboxError('Could not determine the Sprite working directory.')
+                raise WorkspaceError('Could not determine the Sprite working directory.')
             self._canonical_working_dir = directory
         return self._canonical_working_dir
 
@@ -197,7 +216,7 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
             await connection.connect()
             operation = await connection.start_op('exec', cmd=['python3', '-I', '-c', CANCEL, control], stdin=False)
             if await operation.wait() != 0:
-                raise SpriteSandboxError('Sprite cancellation did not complete successfully.')
+                raise WorkspaceError('Sprite cancellation did not complete successfully.')
 
         try:
             return await cleanup_call(cancel, timeout=_CONTROL_TIMEOUT)
@@ -214,21 +233,21 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
         timeout: float | None,
     ) -> NoReturn:
         if isinstance(error, TimeoutError):
-            raise SandboxTimeoutError(
+            raise WorkspaceTimeoutError(
                 'Sprite command deadline expired.',
                 stdout=stdout.decode('utf-8', errors='replace'),
                 stderr=stderr.decode('utf-8', errors='replace'),
                 timeout=timeout,
             ) from error
-        if isinstance(error, SandboxError):
+        if isinstance(error, WorkspaceError):
             raise error
         if isinstance(error, Exception):
-            raise self._error(error, 'Could not execute Sprite command') from error
+            raise _operation_error(error, 'Could not execute Sprite command') from error
         raise error
 
     async def run(
         self,
-        command: SandboxCommand,
+        command: WorkspaceCommand,
         *,
         shell: bool = False,
         cwd: str | None = None,
@@ -236,7 +255,7 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
         timeout: float | None = None,
     ) -> CommandResult:
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
-            raise ValueError('timeout must be positive and finite or None.')
+            raise ValueError(f'timeout must be a positive finite number or None, got {timeout!r}.')
         directory = absolute_path('cwd', cwd) if cwd is not None else self._working_dir
         args = _command_args(command, shell)
 
@@ -251,7 +270,7 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
         code = 0
         try:
             with anyio.fail_after(timeout):
-                sprite = await self.sandbox
+                sprite = await self.workspace
                 options = json.dumps({'args': args, 'cwd': directory, 'env': dict(env or {})})
                 connection = ControlConnection(sprite)
                 await connection.connect()
@@ -266,7 +285,7 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
                     message = 'Sprite command transport closed before reporting an exit status.'
                     if detail:
                         message = f'{message} {detail}'
-                    raise SpriteSandboxError(message) from connection.close_error
+                    raise WorkspaceError(message) from connection.close_error
         except BaseException as error:
             command_error = error
             if operation is not None:
@@ -288,11 +307,11 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
         if close_error is not None:
             if isinstance(close_error, TimeoutError):
                 await raise_after_cleanup(
-                    SpriteSandboxError('Could not close Sprite command connection within the cleanup bound.'),
+                    WorkspaceError('Could not close Sprite command connection within the cleanup bound.'),
                     cause=close_error,
                 )
             await raise_after_cleanup(
-                self._error(close_error, 'Could not close Sprite command connection'), cause=close_error
+                _operation_error(close_error, 'Could not close Sprite command connection'), cause=close_error
             )
         return CommandResult(
             exit_code=code,
@@ -300,53 +319,25 @@ class SpriteSandboxBackend(LazySandbox[Sprite], SandboxBackend):
             stderr=stderr.decode('utf-8', errors='replace'),
         )
 
-    async def destroy(self) -> None:
-        """Delete the saved remote Sprite, including one attached before first use.
-
-        With no saved ref this is a no-op and does not create an SDK client. A saved ref is
-        deleted directly by ID without lookup or creation; an already missing Sprite succeeds.
-        The ref is retained after failure for retry. Successful destruction clears local caches.
-        Finish in-flight commands first.
-        """
-        async with self._lock:
-            if self._ref is None:
-                return
-            client = self._ensure_client()
-            ref = self._ref
-            error = await cleanup_call(
-                lambda: _call(partial(client.destroy_sprite, ref.sandbox_id)), timeout=self._api_timeout
-            )
-            if isinstance(error, NotFoundError):
-                error = None
-            if error is not None:
-                await raise_after_cleanup(
-                    self._error(error, f'Could not destroy Sprite {ref.sandbox_id!r}'), cause=error
-                )
-            self._live = None
-            self._canonical_working_dir = None
-
     async def disconnect(self) -> None:
         """Detach local state while leaving the remote Sprite unchanged.
 
-        An injected SDK client is never closed. An owned client is closed with bounded cleanup;
-        successful disconnect clears local caches and later operations reattach using the saved ref.
-        Failures retain the client and ref so disconnect can be retried. Finish in-flight commands first.
+        A supplied SDK client is never closed. An owned client is closed with bounded cleanup;
+        a successful disconnect clears local caches and later operations reattach using the saved
+        ref. A failure retains the client and ref so disconnect can be retried. Finish in-flight
+        commands first.
         """
         async with self._lock:
             client = self._client
-            if client is None:
-                self._live = None
-                self._canonical_working_dir = None
-                return
-            if not self._client_owned:
-                self._live = None
+            if client is None or not self._owns_client:
+                self._workspace = None
                 self._canonical_working_dir = None
                 return
             error = await cleanup_call(lambda: _call(client.close), timeout=self._api_timeout)
             if error is not None:
                 await raise_after_cleanup(
-                    self._error(error, 'Could not disconnect from Sprite SDK client'), cause=error
+                    _operation_error(error, 'Could not disconnect from Sprite SDK client'), cause=error
                 )
             self._client = None
-            self._live = None
+            self._workspace = None
             self._canonical_working_dir = None

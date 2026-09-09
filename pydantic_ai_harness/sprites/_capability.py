@@ -1,60 +1,64 @@
-"""Supply a Fly.io Sprite through the core sandbox capability hook."""
+"""Capability that supplies a Fly.io Sprite workspace to an agent run."""
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.sandboxes import SandboxBackend, SandboxRef
 from pydantic_ai.tools import AgentDepsT, RunContext
-from sprites import SpritesClient
+from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
-from pydantic_ai_harness._sandbox_provider import absolute_path
-from pydantic_ai_harness.sprites._backend import SpriteSandboxBackend
+from pydantic_ai_harness.sprites._backend import SpriteWorkspaceBackend
+
+if TYPE_CHECKING:
+    from sprites import SpritesClient
 
 
 @dataclass(kw_only=True)
-class SpriteSandbox(AbstractCapability[AgentDepsT]):
-    """Supply a persistent Fly.io Sprite as `ctx.sandbox`.
+class SpriteWorkspace(AbstractCapability[AgentDepsT]):
+    """Supply a persistent [Fly.io Sprite](https://sprites.dev) workspace through `ctx.workspace`.
 
-    Defaults to one named Sprite per conversation. An explicit `sprite_name` or
-    run reference attaches to an existing Sprite and raises if it is missing.
-    Acquisition is lazy; ending a run does not destroy or disconnect the Sprite.
-    Lifecycle methods are explicit and callers finish in-flight commands first.
+    A run with no reference creates a fresh Sprite. Pass a `WorkspaceRef` supplied by the
+    application to attach to a Sprite managed elsewhere. Acquisition is lazy, and ending a run
+    does not disconnect or destroy the Sprite.
+
+    This capability supplies execution only. Compose it with tools or
+    capabilities that consume
+    [`RunContext.workspace`][pydantic_ai.tools.RunContext.workspace].
     """
 
-    token: str | None = None
-    """API token; defaults to SPRITE_TOKEN on first use."""
-    sprite_name: str | None = None
-    """Name of an existing Sprite to attach to."""
-    base_url: str = 'https://api.sprites.dev'
-    """Sprites API endpoint."""
-    api_timeout: float = 30.0
-    """SDK HTTP timeout in seconds; creation uses the SDK's 120-second timeout."""
-    runtime: str | None = None
-    """Runtime for newly created Sprites."""
-    workdir: str | None = None
-    """Absolute working directory inside the Sprite."""
     client: SpritesClient | None = None
-    """Optional caller-owned client, which this capability never closes."""
+    """A caller-owned `sprites.SpritesClient`. When omitted, the backend creates one on first use
+    from `token` (or `SPRITE_TOKEN`) and closes it again on `disconnect`; supply one to own its
+    lifecycle, and the backend never closes it."""
 
-    def __post_init__(self) -> None:
-        self.workdir = absolute_path('workdir', self.workdir)
-        if self.sprite_name is not None and self.runtime is not None:
-            raise ValueError('runtime applies only to creation, not sprite_name attachment.')
+    token: str | None = None
+    """API token for a backend-owned client; defaults to `SPRITE_TOKEN` on first use."""
 
-    def get_sandbox(self, ctx: RunContext[AgentDepsT], *, ref: SandboxRef | None) -> SandboxBackend:
-        """Return a configured backend without acquiring a Sprite."""
-        existing = ref or (SandboxRef(sandbox_id=self.sprite_name) if self.sprite_name is not None else None)
-        identity = ctx.conversation_id or ctx.run_id or ''
-        return SpriteSandboxBackend(
+    base_url: str = 'https://api.sprites.dev'
+    """Sprites API endpoint for a backend-owned client."""
+
+    api_timeout: float = 30.0
+    """HTTP timeout in seconds for a backend-owned client; creation uses the SDK's own timeout."""
+
+    runtime: str | None = None
+    """Runtime for a newly created Sprite."""
+
+    workdir: str | None = None
+    """Absolute working directory for commands and relative filesystem paths."""
+
+    def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
+        """Build the backend for this run. No I/O here: it attaches or creates on first use."""
+        del ctx
+        if ref is not None and ref.provider != 'sprites':
+            return None
+        return SpriteWorkspaceBackend(
+            client=self.client,
+            ref=ref,
             token=self.token,
-            ref=existing,
-            name=f'pydantic-ai-{hashlib.sha256(identity.encode()).hexdigest()[:32]}',
             base_url=self.base_url,
             api_timeout=self.api_timeout,
-            runtime=self.runtime if existing is None else None,
+            runtime=self.runtime,
             working_dir=self.workdir,
-            client=self.client,
         )

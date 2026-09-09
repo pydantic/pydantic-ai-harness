@@ -8,14 +8,14 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, Field
-from pydantic_ai.sandboxes import Sandbox, SandboxFileEntry
+from pydantic_ai.workspaces import Workspace, WorkspaceFileEntry
 
 _ROOT_NOTES = {
     '.codex': 'Codex uses TOML config; assets are derived from the .claude/.agents setup.',
     '.grok': 'Grok setup is derived from the .claude/.agents setup.',
 }
 
-# Sandbox directory entries do not say whether a directory is a symlink, so a walk cannot
+# Workspace directory entries do not say whether a directory is a symlink, so a walk cannot
 # detect a symlink cycle; this bound stops one. Real skill trees are two levels deep.
 _MAX_SKILL_DEPTH = 8
 
@@ -37,21 +37,19 @@ class AgentContextInventory(BaseModel):
     roots: list[AssetRoot] = Field(default_factory=list[AssetRoot], description='One entry per scanned root directory.')
 
 
-async def scan_assets(sandbox: Sandbox, workspace_dir: Path, asset_roots: Sequence[str]) -> AgentContextInventory:
+async def scan_assets(workspace: Workspace, workspace_dir: Path, asset_roots: Sequence[str]) -> AgentContextInventory:
     """Scan `asset_roots` under `workspace_dir`, locating skills, agents, and hooks.
 
     This locates assets only; it does not open or parse SKILL.md, agent `.md`, or
     `settings.json` contents.
     """
-    workspace = await sandbox.resolve(workspace_dir.as_posix())
+    root_dir = await workspace.resolve(workspace_dir.as_posix())
     roots: list[AssetRoot] = []
     for name in asset_roots:
-        if posixpath.isabs(name) or posixpath.normpath(name).startswith('../'):
-            raise ValueError(f'asset root must be relative to the workspace, got {name!r}.')
-        directory = posixpath.normpath(posixpath.join(workspace, name))
+        directory = posixpath.normpath(posixpath.join(root_dir, name))
         notes = _ROOT_NOTES.get(name)
         try:
-            entry = await sandbox.stat(directory)
+            entry = await workspace.stat(directory)
         except FileNotFoundError:
             roots.append(AssetRoot(root=name, exists=False, notes=notes))
             continue
@@ -59,12 +57,12 @@ async def scan_assets(sandbox: Sandbox, workspace_dir: Path, asset_roots: Sequen
             roots.append(AssetRoot(root=name, exists=False, notes=notes))
             continue
 
-        skills = await _scan_skills(sandbox, posixpath.join(directory, 'skills'), workspace)
-        agents = await _scan_agents(sandbox, posixpath.join(directory, 'agents'), workspace)
+        skills = await _scan_skills(workspace, posixpath.join(directory, 'skills'), root_dir)
+        agents = await _scan_agents(workspace, posixpath.join(directory, 'agents'), root_dir)
         settings_path = posixpath.join(directory, 'settings.json')
-        settings_entry = await _stat(sandbox, settings_path)
+        settings_entry = await _stat(workspace, settings_path)
         settings = (
-            _relative(settings_path, workspace) if settings_entry is not None and not settings_entry.is_dir else None
+            _relative(settings_path, root_dir) if settings_entry is not None and not settings_entry.is_dir else None
         )
         skills.sort()
         agents.sort()
@@ -72,8 +70,8 @@ async def scan_assets(sandbox: Sandbox, workspace_dir: Path, asset_roots: Sequen
     return AgentContextInventory(roots=roots)
 
 
-async def _scan_skills(sandbox: Sandbox, skills_root: str, workspace: str) -> list[str]:
-    root = await _stat(sandbox, skills_root)
+async def _scan_skills(workspace: Workspace, skills_root: str, root_dir: str) -> list[str]:
+    root = await _stat(workspace, skills_root)
     if root is None or not root.is_dir:
         return []
 
@@ -83,7 +81,7 @@ async def _scan_skills(sandbox: Sandbox, skills_root: str, workspace: str) -> li
         directory, depth = pending.popleft()
         # Defensive race: the directory may disappear after `_stat`.
         try:
-            entries = await sandbox.list_dir(directory)
+            entries = await workspace.list_dir(directory)
         except FileNotFoundError:  # pragma: no cover
             continue
         for entry in entries:
@@ -91,25 +89,25 @@ async def _scan_skills(sandbox: Sandbox, skills_root: str, workspace: str) -> li
                 if depth < _MAX_SKILL_DEPTH:
                     pending.append((entry.path, depth + 1))
             elif entry.name == 'SKILL.md':
-                found.append(_relative(entry.path, workspace))
+                found.append(_relative(entry.path, root_dir))
     return found
 
 
-async def _scan_agents(sandbox: Sandbox, agents_root: str, workspace: str) -> list[str]:
-    root = await _stat(sandbox, agents_root)
+async def _scan_agents(workspace: Workspace, agents_root: str, root_dir: str) -> list[str]:
+    root = await _stat(workspace, agents_root)
     if root is None or not root.is_dir:
         return []
     # Defensive race: the directory may disappear after `_stat`.
     try:
-        entries = await sandbox.list_dir(agents_root)
+        entries = await workspace.list_dir(agents_root)
     except FileNotFoundError:  # pragma: no cover
         return []
-    return [_relative(entry.path, workspace) for entry in entries if not entry.is_dir and entry.name.endswith('.md')]
+    return [_relative(entry.path, root_dir) for entry in entries if not entry.is_dir and entry.name.endswith('.md')]
 
 
-async def _stat(sandbox: Sandbox, path: str) -> SandboxFileEntry | None:
+async def _stat(workspace: Workspace, path: str) -> WorkspaceFileEntry | None:
     try:
-        return await sandbox.stat(path)
+        return await workspace.stat(path)
     except FileNotFoundError:
         return None
 

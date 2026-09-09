@@ -1,12 +1,9 @@
-"""Fly.io Sprites integration for core sandboxes."""
+"""Fly.io Sprites workspace integration for Pydantic AI agent runs."""
 
-from ._backend import SpriteSandboxAuthError, SpriteSandboxBackend, SpriteSandboxError, SpriteSandboxUnavailableError
-from ._capability import SpriteSandbox
+from ._backend import SpriteWorkspaceBackend
+from ._capability import SpriteWorkspace
 
 __all__ = (
-    'SpriteSandbox',
-    'SpriteSandboxAuthError',
-    'SpriteSandboxBackend',
-    'SpriteSandboxError',
-    'SpriteSandboxUnavailableError',
+    'SpriteWorkspace',
+    'SpriteWorkspaceBackend',
 )

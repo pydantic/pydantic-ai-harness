@@ -5,7 +5,9 @@ from pathlib import Path
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import Capability
+from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.workspaces import LocalWorkspace, ReadOnlyWorkspace, Workspace
 
 import pydantic_ai_harness.coder
 from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS, Coder, coder_agent
@@ -16,6 +18,13 @@ from pydantic_ai_harness.repo_context import RepoContext
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 from pydantic_ai_harness.subagents import SubAgents
 from pydantic_ai_harness.tool_output_limits import ToolOutputLimits
+
+pytestmark = pytest.mark.anyio
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return 'asyncio'
 
 
 def test_coder_constructs_agent() -> None:
@@ -35,6 +44,29 @@ def test_coder_agent_is_model_less_and_composed() -> None:
         ('You are a coding agent built on Pydantic AI.', 'agent')
     ]
     assert any(isinstance(capability, FileSystem) for capability in coder_agent.root_capability.capabilities)
+
+
+async def test_bundled_coder_agent_supplies_current_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    (tmp_path / 'AGENTS.md').write_text('marker for this run', encoding='utf-8')
+    monkeypatch.chdir(tmp_path)
+
+    result = await coder_agent.run('go', model=TestModel(call_tools=[], custom_output_text='done'))
+
+    assert result.output == 'done'
+    assert await result.workspace.working_dir() == tmp_path.as_posix()
+    first_message = result.all_messages()[0]
+    assert isinstance(first_message, ModelRequest)
+    assert 'marker for this run' in (first_message.instructions or '')
+
+
+async def test_bundled_coder_agent_preserves_explicit_workspace_identity(tmp_path: Path) -> None:
+    async with LocalWorkspace(root=tmp_path) as backend:
+        workspace = ReadOnlyWorkspace(Workspace(backend))
+        result = await coder_agent.run(
+            'go', model=TestModel(call_tools=[], custom_output_text='done'), workspace=workspace
+        )
+
+    assert result.workspace is workspace
 
 
 def test_coder_agent_export_is_lazy() -> None:
