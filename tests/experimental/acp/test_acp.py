@@ -25,6 +25,7 @@ from acp import RequestError, schema
 from pydantic import BaseModel
 from pydantic_ai import Agent, DeferredToolRequests, RunContext, Tool, UsageLimitExceeded
 from pydantic_ai.capabilities import AbstractCapability, Capability, Hooks
+from pydantic_ai.exceptions import ApprovalRequired
 from pydantic_ai.messages import (
     AgentStreamEvent,
     BinaryContent,
@@ -249,6 +250,26 @@ def _for_run_approval_session(executed: list[str]) -> Callable[[AcpSession], Acp
         return AcpSessionConfig(deps=None, capabilities=[_PerRunApprovalCapability(executed)])
 
     return session_config
+
+
+def _body_raises_approval_agent(executed: list[str]) -> Agent[None, str]:
+    """An agent whose approval tool is a statically-known plain tool raising `ApprovalRequired` from its body."""
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
+        if _has_tool_return(messages):
+            yield 'done'
+            return
+        yield {0: DeltaToolCall(name='delete_file', json_args='{"path": "x"}')}
+
+    agent = Agent(FunctionModel(stream_function=stream))
+
+    @agent.tool_plain
+    def delete_file(path: str) -> str:
+        # The side effect happens before the body asks for approval: the call has begun running.
+        executed.append(path)
+        raise ApprovalRequired()
+
+    return agent
 
 
 class TestLifecycle:
@@ -983,6 +1004,27 @@ class TestPermission:
         ]
         assert executed == []
 
+    async def test_body_raised_approval_tool_stays_in_progress(self) -> None:
+        # A statically-known tool that raises `ApprovalRequired` from its body has already started
+        # executing, so it is NOT corrected to `pending`: the run's approval report only downgrades
+        # calls whose tool the pre-run scan could not see.
+        executed: list[str] = []
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(_body_raises_approval_agent(executed))
+        client = FakeClient(decider=lambda _call: 'reject_once')
+        session_id = await _start(adapter, client)
+
+        await adapter.prompt(prompt=[acp.text_block('delete')], session_id=session_id)
+
+        [(_id, _title, start_status)] = client.tool_starts()
+        assert start_status == 'in_progress'  # the tool did start, so it is never shown as pending
+        tool_events = [event for event in client.events() if event[0] in ('tool_call', 'tool_call_update')]
+        assert tool_events == [
+            ('tool_call', 'delete_file'),
+            ('tool_call_update', 'failed'),
+        ]
+        # The side effect ran before the approval question, exactly as the docs describe.
+        assert executed == ['x']
+
     async def test_approval_turn_with_a_store_persists_each_update_once(self) -> None:
         # The turn pauses for approval and resumes, accumulating updates across passes. The
         # persisted transcript must be the user's prompt plus what the client saw, with no
@@ -1243,14 +1285,17 @@ class TestPermission:
 
     def test_approval_names_come_from_function_toolsets_only(self) -> None:
         # A non-`FunctionToolset` session toolset cannot expose `requires_approval` without a live
-        # run context, so it contributes nothing and its calls start `in_progress`.
+        # run context, so it contributes nothing to either static name set and its calls start
+        # `in_progress`.
 
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(_approval_agent([]))
         config: AcpSessionConfig[None] = AcpSessionConfig(deps=None, toolsets=[CombinedToolset([])])
 
         names = adapter._approval_tool_names(config)  # pyright: ignore[reportPrivateUsage]
+        plain = adapter._known_non_approval_names(config)  # pyright: ignore[reportPrivateUsage]
 
         assert names == frozenset({'delete_file'})
+        assert plain == frozenset()
 
 
 class TestCancellation:

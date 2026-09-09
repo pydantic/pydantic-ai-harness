@@ -136,6 +136,10 @@ class _TurnState:
     # arms, non-`FunctionToolset` toolsets) are initially announced as running and corrected to
     # `pending` once the run reports which calls actually paused.
     approval_names: frozenset[str]
+    # Names the pre-run scan sees as *not* requiring approval. A call for one of these that still
+    # pauses must have raised `ApprovalRequired` from its body after starting, so it is announced
+    # `in_progress` and stays that way; the pending correction applies only to scan-invisible tools.
+    known_non_approval_names: frozenset[str] = frozenset()
     # Tool-call ids accumulated across the turn's approval-resume passes: `started` so a call
     # paused for approval is announced only once, `denied` so a rejected call's result is failed,
     # `resulted` so a cancelled turn can fail only the calls still left without a terminal status.
@@ -604,7 +608,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         run_input: list[UserContent] | None = user_content
         output_type = [self._agent.output_type, DeferredToolRequests]
         turn = _TurnState(
-            conn=conn, session_id=state.session_id, cwd=state.cwd, approval_names=self._approval_tool_names(config)
+            conn=conn,
+            session_id=state.session_id,
+            cwd=state.cwd,
+            approval_names=self._approval_tool_names(config),
+            known_non_approval_names=self._known_non_approval_names(config),
         )
         # Recorded for replay only, never sent live: the client renders its own prompt during
         # the turn, but `session/load` must rebuild the user side of the conversation too.
@@ -811,10 +819,15 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
         results = DeferredToolResults()
         for call in requests.approvals:
-            # A call that paused for approval despite the pre-run scan not knowing it pauses was
-            # announced as already running; correct it to `pending` before the decision so a client
-            # never renders a rejected call as if it had executed.
-            if turn.announced_status.get(call.tool_call_id) == 'in_progress':
+            # A call announced `in_progress` that paused for approval never actually ran when its
+            # tool is invisible to the pre-run scan (a per-run `for_run()` toolset): correct it to
+            # `pending` before the decision so a client never renders a rejected call as if it had
+            # executed. A statically-known non-approval tool that pauses must have raised
+            # `ApprovalRequired` from its body after starting, so that one stays `in_progress`.
+            if (
+                turn.announced_status.get(call.tool_call_id) == 'in_progress'
+                and call.tool_name not in turn.known_non_approval_names
+            ):
                 await self._update_status(turn, call.tool_call_id, 'pending')
             # `args_as_dict()` canonicalizes the call's arguments to a dict: a model may deliver them
             # as a JSON string (the OpenAI default, and how streamed calls accumulate), and a raw
@@ -849,27 +862,46 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
         """
         await self._send_update(turn, acp.update_tool_call(tool_call_id=tool_call_id, status=status))
 
+    def _static_toolsets(self, config: AcpSessionConfig[AgentDepsT]) -> list[AbstractToolset[AgentDepsT]]:
+        """The toolsets visible without a live run context: agent, session, and statically-contributed.
+
+        A session capability is asked for its toolset the same way; the callable arm of the
+        `AgentToolset` it may return builds one per run, which needs a run context, so only a
+        toolset counts here.
+        """
+        toolsets: list[AbstractToolset[AgentDepsT]] = [*self._agent.toolsets, *(config.toolsets or [])]
+        for capability in config.capabilities or ():
+            contributed: AgentToolset[AgentDepsT] | None = capability.get_toolset()
+            if isinstance(contributed, AbstractToolset):
+                toolsets.append(cast(AbstractToolset[AgentDepsT], contributed))
+        return toolsets
+
     def _approval_tool_names(self, config: AcpSessionConfig[AgentDepsT]) -> frozenset[str]:
         """Best-effort pre-run guess at the tools that pause for the client's approval.
 
         Only `FunctionToolset`-held tools expose `requires_approval` without a live run context;
-        tools from other toolset types are treated as not requiring approval. A session capability
-        is asked for its toolset the same way, so its approval-required tools are announced too --
-        except when it builds one per run, which needs a run context this scan doesn't have. A call
-        this scan misses pauses anyway (the run reports it in `DeferredToolRequests.approvals`), and
-        `_resolve_approvals` then corrects its announced status to `pending`.
+        tools from other toolset types are treated as not requiring approval. A capability that
+        builds its toolset per run is invisible to this scan, but a call to such a tool pauses
+        anyway (the run reports it in `DeferredToolRequests.approvals`), and `_resolve_approvals`
+        then corrects its announced status to `pending`.
         """
-        toolsets: list[AbstractToolset[AgentDepsT]] = [*self._agent.toolsets, *(config.toolsets or [])]
-        for capability in config.capabilities or ():
-            # `get_toolset()` returns `AgentToolset`, whose other arm is a callable that builds one
-            # per run; that needs a run context this scan doesn't have, so only a toolset counts.
-            contributed: AgentToolset[AgentDepsT] | None = capability.get_toolset()
-            if isinstance(contributed, AbstractToolset):
-                toolsets.append(cast(AbstractToolset[AgentDepsT], contributed))
         names: set[str] = set()
-        for toolset in toolsets:
+        for toolset in self._static_toolsets(config):
             if isinstance(toolset, FunctionToolset):
                 names.update(name for name, tool in toolset.tools.items() if tool.requires_approval)
+        return frozenset(names)
+
+    def _known_non_approval_names(self, config: AcpSessionConfig[AgentDepsT]) -> frozenset[str]:
+        """Names the pre-run scan sees as not requiring approval.
+
+        A call for one of these that pauses anyway must have raised `ApprovalRequired` from its
+        body after starting to execute, so its announced `in_progress` is kept and `_resolve_approvals`
+        corrects only scan-invisible tools.
+        """
+        names: set[str] = set()
+        for toolset in self._static_toolsets(config):
+            if isinstance(toolset, FunctionToolset):
+                names.update(name for name, tool in toolset.tools.items() if not tool.requires_approval)
         return frozenset(names)
 
     async def _request_permission(
