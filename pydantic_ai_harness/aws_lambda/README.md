@@ -13,7 +13,7 @@ checkpointing, a resumed run would repeat every model request and tool call.
 ## Installation
 
 ```bash
-pip install "pydantic-ai-harness[aws-lambda,bedrock]"
+pip install "pydantic-ai-harness[aws-lambda]"
 ```
 
 The AWS Durable Execution SDK requires Python 3.11 or newer.
