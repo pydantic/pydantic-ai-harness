@@ -8,7 +8,7 @@ share them without copy-paste.
 from __future__ import annotations
 
 import json
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from typing import Any
 
@@ -79,3 +79,7 @@ def variables_provider(capfire: CaptureLogfire, variables_config: VariablesConfi
         yield
     finally:
         logfire.configure(send_to_logfire=False, console=False)
+
+
+Publish = Callable[[str, Any], None]
+"""The `publish` fixture: put a managed config in the project for `agent__<agent name>`."""

@@ -14,9 +14,15 @@ keeps its variable registry across `configure()` calls.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from contextlib import ExitStack
+from typing import Any
 
 import logfire
 import pytest
+from logfire.testing import CaptureLogfire
+from pydantic import BaseModel
+
+from ._helpers import Publish, published_value, variables_provider
 
 _LOGFIRE_CREDENTIAL_VARS = ('LOGFIRE_TOKEN', 'LOGFIRE_API_KEY')
 
@@ -49,3 +55,24 @@ def anyio_backend() -> str:
     # Pin to asyncio: some tests use `asyncio` primitives directly, and the resolution behavior is
     # backend-agnostic, so running the trio leg too would only duplicate work.
     return 'asyncio'
+
+
+@pytest.fixture
+def publish(capfire: CaptureLogfire) -> Iterator[Publish]:
+    """Publish a managed config for `agent__<agent_name>` for the rest of the test.
+
+    `AgentControl` has no code-side default to set -- the agent itself is the code side -- so a test
+    that wants a managed value in play has to put one in the project, which is also the only way a
+    real deployment gets one. Written as a fixture rather than a `with` block so the provider is torn
+    down at the end of the test even when a test publishes and then asserts across several runs.
+    """
+    stack = ExitStack()
+
+    def _publish(agent_name: str, config: Any) -> None:
+        value = config.model_dump(exclude_none=True) if isinstance(config, BaseModel) else config
+        stack.enter_context(variables_provider(capfire, published_value(f'agent__{agent_name}', value)))
+
+    try:
+        yield _publish
+    finally:
+        stack.close()

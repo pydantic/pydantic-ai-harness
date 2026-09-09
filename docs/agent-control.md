@@ -52,7 +52,7 @@ def get_weather(city: str) -> str:
 
 
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     name='checkout_assistant',
     instructions='You are a concise checkout assistant.',
     tools=[get_weather],
@@ -122,7 +122,7 @@ and the varying half stays where it belongs.
 
 ```python {test="skip"}
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     name='checkout_assistant',
     instructions='You are a concise checkout assistant.',  # editable in Logfire
     capabilities=[AgentControl()],
@@ -147,7 +147,7 @@ from pydantic_ai.messages import InstructionPart
 from pydantic_ai_harness.logfire import AgentControl
 
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     name='checkout_assistant',
     instructions=[
         'You are a concise checkout assistant.',

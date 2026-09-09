@@ -21,7 +21,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.logfire import AgentControl
 
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     name='checkout_assistant',
     tools=[...],
     capabilities=[AgentControl(label='production')],  # -> agent__checkout_assistant
@@ -138,7 +138,7 @@ from pydantic_ai_harness import ManagedPrompt
 logfire.configure()
 
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     capabilities=[
         ManagedPrompt(
             'support_agent',
@@ -173,7 +173,7 @@ class Deps:
 
 
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     deps_type=Deps,
     capabilities=[
         ManagedPrompt(
@@ -211,7 +211,7 @@ class Deps:
 
 
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     deps_type=Deps,
     capabilities=[
         ManagedPrompt(
@@ -265,7 +265,7 @@ support_prompt = logfire.var(
     default='You are a helpful customer support agent. Be friendly and concise.',
 )
 
-agent = Agent('openai:gpt-5', capabilities=[ManagedPrompt(support_prompt, label='production')])
+agent = Agent('anthropic:claude-fable-5-1', capabilities=[ManagedPrompt(support_prompt, label='production')])
 ```
 
 When `name` is a prompt name, pass `logfire_instance=` to declare the variable on a specific
@@ -332,7 +332,7 @@ def get_weather(city: str) -> str:
 
 
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     name='checkout_assistant',
     tools=[get_weather],
     capabilities=[
@@ -353,7 +353,7 @@ The variable holds an `AgentConfig`:
     {"id": "agent", "instructions": "You are a concise checkout assistant."},
     {"id": "toolset:legacy_crm", "instructions": null}
   ],
-  "model": "openai:gpt-5",
+  "model": "anthropic:claude-fable-5-1",
   "settings": {
     "temperature": 0.4,
     "max_tokens": 2048,
@@ -430,17 +430,9 @@ Blocks pydantic-ai cannot key have no entry that reaches them: a callable passed
 `id` that matches nothing in this deployment is inert rather than an error, so one config can be applied
 across services that don't all install the same toolsets.
 
-That gives three places instructions come from, and two ways a published config can act on each:
-
-| Where | Managed from Logfire? | What a published config does to it |
-| --- | --- | --- |
-| `Agent(instructions=...)` | Only by `id` | Adds to it by default; `{"id": "agent", ...}` replaces or drops it. |
-| `AgentControl(instructions=...)` | It *is* the code-side default | **Supersedes** it -- the capability contributes the published value or the default, never both. |
-| The published `instructions` in Logfire | Yes | It is the value. |
-
-An `agent` override is the sharper tool, but the capability default is still the better home for a
-prompt you *intend* to manage: it supersedes rather than shadows, so there is only ever one copy of the
-text and no way for the two to drift.
+The base prompt lives on the agent, where it always has. `AgentControl` carries no code-side config of
+its own: the agent *is* the code side, so an `agent` entry rewrites `Agent(instructions=...)` and an
+absent one leaves it exactly as written.
 
 ```python
 from pydantic_ai import Agent
@@ -448,24 +440,18 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.logfire import AgentControl
 
 agent = Agent(
-    'openai:gpt-5',
+    'anthropic:claude-fable-5-1',
     name='checkout_assistant',
-    capabilities=[AgentControl(instructions='You are a concise checkout assistant.')],
+    instructions='You are a concise checkout assistant.',
+    capabilities=[AgentControl()],
 )
 ```
-
-`instructions=` is shorthand for `default=AgentConfig(instructions=...)` and behaves identically; pass
-the two together and you get a `UserError` rather than a silent precedence rule. Use the long form
-when other sections need code-side defaults too. The other sections have no shorthand because they
-have no such trap: a managed `model`, `settings`, or `tool_definitions` supersedes the agent's own, so
-`Agent(model=...)`, `Agent(model_settings=...)`, and a tool's own docstring stay the natural code-side
-homes.
 
 > **The mistake to avoid.** Copying the agent's observed system prompt into a managed value as *added*
 > text -- a prompt lifted out of a trace, or the whole `example` snapshot -- while the same text stays
 > in `Agent(instructions=...)` sends every block of it to the model **twice**, and pins any dynamic
 > block (`Today is 2026-07-29.`) to whatever it said at the moment it was copied. Take the text over by
-> `id`, or move it to the capability; don't re-add it.
+> `id`; don't re-add it.
 
 Added blocks compose the way a capability's instructions always have. Pydantic AI groups static
 instruction text ahead of dynamic text (so providers can cache the stable prefix) and preserves source
@@ -477,9 +463,8 @@ Only `agent.override(instructions=...)` replaces the lot, and a capability can't
 ### Notes
 
 - **Instructions add unless an entry names what it replaces:** an entry with no `id` is appended to the
-  agent's own, so a base prompt you want to manage belongs on the capability
-  (`AgentControl(instructions=...)`), which a published config supersedes. An entry *with* an `id` swaps
-  out that block instead. See [Where your base prompt lives](#where-your-base-prompt-lives).
+  agent's own; an entry *with* an `id` swaps out that block instead. A base prompt you mean to manage
+  goes on the agent and is rewritten by an `agent` entry.
 - **Overrides apply to the assembled prompt:** they are applied in `before_model_request`, the last
   point at which every contribution exists, which is what lets an entry reach a toolset's or an MCP
   server's text and not just the agent's. They land on

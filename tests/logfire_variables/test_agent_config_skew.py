@@ -30,7 +30,7 @@ from pydantic_ai_harness.logfire import (
     _agent_control,
 )
 
-from ._helpers import published_value, variables_provider
+from ._helpers import Publish, published_value, variables_provider
 
 pytestmark = pytest.mark.anyio
 
@@ -239,16 +239,16 @@ def test_a_bare_empty_instructions_string_drops_without_losing_siblings() -> Non
         assert AgentConfig.model_validate({'instructions': '', 'model': 'test'}) == AgentConfig(model='test')
 
 
-async def test_agent_keeps_managed_config_around_a_dropped_setting() -> None:
+async def test_agent_keeps_managed_config_around_a_dropped_setting(publish: Publish) -> None:
     seen: list[dict[str, object]] = []
 
     def capture(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         seen.append(dict(info.model_settings or {}))
         return ModelResponse(parts=[TextPart('done')])
 
+    publish('skew', {'settings': {'temperature': 0.4, 'thinking': 'ultra'}})
     with pytest.warns(UserWarning, match=r"sets 'thinking' to 'ultra'"):
-        config = AgentConfig.model_validate({'settings': {'temperature': 0.4, 'thinking': 'ultra'}})
-    await Agent(FunctionModel(capture), capabilities=[AgentControl('skew', default=config)]).run('hello')
+        await Agent(FunctionModel(capture), capabilities=[AgentControl('skew', label='production')]).run('hello')
     assert seen == [{'temperature': 0.4}]
 
 
@@ -264,7 +264,7 @@ async def test_an_empty_model_is_refused_by_validation_and_the_config_degrades(c
 
     published = {'model': '', 'instructions': 'MANAGED: never reaches the model.'}
     config = published_value('agent__empty_model', published)
-    capability = AgentControl('empty_model', instructions='CODE: base prompt.', label='production')
+    capability = AgentControl('empty_model', label='production')
     agent = Agent(TestModel(), instructions='code', capabilities=[capability])
     # Deliberately not asserting the warning logfire emits on a failed resolution: whether it warns, and
     # with what, is its business and varies across the range this package supports -- the floor emits
@@ -274,4 +274,4 @@ async def test_an_empty_model_is_refused_by_validation_and_the_config_degrades(c
         warnings.simplefilter('ignore')
         result = await agent.run('hello')
     instructions = [m.instructions for m in result.all_messages() if isinstance(m, ModelRequest)]
-    assert instructions == ['code\n\nCODE: base prompt.']
+    assert instructions == ['code']

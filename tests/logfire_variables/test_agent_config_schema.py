@@ -32,7 +32,7 @@ LOCKSTEP = (
     'schemas for the same agent.'
 )
 
-CANONICAL_SCHEMA_SHA256 = 'd5e13a30edefd2fd1f9b83bc73056156cfdd2348088b417d3034b095190b63a1'
+CANONICAL_SCHEMA_SHA256 = '9f1b3fbaf08171869700857ed35431cb655834ebe30df6aad1dcd5af80d7079e'
 """SHA-256 of this schema's canonical JSON, pinned identically by the platform's `agent-config.test.ts`.
 
 Every other assertion in this module checks a property, and properties are exactly what let the two

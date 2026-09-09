@@ -11,7 +11,6 @@ from logfire.testing import CaptureLogfire
 from logfire.variables import Rollout, Variable, VariableConfig, VariablesConfig
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import InstructionPart, ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -32,7 +31,7 @@ from pydantic_ai_harness.logfire import (
     _managed_variable,
 )
 
-from ._helpers import advertised, capture_tools, get_weather, published_value, variables_provider
+from ._helpers import Publish, advertised, capture_tools, get_weather, published_value, variables_provider
 
 pytestmark = pytest.mark.anyio
 
@@ -55,13 +54,13 @@ async def test_empty_config_keeps_code_behavior() -> None:
     assert instructions_seen(result.all_messages()) == ['code']
 
 
-async def test_managed_instructions_are_appended_not_replaced() -> None:
-    capability = AgentControl('instructions', default=AgentConfig(instructions='managed'))
+async def test_managed_instructions_are_appended_not_replaced(publish: Publish) -> None:
+    publish('instructions', {'instructions': 'managed'})
     agent = Agent(
         TestModel(),
         instructions='code',
         toolsets=[FunctionToolset[object](instructions='toolset')],
-        capabilities=[capability],
+        capabilities=[AgentControl('instructions', label='production')],
     )
 
     @agent.instructions
@@ -69,53 +68,10 @@ async def test_managed_instructions_are_appended_not_replaced() -> None:
         return 'dynamic'
 
     result = await agent.run('hello')
-    # A capability can only contribute instructions, so everything code-defined still reaches the
-    # model. Static text is grouped ahead of dynamic text (for prompt-cache stability) and source
-    # order is kept within each group, putting the managed value after the agent's own.
+    # An entry with no `id` adds a block, so everything code-defined still reaches the model. Static
+    # text is grouped ahead of dynamic text (for prompt-cache stability) and source order is kept
+    # within each group, putting the added block after the agent's own.
     assert instructions_seen(result.all_messages()) == ['code\n\ntoolset\n\ndynamic\n\nmanaged']
-
-
-async def test_published_instructions_supersede_the_code_side_default(capfire: CaptureLogfire) -> None:
-    config = published_value('agent__base_prompt', {'instructions': 'published'})
-    capability = AgentControl('base_prompt', instructions='code-side base', label='production')
-    with variables_provider(capfire, config):
-        result = await Agent(TestModel(), instructions='code', capabilities=[capability]).run('hello')
-    # The capability contributes the published value *or* its default, never both -- which is what
-    # makes the capability, rather than the agent, the place for a base prompt you mean to manage.
-    assert instructions_seen(result.all_messages()) == ['code\n\npublished']
-
-
-async def test_instructions_shorthand_is_equivalent_to_default() -> None:
-    shorthand = AgentControl('shorthand', instructions='base')
-    assert shorthand.default == AgentConfig(instructions='base')
-
-    seen: list[list[str]] = []
-    for capability in (shorthand, AgentControl('long_form', default=AgentConfig(instructions='base'))):
-        result = await Agent(TestModel(), instructions='code', capabilities=[capability]).run('hello')
-        seen.append(instructions_seen(result.all_messages()))
-    assert seen == [['code\n\nbase'], ['code\n\nbase']]
-
-
-def test_instructions_and_default_together_raise() -> None:
-    with pytest.raises(UserError, match='shorthand for `default=AgentConfig'):
-        AgentControl('ambiguous', instructions='base', default=AgentConfig(model='test'))
-
-
-def test_code_side_instructions_with_no_text_raise_user_error() -> None:
-    # A published value that fails validation is remote data and degrades to code; this is a mistake in
-    # the code itself, so it gets the same `UserError` treatment as passing `instructions` and `default`
-    # together, rather than a Pydantic union traceback out of `__post_init__`.
-    with pytest.raises(UserError, match='which has no text to contribute'):
-        AgentControl('empty', instructions='')
-
-
-def test_a_code_side_list_of_empty_entries_degrades_rather_than_raising() -> None:
-    # Not an inconsistency with the above: an entry is the unit of degradation, so a list drops the bad
-    # entries and keeps whatever else it holds. There is nowhere for the validator to learn that *this*
-    # list came from code rather than from Logfire, and a warning still surfaces the drop.
-    with pytest.warns(UserWarning, match=r"entry '' is invalid -- instructions=''"):
-        capability = AgentControl('empty_entries', instructions=['', 'kept'])
-    assert capability.default == AgentConfig(instructions=[InstructionBlock(instructions='kept')])
 
 
 def weather_toolset() -> FunctionToolset[object]:
@@ -316,7 +272,7 @@ async def test_overrides_on_an_agent_with_no_instructions_are_inert(capfire: Cap
     assert instructions_seen(result.all_messages()) == []
 
 
-async def test_added_blocks_render_placeholders_against_deps() -> None:
+async def test_added_blocks_render_placeholders_against_deps(publish: Publish) -> None:
     @dataclass
     class Deps:
         city: str
@@ -324,17 +280,17 @@ async def test_added_blocks_render_placeholders_against_deps() -> None:
     # Rendering happens on the capability's joined contribution, so a `{{...}}` placeholder works the
     # same in a list entry as it does in a bare string. An addressed block is deliberately left alone:
     # its text replaces something the agent assembled, and that text was never templated either.
-    capability: AgentControl[Deps] = AgentControl(
+    publish(
         'render',
-        default=AgentConfig(
+        AgentConfig(
             instructions=[
                 'Serve {{city}}.',
                 InstructionBlock(instructions='Be brief.'),
                 InstructionBlock(id='agent', instructions='Base for {{city}}.'),
             ]
         ),
-        render_template=True,
     )
+    capability: AgentControl[Deps] = AgentControl('render', label='production', render_template=True)
     agent = Agent(TestModel(), instructions='code', deps_type=Deps, capabilities=[capability])
     result = await agent.run('hello', deps=Deps(city='Paris'))
     assert instructions_seen(result.all_messages()) == ['Base for {{city}}.\n\nServe Paris.\n\nBe brief.']
@@ -343,17 +299,17 @@ async def test_added_blocks_render_placeholders_against_deps() -> None:
 def test_instructions_none_outside_run() -> None:
     # Nothing is resolved until `wrap_run` opens the run's resolution context, so the contribution
     # hook has to answer for a capability that was never entered -- as a graph built for inspection is.
-    capability = AgentControl('outside_run_instructions', instructions='base')
+    capability = AgentControl('outside_run_instructions')
     ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
     assert capability.resolved is None
     assert capability.get_instructions()(ctx) is None
 
 
-async def test_tool_definition_patches() -> None:
+async def test_tool_definition_patches(publish: Publish) -> None:
     seen: list[ToolDefinition] = []
-    capability = AgentControl(
+    publish(
         'tools',
-        default=AgentConfig(
+        AgentConfig(
             tool_definitions=[
                 ToolDefinitionOverride(
                     name='get_weather', description='Managed.', parameter_descriptions={'city': 'Managed city.'}
@@ -361,21 +317,22 @@ async def test_tool_definition_patches() -> None:
             ]
         ),
     )
+    capability = AgentControl('tools', label='production')
     await Agent(capture_tools(seen), tools=[get_weather], capabilities=[capability]).run('hello')
     assert advertised(seen) == {'get_weather': 'Managed.'}
     assert seen[0].parameters_json_schema['properties']['city']['description'] == 'Managed city.'
 
 
-async def test_settings_schema_and_lowering() -> None:
+async def test_settings_schema_and_lowering(publish: Publish) -> None:
     seen: list[dict[str, object]] = []
 
     def capture_settings(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         seen.append(dict(info.model_settings or {}))
         return ModelResponse(parts=[TextPart('done')])
 
-    capability = AgentControl(
+    publish(
         'settings',
-        default=AgentConfig(
+        AgentConfig(
             settings=AgentConfigSettings.model_validate(
                 {
                     'temperature': 0.2,
@@ -386,6 +343,7 @@ async def test_settings_schema_and_lowering() -> None:
             )
         ),
     )
+    capability = AgentControl('settings', label='production')
     await Agent(
         FunctionModel(capture_settings),
         model_settings={'temperature': 0.1, 'top_k': 3},
@@ -450,7 +408,7 @@ def test_prebuilt_variable() -> None:
 
 
 @pytest.mark.parametrize('control_first', [True, False])
-async def test_managed_values_beat_another_capability(control_first: bool) -> None:
+async def test_managed_values_beat_another_capability(control_first: bool, publish: Publish) -> None:
     """A published value outranks every other capability's, whichever order they were registered in.
 
     Both directions are asserted because that order-independence is the whole point of the innermost
@@ -476,14 +434,14 @@ async def test_managed_values_beat_another_capability(control_first: bool) -> No
         return [control, Opinionated()] if control_first else [Opinionated(), control]
 
     # The managed `test` model answers, so the other capability's model never ran.
-    model_control: AgentControl[object] = AgentControl('contested_model', default=AgentConfig(model='test'))
+    publish('contested_model', AgentConfig(model='test'))
+    model_control: AgentControl[object] = AgentControl('contested_model', label='production')
     result = await Agent(None, capabilities=order(model_control)).run('hello')
     assert result.output.startswith('success')
 
     # Settings still merge per key: the managed `temperature` wins, the uncontested `top_k` survives.
-    settings_control: AgentControl[object] = AgentControl(
-        'contested_settings', default=AgentConfig(settings=AgentConfigSettings(temperature=0.2))
-    )
+    publish('contested_settings', AgentConfig(settings=AgentConfigSettings(temperature=0.2)))
+    settings_control: AgentControl[object] = AgentControl('contested_settings', label='production')
     await Agent(FunctionModel(capture_settings), capabilities=order(settings_control)).run('hello')
     assert seen == [{'temperature': 0.2, 'top_k': 5}]
 
@@ -793,17 +751,15 @@ async def test_missing_variable_baseline_publish_warns_without_affecting_run(
     assert result.output.startswith('success')
 
 
-async def test_applied_sections_baggage() -> None:
+async def test_applied_sections_baggage(publish: Publish) -> None:
     seen: list[object] = []
 
     def inspect_baggage() -> str:
         seen.append(logfire.get_baggage().get('logfire.managed.applied_sections'))
         return 'ok'
 
-    capability = AgentControl(
-        'baggage',
-        default=AgentConfig(instructions='managed', settings=AgentConfigSettings(temperature=0.2)),
-    )
+    publish('baggage', AgentConfig(instructions='managed', settings=AgentConfigSettings(temperature=0.2)))
+    capability = AgentControl('baggage', label='production')
     await Agent(TestModel(), tools=[inspect_baggage], capabilities=[capability]).run('hello')
     assert seen == ['instructions,settings']
 
@@ -819,7 +775,7 @@ async def test_empty_config_has_no_applied_sections_baggage() -> None:
     assert seen == [None]
 
 
-async def test_rename_round_trip_preserves_original_context_name() -> None:
+async def test_rename_round_trip_preserves_original_context_name(publish: Publish) -> None:
     calls = 0
     context_names: list[str | None] = []
 
@@ -835,15 +791,13 @@ async def test_rename_round_trip_preserves_original_context_name() -> None:
         context_names.append(ctx.tool_name)
         return city
 
-    capability = AgentControl(
-        'rename',
-        default=AgentConfig(tool_definitions=[ToolDefinitionOverride(name='weather', new_name='weather_now')]),
-    )
+    publish('rename', AgentConfig(tool_definitions=[ToolDefinitionOverride(name='weather', new_name='weather_now')]))
+    capability = AgentControl('rename', label='production')
     await Agent(FunctionModel(model), tools=[weather], capabilities=[capability]).run('hello')
     assert context_names == ['weather']
 
 
-async def test_rename_collision_warns_and_keeps_other_patches() -> None:
+async def test_rename_collision_warns_and_keeps_other_patches(publish: Publish) -> None:
     seen: list[ToolDefinition] = []
     calls = 0
 
@@ -861,30 +815,32 @@ async def test_rename_collision_warns_and_keeps_other_patches() -> None:
             return ModelResponse(parts=[ToolCallPart('first', {}, tool_call_id='call')])
         return ModelResponse(parts=[TextPart('done')])
 
-    capability = AgentControl(
+    publish(
         'collision',
-        default=AgentConfig(
+        AgentConfig(
             tool_definitions=[
                 ToolDefinitionOverride(name='first', new_name='second', description='Managed first.'),
             ]
         ),
     )
+    capability = AgentControl('collision', label='production')
     with pytest.warns(UserWarning, match='already advertised'):
         await Agent(FunctionModel(model), tools=[first, second], capabilities=[capability]).run('hello')
     assert advertised(seen[:2]) == {'first': 'Managed first.', 'second': None}
 
 
-async def test_unknown_tool_and_parameter_keys_are_inert() -> None:
+async def test_unknown_tool_and_parameter_keys_are_inert(publish: Publish) -> None:
     seen: list[ToolDefinition] = []
-    capability = AgentControl(
+    publish(
         'unknown_tool',
-        default=AgentConfig(
+        AgentConfig(
             tool_definitions=[
                 ToolDefinitionOverride(name='missing', description='ignored'),
                 ToolDefinitionOverride(name='get_weather', parameter_descriptions={'missing': 'ignored'}),
             ]
         ),
     )
+    capability = AgentControl('unknown_tool', label='production')
     with warnings.catch_warnings(record=True) as caught:
         await Agent(capture_tools(seen), tools=[get_weather], capabilities=[capability]).run('hello')
     assert caught == []
@@ -892,19 +848,20 @@ async def test_unknown_tool_and_parameter_keys_are_inert() -> None:
     assert get_weather('Paris') == 'sunny in Paris'
 
 
-async def test_two_overrides_naming_the_same_tool_keep_the_first() -> None:
+async def test_two_overrides_naming_the_same_tool_keep_the_first(publish: Publish) -> None:
     # The same first-wins rule as a duplicated instruction `id`, and the same reason: which entry a
     # colliding pair resolves to has to be a property of the config, not of JSON key order.
     seen: list[ToolDefinition] = []
-    capability = AgentControl(
+    publish(
         'duplicate_tool',
-        default=AgentConfig(
+        AgentConfig(
             tool_definitions=[
                 ToolDefinitionOverride(name='get_weather', description='First.'),
                 ToolDefinitionOverride(name='get_weather', description='Second.'),
             ]
         ),
     )
+    capability = AgentControl('duplicate_tool', label='production')
     with pytest.warns(UserWarning, match=r"names tool 'get_weather' more than once") as caught:
         await Agent(capture_tools(seen), tools=[get_weather], capabilities=[capability]).run('hello')
     # Read on every `get_tools`, warned about once.
@@ -912,25 +869,27 @@ async def test_two_overrides_naming_the_same_tool_keep_the_first() -> None:
     assert advertised(seen) == {'get_weather': 'First.'}
 
 
-async def test_schema_without_properties_is_tolerated() -> None:
+async def test_schema_without_properties_is_tolerated(publish: Publish) -> None:
     seen: list[ToolDefinition] = []
 
     def raw_tool() -> str:  # pragma: no cover - advertised only
         return 'ok'
 
     tool = Tool.from_schema(raw_tool, name='raw_tool', description='Original.', json_schema={'type': 'object'})
-    capability = AgentControl(
+    publish(
         'raw_schema',
-        default=AgentConfig(
+        AgentConfig(
             tool_definitions=[ToolDefinitionOverride(name='raw_tool', parameter_descriptions={'missing': 'ignored'})]
         ),
     )
+    capability = AgentControl('raw_schema', label='production')
     await Agent(capture_tools(seen), tools=[tool], capabilities=[capability]).run('hello')
     assert seen[0].parameters_json_schema == {'type': 'object'}
 
 
-async def test_managed_model_runs_model_less_agent_and_run_model_wins() -> None:
-    managed = AgentControl('managed_model', default=AgentConfig(model='test'))
+async def test_managed_model_runs_model_less_agent_and_run_model_wins(publish: Publish) -> None:
+    publish('managed_model', AgentConfig(model='test'))
+    managed = AgentControl('managed_model', label='production')
     assert (await Agent(None, capabilities=[managed]).run('hello')).output.startswith('success')
 
     def call_site(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
@@ -940,16 +899,14 @@ async def test_managed_model_runs_model_less_agent_and_run_model_wins() -> None:
     assert result.output == 'call-site'
 
 
-async def test_unknown_managed_model_keeps_code_model() -> None:
+async def test_unknown_managed_model_keeps_code_model(publish: Publish) -> None:
+    publish('unknown_model', AgentConfig(model='not-a-provider:not-a-model'))
     with pytest.warns(UserWarning, match='selects unknown model'):
-        result = await Agent(
-            TestModel(),
-            capabilities=[AgentControl('unknown_model', default=AgentConfig(model='not-a-provider:not-a-model'))],
-        ).run('hello')
+        result = await Agent(TestModel(), capabilities=[AgentControl('unknown_model', label='production')]).run('hello')
     assert result.output.startswith('success')
 
 
-async def test_nameless_model_selector_resolves_once_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_nameless_model_selector_resolves_once_per_run(monkeypatch: pytest.MonkeyPatch, publish: Publish) -> None:
     # A nameless capability's selector is evaluated once per request step, but the managed model is a
     # run-stable value, so it memoizes and resolves the variable exactly once even across steps.
     resolves: list[str] = []
@@ -964,13 +921,14 @@ async def test_nameless_model_selector_resolves_once_per_run(monkeypatch: pytest
     def a_tool() -> str:
         return 'ok'
 
-    capability = AgentControl(default=AgentConfig(model='test'))
+    publish('multi_step', AgentConfig(model='test'))
+    capability = AgentControl(label='production')
     # A model-less agent with one tool: `TestModel` calls the tool (step 1) then answers (step 2).
     await Agent(None, name='multi_step', tools=[a_tool], capabilities=[capability]).run('hello')
     assert resolves == ['agent__multi_step']
 
 
-async def test_callable_targeting_resolution_is_reused_for_run() -> None:
+async def test_callable_targeting_resolution_is_reused_for_run(publish: Publish) -> None:
     calls = 0
 
     def targeting(_ctx: RunContext[object]) -> str:
@@ -978,9 +936,8 @@ async def test_callable_targeting_resolution_is_reused_for_run() -> None:
         calls += 1
         return f'key-{calls}'
 
-    capability = AgentControl(
-        'callable_targeting', default=AgentConfig(model='test'), targeting_key=targeting, publish_baseline=False
-    )
+    publish('callable_targeting', AgentConfig(model='test'))
+    capability = AgentControl('callable_targeting', label='production', targeting_key=targeting, publish_baseline=False)
     result = await Agent(TestModel(), capabilities=[capability]).run('hello')
     assert result.output.startswith('success')
     assert calls == 1

@@ -490,7 +490,7 @@ class AgentConfig(BaseModel):
     is set.
     """
     model: NonEmptyStr | None = None
-    """A Pydantic AI model string such as `'openai:gpt-5'`; `None` keeps the code model.
+    """A Pydantic AI model string such as `'anthropic:claude-fable-5-1'`; `None` keeps the code model.
 
     Non-empty for a blunt reason: `''` is not "no model", it is a model named `''`, and Pydantic AI
     rejects it with `Unknown model:` on every request the agent makes. Publishing one would take the
@@ -686,7 +686,7 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
         'model': {
             'type': 'string',
             'minLength': 1,
-            'description': "A Pydantic AI model string, such as 'openai:gpt-5'.",
+            'description': "A Pydantic AI model string, such as 'anthropic:claude-fable-5-1'.",
         },
         'settings': {
             'type': 'object',
@@ -897,18 +897,9 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     works in two ways, and which one an entry uses is the difference between a prompt that reads well
     and one sent to the model twice.
 
-    An entry with **no `id` adds** a block. A capability can only ever contribute instructions -- it
-    cannot take them over -- so this is what a bare `instructions` string has always done, and it is
-    also why the agent's own text is not something a managed value can edit away:
-
-    - `Agent(instructions=...)` is never managed. Anything published in Logfire is *added* to it, so
-      text kept there cannot be edited or removed by adding more. Seeding a managed config from an
-      agent's observed system prompt while the same text stays on the agent sends it to the model twice.
-    - `AgentControl.instructions` (shorthand for `default=AgentConfig(instructions=...)`) is the
-      code-side base prompt. `get_instructions` contributes the published value *or* the default and
-      never both, so publishing supersedes this text instead of duplicating it -- which is what makes
-      it, not the agent, the place for a base prompt you intend to manage.
-    - The published `instructions` in Logfire takes over from that default the moment it is set.
+    An entry with **no `id` adds** a block, which is all a capability can do on its own. Adding is also
+    the one way the same text can reach the model twice: seeding a config from an agent's observed
+    prompt while that text stays in `Agent(instructions=...)` sends every block of it twice over.
 
     An entry **with an `id` swaps out** the block Pydantic AI assembled under that key -- replacing its
     text, or dropping it with `instructions=None`. This is how a managed config reaches text no
@@ -973,9 +964,10 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
 
     logfire.configure()
     agent = Agent(
-        'openai:gpt-5',
+        'anthropic:claude-fable-5-1',
         name='checkout_assistant',
-        capabilities=[AgentControl(instructions='You are a checkout assistant.', label='production')],
+        instructions='You are a checkout assistant.',
+        capabilities=[AgentControl(label='production')],
     )
     result = agent.run_sync('Refund my last order.')
     ```
@@ -988,25 +980,8 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     name: str | Variable[AgentConfig] | None = None
     """Bare variable name, pre-built variable, or `None` to derive it from the agent name.
 
-    A nameless capability derives its variable (and can source the model) from the agent's `name`
-    the first time it's needed in a run; the agent must then have a `name`.
-    """
-    default: AgentConfig | None = None
-    """Code-side fallback config; omitted sections preserve the corresponding agent behavior.
-
-    Mutually exclusive with the `instructions` shorthand below.
-    """
-    instructions: InstructionText | list[InstructionText | InstructionBlock] | None = None
-    """Code-side base prompt, exactly equivalent to `default=AgentConfig(instructions=...)`.
-
-    The base prompt belongs here rather than on `Agent(instructions=...)`, which a published config
-    can only add to. Mutually exclusive with `default`: an agent that also needs code-side defaults
-    for `model`, `settings`, or `tool_definitions` carries its instructions on that `AgentConfig`,
-    and passing both raises [`UserError`][pydantic_ai.exceptions.UserError] rather than picking one.
-
-    The other sections have no such shorthand because they have no such trap: a managed `model`,
-    `settings`, or `tool_definitions` supersedes the agent's own, so `Agent(model=...)`,
-    `Agent(model_settings=...)`, and a tool's own docstring remain the natural code-side homes.
+    A nameless capability derives its variable (and can source the model) from the agent's `name`,
+    which must then be one the agent was given explicitly.
     """
     render_template: bool = False
     """Render `{{...}}` placeholders in *added* instruction text against run dependencies when enabled.
@@ -1047,27 +1022,14 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         self._code_model = ContextVar('agent_control_code_model', default=None)
         self._code_settings = ContextVar('agent_control_code_settings', default=None)
         self._code_tools = ContextVar('agent_control_code_tools', default=None)
-        if self.instructions is not None:
-            if self.instructions == '':
-                raise UserError(
-                    "`AgentControl` was given '' as `instructions`, which has no text to contribute. Pass "
-                    'instruction text, a list of blocks, or leave it out entirely to keep the code-defined instructions.'
-                )
-            if self.default is not None:
-                raise UserError(
-                    '`AgentControl` was given both `instructions` and `default`, which set the same value: '
-                    '`instructions=...` is shorthand for `default=AgentConfig(instructions=...)`. Pass one or '
-                    'the other, putting the base prompt on the `default` config when other sections need '
-                    'code-side defaults too.'
-                )
-            # Normalized into `default` so the resolved value -- and every reader of it -- sees one
-            # code-side config, and `get_instructions` keeps a single path through `resolved.value`.
-            self.default = AgentConfig(instructions=self.instructions)
+        # The empty config is the only code-side default there is. The agent itself is what a
+        # published value is layered onto, so a second place to say the same thing would only be
+        # somewhere for the two to disagree.
         self._setup_variable(
             self.name,
             prefix=_AGENT_VARIABLE_PREFIX,
             value_type=AgentConfig,
-            default=self.default or AgentConfig(),
+            default=AgentConfig(),
             json_schema=AGENT_CONFIG_JSON_SCHEMA,
         )
 
@@ -1078,9 +1040,8 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         append for them -- and are applied to the assembled parts in
         [`before_model_request`][pydantic_ai_harness.logfire.AgentControl.before_model_request] instead.
 
-        `resolved.value` is either the published config or this capability's `default`, never a merge
-        of the two, so a code-side base prompt set through `instructions`/`default` is superseded by a
-        published one rather than sent alongside it.
+        Nothing is contributed until something is published: with no managed config the resolved value
+        is the empty one, and the agent's own instructions are the whole prompt.
         """
 
         def instructions(ctx: RunContext[AgentDepsT]) -> str | None:
@@ -1104,6 +1065,14 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         `CombinedCapability` keeps its children as siblings, so a container in this position would
         take the user's capability out of the tree entirely.
         """
+        if self._deferred is not None and not agent.name:
+            raise UserError(
+                "`AgentControl` without an explicit `name` reads the agent's `name`, and this agent has none. "
+                'Pydantic AI would infer one from the variable the agent is assigned to, so renaming that '
+                'variable would silently point the agent at a different managed config -- which is why it is '
+                'refused rather than inferred. Give the agent a `name=...`, or pass an explicit `name` to '
+                '`AgentControl`.'
+            )
         return CombinedCapability([self, _AgentControlOverrides(self)])
 
     def _resolve_for_selection(
