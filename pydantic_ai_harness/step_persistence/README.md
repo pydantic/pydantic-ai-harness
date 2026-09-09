@@ -479,10 +479,12 @@ re-inlines the externalized field correctly, but it leaves both reserved keys
 sitting in the restored payload rather than removing them. A marker carrying
 both, stamped with a version this reader does not know, is rejected rather than
 restored with the reserved values stripped: `restore_media` raises `ValueError`,
-which the stores do not wrap, so it propagates out of `latest_snapshot` and
-`list_snapshots` for the file, sqlite, and mongo stores. That rejection is the
-version gate and is intended, but store users have to anticipate it. Keep a
-current reader for persisted snapshots that contain escaped markers.
+and `latest_snapshot` surfaces it to the caller for the file, sqlite, and mongo
+stores. `list_snapshots` is different: each store treats the failed snapshot as
+unparsable, skips it, and logs the error, so an unknown version shows up as a
+missing snapshot rather than an exception. That rejection is the version gate
+and is intended, but store users have to anticipate it. Keep a current reader
+for persisted snapshots that contain escaped markers.
 
 | StepStore           | Default `media_store`                  | Where blobs live                      |
 | ------------------- | --------------------------------------- | ------------------------------------- |
