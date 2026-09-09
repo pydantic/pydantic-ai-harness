@@ -18,6 +18,7 @@ from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai_harness.memory._store import InMemoryStore, MemoryFile, MemoryStore, validate_store_path
 from pydantic_ai_harness.memory._toolset import (
     DEFAULT_AGENT_NAME,
+    DEFAULT_MEMORY_ID,
     MAIN_FILENAME,
     MemoryToolset,
     injection_listing_limit,
@@ -104,10 +105,11 @@ class Memory(AbstractCapability[AgentDepsT]):
     """Whether store failures during automatic injection are ignored or raised."""
 
     # Override the inherited default ID because durable-operation recovery needs a stable identity.
-    # Derived per scope rather than fixed, in `__post_init__`: composed memories are separate
-    # capabilities on one agent, and one shared id makes the run reject them outright.
+    # Declared in the class body, because that is what tells Pydantic AI an agent has one `Memory`
+    # and two of it are one configuration stated twice. `__post_init__` moves a *named* scope off
+    # this default; see there.
     _: KW_ONLY
-    id: str | None = None
+    id: str | None = DEFAULT_MEMORY_ID
 
     _resolved_scope: tuple[MemoryStore, str] | None = field(default=None, init=False, repr=False, compare=False)
 
@@ -120,10 +122,12 @@ class Memory(AbstractCapability[AgentDepsT]):
         _validate_positive('max_search_files', self.max_search_files)
         if self.injection_errors not in ('ignore', 'raise'):
             raise ValueError("injection_errors must be 'ignore' or 'raise'")
-        if self.id is None:
-            # The scope is what tells two composed memories apart, and the toolset already keys on
-            # it, so the capability takes the same id. The default scope keeps the bare `memory` a
-            # durable deployment has already journaled operations under; a named scope moves to
+        if self.id == DEFAULT_MEMORY_ID:
+            # A named scope takes the toolset's own id. Composing several memories on one agent is
+            # a documented pattern, and it needs this: `prefix_tools` wraps one of them, so the two
+            # reach the run as different capability *classes*, and one id claimed by two classes is
+            # rejected outright rather than merged. The default scope keeps the bare `memory` a
+            # durable deployment has already journaled operations under; a named one moves to
             # `memory-<agent_name>`, the same rename its workflow step name already takes and for
             # the same reason.
             self.id = memory_toolset_id(self.agent_name)

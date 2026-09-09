@@ -50,6 +50,9 @@ if TYPE_CHECKING:
 
 _AGENT_VARIABLE_PREFIX = 'agent__'
 
+_AGENT_CONTROL_ID = 'agent-control'
+"""The capability ID an `AgentControl` carries, and what the baseline excludes its own blocks by."""
+
 # 64 KiB of text is already roughly 16K tokens for typical English prose. It accommodates substantial
 # instructions while preventing one managed entry from adding megabytes to every model request.
 _MAX_MODEL_FACING_TEXT_LENGTH = 65_536
@@ -1019,6 +1022,13 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     when the variables token is intentionally read-only or code must not update variable metadata.
     """
 
+    # Override the inherited default ID: a stable id lets the baseline exclude this capability's
+    # own instruction contribution without comparing text, which would confuse identical code and
+    # managed blocks. Declared in the class body rather than assigned in `__post_init__`, because
+    # that is what tells Pydantic AI an agent has one managed config and two of it are one
+    # configuration stated twice, rather than two anonymous capabilities that collide.
+    id: str | None = field(default=_AGENT_CONTROL_ID, kw_only=True)
+
     _auto_create_in_wrap_run: ClassVar[bool] = False
     _selection_resolved: ContextVar[ResolvedVariable[AgentConfig] | None] = field(init=False, repr=False)
     _code_model: ContextVar[str | None] = field(init=False, repr=False)
@@ -1033,10 +1043,6 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     _code_tools: ContextVar[list[ToolDefinition] | None] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.id is None:
-            # A stable id lets the baseline exclude this capability's own instruction contribution
-            # without comparing text, which would confuse identical code and managed blocks.
-            self.id = 'agent-control'
         self._selection_resolved = ContextVar('agent_control_selection_resolved', default=None)
         self._code_model = ContextVar('agent_control_code_model', default=None)
         self._code_settings = ContextVar('agent_control_code_settings', default=None)

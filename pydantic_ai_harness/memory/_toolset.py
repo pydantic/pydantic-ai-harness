@@ -273,7 +273,10 @@ def _apply_write(existing: str | None, content: str, old_text: str | None, name:
 
 
 DEFAULT_AGENT_NAME = 'main'
-"""The `Memory.agent_name` scope that keeps the bare `memory` toolset ID."""
+"""The `Memory.agent_name` scope that keeps the bare `memory` ID."""
+
+DEFAULT_MEMORY_ID = 'memory'
+"""The capability and toolset ID the default scope keeps, and `Memory`'s class-level default."""
 
 
 def memory_toolset_id(agent_name: str) -> str:
@@ -292,7 +295,7 @@ def memory_toolset_id(agent_name: str) -> str:
     step from `memory` to `memory-support`, and Temporal reports nondeterminism until the workflows
     recorded against the old name drain.
     """
-    return 'memory' if agent_name == DEFAULT_AGENT_NAME else f'memory-{agent_name}'
+    return DEFAULT_MEMORY_ID if agent_name == DEFAULT_AGENT_NAME else f'{DEFAULT_MEMORY_ID}-{agent_name}'
 
 
 class MemoryToolset(FunctionToolset[AgentDepsT]):
