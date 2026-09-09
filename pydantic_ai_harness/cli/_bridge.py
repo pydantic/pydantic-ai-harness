@@ -38,6 +38,7 @@ from pydantic_ai_harness.shell import (
     ShellCommandStartEvent,
     ShellOutputLineEvent,
 )
+from pydantic_ai_harness.subagents import DelegationEndEvent, DelegationStartEvent
 
 NO_APPROVER = DeclineAll(reason='nobody can approve this; give the run `CliDeps` or the bridge an `approver`')
 
@@ -118,7 +119,9 @@ class CliBridge(AbstractCapability[AgentDepsT]):
     an exit summary that replaces the generic result line. File changes render from `file_system.*`
     events: the proposed diff, and a match count that replaces a search's result line. A
     `ShellCommandRequestEvent` or `FileChangeRequestEvent` is put to the `approver` first and
-    cancelled with the approver's reason when declined.
+    cancelled with the approver's reason when declined. Delegations render from `sub_agents.*`
+    events: a `>>` line with the sub-agent and its task as the child starts, and a `<<` line with
+    the outcome, duration, and what came back, replacing the generic result line.
     """
 
     output: TextIO | None = None
@@ -180,9 +183,11 @@ class CliBridge(AbstractCapability[AgentDepsT]):
     @on_event(FunctionToolResultEvent)
     async def _on_tool_result(self, ctx: RunContext[AgentDepsT], event: FunctionToolResultEvent) -> None:
         part = event.part
+        if part.tool_call_id in self._summarised:
+            return
         if isinstance(part, RetryPromptPart):
             self._line('!', part.tool_name or 'retry', part.model_response())
-        elif part.tool_call_id not in self._summarised:
+        else:
             self._line('<', part.tool_name, part.model_response_str())
 
     @on_event(ShellCommandRequestEvent)
@@ -236,6 +241,20 @@ class CliBridge(AbstractCapability[AgentDepsT]):
             outcome = f'exit {event.exit_code}'
         note = ', output truncated' if event.truncated else ''
         self._write(f'{DIM_ON}{outcome} ({event.duration_seconds:.1f}s{note}){DIM_OFF}')
+
+    @on_event(DelegationStartEvent)
+    async def _on_delegation_start(self, ctx: RunContext[AgentDepsT], event: DelegationStartEvent) -> None:
+        who = event.agent_name if event.model is None else f'{event.agent_name} ({event.model})'
+        self._line('>>', who, event.task)
+
+    @on_event(DelegationEndEvent)
+    async def _on_delegation_end(self, ctx: RunContext[AgentDepsT], event: DelegationEndEvent) -> None:
+        """The outcome and what came back; a failed delegation's retry prompt says the same, so it is not repeated."""
+        if event.tool_call_id is not None:
+            self._summarised.add(event.tool_call_id)
+        outcome = '' if event.outcome == 'ok' else f'{event.outcome} '
+        note = ', output truncated' if event.truncated else ''
+        self._line('<<', event.agent_name, f'{outcome}({event.duration_seconds:.1f}s{note}) {event.output}')
 
     def _line(self, marker: str, tool_name: str, detail: str) -> None:
         """One line per tool event: first line of `detail`, cut to the terminal width."""
