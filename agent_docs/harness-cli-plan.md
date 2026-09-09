@@ -151,8 +151,9 @@ the branch. Each item names its acceptance check.
       Termflow. Acceptance: a transcript test drives `Agent(capabilities=[Coder(), CliBridge()])`
       with `TestModel` and asserts rendered output. (on `feat/experimental-cli` at a7e221bb,
       no PR yet)
-- [ ] 0.3 REPL loop: line editor, `-p` one-shot mode, Ctrl+C cancel via `AgentRun.cancel`, steer
-      via `AgentRun.enqueue`. Acceptance: tests for cancel and steer.
+- [x] 0.3 REPL loop: line editor, `-p` one-shot mode, Ctrl+C cancel via `AgentRun.cancel`, steer
+      via `AgentRun.enqueue`. Acceptance: tests for cancel and steer. (on `feat/experimental-cli`
+      at c164b433, no PR yet; the line editor is the terminal's own until 3.6, see Decisions)
 - [ ] 0.4 Config file and `Theme`; model selection from config via core `infer_model`. Acceptance:
       config round-trip test.
 
@@ -191,7 +192,12 @@ the branch. Each item names its acceptance check.
 - [ ] 3.3 Model registry: models.dev catalog, `/add_model`, `/refresh_models`, model settings menu.
 - [ ] 3.4 Provider auth flows from `stash@{0}` `_auth.py`; core provider PRs where generic.
 - [ ] 3.5 Attachments and clipboard images via `media`.
-- [ ] 3.6 Custom prompt-template commands, shell passthrough, chords, `$EDITOR`.
+- [ ] 3.6 Custom prompt-template commands, shell passthrough, chords, `$EDITOR`. Includes the
+      inline line editor 0.3 deferred: raw mode over Termflow's `read_key`, history, bracketed
+      paste (a multi-line paste today is one prompt plus steers), and a prompt that survives
+      output written while a run is in flight.
+- [ ] 3.9 Session error handling: a run that raises (`UsageLimitExceeded`, a model API error)
+      ends the session with a traceback today; print it as a status line and keep the prompt.
 - [ ] 3.7 Splash, onboarding, theme menus, version check.
 - [ ] 3.8 Partner PR to pydantic-ai `docs/navigation.yml` adding `harness/cli` (the sidebar lives
       there, see `agent_docs/docs-conventions.md`). Do this when `feat/experimental-cli` opens its
@@ -284,6 +290,33 @@ Append-only. Date, item, decision, why.
 - 2026-09-09, 0.2: CI runs on `main` pushes and PRs only, so `feat/experimental-cli` gets no CI
   until its PR opens. A focused branch-coverage run on `pydantic_ai_harness/cli/*` is the
   substitute for host items (100% at a7e221bb); repo-wide runs stay off.
+
+- 2026-09-09, 0.3: the session is `Repl` in `pydantic_ai_harness/cli/_repl.py` (not `Session`,
+  which 3.2 needs for persisted conversations). It drives `agent.iter()` so it holds the
+  `AgentRun` handle; `run.cancel()` from the SIGINT handler surfaces as `RunCancelled` at
+  context exit, and `exc.all_messages()` becomes the next prompt's `message_history`, so the
+  cancelled turn (tool call included) stays in the conversation. Verified against core 2.38.0.
+- 2026-09-09, 0.3: Termflow's `TextInput` is a full-frame form widget (`CURSOR_HOME` plus
+  clear-below on every paint), so it cannot be the inline prompt. 0.3 ships the terminal's own
+  canonical-mode editing over `sys.stdin.readline`; the raw-mode inline editor moved to 3.6.
+  Not a new dependency and not a blocker: the acceptance check is cancel and steer.
+- 2026-09-09, 0.3: one stdin reader (`Lines.from_stdin`, a daemon thread feeding an
+  `asyncio.Queue` via `call_soon_threadsafe`) serves the whole session. A blocked read cannot be
+  cancelled, so a reader-per-prompt would leave a stray thread racing the next one for the
+  terminal. The rule that falls out: a line read while a run is in flight is enqueued into it
+  (`(steer queued: ...)`), a line read while idle is the next prompt. Piped multi-line stdin
+  into the session therefore steers the first run; scripting is `-p`, and paste is 3.6.
+- 2026-09-09, 0.3: `-p` does not read stdin at all (`Repl(lines=Lines())`), so piped input keeps
+  its meaning for a later stdin-as-attachment item (3.5) and pytest's stdin stub never runs.
+- 2026-09-09, 0.3: SIGINT is wired with `loop.add_signal_handler` (CI is Ubuntu, dev is macOS;
+  Windows would need `signal.signal`). Ctrl+C while idle writes a newline and re-shows the
+  prompt, like the Python REPL; Ctrl+D ends the session. The cancel test sends a real SIGINT
+  with `os.kill` so the handler wiring is covered, not just `Repl.interrupt()`.
+- 2026-09-09, 0.3: `Repl` and `Lines` are public exports so a host embedding the CLI can drive a
+  session without a tty; `submit()` is public too because 3.1's slash commands will call it.
+  `AgentRunError`s still propagate and end the session (3.9).
+- 2026-09-09, 0.3: a size-less pty reports 0 columns and Termflow's `truncate_ansi` then blanks
+  the bridge's tool lines. Real terminals report a size; noted, not handled.
 
 ## Open questions for Mike
 
