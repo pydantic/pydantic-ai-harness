@@ -63,9 +63,7 @@ dbos = [
 ]
 logfire = [
     'logfire>=4.31.0',
-    # `AgentControl` reads `InstructionPart.id` to apply instruction overrides by key, which landed in
-    # pydantic-ai 2.36.0 (pydantic-ai#6887). Only this extra needs it; the base dependency stays put.
-    "pydantic-ai-slim[spec]>=2.36.0",
+    "pydantic-ai-slim[spec]>=2.18.0",
 ]
 modal = [
     "modal>=1.5.0",
