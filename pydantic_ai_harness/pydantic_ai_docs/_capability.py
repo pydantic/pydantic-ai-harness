@@ -56,7 +56,7 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     """
 
     local_docs_path: Path | None = None
-    """Pyai docs checkout inside the run sandbox. Relative paths use the sandbox
+    """Pyai docs checkout inside the run workspace. Relative paths use the workspace
     working directory. When `None`, falls back to the
     `PYDANTIC_AI_HARNESS_DOCS_PATH` env var, then to the remote source."""
 
@@ -69,13 +69,13 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     """In-memory doc cache shared with toolsets created during one run."""
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> PydanticAIDocs[AgentDepsT]:
-        """Return a fresh per-run cache so sandbox-local content cannot cross runs."""
+        """Return a fresh per-run cache so workspace-local content cannot cross runs."""
         return replace(self)
 
     def _resolved_local_path(self) -> Path | None:
         """The local checkout path: `local_docs_path`, else the env var, else `None`.
 
-        Paths identify files inside the run sandbox. Relative paths are resolved
+        Paths identify files inside the run workspace. Relative paths are resolved
         from its working directory.
         """
         if self.local_docs_path is not None:
