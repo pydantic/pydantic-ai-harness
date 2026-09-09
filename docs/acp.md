@@ -111,6 +111,7 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
             FileSystem[None](root_dir=session.cwd),
             Shell[None](cwd=session.cwd),
         ],
+        workspace=LocalWorkspace(root=Path(session.cwd)),
     )
 
 

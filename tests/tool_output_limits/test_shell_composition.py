@@ -9,6 +9,7 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.workspaces import LocalWorkspace
 
 from pydantic_ai_harness.shell import Shell
 from pydantic_ai_harness.tool_output_limits import (
@@ -54,7 +55,8 @@ async def test_shell_stacking_recipe(tmp_path: Path, output_chars: int):
             ),
         ],
     )
-    result = await agent.run('run the command')
+    async with LocalWorkspace(root=tmp_path) as workspace:
+        result = await agent.run('run the command', workspace=workspace)
     returns = [part for message in result.all_messages() for part in message.parts if isinstance(part, ToolReturnPart)]
     assert len(returns) == 1
     part = returns[0]
