@@ -15,7 +15,6 @@ import posixpath
 import shlex
 from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from functools import cached_property
 from typing import TYPE_CHECKING
 
 import anyio
@@ -142,23 +141,28 @@ class E2BWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
         self._canonical_working_dir: str | None = None
         self._working_dir = absolute_path('workdir', workdir)
         self._created_timeout: int | None = None
+        self._lock = anyio.Lock()
 
     @property
     def workspace(self) -> Awaitable[e2b.AsyncSandbox]:
-        return self._get_workspace()
+        return self._create_or_attach()
 
-    async def _get_workspace(self) -> e2b.AsyncSandbox:
-        if self._workspace is None:
-            async with self._lock:
-                if self._workspace is None:
-                    self._workspace = await self._create_or_attach(self._ref)
-                    self._ref = WorkspaceRef(provider='e2b', id=self._workspace.sandbox_id)
-        assert self._workspace is not None
-        return self._workspace
+    async def _create_or_attach(self) -> e2b.AsyncSandbox:
+        """Acquire the native E2B sandbox on first use, once, and record its identity.
 
-    @cached_property
-    def _lock(self) -> anyio.Lock:
-        return anyio.Lock()
+        The only place `_workspace` is read, so nothing can reach an unacquired handle:
+        it stays optional and every other method comes through here. The lock serializes
+        concurrent first uses -- two callers each creating a sandbox would leave the loser
+        billed and unreferenced.
+        """
+        async with self._lock:
+            if (workspace := self._workspace) is not None:
+                return workspace
+            ref = self._ref
+            workspace = await self._attach(ref.id) if ref is not None else await self._create()
+            self._workspace = workspace
+            self._ref = WorkspaceRef(provider='e2b', id=workspace.sandbox_id)
+            return workspace
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -229,11 +233,6 @@ class E2BWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
             raise WorkspaceError(f'Could not start E2B sandbox: {type(e).__name__}: {e}') from e
         self._created_timeout = self._sandbox_timeout
         return sandbox
-
-    async def _create_or_attach(self, ref: WorkspaceRef | None) -> e2b.AsyncSandbox:
-        if ref is not None:
-            return await self._attach(ref.id)
-        return await self._create()
 
     async def _attach(self, id: str) -> e2b.AsyncSandbox:
         """Attach to an E2B sandbox that already exists, without taking over its lifecycle.
