@@ -1,0 +1,226 @@
+# Harness CLI plan: Code Puppy feature parity on capabilities and events
+
+Status: plan, iteration 0. Owner: Mike (mpfaffenberger). Loop driver: this file.
+Branch: `feat/experimental-cli` (even with `main` at 8e863b5b when written).
+
+## Rules the loop obeys
+
+1. Every agentic behavior is a `Capability` (core `AbstractCapability`). The CLI host owns only
+   terminal rendering, the line editor, slash-command dispatch, config persistence, and provider
+   auth. The host never reaches into a capability's internals; it subscribes to events.
+2. Every UI update is driven by typed events: core `AgentStreamEvent`s for model output and tool
+   calls, `CapabilityEvent`s for everything a capability does. No message bus, no callbacks.
+3. Decisions (approve, block, rewrite, answer) are `dispatch='immediate'` events with the core
+   `cancel(reason)` shape. Notifications dispatch on the stream. See
+   `pydantic-ai-notes/features/harness/2026-09-08 plan - a round of capability events for every
+   harness capability.md` for the payload conventions; this file does not repeat them.
+4. A missing capability or missing event is a PR on its own branch in a fresh worktree:
+   `git worktree add ../harness-<slug> -b puppy/<slug> main`. Open the PR as a draft, then continue
+   with the next item. The CLI consumes the branch via a local `uv` source until the PR merges.
+5. One item per loop iteration. Pick the first unchecked item in "Execution order", do it, tick it,
+   record any non-obvious decision under "Decisions", and stop. Re-read this file at the start of
+   every iteration; it is the only state the loop trusts.
+6. Never use `Any`. Never use em-dashes. Follow `AGENTS.md`, `agent_docs/capability-authoring.md`,
+   and the docs parity rule (README next to code plus `docs/<name>.md`).
+
+## Where things live
+
+- CLI package: `pydantic_ai_harness/cli/` (the `experimental` tier is retired; ACP is the only
+  capability left there). Console script under a code name in `pyproject.toml`, optional extra
+  `cli` pulling `termflow` (approved as a dependency on 2026-09-08).
+- Code name: placeholder `harness` until Mike picks one. The team sync left naming open; do not
+  block on it.
+- An earlier 480-line skeleton (`_app.py`, `_auth.py`, `_terminal.py`, `tests/experimental/test_cli.py`)
+  is in `git stash@{0}` on `main`. Mine it for the provider-auth bits; do not restore it wholesale.
+- Bridge capability: `CliBridge` in `pydantic_ai_harness/cli/_bridge.py`, wired last in the
+  capability list so it observes every other capability's events via `@on_event`, and answers
+  immediate decision events with the terminal prompts.
+
+## Feature inventory
+
+Every unique Code Puppy feature, where it lands, and what event work it needs. "Host" means CLI
+code that is not a capability. "Core" means pydantic-ai owns it and the CLI just uses it.
+
+### Agent loop and model output
+
+| Code Puppy feature | Source | Lands in | Events | State |
+|---|---|---|---|---|
+| Default coding agent, system prompt, tool set | `agents/agent_code_puppy.py`, `_builder.py` | `Coder` composition | families of its members | exists |
+| Streamed text, thinking, tool-call deltas; smooth stream; non-streaming fallback render | `event_stream_handler.py`, `smooth_stream.py`, `_non_streaming_render.py` | Host, consuming core `AgentStreamEvent` | core | host work |
+| Thinking display filter, suppress thinking / info messages | `on_thinking_display_filter`, config flags | Host render policy | none | host work |
+| Steer: inject user text mid-run | `_steer_processor.py`, `steer_metadata.py` | Core `AgentRun.enqueue` / `EnqueuedMessagesEvent` | core | host wiring |
+| Cancel / pause / interrupt (Ctrl+C, key listeners) | `_run_signals.py`, `_key_listeners.py`, `pause_controller.py` | Core `AgentRun.cancel`; host keymap | core | host wiring |
+| `agent_run_start` / `end` / `result` / `cancel` / `exception` hooks | `callbacks.py` | Core `wrap_run` on `CliBridge`; core run events | core | host wiring |
+| `transform_model_messages`, `prepare_model_prompt`, `get_model_system_prompt` | `callbacks.py` | Core `before_model_request` and `instructions` on capabilities | core | nothing to build |
+| `user_prompt_submit` (mutate prompt before run) | `callbacks.py` | `guardrails.InputGuard` | `GuardDecisionEvent` (wave 2) | events needed |
+| Multiple system messages, per-model prompt overlays | README "Multiple System Messages" | `Coder` instructions plus model profile | none | verify then drop |
+| Run stats, token usage, status bar | `run_stats.py`, `token_usage.py`, `status_display.py` | `spend` + `compaction.ReportContextUsage` | `SpendRecordedEvent`, `ContextUsageEvent` | merged (#714) |
+| Retry profiles, retry checkpoint, HTTP retry | `retry_profiles.py`, `http_retry.py` | Core model retries, `FallbackModel`, provider `RetryConfig` | core | host config |
+| Round-robin model distribution | `round_robin_model.py` | Core `FallbackModel` or a tiny `Model` wrapper in `cli/_models.py` | none | host work |
+| Pydantic patches | `pydantic_patches.py` | Audit each patch; upstream to core or drop | none | audit |
+
+### Tools the model calls
+
+| Code Puppy feature | Source | Lands in | Events | State |
+|---|---|---|---|---|
+| `list_files`, `read_file`, `grep` | `tools/file_operations.py` | `FileSystem` | `DirectoryListedEvent`, `FileReadEvent` merged (#712); `FilesSearchedEvent` | round 2 needed |
+| `edit_file`, `create_file`, `replace_in_file`, `delete_snippet`, `delete_file`, `apply_patch` | `tools/file_modifications.py`, `apply_patch.py` | `FileSystem` | `FileWrittenEvent` merged; `FileChangeRequestEvent` (immediate), `FileEditedEvent` with bounded diff, `DirectoryCreatedEvent` | round 2 needed |
+| File permission prompt, yolo mode, `fs_access` sandbox | `file_permission_state.py`, `fs_access.py` | `FileSystem` root plus `FileChangeRequestEvent`; yolo = host auto-approves | same | round 2 needed |
+| Undo last file change (`/undo`) | `undo_manager.py` | `FileSystem(snapshot_writes=True)` plus `revert_last()`; `FileRevertedEvent` | new | new option |
+| `agent_run_shell_command`, background, kill / background chords, inactivity timeout | `tools/command_runner.py`, `shell_backgrounding.py` | `Shell` port | `ShellCommandRequestEvent` (immediate), `Start`, `OutputLine`, `End` | in progress, `puppy/shell-events` |
+| Dangerous command guard + allowlist | `config.py`, `command_runner.py` | `Shell` deny policy plus `guardrails.ToolGuard` | `GuardDecisionEvent` | wave 2 |
+| `invoke_agent`, `invoke_agent_with_model`, `list_agents`, recursion limit, subagent usage metrics | `tools/subagent_invocation.py`, `_subagent_recursion.py` | `SubAgents` | `DelegationStartEvent`, `DelegationEndEvent` | events needed |
+| `ask_user_question` (interactive TUI question) | `tools/ask_user_question/` | New capability `AskUser` | `UserQuestionEvent` (immediate, `answer(...)`) | new capability |
+| `agent_share_your_reasoning` | `tools/agent_tools.py` | Drop; thinking parts plus `Planning` cover it | none | decide |
+| `load_image_for_analysis`, attachments, clipboard image paste | `tools/image_tools.py`, `command_line/attachments.py` | `media` capability plus host attachment picker | `MediaExternalizedEvent` (wave 3) | exists |
+| Browser tools, QA Kitten agent | `tools/browser/`, `agent_qa_kitten.py` | `playwright` / `browser_use` | `BrowserNavigatedEvent` (wave 3) | exists |
+| Web retriever agent | `agent_web_retriever.py` | `researcher` + `exa` / `youdotcom` | none | exists |
+| Model judge agent | `agent_model_judge.py` | `trajectory_judge` | `TrajectoryJudgedEvent` (wave 2) | exists |
+| Planning agent, `/plan` | `agent_planning.py` | `planning` | plan events merged (#714) | exists |
+| Universal constructor (`/uc`, model writes its own tools) | `tools/universal_constructor.py` | `runtime_authoring` / `capability_creation` | `CapabilityCreatedEvent` (wave 3) | exists |
+| Kennel memory | `kennel_provider.py` | `memory` + `conversation_search` | `MemoryChangedEvent`, `MemoryQueriedEvent`, `ConversationSearchedEvent` | wave 2 |
+| Tool output limit (`tool_output_limit_chars`) | `_output_limits.py` | `tool_output_limits` / `overflowing_tool_output` | `ToolOutputLimitedEvent` (fold into #729) | events needed |
+| Pre / post tool call hooks (`pre_tool_call`, `post_tool_call`, `fail_closed`) | `callbacks.py` | Core `before_tool_execute` / `after_tool_execute`; guards | core | nothing to build |
+| Claude-Code-compatible hook engine (`PreToolUse` shell hooks, exit-code protocol, matchers) | `hook_engine/` | New capability `CommandHooks` | `HookRanEvent(event, matcher, exit_code, action)` | new capability |
+
+### Context, history, and sessions
+
+| Code Puppy feature | Source | Lands in | Events | State |
+|---|---|---|---|---|
+| Auto compaction, `/compact`, summarization model, protected tokens, strategy choice | `agents/_compaction.py`, config | `compaction` (`SummarizingCompaction`, `SlidingWindowCompaction`, `TieredCompaction`, `ClearToolResults`, `WarnNearLimits`) | core `CompactionStart/EndEvent` via #713 (blocked on core #7801); `ContextLimitWarnedEvent` | events queued |
+| `/truncate` (drop N oldest turns) | `agents/_history.py` | Host calls the compaction capability's public API; add a strategy only if none fits | same | verify |
+| Autosave, sessions, `/session`, `/autosave_load`, `/quick-resume`, session browser, format migration | `session_storage.py`, `session_lifecycle.py`, `command_line/session_*` | `step_persistence` (save / continue / fork) plus host session index | `StepSavedEvent`, `RunRestoredEvent` | wave 2 |
+| `/dump_context`, `/load_context` | `core_commands.py` | Host, over `step_persistence` snapshots | same | host work |
+| Agent rules: `AGENTS.md` search order, size cap | README "Agent Rules" | `repo_context` | `RepoNoteEnqueuedEvent` (wave 3) | exists |
+| Skills catalog, `/skills`, skill activation | `skill_provider.py`, `tools/skills_tools.py` | `skills` | `SkillsLoadedEvent`, `SkillActivatedEvent` | events needed |
+| Transcript guard, message queue, bus, frontend emitter | `messaging/` | Replaced by the event stream; ACP already consumes it | none | delete |
+
+### Agents and models as data
+
+| Code Puppy feature | Source | Lands in | Events | State |
+|---|---|---|---|---|
+| Agent catalog: Python agents, JSON agents, `/agent`, agent creator | `agent_manager.py`, `json_agent.py`, `agent_creator_agent.py` | `SubAgents` disk loader (Markdown + frontmatter) for definitions; host `/agent` switches the top-level composition | `AgentsLoadedEvent` | extend loader |
+| Model registry, models.dev catalog, `/add_model`, `/refresh_models`, custom OpenAI types, timeouts | `model_factory.py`, `models_dev_parser.py`, `add_model_*` | Host `cli/_models.py` over core `infer_model` and providers | none | host work |
+| Per-run model selection, per-agent pinning (`/model`, `/pin_model`, `/unpin`, `model_select` hook) | `model_switching.py`, `callbacks.py` | New capability `SelectModel` (swaps `ctx.model` in `before_model_request`) | `ModelSelectedEvent(model, reason)` | new capability |
+| Model settings menu (temperature, seed, top_p, max tokens, context length) | `model_settings_*` | Core `ModelSettings`; host menu | none | host work |
+| Provider auth: Claude OAuth, ChatGPT Codex, Gemini Code Assist, secret store, private inference | `claude_oauth_transport.py`, `chatgpt_codex_client.py`, `gemini_code_assist.py`, `secret_store*.py` | Host `cli/_auth.py`; propose core provider PRs where a flow is generic | none | host work, core PRs |
+| MCP servers: config, `/mcp` commands, catalog install, health, circuit breaker, per-agent bindings, `pre_mcp_autostart` | `mcp_/`, `command_line/mcp/` | New capability `McpServers` wrapping core `MCPServer` toolsets | `McpServerStartedEvent`, `McpServerFailedEvent`, `McpServerStoppedEvent` | new capability |
+| Plugins (`plugins/`, trust, callbacks registry) | `plugins/`, `callbacks.py` | Replaced by capabilities; host loads extra capabilities from config via core capability specs | none | delete |
+| Logfire / observability toggle | `observability.py` | `logfire` capability plus core instrumentation | none | exists |
+| Durable execution (DBOS) | README "Durable Execution" | Core durable exec plus `step_persistence` / `aws_lambda` | none | exists |
+
+### Host chrome (not capabilities, listed for completeness)
+
+Line editor, Ctrl+X chords, external `$EDITOR`, paste handling, completers (files, models, agents,
+skills, commands), bottom bar and spinner, splash and figlet banner, onboarding wizard, colors and
+theme menus, `/help` overlay and catalog, `/set` and `/show` config, `/cd`, `/clear`, `/exit`,
+`/tools`, `/tutorial`, custom prompt-template commands (`~/.<name>/commands/*.md`,
+`/generate-pr-description`), version check, diagnostics and error log, i18n, shell passthrough
+(`!cmd`), headless / `-p` one-shot mode, CLI args and `handle_cli_args`.
+
+Decisions for v1: i18n is dropped (YAGNI); everything else is host work rendered with Termflow.
+Theme hooks (`termflow_style`, `highlighter`, `prompt_text_color`) become a single host `Theme`
+dataclass loaded from config, not an extension point.
+
+## New capabilities to propose (each its own worktree and PR)
+
+| Capability | Module | Shape | Why not host code |
+|---|---|---|---|
+| `AskUser` | `pydantic_ai_harness/ask_user/` | Tool `ask_user_question(questions)`; emits `UserQuestionEvent` (immediate) that a host answers inline; falls back to a deferred tool request when no host answers. Implements open issue #42 (Aditya, 2026-03, never started); PR must reference it | The model calls it; the host only renders |
+| `CommandHooks` | `pydantic_ai_harness/command_hooks/` | `before_tool_execute` / `after_tool_execute` run configured shell commands with Claude-Code-compatible env and exit-code protocol; matchers by tool name | Governs tool execution, not rendering |
+| `McpServers` | `pydantic_ai_harness/mcp_servers/` | Loads a server config file, exposes core `MCPServer` toolsets, supervises lifecycle with retry and circuit breaker, per-agent binding filter | Provides tools; lifecycle is run state |
+| `SelectModel` | `pydantic_ai_harness/select_model/` | `before_model_request` swaps the model from a `selector(ctx)` returning a `Model` or `None`; pinning is one selector | Changes what the run does |
+| `FileSystem` undo option | existing package | `snapshot_writes` flag, `revert_last()`, `FileRevertedEvent` | Owned by the writer |
+
+Before opening any of these, check `pydantic-ai-notes` and open/closed PRs in both repos for prior
+art, per the repo guide. If core already has the primitive (for example a deferred human-in-the-loop
+tool shape that fits `AskUser`), use it and record the finding.
+
+## Execution order
+
+Tick the box when the item is merged or, for CLI host items, when the acceptance check passes on
+the branch. Each item names its acceptance check.
+
+### Phase 0: skeleton that runs
+
+- [ ] 0.1 `pydantic_ai_harness/cli/` package, `pyproject.toml` console script and `cli` extra
+      with `termflow`, `docs/cli.md` + package `README.md`. Acceptance: `uv run harness -p "hi"`
+      with `TestModel` prints a response; `tests/cli/` passes.
+- [ ] 0.2 `CliBridge` capability: subscribes to core stream events, renders text and tool calls via
+      Termflow. Acceptance: a transcript test drives `Agent(capabilities=[Coder(), CliBridge()])`
+      with `TestModel` and asserts rendered output.
+- [ ] 0.3 REPL loop: line editor, `-p` one-shot mode, Ctrl+C cancel via `AgentRun.cancel`, steer
+      via `AgentRun.enqueue`. Acceptance: tests for cancel and steer.
+- [ ] 0.4 Config file and `Theme`; model selection from config via core `infer_model`. Acceptance:
+      config round-trip test.
+
+### Phase 1: the transcript (events the CLI needs to be usable)
+
+- [ ] 1.1 `shell` events PR (`puppy/shell-events`, worktree `../harness-shell`). Finish, open draft
+      PR, bridge renders `ShellCommandStartEvent` / `ShellOutputLineEvent` / `ShellCommandEndEvent`
+      and answers `ShellCommandRequestEvent` with an approval prompt (yolo auto-approves).
+- [ ] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`): `FileChangeRequestEvent`,
+      `FileEditedEvent`, `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and
+      grep results, answers the request event.
+- [ ] 1.3 `subagents` events PR (`puppy/subagents-events`): `DelegationStartEvent`,
+      `DelegationEndEvent`. Bridge renders nested invocation panels.
+- [ ] 1.4 `skills` events PR (`puppy/skills-events`): `SkillsLoadedEvent`, `SkillActivatedEvent`.
+- [ ] 1.5 `tool_output_limits` events (`ToolOutputLimitedEvent`), coordinated with #729.
+- [ ] 1.6 Consume `SpendRecordedEvent`, `ContextUsageEvent`, planning events in the status bar.
+- [ ] 1.7 Compaction: consume #713 events once core #7801 ships; `ContextLimitWarnedEvent` PR.
+
+### Phase 2: new capabilities
+
+- [ ] 2.1 `AskUser` capability PR (`puppy/ask-user`, closes #42). Bridge renders the question TUI.
+- [ ] 2.2 `SelectModel` capability PR (`puppy/select-model`); host `/model`, `/pin_model`, `/unpin`.
+- [ ] 2.3 `FileSystem` undo option PR (`puppy/filesystem-undo`); host `/undo`.
+- [ ] 2.4 `CommandHooks` capability PR (`puppy/command-hooks`).
+- [ ] 2.5 `McpServers` capability PR (`puppy/mcp-servers`), thin config wrapper only; host `/mcp`
+      list / start / stop commands.
+- [ ] 2.6 `SubAgents` loader: agent catalog events and host `/agent` switching.
+
+### Phase 3: host parity
+
+- [ ] 3.1 Slash-command registry and `/help`; `/compact`, `/truncate`, `/plan`, `/tools`, `/cd`,
+      `/clear`, `/set`, `/show`, `/dump_context`, `/load_context`.
+- [ ] 3.2 Sessions over `step_persistence`: autosave, `/session`, `/quick-resume`, browser.
+- [ ] 3.3 Model registry: models.dev catalog, `/add_model`, `/refresh_models`, model settings menu.
+- [ ] 3.4 Provider auth flows from `stash@{0}` `_auth.py`; core provider PRs where generic.
+- [ ] 3.5 Attachments and clipboard images via `media`.
+- [ ] 3.6 Custom prompt-template commands, shell passthrough, chords, `$EDITOR`.
+- [ ] 3.7 Splash, onboarding, theme menus, version check.
+
+### Phase 4: remaining event families (wave 2 and 3 of the events plan)
+
+- [ ] 4.1 `guardrails` `GuardDecisionEvent`; dangerous-command guard as a `ToolGuard`.
+- [ ] 4.2 `step_persistence` `StepSavedEvent`, `RunRestoredEvent`.
+- [ ] 4.3 `memory`, `conversation_search` events.
+- [ ] 4.4 `trajectory_judge`, `prompt_injection_defender` events (deprecate callbacks).
+- [ ] 4.5 `code_mode` execution lifecycle events.
+- [ ] 4.6 Wave 3 as the bridge needs them: `media`, `playwright`, `runtime_authoring`,
+      `repo_context`.
+
+## Decisions
+
+Append-only. Date, item, decision, why.
+
+- 2026-09-09, plan: CLI lives in `pydantic_ai_harness/cli/`, not `experimental/`, because the
+  experimental tier is retired per `AGENTS.md`.
+- 2026-09-09, plan: i18n dropped for v1. No user has asked; it is pure host cost.
+- 2026-09-09, plan: plugins and the callback registry are not ported. Capabilities plus core
+  capability specs are the extension model; a plugin is a capability the host loads from config.
+- 2026-09-09, plan: `agent_share_your_reasoning` is not ported pending evidence that thinking parts
+  plus `Planning` leave a gap.
+- 2026-09-09, Mike: `AskUser` is inline immediate event first, deferred fallback second.
+  Implements #42. Mike confirmed the three vetoable calls above (cli package location, i18n
+  dropped, plugins not ported).
+- 2026-09-09, Mike: `McpServers` is a thin config-driven wrapper first; the supervisor (health,
+  circuit breaker, catalog install) is a later item, not part of 2.5.
+- 2026-09-09, plan: approval answers in the bridge go through a pluggable `Approver` because #340
+  `PermissionPolicy` is open and targets the same decisions.
+- 2026-09-09, plan: the `agent_docs/index.md` link to this file is parked in a stash named
+  "cli-plan: agent_docs/index.md" on `feat/experimental-cli`; re-apply it when committing the plan.
+
+## Open questions for Mike
+
+1. Console script code name. Placeholder is `harness`.

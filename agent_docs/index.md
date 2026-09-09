@@ -30,6 +30,7 @@ For any code change:
   Boundaries" before implementation and review
 - Adding a link to an open issue in a docs page, a README, or source:
   `review-checklist.md` "Issue References"
+- Working on the harness CLI or the Code Puppy parity loop: `harness-cli-plan.md`
 
 ## Exemplar
 
