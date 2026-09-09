@@ -9,6 +9,7 @@ prose match the code as written) is a review-time concern, not a unit test.
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
 from pathlib import Path
 
@@ -384,3 +385,17 @@ def test_blown_out_example_matches_coder_defaults() -> None:
     assert identity in example and 'denied_env_patterns=LLM_API_KEY_ENV_PATTERNS' in example, (
         'examples/coding_agent.py drifted from the coder_agent composition'
     )
+
+
+def test_documented_install_commands_name_defined_extras() -> None:
+    """Install lines naming `pydantic-ai-harness[...]` extras must name defined ones (issue #844).
+
+    Surface-to-surface parity cannot catch two install commands drifting together, so the
+    aws-lambda install surfaces are checked against the manifest directly.
+    """
+    provides = set(importlib.metadata.metadata('pydantic-ai-harness').get_all('Provides-Extra') or [])
+    named = re.compile(r'pydantic-ai-harness\[([a-z0-9-]+(?:,[a-z0-9-]+)*)\]')
+    for surface in ('docs/aws-lambda.md', 'pydantic_ai_harness/aws_lambda/README.md'):
+        for group in named.findall((_ROOT / surface).read_text(encoding='utf-8')):
+            for extra in group.split(','):
+                assert extra in provides, f'{surface} installs `{extra}`, which pyproject.toml does not define'
