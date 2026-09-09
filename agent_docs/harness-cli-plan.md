@@ -162,7 +162,10 @@ the branch. Each item names its acceptance check.
 - [x] 1.1 `shell` events PR (`puppy/shell-events`, worktree `../harness-shell`). Finish, open draft
       PR, bridge renders `ShellCommandStartEvent` / `ShellOutputLineEvent` / `ShellCommandEndEvent`
       and answers `ShellCommandRequestEvent` with an approval prompt (yolo auto-approves). PR #845
-      (draft, tests green, pydanty labelled); bridge half merged into `feat/experimental-cli`.
+      (draft, CI green, pydanty labelled); bridge half merged into `feat/experimental-cli`.
+- [ ] 1.1b Work pydanty's review of #845 (`gh pr view 845 --comments`; the label
+      `pydanty:is-working` clears when it lands), address the findings in `../harness-shell`,
+      merge the fixes into `feat/experimental-cli`, then mark #845 ready for review.
 - [ ] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`): `FileChangeRequestEvent`,
       `FileEditedEvent`, `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and
       grep results, answers the request event.
