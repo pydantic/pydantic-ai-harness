@@ -334,13 +334,9 @@ def get_weather(city: str) -> str:
 agent = Agent(
     'anthropic:claude-fable-5-1',
     name='checkout_assistant',
+    instructions='You are a concise checkout assistant.',
     tools=[get_weather],
-    capabilities=[
-        AgentControl(  # -> agent__checkout_assistant
-            instructions='You are a concise checkout assistant.',
-            label='production',
-        )
-    ],
+    capabilities=[AgentControl(label='production')],  # -> agent__checkout_assistant
 )
 ```
 
@@ -357,10 +353,7 @@ The variable holds an `AgentConfig`:
   "settings": {
     "temperature": 0.4,
     "max_tokens": 2048,
-    "thinking": "high",
-    "provider_options": {
-      "anthropic": {"thinking": {"type": "enabled", "budget_tokens": 16384}}
-    }
+    "thinking": "high"
   },
   "tool_definitions": [
     {
@@ -368,6 +361,11 @@ The variable holds an `AgentConfig`:
       "new_name": "lookup_weather",
       "description": "Look up the current weather for a city.",
       "parameters": {"city": {"description": "City name, e.g. 'London'"}}
+    },
+    {
+      "name": "search",
+      "toolset": "crm",
+      "description": "Search CRM records by customer name or order id."
     }
   ]
 }
@@ -380,17 +378,21 @@ The variable holds an `AgentConfig`:
   [Where your base prompt lives](#where-your-base-prompt-lives).
   Text supports `{{...}}` runtime placeholders, which pass through verbatim unless
   `render_template=True` renders them against `deps` (like `ManagedPrompt`).
-- `model` is a pydantic-ai model string. It's a first-class field, not a setting: pydantic-ai keeps
-  the model id separate from `ModelSettings` (which has no `model` key), so there's no collision
-  putting them side by side.
-- `settings` keys are the canonical, cross-framework ones (they match
-  `pydantic_ai.settings.ModelSettings`), with a nested `provider_options` escape hatch for
-  provider-specific settings (`provider_options.openai.reasoning_effort` lowers to the
-  `openai_reasoning_effort` model setting, and a provider-specific value wins over its canonical
-  counterpart). `thinking` accepts `true`/`false` or an effort level (`'minimal'` ... `'xhigh'`),
-  exactly like the unified `thinking` model setting.
+- `model` is a model string in `provider:model` form -- pydantic-ai's own, with its provider ids.
+  It's a first-class field, not a setting: pydantic-ai keeps the model id separate from
+  `ModelSettings` (which has no `model` key), so there's no collision putting them side by side.
+- `settings` keys are the canonical, cross-framework ones -- the settings every framework has a knob
+  for, under the names `pydantic_ai.settings.ModelSettings` gives them: `max_tokens`, `temperature`,
+  `top_p`, `top_k`, `seed`, `presence_penalty`, `frequency_penalty`, `parallel_tool_calls`, `timeout`,
+  `stop_sequences`, and `thinking`, which accepts `true`/`false` or an effort level (`'minimal'` ...
+  `'xhigh'`) exactly like the unified `thinking` model setting. Provider-specific settings
+  (`openai_reasoning_effort`, `extra_headers`) stay in code: a key the section doesn't name is not
+  forwarded, and the run reports it (see `on_unmatched` below).
 - `tool_definitions` is a list too, each entry naming the tool it patches by its original (code-side)
-  `name`; every other field is optional and unset fields keep the tool's own definition.
+  `name`; every other field is optional and unset fields keep the tool's own definition. `toolset`
+  narrows the match to one toolset's tool of that name -- the same string the baseline reports for
+  each tool (its `id`, or its label when it has none) -- and an entry without it matches by `name`
+  alone. When both match one tool the narrowed entry wins.
 
 `''` is never accepted where a string carries meaning -- `model`, a block's text, `new_name`. Omission
 and `null` already mean "leave this to code", so an empty string is only ever a half-filled field, and
@@ -425,10 +427,13 @@ from pydantic-ai's [`InstructionPart.id`](https://ai.pydantic.dev/api/messages/#
 | `agent:<name>` | one `@agent.instructions(name=...)` part |
 | `capability:<id>:<name>` | one `@capability.instructions(name=...)` part |
 
+These keys are pydantic-ai's namespace: the contract only reserves `agent` as the cross-framework name
+for the prompt as written, and each SDK defines the rest of the ids it lists in its baseline.
+
 Blocks pydantic-ai cannot key have no entry that reaches them: a callable passed to
 `Agent(instructions=...)`, anything from `run(instructions=...)`, a toolset with no `id` of its own. An
-`id` that matches nothing in this deployment is inert rather than an error, so one config can be applied
-across services that don't all install the same toolsets.
+`id` that matches nothing in this deployment warns rather than fails by default (`on_unmatched`, below),
+so one config can be applied across services that don't all install the same toolsets.
 
 The base prompt lives on the agent, where it always has. `AgentControl` carries no code-side config of
 its own: the agent *is* the code side, so an `agent` entry rewrites `Agent(instructions=...)` and an
@@ -481,9 +486,15 @@ Only `agent.override(instructions=...)` replaces the lot, and a capability can't
   tool routes back to the original implementation, and `ctx.tool_name` inside the tool is the
   original name. A rename that collides with a name another tool already advertises is dropped
   with a warning (other patches still apply) rather than breaking the run.
-- An override naming a tool that no longer exists is inert -- that's the drift case (the tool was
-  removed or renamed in code), and the Logfire UI is where it becomes visible. An instruction entry
-  whose `id` matches nothing behaves the same way.
+- **`on_unmatched` decides what a published entry that reaches nothing costs:** an override naming a
+  tool no toolset advertises (the drift case: the tool was removed or renamed in code), an instruction
+  entry whose `id` no block carries -- or only a per-request block carries -- and a `settings` key
+  this SDK has no field for. `'warn'` (the default) emits a `UserWarning` once per process, at the
+  point the entry would have been applied; `'error'` raises `UserError` with the same message there,
+  failing the run; `'ignore'` applies nothing and says nothing. Warning rather than raising is the
+  default because tool availability is dynamic: one config is applied across deployments that need
+  not all install the same toolsets, and a toolset can advertise different tools from one request to
+  the next, so an entry that reaches nothing now is not necessarily wrong.
 - **Model precedence:** the managed `model` is sourced during model selection via the capability's
   `get_model` hook, so it slots in with the right precedence -- a call-site `run(model=...)` beats
   it, it beats the agent's constructor model, and a fully model-less agent (named or nameless) can be
@@ -503,18 +514,18 @@ Only `agent.override(instructions=...)` replaces the lot, and a capability can't
   purpose: `AgentConfig` ignores keys it doesn't know so a value written by a newer UI degrades to
   the sections an older SDK understands instead of failing, and a stored schema that rejected those
   keys would break that by refusing the write.
-- **Forward compatibility covers values, not just keys:** a `thinking` effort level or a
-  `service_tier` that a newer Pydantic AI accepts and this SDK has never heard of drops just that
-  setting; a tool override that doesn't validate (a missing `name`, an empty `new_name`) drops just that
-  override; an instruction entry that doesn't validate (an empty text, an entry naming neither what nor
-  where) drops just that block -- each with a warning naming the offending value, emitted once per
-  process so a per-run resolution can't turn it into noise. Everything else in the config still
-  applies. A malformed settings key drops independently, and a wrong instructions, settings, or
-  tool-definitions container drops only that section. Each list entry is a unit of degradation for
-  the same reason: it addresses exactly one
-  thing, so dropping it costs exactly that thing. The
-  alternative isn't stricter, it's blunter: an `AgentConfig` that fails validation falls back to the
-  code-defined agent *whole*, so one unfamiliar enum value would silently un-manage the instructions,
-  the model, and every tool override with it.
+- **Forward compatibility covers values, not just keys:** a `thinking` effort level that a newer
+  Pydantic AI accepts and this SDK has never heard of drops just that setting; a tool override that
+  doesn't validate (a missing `name`, an empty `new_name`) drops just that override; an instruction
+  entry that doesn't validate (an empty text, an entry naming neither what nor where) drops just that
+  block -- each with a warning naming the offending value, emitted once per process so a per-run
+  resolution can't turn it into noise. Everything else in the config still applies. A malformed
+  settings value drops independently, a settings key this SDK has no field for is dropped and
+  reported under `on_unmatched`, and a wrong instructions, settings, or tool-definitions container
+  drops only that section. Each list entry is a unit of degradation for the same reason: it addresses
+  exactly one thing, so dropping it costs exactly that thing. The alternative isn't stricter, it's
+  blunter: an `AgentConfig` that fails validation falls back to the code-defined agent *whole*, so one
+  unfamiliar enum value would silently un-manage the instructions, the model, and every tool override
+  with it.
 - `AgentControl.resolved` exposes the active run's `ResolvedVariable`, and resolution is isolated
   per run, exactly like `ManagedPrompt`.

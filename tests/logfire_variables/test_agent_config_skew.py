@@ -89,35 +89,26 @@ def assert_other_sections_survived(
 
 def test_unrecognized_thinking_drops_only_that_setting() -> None:
     with pytest.warns(UserWarning, match=r"sets 'thinking' to 'ultra', which this version of the SDK"):
-        config = AgentConfig.model_validate(full_value(thinking='ultra', service_tier='flex'))
+        config = AgentConfig.model_validate(full_value(thinking='ultra', max_tokens=100))
     assert config.settings is not None
     assert config.settings.thinking is None
-    assert config.settings.service_tier == 'flex'
-    # Dropped, not smuggled through as an extra key, so `_lower_settings` never emits it.
-    assert config.settings.model_extra == {}
-    assert_other_sections_survived(config)
-
-
-def test_unrecognized_service_tier_drops_only_that_setting() -> None:
-    with pytest.warns(UserWarning, match=r"sets 'service_tier' to 'realtime'"):
-        config = AgentConfig.model_validate(full_value(thinking='high', service_tier='realtime'))
-    assert config.settings is not None
-    assert config.settings.thinking == 'high'
-    assert config.settings.service_tier is None
+    # Dropped, not smuggled through, so the lowered patch never carries it.
+    assert config.settings.model_dump(exclude_none=True) == {'temperature': 0.4, 'max_tokens': 100}
     assert_other_sections_survived(config)
 
 
 def test_recognized_values_are_untouched() -> None:
     with warnings.catch_warnings(record=True) as caught:
-        settings = AgentConfigSettings.model_validate({'thinking': True, 'service_tier': 'priority'})
+        settings = AgentConfigSettings.model_validate({'thinking': True})
     assert caught == []
-    assert (settings.thinking, settings.service_tier) == (True, 'priority')
+    assert settings.thinking is True
 
 
-def test_unknown_keys_still_flow_through_untouched() -> None:
-    # The key-level tolerance this SDK already promised: only *known* fields with unrecognized values
-    # are dropped, so a newer UI's keys keep reaching `extra='allow'` and the ignored top level. An
-    # unknown key inside a list entry is ignored by the entry's own model, costing nothing either.
+def test_unknown_keys_are_ignored_without_failing_validation() -> None:
+    # The key-level tolerance this SDK promised: a newer UI's keys reach the ignored top level, the
+    # entry models, and the settings section without any of them costing the value. A settings key
+    # is the one place an ignored key is not simply forgotten -- it is reported when the settings are
+    # applied to a run (`AgentControl.on_unmatched`), which is a run's business and not validation's.
     with warnings.catch_warnings(record=True) as caught:
         config = AgentConfig.model_validate(
             {
@@ -129,10 +120,21 @@ def test_unknown_keys_still_flow_through_untouched() -> None:
         )
     assert caught == []
     assert config.settings is not None
-    assert config.settings.model_extra == {'future_setting': 'raw json'}
-    assert config.settings.thinking == 'high'
+    assert config.settings.model_dump(exclude_none=True) == {'thinking': 'high'}
     assert config.tool_definitions == SURVIVING_TOOL_DEFINITIONS
     assert config.instructions == [InstructionBlock(id='agent', instructions='Be concise.')]
+
+
+def test_a_settings_key_this_sdk_has_no_field_for_drops_only_that_key() -> None:
+    # `service_tier` is what a newer contract, or a hand-written value, might carry: not malformed,
+    # not a known field with a newer value, just a key this release has no setting for. It leaves
+    # the section and every other section alone.
+    with warnings.catch_warnings(record=True) as caught:
+        config = AgentConfig.model_validate(full_value(service_tier='flex'))
+    assert caught == []
+    assert config.settings is not None
+    assert config.settings.model_dump(exclude_none=True) == {'temperature': 0.4}
+    assert_other_sections_survived(config)
 
 
 def test_invalid_override_drops_only_that_tool() -> None:
@@ -250,6 +252,25 @@ async def test_agent_keeps_managed_config_around_a_dropped_setting(publish: Publ
     with pytest.warns(UserWarning, match=r"sets 'thinking' to 'ultra'"):
         await Agent(FunctionModel(capture), capabilities=[AgentControl('skew', label='production')]).run('hello')
     assert seen == [{'temperature': 0.4}]
+
+
+async def test_agent_reports_a_settings_key_it_has_no_field_for_when_applying(publish: Publish) -> None:
+    # The same drop as above, one SDK version earlier: the key is not wrong, this release simply has
+    # no setting for it. Validation stays quiet (it also builds the baseline, where an unknown key is
+    # the agent's own `extra_headers`); the run says so where the patch is applied, once per process.
+    seen: list[dict[str, object]] = []
+
+    def capture(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        seen.append(dict(info.model_settings or {}))
+        return ModelResponse(parts=[TextPart('done')])
+
+    publish('skew_key', {'settings': {'temperature': 0.4, 'service_tier': 'flex'}})
+    with pytest.warns(UserWarning, match=r"sets 'service_tier', which this version of the SDK has no") as caught:
+        agent = Agent(FunctionModel(capture), capabilities=[AgentControl('skew_key', label='production')])
+        await agent.run('hello')
+        await agent.run('again')
+    assert len(caught) == 1
+    assert seen == [{'temperature': 0.4}, {'temperature': 0.4}]
 
 
 async def test_an_empty_model_is_refused_by_validation_and_the_config_degrades(capfire: CaptureLogfire) -> None:

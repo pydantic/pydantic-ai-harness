@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import threading
 import warnings
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Hashable, Mapping
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from typing import (
@@ -24,7 +24,17 @@ from typing import (
 import logfire
 from logfire.variables import Variable
 from logfire.variables.abstract import NoOpVariableProvider
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ModelWrapValidatorHandler,
+    PrivateAttr,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from pydantic_ai import AbstractToolset, RunContext, TemplateStr, ToolDefinition, WrapperToolset
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, CombinedCapability
 from pydantic_ai.exceptions import UserError
@@ -33,6 +43,7 @@ from pydantic_ai.models import ModelRequestContext, infer_model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets.abstract import ToolsetTool
+from typing_extensions import Self
 
 from pydantic_ai_harness.logfire._managed_variable import (
     ManagedVariableCapability,
@@ -57,14 +68,8 @@ _AGENT_CONTROL_ID = 'agent-control'
 # instructions while preventing one managed entry from adding megabytes to every model request.
 _MAX_MODEL_FACING_TEXT_LENGTH = 65_536
 
-# Settings kept out of the published baseline. `AgentConfigSettings` allows extra keys deliberately --
-# a provider-specific setting like `openai_reasoning_effort` has to survive -- and these two come
-# through that same door. Pydantic AI forwards them to the provider request, which is exactly where
-# authorization headers and signed bodies live, and a baseline is published to a Logfire variable
-# every project member can read. They still apply to the run; they just don't describe the agent to
-# anyone else. This is a denylist rather than an allowlist because the extras that are *not*
-# credentials are the whole point of `extra='allow'`.
-_SETTINGS_WITHHELD_FROM_BASELINE = frozenset({'extra_headers', 'extra_body'})
+_OnUnmatched: TypeAlias = Literal['ignore', 'warn', 'error']
+"""What to do with a published entry that reaches nothing; see `AgentControl.on_unmatched`."""
 
 # Where a renamed tool records the code-side name it routes back to, on its own definition's
 # `metadata`, so `call_tool` reads it off the very tool the model was handed. Recomputing the mapping
@@ -75,6 +80,7 @@ _SETTINGS_WITHHELD_FROM_BASELINE = frozenset({'extra_headers', 'extra_body'})
 # through, so nothing downstream sees it.
 _ROUTES_TO_METADATA_KEY = '__agent_control_routes_to__'
 
+_KeyT = TypeVar('_KeyT', bound=Hashable)
 _EntryT = TypeVar('_EntryT')
 
 # Drop warnings already emitted in this process, keyed by the message itself. See `_warn_dropped`.
@@ -101,6 +107,25 @@ def _warn_dropped(message: str) -> None:
         return
     _warned_drops.add(message)
     warnings.warn(message)
+
+
+def _report_unmatched(policy: _OnUnmatched, message: str) -> None:
+    """Apply `AgentControl.on_unmatched` to one published entry that reached nothing.
+
+    Called where the entry would have been applied -- the settings hook, the instruction hook, the
+    toolset listing -- and not from validation, for two reasons. Validation runs inside Logfire's
+    resolution, which turns any exception into a fallback to the code-defined agent, so an `'error'`
+    raised there would be swallowed and un-manage the whole config instead of stopping the run. And
+    the same validation builds the code baseline, where a key this SDK has no field for is the
+    agent's own `extra_headers` rather than anything anyone published.
+
+    The message is the same under every policy so a warning someone chose to tolerate reads like
+    the error they would have gotten by not tolerating it.
+    """
+    if policy == 'error':
+        raise UserError(message)
+    if policy == 'warn':
+        _warn_dropped(message)
 
 
 def _reset_baseline_publish_guard() -> None:  # pyright: ignore[reportUnusedFunction]
@@ -146,16 +171,22 @@ def _publish_baseline(variable: Variable[Any], example: str) -> None:
 class AgentConfigSettings(BaseModel):
     """Canonical model settings managed as one section of an `AgentConfig`.
 
-    Every field name matches a key in [`ModelSettings`][pydantic_ai.settings.ModelSettings], so the
-    payload lowers without translation. Unset fields keep their code-defined values. Extra fields
-    are allowed so canonical settings introduced by a newer Logfire UI can flow through older SDKs.
-    A field whose *value* this SDK doesn't recognize -- an effort level or service tier a newer
-    Pydantic AI accepts -- is dropped with a warning so that setting alone keeps its code-defined
-    value, rather than failing the enclosing `AgentConfig`. The model itself is the sibling `model`
-    field on `AgentConfig`.
+    The fields are the contract: the settings every framework Agent Control drives has a knob for,
+    under the names Pydantic AI's [`ModelSettings`][pydantic_ai.settings.ModelSettings] gives them,
+    so a published value lowers here without translation and means the same thing to every SDK
+    reading it. Unset fields keep their code-defined values. The model itself is the sibling
+    `model` field on `AgentConfig`.
+
+    Nothing else gets through. A key this SDK has no field for is dropped rather than forwarded --
+    a key it does not understand is not one it can lower into a request -- and remembered in
+    `_unrecognized` so the run can report it under `AgentControl.on_unmatched`, since a newer UI's
+    key that this SDK quietly did nothing with is exactly the kind of gap between what Logfire shows
+    and what the agent does that has to be visible. A field whose *value* this SDK doesn't
+    recognize -- an effort level a newer Pydantic AI accepts -- is dropped with a warning so that
+    setting alone keeps its code-defined value, rather than failing the enclosing `AgentConfig`.
     """
 
-    model_config = ConfigDict(extra='allow')
+    model_config = ConfigDict(extra='ignore')
 
     max_tokens: int | None = None
     temperature: float | None = None
@@ -168,30 +199,40 @@ class AgentConfigSettings(BaseModel):
     timeout: float | None = None
     stop_sequences: list[str] | None = None
     thinking: bool | Literal['minimal', 'low', 'medium', 'high', 'xhigh'] | None = None
-    service_tier: Literal['auto', 'default', 'flex', 'priority'] | None = None
-    provider_options: dict[str, dict[str, Any]] | None = None
-    """Per-provider escape hatch.
 
-    `provider_options[provider][key]` lowers to the flat `<provider>_<key>` model setting. Provider
-    options are applied after canonical fields, so a provider-specific value wins on collision.
+    _unrecognized: tuple[str, ...] = PrivateAttr(default=())
+    """The keys of the value this was validated from that this SDK has no field for, in their order.
+
+    Private rather than a field because it is not part of the value: it is what the value asked for
+    that this release could not do, which only the run applying the settings has any use for. It is
+    not reported from validation -- see `_report_unmatched` for why -- and is deliberately empty on
+    a code baseline, where an unrecognized key is the agent's own `extra_headers` rather than
+    anything published.
     """
+
+    @model_validator(mode='wrap')
+    @classmethod
+    def _remember_unrecognized_keys(cls, data: Any, handler: ModelWrapValidatorHandler[Self]) -> Self:
+        settings = handler(data)
+        if isinstance(data, dict):
+            settings._unrecognized = tuple(name for name in cast(dict[str, Any], data) if name not in cls.model_fields)
+        return settings
 
     @model_validator(mode='before')
     @classmethod
     def _drop_unrecognized_values(cls, data: Any) -> Any:
         """Drop a versioned field whose value this SDK doesn't recognize, keeping the rest of the patch.
 
-        Tolerating unknown *keys* is only half of forward compatibility: a newer Logfire UI (or a newer
-        Pydantic AI adding an effort level or service tier) writes a value that the stored schema and
-        the Logfire backend both accept, and an older SDK would then fail the whole `AgentConfig` over
-        it and revert instructions, model, and every tool override to code along with it. Dropping the
-        one field the SDK can't act on leaves the value it doesn't understand out of the lowered
+        Ignoring unknown *keys* is only half of forward compatibility: a newer Logfire UI (or a newer
+        Pydantic AI adding an effort level) writes a value that the stored schema and the Logfire
+        backend both accept, and an older SDK would then fail the whole `AgentConfig` over it and
+        revert instructions, model, and every tool override to code along with it. Dropping the one
+        field the SDK can't act on leaves the value it doesn't understand out of the lowered
         settings, so that setting -- and only that setting -- keeps its code-defined behavior.
 
         Unrecognized values are rejected, not passed through: the field's public type is the guarantee
         `_lower_settings` and its consumers hold, and forwarding an unknown effort level to the
-        provider would trade a version-skew problem for a request-time one. Keys the SDK has never
-        heard of are a different case and stay untouched, so `extra='allow'` still carries them.
+        provider would trade a version-skew problem for a request-time one.
         """
         if not isinstance(data, dict):
             return data
@@ -223,6 +264,8 @@ class AgentConfigSettings(BaseModel):
         for name, value in values.items():
             field_info = cls.model_fields.get(name)
             if field_info is None:
+                # Not this validator's to judge: `extra='ignore'` drops it, and the wrap validator
+                # records it for the run to report.
                 kept[name] = value
                 continue
             if _enumerates_values(field_info.annotation):
@@ -255,27 +298,20 @@ _VERSIONED_SETTINGS: dict[str, TypeAdapter[Any]] = {
 """Per-field validators for the settings whose accepted values grow from release to release.
 
 A `Literal` in a field's annotation is exactly the signal that the field enumerates what *this*
-release knows about, so the set of version-skew-prone fields (`thinking`, `service_tier`) and the
-values each one accepts are both read off the annotations rather than restated here, where the two
-would drift apart. Fields without a `Literal` -- `provider_options` above all, the deliberate
-free-form escape hatch -- are left alone: a wrong type there is malformed rather than merely newer,
-and the stored schema already rejects it at write time.
+release knows about, so the set of version-skew-prone fields (`thinking`, today) and the values each
+one accepts are both read off the annotations rather than restated here, where the two would drift
+apart. Fields without a `Literal` are left alone: a wrong type there is malformed rather than merely
+newer, and the stored schema already rejects it at write time.
 """
 
 
 def _lower_settings(value: AgentConfigSettings) -> ModelSettings:
     """Lower an `AgentConfigSettings` value to Pydantic AI's flat `ModelSettings` shape.
 
-    Only explicitly set, non-`None` canonical fields are emitted. `provider_options` entries are
-    flattened to `<provider>_<key>` afterwards, giving them precedence over canonical fields that
-    lower to the same key.
+    Only explicitly set, non-`None` fields are emitted, and every field name is already a
+    `ModelSettings` key, so the dump is the patch.
     """
-    settings: dict[str, Any] = value.model_dump(exclude_none=True, exclude={'provider_options'})
-    if value.provider_options:
-        for provider, options in value.provider_options.items():
-            for key, option in options.items():
-                settings[f'{provider}_{key}'] = option
-    return cast(ModelSettings, settings)
+    return cast(ModelSettings, value.model_dump(exclude_none=True))
 
 
 NonEmptyStr: TypeAlias = Annotated[str, Field(min_length=1)]
@@ -305,15 +341,18 @@ class InstructionBlock(BaseModel):
     | `InstructionBlock(id=key, instructions='text')` | Replaces the text of every block keyed `key`. |
     | `InstructionBlock(id=key)` | Drops every block keyed `key`. |
 
-    An `id` nothing matches is inert, exactly like an unknown tool name: one config is applied across
-    deployments that need not all install the same toolsets. Two entries naming the same `id` keep the
-    first, with a warning.
+    An `id` nothing matches applies nothing and is reported under `AgentControl.on_unmatched`, exactly
+    like an unknown tool name: one config is applied across deployments that need not all install the
+    same toolsets, so the default is a warning rather than an error. Two entries naming the same `id`
+    keep the first, with a warning.
     """
 
     id: str | None = None
     """The [`InstructionPart.id`][pydantic_ai.messages.InstructionPart.id] to address, or `None` to add a block.
 
-    Pydantic AI keys each block it can name, and those keys are what this field takes: `'agent'` for the
+    The contract keeps `id` free-form and reserves only `'agent'` as the cross-framework name for the
+    prompt as written; the rest of the namespace belongs to each implementation, and these are Pydantic
+    AI's. It keys each block it can name, and those keys are what this field takes: `'agent'` for the
     agent's own literal instructions, `'toolset:<id>'` and `'capability:<id>'` for everything a toolset
     or capability contributes, and `'agent:<declared id>'` / `'capability:<id>:<declared id>'` for a
     single declared block. Blocks Pydantic AI cannot key -- a callable passed to `Agent(instructions=...)`,
@@ -350,16 +389,17 @@ class ToolDefinitionOverride(BaseModel):
     """A patch over a tool's LLM-facing definition.
 
     Overrides change only what the model is shown. Schema structure, validation, and execution
-    remain code-defined. `name` looks the tool up by its original code-side name. An entry that
-    doesn't validate is dropped from `AgentConfig.tool_definitions` with a warning, leaving its
-    siblings in place; two entries naming the same tool keep the first, with a warning.
+    remain code-defined. `name` looks the tool up by its original code-side name, narrowed to one
+    toolset's tool of that name when `toolset` is set too. An entry that doesn't validate is dropped
+    from `AgentConfig.tool_definitions` with a warning, leaving its siblings in place; two entries
+    with the same `name` and `toolset` keep the first, with a warning.
     """
 
     name: str = Field(min_length=1)
     """The tool's original code-side name, which is what this entry patches.
 
-    A tool no toolset advertises is inert rather than an error, for the same reason an unmatched
-    instruction `id` is.
+    A tool no toolset advertises applies nothing and is reported under `AgentControl.on_unmatched`,
+    for the same reason an unmatched instruction `id` is.
     """
     new_name: str | None = Field(default=None, min_length=1)
     """Replacement name shown to the model; `None` keeps the original.
@@ -371,13 +411,17 @@ class ToolDefinitionOverride(BaseModel):
     parameters: dict[str, ParameterOverride] | None = None
     """Patches per top-level parameter name; see `ParameterOverride`.
 
-    Unknown parameter names are ignored, for the same reason an unmatched tool `name` is.
+    Unknown parameter names are ignored: a parameter is part of the tool's code-defined shape, so a
+    patch on one the tool does not have is the tool having changed, which the baseline shows.
     """
     toolset: str | None = None
-    """The toolset the tool came from, as the baseline reports it. Informational; ignored when a value is applied.
+    """The toolset the tool came from: the baseline reports it, and on an override it narrows the match.
 
     It is the toolset's `id` when it has one, else its label, so the Logfire UI can group a long tool
-    list by where each tool comes from without inferring it from tool names.
+    list by where each tool comes from without inferring it from tool names. An override that sets it
+    applies only to that toolset's tool of this `name`, which is what lets two toolsets that both
+    advertise a `search` be patched apart; an override without it matches by `name` alone, and when
+    both match one tool the qualified entry wins.
     """
 
 
@@ -393,24 +437,43 @@ def _entry_errors(error: ValidationError, *, whole: str) -> str:
     )
 
 
-def _first_by_key(entries: list[tuple[str, _EntryT]], subject: str) -> dict[str, _EntryT]:
+def _first_by_key(entries: list[tuple[_KeyT, _EntryT]], describe: Callable[[_KeyT], str]) -> dict[_KeyT, _EntryT]:
     """Index entries by key, keeping the first of any duplicates with a warning.
 
     Both list sections address things by key, so both can be written with the same key twice -- by a
     hand-edited value, or by a UI bug. Keeping the first matches how a colliding rename is resolved in
     `_ToolDefinitionOverridesToolset`: the run stays predictable and the ignored entry is named, rather
-    than the last writer silently winning depending on how the JSON happened to be ordered.
+    than the last writer silently winning depending on how the JSON happened to be ordered. `describe`
+    renders a key for that warning, since a tool's key is a pair and reads badly as a bare tuple.
     """
-    indexed: dict[str, _EntryT] = {}
+    indexed: dict[_KeyT, _EntryT] = {}
     for key, entry in entries:
         if key in indexed:
             _warn_dropped(
-                f'Managed agent config names {subject} {key!r} more than once; keeping the first entry '
+                f'Managed agent config names {describe(key)} more than once; keeping the first entry '
                 f'and ignoring the rest.'
             )
             continue
         indexed[key] = entry
     return indexed
+
+
+_ToolKey: TypeAlias = tuple[str | None, str]
+"""What a tool override is matched on: the toolset it is narrowed to (`None` for any) and the tool's name."""
+
+
+def _toolset_key(toolset: AbstractToolset[Any]) -> str:
+    """The string a tool's toolset is reported and matched as: its `id`, or its label when it has none.
+
+    One rule for both directions, so the value the baseline shows in the editor is exactly the value
+    an override can be narrowed by.
+    """
+    return toolset.id or toolset.label
+
+
+def _describe_tool_key(key: _ToolKey) -> str:
+    toolset, name = key
+    return f'tool {name!r}' if toolset is None else f'tool {name!r} from toolset {toolset!r}'
 
 
 def _instruction_blocks(config: AgentConfig) -> list[InstructionBlock]:
@@ -455,13 +518,20 @@ def _instruction_overrides(config: AgentConfig) -> dict[str, str | None]:
     """Replacement text per addressed [`InstructionPart.id`][pydantic_ai.messages.InstructionPart.id], `None` to drop it."""
     return _first_by_key(
         [(block.id, block.instructions) for block in _instruction_blocks(config) if block.id is not None],
-        'instruction id',
+        lambda key: f'instruction id {key!r}',
     )
 
 
-def _tool_overrides(config: AgentConfig) -> dict[str, ToolDefinitionOverride]:
-    """Tool definition overrides indexed by the code-side tool name each one patches."""
-    return _first_by_key([(override.name, override) for override in config.tool_definitions or []], 'tool')
+def _tool_overrides(config: AgentConfig) -> dict[_ToolKey, ToolDefinitionOverride]:
+    """Tool definition overrides indexed by the `(toolset, name)` each one patches.
+
+    An entry without a `toolset` is keyed under `None`, so the same `name` can carry one unqualified
+    entry and one per toolset side by side; only two entries with the same pair collide.
+    """
+    return _first_by_key(
+        [((override.toolset, override.name), override) for override in config.tool_definitions or []],
+        _describe_tool_key,
+    )
 
 
 class AgentConfig(BaseModel):
@@ -472,12 +542,14 @@ class AgentConfig(BaseModel):
     a deliberate revert to code.
 
     Nothing the SDK fails to understand costs more than the part that contains it. Extra keys retain
-    Pydantic's default `ignore` behavior, and a *value* it cannot make sense of -- an effort level or
-    service tier a newer Pydantic AI accepts, a tool override that doesn't validate -- drops only its
-    own setting or its own override, with a warning. Both rules exist for the same reason: a value
-    that fails validation falls back through Logfire's resolution to the code-defined agent *in its
-    entirety*, so without them one unfamiliar key or enum value would silently un-manage the
-    instructions, the model, and every tool override alongside it.
+    Pydantic's default `ignore` behavior, and a *value* it cannot make sense of -- an effort level a
+    newer Pydantic AI accepts, a tool override that doesn't validate -- drops only its own setting or
+    its own override, with a warning. Both rules exist for the same reason: a value that fails
+    validation falls back through Logfire's resolution to the code-defined agent *in its entirety*,
+    so without them one unfamiliar key or enum value would silently un-manage the instructions, the
+    model, and every tool override alongside it. An ignored `settings` key is the one extra that is
+    reported rather than silently dropped, under `AgentControl.on_unmatched`: it is a setting someone
+    published and this SDK did not apply, which the run should say.
     """
 
     model_config = ConfigDict(protected_namespaces=())
@@ -488,8 +560,8 @@ class AgentConfig(BaseModel):
     A capability contributes instructions, it cannot take them over: Pydantic AI appends every
     contribution to the agent's own. Blocks with no `id` are therefore *added*, which is why a bare
     string means one added block and text that also lives in `Agent(instructions=...)` reaches the model
-    twice. The code-side home for a managed base prompt is `AgentControl.instructions` (or
-    `AgentControl.default`), which this value supersedes rather than adds to; see
+    twice. The code-side home for a managed base prompt is `Agent(instructions=...)` itself, which an
+    entry with `id='agent'` rewrites rather than adds to; see
     [`AgentControl`][pydantic_ai_harness.logfire.AgentControl].
 
     Blocks *with* an `id` reach what no capability owns -- the agent's own literal, a toolset's, an MCP
@@ -506,7 +578,10 @@ class AgentConfig(BaseModel):
     is set.
     """
     model: NonEmptyStr | None = None
-    """A Pydantic AI model string such as `'anthropic:claude-fable-5-1'`; `None` keeps the code model.
+    """A model string in `'provider:model'` form, such as `'anthropic:claude-fable-5-1'`; `None` keeps the code model.
+
+    The contract's canonical form is Pydantic AI's own model string with its provider ids, so it lowers
+    here through [`infer_model`][pydantic_ai.models.infer_model] as written.
 
     Non-empty for a blunt reason: `''` is not "no model", it is a model named `''`, and Pydantic AI
     rejects it with `Unknown model:` on every request the agent makes. Publishing one would take the
@@ -664,10 +739,9 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
                                         'type': 'string',
                                         'minLength': 1,
                                         'description': (
-                                            "The instruction block to address: 'agent', 'toolset:<id>', "
-                                            "'capability:<id>', or one of those plus ':<declared id>'. "
-                                            'Omit to add a block instead. A block the agent recomputes '
-                                            'per request cannot be addressed: replacing it would pin one '
+                                            'The id of the instruction block to address, as the baseline '
+                                            'lists it. Omit to add a block instead. A block the baseline '
+                                            'marks dynamic cannot be addressed: replacing it would pin one '
                                             'rendering and dropping it would remove the computation, so '
                                             'either is ignored.'
                                         ),
@@ -702,13 +776,12 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
         'model': {
             'type': 'string',
             'minLength': 1,
-            'description': "A Pydantic AI model string, such as 'anthropic:claude-fable-5-1'.",
+            'description': "A model string in 'provider:model' form, such as 'anthropic:claude-fable-5-1'.",
         },
         'settings': {
             'type': 'object',
             'description': (
-                'Model settings patch. Keys match `pydantic_ai.settings.ModelSettings`; '
-                'a key this schema does not name is still allowed.'
+                'Model settings patch. Only the keys named here are applied; a key an SDK does not know is ignored.'
             ),
             'properties': {
                 'max_tokens': {'type': 'integer'},
@@ -724,18 +797,6 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
                 'thinking': {
                     'anyOf': [{'type': 'boolean'}, {'type': 'string'}],
                     'description': "Enabled/disabled, or an effort level: 'minimal', 'low', 'medium', 'high', 'xhigh'.",
-                },
-                'service_tier': {
-                    'type': 'string',
-                    'description': "Provider service tier: 'auto', 'default', 'flex', or 'priority'.",
-                },
-                'provider_options': {
-                    'type': 'object',
-                    'description': (
-                        'Per-provider settings: `provider_options.<provider>.<key>` lowers to the '
-                        '`<provider>_<key>` model setting.'
-                    ),
-                    'additionalProperties': {'type': 'object'},
                 },
             },
         },
@@ -772,8 +833,8 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
                     'toolset': {
                         'type': 'string',
                         'description': (
-                            'The toolset the tool came from, as reported by the baseline; informational, '
-                            'ignored when applied.'
+                            'The toolset the tool came from: the baseline reports it, and on an override it '
+                            "narrows the match to that toolset's tool of this name."
                         ),
                     },
                 },
@@ -798,8 +859,10 @@ That is also why it is permissive at every level: `AgentConfig` ignores extra ke
 written by a newer UI does not fail validation and revert the whole config to code, and an
 `additionalProperties: false` anywhere in the stored schema would defeat that by rejecting the key at
 write time instead. For the same reason the fields whose accepted values grow over releases
-(`thinking`, `service_tier`) are typed rather than enumerated, and the known `settings` keys are named
-for the editor's benefit while unnamed ones stay writable.
+(`thinking`) are typed rather than enumerated, and `settings` names the canonical keys for the
+editor's benefit while leaving unnamed ones writable: a key a newer contract adds has to be storable
+before every SDK reading the variable knows it, and `AgentConfigSettings` ignores -- and, under
+`AgentControl.on_unmatched`, reports -- the ones this release cannot apply.
 
 The constraints it does keep are structural rather than versioned, and each one closes a hole a
 permissive schema would otherwise leave open. Every `minLength: 1` says the same thing as
@@ -810,7 +873,7 @@ applied to anything, so accepting it would only let the UI save a row that silen
 """
 
 
-OverridesProvider: TypeAlias = Callable[[], Mapping[str, ToolDefinitionOverride]]
+OverridesProvider: TypeAlias = Callable[[], Mapping[_ToolKey, ToolDefinitionOverride]]
 ToolsObserver: TypeAlias = Callable[[list[ToolsetTool[Any]]], None]
 
 
@@ -857,20 +920,33 @@ class _ToolDefinitionOverridesToolset(WrapperToolset[AgentDepsT]):
 
     get_overrides: OverridesProvider = field(repr=False, compare=False)
     observe_code_tools: ToolsObserver = field(repr=False, compare=False)
+    on_unmatched: _OnUnmatched = field(default='warn', kw_only=True)
 
     def _effective_tools(
         self, tools: dict[str, ToolsetTool[AgentDepsT]]
     ) -> dict[str, tuple[str, ToolsetTool[AgentDepsT]]]:
         """Build the advertised-name to (code-side name, tool) mapping.
 
+        An override narrowed to a toolset beats one that only names the tool, so a config can say
+        "every `search`" and "the CRM's `search`" at once and the specific entry wins where both
+        apply. The unqualified entry is then outranked, not unmatched: it still reached the tool it
+        named, so only an entry that matched no tool at all is reported under `on_unmatched`. That
+        is done here, on every listing, because tool availability is dynamic -- a toolset can
+        advertise different tools from one step to the next -- and a report from any one listing is
+        a report about that listing.
+
         A renamed tool carries the name it routes back to in its definition's metadata, so `call_tool`
         can read it off the very tool the model was handed. A colliding rename is dropped while its
         other patches remain, preserving every tool under a callable name.
         """
         overrides = self.get_overrides()
+        matched: set[_ToolKey] = set()
         result: dict[str, tuple[str, ToolsetTool[AgentDepsT]]] = {}
         for original_name, tool in tools.items():
-            override = overrides.get(original_name)
+            qualified: _ToolKey = (_toolset_key(tool.toolset), original_name)
+            unqualified: _ToolKey = (None, original_name)
+            matched.update(key for key in (qualified, unqualified) if key in overrides)
+            override = overrides.get(qualified, overrides.get(unqualified))
             new_tool_def = tool.tool_def if override is None else _apply_override(tool.tool_def, override)
             new_name = new_tool_def.name
             if new_name != original_name and (new_name in tools or new_name in result):
@@ -889,6 +965,13 @@ class _ToolDefinitionOverridesToolset(WrapperToolset[AgentDepsT]):
                 original_name,
                 tool if new_tool_def is tool.tool_def else replace(tool, toolset=self, tool_def=new_tool_def),
             )
+        for key in overrides:
+            if key not in matched:
+                _report_unmatched(
+                    self.on_unmatched,
+                    f'Managed agent config patches {_describe_tool_key(key)}, which no toolset advertises for '
+                    'this request; that override applies to nothing.',
+                )
         return result
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
@@ -961,9 +1044,18 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     diverge. An unknown managed model warns and keeps the code model.
 
     Tool overrides change only the definitions shown to the model. Renames route back to the original
-    implementation, collisions retain the original name with a warning, unknown tool keys are inert,
-    and an override the SDK can't validate is dropped with a warning while its siblings still apply.
+    implementation, collisions retain the original name with a warning, and an override the SDK
+    can't validate is dropped with a warning while its siblings still apply. An override names its
+    tool by code-side `name`, narrowed to one toolset's tool of that name when it sets `toolset` too.
     Parameter names, types, requiredness, validation, and implementation stay code-owned.
+
+    A published entry that reaches nothing -- an instruction `id` no assembled block carries (or only
+    a dynamic one carries), a tool override no advertised tool matches, a settings key this SDK has
+    no field for -- is governed by `on_unmatched`. The default warns once per process rather than
+    raising, because one config is applied across deployments that need not all install the same
+    toolsets, and a toolset can advertise different tools from one step to the next; an entry that
+    reaches nothing here may be exactly right somewhere else. `'error'` is for the deployment that
+    would rather stop than run with part of its published config silently unapplied.
 
     Missing, invalid, or unreachable remote values degrade to the code-defined agent through Logfire's
     resolution fallback, which is why a value this SDK doesn't recognize degrades the narrowest unit
@@ -1023,6 +1115,26 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     Enabled by default because `example` is documentation for the Logfire editor and is never resolved
     or applied to a run. A failed or stale publish therefore cannot change agent behavior. Disable it
     when the variables token is intentionally read-only or code must not update variable metadata.
+    """
+    on_unmatched: _OnUnmatched = field(default='warn', kw_only=True)
+    """What to do with a published entry that reaches nothing in this deployment.
+
+    That is an instruction `id` no assembled block carries, or that only a dynamic block carries; a
+    tool override whose `name` (and `toolset`, when set) matches no tool a toolset advertises; and a
+    `settings` key this SDK has no field for. Each is a place where Logfire shows one thing and the
+    agent does another.
+
+    - `'warn'` (the default) emits a `UserWarning` once per process per message, at the point the entry
+      would have been applied.
+    - `'error'` raises [`UserError`][pydantic_ai.exceptions.UserError] with the same message at that
+      point, failing the run.
+    - `'ignore'` applies nothing and says nothing.
+
+    Warning rather than raising is the default because tool availability is dynamic: one config is
+    applied across deployments that need not all install the same toolsets, and a toolset can
+    advertise different tools from one request to the next, so an entry that reaches nothing now is
+    not necessarily wrong. Once per process rather than once per run for the same reason every other
+    drop is: the config is resolved on every run, and the signal has to survive its own repetition.
     """
 
     # Override the inherited default ID: a stable id lets the baseline exclude this capability's
@@ -1161,14 +1273,17 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
         """Wrap the agent toolset with managed LLM-facing definition overlays."""
         return _ToolDefinitionOverridesToolset(
-            wrapped=toolset, get_overrides=self._current_overrides, observe_code_tools=self._observe_code_tools
+            wrapped=toolset,
+            get_overrides=self._current_overrides,
+            observe_code_tools=self._observe_code_tools,
+            on_unmatched=self.on_unmatched,
         )
 
     def _observe_code_tools(self, tools: list[ToolsetTool[Any]]) -> None:
         self._code_tools.set(tools)
 
-    def _current_overrides(self) -> Mapping[str, ToolDefinitionOverride]:
-        """Return the active run's overrides by tool name, or an empty mapping outside a resolved run."""
+    def _current_overrides(self) -> Mapping[_ToolKey, ToolDefinitionOverride]:
+        """Return the active run's overrides by `(toolset, name)`, or an empty mapping outside a resolved run."""
         resolved = self.resolved
         return {} if resolved is None else _tool_overrides(resolved.value)
 
@@ -1226,7 +1341,9 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         regression in exchange for nothing.
 
         A part with no `id` is unaddressable by construction and passes through. An `id` that matches no
-        part is inert.
+        part, or only a dynamic one, applies nothing and is reported under `on_unmatched` -- here, per
+        request, because the assembled parts are this request's: an agent whose instructions vary with
+        `deps` or the step can carry a block on one request and not the next.
 
         The new parameters are assigned onto the given context rather than returned on a
         `dataclasses.replace` copy of it, which would look tidier and be wrong: `ModelRequestContext`
@@ -1239,29 +1356,42 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
         if resolved is None:
             return request_context
         overrides = _instruction_overrides(resolved.value)
-        parameters = request_context.model_request_parameters
-        if not overrides or not parameters.instruction_parts:
+        if not overrides:
             return request_context
+        parameters = request_context.model_request_parameters
+        matched: set[str] = set()
         parts: list[InstructionPart] = []
-        for part in parameters.instruction_parts:
+        for part in parameters.instruction_parts or []:
             key = _instruction_key(part)
             if key is None or key not in overrides:
                 parts.append(part)
                 continue
+            # Addressed, and refused for a reason of its own: it is reported as the dynamic case and not
+            # again as a key nothing carries.
+            matched.add(key)
             if part.dynamic:
-                _warn_dropped(
+                _report_unmatched(
+                    self.on_unmatched,
                     f'Managed agent config addresses instruction block {key!r}, which the agent recomputes '
-                    'per request; a managed value would pin or remove that computation, so it is ignored '
+                    'per request; a managed value would pin or remove that computation, so it is not applied '
                     'and the block keeps what the code produces. An instruction function that returns '
                     'fixed text is flagged this way too: contribute it as an `InstructionPart` instead '
-                    'of from a function to make it addressable.'
+                    'of from a function to make it addressable.',
                 )
                 parts.append(part)
                 continue
             replacement = overrides[key]
             if replacement is not None:
                 parts.append(replace(part, content=replacement))
-        request_context.model_request_parameters = replace(parameters, instruction_parts=parts)
+        for key in overrides:
+            if key not in matched:
+                _report_unmatched(
+                    self.on_unmatched,
+                    f'Managed agent config addresses instruction block {key!r}, which this request does not '
+                    'assemble; that entry applies to nothing.',
+                )
+        if parameters.instruction_parts:
+            request_context.model_request_parameters = replace(parameters, instruction_parts=parts)
         return request_context
 
     def _publish_request_baseline(self, ctx: RunContext[AgentDepsT], request_context: ModelRequestContext) -> None:
@@ -1363,14 +1493,16 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
                     name=tool_def.name,
                     description=tool_def.description or None,
                     parameters=parameters or None,
-                    toolset=tool.toolset.id or tool.toolset.label,
+                    toolset=_toolset_key(tool.toolset),
                 )
             )
-        settings = {
-            name: value
-            for name, value in (self._code_settings.get() or {}).items()
-            if name not in _SETTINGS_WITHHELD_FROM_BASELINE
-        }
+        # Validating the code settings as an `AgentConfigSettings` is what keeps the baseline to the
+        # canonical keys: the run's settings also carry provider-specific keys and `extra_headers` /
+        # `extra_body`, which Pydantic AI forwards to the provider request -- exactly where
+        # authorization headers and signed bodies live -- and the baseline is published to a variable
+        # every project member can read. They still apply to the run; they just are not part of the
+        # contract, so they don't describe the agent to anyone else.
+        settings = self._code_settings.get() or {}
         return AgentConfig(
             instructions=instructions or None,
             model=self._code_model.get(),
@@ -1409,14 +1541,25 @@ class _AgentControlOverrides(AbstractCapability[AgentDepsT]):
         return CapabilityOrdering(position='innermost')
 
     def get_model_settings(self) -> AgentModelSettings[AgentDepsT] | None:
-        """Contribute the lowered managed settings patch for each model request."""
+        """Contribute the lowered managed settings patch for each model request.
+
+        A published key this SDK has no field for is reported here, where the patch is applied, rather
+        than from validation; see `_report_unmatched` for why.
+        """
 
         def model_settings(ctx: RunContext[AgentDepsT]) -> ModelSettings:
             self.control._code_settings.set(dict(ctx.model_settings or {}))  # pyright: ignore[reportPrivateUsage]
             resolved = self.control.resolved
             if resolved is None or resolved.value.settings is None:
                 return ModelSettings()
-            return _lower_settings(resolved.value.settings)
+            settings = resolved.value.settings
+            for name in settings._unrecognized:  # pyright: ignore[reportPrivateUsage]
+                _report_unmatched(
+                    self.control.on_unmatched,
+                    f'Managed agent config sets {name!r}, which this version of the SDK has no model setting '
+                    'for; that key is not applied.',
+                )
+            return _lower_settings(settings)
 
         return model_settings
 

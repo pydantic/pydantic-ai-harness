@@ -32,7 +32,7 @@ LOCKSTEP = (
     'schemas for the same agent.'
 )
 
-CANONICAL_SCHEMA_SHA256 = '9093dde0236171434775d48d3cb1d412170e1a33988d29a9edfa5411f7ce9af3'
+CANONICAL_SCHEMA_SHA256 = 'e4c38488d6c46440dbf31939291e13fcd56814c1305bc9012cd2158733b0bbad'
 """SHA-256 of this schema's canonical JSON, pinned identically by the platform's `agent-config.test.ts`.
 
 Every other assertion in this module checks a property, and properties are exactly what let the two
@@ -77,8 +77,6 @@ FULL_VALUE: dict[str, Any] = {
         'timeout': 30.0,
         'stop_sequences': ['STOP'],
         'thinking': 'high',
-        'service_tier': 'flex',
-        'provider_options': {'anthropic': {'thinking': {'type': 'enabled', 'budget_tokens': 16384}}},
     },
     'tool_definitions': [
         {
@@ -86,6 +84,7 @@ FULL_VALUE: dict[str, Any] = {
             'new_name': 'lookup_weather',
             'description': 'Look up the current weather for a city.',
             'parameters': {'city': {'description': "City name, e.g. 'London'"}},
+            'toolset': 'weather',
         }
     ],
 }
@@ -282,7 +281,10 @@ def test_unknown_keys_are_accepted_everywhere() -> None:
         'instructions': [{'id': 'agent', 'instructions': 'x', 'future_field': 1}],
     }
     assert schema_errors(AGENT_CONFIG_JSON_SCHEMA, value) == [], LOCKSTEP
-    assert AgentConfig.model_validate(value).settings is not None
+    config = AgentConfig.model_validate(value)
+    # Writable, and the section survives; what this SDK does with the key it doesn't know is the run's
+    # business (`AgentControl.on_unmatched`), not the schema's.
+    assert config.settings is not None and config.settings.model_dump(exclude_none=True) == {}
 
 
 def test_wrong_types_are_rejected() -> None:

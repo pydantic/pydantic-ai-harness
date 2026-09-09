@@ -11,6 +11,7 @@ from logfire.testing import CaptureLogfire
 from logfire.variables import Rollout, Variable, VariableConfig, VariablesConfig
 from pydantic_ai import Agent, RunContext, Tool
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import InstructionPart, ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -32,7 +33,15 @@ from pydantic_ai_harness.logfire import (
     _managed_variable,
 )
 
-from ._helpers import Publish, advertised, capture_tools, get_weather, published_value, variables_provider
+from ._helpers import (
+    Publish,
+    advertised,
+    capture_tools,
+    get_forecast,
+    get_weather,
+    published_value,
+    variables_provider,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -182,19 +191,13 @@ TOOLSET_BLOCK = ('toolset:weather', 'TOOLSET: call get_weather first.', True)
             [TODAY_BLOCK, TOOLSET_BLOCK],
             id='drop-the-agent-literal',
         ),
-        pytest.param(
-            'blocks_inert',
-            {'instructions': [{'id': 'toolset:nope', 'instructions': 'never sent'}]},
-            [AGENT_BLOCK, TODAY_BLOCK, TOOLSET_BLOCK],
-            id='an-id-nothing-matches-is-inert',
-        ),
     ],
 )
 async def test_instruction_blocks_the_model_receives(
     capfire: CaptureLogfire, name: str, value: dict[str, Any], expected: list[tuple[str | None, str, bool]]
 ) -> None:
-    # The whole contract in one table: an entry with no `id` adds a block, an entry with one replaces
-    # or drops the block the agent assembled under that key, and an `id` nothing matches costs nothing.
+    # The whole contract in one table: an entry with no `id` adds a block, and an entry with one
+    # replaces or drops the block the agent assembled under that key.
     #
     # Added blocks land after the dynamic `@agent.instructions` text and before the dynamic toolset
     # text because a capability's contribution is itself dynamic: Pydantic AI sorts static blocks
@@ -202,6 +205,18 @@ async def test_instruction_blocks_the_model_receives(
     # each group. Every added entry becomes one part, joined by a blank line, because they are
     # contributed through `get_instructions` as a single string.
     assert triples(await run_blocks(capfire, name, value)) == expected
+
+
+async def test_an_id_nothing_matches_applies_nothing_and_warns_once(capfire: CaptureLogfire) -> None:
+    # One config is applied across deployments that need not all install the same toolsets, so an
+    # `id` this agent never assembles is not an error by default. It is a place where Logfire shows
+    # one thing and the agent does another, though, so it warns -- once per process, not per request.
+    with pytest.warns(UserWarning, match=r"addresses instruction block 'toolset:nope', which this request") as caught:
+        parts = await run_blocks(
+            capfire, 'blocks_unmatched', {'instructions': [{'id': 'toolset:nope', 'instructions': 'never sent'}]}
+        )
+    assert len(caught) == 1
+    assert triples(parts) == [AGENT_BLOCK, TODAY_BLOCK, TOOLSET_BLOCK]
 
 
 @pytest.mark.parametrize(
@@ -261,14 +276,20 @@ async def test_two_entries_addressing_the_same_block_keep_the_first(capfire: Cap
     assert triples(parts) == [('agent', 'FIRST', False), TODAY_BLOCK, TOOLSET_BLOCK]
 
 
-async def test_overrides_on_an_agent_with_no_instructions_are_inert(capfire: CaptureLogfire) -> None:
-    # One managed config is applied across deployments that need not all assemble the same blocks, so
-    # an agent that sends no instructions at all is not an error -- there is simply nothing to address.
+async def test_overrides_on_an_agent_with_no_instructions_reach_nothing(capfire: CaptureLogfire) -> None:
+    # An agent that sends no instructions at all has nothing to address, so the entry is reported
+    # like any other unmatched `id` -- and `on_unmatched='ignore'` is the way to say that is expected.
     seen: list[InstructionPart] = []
-    capability = AgentControl('no_blocks', label='production')
     published = {'instructions': [{'id': 'agent', 'instructions': 'never sent'}]}
     with variables_provider(capfire, published_value('agent__no_blocks', published)):
-        result = await Agent(capture_instructions(seen), capabilities=[capability]).run('hello')
+        with pytest.warns(UserWarning, match=r"addresses instruction block 'agent', which this request"):
+            result = await Agent(
+                capture_instructions(seen), capabilities=[AgentControl('no_blocks', label='production')]
+            ).run('hello')
+        with warnings.catch_warnings(record=True) as caught:
+            quiet = AgentControl('no_blocks', label='production', on_unmatched='ignore')
+            await Agent(capture_instructions(seen), capabilities=[quiet]).run('hello')
+    assert caught == []
     assert seen == []
     assert instructions_seen(result.all_messages()) == []
 
@@ -326,7 +347,14 @@ async def test_tool_definition_patches(publish: Publish) -> None:
     assert seen[0].parameters_json_schema['properties']['city']['description'] == 'Managed city.'
 
 
-async def test_settings_schema_and_lowering(publish: Publish) -> None:
+async def test_settings_lower_by_canonical_key_and_ignore_the_rest(publish: Publish) -> None:
+    """Only the canonical keys reach the request; anything else in the section is reported, not forwarded.
+
+    A provider-specific key (`openai_temperature`) and a nested escape hatch (`provider_options`) are
+    exactly what an SDK for another framework could not lower, so the contract has neither. Forwarding
+    them anyway would make this SDK apply a value the schema never promised, so each is dropped and
+    named once per process, at the point the settings are applied.
+    """
     seen: list[dict[str, object]] = []
 
     def capture_settings(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -335,32 +363,27 @@ async def test_settings_schema_and_lowering(publish: Publish) -> None:
 
     publish(
         'settings',
-        AgentConfig(
-            settings=AgentConfigSettings.model_validate(
-                {
-                    'temperature': 0.2,
-                    'top_p': 0.4,
-                    'provider_options': {'openai': {'temperature': 0.8}, 'custom': {'flag': True}},
-                    'openai_temperature': 0.6,
-                }
-            )
-        ),
+        {
+            'settings': {
+                'temperature': 0.2,
+                'top_p': 0.4,
+                'provider_options': {'openai': {'temperature': 0.8}},
+                'openai_temperature': 0.6,
+            }
+        },
     )
     capability = AgentControl('settings', label='production')
-    await Agent(
-        FunctionModel(capture_settings),
-        model_settings={'temperature': 0.1, 'top_k': 3},
-        capabilities=[capability],
-    ).run('hello', model_settings={'temperature': 0.9})
-    assert seen == [
-        {
-            'temperature': 0.9,
-            'top_k': 3,
-            'top_p': 0.4,
-            'openai_temperature': 0.8,
-            'custom_flag': True,
-        }
+    with pytest.warns(UserWarning, match='which this version of the SDK has no model setting for') as caught:
+        await Agent(
+            FunctionModel(capture_settings),
+            model_settings={'temperature': 0.1, 'top_k': 3},
+            capabilities=[capability],
+        ).run('hello', model_settings={'temperature': 0.9})
+    assert sorted(str(warning.message).split(',')[0] for warning in caught) == [
+        "Managed agent config sets 'openai_temperature'",
+        "Managed agent config sets 'provider_options'",
     ]
+    assert seen == [{'temperature': 0.9, 'top_k': 3, 'top_p': 0.4}]
 
 
 def test_agent_config_ignores_forward_keys() -> None:
@@ -701,19 +724,6 @@ async def test_baseline_publish_failure_does_not_affect_run_and_warns_once(
     assert second.output.startswith('success')
 
 
-async def test_non_json_baseline_setting_does_not_affect_run(capfire: CaptureLogfire) -> None:
-    # A provider-specific setting: it reaches the baseline through `extra='allow'` (unlike
-    # `extra_headers`/`extra_body`, which are withheld) and has nothing `json.dumps` can write.
-    with variables_provider(capfire, published_value('agent__non_json_baseline', {})):
-        with pytest.warns(UserWarning, match='Failed to publish the code baseline'):
-            result = await Agent(
-                TestModel(),
-                model_settings=cast(ModelSettings, {'openai_custom_option': object()}),
-                capabilities=[AgentControl('non_json_baseline')],
-            ).run('hello')
-    assert result.output.startswith('success')
-
-
 async def test_oversized_code_instructions_do_not_affect_run(capfire: CaptureLogfire) -> None:
     """The length bound is about what a managed value may add, not about what the agent already says.
 
@@ -836,25 +846,115 @@ async def test_rename_collision_warns_and_keeps_other_patches(publish: Publish) 
     assert advertised(seen[:2]) == {'first': 'Managed first.', 'second': None}
 
 
-async def test_unknown_tool_and_parameter_keys_are_inert(publish: Publish) -> None:
+async def test_unknown_parameter_keys_are_inert(publish: Publish) -> None:
+    # A parameter is part of the tool's code-defined shape, so a patch on one the tool does not have
+    # is the tool having changed -- which the baseline shows -- rather than an entry reaching nothing.
     seen: list[ToolDefinition] = []
     publish(
-        'unknown_tool',
+        'unknown_parameter',
         AgentConfig(
             tool_definitions=[
-                ToolDefinitionOverride(name='missing', description='ignored'),
                 ToolDefinitionOverride(
                     name='get_weather', parameters={'missing': ParameterOverride(description='ignored')}
                 ),
             ]
         ),
     )
-    capability = AgentControl('unknown_tool', label='production')
+    capability = AgentControl('unknown_parameter', label='production')
     with warnings.catch_warnings(record=True) as caught:
         await Agent(capture_tools(seen), tools=[get_weather], capabilities=[capability]).run('hello')
     assert caught == []
     assert advertised(seen) == {'get_weather': None}
     assert get_weather('Paris') == 'sunny in Paris'
+
+
+async def test_an_override_no_tool_matches_applies_nothing_and_warns_once(publish: Publish) -> None:
+    # The drift case: the tool was removed or renamed in code, or this deployment never had it. Tool
+    # availability is dynamic across deployments and across steps, so by default it warns rather than
+    # fails -- once per process, although the listing runs on every step.
+    seen: list[ToolDefinition] = []
+    publish(
+        'unknown_tool',
+        AgentConfig(
+            tool_definitions=[
+                ToolDefinitionOverride(name='missing', description='ignored'),
+                ToolDefinitionOverride(name='get_weather', description='Managed.'),
+            ]
+        ),
+    )
+    capability = AgentControl('unknown_tool', label='production')
+    with pytest.warns(UserWarning, match=r"patches tool 'missing', which no toolset advertises") as caught:
+        await Agent(capture_tools(seen), tools=[get_weather], capabilities=[capability]).run('hello')
+    assert len(caught) == 1
+    assert advertised(seen) == {'get_weather': 'Managed.'}
+
+
+async def test_an_override_narrowed_to_a_toolset_matches_only_that_toolsets_tool(publish: Publish) -> None:
+    """`toolset` on an override is the same string the baseline reports, and it narrows the match.
+
+    One config is applied across deployments, and two of them can each have a `search` that means
+    something different. An entry narrowed to the CRM's `search` leaves the docs toolset's alone,
+    and an entry narrowed to a toolset this deployment does not have reaches nothing -- even when a
+    tool of that name exists somewhere else.
+    """
+    seen: list[ToolDefinition] = []
+
+    def search(query: str) -> str:  # pragma: no cover - advertised only
+        return query
+
+    crm = FunctionToolset[object]([search], id='crm')
+    docs = FunctionToolset[object]([get_forecast], id='docs')
+    publish(
+        'qualified',
+        AgentConfig(
+            tool_definitions=[
+                ToolDefinitionOverride(name='search', toolset='crm', description='Search CRM records.'),
+                ToolDefinitionOverride(name='get_forecast', toolset='crm', description='never shown'),
+            ]
+        ),
+    )
+    capability = AgentControl('qualified', label='production')
+    with pytest.warns(UserWarning, match=r"patches tool 'get_forecast' from toolset 'crm', which no toolset"):
+        await Agent(capture_tools(seen), toolsets=[crm, docs], capabilities=[capability]).run('hello')
+    assert advertised(seen) == {'search': 'Search CRM records.', 'get_forecast': None}
+
+
+async def test_a_qualified_override_beats_an_unqualified_one_for_the_same_tool(publish: Publish) -> None:
+    # Both entries are valid side by side: "every `get_weather`" and "the weather toolset's
+    # `get_weather`". Where both match one tool the specific entry wins, and the general one is
+    # outranked rather than unmatched -- it reached the tool it named -- so nothing warns.
+    seen: list[ToolDefinition] = []
+    publish(
+        'qualified_precedence',
+        AgentConfig(
+            tool_definitions=[
+                ToolDefinitionOverride(name='get_weather', description='Any toolset.'),
+                ToolDefinitionOverride(name='get_weather', toolset='weather', description='The weather toolset.'),
+            ]
+        ),
+    )
+    capability = AgentControl('qualified_precedence', label='production')
+    with warnings.catch_warnings(record=True) as caught:
+        await Agent(capture_tools(seen), toolsets=[weather_toolset()], capabilities=[capability]).run('hello')
+    assert caught == []
+    assert advertised(seen) == {'get_weather': 'The weather toolset.'}
+
+
+async def test_two_overrides_with_the_same_toolset_and_name_keep_the_first(publish: Publish) -> None:
+    seen: list[ToolDefinition] = []
+    publish(
+        'duplicate_qualified',
+        AgentConfig(
+            tool_definitions=[
+                ToolDefinitionOverride(name='get_weather', toolset='weather', description='First.'),
+                ToolDefinitionOverride(name='get_weather', toolset='weather', description='Second.'),
+            ]
+        ),
+    )
+    capability = AgentControl('duplicate_qualified', label='production')
+    with pytest.warns(UserWarning, match=r"names tool 'get_weather' from toolset 'weather' more than once"):
+        await Agent(capture_tools(seen), toolsets=[weather_toolset()], capabilities=[capability]).run('hello')
+    assert advertised(seen) == {'get_weather': 'First.'}
 
 
 async def test_two_overrides_naming_the_same_tool_keep_the_first(publish: Publish) -> None:
@@ -876,6 +976,80 @@ async def test_two_overrides_naming_the_same_tool_keep_the_first(publish: Publis
     # Read on every `get_tools`, warned about once.
     assert len(caught) == 1
     assert advertised(seen) == {'get_weather': 'First.'}
+
+
+UNMATCHED_CASES = [
+    pytest.param(
+        {'instructions': [{'id': 'toolset:nope', 'instructions': 'never sent'}]},
+        r"addresses instruction block 'toolset:nope', which this request does not assemble",
+        id='an-instruction-id-no-block-carries',
+    ),
+    pytest.param(
+        {'instructions': [{'id': 'toolset:weather', 'instructions': 'never sent'}]},
+        r"addresses instruction block 'toolset:weather', which the agent recomputes per request",
+        id='an-instruction-id-only-a-dynamic-block-carries',
+    ),
+    pytest.param(
+        {'tool_definitions': [{'name': 'missing', 'description': 'never shown'}]},
+        r"patches tool 'missing', which no toolset advertises",
+        id='a-tool-override-no-tool-matches',
+    ),
+    pytest.param(
+        {'tool_definitions': [{'name': 'get_weather', 'toolset': 'crm', 'description': 'never shown'}]},
+        r"patches tool 'get_weather' from toolset 'crm', which no toolset advertises",
+        id='a-tool-override-narrowed-to-a-toolset-this-agent-lacks',
+    ),
+    pytest.param(
+        {'settings': {'temperature': 0.2, 'service_tier': 'flex'}},
+        r"sets 'service_tier', which this version of the SDK has no model setting for",
+        id='a-settings-key-this-sdk-has-no-field-for',
+    ),
+]
+
+
+async def run_with_unmatched(
+    capfire: CaptureLogfire, name: str, value: dict[str, Any], on_unmatched: Any
+) -> list[InstructionPart]:
+    """Run the block-of-each-kind agent plus the weather toolset's tool under one `on_unmatched` policy."""
+    seen: list[InstructionPart] = []
+    agent = Agent(
+        capture_instructions(seen),
+        instructions='AGENT: You are a concise checkout assistant.',
+        toolsets=[weather_toolset()],
+        capabilities=[AgentControl(name, label='production', on_unmatched=on_unmatched)],
+    )
+    with variables_provider(capfire, published_value(f'agent__{name}', value)):
+        await agent.run('hello')
+    return seen
+
+
+@pytest.mark.parametrize('value,message', UNMATCHED_CASES)
+async def test_on_unmatched_error_fails_the_run_with_the_warning_message(
+    capfire: CaptureLogfire, value: dict[str, Any], message: str
+) -> None:
+    # For the deployment that would rather stop than run with part of its published config silently
+    # unapplied. The message is the one `'warn'` would have emitted, so a warning someone tolerated
+    # reads like the error they would have gotten by not tolerating it.
+    with pytest.raises(UserError, match=message):
+        await run_with_unmatched(capfire, 'unmatched_error', value, 'error')
+
+
+@pytest.mark.parametrize('value,message', UNMATCHED_CASES)
+async def test_on_unmatched_ignore_applies_nothing_and_says_nothing(
+    capfire: CaptureLogfire, value: dict[str, Any], message: str
+) -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        parts = await run_with_unmatched(capfire, 'unmatched_ignore', value, 'ignore')
+    assert caught == []
+    assert triples(parts) == [AGENT_BLOCK, TOOLSET_BLOCK]
+
+
+@pytest.mark.parametrize('value,message', UNMATCHED_CASES)
+async def test_on_unmatched_warn_is_the_default(capfire: CaptureLogfire, value: dict[str, Any], message: str) -> None:
+    with pytest.warns(UserWarning, match=message):
+        parts = await run_with_unmatched(capfire, 'unmatched_warn', value, 'warn')
+    assert triples(parts) == [AGENT_BLOCK, TOOLSET_BLOCK]
+    assert AgentControl('unmatched_default').on_unmatched == 'warn'
 
 
 async def test_schema_without_properties_is_tolerated(publish: Publish) -> None:
@@ -977,14 +1151,16 @@ async def test_before_model_request_outside_run_is_inert() -> None:
         assert await half.before_model_request(cast(Any, None), request) is request
 
 
-async def test_credential_bearing_settings_stay_out_of_the_published_baseline(
+async def test_only_canonical_settings_reach_the_published_baseline(
     capfire: CaptureLogfire, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`extra_headers` and `extra_body` apply to the run but never describe the agent to a reader.
+    """The run's settings carry more than the contract names, and none of it describes the agent to a reader.
 
-    `AgentConfigSettings` allows extra keys so a provider-specific setting survives; these two arrive
-    the same way and routinely carry authorization. The baseline is published to a variable every
-    project member can read, so they are withheld from it -- and only from it.
+    `extra_headers` and `extra_body` are forwarded to the provider request and routinely carry
+    authorization; a provider-specific key may not even be JSON. The baseline is published to a
+    variable every project member can read, and it holds the canonical keys only -- because that is
+    all `AgentConfigSettings` has fields for, not because of a list of names to withhold. The run
+    itself still sends everything.
     """
     monkeypatch.setattr(_agent_control, '_spawn_baseline_publish', _agent_control._publish_baseline)
     sent: list[ModelSettings | None] = []
@@ -1011,15 +1187,16 @@ async def test_credential_bearing_settings_stay_out_of_the_published_baseline(
                     'temperature': 0.1,
                     'extra_headers': {'Authorization': 'Bearer sk-secret'},
                     'extra_body': {'signature': 'sk-secret'},
-                    'openai_custom_option': 'kept',
+                    'openai_custom_option': object(),
                 },
             ),
             capabilities=[AgentControl('secretless_baseline')],
         ).run('hello')
 
-    assert json.loads(updates[0].example or '{}')['settings'] == {'temperature': 0.1, 'openai_custom_option': 'kept'}
-    # Withheld from the snapshot, not from the request: the run still sends them.
+    assert json.loads(updates[0].example or '{}')['settings'] == {'temperature': 0.1}
+    # Left out of the snapshot, not out of the request: the run still sends them.
     assert sent[0] is not None and sent[0]['extra_headers'] == {'Authorization': 'Bearer sk-secret'}  # type: ignore[typeddict-item]
+    assert sent[0]['openai_custom_option'] is not None  # type: ignore[typeddict-item]
 
 
 async def test_rename_routes_to_the_tool_the_model_was_handed(capfire: CaptureLogfire) -> None:
@@ -1071,7 +1248,9 @@ async def test_rename_routes_to_the_tool_the_model_was_handed(capfire: CaptureLo
         await Agent(
             FunctionModel(model),
             toolsets=[NamePolicy(Flipping(FunctionToolset[object]([first, second])))],
-            capabilities=[AgentControl('rename_identity')],
+            # Each listing advertises one of the two patched tools, so the other's override reaches
+            # nothing on that listing: the dynamic case `on_unmatched` exists for, and not this test's.
+            capabilities=[AgentControl('rename_identity', on_unmatched='ignore')],
         ).run('hello')
 
     assert authorized == ['first']

@@ -87,9 +87,15 @@ Pinning `label='production'` is the recommended default, for the same
 Anything you don't change in Logfire keeps doing what the code says, and removing a change there puts
 that piece back the way the code has it.
 
+The settings are the canonical ones every framework has a knob for, under the names
+[`ModelSettings`](https://ai.pydantic.dev/api/settings/) gives them. Provider-specific settings
+(`openai_reasoning_effort`, `extra_headers`) stay in code, where they always were.
+
 A tool's implementation and the shape of its arguments stay code-owned: Logfire edits what the model
 is *told* about a tool, never what it *does*. A renamed tool still routes to the same function, and
-`ctx.tool_name` is still the original name, so nothing in code has to know about the rename.
+`ctx.tool_name` is still the original name, so nothing in code has to know about the rename. Logfire
+shows which toolset each tool came from, and a change can be narrowed to that toolset's tool of a
+given name -- so two services sharing one config, each with its own `search`, can be told apart.
 
 Your call site still wins. A `run(model=...)` or `run(model_settings=...)` argument overrides the
 published value for that one run, and the published value overrides what the agent was constructed
@@ -181,6 +187,24 @@ Nothing this SDK can't act on costs more than the piece that contains it. A sett
 recognize drops that setting; a malformed tool entry drops that tool; a block it can't apply drops
 that block. The rest of the config still applies, and each drop warns once per process naming what it
 skipped, rather than once per run.
+
+A published change can also be perfectly valid and still reach nothing *here*: an instruction block
+this deployment never assembles (or only computes per request), a tool no toolset advertises, a
+setting this version of the SDK has no field for. `on_unmatched` decides what that costs:
+
+```python {test="skip"}
+AgentControl(label='production', on_unmatched='error')
+```
+
+- `'warn'` (the default) emits a `UserWarning` once per process, at the point the change would have
+  applied, so a change Logfire shows and the agent isn't making is visible without stopping anything.
+- `'error'` raises `UserError` with the same message there, for a deployment that would rather stop
+  than run with part of its published config unapplied.
+- `'ignore'` applies nothing and says nothing.
+
+Warning is the default because tool availability is dynamic: one config is applied across services
+that need not all install the same toolsets, and a toolset can advertise different tools from one
+request to the next, so a change that reaches nothing now is not necessarily wrong.
 
 Changes are picked up **once per run**. Publishing mid-run takes effect on the next run, which is what
 lets every span of a run agree on the version that produced it.
