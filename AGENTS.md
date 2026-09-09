@@ -112,6 +112,11 @@ The house pattern (spans on `ctx.tracer`, attribute naming, content behind
 - prefer the most generic input types possible (reduce dependency chains)
 - don't add comments that restate what the code does
 
+## Async
+
+- Use `anyio.create_task_group()` for structured concurrency. Do not use `asyncio.gather()`.
+- Keep a strong reference to every `asyncio.Task` until it finishes. Do not create unowned background tasks.
+
 ## Writing style
 
 Applies to docs, READMEs, docstrings, comments, commit messages, and PR text.
