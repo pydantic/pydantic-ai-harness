@@ -16,7 +16,11 @@ from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelect
 from typing_extensions import TypedDict
 
 from pydantic_ai_harness.code_mode._eager import EagerCodeModeToolset
-from pydantic_ai_harness.code_mode._speculation import SpeculationCoordinator, SpeculationStats
+from pydantic_ai_harness.code_mode._speculation import (
+    MAX_SPECULATIONS_PER_PART,
+    SpeculationCoordinator,
+    SpeculationStats,
+)
 from pydantic_ai_harness.code_mode._toolset import (
     CodeModeMount,
     CodeModeOS,
@@ -134,8 +138,10 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     text has streamed; when the completed snippet dispatches the same call, the in-flight result
     is adopted instead of starting cold. Pass the names of tools that are safe to run early, or
     `'declared'` to trust what the tools declare about themselves (`Tool(metadata={'read_only':
-    True})`, `'idempotent'`, or MCP `readOnlyHint`/`idempotentHint` annotations). Composes with
-    `eager`. Inactive under durable execution. See the Code Mode guide for the mechanics.
+    True})` or the MCP `readOnlyHint` annotation). At most `max_tool_calls` (and never more than
+    32) calls start early per `run_code` call. Composes with `eager`. Inactive under durable
+    execution and when the run's parallel execution mode is sequential. See the Code Mode guide
+    for the mechanics.
     """
 
     dynamic_catalog: bool = False
@@ -197,7 +203,11 @@ class CodeMode(AbstractCapability[AgentDepsT]):
         clone.speculation_stats = self.speculation_stats
         if self.speculate is not None:
             allowlist = 'declared' if isinstance(self.speculate, str) else frozenset(self.speculate)
-            clone._speculation = SpeculationCoordinator(allowlist=allowlist, stats=self.speculation_stats)
+            clone._speculation = SpeculationCoordinator(
+                allowlist=allowlist,
+                stats=self.speculation_stats,
+                launch_cap=min(MAX_SPECULATIONS_PER_PART, self.max_tool_calls),
+            )
         return clone
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:

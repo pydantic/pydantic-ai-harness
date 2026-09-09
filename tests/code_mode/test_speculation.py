@@ -783,17 +783,21 @@ class TestSpeculationEdgeCases:
         assert not [e for e in emitted(ctx) if isinstance(e, SpeculativeCallEvictedEvent)]
 
     @pytest.mark.parametrize(
-        ('padding_lines', 'chunk_size'),
+        ('padding_lines', 'chunk_size', 'prefetched'),
         [
-            pytest.param(40_000, 1 << 16, id='single-prefix-cap'),
-            pytest.param(20_000, 1 << 14, id='cumulative-work-cap'),
+            pytest.param(40_000, 1 << 16, 0, id='single-prefix-cap'),
+            pytest.param(20_000, 1 << 14, 1, id='cumulative-work-cap'),
         ],
     )
-    async def test_stream_scan_halts_past_the_host_parse_budget(self, padding_lines: int, chunk_size: int):
+    async def test_stream_scan_halts_past_the_host_parse_budget(
+        self, padding_lines: int, chunk_size: int, prefetched: int
+    ):
         """An oversized streamed prefix stops host-side scanning; the dispatch still runs it whole.
 
         Both bounds apply: one decode of a prefix past `MAX_SCAN_CHARS`, and rescans of a
-        growing prefix whose total passes `MAX_SCAN_WORK_CHARS` first.
+        growing prefix whose total passes `MAX_SCAN_WORK_CHARS` first. A snippet past the
+        single-parse cap is not parsed by the execution prefetch either, so it runs cold; one
+        that only exhausted the cumulative budget is still prefetched once, at dispatch.
         """
         log = ToolLog()
         capability = CodeMode[None](speculate=['search'])
@@ -804,11 +808,9 @@ class TestSpeculationEdgeCases:
 
         assert result.output == 'done'
         assert log.calls == [('search', 'alpha')]
-        # The prefix outgrew the scan budget before the call streamed, so the stream never
-        # launched it; the execution prefetch is what started it.
         assert log.started_during_stream == 0
-        assert capability.speculation_stats.launched == 1
-        assert capability.speculation_stats.adopted == 1
+        assert capability.speculation_stats.launched == prefetched
+        assert capability.speculation_stats.adopted == prefetched
 
     async def test_no_eligible_tool_this_step_runs_everything_cold(self):
         """An allowlist naming no sandboxed tool leaves both the stream and the prefetch inert."""
@@ -844,6 +846,164 @@ class TestSpeculationEdgeCases:
 
         assert result.output == 'done'
         assert capability.speculation_stats.launched == 0
+
+    async def test_inactive_when_the_run_executes_tools_sequentially(self):
+        """A run opted into sequential tool execution gets no launches; they would overlap."""
+        log = ToolLog()
+        capability = CodeMode[None](speculate=['search'])
+        agent = build_agent(log, padded('a = await search(query="alpha")\nprint(a)'), capability)
+
+        with ToolManager.parallel_execution_mode('sequential'):
+            result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert log.calls == [('search', 'alpha')]
+        assert log.started_during_stream == 0
+        assert capability.speculation_stats.launched == 0
+
+    async def test_launches_are_capped_by_max_tool_calls(self):
+        """A snippet cannot start more early calls than the nested-call budget allows."""
+        log = ToolLog()
+        capability = CodeMode[None](speculate=['search'], max_tool_calls=2)
+        code = padded('a = await search(query="a")\nb = await search(query="b")\nprint(a, b)')
+        # Dead branches hold two more literal calls the cap must refuse.
+        code = 'if False:\n    await search(query="x")\n    await search(query="y")\n' + code
+        agent = build_agent(log, code, capability)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert capability.speculation_stats.launched == 2
+        assert log.calls.count(('search', 'a')) + log.calls.count(('search', 'b')) == 2
+
+    async def test_odd_literal_arguments_key_without_crashing_and_stay_distinct(self):
+        """Literal keys the sandbox could never dispatch still stream past the text scanner.
+
+        Sandbox stubs are JSON-shaped, so only the text scan can see `{1: ...}` or a tuple key
+        (here spelled inside string literals). Keying them must neither fail the scan (tuple
+        keys broke JSON) nor collide with the `{"1": ...}` the snippet really dispatches.
+        """
+        seen: list[str] = []
+
+        async def lookup(spec: dict[str, str] | list[int]) -> str:
+            """Return a canned result."""
+            seen.append(repr(spec))
+            await asyncio.sleep(0)
+            return 'r'
+
+        log = ToolLog()
+        capability = CodeMode[None](speculate=['lookup'])
+        code = padded(
+            's1 = \'lookup(spec={1: "x"})\'\n'
+            's2 = \'lookup(spec={(1, 2): "x"})\'\n'
+            "s3 = 'lookup(spec={3, 1, 2})'\n"
+            'b = await lookup(spec={"1": "x"})\n'
+            'c = await lookup(spec=[3, 1, 2])\n'
+            'print(b, c)'
+        )
+        agent = build_agent(log, code, capability)
+        agent.tool_plain(lookup)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert capability.speculation_stats.launched == 5
+        assert capability.speculation_stats.adopted == 2
+        assert capability.speculation_stats.evicted == 3
+        assert seen.count("{'1': 'x'}") == 1
+        assert seen.count('[3, 1, 2]') == 1
+
+    async def test_paren_walks_count_against_the_scan_budget(self, monkeypatch: pytest.MonkeyPatch):
+        """Nested calls make the paren scanner walk overlapping spans; that work is bounded too."""
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._speculation.MAX_SCAN_WORK_CHARS', 20_000)
+        log = ToolLog()
+        capability = CodeMode[None](speculate=['search'])
+        code = 'x = await ' + 'search(' * 80 + 'query="q"' + ')' * 80 + '\nprint(x)'
+        agent = build_agent(log, code, capability, chunk_size=1 << 16)
+        events: list[CapabilityEvent] = []
+
+        result = await agent.run('go', event_stream_handler=event_collector(events))
+
+        assert result.output == 'done'
+        # The stream scan halted before launching anything; the innermost literal call is the
+        # execution prefetch's, found by the AST once the snippet reached dispatch.
+        launches = [e for e in events if isinstance(e, SpeculativeCallLaunchedEvent)]
+        assert [e.phase for e in launches] == ['execution']
+
+    async def test_rewritten_call_id_still_evicts_the_streamed_launches(self):
+        """A provider that re-keys the part mid-stream still gets its unclaimed launches evicted."""
+        released = asyncio.Event()
+
+        async def search(query: str) -> str:
+            """Block until released, so eviction has to cancel it."""
+            await released.wait()
+            return f'result:{query}'  # pragma: no cover - always cancelled or unreached
+
+        code = 'if False:\n    a = await search(query="never")\nb = 1\nb'
+        async with prepared_toolset([Tool(search)], CodeMode[None](speculate=['search'])) as (
+            run_capability,
+            toolset,
+            ctx,
+            run_code,
+        ):
+            await observe(
+                run_capability,
+                ctx,
+                [
+                    PartStartEvent(index=0, part=ToolCallPart(tool_name='run_code', args='', tool_call_id='old')),
+                    PartDeltaEvent(
+                        index=0, delta=ToolCallPartDelta(args_delta=json.dumps({'code': code}), tool_call_id='new')
+                    ),
+                ],
+            )
+            assert run_capability.speculation_stats.launched == 1
+
+            result = await toolset.call_tool('run_code', {'code': code}, run_code_context(ctx, 'new'), run_code)
+
+        assert isinstance(result, ToolReturn)
+        assert run_capability.speculation_stats.evicted == 1
+        evictions = [e for e in emitted(ctx) if isinstance(e, SpeculativeCallEvictedEvent)]
+        assert [(e.tool_call_id, e.state) for e in evictions] == [('new', 'pending')]
+
+    async def test_eviction_abandons_a_tool_that_swallows_cancellation(self, monkeypatch: pytest.MonkeyPatch):
+        """A launched tool that refuses to cancel cannot hold the `run_code` result hostage."""
+        monkeypatch.setattr('pydantic_ai_harness.code_mode._speculation.CANCEL_TIMEOUT_SECONDS', 0.05)
+        stubborn_started = asyncio.Event()
+
+        async def search(query: str) -> str:
+            """Ignore cancellation for longer than the eviction budget."""
+            stubborn_started.set()
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    await asyncio.sleep(0.2)
+                    raise
+
+        code = 'if False:\n    a = await search(query="never")\nb = 1\nb'
+        async with prepared_toolset([Tool(search)], CodeMode[None](speculate=['search'])) as (
+            run_capability,
+            toolset,
+            ctx,
+            run_code,
+        ):
+            await observe(
+                run_capability,
+                ctx,
+                [
+                    PartStartEvent(
+                        index=0, part=ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='c1')
+                    )
+                ],
+            )
+            await asyncio.wait_for(stubborn_started.wait(), timeout=1)
+
+            result = await asyncio.wait_for(
+                toolset.call_tool('run_code', {'code': code}, run_code_context(ctx, 'c1'), run_code), timeout=1
+            )
+
+        assert isinstance(result, ToolReturn)
+        assert run_capability.speculation_stats.evicted == 1
 
 
 def event_collector(events: list[CapabilityEvent]):
@@ -988,7 +1148,7 @@ class TestDeclaredSpeculation:
             return query  # pragma: no cover - eligibility test only
 
         def idem(query: str) -> str:
-            """Declared idempotent."""
+            """Declared idempotent, which says nothing about the first call's effect."""
             return query  # pragma: no cover - eligibility test only
 
         def readonly(query: str) -> str:
@@ -1017,7 +1177,7 @@ class TestDeclaredSpeculation:
 
         tools = [
             Tool(free, metadata={'read_only': True}),
-            Tool(idem, metadata={'idempotent': True}),
+            Tool(idem, metadata={'idempotent': True, 'annotations': {'idempotentHint': True}}),
             Tool(readonly, metadata={'annotations': {'readOnlyHint': True, 'title': 'Read'}}),
             Tool(malformed, metadata={'annotations': 'not-a-mapping'}),
             Tool(hintless, metadata={'annotations': {'title': 'No hints'}}),
@@ -1029,7 +1189,7 @@ class TestDeclaredSpeculation:
             speculation = toolset.speculation
             assert speculation is not None
             assert speculation.eligible('free')
-            assert speculation.eligible('idem')
+            assert not speculation.eligible('idem')
             assert speculation.eligible('readonly')
             assert not speculation.eligible('malformed')
             assert not speculation.eligible('hintless')

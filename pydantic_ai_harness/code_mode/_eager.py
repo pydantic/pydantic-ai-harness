@@ -14,14 +14,14 @@ from pydantic_ai.messages import AgentStreamEvent, PartDeltaEvent, PartStartEven
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets.abstract import ToolsetTool
 
-from ._streaming import MAX_SCAN_CHARS, MAX_SCAN_WORK_CHARS, closed_statements, decode_partial_args
+from ._streaming import (
+    CANCEL_TIMEOUT_SECONDS,
+    MAX_SCAN_CHARS,
+    MAX_SCAN_WORK_CHARS,
+    closed_statements,
+    decode_partial_args,
+)
 from ._toolset import CodeModeToolset, RunCodeExecution
-
-PUMP_CANCEL_TIMEOUT_SECONDS = 5.0
-"""How long to wait for a cancelled pump to release a non-cooperative nested tool before
-abandoning it. Abandoning is safe: the pump's feed aborts with the cancellation, and the
-executor cancels the in-flight nested calls, so an abandoned pump starts no further
-tool calls."""
 
 
 @dataclass(kw_only=True)
@@ -270,7 +270,7 @@ class EagerCoordinator(Generic[AgentDepsT]):
         pump.cancel()
         # A nested tool that swallows the cancellation can hold the pump past the budget;
         # waiting without a deadline would let one such tool hang run teardown.
-        await asyncio.wait({pump}, timeout=PUMP_CANCEL_TIMEOUT_SECONDS)
+        await asyncio.wait({pump}, timeout=CANCEL_TIMEOUT_SECONDS)
 
     async def close(self) -> None:
         """Cancel all background work owned by this run."""

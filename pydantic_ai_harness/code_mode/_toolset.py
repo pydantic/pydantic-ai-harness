@@ -476,7 +476,7 @@ def _sanitize_tool_name(name: str) -> str:
     return sanitized or '_'
 
 
-def _global_mode_is_sequential(get_mode: Callable[..., ParallelExecutionMode]) -> bool:
+def global_mode_is_sequential(get_mode: Callable[..., ParallelExecutionMode]) -> bool:
     """Whether the run-scoped execution mode forces sandbox tool calls to run sequentially.
 
     pydantic-ai v1's `get_parallel_execution_mode` took the pending calls list
@@ -984,7 +984,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
         #   Checked with empty calls to isolate the context var from per-tool flags.
         # - sequential_tools: per-tool `sequential` flags on ToolDefinition.
         #   These tools are rendered as `def` (sync) and resolved inline.
-        global_sequential = _global_mode_is_sequential(tool_manager.get_parallel_execution_mode)
+        global_sequential = global_mode_is_sequential(tool_manager.get_parallel_execution_mode)
         sequential_tools = {name for name, td in callable_defs.items() if td.sequential}
 
         speculation = self.speculation

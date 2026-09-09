@@ -279,10 +279,10 @@ Keep these limitations in mind:
 
 `speculate` starts side-effect-free tool calls while the model is still writing the
 `run_code` call. As the `code` argument streams in, `CodeMode` looks for calls to the named
-tools whose arguments are all keyword literals. Each one starts as soon as its closing
-parenthesis has streamed, even if the statement around it (an `if` arm, a `with` body) is not
-finished yet. When the completed snippet runs and reaches the same call, it takes the result
-that is already in flight instead of starting the tool cold. This overlaps tool latency with
+tools whose arguments are all keyword literals. Each one starts once the line that completes
+it has streamed, even if the statement around it (an `if` arm, a `with` body) is not finished
+yet. When the completed snippet runs and reaches the same call, it takes the result that is
+already in flight instead of starting the tool cold. This overlaps tool latency with
 model generation (speculative programmatic tool calling,
 <https://alexzhang13.github.io/blog/2026/spec-ptc/>).
 
@@ -298,13 +298,16 @@ agent = Agent(
 
 Name only tools that are safe to run early: a speculated call can run for a branch the
 snippet never takes, so it must be harmless to repeat or discard. Calls the snippet never
-claims are cancelled when the snippet finishes.
+claims are cancelled when the snippet finishes successfully. A snippet that fails before it
+runs (a syntax or type error) keeps its launches so the retry can claim them; they are
+cancelled when the run ends if no retry does.
 
 Instead of naming tools, pass `speculate='declared'` to trust what the tools say about
-themselves: tools marked `Tool(..., metadata={'read_only': True})` (or `'idempotent'`), and
-MCP tools whose server publishes the `readOnlyHint` or `idempotentHint` annotation. A
-declaration is the tool author's claim, not a proof, so `'declared'` extends the same trust
-to authors that an explicit list places in you.
+themselves: tools marked `Tool(..., metadata={'read_only': True})`, and MCP tools whose
+server publishes the `readOnlyHint` annotation. Idempotence is not enough, an idempotent
+delete still deletes, so `idempotent` declarations do not count. A declaration is the tool
+author's claim, not a proof, so `'declared'` extends the same trust to authors that an
+explicit list places in you.
 
 ```python
 from pydantic_ai import Agent, Tool
@@ -336,9 +339,14 @@ Keep these limitations in mind:
   from an earlier statement waits for that statement.
 - Calls are found in the streamed text, so a call spelled inside a string literal or a
   comment can start too. It is discarded when the snippet finishes.
-- `sequential` tools never speculate.
-- Hooks on a speculated tool run when it starts, not when the snippet claims it.
-- At most 32 calls start early per `run_code` call; later ones run cold.
+- `sequential` tools never speculate, and nothing speculates when the run's parallel
+  execution mode is `sequential`.
+- Hooks on a speculated tool run when it starts, not when the snippet claims it. Hooks,
+  approval, and guardrails on `run_code` itself run only after the model has finished writing
+  the call, so they cannot stop a call that has already started early; this is the same
+  contract as eager mode.
+- At most `max_tool_calls` calls (and never more than 32) start early per `run_code` call;
+  later ones run cold.
 - Enabling `speculate` puts runs in streaming mode, and the option is disabled under durable
   execution such as Temporal or DBOS.
 
@@ -347,14 +355,15 @@ finished writing, and speculation starts the calls it has not reached yet (branc
 after a slow statement). Statements that eager mode runs claim those launches too.
 
 Aggregate counters are available on `CodeMode.speculation_stats` (`launched`, `adopted`,
-`evicted`). Each transition is also emitted as a
-[capability event](https://pydantic.dev/docs/ai/core-concepts/hooks/) in the `code_mode`
-namespace, so UIs and other capabilities can follow the lifecycle live from the run's event
-stream: `SpeculativeCodeUpdateEvent` (the decoded snippet so far, with its closed-statement
+`evicted`). The lifecycle is also emitted as
+[capability events](https://pydantic.dev/docs/ai/core-concepts/hooks/) in the `code_mode`
+namespace, so UIs and other capabilities can follow it live from the run's event stream:
+`SpeculativeCodeUpdateEvent` (the decoded snippet so far, with its closed-statement
 boundary), `SpeculativeCallLaunchedEvent` (with the launching statement's line span and a
-`phase` of `streaming` or `execution`), `SpeculativeCallSettledEvent`, and, once the snippet
-runs, `SpeculativeCallClaimedEvent`, `SpeculativeCallMissedEvent`, and
-`SpeculativeCallEvictedEvent`. When speculation did work for a `run_code` call, the return's
+`phase` of `streaming` or `execution`), `SpeculativeCallSettledEvent` (only while the stream
+is still flowing; a call that finishes later reports its state on its claimed or evicted
+event instead), and, once the snippet runs, `SpeculativeCallClaimedEvent`,
+`SpeculativeCallMissedEvent`, and `SpeculativeCallEvictedEvent`. When speculation did work for a `run_code` call, the return's
 history-only metadata gains a `speculation` entry (`hits`, `hidden_ms`, `misses`, `wasted`)
 alongside the nested `tool_calls`/`tool_returns` records; the content the model sees is
 unchanged.

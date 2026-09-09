@@ -30,6 +30,10 @@ equivalent UTF-8 byte size can be up to four times larger.
 MAX_SCAN_WORK_CHARS = 1 << 20
 """Cumulative characters a streamed call may hand to host parsers."""
 
+CANCEL_TIMEOUT_SECONDS = 5.0
+"""How long to wait for cancelled streamed work to release a non-cooperative nested tool before
+abandoning it. Abandoning is safe: the cancelled feed or launch starts no further tool calls."""
+
 
 def decode_partial_args(args_text: str) -> PartialArgs | None:
     """Recover what has streamed so far of the `run_code` arguments, or `None` if undecodable.

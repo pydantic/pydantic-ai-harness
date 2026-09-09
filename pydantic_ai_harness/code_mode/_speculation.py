@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import ast
 import asyncio
-import json
 import re
 import time
 from collections import deque
@@ -55,12 +54,18 @@ from pydantic_ai_harness.code_mode._events import (
     SpeculativeCodeUpdateEvent,
 )
 from pydantic_ai_harness.code_mode._streaming import (
+    CANCEL_TIMEOUT_SECONDS,
     MAX_SCAN_CHARS,
     MAX_SCAN_WORK_CHARS,
     closed_statements,
     decode_partial_args,
 )
-from pydantic_ai_harness.code_mode._toolset import NestedCallOutcome, RunCodeExecution, run_nested_call
+from pydantic_ai_harness.code_mode._toolset import (
+    NestedCallOutcome,
+    RunCodeExecution,
+    global_mode_is_sequential,
+    run_nested_call,
+)
 
 _RUN_CODE_TOOL_NAME = 'run_code'
 
@@ -167,9 +172,30 @@ class _PartWatch:
     """Launch-to-claim wall-clock summed over hits: latency the snippet did not wait for."""
 
 
+def _canonical(value: Any) -> object:
+    """A type-tagged, order-normalized form of a literal value whose `repr` is injective.
+
+    JSON was not enough: it coerces `{1: 'x'}` and `{'1': 'x'}` to the same text and rejects
+    tuple keys outright. Tagging every node with its type keeps `1`, `1.0`, `True`, and `'1'`
+    apart, and sorting unordered containers by the `repr` of their members makes the form
+    independent of construction order while staying comparable across mixed member types.
+    """
+    # Same idiom as `_preview`: `isinstance` narrows to an unparameterized container, so the
+    # elements are read through an unnarrowed alias to keep them typed.
+    raw: Any = value
+    if isinstance(value, dict):
+        items = [(_canonical(key), _canonical(item)) for key, item in raw.items()]
+        return ('dict', tuple(sorted(items, key=repr)))
+    if isinstance(value, (set, frozenset)):
+        return (type(raw).__name__, tuple(sorted((_canonical(member) for member in raw), key=repr)))
+    if isinstance(value, (list, tuple)):
+        return (type(raw).__name__, tuple(_canonical(element) for element in raw))
+    return (type(raw).__name__, value)
+
+
 def _canonical_key(sandbox_name: str, kwargs: dict[str, object]) -> str:
     """Claim identity for one concrete call: both launch and claim hash through here."""
-    return json.dumps([sandbox_name, kwargs], sort_keys=True, default=repr)
+    return repr((sandbox_name, _canonical(kwargs)))
 
 
 _StrictBool = Annotated[bool, Strict()]
@@ -180,14 +206,12 @@ class _McpSafetyHints(TypedDict, total=False):
     """The MCP tool annotations that vouch for early execution, as they arrive in tool metadata."""
 
     readOnlyHint: _StrictBool
-    idempotentHint: _StrictBool
 
 
 class _SafetyDeclarations(TypedDict, total=False):
     """The tool metadata keys `speculate='declared'` reads; unrelated keys are ignored."""
 
     read_only: _StrictBool
-    idempotent: _StrictBool
     annotations: _McpSafetyHints
 
 
@@ -197,26 +221,22 @@ _SAFETY_ADAPTER = TypeAdapter(_SafetyDeclarations)
 def declares_speculation_safety(tool_def: ToolDefinition) -> bool:
     """Whether a tool's own definition presents evidence that early execution is safe.
 
-    Two channels: first-party tools set `metadata={'read_only': True}` (or `'idempotent'`) on
-    the `Tool`, and MCP servers publish `readOnlyHint` or `idempotentHint` tool annotations,
-    which arrive under `metadata['annotations']`. Hints are the server's claim, not a proof;
-    `speculate='declared'` extends them the trust an explicit allowlist places in the user.
+    Two channels: first-party tools set `metadata={'read_only': True}` on the `Tool`, and MCP
+    servers publish the `readOnlyHint` tool annotation, which arrives under
+    `metadata['annotations']`. Idempotence is deliberately not evidence: an idempotent delete
+    still deletes, and a launch from an untaken branch would run it. Hints are the server's
+    claim, not a proof; `speculate='declared'` extends them the trust an explicit allowlist
+    places in the user.
 
     The key vocabulary tracks pydantic-ai's tool behavior annotations (pydantic/pydantic-ai#6344,
-    catalogued in pydantic/pydantic-ai#7955), so first-class `ToolDefinition` fields with these
-    names would already be in use here.
+    catalogued in pydantic/pydantic-ai#7955), so a first-class `ToolDefinition` field with this
+    name would already be in use here.
     """
     try:
         declared = _SAFETY_ADAPTER.validate_python(tool_def.metadata or {})
     except ValidationError:
         return False
-    hints = declared.get('annotations', {})
-    return bool(
-        declared.get('read_only')
-        or declared.get('idempotent')
-        or hints.get('readOnlyHint')
-        or hints.get('idempotentHint')
-    )
+    return bool(declared.get('read_only') or declared.get('annotations', {}).get('readOnlyHint'))
 
 
 _SKIP_CONTAINERS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
@@ -326,7 +346,7 @@ def _close_paren(code: str, start: int) -> int | None:
     return None
 
 
-def _text_literal_calls(code: str, eligible: frozenset[str]) -> list[_ExtractedCall]:
+def _text_literal_calls(code: str, eligible: frozenset[str]) -> tuple[list[_ExtractedCall], int]:
     """Extract complete eligible calls straight from streamed text, closed statement or not.
 
     This is what makes launches fire as soon as a call finishes streaming: `_literal_calls` only
@@ -337,8 +357,12 @@ def _text_literal_calls(code: str, eligible: frozenset[str]) -> list[_ExtractedC
     Text-level extraction cannot see context, so a call spelled inside a string literal, a
     comment, or a `def` body can launch too. Those launches waste a pure call and are evicted at
     completion; the `def`/attribute lookbehind filters the two cheap-to-catch shapes.
+
+    Also returns the characters the paren scanner walked, so the caller can charge it against
+    the scan budget: nested calls make the walks overlap, and the sum is what bounds the work.
     """
     out: list[_ExtractedCall] = []
+    walked = 0
     for name in eligible:
         for match in re.finditer(rf'\b{re.escape(name)}\s*\(', code):
             before = code[: match.start()]
@@ -346,7 +370,11 @@ def _text_literal_calls(code: str, eligible: frozenset[str]) -> list[_ExtractedC
                 continue
             end = _close_paren(code, match.end() - 1)
             if end is None:
-                continue
+                # Every later occurrence sits inside this still-open call, so none of them is a
+                # launchable top-level call yet; stopping here keeps one scan linear.
+                walked += len(code) - match.start()
+                break
+            walked += end - match.start()
             try:
                 expression = ast.parse(code[match.start() : end], mode='eval')
             except SyntaxError:
@@ -364,7 +392,7 @@ def _text_literal_calls(code: str, eligible: frozenset[str]) -> list[_ExtractedC
                     line_end=code[:end].count('\n') + 1,
                 )
             )
-    return out
+    return out, walked
 
 
 @dataclass(kw_only=True)
@@ -378,6 +406,12 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
 
     allowlist: SpeculationAllowlist
     stats: SpeculationStats
+    launch_cap: int = MAX_SPECULATIONS_PER_PART
+    """Most launches one `run_code` part may start; `CodeMode` lowers it to its `max_tool_calls`.
+
+    Launches are host tasks the snippet has not asked for yet, so they cannot reserve from the
+    part's nested-call budget; capping them at that budget bounds the total either way.
+    """
 
     _step: _StepIngredients[AgentDepsT] | None = field(default=None, init=False)
     _parts: dict[str, _PartWatch] = field(default_factory=dict[str, _PartWatch], init=False)
@@ -433,7 +467,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
             case PartStartEvent():
                 self._index_to_part.pop(event.index, None)
             case PartDeltaEvent(delta=ToolCallPartDelta() as delta):
-                watch = self._watch_at(event.index)
+                watch = self._watch_at(event.index, delta.tool_call_id)
                 if watch is not None:
                     if isinstance(delta.args_delta, str):
                         watch.args_text += delta.args_delta
@@ -441,7 +475,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
                         watch.args_dict = {**(watch.args_dict or {}), **delta.args_delta}
                     await self._scan(watch, ctx)
             case PartEndEvent():
-                watch = self._watch_at(event.index)
+                watch = self._watch_at(event.index, None)
                 if watch is not None:
                     # The arguments are complete: every statement is closed now, including the
                     # trailing ones the line-conservative scanner held back (streamed code rarely
@@ -452,9 +486,22 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
                 pass
         await self._emit_settles(ctx)
 
-    def _watch_at(self, part_index: int) -> _PartWatch | None:
-        part_id = self._index_to_part.get(part_index)
-        return None if part_id is None else self._parts[part_id]
+    def _watch_at(self, part_index: int, tool_call_id: str | None) -> _PartWatch | None:
+        """Route a delta by part index, following a call id the provider rewrites mid-stream.
+
+        Without the re-key, the executed call would look up a part the stream never recorded
+        under that id, and the launches would outlive the snippet instead of being evicted.
+        """
+        indexed_id = self._index_to_part.get(part_index)
+        if indexed_id is None:
+            return None
+        watch = self._parts[indexed_id]
+        if tool_call_id is not None and tool_call_id != indexed_id:
+            del self._parts[indexed_id]
+            self._parts[tool_call_id] = watch
+            self._index_to_part[part_index] = tool_call_id
+            watch.tool_call_id = tool_call_id
+        return watch
 
     @property
     def _current_step(self) -> _StepIngredients[AgentDepsT]:
@@ -462,9 +509,15 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         assert step is not None, '`get_tools` primes the step before the model streams or `run_code` dispatches'
         return step
 
+    @staticmethod
+    def _run_is_sequential(ctx: RunContext[AgentDepsT]) -> bool:
+        """Whether the run opted every tool call into serial execution, which launches would break."""
+        tool_manager = ctx.tool_manager
+        return tool_manager is not None and global_mode_is_sequential(tool_manager.get_parallel_execution_mode)
+
     async def _scan(self, watch: _PartWatch, ctx: RunContext[AgentDepsT], *, final: bool = False) -> None:
         step = self._current_step
-        if not step.eligible or watch.halted:
+        if not step.eligible or watch.halted or self._run_is_sequential(ctx):
             return
         code = self._decode(watch)
         if code is None:
@@ -483,13 +536,16 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         # paren has streamed, even while its enclosing statement (an `if` arm, a `with` body) is
         # still being generated. Rescans recount every occurrence in the grown prefix, so
         # `demanded` is reconciled to the count rather than incremented.
+        extracted_calls, walked = _text_literal_calls(code, step.eligible)
+        if not self._charge_scan_work(watch, walked):
+            return
         seen: dict[str, int] = {}
-        for extracted in _text_literal_calls(code, step.eligible):
+        for extracted in extracted_calls:
             key = _canonical_key(extracted.sandbox_name, extracted.kwargs)
             seen[key] = seen.get(key, 0) + 1
             if seen[key] <= watch.demanded.get(key, 0):
                 continue
-            if watch.launched >= MAX_SPECULATIONS_PER_PART:
+            if watch.launched >= self.launch_cap:
                 return
             watch.demanded[key] = seen[key]
             if watch.demanded[key] <= self._in_flight(key):
@@ -518,11 +574,16 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
             code = decoded
         # Every scan rereads the whole prefix, so cumulative work is quadratic in snippet length
         # without this bound.
-        if len(code) > MAX_SCAN_WORK_CHARS - watch.scan_work_chars:
+        return code if self._charge_scan_work(watch, len(code)) else None
+
+    @staticmethod
+    def _charge_scan_work(watch: _PartWatch, chars: int) -> bool:
+        """Account host-side parsing against the part's budget; a part past it stays whole until dispatch."""
+        if chars > MAX_SCAN_WORK_CHARS - watch.scan_work_chars:
             watch.halted = True
-            return None
-        watch.scan_work_chars += len(code)
-        return code
+            return False
+        watch.scan_work_chars += chars
+        return True
 
     @staticmethod
     def _count_closed(code: str, *, final: bool) -> int:
@@ -611,11 +672,13 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         in flight is started, so FIFO multiplicity stays exact.
         """
         step = self._current_step
-        if not step.eligible:
+        if not step.eligible or self._run_is_sequential(ctx) or len(code) > MAX_SCAN_CHARS:
+            # Oversized snippets skip host-side parsing entirely, like the stream scan: the
+            # sandbox parser applies its own resource limits at dispatch.
             return
         try:
             body = ast.parse(code).body
-        except SyntaxError:
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
             return
         extracted_calls = _literal_calls(body, step.eligible)
         if not extracted_calls:
@@ -627,7 +690,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
             demanded[key] = demanded.get(key, 0) + 1
             if demanded[key] <= self._in_flight(key):
                 continue
-            if watch.launched >= MAX_SPECULATIONS_PER_PART:
+            if watch.launched >= self.launch_cap:
                 return
             await self._launch(ctx, watch, step, extracted, phase='execution')
 
@@ -753,7 +816,8 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
                 self.stats.evicted += 1
         watch.calls.clear()
         if evicted:
-            # Await the cancellations so dispatched work has fully unwound before the run moves
-            # on, mirroring `MontyExecutor.run`'s cleanup. Outcomes are deliberately discarded.
-            await asyncio.gather(*(call.task for call, _ in evicted), return_exceptions=True)
+            # Wait for the cancellations to unwind before the run moves on, but not forever: a
+            # tool that swallows the cancellation would otherwise hold the `run_code` result
+            # hostage. Abandoning such a task is safe, it starts no further tool calls.
+            await asyncio.wait({call.task for call, _ in evicted}, timeout=CANCEL_TIMEOUT_SECONDS)
         return evicted
