@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 from dataclasses import is_dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -210,6 +211,34 @@ class TestJudgeInstructions:
         assert judge_instructions[0] is not None
         assert 'You are a trajectory judge' in judge_instructions[0]
         assert 'Your review focus:\nFlag unsupported claims.' in judge_instructions[0]
+
+    async def test_evaluation_inherits_the_hook_context(self) -> None:
+        marker = ContextVar('trajectory_judge_test_marker', default='outside')
+        seen: list[str] = []
+        done = anyio.Event()
+
+        def judge_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen.append(marker.get())
+            return _all_good_response()
+
+        cap = TrajectoryJudge(model=FunctionModel(judge_fn), every=1, on_verdict=lambda _: done.set())
+        ctx = _ctx()
+        run_cap = await cap.for_run(ctx)
+
+        async def handler() -> Any:
+            token = marker.set('handler')
+            try:
+                await run_cap.after_model_request(
+                    ctx, request_context=_request_context(_hi_request()), response=_text_response()
+                )
+                await done.wait()
+            finally:
+                marker.reset(token)
+            return 'run-result'
+
+        await run_cap.wrap_run(ctx, handler=handler)
+
+        assert seen == ['handler']
 
 
 class TestSteering:
@@ -479,6 +508,27 @@ class TestFailureHandling:
         with pytest.raises(RuntimeError, match='judge exploded'):
             await asyncio.wait_for(run_cap.wrap_run(ctx, handler=handler), timeout=_WAIT)
 
+    async def test_judge_failure_surfaces_at_run_end(self) -> None:
+        failed = anyio.Event()
+
+        def on_verdict(verdict: TrajectoryVerdict) -> None:
+            failed.set()
+            raise RuntimeError('judge exploded')
+
+        cap = TrajectoryJudge(model=_all_good_model(), every=1, on_verdict=on_verdict)
+        ctx = _ctx()
+        run_cap = await cap.for_run(ctx)
+
+        async def handler() -> Any:
+            await run_cap.after_model_request(
+                ctx, request_context=_request_context(_hi_request()), response=_text_response()
+            )
+            await failed.wait()
+            return 'run-result'
+
+        with pytest.raises(RuntimeError, match='judge exploded'):
+            await run_cap.wrap_run(ctx, handler=handler)
+
     async def test_run_end_cancels_an_in_flight_evaluation(self) -> None:
         """A run that ends mid-evaluation completes normally; the evaluation is cancelled."""
         gate = asyncio.Event()
@@ -574,7 +624,7 @@ class TestFailureHandling:
 
         with anyio.fail_after(_WAIT):
             with anyio.CancelScope() as run_scope:
-                async with anyio.create_task_group() as task_group:
+                async with anyio.create_task_group() as task_group:  # pragma: no branch - cancellation exits here
                     task_group.start_soon(cancel_when_started, run_scope)
                     await run_cap.wrap_run(ctx, handler=handler)
                     completed = True  # pragma: no cover - cancellation must leave the scope first

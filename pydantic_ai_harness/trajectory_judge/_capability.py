@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, TypeAlias, runtime_checkable
 
 import anyio
-from anyio.abc import TaskGroup
+from anyio.abc import TaskGroup, TaskStatus
 from pydantic import Field, TypeAdapter
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
@@ -154,7 +154,6 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     _task_group: TaskGroup | None = field(default=None, init=False, repr=False, compare=False)
     _evaluation_running: bool = field(default=False, init=False, repr=False, compare=False)
     _evaluation_error: BaseException | None = field(default=None, init=False, repr=False, compare=False)
-    _claim_held: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         _positive_int_adapter.validate_python(self.every)
@@ -229,11 +228,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
             task_group = self._task_group
             if task_group is None:  # pragma: no cover - core invokes model hooks inside `wrap_run`
                 raise RuntimeError('TrajectoryJudge.after_model_request called outside its run scope')
-            if not self._claim_request(ctx):
-                return response
             prompt = _judge_prompt([*request_context.messages, response], self.window)
-            self._evaluation_running = True
-            task_group.start_soon(
+            await task_group.start(
                 self._evaluate,
                 ctx,
                 prompt,
@@ -257,7 +253,6 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         if limits is not None and limits.request_limit is not None and ctx.usage.requests + 2 > limits.request_limit:
             return False
         ctx.usage.requests += 1
-        self._claim_held = True
         return True
 
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
@@ -272,33 +267,23 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         result: AgentRunResult[Any] | None = None
         handler_error: BaseException | None = None
         evaluation_error: BaseException | None = None
-        handler_done = anyio.Event()
-
-        async def run_handler() -> None:
-            nonlocal result, handler_error
-            try:
-                result = await handler()
-            except BaseException as exc:
-                handler_error = exc
-            finally:
-                handler_done.set()
 
         try:
             async with anyio.create_task_group() as task_group:
                 self._task_group = task_group
-                task_group.start_soon(run_handler, name='trajectory-judge:agent-run')
-                await handler_done.wait()
-                if handler_error is None and not self._evaluation_running:
-                    evaluation_error, self._evaluation_error = self._evaluation_error, None
-                elif handler_error is not None:
+                try:
+                    result = await handler()
+                except BaseException as exc:
+                    handler_error = exc
                     self._evaluation_error = None
-                task_group.cancel_scope.cancel()
+                else:
+                    if not self._evaluation_running:
+                        evaluation_error, self._evaluation_error = self._evaluation_error, None
+                finally:
+                    task_group.cancel_scope.cancel()
         finally:
             self._task_group = None
             self._evaluation_running = False
-            if self._claim_held:
-                self._claim_held = False
-                ctx.usage.requests -= 1
 
         if handler_error is not None:
             raise handler_error
@@ -307,7 +292,13 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         assert result is not None
         return result
 
-    async def _evaluate(self, ctx: RunContext[AgentDepsT], prompt: str) -> None:
+    async def _evaluate(
+        self,
+        ctx: RunContext[AgentDepsT],
+        prompt: str,
+        *,
+        task_status: TaskStatus[None],
+    ) -> None:
         """Run the judge once and enqueue attributed steering when it says to steer.
 
         `output_type=[AllGood, Steer]` is set here, at the run boundary, so the verdict
@@ -316,25 +307,24 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         The judge runs against the shared `usage` under a request limit raised by exactly
         one: the launch's claim occupies a slot in `usage.requests` for the whole
         evaluation, so the unadjusted limit would count this evaluation against itself
-        twice. The claim is released once the run has recorded the judge's real spend (or
-        recorded nothing, on failure or cancellation); an evaluation cancelled before this
-        coroutine starts never reaches the `finally`, so `wrap_run` releases the claim instead.
+        twice. `TaskGroup.start` waits until the claim is held and the cleanup scope is in
+        place before the model hook continues.
 
         Provider failures are recorded as-is (`ModelAPIError` subclasses from the model
         layer) and re-raised on the next cadence tick or at run end.
         """
+        if not self._claim_request(ctx):
+            task_status.started()
+            return
+        self._evaluation_running = True
         try:
-            try:
-                result = await self._judge.run(
-                    prompt,
-                    output_type=[AllGood, Steer],
-                    usage=ctx.usage,
-                    usage_limits=_claim_offset_limits(ctx.usage_limits),
-                )
-            finally:
-                if self._claim_held:
-                    self._claim_held = False
-                    ctx.usage.requests -= 1
+            task_status.started()
+            result = await self._judge.run(
+                prompt,
+                output_type=[AllGood, Steer],
+                usage=ctx.usage,
+                usage_limits=_claim_offset_limits(ctx.usage_limits),
+            )
             verdict = result.output
             if isinstance(verdict, Steer):
                 ctx.enqueue(f'Steering from trajectory judge {self._judge_name()!r}: {verdict.message}')
@@ -345,6 +335,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
                 raise
             self._evaluation_error = exc
         finally:
+            ctx.usage.requests -= 1
             self._evaluation_running = False
 
     def _judge_name(self) -> str:
