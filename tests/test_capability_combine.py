@@ -276,6 +276,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         lambda cls: (cls(), cls()),
     ),
     'PyaiDocs': Collides('deprecated alias of `PydanticAIDocs`, and collides the same way'),
+    'Atlassian': Collides('provider connections expose fixed tool names; use PrefixTools for multiple connections'),
     'Macroscope': Collides(
         'its toolset registers `run_macroscope_review` under a fixed name',
         lambda cls: (cls(), cls()),
