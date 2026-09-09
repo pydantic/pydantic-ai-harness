@@ -12,10 +12,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelRequest, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
 from pydantic_ai.workspaces import LocalWorkspace, UnavailableWorkspace, Workspace
 
@@ -52,10 +51,6 @@ def _run_context(workspace: Workspace) -> RunContext[object]:
     return RunContext[object](
         deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0, workspace=workspace
     )
-
-
-def _call(tool_name: str, **args: str) -> tuple[ToolCallPart, ToolDefinition, dict[str, str]]:
-    return ToolCallPart(tool_name=tool_name, args=args), ToolDefinition(name=tool_name), args
 
 
 def _write(path: Path, content: str) -> Path:
@@ -447,17 +442,23 @@ class TestNestedTraversal:
             ],
         ).run('go', workspace=LocalWorkspace(root=tmp_path))
 
-    async def test_customized_sniff_fallback_warns_and_supports_non_event_tool(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('remove_before_return', [False, True])
+    async def test_customized_sniff_fallback_warns_and_supports_non_event_tool(
+        self, tmp_path: Path, remove_before_return: bool
+    ) -> None:
         _write(tmp_path / 'sub' / 'AGENTS.md', 'NESTED BODY')
 
         async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
             if _tool_returns(messages) == 0:
                 yield {0: DeltaToolCall(name='list_dir', json_args='{"target":"sub"}', tool_call_id='list')}
             else:
-                assert len(_repo_notes(messages)) == 1
+                assert len(_repo_notes(messages)) == (0 if remove_before_return else 1)
                 yield 'done'
 
         def list_dir(target: str) -> list[dict[str, str]]:
+            if remove_before_return:
+                (tmp_path / target / 'AGENTS.md').unlink()
+                (tmp_path / target).rmdir()
             return [{'name': 'AGENTS.md'}, {'name': 'one.py'}]
 
         with pytest.warns(
