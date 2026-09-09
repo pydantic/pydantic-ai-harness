@@ -179,11 +179,14 @@ the branch. Each item names its acceptance check.
       `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and search counts,
       answers the request event. PR #853 (draft, CI green including coverage, pydanty labelled);
       bridge half merged into `feat/experimental-cli` at 9cd783c7.
-- [ ] 1.2b Work pydanty's review of #853 (`gh pr view 853 --comments`; the label
+- [x] 1.2b Work pydanty's review of #853 (`gh pr view 853 --comments`; the label
       `pydanty:is-working` clears when it lands), address the findings in
       `../harness-filesystem-change-events`, merge the fixes into `feat/experimental-cli`, then
-      mark #853 ready for review. Ask Douwe on the PR whether `FileEditedEvent` as a
-      `FileWrittenEvent` subclass is the shape he wants (the events plan's open question).
+      mark #853 ready for review. One blocking and seven required findings fixed at 0b0932f4,
+      merged into `feat/experimental-cli` at f32cb9cd, CI green, marked ready; the floor
+      finding is answered with #851 as on #845. A second pydanty pass was requested at 23:32Z
+      and had not landed when this iteration ended: check it at the start of the next one.
+      The `FileEditedEvent` subclass question for Douwe is in the PR body.
 - [ ] 1.2c When #853 merges: merge `main` into `feat/experimental-cli` and drop the
       `puppy/filesystem-change-events` worktree.
 - [ ] 1.3 `subagents` events PR (`puppy/subagents-events`): `DelegationStartEvent`,
@@ -491,6 +494,26 @@ Append-only. Date, item, decision, why.
   result line with a match count the way a shell end event does. `FileWrittenEvent`,
   `FileEditedEvent`, and `DirectoryCreatedEvent` get no handler: the generic `< tool` line
   already says what happened, and the diff was shown at request time.
+
+- 2026-09-09, 1.2b: pydanty's blocking finding was that `write_file` announced a change and
+  then failed its `expected_hash` check, so the request's "only changes that would go ahead"
+  promise was false for writes. Fixed in the code, not the docstring: `_announce_write`
+  checks the hash against the canonical text before the request and the descriptor re-check
+  stays as the guard. Supersedes the 1.2 "docs say exactly that rather than one rule for
+  both" decision; one rule now holds for both, and the docs name the race.
+- 2026-09-09, 1.2b: `create_directory` pre-checks its collisions with `_nearest_existing`
+  (walks up to the first existing ancestor) rather than `resolved.parent` alone, so
+  `file.txt/deeper/still` is refused before the announce. The `mkdir` excepts are now race
+  guards and carry `# pragma: no cover`, the treatment `AGENTS.md` gives unreachable-by-test
+  branches.
+- 2026-09-09, 1.2b: the diff is skipped for a direct `write_file` (no run, nobody to show it
+  to, and it would read a file the write never needed to read) but not for `edit_file`, which
+  already holds the text; guarding both would have cost a `ctx is not None and change is not
+  None` dance for no saved I/O.
+- 2026-09-09, 1.2b: pydanty took 45 minutes on #853 (labelled 22:38Z, verdict 23:23Z), and
+  its `check_bots.sh` watermark must be after the "Review started" ack or every poll re-prints
+  it. Replying in one comment that maps each finding to the fix, then re-applying
+  `pydanty:review-lite`, is the ritual; the second pass is what a maintainer sees first.
 
 ## Open questions for Mike
 
