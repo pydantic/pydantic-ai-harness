@@ -30,10 +30,12 @@ Long agentic runs drift: the model loses track of what it set out to do and what
 
 ## The solution
 
-The model owns the plan through the `planning` toolset. The current plan is surfaced back as an ephemeral reminder appended to the tail of each request, with a cache breakpoint after its stable opening tag:
+The model owns the plan through the `planning` toolset. The current plan is surfaced back as an ephemeral reminder appended to the tail of each request, with the single cache breakpoint anchored on the last durable user content:
 
 - The reminder is added after the durable history is persisted, so it reaches the model but is never written to `message_history`. No reminders accumulate across turns.
-- A `CachePoint` follows the stable `<plan-reminder>` opening tag, so the cached prefix (tools + system + real conversation + that tag) stays byte-identical turn over turn. Only the mutable reminder content falls outside the cache.
+- The `CachePoint` sits on the last durable user content, so the prefix it saves is a prefix of the next request and cache hits survive turn over turn. The reminder carries no breakpoint, so re-sending its mutable content never invalidates the cache.
+
+As with all capability cache breakpoints, provider mapping applies: OpenAI models only receive the `CachePoint` when the model profile enables explicit cache control, and with no durable user content to anchor on the reminder is sent without a breakpoint.
 
 ## Usage
 
