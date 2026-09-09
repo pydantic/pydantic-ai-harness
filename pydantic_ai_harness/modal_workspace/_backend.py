@@ -389,7 +389,7 @@ class ModalWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
                 task.cancel()
             with anyio.CancelScope(shield=True):
                 await asyncio.gather(*tasks, return_exceptions=True)
-            if isinstance(error, TimeoutError):
+            if isinstance(error, (TimeoutError, asyncio.TimeoutError)):
 
                 def captured(task: asyncio.Task[str]) -> str:
                     if task.cancelled() or task.exception() is not None:
