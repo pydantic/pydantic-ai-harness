@@ -123,7 +123,6 @@ harness capabilities, so a module is the form to use when the agent composes any
 on:
   issues:
     types: [opened]
-  workflow_dispatch:
 permissions:
   contents: read
   issues: read
@@ -151,9 +150,10 @@ Post your triage as a single comment on that issue.
 
 Key by key:
 
-- `on: issues: types: [opened]` is the trigger. gh-aw does not add
-  `workflow_dispatch:` on its own, and without it there is no Run workflow button and
-  `gh aw run` has nothing to dispatch, so declare it alongside.
+- `on: issues: types: [opened]` is the only trigger. `add-comment` posts to the issue
+  that triggered the run, and a `workflow_dispatch` run has none, so the workflow declares
+  no manual trigger: `gh aw run` and the Run workflow button are not part of this
+  walkthrough.
 - `permissions:` is the workflow-level token scope, and gh-aw rejects a write scope here;
   the jobs that write to GitHub get their own narrower scopes in the compiled file.
   `issues: read` is what lets the GitHub MCP tools read an issue. gh-aw loads a default
@@ -184,8 +184,7 @@ Key by key:
   `${{ steps.sanitized.outputs.text }}` is what puts the title and body in front of the
   agent. gh-aw computes that value by sanitizing the triggering item's content, and it is
   the form its [templating reference](https://github.github.com/gh-aw/reference/templating/)
-  documents for prompts (`.title` and `.body` expose the two halves separately). On a
-  `workflow_dispatch` run there is no triggering issue and the value is empty.
+  documents for prompts (`.title` and `.body` expose the two halves separately).
 
 The compile error you get from a missing `imports:` line carries a tip naming
 `github/gh-aw/.github/workflows/shared/pydantic.md@<version>`. That is gh-aw's own older
@@ -228,9 +227,10 @@ at additions before it accepts them. Read the list, then re-run with `--approve`
 gh aw compile --approve
 ```
 
-`gh aw run --push` commits and pushes before dispatching, but it stages only the `.md`,
-the `.lock.yml` and local imports. The remote import cache under `.github/aw/imports/` is
-not staged, so commit it yourself.
+`gh aw compile` also caches the remote import under `.github/aw/imports/` by commit SHA.
+gh-aw treats the lock and that cache together as the
+[reproducibility guarantee](https://github.github.com/gh-aw/practices/sharing-workflows/)
+for shared workflows, so commit it alongside the `.md` and the `.lock.yml`.
 
 ## Dependencies
 
@@ -267,7 +267,8 @@ reads:
 | `codex/...` | `CODEX_API_KEY`, or `OPENAI_API_KEY` when `CODEX_API_KEY` is unset |
 
 Only the secret for the provider you use needs setting. The workflow above uses
-`openai/gpt-5`, so it needs `OPENAI_API_KEY`.
+`openai/gpt-5`, so it needs `CODEX_API_KEY` or, when that is unset, `OPENAI_API_KEY`. The
+examples below set `OPENAI_API_KEY`.
 
 === "CLI"
 
@@ -353,8 +354,7 @@ page still lists `github/gh-aw@*`, which is not what current versions emit.
     reusable workflows.
 
 **Default-branch placement.** GitHub only fires the `issues` event for workflow files on
-the repository's default branch, and the Run workflow button for `workflow_dispatch` needs
-the file there too. Nothing happens while the workflow sits on a feature branch; this is
+the repository's default branch. Nothing happens while the workflow sits on a feature branch; this is
 [GitHub Actions behavior](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#issues),
 not a gh-aw setting, and gh-aw's own pages do not mention it.
 
@@ -373,12 +373,7 @@ requests" only matters for the `create-pull-request` safe output.
 
 ## Run and observe
 
-Merge the workflow to the default branch. Opening an issue then starts a run, and so does
-dispatching the workflow yourself:
-
-```bash
-gh aw run triage
-```
+Merge the workflow to the default branch. Opening an issue then starts a run.
 
 ```bash
 gh aw status
