@@ -163,7 +163,7 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
 
 Each helper returns `None` when the client did not advertise support. Add local fallbacks as capabilities so their hooks and events remain attached; add editor-native helpers as toolsets. The local fallbacks use the `workspace` on `AcpSessionConfig`. The tool names match the local `FileSystem`/`Shell`, so rich rendering (next section) is identical. `acp_terminal` runs the command in the editor's environment and returns its captured output (see [Limitations](#cancellation-and-limitations)).
 
-If a client advertises filesystem *reads* but not *writes*, `acp_filesystem` keeps editor-native reads and sends writes to the local `FileSystem` rooted at `session.cwd`. That fallback requires the session's `AcpSessionConfig.workspace`; it is coherent only when that workspace shares the editor's files (the same machine, or the agent running inside the editor's container). For a remote editor those writes land in the attached workspace, not the editor.
+If a client advertises filesystem reads but not writes, `acp_filesystem` exposes `read_file` only. It does not silently send writes to a different filesystem. A product that requires local writes in that case should choose the full local `FileSystem` fallback instead.
 
 ## Tool approval
 

@@ -17,6 +17,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from pydantic_ai.workspaces import (
     CommandResult,
+    FileWindow,
     LocalWorkspace,
     Workspace,
     WorkspaceCommand,
@@ -369,6 +370,23 @@ async def test_read_file_reports_binary_content_instead_of_text(tmp_path: Path, 
     result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'binary.bin'})
 
     assert result == '[Binary file: 11 bytes. Use a binary-aware tool to inspect.]'
+
+
+async def test_read_file_reports_unknown_binary_size_without_a_second_lookup(
+    tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def read_binary(_: str, *, offset: int = 1, limit: int | None = None) -> FileWindow:
+        return FileWindow(lines=(), start_line=offset, has_more=False, total_lines=None, binary=True, byte_size=None)
+
+    async def unexpected_stat(_: str) -> WorkspaceFileEntry:
+        raise AssertionError('read_file must not require a second metadata lookup')
+
+    monkeypatch.setattr(workspace, 'read_file', read_binary)
+    monkeypatch.setattr(workspace, 'stat', unexpected_stat)
+
+    result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'binary.bin'})
+
+    assert result == '[Binary file: size unavailable. Use a binary-aware tool to inspect.]'
 
 
 async def test_read_file_replaces_undecodable_utf8(tmp_path: Path, workspace: Workspace) -> None:

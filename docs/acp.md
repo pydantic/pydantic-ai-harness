@@ -158,6 +158,8 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
 
 Each helper returns `None` when the client did not advertise support. Add local fallbacks as capabilities so their hooks and events remain attached; add editor-native helpers as toolsets. The local fallbacks use the `workspace` on `AcpSessionConfig`. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
 
+If a client advertises filesystem reads but not writes, `acp_filesystem` exposes `read_file` only. It does not silently send writes to a different filesystem. A product that requires local writes in that case should choose the full local `FileSystem` fallback instead.
+
 ## Tool approval
 
 Mark a tool to require approval and ACP relays the decision to the client, which shows the user an approve/reject prompt:

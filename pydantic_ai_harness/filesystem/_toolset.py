@@ -331,10 +331,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         if window.binary:
             size = window.byte_size
-            if size is None:
-                size = (await ctx.workspace.stat(resolved)).size or 0
             await ctx.emit(FileReadEvent(**self._event_location(root, resolved), content_hash=None))
-            return f'[Binary file: {size} bytes. Use a binary-aware tool to inspect.]'
+            size_label = f'{size} bytes' if size is not None else 'size unavailable'
+            return f'[Binary file: {size_label}. Use a binary-aware tool to inspect.]'
 
         lines = window.lines
         if offset == 0 and not window.has_more:
