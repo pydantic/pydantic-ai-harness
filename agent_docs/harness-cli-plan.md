@@ -159,9 +159,10 @@ the branch. Each item names its acceptance check.
 
 ### Phase 1: the transcript (events the CLI needs to be usable)
 
-- [ ] 1.1 `shell` events PR (`puppy/shell-events`, worktree `../harness-shell`). Finish, open draft
+- [x] 1.1 `shell` events PR (`puppy/shell-events`, worktree `../harness-shell`). Finish, open draft
       PR, bridge renders `ShellCommandStartEvent` / `ShellOutputLineEvent` / `ShellCommandEndEvent`
-      and answers `ShellCommandRequestEvent` with an approval prompt (yolo auto-approves).
+      and answers `ShellCommandRequestEvent` with an approval prompt (yolo auto-approves). PR #845
+      (draft, tests green, pydanty labelled); bridge half merged into `feat/experimental-cli`.
 - [ ] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`): `FileChangeRequestEvent`,
       `FileEditedEvent`, `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and
       grep results, answers the request event.
@@ -350,6 +351,39 @@ Append-only. Date, item, decision, why.
 - 2026-09-09, 0.4: `tests/cli/conftest.py` sets `HOME` to `tmp_path` for every CLI test so
   `Config.default_path()` never reaches the developer's real file. `Path.home()` reads `HOME`
   on POSIX; Windows would need `USERPROFILE`, and CI is Ubuntu.
+
+- 2026-09-09, 1.1: the shell PR keeps `start_command` / `check_command` / `stop_command` and
+  adds the four events to the existing toolset instead of porting Code Puppy's tool wholesale
+  (inactivity timeout, detached background mode). The events are what the CLI needs; the port
+  is a separate item if the CLI's daily use asks for it. Helpers moved to `_process.py` to keep
+  `_toolset.py` under the size limit; they are public names inside the private module because
+  pyright's `reportPrivateUsage` fires on cross-module underscore imports.
+- 2026-09-09, 1.1: `ShellOutputLineEvent` only for foreground commands (background output goes to
+  files the model polls); a background command's end event fires from `check_command` or
+  `stop_command` and carries that call's `tool_call_id`, not the original `start_command`'s.
+- 2026-09-09, 1.1: the approver is a run-time dependency. `Repl` passes `CliDeps(approver=...)`
+  to `agent.iter(deps=...)` and the bridge reads `ctx.deps`; `cli_agent` is now
+  `Agent[CliDeps, str]`. Rejected: a ContextVar (works but is not how core hands run-time state to
+  capabilities) and rebuilding `cli_agent` per session (breaks the module-level agent tests use).
+  `CliBridge(approver=...)` still exists for a user's own agent without `CliDeps`; with neither,
+  every request is declined with a reason naming both options. `Approver` returns a `Verdict`
+  (`allowed`, `reason`) rather than a bool so `DeclineAll` can say why.
+- 2026-09-09, 1.1: `Lines.ask()` routes the next pushed line to a pending question ahead of
+  `read()`, because the steer task drains `read()` for the whole run and would otherwise forward
+  the `y` to the model. End of input answers the question and still reaches `read()`. One
+  question at a time; a second concurrent `ask()` raises.
+- 2026-09-09, 1.1: `-p` mode has no stdin reader by the 0.3 decision, so without `--yolo` every
+  request is declined with `one-shot mode has no terminal to ask; run with --yolo to allow`
+  instead of hanging. `--yolo` and `Config.yolo` both select `allow_all`.
+- 2026-09-09, 1.1: the bridge skips its generic `< tool` result line for any `tool_call_id` an
+  end event already summarised, keyed on the event's `tool_call_id`; it keeps the `> tool` call
+  line because that fires before the request event. It does not know tool names.
+- 2026-09-09, 1.1: core refuses `AgentRun.emit` for capability events (only `CustomEvent`), so the
+  bridge test for a host-emitted end event uses a one-hook test capability.
+- 2026-09-09, 1.1: the docs snippet style for events is `@agent.on_event` with untyped params,
+  matching the planning and spend pages; snippets are ruff-checked, not run.
+- 2026-09-09, loop: issuing several `edit` calls against one file in a single tool batch loses
+  all but one of them (they apply against the same base). One edit per file per call.
 
 ## Open questions for Mike
 
