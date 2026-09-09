@@ -248,14 +248,15 @@ class CancelOnStart(AbstractCapability[None]):
 
 
 async def _process_group_is_gone(pgid: int) -> bool:
+    """Usually true on the first check; the polling below only runs when reaping lags."""
     with anyio.move_on_after(3):
         while True:
             try:
                 os.killpg(pgid, 0)
             except ProcessLookupError:
                 return True
-            await anyio.sleep(0.05)
-    return False
+            await anyio.sleep(0.05)  # pragma: no cover
+    return False  # pragma: no cover
 
 
 class TestCancellation:
