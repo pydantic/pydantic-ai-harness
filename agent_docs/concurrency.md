@@ -128,13 +128,15 @@ before writing cleanup.
   covers `def` tools, output functions and validators, instructions functions,
   hooks, and history processors.
 - Harness callbacks take the other lane. `SpendLimits.on_spend`,
-  `ReportContextUsage.on_usage`, `SystemReminders.on_fire`, and
-  `PromptInjectionDefender.on_detection` are called inline from the hook and
-  awaited only if they return an awaitable, so a sync callback blocks the loop
-  and its `ContextVar` writes stick. That is deliberate (they are cheap
-  notifications) but it is a contract: do not move one to `to_thread` without
-  saying so, and prefer emitting a `CapabilityEvent` over adding another
-  callback (#714 deprecates those four toward events).
+  `ReportContextUsage.on_usage`, and `PromptInjectionDefender.on_detection` are
+  called inline from the hook and awaited only if they return an awaitable;
+  `SystemReminders.on_fire` is typed `Callable[[str], None]` and called bare,
+  so an `async def` there produces a coroutine that is never run. Either way a
+  sync callback blocks the loop and its `ContextVar` writes stick. That is
+  deliberate (they are cheap notifications) but it is a contract: do not move
+  one to `to_thread` without saying so, and prefer emitting a
+  `CapabilityEvent` over adding another callback (#714 deprecates those four
+  toward events).
 - Not every sync callback is dispatched. Core awaits `Tool.prepare`,
   `PreparedToolset.prepare_func`, `FallbackModel` handlers, and model-id
   resolvers inline via `_utils.await_maybe`: they block the loop and their
