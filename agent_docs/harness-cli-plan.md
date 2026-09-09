@@ -167,9 +167,13 @@ the branch. Each item names its acceptance check.
       `pydanty:is-working` clears when it lands), address the findings in `../harness-shell`,
       merge the fixes into `feat/experimental-cli`, then mark #845 ready for review. Six required
       findings fixed at 5013ee2c; the blocking one is the floor (1.1c), answered on the PR.
-- [ ] 1.1c Floor on `pydantic-ai` 2.40.0 (issue #850, branch `puppy/floor-2-40`, worktree
+- [x] 1.1c Floor on `pydantic-ai` 2.40.0 (issue #850, branch `puppy/floor-2-40`, worktree
       `../harness-floor`): `@agent.on_event` is 2.40.0+ and six merged docs pages plus shell
-      use it. Dependency PR, needs `dependencies:approved`. Unblocks pydanty on #845.
+      use it. Dependency PR, needs `dependencies:approved`. Unblocks pydanty on #845. PR #851
+      (draft, pydanty labelled); waiting on a maintainer for `dependencies:approved`.
+- [ ] 1.1d When #851 merges: rebase `puppy/shell-events` on `main`, answer pydanty's floor
+      finding on #845 with the merged PR, mark #845 ready for review, and merge `main` into
+      `feat/experimental-cli` so the CLI lock picks up the floor.
 - [ ] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`): `FileChangeRequestEvent`,
       `FileEditedEvent`, `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and
       grep results, answers the request event.
@@ -411,6 +415,22 @@ Append-only. Date, item, decision, why.
   checkout's binary with `--pythonpath .venv/bin/python` against the worktree.
 - 2026-09-09, 1.1b: pydanty took 42 minutes on #845 (labelled 21:03Z, verdict 21:45Z), at the
   long end of the 20-57 range. Budget for it before polling.
+
+- 2026-09-09, 1.1c: the floor is 2.40.0 (the release with `@agent.on_event`), not the newest
+  2.42.0; the floor names the feature, the lock takes what resolves. `uv.lock` therefore lands
+  on 2.42.0 and the `lowest-versions` CI job is the one that exercises 2.40.0 itself.
+- 2026-09-09, 1.1c: seven `pydantic-ai-slim` floors move, not the six #850 counted: `aws-lambda`
+  (#417) repeats the base floor and was added after #780. Grep `>=2.40.0` before the next bump.
+- 2026-09-09, 1.1c: the `[tool.uv]` `openai>=2.45.0` override was already below slim's
+  `openai>=3.0.0` at 2.38.0 (3.8.0 at 2.40.0). Its comment only ties `anthropic` to slim's
+  floor, and `lowest-direct` still resolves `openai` 3.11.0 because nothing else admits lower,
+  so it was left alone and noted on #851. Not filed as an issue; nobody has hit it.
+- 2026-09-09, 1.1c: `uv lock --resolution lowest-direct --dry-run` is the local stand-in for the
+  `lowest-versions` CI job; it reports the slim and SDK versions without touching `uv.lock`.
+- 2026-09-09, 1.1c: the loop does not self-apply `dependencies:approved`. The workflow says a
+  maintainer adds it, and a dependency PR approving its own dependency change is the one label
+  the loop must not touch. Ticked on the draft plus the pydanty label; 1.1d holds the
+  post-merge follow-through.
 
 ## Open questions for Mike
 
