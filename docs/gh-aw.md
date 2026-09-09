@@ -88,19 +88,27 @@ Four things about that module.
 - **No model.** The engine always passes `-m` built from the workflow's `engine.model`,
   and an explicit `-m` replaces whatever model a loaded agent declares. Setting a model on
   the `Agent` would be ignored, so the workflow is the one place the model is configured.
-- **`safeoutputs_add_comment` is the safe output, not an ordinary tool.** gh-aw exposes
-  safe outputs as an MCP server named `safeoutputs`, and
-  [`load_mcp_toolsets`](/ai/mcp/client/) prefixes every tool with its server name, so the
-  `add-comment` safe output declared in the workflow reaches the agent under that name.
-  The comment is posted by a separate job after the agent finishes; the agent never holds a
+- **`safeoutputs_add_comment` is the safe output, not an ordinary tool.** gh-aw fronts
+  every MCP server it configures behind a gateway and writes them to
+  `${RUNNER_TEMP}/gh-aw/mcp-config/mcp-servers.json` on the host runner, which the agent
+  step mounts read-only and the engine passes to `pai --mcp-config`;
+  [`load_mcp_toolsets`](/ai/mcp/client/) prefixes each server's tools with its name, so the
+  `add-comment` safe output arrives as `safeoutputs_add_comment`. That file is deliberately
+  outside the checkout: a file committed at a path the engine reads would be
+  repository-controlled input to a process holding the gateway's credentials. The comment
+  itself is posted by a separate job after the agent finishes; the agent never holds a
   token that can write to the repository.
 - **`label_catalog` is an ordinary [function tool](/ai/tools-toolsets/tools/).** It is
   here to show that repository code is importable and that the agent's own tools work
   alongside the MCP tools gh-aw supplies.
 - **No third-party imports.** The engine installs `pydantic-ai-harness[cli]` and
-  `pydantic-ai-slim[openai,mcp]`, so `pydantic_ai` is importable without any setup of your
-  own. Anything else your agent imports is installed by a workflow-level `steps:` block
-  (see [Dependencies](#dependencies)).
+  `pydantic-ai-slim[anthropic,openai,mcp]`, so `pydantic_ai` is importable without any
+  setup of your own. Anything else your agent imports is installed by a workflow-level
+  `steps:` block (see [Dependencies](#dependencies)).
+
+The module is imported once, by the interpreter that then runs the CLI in the same process,
+so module-level work runs once. An agent that raises on import fails the step with its
+Python traceback rather than a one-line "could not load agent" message.
 
 `PAI_AGENT` also accepts a `.yml`, `.yaml` or `.json`
 [agent spec](/ai/core-concepts/agent-spec/) instead of an import path. A spec cannot name
@@ -118,6 +126,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+  issues: read
 imports:
   - pydantic/pydantic-ai-harness/gh-aw/pydantic.md@main
 engine:
@@ -131,8 +140,13 @@ safe-outputs:
 
 # Triage the new issue
 
-Read the issue that triggered this run, then post your triage as a single
-comment on it.
+The issue that triggered this run, as gh-aw sanitized it:
+
+<issue>
+${{ steps.sanitized.outputs.text }}
+</issue>
+
+Post your triage as a single comment on that issue.
 ```
 
 Key by key:
@@ -140,15 +154,24 @@ Key by key:
 - `on: issues: types: [opened]` is the trigger. gh-aw does not add
   `workflow_dispatch:` on its own, and without it there is no Run workflow button and
   `gh aw run` has nothing to dispatch, so declare it alongside.
-- `permissions: contents: read` is the workflow-level token scope. gh-aw rejects a
-  top-level write scope; the jobs that write to GitHub get their own narrower scopes in the
-  compiled file.
+- `permissions:` is the workflow-level token scope, and gh-aw rejects a write scope here;
+  the jobs that write to GitHub get their own narrower scopes in the compiled file.
+  `issues: read` is what lets the GitHub MCP tools read an issue. gh-aw loads a default
+  GitHub read toolset (`context`, `repos`, `issues`, `pull_requests`, `users`) with no
+  `tools:` block at all, so the agent has `github_issue_read` either way, but without the
+  scope the call comes back
+  `403 Resource not accessible by integration`. Narrow or widen the toolset with
+  [`tools: github: toolsets:`](https://github.github.com/gh-aw/reference/github-tools/).
 - `imports:` pulls in the engine definition. gh-aw's engine catalog knows the
   `pydantic-ai` id but does not import it for you: naming the engine without this line
   fails to compile.
 - `engine: id:` selects the imported engine, and `engine: model:` is required in
   `provider/model` form. The provider segment selects which backend of gh-aw's api-proxy
   serves the request; `copilot`, `anthropic`, `openai` and `codex` are the accepted values.
+  It also decides the wire API: `anthropic/` runs over the Anthropic Messages API, because
+  that backend forwards the request path to `api.anthropic.com` unchanged, and the other
+  three are OpenAI-shaped and use Chat Completions. Under `PAI_BASE_URL` everything stays
+  on Chat Completions.
 - `engine: env: PAI_AGENT:` is what replaces the engine's composed
   [`Coder`](/ai/harness/coder/) agent with yours. Setting it also puts the checkout on
   `PYTHONPATH`, which is what makes `my_agent` importable.
@@ -156,8 +179,13 @@ Key by key:
   `safe-outputs:` section at all, gh-aw enables `create-issue` with a max of 1 instead;
   declaring the section replaces that default, so the triage does not also open an issue
   for every issue it comments on.
-- The body after the frontmatter is the prompt. gh-aw renders it with the triggering
-  event's context before the agent sees it.
+- The body after the frontmatter is the prompt. gh-aw prepends its own context block,
+  which carries the issue number but not the issue text, so
+  `${{ steps.sanitized.outputs.text }}` is what puts the title and body in front of the
+  agent. gh-aw computes that value by sanitizing the triggering item's content, and it is
+  the form its [templating reference](https://github.github.com/gh-aw/reference/templating/)
+  documents for prompts (`.title` and `.body` expose the two halves separately). On a
+  `workflow_dispatch` run there is no triggering issue and the value is empty.
 
 The compile error you get from a missing `imports:` line carries a tip naming
 `github/gh-aw/.github/workflows/shared/pydantic.md@<version>`. That is gh-aw's own older
@@ -377,13 +405,40 @@ gh aw audit <run-id-or-url>
 `gh aw logs` downloads runs into per-run folders; `--artifacts all` adds the agent logs,
 `agent-stdio.log`, `aw.patch` and `summary.json` to the compact usage artifact it fetches
 by default. `gh aw audit` turns one run into a Markdown report under `.github/aw/logs`, and
-diffs two or more runs when given more than one id.
+diffs two or more runs when given more than one id. For the raw step output, including the
+engine's own lines, `gh run view <run-id> --log` (add `--attempt N` for an earlier attempt)
+is often quicker.
 
 The engine's own step summary is written by the lock's `Parse agent logs for step summary`
 step and appears on the Actions run's Summary page, carrying the turn, tool-call and token
 counts. `gh aw logs --parse` and `gh aw audit --parse` do not re-render it locally: they
 resolve engines through gh-aw's built-in registry (claude, codex, copilot, gemini, pi) and
 skip anything else, which is every import-based engine, this one included.
+
+### What a working run looks like
+
+In the `Execute Pydantic AI CLI` step, the engine prints the configuration it resolved
+before the agent starts, then a line per tool call:
+
+```text
+[pydantic-ai] provider=openai model=gpt-5 baseUrl=http://api-proxy:10000/v1 agent=my_agent:agent
+▌ Called tool label_catalog.
+▌ Called tool safeoutputs_add_comment.
+```
+
+The `agent=` value is what `PAI_AGENT` resolved to, and `baseUrl=` is the api-proxy inside
+the sandbox. A line like
+
+```text
+[pydantic-ai] awf-reflect: unable to persist reflect payload to /home/runner/work/_temp/awf-reflect.json: EACCES: permission denied
+```
+
+appears in successful runs too. It comes from gh-aw's reflect helper trying to cache the
+endpoint payload in a directory the sandbox does not let it write, and the discovered
+endpoint is used regardless.
+
+The comment lands on the issue with a gh-aw footer naming the workflow and linking its run,
+followed by an HTML comment recording the engine, its version and the model.
 
 ## Troubleshooting
 
@@ -404,6 +459,15 @@ a repository secret instead.
 **`warning: safe update mode detected unapproved changes` with a list of new restricted
 secrets.** Expected on the first compile, and on any compile that changes which secrets,
 actions or images the lock uses. Review the list, then re-run `gh aw compile --approve`.
+
+**`[INFO] API proxy enabled: OpenAI=false, Anthropic=false, ...` then
+`[health-check][ERROR] Cannot connect to OpenAI API proxy at http://host.docker.internal:10000`.**
+The provider secret is missing or empty, so gh-aw starts no proxy backend and the job fails
+before the engine's own script runs. The preceding line says so directly:
+`[WARN] API proxy enabled but no API keys found in environment`. Set the secret, then rerun
+the run with `gh run rerun <run-id>` so secrets are read again. A run that started before
+the secret existed keeps the empty value for its whole life, so re-running the same attempt
+is the fix, not waiting.
 
 **`Lock file '...' is outdated! The workflow file '...' frontmatter has changed. Run 'gh aw
 compile' to regenerate the lock file.`** The committed `.lock.yml` does not match the
