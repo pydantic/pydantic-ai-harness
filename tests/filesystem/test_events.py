@@ -95,6 +95,25 @@ def _tool_result(events: list[AgentStreamEvent]) -> str:
     return results[0].model_response_str()
 
 
+def _retry_reason(events: list[AgentStreamEvent]) -> str:
+    """What the model was told when its one tool call was rejected."""
+    results = [event.part for event in events if isinstance(event, FunctionToolResultEvent)]
+    assert len(results) == 1
+    assert isinstance(results[0], RetryPromptPart)
+    return results[0].model_response()
+
+
+@dataclass
+class WrittenListener(AbstractCapability[None]):
+    """Subscribes to writes the way a capability such as `RepoContext` would."""
+
+    written: list[FileWrittenEvent] = field(default_factory=list[FileWrittenEvent])
+
+    @on_event(FileWrittenEvent)
+    async def _on_written(self, ctx: RunContext[None], event: FileWrittenEvent) -> None:
+        self.written.append(event)
+
+
 @dataclass
 class Listener(AbstractCapability[None]):
     """Records every change request and cancels it when `cancel` is set."""
@@ -413,19 +432,54 @@ class TestFileChangeRequests:
 
         assert listener.requests == []
 
-    async def test_stale_edit_emits_no_request(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args'),
+        [
+            ('edit_file', '{"path":"target.txt","old_text":"old","new_text":"new","expected_hash":"000000000000"}'),
+            ('write_file', '{"path":"target.txt","content":"new\\n","expected_hash":"000000000000"}'),
+        ],
+    )
+    async def test_stale_change_emits_no_request(self, tmp_path: Path, tool_name: str, json_args: str) -> None:
         (tmp_path / 'target.txt').write_text('old\n')
         listener = Listener()
 
-        events = await _run_and_collect(
-            tmp_path,
-            'edit_file',
-            '{"path":"target.txt","old_text":"old","new_text":"new","expected_hash":"000000000000"}',
-            listeners=[listener],
-        )
+        events = await _run_and_collect(tmp_path, tool_name, json_args, listeners=[listener])
 
         assert listener.requests == []
-        assert any(isinstance(event, FunctionToolResultEvent) for event in events)
+        assert 'Conflict' in _retry_reason(events)
+        assert (tmp_path / 'target.txt').read_text() == 'old\n'
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args', 'reason'),
+        [
+            ('write_file', '{"path":"missing/target.txt","content":"x"}', 'does not exist'),
+            ('create_directory', '{"path":"file.txt"}', 'exists and is not a directory'),
+            ('create_directory', '{"path":"file.txt/deeper/still"}', 'parent that is not a directory'),
+        ],
+    )
+    async def test_change_that_cannot_happen_emits_no_request(
+        self, tmp_path: Path, tool_name: str, json_args: str, reason: str
+    ) -> None:
+        (tmp_path / 'file.txt').write_text('x')
+        listener = Listener()
+
+        events = await _run_and_collect(tmp_path, tool_name, json_args, listeners=[listener])
+
+        assert listener.requests == []
+        assert reason in _retry_reason(events)
+
+    async def test_a_listener_for_writes_receives_the_edit(self, tmp_path: Path) -> None:
+        (tmp_path / 'target.txt').write_text('old\n')
+        listener = WrittenListener()
+
+        await _run_and_collect(
+            tmp_path, 'edit_file', '{"path":"target.txt","old_text":"old","new_text":"new"}', listeners=[listener]
+        )
+
+        (event,) = listener.written
+        assert isinstance(event, FileEditedEvent)
+        assert event.path == 'target.txt'
+        assert event.diff.endswith('-old\n+new')
 
     async def test_large_diff_is_cut_and_marked(self, tmp_path: Path) -> None:
         content = ''.join(f'line {i}\n' for i in range(2000))
@@ -437,7 +491,10 @@ class TestFileChangeRequests:
 
         (request,) = listener.requests
         assert request.truncated
-        assert len(request.diff) == MAX_EVENT_DIFF_CHARS
+        assert len(request.diff) <= MAX_EVENT_DIFF_CHARS
+        # Cut on a line boundary: the last kept line is a whole diff line.
+        assert request.diff.splitlines()[-1].startswith('+line ')
+        assert not request.diff.endswith('\n')
         assert (tmp_path / 'big.txt').read_text() == content
         assert any(isinstance(event, FileWrittenEvent) for event in events)
 
