@@ -21,7 +21,6 @@ import posixpath
 import time
 from collections.abc import AsyncGenerator, Awaitable, Mapping, Sequence
 from contextlib import asynccontextmanager
-from functools import cached_property
 from typing import TYPE_CHECKING
 
 import anyio
@@ -158,28 +157,32 @@ class ModalWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
         self._working_dir: str | None = None
         # Set once the workspace exists, so an expiry message can say which lifetime ran out.
         self._created_timeout: int | None = None
-
-    @cached_property
-    def _lock(self) -> anyio.Lock:
-        return anyio.Lock()
+        self._lock = anyio.Lock()
 
     @property
     def workspace(self) -> Awaitable[modal.Sandbox]:
-        return self._get_workspace()
+        return self._create_or_attach()
 
-    async def _get_workspace(self) -> modal.Sandbox:
-        """Acquire the native Modal sandbox and record its identity."""
-        if self._workspace is None:
-            async with self._lock:
-                if self._workspace is None:
-                    try:
-                        importlib.import_module('modal')
-                    except ImportError as e:
-                        raise WorkspaceError(_MISSING_MODAL) from e
-                    self._workspace = await self._create_or_attach(self._ref)
-                    self._ref = WorkspaceRef(provider='modal', id=self._workspace.object_id)
-        assert self._workspace is not None
-        return self._workspace
+    async def _create_or_attach(self) -> modal.Sandbox:
+        """Acquire the native Modal sandbox on first use, once, and record its identity.
+
+        The only place `_workspace` is read, so nothing can reach an unacquired handle:
+        it stays optional and every other method comes through here. The lock serializes
+        concurrent first uses -- two callers each creating a sandbox would leave the loser
+        billed and unreferenced.
+        """
+        async with self._lock:
+            if (workspace := self._workspace) is not None:
+                return workspace
+            try:
+                importlib.import_module('modal')
+            except ImportError as e:
+                raise WorkspaceError(_MISSING_MODAL) from e
+            ref = self._ref
+            workspace = await self._attach(ref.id) if ref is not None else await self._create()
+            self._workspace = workspace
+            self._ref = WorkspaceRef(provider='modal', id=workspace.object_id)
+            return workspace
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -278,11 +281,6 @@ class ModalWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
             raise WorkspaceError(f'Could not start Modal sandbox: {error}') from error
         self._created_timeout = self._sandbox_timeout
         return workspace
-
-    async def _create_or_attach(self, ref: WorkspaceRef | None) -> modal.Sandbox:
-        if ref is not None:
-            return await self._attach(ref.id)
-        return await self._create()
 
     async def _attach(self, id: str) -> modal.Sandbox:
         """Attach to a Modal sandbox that already exists.
