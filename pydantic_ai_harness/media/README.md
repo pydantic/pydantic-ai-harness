@@ -34,9 +34,9 @@ Every store implements the `MediaStore` protocol: `put`, `get`, `exists`, `publi
 | `DiskMediaStore(directory=...)` | A directory on disk | Local runs and tests |
 | `SqliteMediaStore(...)` | A SQLite database | A single-file store that travels with the data |
 | `S3MediaStore(...)` | S3 or an S3-compatible bucket | Shared or production storage |
-| `MongoMediaStore(...)` | MongoDB (sha256-addressed manual chunking) | A MongoDB deployment; blobs larger than one BSON document, split so no chunk hits the 16 MiB cap |
+| `MongoMediaStore(...)` | MongoDB (sha256-addressed manual chunking) | A MongoDB deployment; blobs larger than one BSON document, split so each chunk document stays below the 16 MiB cap |
 
-`MongoMediaStore` needs the `mongodb` extra (`pip install pydantic-ai-harness[mongodb]`, which installs `pymongo>=4.17.0`) and is imported the same way (`from pydantic_ai_harness.media import MongoMediaStore`). It chunks each blob so no single BSON document exceeds MongoDB's document cap.
+`MongoMediaStore` needs the `mongodb` extra (`pip install pydantic-ai-harness[mongodb]`, which installs `pymongo>=4.17.0`) and is imported the same way (`from pydantic_ai_harness.media import MongoMediaStore`). Blob chunk documents are bounded below MongoDB's document cap, but the unchunked manifest keeps `MediaContext.metadata` inline, so per-blob metadata must remain small.
 
 `collection=` (default `'media'`) names the manifest collection and derives the chunk collection as `<collection>_chunks`. `chunk_size_bytes=` (default 8 MiB) sets the split size and is rejected below 1 byte or above 16 MiB minus 64 KiB of headroom for the chunk document's own fields. On the first `put` or `get` the store issues `createIndex` for a compound `(files_id, n)` index on the chunk collection, without which reassembly is a collection scan -- so the connecting user needs the privilege to create indexes, and an already-populated collection pays the index build on that first call.
 
