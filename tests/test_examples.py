@@ -34,6 +34,7 @@ def test_examples_present():
     assert [path.name for path in EXAMPLE_FILES] == [
         'coding_agent.py',
         'research_agent.py',
+        'slack_agent.py',
     ]
 
 
@@ -55,6 +56,9 @@ def test_example_builds_agent(
     # Keep any filesystem-scoped capabilities and memory stores inside tmp_path.
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('SUPPORT_MEMORY_DIR', str(tmp_path / 'memory'))
+    # slack_agent.py builds a SlackApp at import time, which needs these two settings.
+    monkeypatch.setenv('SLACK_BOT_TOKEN', 'xoxb-test')
+    monkeypatch.setenv('SLACK_SIGNING_SECRET', 'test-signing-secret')
     try:
         module = _load(path)
         if optional_dependency_error is not None:
