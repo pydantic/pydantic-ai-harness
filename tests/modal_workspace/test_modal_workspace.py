@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import anyio
 import pytest
 from pydantic_ai import Agent
@@ -10,7 +12,13 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
-from pydantic_ai.workspaces import Workspace, WorkspaceError, WorkspaceRef, WorkspaceTimeoutError
+from pydantic_ai.workspaces import (
+    Workspace,
+    WorkspaceError,
+    WorkspaceRef,
+    WorkspaceTimeoutError,
+    WorkspaceUnavailableError,
+)
 
 from pydantic_ai_harness.modal_workspace import ModalWorkspace, ModalWorkspaceBackend
 
@@ -27,11 +35,28 @@ async def test_backend_acquires_fresh_workspace_and_records_ref(fake_modal: Fake
     assert backend.ref == WorkspaceRef(provider='modal', id=native.object_id)
 
 
+async def test_missing_modal_extra_has_install_hint(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, 'modal', None)
+    with pytest.raises(WorkspaceError, match=r'pydantic-ai-harness\[modal\]'):
+        await ModalWorkspaceBackend().workspace
+
+
 async def test_backend_attaches_explicit_ref_without_create(fake_modal: FakeModal) -> None:
     backend = ModalWorkspaceBackend(ref=WorkspaceRef(provider='modal', id='existing'))
     await backend.workspace
     assert fake_modal.attach_ids == ['existing']
     assert not fake_modal.create_kwargs
+
+
+@pytest.mark.parametrize('error_kind', ['auth', 'error'])
+async def test_attach_failures_keep_reference_and_do_not_create(fake_modal: FakeModal, error_kind: str) -> None:
+    fake_modal.attach_error = fake_modal.auth_type('bad') if error_kind == 'auth' else fake_modal.error_type('failed')
+    backend = ModalWorkspaceBackend(ref=WorkspaceRef(provider='modal', id='existing'))
+    with pytest.raises(WorkspaceUnavailableError if error_kind == 'auth' else WorkspaceError) as exc_info:
+        await backend.workspace
+    assert backend.ref == WorkspaceRef(provider='modal', id='existing')
+    assert not fake_modal.create_kwargs
+    assert exc_info.value.__cause__ is fake_modal.attach_error
 
 
 async def test_native_workspace_identity_is_immediate(fake_modal: FakeModal) -> None:
@@ -55,6 +80,14 @@ async def test_filesystem_directory_error_uses_builtin_exception(fake_modal: Fak
         await backend.read_bytes('/directory')
 
 
+async def test_filesystem_not_directory_error_uses_builtin_exception(fake_modal: FakeModal) -> None:
+    backend = ModalWorkspaceBackend()
+    await backend.workspace
+    fake_modal.sandboxes[0].fs_error = fake_modal.module.exception.SandboxFilesystemNotADirectoryError('file')
+    with pytest.raises(NotADirectoryError, match='Not a directory'):
+        await backend.read_bytes('/file/child')
+
+
 async def test_command_start_timeout_is_bounded(fake_modal: FakeModal) -> None:
     fake_modal.exec_hangs = True
     backend = ModalWorkspaceBackend()
@@ -62,6 +95,26 @@ async def test_command_start_timeout_is_bounded(fake_modal: FakeModal) -> None:
         with anyio.fail_after(0.2):
             await backend.run(['echo', 'hello'], timeout=0.01)
     assert exc_info.value.timeout == 0.01
+
+
+async def test_create_timeout_is_bounded(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_modal.create_gate = anyio.Event()
+    monkeypatch.setattr('pydantic_ai_harness.modal_workspace._backend._CREATE_TIMEOUT', 0.01)
+    backend = ModalWorkspaceBackend()
+    with pytest.raises(WorkspaceError, match='control plane'):
+        await backend.workspace
+    assert backend.ref is None
+    assert not fake_modal.sandboxes
+
+
+async def test_command_timeout_bounds_acquisition(fake_modal: FakeModal) -> None:
+    fake_modal.create_gate = anyio.Event()
+    backend = ModalWorkspaceBackend()
+    with pytest.raises(WorkspaceTimeoutError) as exc_info:
+        await backend.run(['echo', 'hello'], timeout=0.01)
+    assert exc_info.value.timeout == 0.01
+    assert backend.ref is None
+    assert not fake_modal.sandboxes
 
 
 async def test_command_timeout_keeps_captured_output(fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,6 +125,19 @@ async def test_command_timeout_keeps_captured_output(fake_modal: FakeModal, monk
     with pytest.raises(WorkspaceTimeoutError) as exc_info:
         await backend.run(['echo', 'hello'], timeout=0.01)
     assert exc_info.value.stdout == 'partial stdout'
+    assert exc_info.value.stderr == 'partial stderr'
+
+
+async def test_command_timeout_keeps_completed_stderr_when_stdout_reader_hangs(
+    fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr('pydantic_ai_harness.modal_workspace._backend._RESULT_GRACE', 0.01)
+    fake_modal.responder = lambda argv, timeout: ('partial stdout', 'partial stderr', 0)
+    fake_modal.stdout_hangs = True
+    backend = ModalWorkspaceBackend()
+    with pytest.raises(WorkspaceTimeoutError) as exc_info:
+        await backend.run(['echo', 'hello'], timeout=0.01)
+    assert exc_info.value.stdout == ''
     assert exc_info.value.stderr == 'partial stderr'
 
 

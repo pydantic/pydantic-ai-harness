@@ -92,9 +92,9 @@ class _HangingAioCall:
 class _FakeStream:
     """Mimics the whole-output `.read.aio()` surface used by the backend."""
 
-    def __init__(self, data: bytes) -> None:
+    def __init__(self, data: bytes, hangs: bool = False) -> None:
         self._data = data
-        self.read = _AioCallable(self._read)
+        self.read = _HangingAioCall() if hangs else _AioCallable(self._read)
 
     def _read(self) -> bytes:
         return self._data
@@ -108,8 +108,9 @@ class _FakeProcess:
         returncode: int,
         wait_error: Exception | None,
         wait_hangs: bool,
+        stdout_hangs: bool = False,
     ) -> None:
-        self.stdout = _FakeStream(stdout)
+        self.stdout = _FakeStream(stdout, stdout_hangs)
         self.stderr = _FakeStream(stderr)
         self._returncode = returncode
         self._wait_error = wait_error
@@ -287,6 +288,7 @@ class FakeSandbox:
             code,
             self._control.wait_error,
             self._control.wait_hangs,
+            self._control.stdout_hangs,
         )
 
     def _poll(self) -> int | None:
@@ -321,6 +323,7 @@ class FakeModal:
         self.exec_hangs = False
         self.wait_error: Exception | None = None
         self.wait_hangs = False
+        self.stdout_hangs = False
         self.module = self._build_module()
 
     @property
