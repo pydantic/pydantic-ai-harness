@@ -98,8 +98,9 @@ def test_capability_linked_from_top_readme(package: Path) -> None:
 
 _DOCS_DIR = _ROOT / 'docs'
 # `media.md` documents Step Persistence's storage plumbing (see `_NOT_A_CAPABILITY` above),
-# so the capability-page checks do not apply to it.
-_NON_CAPABILITY_PAGES = {'examples.md', 'index.md', 'media.md', 'mutation-testing.md'}
+# and `gh-aw.md` walks through the gh-aw engine definition under `gh-aw/`, so the
+# capability-page checks do not apply to either.
+_NON_CAPABILITY_PAGES = {'examples.md', 'gh-aw.md', 'index.md', 'media.md', 'mutation-testing.md'}
 _ACP_PAGE = 'acp.md'
 
 _SOURCE_LINK = 'github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/'
@@ -150,6 +151,7 @@ _CAPABILITY_PAGE_META = {
     'dynamic-workflow.md': ('dynamic_workflow', 'Dynamic Workflow'),
     'planning.md': ('planning', 'Planning'),
     'system-reminders.md': ('system_reminders', 'System Reminders'),
+    'trajectory-judge.md': ('trajectory_judge', 'Trajectory Judge'),
     'capability-creation.md': ('capability_creation', 'Runtime Capability Creation'),
     'guardrails.md': ('guardrails', 'Input, Output & Tool Guardrails'),
     'prompt-injection-defender.md': ('prompt_injection_defender', 'Prompt Injection Defender'),
