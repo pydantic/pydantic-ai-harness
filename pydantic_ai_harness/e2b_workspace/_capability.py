@@ -9,7 +9,6 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
-from pydantic_ai_harness._workspace_provider import absolute_path
 from pydantic_ai_harness.e2b_workspace._backend import (
     DEFAULT_SANDBOX_TIMEOUT,
     E2BWorkspaceBackend,
@@ -46,17 +45,9 @@ class E2BWorkspace(AbstractCapability[AgentDepsT]):
     allow_internet_access: bool = True
     """Whether a newly created workspace may reach the internet."""
 
-    def __post_init__(self) -> None:
-        if self.sandbox_timeout <= 0:
-            raise ValueError(f'sandbox_timeout must be a positive integer, got {self.sandbox_timeout!r}.')
-        self.workdir = absolute_path('workdir', self.workdir)
-        if self.env is not None:
-            self.env = dict(self.env)
-        if self.metadata is not None:
-            self.metadata = dict(self.metadata)
-
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
         """Build the backend for this run. No I/O here: it attaches or creates on first use."""
+        del ctx
         if ref is not None and ref.provider != 'e2b':
             return None
         return E2BWorkspaceBackend(

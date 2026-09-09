@@ -352,9 +352,9 @@ class FakeAsyncSandboxFactory:
         await anyio.lowlevel.checkpoint()
         if self._control.connect_error is not None:
             raise self._control.connect_error
-        for sandbox in self._control.sandboxes:
-            if sandbox.id == id:
-                return sandbox
+        existing = next((sandbox for sandbox in self._control.sandboxes if sandbox.id == id), None)
+        if existing is not None:
+            return existing
         return self._control.new_sandbox(id)
 
 

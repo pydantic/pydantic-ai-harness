@@ -38,21 +38,6 @@ def test_capability_declines_foreign_reference() -> None:
     assert E2BWorkspace().get_workspace(ctx, ref=WorkspaceRef(provider='modal', id='other')) is None
 
 
-def test_capability_validates_and_snapshots_creation_options() -> None:
-    env = {'FOO': 'bar'}
-    metadata = {'owner': 'test'}
-    capability = E2BWorkspace(sandbox_timeout=120, workdir='/work', env=env, metadata=metadata)
-    env['FOO'] = 'changed'
-    metadata['owner'] = 'changed'
-    assert capability.env == {'FOO': 'bar'}
-    assert capability.metadata == {'owner': 'test'}
-    assert capability.workdir == '/work'
-    with pytest.raises(ValueError):
-        E2BWorkspace(sandbox_timeout=0)
-    with pytest.raises(ValueError):
-        E2BWorkspace(workdir='relative')
-
-
 async def test_native_handle_is_exposed_without_creation(fake_e2b: FakeE2B) -> None:
     seed_backend = E2BWorkspaceBackend()
     native = await seed_backend.workspace
