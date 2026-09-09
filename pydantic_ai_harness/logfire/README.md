@@ -367,7 +367,7 @@ The variable holds an `AgentConfig`:
       "name": "get_weather",
       "new_name": "lookup_weather",
       "description": "Look up the current weather for a city.",
-      "parameter_descriptions": {"city": "City name, e.g. 'London'"}
+      "parameters": {"city": {"description": "City name, e.g. 'London'"}}
     }
   ]
 }

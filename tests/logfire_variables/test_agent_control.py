@@ -26,6 +26,7 @@ from pydantic_ai_harness.logfire import (
     AgentConfigSettings,
     AgentControl,
     InstructionBlock,
+    ParameterOverride,
     ToolDefinitionOverride,
     _agent_control,
     _managed_variable,
@@ -312,7 +313,9 @@ async def test_tool_definition_patches(publish: Publish) -> None:
         AgentConfig(
             tool_definitions=[
                 ToolDefinitionOverride(
-                    name='get_weather', description='Managed.', parameter_descriptions={'city': 'Managed city.'}
+                    name='get_weather',
+                    description='Managed.',
+                    parameters={'city': ParameterOverride(description='Managed city.')},
                 )
             ]
         ),
@@ -489,7 +492,10 @@ async def test_auto_create_uses_request_snapshot(capfire: CaptureLogfire, monkey
             name='snapshot_agent',
             instructions='Code instructions.',
             model_settings={'temperature': 0.3},
-            tools=[lookup, raw_tool, empty_tool],
+            tools=[lookup],
+            # One toolset with an `id` and one without: the baseline reports the id when there is
+            # one and falls back to the label, so the UI can group tools by origin either way.
+            toolsets=[FunctionToolset([raw_tool], id='raw-tools'), FunctionToolset([empty_tool])],
             capabilities=[AgentControl()],
         )
         await agent.run('hello')
@@ -506,10 +512,11 @@ async def test_auto_create_uses_request_snapshot(capfire: CaptureLogfire, monkey
             {
                 'name': 'lookup',
                 'description': 'Look up a city.',
-                'parameter_descriptions': {'city': 'City to look up.'},
+                'parameters': {'city': {'description': 'City to look up.'}},
+                'toolset': '<agent>',
             },
-            {'name': 'raw', 'parameter_descriptions': {'named': 'Named.'}},
-            {'name': 'empty'},
+            {'name': 'raw', 'parameters': {'named': {'description': 'Named.'}}, 'toolset': 'raw-tools'},
+            {'name': 'empty', 'toolset': 'FunctionToolset'},
         ],
     }
 
@@ -661,7 +668,7 @@ async def test_published_baseline_contains_only_code_side_behavior(
         'instructions': [{'id': 'agent', 'instructions': 'CODE instruction.', 'dynamic': False}],
         'model': 'function:function:<lambda>:',
         'settings': {'temperature': 0.1},
-        'tool_definitions': [{'name': 'get_weather'}],
+        'tool_definitions': [{'name': 'get_weather', 'toolset': '<agent>'}],
     }
 
 
@@ -836,7 +843,9 @@ async def test_unknown_tool_and_parameter_keys_are_inert(publish: Publish) -> No
         AgentConfig(
             tool_definitions=[
                 ToolDefinitionOverride(name='missing', description='ignored'),
-                ToolDefinitionOverride(name='get_weather', parameter_descriptions={'missing': 'ignored'}),
+                ToolDefinitionOverride(
+                    name='get_weather', parameters={'missing': ParameterOverride(description='ignored')}
+                ),
             ]
         ),
     )
@@ -879,7 +888,11 @@ async def test_schema_without_properties_is_tolerated(publish: Publish) -> None:
     publish(
         'raw_schema',
         AgentConfig(
-            tool_definitions=[ToolDefinitionOverride(name='raw_tool', parameter_descriptions={'missing': 'ignored'})]
+            tool_definitions=[
+                ToolDefinitionOverride(
+                    name='raw_tool', parameters={'missing': ParameterOverride(description='ignored')}
+                )
+            ]
         ),
     )
     capability = AgentControl('raw_schema', label='production')

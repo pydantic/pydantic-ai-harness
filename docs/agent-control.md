@@ -82,7 +82,7 @@ Pinning `label='production'` is the recommended default, for the same
 | **Instructions** | Rewrite or remove any block of the prompt, and add new ones |
 | **Model** | Run the agent on a different model |
 | **Model settings** | Change settings individually -- `temperature`, `max_tokens`, `thinking`, ... |
-| **Tools** | Rename a tool and reword its description and its parameters', for the model's eyes only |
+| **Tools** | Rename a tool and reword its description and its parameters' descriptions, for the model's eyes only |
 
 Anything you don't change in Logfire keeps doing what the code says, and removing a change there puts
 that piece back the way the code has it.

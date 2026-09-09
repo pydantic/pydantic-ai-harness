@@ -32,7 +32,7 @@ LOCKSTEP = (
     'schemas for the same agent.'
 )
 
-CANONICAL_SCHEMA_SHA256 = '9f1b3fbaf08171869700857ed35431cb655834ebe30df6aad1dcd5af80d7079e'
+CANONICAL_SCHEMA_SHA256 = '9093dde0236171434775d48d3cb1d412170e1a33988d29a9edfa5411f7ce9af3'
 """SHA-256 of this schema's canonical JSON, pinned identically by the platform's `agent-config.test.ts`.
 
 Every other assertion in this module checks a property, and properties are exactly what let the two
@@ -85,7 +85,7 @@ FULL_VALUE: dict[str, Any] = {
             'name': 'get_weather',
             'new_name': 'lookup_weather',
             'description': 'Look up the current weather for a city.',
-            'parameter_descriptions': {'city': "City name, e.g. 'London'"},
+            'parameters': {'city': {'description': "City name, e.g. 'London'"}},
         }
     ],
 }

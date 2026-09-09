@@ -335,6 +335,17 @@ class InstructionBlock(BaseModel):
     """
 
 
+class ParameterOverride(BaseModel):
+    """A patch over one top-level parameter of a tool's LLM-facing definition.
+
+    Only what the model is shown changes. The parameter's name, type, and requiredness stay as
+    defined in code, so argument validation is unaffected.
+    """
+
+    description: str | None = None
+    """Replacement description shown to the model; `None` keeps the code-defined description."""
+
+
 class ToolDefinitionOverride(BaseModel):
     """A patch over a tool's LLM-facing definition.
 
@@ -357,11 +368,16 @@ class ToolDefinitionOverride(BaseModel):
     """
     description: str | None = None
     """Replacement description shown to the model; `None` keeps the code-defined description."""
-    parameter_descriptions: dict[str, str] | None = None
-    """Replacement description text for named top-level parameters.
+    parameters: dict[str, ParameterOverride] | None = None
+    """Patches per top-level parameter name; see `ParameterOverride`.
 
-    Names, types, and requiredness stay exactly as defined in code, so argument validation is
-    unaffected. Unknown parameter names are ignored.
+    Unknown parameter names are ignored, for the same reason an unmatched tool `name` is.
+    """
+    toolset: str | None = None
+    """The toolset the tool came from, as the baseline reports it. Informational; ignored when a value is applied.
+
+    It is the toolset's `id` when it has one, else its label, so the Logfire UI can group a long tool
+    list by where each tool comes from without inferring it from tool names.
     """
 
 
@@ -727,7 +743,8 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
             'type': 'array',
             'description': (
                 'LLM-facing overlays, each naming the tool it patches by its code-side name. Parameter '
-                'names, types, requiredness, validation, and implementation stay code-defined.'
+                'names, types, requiredness, validation, and implementation stay code-defined. The baseline '
+                'also says which `toolset` each tool came from.'
             ),
             'items': {
                 'type': 'object',
@@ -744,10 +761,20 @@ AGENT_CONFIG_JSON_SCHEMA: dict[str, Any] = {
                         'description': 'Name shown to the model; a call to it routes back to the original tool.',
                     },
                     'description': {'type': 'string'},
-                    'parameter_descriptions': {
+                    'parameters': {
                         'type': 'object',
-                        'description': 'Replacement description text per top-level parameter name.',
-                        'additionalProperties': {'type': 'string'},
+                        'description': 'Patches per top-level parameter name.',
+                        'additionalProperties': {
+                            'type': 'object',
+                            'properties': {'description': {'type': 'string'}},
+                        },
+                    },
+                    'toolset': {
+                        'type': 'string',
+                        'description': (
+                            'The toolset the tool came from, as reported by the baseline; informational, '
+                            'ignored when applied.'
+                        ),
                     },
                 },
             },
@@ -784,11 +811,11 @@ applied to anything, so accepting it would only let the UI save a row that silen
 
 
 OverridesProvider: TypeAlias = Callable[[], Mapping[str, ToolDefinitionOverride]]
-ToolsObserver: TypeAlias = Callable[[list[ToolDefinition]], None]
+ToolsObserver: TypeAlias = Callable[[list[ToolsetTool[Any]]], None]
 
 
-def _with_parameter_descriptions(
-    parameters_json_schema: dict[str, Any], parameter_descriptions: dict[str, str]
+def _with_parameters(
+    parameters_json_schema: dict[str, Any], parameters: Mapping[str, ParameterOverride]
 ) -> dict[str, Any]:
     """Patch top-level parameter descriptions while preserving all schema structure."""
     if not isinstance(parameters_json_schema.get('properties'), dict):
@@ -797,9 +824,10 @@ def _with_parameter_descriptions(
     new_properties: dict[str, Any] = {}
     changed = False
     for name, schema in properties.items():
-        if name in parameter_descriptions and isinstance(schema, dict):
+        override = parameters.get(name)
+        if override is not None and override.description is not None and isinstance(schema, dict):
             param_schema: dict[str, Any] = properties[name]
-            new_properties[name] = {**param_schema, 'description': parameter_descriptions[name]}
+            new_properties[name] = {**param_schema, 'description': override.description}
             changed = True
         else:
             new_properties[name] = schema
@@ -815,8 +843,8 @@ def _apply_override(tool_def: ToolDefinition, override: ToolDefinitionOverride) 
         changes['name'] = override.new_name
     if override.description is not None and override.description != tool_def.description:
         changes['description'] = override.description
-    if override.parameter_descriptions:
-        schema = _with_parameter_descriptions(tool_def.parameters_json_schema, override.parameter_descriptions)
+    if override.parameters:
+        schema = _with_parameters(tool_def.parameters_json_schema, override.parameters)
         if schema is not tool_def.parameters_json_schema:
             changes['parameters_json_schema'] = schema
     # `replace` preserves concrete `ToolDefinition` subclasses and fields added by the framework.
@@ -866,7 +894,7 @@ class _ToolDefinitionOverridesToolset(WrapperToolset[AgentDepsT]):
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
         """Return tools with managed definitions and collision-safe advertised names."""
         tools = await super().get_tools(ctx)
-        self.observe_code_tools([tool.tool_def for tool in tools.values()])
+        self.observe_code_tools(list(tools.values()))
         if not self.get_overrides():
             return tools
         return {name: tool for name, (_, tool) in self._effective_tools(tools).items()}
@@ -1015,7 +1043,7 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
     thing done with it is `AgentConfigSettings.model_validate`, which takes any mapping. Narrowing
     to one of the two would either cast away a real case or drop a realtime agent's baseline.
     """
-    _code_tools: ContextVar[list[ToolDefinition] | None] = field(init=False, repr=False)
+    _code_tools: ContextVar[list[ToolsetTool[Any]] | None] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._selection_resolved = ContextVar('agent_control_selection_resolved', default=None)
@@ -1136,7 +1164,7 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
             wrapped=toolset, get_overrides=self._current_overrides, observe_code_tools=self._observe_code_tools
         )
 
-    def _observe_code_tools(self, tools: list[ToolDefinition]) -> None:
+    def _observe_code_tools(self, tools: list[ToolsetTool[Any]]) -> None:
         self._code_tools.set(tools)
 
     def _current_overrides(self) -> Mapping[str, ToolDefinitionOverride]:
@@ -1319,19 +1347,23 @@ class AgentControl(ManagedVariableCapability[AgentDepsT, AgentConfig]):
                 instructions.append(InstructionBlock(id=key, dynamic=True))
         tool_definitions: list[ToolDefinitionOverride] = []
         for tool in self._code_tools.get() or []:
-            descriptions: dict[str, str] = {}
-            properties = tool.parameters_json_schema.get('properties')
+            tool_def = tool.tool_def
+            parameters: dict[str, ParameterOverride] = {}
+            properties = tool_def.parameters_json_schema.get('properties')
             if isinstance(properties, dict):
-                typed_properties: dict[str, Any] = tool.parameters_json_schema['properties']
+                typed_properties: dict[str, Any] = tool_def.parameters_json_schema['properties']
                 for name, schema in typed_properties.items():
                     if isinstance(schema, dict):
                         parameter_schema: dict[str, Any] = typed_properties[name]
                         description = parameter_schema.get('description')
                         if isinstance(description, str):
-                            descriptions[name] = description
+                            parameters[name] = ParameterOverride(description=description)
             tool_definitions.append(
                 ToolDefinitionOverride(
-                    name=tool.name, description=tool.description or None, parameter_descriptions=descriptions or None
+                    name=tool_def.name,
+                    description=tool_def.description or None,
+                    parameters=parameters or None,
+                    toolset=tool.toolset.id or tool.toolset.label,
                 )
             )
         settings = {
