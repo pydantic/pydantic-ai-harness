@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
@@ -75,6 +75,9 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     print(result.output)
     ```
     """
+
+    id: str | None = field(default='modal_sandbox', kw_only=True)
+    """Stable capability and toolset ID."""
 
     image: str = _DEFAULT_IMAGE
     """Container image for owned sandboxes, as a registry tag (e.g. `python:3.12-slim`)."""
@@ -288,6 +291,7 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> AgentToolset[AgentDepsT]:
         """Build and return the Modal sandbox toolset."""
         return ModalSandboxToolset[AgentDepsT](
+            id=self.id,
             image=self.image,
             sandbox_id=self.sandbox_id,
             app_name=self.app_name,

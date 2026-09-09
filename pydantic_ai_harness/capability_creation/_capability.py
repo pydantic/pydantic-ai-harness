@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -63,6 +63,9 @@ class CapabilityCreation(AbstractCapability[AgentDepsT]):
     directory: Path
     """Directory holding the authored `<name>.py` files and the `manifest.json` index."""
 
+    id: str | None = field(default='capability_creation', kw_only=True)
+    """Stable capability and toolset ID."""
+
     guidance: str | None = None
     """Static system-prompt guidance on authoring. Cache-stable. Leave `None` for the
     default, or set `''` to omit guidance entirely."""
@@ -79,7 +82,7 @@ class CapabilityCreation(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
         """Toolset providing the authoring tools over this capability's store."""
-        return CapabilityCreationToolset[AgentDepsT](self.store)
+        return CapabilityCreationToolset[AgentDepsT](self.store, id=self.id)
 
     @classmethod
     def get_serialization_name(cls) -> str | None:
