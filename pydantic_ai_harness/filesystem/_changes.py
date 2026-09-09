@@ -33,7 +33,10 @@ def unified_diff(old: str, new: str, *, path: str) -> tuple[str, bool]:
     diff = '\n'.join(lines)
     if len(diff) <= MAX_EVENT_DIFF_CHARS:
         return diff, False
-    return diff[:MAX_EVENT_DIFF_CHARS], True
+    # Cut on a line boundary so the kept part is still whole diff lines; the
+    # two header lines guarantee a newline well before the cap.
+    cut = diff.rfind('\n', 0, MAX_EVENT_DIFF_CHARS + 1)
+    return diff[:cut], True
 
 
 @dataclass(kw_only=True)

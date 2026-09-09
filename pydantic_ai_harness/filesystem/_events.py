@@ -102,8 +102,10 @@ class FileChangeRequestEvent(
 
     Fires after the path has passed the access checks and, for a write or
     edit, after the conflict check, so a listener only sees changes that
-    would otherwise go ahead. A cancelled change is not applied and the model
-    gets `cancel_reason` as the tool result.
+    would otherwise go ahead; a write re-checks under its open descriptor,
+    so a file replaced in the meantime can still fail after it was announced.
+    A cancelled change is not applied and the model gets `cancel_reason` as
+    the tool result.
 
     `diff` is the unified diff from the current content to the proposed
     content; a new file diffs from empty, and a `create_directory` has none.

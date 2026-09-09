@@ -61,10 +61,13 @@ lands, without parsing tool arguments:
 | `FilesSearchedEvent` | stream | `search_files`, `find_files` | `path`, `root_dir`, `pattern`, `search` (`grep` or `find`), `match_count`, `truncated` |
 
 `FileChangeRequestEvent` is a decision. It fires after the path has passed the
-access checks and, for `edit_file`, after the conflict check, so a listener
-only sees changes that would otherwise go ahead; a path the configuration
-denies emits no request, so a listener cannot approve what the policy
-refuses. A listener that calls `cancel(reason)` stops the change before it
+access checks and, for `write_file` and `edit_file`, after the conflict check,
+so a listener only sees changes that would otherwise go ahead: a denied path,
+a missing parent directory, a stale `expected_hash`, or a directory that
+collides with a file emits no request, so a listener cannot approve what the
+policy or the filesystem refuses. A write re-checks the hash under its open
+descriptor, so a file replaced in the meantime can still fail after it was
+announced. A listener that calls `cancel(reason)` stops the change before it
 touches the disk, and the model gets the reason as the tool result. `diff` is
 the unified diff from the current content to the proposed content: a new file
 diffs from empty, and a `create_directory` has no diff. A `create_directory`

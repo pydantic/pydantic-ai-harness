@@ -214,6 +214,22 @@ def _current_text(resolved: Path) -> str:
         return f.read()
 
 
+def _check_expected_hash(path: str, current_hash: str, expected_hash: str) -> None:
+    """Reject a write or edit whose `expected_hash` no longer matches the file."""
+    if current_hash != expected_hash:
+        raise ValueError(
+            f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
+            f'got hash:{current_hash}). Re-read the file and retry.'
+        )
+
+
+def _nearest_existing(path: Path) -> Path:
+    """The path itself or its closest ancestor that exists."""
+    while not path.exists():
+        path = path.parent
+    return path
+
+
 def _open_for_write(resolved: Path, path: str, *, read_back: bool) -> tuple[int, bool]:
     """Open `resolved` for writing without truncating it; returns the descriptor and whether it was created.
 
@@ -514,12 +530,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             parent_rel = str(resolved.parent.relative_to(self._root))
             raise FileNotFoundError(f"Parent directory '{parent_rel}' does not exist. Use create_directory first.")
 
-        # Announce before opening: `O_CREAT` below would already have made the
-        # file a listener is about to refuse.
-        change = Change.propose(
-            **self._event_location(resolved), operation='write', old=_current_text(resolved), new=content
-        )
-        if (refusal := await change.request(ctx)) is not None:
+        if (
+            refusal := await self._announce_write(ctx, resolved, path, content, expected_hash=expected_hash)
+        ) is not None:
             return refusal
 
         descriptor, created = _open_for_write(resolved, path, read_back=expected_hash is not None)
@@ -532,12 +545,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             descriptor = -1
             with text_file:
                 if expected_hash is not None and not created:
-                    current_hash = _content_hash(text_file.read())
-                    if current_hash != expected_hash:
-                        raise ValueError(
-                            f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
-                            f'got hash:{current_hash}). Re-read the file and retry.'
-                        )
+                    _check_expected_hash(path, _content_hash(text_file.read()), expected_hash)
 
                 text_file.seek(0)
                 text_file.truncate(0)
@@ -551,6 +559,27 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if ctx is not None:
             await ctx.emit(FileWrittenEvent(**self._event_location(resolved), content_hash=new_hash))
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
+
+    async def _announce_write(
+        self, ctx: RunContext[AgentDepsT] | None, resolved: Path, path: str, content: str, *, expected_hash: str | None
+    ) -> str | None:
+        """Check the conflict and announce the write before the file is opened.
+
+        `O_CREAT` in `_open_for_write` would already have made the file a
+        listener is about to refuse, so the request cannot wait for the
+        descriptor. The hash is checked here first so a listener only sees a
+        write that would go ahead, and again under the descriptor, which is
+        what actually guards the write. Outside a run nothing is read: the
+        diff is for listeners.
+        """
+        if expected_hash is not None and resolved.is_file():
+            _check_expected_hash(path, _content_hash(_read_canonical_text(resolved)), expected_hash)
+        if ctx is None:
+            return None
+        change = Change.propose(
+            **self._event_location(resolved), operation='write', old=_current_text(resolved), new=content
+        )
+        return await change.request(ctx)
 
     async def edit_file(self, path: str, old_text: str, new_text: str, *, expected_hash: str | None = None) -> str:
         """Edit a text file directly, outside an agent run."""
@@ -604,12 +633,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         text = _read_canonical_text(resolved)
         current_hash = _content_hash(text)
 
-        # Optimistic concurrency check
-        if expected_hash is not None and current_hash != expected_hash:
-            raise ValueError(
-                f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
-                f'got hash:{current_hash}). Re-read the file and retry.'
-            )
+        if expected_hash is not None:
+            _check_expected_hash(path, current_hash, expected_hash)
 
         count = text.count(old_text)
         if count == 0:
@@ -874,17 +899,22 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if resolved.is_dir():
             # Nothing changes, so there is nothing to announce or report.
             return f'Created directory: {path}'
+        # The same collisions `mkdir` reports below, checked first so a listener
+        # is only asked about a directory that can be created.
+        if resolved.exists():
+            raise ModelRetry(f'Path {path!r} exists and is not a directory.')
+        if not _nearest_existing(resolved.parent).is_dir():
+            raise ModelRetry(f'Path {path!r} has a parent that is not a directory.')
         change = Change.propose(**self._event_location(resolved), operation='create_directory')
         if (refusal := await change.request(ctx)) is not None:
             return refusal
+        # The checks above already named these collisions; here they mean the
+        # path changed under us between the check and the `mkdir`.
         try:
             resolved.mkdir(parents=True, exist_ok=True)
-        except FileExistsError as e:
-            # `exist_ok` only suppresses the error when the existing path is a
-            # directory; name the conflicting model-supplied path directly.
+        except FileExistsError as e:  # pragma: no cover
             raise ModelRetry(f'Path {path!r} exists and is not a directory.') from e
-        except NotADirectoryError as e:
-            # Distinguish a parent collision from a collision at the leaf.
+        except NotADirectoryError as e:  # pragma: no cover
             raise ModelRetry(f'Path {path!r} has a parent that is not a directory.') from e
         if ctx is not None:
             await ctx.emit(DirectoryCreatedEvent(**self._event_location(resolved)))
