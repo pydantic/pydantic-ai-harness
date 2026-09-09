@@ -14,27 +14,27 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox, Sandbox
 from pydantic_ai.usage import RunUsage
+from pydantic_ai.workspaces import LocalWorkspace, Workspace
 
 from pydantic_ai_harness.pydantic_ai_docs import PydanticAIDocs, PydanticAIDocsToolset, PydanticAIDocsTopic
 
 pytestmark = pytest.mark.anyio
 
 
-def _run_context(sandbox: Sandbox | None = None) -> RunContext[None]:
+def _run_context(workspace: Workspace | None = None) -> RunContext[None]:
     """Minimal `RunContext` for direct toolset invocations."""
-    if sandbox is None:
+    if workspace is None:
         return RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
     return RunContext[None](
-        deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0, sandbox=sandbox
+        deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0, workspace=workspace
     )
 
 
 async def _call_docs_tool(
-    toolset: PydanticAIDocsToolset[object], sandbox: Sandbox | None, name: str, **tool_args: Any
+    toolset: PydanticAIDocsToolset[object], workspace: Workspace | None, name: str, **tool_args: Any
 ) -> str:
-    ctx = _run_context(sandbox=sandbox)
+    ctx = _run_context(workspace=workspace)
     tools = await toolset.get_tools(ctx)
     result = await toolset.call_tool(name, tool_args, ctx, tools[name])
     assert isinstance(result, str)
@@ -48,9 +48,9 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-async def sandbox(tmp_path: Path) -> AsyncIterator[Sandbox]:
-    async with LocalSandbox(root=tmp_path) as backend:
-        yield Sandbox.wrap(backend)
+async def workspace(tmp_path: Path) -> AsyncIterator[Workspace]:
+    async with LocalWorkspace(root=tmp_path) as backend:
+        yield Workspace(backend)
 
 
 class _FakeClient:
@@ -89,13 +89,13 @@ def _install_fake_httpx(
 
 
 class TestPydanticAIDocsToolset:
-    async def test_local_hit_is_cached(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_local_hit_is_cached(self, tmp_path: Path, workspace: Workspace) -> None:
         (tmp_path / 'hooks.md').write_text('# Hooks local', encoding='utf-8')
         cache: dict[PydanticAIDocsTopic, str] = {}
         toolset = PydanticAIDocsToolset[object](local_docs_path=tmp_path, cache=cache)
 
         assert (
-            await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
+            await _call_docs_tool(toolset, workspace, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
             == '# Hooks local'
         )
         assert cache[PydanticAIDocsTopic.hooks] == '# Hooks local'
@@ -103,7 +103,7 @@ class TestPydanticAIDocsToolset:
         # Second call serves from cache: removing the file does not change the result.
         (tmp_path / 'hooks.md').unlink()
         assert (
-            await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
+            await _call_docs_tool(toolset, workspace, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
             == '# Hooks local'
         )
 
@@ -117,27 +117,27 @@ class TestPydanticAIDocsToolset:
         )
 
     async def test_remote_fallback_when_local_file_missing(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sandbox: Sandbox
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workspace: Workspace
     ) -> None:
         _install_fake_httpx(monkeypatch, text='# Agent remote')
         cache: dict[PydanticAIDocsTopic, str] = {}
         toolset = PydanticAIDocsToolset[object](local_docs_path=tmp_path, cache=cache)
 
         assert (
-            await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.agent)
+            await _call_docs_tool(toolset, workspace, 'read_pyai_docs', topic=PydanticAIDocsTopic.agent)
             == '# Agent remote'
         )
         assert cache[PydanticAIDocsTopic.agent] == '# Agent remote'
 
     async def test_remote_fallback_when_local_parent_is_not_a_directory(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sandbox: Sandbox
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workspace: Workspace
     ) -> None:
         _install_fake_httpx(monkeypatch, text='# Agent remote')
         local_parent = tmp_path / 'not-a-directory'
         local_parent.write_text('file', encoding='utf-8')
         toolset = PydanticAIDocsToolset[object](local_docs_path=local_parent, cache=None)
 
-        result = await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.agent)
+        result = await _call_docs_tool(toolset, workspace, 'read_pyai_docs', topic=PydanticAIDocsTopic.agent)
 
         assert result == '# Agent remote'
 
@@ -149,13 +149,13 @@ class TestPydanticAIDocsToolset:
             await _call_docs_tool(toolset, None, 'read_pyai_docs', topic=PydanticAIDocsTopic.tools)
 
     async def test_remote_error_reports_local_path(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sandbox: Sandbox
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, workspace: Workspace
     ) -> None:
         _install_fake_httpx(monkeypatch, status=404)
         toolset = PydanticAIDocsToolset[object](local_docs_path=tmp_path, cache=None)
 
         with pytest.raises(RuntimeError, match=str(tmp_path)):
-            await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.toolsets)
+            await _call_docs_tool(toolset, workspace, 'read_pyai_docs', topic=PydanticAIDocsTopic.toolsets)
 
     def test_tools_advanced_value_coerces_to_member(self) -> None:
         # The LLM passes the enum VALUE; pydantic coerces it back to the member.
@@ -163,28 +163,29 @@ class TestPydanticAIDocsToolset:
         assert PydanticAIDocsTopic.tools_advanced.value == 'tools-advanced'
         assert TypeAdapter(PydanticAIDocsTopic).validate_python('tools-advanced') is PydanticAIDocsTopic.tools_advanced
 
-    async def test_tools_advanced_reads_hyphenated_file(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_tools_advanced_reads_hyphenated_file(self, tmp_path: Path, workspace: Workspace) -> None:
         (tmp_path / 'tools-advanced.md').write_text('# Tools advanced local', encoding='utf-8')
         toolset = PydanticAIDocsToolset[object](local_docs_path=tmp_path, cache=None)
 
         assert (
-            await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.tools_advanced)
+            await _call_docs_tool(toolset, workspace, 'read_pyai_docs', topic=PydanticAIDocsTopic.tools_advanced)
             == '# Tools advanced local'
         )
 
-    async def test_relative_local_path_uses_sandbox_working_dir(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_relative_local_path_uses_workspace_working_dir(self, tmp_path: Path, workspace: Workspace) -> None:
         (tmp_path / 'hooks.md').write_text('# Hooks home', encoding='utf-8')
         toolset = PydanticAIDocsToolset[object](local_docs_path=Path('.'), cache=None)
 
         assert (
-            await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks) == '# Hooks home'
+            await _call_docs_tool(toolset, workspace, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
+            == '# Hooks home'
         )
 
-    async def test_tilde_is_rejected(self, sandbox: Sandbox) -> None:
+    async def test_tilde_is_rejected(self, workspace: Workspace) -> None:
         toolset = PydanticAIDocsToolset[object](local_docs_path=Path('~/docs'), cache=None)
 
         with pytest.raises(UserError, match='do not expand'):
-            await _call_docs_tool(toolset, sandbox, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
+            await _call_docs_tool(toolset, workspace, 'read_pyai_docs', topic=PydanticAIDocsTopic.hooks)
 
 
 class TestPydanticAIDocsCapability:
@@ -230,8 +231,8 @@ class TestThroughAgent:
             return ModelResponse(parts=[TextPart('done')])
 
         agent = Agent(FunctionModel(call_then_finish), capabilities=[PydanticAIDocs(local_docs_path=tmp_path)])
-        async with LocalSandbox(root=tmp_path) as backend:
-            result = await agent.run('go', sandbox=backend)
+        async with LocalWorkspace(root=tmp_path) as backend:
+            result = await agent.run('go', workspace=backend)
 
         assert result.output == 'done'
         returns = [
@@ -242,7 +243,7 @@ class TestThroughAgent:
         ]
         assert returns == ['# Capabilities doc']
 
-    async def test_local_path_without_sandbox_raises(self, tmp_path: Path) -> None:
+    async def test_local_path_without_workspace_raises(self, tmp_path: Path) -> None:
         (tmp_path / 'capabilities.md').write_text('# Host capabilities', encoding='utf-8')
 
         def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -250,13 +251,13 @@ class TestThroughAgent:
 
         agent = Agent(FunctionModel(call_then_finish), capabilities=[PydanticAIDocs(local_docs_path=tmp_path)])
 
-        with pytest.raises(UserError, match='No sandbox is attached'):
+        with pytest.raises(UserError, match='No workspace is attached'):
             await agent.run('go')
 
-    async def test_cache_is_isolated_between_run_sandboxes(self, tmp_path: Path) -> None:
+    async def test_cache_is_isolated_between_run_workspaces(self, tmp_path: Path) -> None:
         first_root = tmp_path / 'first'
         second_root = tmp_path / 'second'
-        for root, content in ((first_root, '# First sandbox'), (second_root, '# Second sandbox')):
+        for root, content in ((first_root, '# First workspace'), (second_root, '# Second workspace')):
             docs = root / 'docs'
             docs.mkdir(parents=True)
             (docs / 'capabilities.md').write_text(content, encoding='utf-8')
@@ -270,8 +271,8 @@ class TestThroughAgent:
 
         returned: list[str] = []
         for root in (first_root, second_root):
-            async with LocalSandbox(root=root) as backend:
-                result = await agent.run('go', sandbox=backend)
+            async with LocalWorkspace(root=root) as backend:
+                result = await agent.run('go', workspace=backend)
             returned.extend(
                 part.content
                 for message in result.all_messages()
@@ -281,4 +282,4 @@ class TestThroughAgent:
                 and isinstance(part.content, str)
             )
 
-        assert returned == ['# First sandbox', '# Second sandbox']
+        assert returned == ['# First workspace', '# Second workspace']

@@ -21,6 +21,8 @@ For any code change:
 - Adding a retry, fallback or error-handling field to a capability that takes a
   pluggable dependency: `capability-authoring.md` "Policy Lives In The Pluggable
   Component"
+- Deciding what a capability emits to OpenTelemetry, or documenting that it
+  emits nothing: `capability-authoring.md` "Telemetry"
 - README, `docs/` pages, or capability READMEs: `docs-conventions.md`
 - Review, pre-PR check, or final self-check: `review-checklist.md`
 - Commands/parsers, processes/containers, network endpoints, resource cleanup,
@@ -44,11 +46,6 @@ shape:
 Do not copy `CodeMode` mechanically. Use it to understand package shape,
 testing depth, docs placement, and how a harness capability composes with
 Pydantic AI toolsets.
-
-## Sandbox Backend Authors
-
-Read [writing sandbox backends](https://ai.pydantic.dev/sandbox/#supply-a-sandbox-from-a-capability) when implementing a native SDK backend.
-`LazySandbox` owns acquisition coordination and caching; providers implement `create_or_attach()`.
 
 ## Pydantic AI References
 

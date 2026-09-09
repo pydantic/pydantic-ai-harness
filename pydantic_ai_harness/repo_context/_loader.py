@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic_ai.sandboxes import Sandbox
+from pydantic_ai.workspaces import Workspace
 
 
 @dataclass(frozen=True)
@@ -29,8 +29,7 @@ def _walk_dirs(workspace_dir: Path, home_dir: Path | None) -> list[Path]:
 
     Walk up from `workspace_dir` to `home_dir` inclusive. When `home_dir` is
     `None`, or is not an ancestor of `workspace_dir`, only `workspace_dir` is
-    scanned. Symlink realpath resolution is delegated to the sandbox (the
-    resulting directories are used verbatim for reads).
+    scanned. The workspace backend handles filesystem path behavior.
     """
     if home_dir is None:
         return [workspace_dir]
@@ -45,18 +44,18 @@ def _walk_dirs(workspace_dir: Path, home_dir: Path | None) -> list[Path]:
     return list(reversed(chain))
 
 
-async def _sandbox_is_file(sandbox: Sandbox, path: Path) -> bool:
-    """True when `path` exists and is a regular file inside `sandbox`."""
+async def _is_file(workspace: Workspace, path: Path) -> bool:
+    """True when `path` exists and is a regular file inside `workspace`."""
     text = str(path)
     try:
-        entry = await sandbox.stat(text)
+        entry = await workspace.stat(text)
     except (FileNotFoundError, NotADirectoryError):
         return False
     return not entry.is_dir
 
 
 async def discover_instruction_files(
-    sandbox: Sandbox,
+    workspace: Workspace,
     workspace_dir: Path,
     home_dir: Path | None,
     filenames: Sequence[str],
@@ -77,11 +76,11 @@ async def discover_instruction_files(
     for directory in _walk_dirs(workspace_dir, home_dir):
         for filename in filenames:
             candidate = directory / filename
-            if not await _sandbox_is_file(sandbox, candidate):
+            if not await _is_file(workspace, candidate):
                 continue
             if candidate in seen_paths:
                 continue
-            content = (await sandbox.read_bytes(str(candidate))).decode('utf-8', errors='replace')
+            content = (await workspace.read_bytes(str(candidate))).decode('utf-8', errors='replace')
             digest = hashlib.sha256(content.encode('utf-8')).hexdigest()
             if digest in seen_hashes:
                 continue
@@ -91,15 +90,15 @@ async def discover_instruction_files(
     return found
 
 
-async def find_dir_context_file(sandbox: Sandbox, directory: Path, filenames: Sequence[str]) -> ContextFile | None:
+async def find_dir_context_file(workspace: Workspace, directory: Path, filenames: Sequence[str]) -> ContextFile | None:
     """Return the first existing instruction file in `directory`, or `None`."""
     for filename in filenames:
         candidate = directory / filename
-        if await _sandbox_is_file(sandbox, candidate):
+        if await _is_file(workspace, candidate):
             return ContextFile(
                 directory=directory,
                 path=candidate,
-                content=(await sandbox.read_bytes(str(candidate))).decode('utf-8', errors='replace'),
+                content=(await workspace.read_bytes(str(candidate))).decode('utf-8', errors='replace'),
             )
     return None
 
