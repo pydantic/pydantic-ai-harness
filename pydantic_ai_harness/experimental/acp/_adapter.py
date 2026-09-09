@@ -131,6 +131,10 @@ class _TurnState:
     conn: Client
     session_id: str
     cwd: str
+    # Best-effort pre-run guess at which tools pause for approval (see `_approval_tool_names`):
+    # tools the static scan cannot see (per-run `for_run()` toolsets, callable `AgentToolset`
+    # arms, non-`FunctionToolset` toolsets) are initially announced as running and corrected to
+    # `pending` once the run reports which calls actually paused.
     approval_names: frozenset[str]
     # Tool-call ids accumulated across the turn's approval-resume passes: `started` so a call
     # paused for approval is announced only once, `denied` so a rejected call's result is failed,
@@ -138,6 +142,9 @@ class _TurnState:
     started: set[str] = field(default_factory=set[str])
     denied: set[str] = field(default_factory=set[str])
     resulted: set[str] = field(default_factory=set[str])
+    # The status each announced tool call started with, keyed by tool call id, so `_resolve_approvals`
+    # can downgrade a call that paused for approval after being announced as already running.
+    announced_status: dict[str, schema.ToolCallStatus] = field(default_factory=dict[str, schema.ToolCallStatus])
     # The `session/update`s sent this turn; appended to the session transcript only on commit.
     updates: list[SessionUpdate] = field(default_factory=list[SessionUpdate])
 
@@ -750,7 +757,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             fields = self._tool_call_fields(call, turn.cwd, default_kind=None)
             # A call awaiting approval is not running yet: it starts `pending` and
             # `_resolve_approvals` promotes it once approved. Any other call is already executing.
+            # The pre-run scan cannot see every approval requirement (per-run `for_run()` toolsets,
+            # callable `AgentToolset` arms, non-`FunctionToolset` toolsets), so a call announced
+            # here may still pause: `_resolve_approvals` corrects it once the run reports so.
             status: schema.ToolCallStatus = 'pending' if call.tool_name in turn.approval_names else 'in_progress'
+            turn.announced_status[call.tool_call_id] = status
             await self._send_update(
                 turn,
                 acp.start_tool_call(
@@ -800,6 +811,11 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
 
         results = DeferredToolResults()
         for call in requests.approvals:
+            # A call that paused for approval despite the pre-run scan not knowing it pauses was
+            # announced as already running; correct it to `pending` before the decision so a client
+            # never renders a rejected call as if it had executed.
+            if turn.announced_status.get(call.tool_call_id) == 'in_progress':
+                await self._update_status(turn, call.tool_call_id, 'pending')
             # `args_as_dict()` canonicalizes the call's arguments to a dict: a model may deliver them
             # as a JSON string (the OpenAI default, and how streamed calls accumulate), and a raw
             # string would make the scope key sensitive to key order, defeating a remembered "always"
@@ -809,7 +825,7 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             )
             if scope in state.always_allow:
                 results.approvals[call.tool_call_id] = True
-                await self._mark_running(turn, call.tool_call_id)
+                await self._update_status(turn, call.tool_call_id, 'in_progress')
                 continue
             if scope in state.always_reject:
                 results.approvals[call.tool_call_id] = ToolDenied('Rejected by the client.')
@@ -822,20 +838,26 @@ class PydanticAIACPAgent(acp.Agent, Generic[AgentDepsT, OutputDataT]):
             if isinstance(decision, ToolDenied):
                 turn.denied.add(call.tool_call_id)
             else:
-                await self._mark_running(turn, call.tool_call_id)
+                await self._update_status(turn, call.tool_call_id, 'in_progress')
         return results
 
-    async def _mark_running(self, turn: _TurnState, tool_call_id: str) -> None:
-        """Promote an approved tool call from `pending` to `in_progress`, just before it executes."""
-        await self._send_update(turn, acp.update_tool_call(tool_call_id=tool_call_id, status='in_progress'))
+    async def _update_status(self, turn: _TurnState, tool_call_id: str, status: schema.ToolCallStatus) -> None:
+        """Move an announced tool call to `pending` or `in_progress` directly.
+
+        `pending` downgrades a call announced as running that paused for approval after all;
+        `in_progress` promotes an approved call, just before it executes.
+        """
+        await self._send_update(turn, acp.update_tool_call(tool_call_id=tool_call_id, status=status))
 
     def _approval_tool_names(self, config: AcpSessionConfig[AgentDepsT]) -> frozenset[str]:
-        """Names of the tools that pause for the client's approval, announced `pending` in `_emit_event`.
+        """Best-effort pre-run guess at the tools that pause for the client's approval.
 
         Only `FunctionToolset`-held tools expose `requires_approval` without a live run context;
         tools from other toolset types are treated as not requiring approval. A session capability
         is asked for its toolset the same way, so its approval-required tools are announced too --
-        except when it builds one per run, which needs a run context this scan doesn't have.
+        except when it builds one per run, which needs a run context this scan doesn't have. A call
+        this scan misses pauses anyway (the run reports it in `DeferredToolRequests.approvals`), and
+        `_resolve_approvals` then corrects its announced status to `pending`.
         """
         toolsets: list[AbstractToolset[AgentDepsT]] = [*self._agent.toolsets, *(config.toolsets or [])]
         for capability in config.capabilities or ():
