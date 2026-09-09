@@ -284,6 +284,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `aws_cli` and `localstack_health` under fixed names',
         lambda cls: (cls(), cls()),
     ),
+    'Linear': Collides("its toolset registers Linear's tool names under a fixed toolset id"),
     'CodeMode': Collides('`run_code` is reserved, so a second one is rejected by name'),
     'BrowserUse': Collides('its toolset registers its browser tools under fixed names'),
     'PlaywrightBrowser': Collides('its toolset registers `click` and friends under fixed names'),
