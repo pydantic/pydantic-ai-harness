@@ -1,8 +1,8 @@
 # Harness CLI
 
-A terminal client for the [Coder](../coder/) harness. `harness -p "..."` runs one prompt against `Coder` in the current directory and renders the run as it happens: streamed Markdown for the model's text, one line per tool call and result.
+A terminal client for the [Coder](../coder/) harness. `harness` starts an interactive session with `Coder` in the current directory, and `harness -p "..."` runs one prompt and exits. Either way the run renders as it happens: streamed Markdown for the model's text, one line per tool call and result.
 
-This is an early slice of a larger client. The interactive session, config file, and slash commands land one plan item at a time; the plan is [`agent_docs/harness-cli-plan.md`](https://github.com/pydantic/pydantic-ai-harness/blob/main/agent_docs/harness-cli-plan.md). `harness` is a placeholder command name.
+This is an early slice of a larger client. The config file, slash commands, and a richer line editor land one plan item at a time; the plan is [`agent_docs/harness-cli-plan.md`](https://github.com/pydantic/pydantic-ai-harness/blob/main/agent_docs/harness-cli-plan.md). `harness` is a placeholder command name.
 
 See the [source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/cli/). While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade; see the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
@@ -17,13 +17,25 @@ The CLI needs Python 3.11 or newer. It renders with [Termflow](https://pypi.org/
 ## Usage
 
 ```bash
+harness
+harness --model openai:gpt-5.6-sol
 harness -p "Explain what tests/test_parser.py covers."
-harness -p "Add a --verbose flag to scripts/build.py." --model openai:gpt-5.6-sol
 ```
 
 `--model` takes any name Pydantic AI's [`infer_model`](https://pydantic.dev/docs/ai/models/overview/) accepts and defaults to `anthropic:claude-fable-5`. The provider's API key comes from the environment as usual; a missing key exits with the provider's own message.
 
 The agent is `Coder` rooted at the current directory: it can read and edit files under it and run the commands on `Coder`'s allowlist. That allowlist is a guardrail against accidents, not a security boundary; see the [Coder docs](../coder/) for the exact composition and how to sandbox it.
+
+### The session
+
+Without `-p`, `harness` shows a `harness>` prompt and reads one line per prompt. The conversation carries across prompts, so a follow-up sees everything before it.
+
+- **Enter** sends the line. Blank lines are ignored.
+- **Typing during a run** steers it: the line is enqueued into the run and reaches the model at its next request (or turns into one more request if the run was about to finish). The session confirms with `(steer queued: ...)` when the line is taken.
+- **Ctrl+C** cancels the run in flight through core's `AgentRun.cancel`: the model request or tool call is torn down, `(cancelled)` prints, and what completed before the cancel stays in the conversation. When nothing is running, Ctrl+C starts a fresh prompt line.
+- **Ctrl+D** ends the session.
+
+Line editing is what the terminal itself provides (Backspace, Ctrl+U, Ctrl+W); history search, completion, and paste handling are later plan items. With `-p`, the session's stdin is not read, so piped input is neither a prompt nor a steer.
 
 ## What you see
 
@@ -32,6 +44,8 @@ The agent is `Coder` rooted at the current directory: it can read and edit files
 - Model text streams through Termflow as Markdown: headings, emphasis, lists, code blocks with syntax highlighting, and tables render as the text completes each line.
 - Each tool call prints as `> tool_name {"arg": ...}` and its result as `< tool_name` followed by the first line of the return value. When a result spans several lines, the line ends with `(+N lines)`; every line is cut to the terminal width. A tool that asks the model to retry prints as `! tool_name` with the retry reason.
 - Thinking parts and capability events (a file read, a plan update) are not rendered yet; the plan schedules them.
+
+The session's own lines, the prompt and the dimmed `(cancelled)` and `(steer queued: ...)` notes, come from `Repl`, not the bridge.
 
 The bridge is an ordinary capability, so you can put it on your own agent. Wire it last so it observes every other capability's events:
 
@@ -62,6 +76,34 @@ with cli_agent.override(model=TestModel(call_tools=[], custom_output_text='Hello
 
 To assert on a rendered transcript, give `CliBridge` an `io.StringIO` as `output` and a fixed `width`, then strip the ANSI styling with `termflow.ansi.visible` before comparing.
 
+To drive a whole session without a terminal, build a `Repl` over your agent and feed it `Lines`: `push` a line to type it, `push(None)` for Ctrl+D, and call `interrupt()` for Ctrl+C. `Repl.run()` is the session, `Repl.run_once(prompt)` is `-p`, and `Repl.history` is the conversation so far.
+
+```python
+import asyncio
+import io
+
+from pydantic_ai import Agent
+from pydantic_ai.models.test import TestModel
+
+from pydantic_ai_harness.cli import CliBridge, Lines, Repl
+
+
+async def main() -> None:
+    buffer = io.StringIO()
+    agent = Agent(capabilities=[CliBridge(output=buffer, width=80)])
+    lines = Lines()
+    lines.push('hi')
+    lines.push(None)
+    repl = Repl(agent=agent, model=TestModel(custom_output_text='Hello.'), lines=lines, output=buffer)
+    await repl.run()
+    print(buffer.getvalue())
+    #> harness> Hello.
+    #> harness>
+
+
+asyncio.run(main())
+```
+
 ## Telemetry
 
-The CLI adds no spans of its own, and neither does `CliBridge`: rendering records no decision that core's spans do not already show. Core's [instrumentation](https://pydantic.dev/docs/ai/capabilities/instrumentation/) covers the run: `logfire.instrument_pydantic_ai()` before `main()` traces every model and tool call.
+The CLI adds no spans of its own, and neither does `CliBridge` or `Repl`: rendering and prompt reading record no decision that core's spans do not already show, and a cancel or steer is visible in core's run span through `RunCancelled` and `EnqueuedMessagesEvent`. Core's [instrumentation](https://pydantic.dev/docs/ai/capabilities/instrumentation/) covers the run: `logfire.instrument_pydantic_ai()` before `main()` traces every model and tool call.
