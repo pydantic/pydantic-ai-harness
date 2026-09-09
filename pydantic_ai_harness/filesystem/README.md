@@ -46,13 +46,37 @@ print(result.output)
 
 ## Events
 
-`FileSystem` emits typed capability events after successful operations:
+`FileSystem` emits typed capability events in the `file_system` namespace so a
+host can show what the agent did to the workspace, or veto a change before it
+lands, without parsing tool arguments:
 
-| Event | Operation | Payload |
-|---|---|---|
-| `FileReadEvent` | `read_file` | `path`, `root_dir`, `content_hash` |
-| `DirectoryListedEvent` | `list_directory` | `path`, `root_dir`, `entry_count` |
-| `FileWrittenEvent` | `write_file`, `edit_file` | `path`, `root_dir`, `content_hash` |
+| Event | Dispatch | Operation | Payload |
+|---|---|---|---|
+| `FileChangeRequestEvent` | immediate | `write_file`, `edit_file`, `create_directory` | `path`, `root_dir`, `operation`, `diff`, `truncated`; `cancel(reason)` |
+| `FileReadEvent` | stream | `read_file` | `path`, `root_dir`, `content_hash` |
+| `DirectoryListedEvent` | stream | `list_directory` | `path`, `root_dir`, `entry_count` |
+| `FileWrittenEvent` | stream | `write_file` | `path`, `root_dir`, `content_hash` |
+| `FileEditedEvent` | stream | `edit_file` | a `FileWrittenEvent` plus `diff`, `truncated` |
+| `DirectoryCreatedEvent` | stream | `create_directory` | `path`, `root_dir` |
+| `FilesSearchedEvent` | stream | `search_files`, `find_files` | `path`, `root_dir`, `pattern`, `search` (`grep` or `find`), `match_count`, `truncated` |
+
+`FileChangeRequestEvent` is a decision. It fires after the path has passed the
+access checks and, for `edit_file`, after the conflict check, so a listener
+only sees changes that would otherwise go ahead; a path the configuration
+denies emits no request, so a listener cannot approve what the policy
+refuses. A listener that calls `cancel(reason)` stops the change before it
+touches the disk, and the model gets the reason as the tool result. `diff` is
+the unified diff from the current content to the proposed content: a new file
+diffs from empty, and a `create_directory` has no diff. A `create_directory`
+on a directory that already exists changes nothing and emits nothing. The
+other events are notifications.
+
+`FileEditedEvent` subclasses `FileWrittenEvent`, so a listener for writes
+receives edits too and can read the `diff` when it has one. Diffs are cut at
+`MAX_EVENT_DIFF_CHARS` (8192) with a `truncated` flag, so a persisted or
+forwarded event stream cannot be flooded by one large write. A
+`FilesSearchedEvent` counts the matches the model received; `truncated` says
+the search stopped at `max_search_results` or `max_find_results`.
 
 `path` is the normalized, symlink-resolved location relative to `root_dir`,
 never an absolute host path, so it is safe to echo to the model or a UI.
@@ -61,16 +85,33 @@ elsewhere can locate the file as `Path(root_dir) / path` instead of assuming
 it shares the emitter's root.
 
 Every event path has passed the containment check and the denied patterns. A
-`DirectoryListedEvent` names the listing root, which is not gated by
-`allowed_patterns` (see [Security model](#security-model)); only its entries
-are. A denied or failed operation emits no event, including a `read_file`
-whose `offset` is past the end of the file.
+`DirectoryListedEvent` or `FilesSearchedEvent` names the walk root, which is
+not gated by `allowed_patterns` (see [Security model](#security-model)); only
+its entries are. A denied or failed operation emits no event, including a
+`read_file` whose `offset` is past the end of the file.
 
-Other capabilities can subscribe with `@on_event`, and application code with
-`@agent.on_event`. A host with its own file
-tools can emit the same event types by importing them from
-`pydantic_ai_harness.filesystem`, which lets subscribers such as `RepoContext`
-react without depending on tool names or raw model arguments.
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import FileSystem
+from pydantic_ai_harness.filesystem import FileChangeRequestEvent
+
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[FileSystem()])
+
+@agent.on_event(FileChangeRequestEvent)
+async def hold_migrations(ctx, event):
+    if event.path.startswith('migrations/'):
+        event.cancel('migrations need a human')
+```
+
+Other capabilities subscribe with `@on_event` on a method, the way
+`RepoContext` follows `FileReadEvent` and `DirectoryListedEvent`. A host with
+its own file tools can emit the same event types by importing them from
+`pydantic_ai_harness.filesystem`, which lets subscribers react without
+depending on tool names or raw model arguments.
+
+`FileSystem` emits no OpenTelemetry spans of its own: the core tool-call span
+already records each operation and its result, and the events above carry the
+diff a trace would not.
 
 Tool errors the model can correct -- a missing file, a denied path, a stale
 edit, a directory that collides with an existing file, an invalid glob pattern,
@@ -100,7 +141,10 @@ applies the same rule to absolute symlink targets.
   binary bytes into the model context.
 - **Optimistic concurrency.** `write_file`/`edit_file` accept an
   `expected_hash` so an agent operating on a stale read is told to re-read
-  rather than silently overwriting newer content.
+  rather than silently overwriting newer content. Content hashes identify
+  the file's bytes decoded without newline translation, so `read_file`,
+  `write_file`, `edit_file`, and `file_info` agree regardless of line
+  endings.
 - **Regular write targets.** `write_file` rejects an existing target that is
   not a regular file. On POSIX, it opens the final target descriptor in
   non-blocking mode and checks that descriptor's type before truncating, so a

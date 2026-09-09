@@ -3,20 +3,37 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
-from collections.abc import AsyncIterable, AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.messages import AgentStreamEvent, ModelMessage, RetryPromptPart, ToolReturnPart
+from pydantic_ai.capabilities import AbstractCapability, on_event
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    FunctionToolResultEvent,
+    ModelMessage,
+    RetryPromptPart,
+    ToolReturnPart,
+)
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
 from pydantic_ai_harness.filesystem import (
+    MAX_EVENT_DIFF_CHARS,
+    DirectoryCreatedEvent,
     DirectoryListedEvent,
+    FileChangeRequestEvent,
+    FileEditedEvent,
+    FileOperation,
     FileReadEvent,
+    FilesSearchedEvent,
     FileSystem,
+    FileSystemToolset,
     FileWrittenEvent,
+    SearchKind,
 )
 
 pytestmark = pytest.mark.anyio
@@ -42,7 +59,13 @@ def _tool_model(tool_name: str, json_args: str) -> FunctionModel:
 
 
 async def _run_and_collect(
-    root: Path, tool_name: str, json_args: str, *, denied_patterns: list[str] | None = None
+    root: Path,
+    tool_name: str,
+    json_args: str,
+    *,
+    denied_patterns: list[str] | None = None,
+    listeners: Sequence[AbstractCapability[None]] = (),
+    max_results: int = 1000,
 ) -> list[AgentStreamEvent]:
     events: list[AgentStreamEvent] = []
 
@@ -52,9 +75,39 @@ async def _run_and_collect(
 
     # Named explicitly: an anonymous capability gets a run-local synthetic id
     # on newer pydantic-ai, which the event assertions could not pin down.
-    capability = FileSystem(root_dir=root, denied_patterns=denied_patterns or [], id='file_system')
-    await Agent(_tool_model(tool_name, json_args), capabilities=[capability]).run('go', event_stream_handler=handler)
+    capability = FileSystem[None](
+        root_dir=root,
+        denied_patterns=denied_patterns or [],
+        max_search_results=max_results,
+        max_find_results=max_results,
+        id='file_system',
+    )
+    agent = Agent(_tool_model(tool_name, json_args), deps_type=type(None), capabilities=[capability, *listeners])
+    await agent.run('go', event_stream_handler=handler)
     return events
+
+
+def _tool_result(events: list[AgentStreamEvent]) -> str:
+    """What the model was told by the one tool call the run made."""
+    results = [event.part for event in events if isinstance(event, FunctionToolResultEvent)]
+    assert len(results) == 1
+    assert isinstance(results[0], ToolReturnPart)
+    return results[0].model_response_str()
+
+
+@dataclass
+class Listener(AbstractCapability[None]):
+    """Records every change request and cancels it when `cancel` is set."""
+
+    cancel: bool = False
+    reason: str | None = None
+    requests: list[FileChangeRequestEvent] = field(default_factory=list[FileChangeRequestEvent])
+
+    @on_event(FileChangeRequestEvent)
+    async def _on_request(self, ctx: RunContext[None], event: FileChangeRequestEvent) -> None:
+        self.requests.append(event)
+        if self.cancel:
+            event.cancel(self.reason)
 
 
 def _hash(content: str) -> str:
@@ -113,34 +166,130 @@ class TestFileSystemEvents:
             )
         ]
 
-    @pytest.mark.parametrize(
-        ('tool_name', 'json_args', 'content'),
-        [
-            ('write_file', '{"path":"sub/../target.txt","content":"new\\n"}', 'new\n'),
-            (
-                'edit_file',
-                '{"path":"sub/../target.txt","old_text":"old","new_text":"new"}',
-                'new\n',
-            ),
-        ],
-    )
-    async def test_write_and_edit_emit_one_written_event(
-        self, tmp_path: Path, tool_name: str, json_args: str, content: str
-    ) -> None:
+    async def test_write_emits_one_written_event(self, tmp_path: Path) -> None:
         (tmp_path / 'target.txt').write_text('old\n')
 
-        events = await _run_and_collect(tmp_path, tool_name, json_args)
+        events = await _run_and_collect(tmp_path, 'write_file', '{"path":"sub/../target.txt","content":"new\\n"}')
 
         assert [event for event in events if isinstance(event, FileWrittenEvent)] == [
             FileWrittenEvent(
                 path='target.txt',
                 root_dir=_root(tmp_path),
-                content_hash=_hash(content),
+                content_hash=_hash('new\n'),
+                capability_id='file_system',
+                tool_call_id='call_1',
+                tool_name='write_file',
+            )
+        ]
+
+    async def test_edit_emits_one_edited_event_with_the_diff(self, tmp_path: Path) -> None:
+        (tmp_path / 'target.txt').write_text('old\n')
+
+        events = await _run_and_collect(
+            tmp_path, 'edit_file', '{"path":"sub/../target.txt","old_text":"old","new_text":"new"}'
+        )
+
+        # A `FileEditedEvent` is a `FileWrittenEvent`, so a listener for writes sees the edit too.
+        assert [event for event in events if isinstance(event, FileWrittenEvent)] == [
+            FileEditedEvent(
+                path='target.txt',
+                root_dir=_root(tmp_path),
+                content_hash=_hash('new\n'),
+                diff='--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-old\n+new',
+                truncated=False,
+                capability_id='file_system',
+                tool_call_id='call_1',
+                tool_name='edit_file',
+            )
+        ]
+
+    async def test_create_directory_emits_one_created_event(self, tmp_path: Path) -> None:
+        events = await _run_and_collect(tmp_path, 'create_directory', '{"path":"sub/../new/deep"}')
+
+        assert [event for event in events if isinstance(event, DirectoryCreatedEvent)] == [
+            DirectoryCreatedEvent(
+                path='new/deep',
+                root_dir=_root(tmp_path),
+                capability_id='file_system',
+                tool_call_id='call_1',
+                tool_name='create_directory',
+            )
+        ]
+
+    async def test_existing_directory_emits_nothing(self, tmp_path: Path) -> None:
+        (tmp_path / 'existing').mkdir()
+
+        events = await _run_and_collect(tmp_path, 'create_directory', '{"path":"existing"}')
+
+        assert not any(isinstance(event, (DirectoryCreatedEvent, FileChangeRequestEvent)) for event in events)
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args', 'search'),
+        [
+            ('search_files', '{"pattern":"x","path":"sub"}', 'grep'),
+            ('find_files', '{"pattern":"*.py","path":"sub"}', 'find'),
+        ],
+    )
+    async def test_searches_emit_one_searched_event(
+        self, tmp_path: Path, tool_name: str, json_args: str, search: SearchKind
+    ) -> None:
+        sub = tmp_path / 'sub'
+        sub.mkdir()
+        (sub / 'one.py').write_text('x = 1\nx = 2\n')
+        (sub / 'two.py').write_text('y = 1\n')
+
+        events = await _run_and_collect(tmp_path, tool_name, json_args)
+
+        assert [event for event in events if isinstance(event, FilesSearchedEvent)] == [
+            FilesSearchedEvent(
+                path='sub',
+                root_dir=_root(tmp_path),
+                pattern='x' if search == 'grep' else '*.py',
+                search=search,
+                match_count=2,
+                truncated=False,
                 capability_id='file_system',
                 tool_call_id='call_1',
                 tool_name=tool_name,
             )
         ]
+
+    async def test_write_crlf_emits_hash_of_written_bytes(self, tmp_path: Path) -> None:
+        """A `\\r\\n` write event mirrors the on-disk text, not a translated view."""
+        content = 'alpha\r\nbeta\r\n'
+        events = await _run_and_collect(tmp_path, 'write_file', '{"path":"crlf.txt","content":"alpha\\r\\nbeta\\r\\n"}')
+
+        assert (tmp_path / 'crlf.txt').read_bytes() == content.encode()
+        written = [event for event in events if isinstance(event, FileWrittenEvent)]
+        assert len(written) == 1
+        assert written[0].content_hash == _hash(content)
+
+    async def test_edit_crlf_preserves_bytes_and_event_hash(self, tmp_path: Path) -> None:
+        """Editing a CRLF file leaves `\\r\\n` intact and reports its canonical hash."""
+        (tmp_path / 'target.txt').write_bytes(b'old\r\n')
+
+        events = await _run_and_collect(
+            tmp_path, 'edit_file', '{"path":"target.txt","old_text":"old","new_text":"new"}'
+        )
+
+        assert (tmp_path / 'target.txt').read_bytes() == b'new\r\n'
+        written = [event for event in events if isinstance(event, FileWrittenEvent)]
+        assert len(written) == 1
+        assert written[0].content_hash == _hash('new\r\n')
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args'),
+        [('search_files', '{"pattern":"x"}'), ('find_files', '{"pattern":"*.py"}')],
+    )
+    async def test_capped_search_is_marked_truncated(self, tmp_path: Path, tool_name: str, json_args: str) -> None:
+        for name in ('a', 'b', 'c'):
+            (tmp_path / f'{name}.py').write_text('x = 1\n')
+
+        events = await _run_and_collect(tmp_path, tool_name, json_args, max_results=2)
+
+        searched = [event for event in events if isinstance(event, FilesSearchedEvent)]
+        assert [(event.match_count, event.truncated) for event in searched] == [(2, True)]
+        assert 'truncated at 2 matches' in _tool_result(events)
 
     async def test_subdirectory_root_is_carried_on_the_event(self, tmp_path: Path) -> None:
         project = tmp_path / 'project'
@@ -168,3 +317,137 @@ class TestFileSystemEvents:
         events = await _run_and_collect(tmp_path, 'read_file', '{"path":"secret.txt"}', denied_patterns=['secret.txt'])
 
         assert not any(isinstance(event, (FileReadEvent, DirectoryListedEvent, FileWrittenEvent)) for event in events)
+
+
+class TestFileChangeRequests:
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args', 'operation', 'diff'),
+        [
+            (
+                'write_file',
+                '{"path":"target.txt","content":"new\\n"}',
+                'write',
+                '--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-old\n+new',
+            ),
+            (
+                'write_file',
+                '{"path":"fresh.txt","content":"one\\ntwo\\n"}',
+                'write',
+                '--- a/fresh.txt\n+++ b/fresh.txt\n@@ -0,0 +1,2 @@\n+one\n+two',
+            ),
+            (
+                'edit_file',
+                '{"path":"target.txt","old_text":"old","new_text":"new"}',
+                'edit',
+                '--- a/target.txt\n+++ b/target.txt\n@@ -1 +1 @@\n-old\n+new',
+            ),
+            ('create_directory', '{"path":"made"}', 'create_directory', ''),
+        ],
+    )
+    async def test_request_carries_the_proposed_diff(
+        self, tmp_path: Path, tool_name: str, json_args: str, operation: FileOperation, diff: str
+    ) -> None:
+        (tmp_path / 'target.txt').write_text('old\n')
+        listener = Listener()
+
+        await _run_and_collect(tmp_path, tool_name, json_args, listeners=[listener])
+
+        path = json.loads(json_args)['path']
+        assert listener.requests == [
+            FileChangeRequestEvent(
+                path=path,
+                root_dir=_root(tmp_path),
+                operation=operation,
+                diff=diff,
+                truncated=False,
+                capability_id='file_system',
+                tool_call_id='call_1',
+                tool_name=tool_name,
+            )
+        ]
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args', 'refusal'),
+        [
+            ('write_file', '{"path":"target.txt","content":"new\\n"}', "['target.txt' was not written: not today]"),
+            ('write_file', '{"path":"fresh.txt","content":"new\\n"}', "['fresh.txt' was not written: not today]"),
+            (
+                'edit_file',
+                '{"path":"target.txt","old_text":"old","new_text":"new"}',
+                "['target.txt' was not edited: not today]",
+            ),
+            ('create_directory', '{"path":"made"}', "['made' was not created: not today]"),
+        ],
+    )
+    async def test_cancelled_request_leaves_the_workspace_alone(
+        self, tmp_path: Path, tool_name: str, json_args: str, refusal: str
+    ) -> None:
+        (tmp_path / 'target.txt').write_text('old\n')
+
+        events = await _run_and_collect(
+            tmp_path, tool_name, json_args, listeners=[Listener(cancel=True, reason='not today')]
+        )
+
+        assert _tool_result(events) == refusal
+        assert sorted(entry.name for entry in tmp_path.iterdir()) == ['target.txt']
+        assert (tmp_path / 'target.txt').read_text() == 'old\n'
+        assert not any(isinstance(event, (FileWrittenEvent, DirectoryCreatedEvent)) for event in events)
+
+    async def test_cancel_without_a_reason_names_the_listener(self, tmp_path: Path) -> None:
+        events = await _run_and_collect(
+            tmp_path, 'write_file', '{"path":"fresh.txt","content":"new\\n"}', listeners=[Listener(cancel=True)]
+        )
+
+        assert _tool_result(events) == "['fresh.txt' was not written: cancelled by a listener]"
+
+    async def test_denied_write_emits_no_request(self, tmp_path: Path) -> None:
+        listener = Listener()
+
+        await _run_and_collect(
+            tmp_path,
+            'write_file',
+            '{"path":"secret.txt","content":"x"}',
+            denied_patterns=['secret.txt'],
+            listeners=[listener],
+        )
+
+        assert listener.requests == []
+
+    async def test_stale_edit_emits_no_request(self, tmp_path: Path) -> None:
+        (tmp_path / 'target.txt').write_text('old\n')
+        listener = Listener()
+
+        events = await _run_and_collect(
+            tmp_path,
+            'edit_file',
+            '{"path":"target.txt","old_text":"old","new_text":"new","expected_hash":"000000000000"}',
+            listeners=[listener],
+        )
+
+        assert listener.requests == []
+        assert any(isinstance(event, FunctionToolResultEvent) for event in events)
+
+    async def test_large_diff_is_cut_and_marked(self, tmp_path: Path) -> None:
+        content = ''.join(f'line {i}\n' for i in range(2000))
+        listener = Listener()
+
+        events = await _run_and_collect(
+            tmp_path, 'write_file', json.dumps({'path': 'big.txt', 'content': content}), listeners=[listener]
+        )
+
+        (request,) = listener.requests
+        assert request.truncated
+        assert len(request.diff) == MAX_EVENT_DIFF_CHARS
+        assert (tmp_path / 'big.txt').read_text() == content
+        assert any(isinstance(event, FileWrittenEvent) for event in events)
+
+    async def test_direct_call_asks_nobody(self, tmp_path: Path) -> None:
+        toolset = FileSystem[None](root_dir=tmp_path).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+
+        await toolset.write_file('direct.txt', 'hi\n')
+        await toolset.edit_file('direct.txt', 'hi', 'bye')
+        await toolset.create_directory('made')
+
+        assert (tmp_path / 'direct.txt').read_text() == 'bye\n'
+        assert (tmp_path / 'made').is_dir()
