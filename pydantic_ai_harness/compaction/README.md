@@ -425,7 +425,8 @@ endpoint requires a fixed leading instruction.
 The messages served into that template are rendered to text, and each tool return is capped per return at
 `tool_return_max_chars` (default 500) characters using the same explicit truncation marker as kept user
 turns. Raise it, or set it to `None` to render each return whole, when the summarizer's context window is
-large enough to absorb the payloads; a `max_tokens` / `keep_tokens` budget still bounds the total.
+large enough to absorb the payloads. `max_tokens` and `keep_tokens` control when compaction runs and which
+history messages are retained; they do not cap the summary-request payload.
 
 ## Usage accounting
 

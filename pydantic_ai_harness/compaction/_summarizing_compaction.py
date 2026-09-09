@@ -414,7 +414,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """Per-message character cap for ``keep_user_messages``; oversized messages are truncated
     with an explicit marker (the shared truncation-marker convention)."""
 
-    tool_return_max_chars: int | None = 500
+    tool_return_max_chars: int | None = field(default=500, kw_only=True)
     """Per-return character cap when rendering tool results for the summarizer. `None` renders
     them whole."""
 
