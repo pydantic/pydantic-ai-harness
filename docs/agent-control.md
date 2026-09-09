@@ -216,10 +216,15 @@ replay-safe. Run the agent outside the workflow once to get it registered.
 
 ## Which agent in Logfire it controls
 
-The agent's `name` -- so **set one explicitly**. An `Agent` without a `name` gets one inferred from
-the Python variable it was assigned to, which means renaming a local variable silently points the
-agent at a different config, and an agent built somewhere that inference can't see has no name at all
-(`AgentControl` raises rather than guessing).
+The agent's `name`, which you have to **set explicitly** -- `AgentControl` refuses an agent that has
+none. Pydantic AI would otherwise infer one from the Python variable the agent was assigned to, and
+an agent's config is not something a local rename should be able to move. The refusal happens where
+the capability is wired up, not mid-run:
+
+```python {test="skip"}
+Agent('anthropic:claude-fable-5-1', capabilities=[AgentControl()])
+# UserError: `AgentControl` without an explicit `name` reads the agent's `name`, and this agent has none.
+```
 
 The name is normalized the way Logfire normalizes an agent's name in your traces, and that is lossy:
 `checkout-assistant`, `Checkout Assistant`, and `checkout_assistant` are one agent to Logfire,
