@@ -39,9 +39,18 @@ except ImportError as _import_error:  # pragma: no cover
         'MCP support is required for the StackOne capability. Install it with: uv add "pydantic-ai-harness[stackone]"'
     ) from _import_error
 
+# `MCPToolsetClient` is re-exported for `_capability`, which must not import `pydantic_ai.mcp`
+# directly: this module's guarded import is what turns a missing `mcp` extra into the
+# install-hint `ImportError`.
 __all__ = (
+    # Re-exported so `_capability` can take it from here instead of repeating the optional-import
+    # guard above. Naming it makes the re-export explicit, which is what `reportPrivateImportUsage`
+    # asks for; without it the import only type-checks when Pyright happens to analyze this module
+    # in the same invocation as the one importing from it.
+    'MCPToolsetClient',
     'STACKONE_API_KEY_ENV',
     'STACKONE_BASE_URL',
+    'MCPToolsetClient',
     'StackOneToolset',
     'ToolMode',
 )

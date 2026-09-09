@@ -1,6 +1,6 @@
 # Shell
 
-Give an agent the ability to run shell commands inside the run's sandbox, with
+Give an agent the ability to run shell commands inside the run's workspace, with
 allow/deny controls and managed background processes.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/shell/)
@@ -16,7 +16,7 @@ is fiddly boilerplate that every agent reinvents.
 
 `Shell` exposes command-execution tools rooted at a working directory, with
 configurable allow/deny lists and automatic cleanup of background processes
-when the agent run ends. Commands run inside the sandbox attached to the run, so
+when the agent run ends. Commands run inside the workspace attached to the run, so
 every run needs one; without it the first tool call raises an error that says
 how to attach one.
 
@@ -24,7 +24,7 @@ how to attach one.
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.sandboxes import LocalSandbox
+from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import Shell
 
 agent = Agent(
@@ -34,15 +34,15 @@ agent = Agent(
 
 result = agent.run_sync(
     'List the Python files and summarize the largest one.',
-    sandbox=LocalSandbox(root=Path.cwd()),  # the agent process's own filesystem
+    workspace=LocalWorkspace(root=Path.cwd()),  # the agent process's own filesystem
 )
 print(result.output)
 ```
 
-`cwd` is a sandbox path: absolute, or relative to the sandbox working directory.
-`~` is not expanded. `LocalSandbox` runs commands on the agent process's own
+`cwd` is a workspace path: absolute, or relative to the workspace working directory.
+`~` is not expanded. `LocalWorkspace` runs commands on the agent process's own
 machine and isolates nothing; for untrusted work attach a container- or
-VM-backed sandbox instead.
+VM-backed workspace instead.
 
 ## Tools
 
@@ -58,7 +58,7 @@ line on non-zero exit. `max_output_chars` limits the text sent to the model afte
 execution; the **tail** is kept (the head is dropped), so errors, stack traces,
 and the `[stderr]` section -- which all land at the end -- survive truncation.
 Background command status and exit metadata follow the captured output so they
-remain in the retained tail. `LocalSandbox` also has a separate 10 MiB safety
+remain in the retained tail. `LocalWorkspace` also has a separate 10 MiB safety
 ceiling on command output.
 
 Each command starts in the configured `cwd`; `cd` affects only that command. The
@@ -88,7 +88,7 @@ A denied or blocked command surfaces to the model as a `ModelRetry` (the model
 can retry with an allowed command) rather than aborting the run. So does every
 other failure the model can act on: a working directory an earlier command
 deleted or replaced with a file, and a command holding a NUL byte or a character
-that cannot be encoded for the operating system. A sandbox that has gone away
+that cannot be encoded for the operating system. A workspace that has gone away
 aborts the run instead, since the model cannot recover from it. Bare backend
 programming failures also abort the run.
 
@@ -96,25 +96,25 @@ programming failures also abort the run.
 > is a guardrail against accidents, not a security boundary. Validation checks
 > only the first token, and allowlisted commands such as `python`, `git`, `uv`,
 > and `make` can spawn arbitrary processes. A model that wants to work around
-> the allowlist can. The sandbox is the isolation boundary: for untrusted work
-> attach a container- or VM-backed one rather than `LocalSandbox`.
+> the allowlist can. The workspace is the isolation boundary: for untrusted work
+> attach a container- or VM-backed one rather than `LocalWorkspace`.
 
 ## Environment control
 
 `env` sets the environment commands run with; `denied_env_patterns` removes
-names from it by glob before it is handed to the sandbox.
+names from it by glob before it is handed to the workspace.
 
 | Field | Effect |
 |---|---|
-| `env` | Explicit environment for commands. `None` (the default) leaves the sandbox's own environment in place. |
+| `env` | Explicit environment for commands. `None` (the default) leaves the workspace's own environment in place. |
 | `denied_env_patterns` | Glob patterns (`fnmatch`) for variable names removed from `env`. Mirrors `denied_commands`. |
 
 `denied_env_patterns` requires an explicit `env` mapping and filters that mapping
-only; it cannot remove a variable the sandbox itself provides.
-`LocalSandbox` runs commands on the agent process's own machine, but passes only
+only; it cannot remove a variable the workspace itself provides.
+`LocalWorkspace` runs commands on the agent process's own machine, but passes only
 its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` variables plus the explicit `env`.
 It is not an isolation boundary: commands can still access other host files.
-A container- or VM-backed sandbox starts from its own image instead.
+A container- or VM-backed workspace starts from its own image instead.
 
 ```python
 import os
@@ -136,14 +136,14 @@ its prefixes are coarse, so `GOOGLE_*` also strips non-credential vars like
 `GOOGLE_APPLICATION_CREDENTIALS`. Treat it as a starting point and add your own
 patterns.
 
-How `env` combines with what the sandbox already provides is the sandbox backend's
-decision: `LocalSandbox` adds yours to its own fixed `PATH`, `HOME`, `LANG` and
+How `env` combines with what the workspace already provides is the workspace backend's
+decision: `LocalWorkspace` adds yours to its own fixed `PATH`, `HOME`, `LANG` and
 `TMPDIR`, others may replace it outright. Supply what a command needs rather
 than assuming the agent process's environment reaches it.
 
 ## Background processes
 
-`start_command` writes stdout/stderr to temp files in the sandbox and returns a
+`start_command` writes stdout/stderr to temp files in the workspace and returns a
 short ID. Use `check_command(command_id)` to poll and `stop_command(command_id)`
 to terminate and collect final output. Each process is started with `setsid`, so
 the whole process group can be signalled -- `SIGTERM`, escalating to `SIGKILL`
@@ -158,7 +158,7 @@ agent that forgets to call `stop_command` won't leak processes.
 
 ```python
 Shell(
-    cwd='.',                       # str | Path -- sandbox working directory
+    cwd='.',                       # str | Path -- workspace working directory
     allowed_commands=[],           # allowlist (mutually exclusive with denied)
     denied_commands=[...],         # denylist (defaults to destructive commands)
     denied_operators=[],           # blocked shell operators
@@ -166,7 +166,7 @@ Shell(
     max_timeout=600.0,              # maximum seconds, per run_command
     max_output_chars=50_000,       # output cap returned to the model
     allow_interactive=False,       # allow TTY-style commands
-    env=None,                      # explicit env (None = the sandbox's own)
+    env=None,                      # explicit env (None = the workspace's own)
     denied_env_patterns=[],        # glob patterns removed from `env`
 )
 ```

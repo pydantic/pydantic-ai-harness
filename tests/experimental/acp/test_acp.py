@@ -24,6 +24,7 @@ import pytest
 from acp import RequestError, schema
 from pydantic import BaseModel
 from pydantic_ai import Agent, DeferredToolRequests, RunContext, UsageLimitExceeded
+from pydantic_ai.capabilities import Hooks
 from pydantic_ai.messages import (
     AgentStreamEvent,
     BinaryContent,
@@ -45,9 +46,9 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox
 from pydantic_ai.toolsets import CombinedToolset, FunctionToolset
 from pydantic_ai.usage import UsageLimits
+from pydantic_ai.workspaces import LocalWorkspace
 
 from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
@@ -77,7 +78,7 @@ from pydantic_ai_harness.experimental.acp._serialize import (
     chunk_text,
 )
 from pydantic_ai_harness.experimental.acp._session import SessionState
-from pydantic_ai_harness.filesystem import FileSystemToolset
+from pydantic_ai_harness.filesystem import FileSystemToolset, FileWrittenEvent
 from tests.experimental.acp._acp_clients import (  # pyright: ignore[reportMissingTypeStubs]
     RecordingClient,
     RecordingClientBase,
@@ -443,12 +444,12 @@ class TestSessionConfig:
 
         @agent.tool
         async def sandbox_working_dir(ctx: RunContext[object]) -> str:
-            return await ctx.sandbox.working_dir()
+            return await ctx.workspace.working_dir()
 
         client = FakeClient()
-        async with LocalSandbox(root=tmp_path) as backend:
+        async with LocalWorkspace(root=tmp_path) as backend:
             adapter = PydanticAIACPAgent(
-                agent, session_config=lambda _session: AcpSessionConfig(deps=None, sandbox=backend)
+                agent, session_config=lambda _session: AcpSessionConfig(deps=None, workspace=backend)
             )
             adapter.on_connect(client)
             await adapter.initialize(protocol_version=1)
@@ -2210,7 +2211,7 @@ class TestPathAbsolutization:
         assert resolved.content == presentation.content
 
     def test_relative_traversal_escaping_the_workspace_drops_the_location(self) -> None:
-        # A `..` path that normalizes outside cwd is not shown as a location: the tool sandbox
+        # A `..` path that normalizes outside cwd is not shown as a location: the tool workspace
         # rejects it, and an editor should never get a click-to-file link outside the workspace.
         presentation = default_coding_presenter(_tool_call('read_file', {'path': '../../etc/passwd'}))
         assert presentation is not None
@@ -2258,11 +2259,7 @@ class TestWorkspaceRooting:
         agent = Agent(_calls_tool_each_turn(write))  # the agent itself has no filesystem tools
 
         def session_config(session: AcpSession) -> AcpSessionConfig[None]:
-            return AcpSessionConfig(
-                deps=None,
-                toolsets=[FileSystem[None](root_dir=session.cwd).get_toolset()],
-                sandbox=LocalSandbox(root=session.cwd),
-            )
+            return AcpSessionConfig(deps=None, capabilities=[FileSystem[None](root_dir=session.cwd)])
 
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, session_config=session_config)
         client = FakeClient()
@@ -2277,3 +2274,34 @@ class TestWorkspaceRooting:
         # ...and the tool call reported the absolute path under that workspace.
         [start] = _starts(client)
         assert [loc.path for loc in getattr(start, 'locations')] == [str(tmp_path / 'note.txt')]
+
+    async def test_session_capability_owns_the_events_its_tools_emit(self, tmp_path: Path) -> None:
+        """A session capability's tools keep their owner, so the events they emit are attributable.
+
+        Passing `FileSystem(...).get_toolset()` as a `toolsets` entry instead drops the capability,
+        and core then rejects the `CapabilityEvent` its tools emit as having no owner.
+        """
+        write = DeltaToolCall(name='write_file', json_args=json.dumps({'path': 'note.txt', 'content': 'hi'}))
+        agent = Agent(_calls_tool_each_turn(write))
+        seen: list[FileWrittenEvent] = []
+
+        hooks = Hooks[None]()
+
+        @hooks.on.event(FileWrittenEvent)
+        async def record(ctx: RunContext[None], event: FileWrittenEvent) -> None:
+            seen.append(event)
+
+        def session_config(session: AcpSession) -> AcpSessionConfig[None]:
+            return AcpSessionConfig(deps=None, capabilities=[FileSystem[None](root_dir=session.cwd), hooks])
+
+        adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, session_config=session_config)
+        client = FakeClient()
+        adapter.on_connect(client)
+        await adapter.initialize(protocol_version=1)
+        session = await adapter.new_session(cwd=str(tmp_path))
+
+        await adapter.prompt(prompt=[acp.text_block('write the note')], session_id=session.session_id)
+
+        # The event reached a listener at all, which it only can when its emitter has an owner.
+        assert [event.path for event in seen] == ['note.txt']
+        assert all(event.capability_id is not None for event in seen)

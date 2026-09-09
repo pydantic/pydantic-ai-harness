@@ -96,7 +96,7 @@ A coding agent should read and write files in the workspace the editor opened, n
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.sandboxes import LocalSandbox
+from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, run_acp_stdio_sync
 
@@ -127,7 +127,7 @@ The local [`FileSystem`](filesystem.md) and [`Shell`](shell.md) above operate on
 ```python
 from pathlib import Path
 
-from pydantic_ai.sandboxes import LocalSandbox
+from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, acp_filesystem, acp_terminal
 
@@ -139,11 +139,11 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
     return AcpSessionConfig(
         deps=None,
         toolsets=[fs, shell],
-        sandbox=LocalSandbox(root=Path(session.cwd)),
+        workspace=LocalWorkspace(root=Path(session.cwd)),
     )
 ```
 
-Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The local fallback requires the `sandbox` on `AcpSessionConfig` shown above. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
+Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The local fallback requires the `workspace` on `AcpSessionConfig` shown above. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
 
 ## Tool approval
 

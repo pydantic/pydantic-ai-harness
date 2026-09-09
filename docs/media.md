@@ -1,11 +1,13 @@
 ---
 title: Media Externalization
-description: Content-addressed stores and walker helpers that move large binary and text payloads out of message history into deduplicated storage and put them back on demand.
+description: The storage plumbing behind Step Persistence, content-addressed stores and walker helpers that move large binary and text payloads out of message history and put them back on demand.
 ---
 
 # Media Externalization
 
-A conversation that carries images, audio, or other `BinaryContent` inlines those bytes into every message, and a large text part (a big tool-return string, say) is just as heavy. Persist that history and each snapshot re-serializes the payloads; the same image referenced by ten messages is ten copies of the bytes. Media externalization solves that: content-addressed stores write each payload once, keyed by its own hash, and leave a short `media+sha256://` URI in its place. Reach for it whenever large binary or text payloads would otherwise balloon what you store or send.
+The storage plumbing that [Step Persistence](step-persistence.md) uses to keep run snapshots small. This is supporting infrastructure, not a capability: nothing on this page mounts on `Agent(capabilities=[...])`. If you want snapshots that externalize large payloads automatically, start with [Step Persistence](step-persistence.md); read this page when you configure a store yourself or call the walker helpers directly.
+
+Why it exists: a conversation that carries images, audio, or other `BinaryContent` inlines those bytes into every message, and a large text part (a big tool-return string, say) is just as heavy. Persist that history and each snapshot re-serializes the payloads; the same image referenced by ten messages is ten copies of the bytes. Content-addressed stores write each payload once, keyed by its own hash, and leave a short `media+sha256://` URI in its place.
 
 !!! note "Import path"
     Import these helpers from their submodule -- there is no top-level `pydantic_ai_harness` re-export:
@@ -22,9 +24,9 @@ A conversation that carries images, audio, or other `BinaryContent` inlines thos
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
-## Building blocks, not a capability
+## Consumers
 
-These are building blocks. There is no class you add to `Agent(capabilities=[...])` yet. [`StepPersistence`](step-persistence.md) already uses them to keep snapshots small when messages carry `BinaryContent` or large text (e.g. a big tool-return string), and a forthcoming `MediaExternalizer` capability ([#254](https://github.com/pydantic/pydantic-ai-harness/issues/254)) will reuse the same stores to rewrite `BinaryContent` into URL parts before the model sees them.
+[`StepPersistence`](step-persistence.md) uses these stores to externalize large `BinaryContent` and text parts in run snapshots through its file, sqlite, and mongo backends (see [Persisting media](step-persistence.md#persisting-media)).
 
 ## Why content-addressing
 
@@ -78,6 +80,8 @@ full = await restore_media(lean, media_store=store)
 
 The current reader restores binary markers written before text externalization. That compatibility is upgrade-only: a release that predates text externalization treats every marker as binary, so it cannot validate a snapshot containing an externalized text marker. Keep a current reader for persisted snapshots that contain those markers.
 
+If a payload uses the same namespaced keys as the marker format, the writer moves those values into a versioned reserved mapping and the current reader restores them. A marker written before this escaping format was added still restores. The reader treats the reserved keys as its own only when the reserved mapping has the shape the writer produces and the version key carries a stamp from the format's own namespace, so a payload that happened to carry either or both is left alone. A marker carrying both, stamped with a version this reader does not know, is rejected rather than restored with the reserved values stripped. Compatibility the other way is upgrade-only. A reader that predates the escaping format re-inlines the externalized field correctly, but it leaves the caller's values in the reserved mapping instead of restoring them to their own keys, and leaves the two reserved keys in the payload. Keep a current reader for persisted snapshots that contain escaped markers.
+
 ## Public URLs
 
 When a store is fronted by a CDN, a local HTTP server, or a signed-URL service, pass a `public_url=` resolver (or use `make_static_public_url`) to turn a stored `media+sha256://` URI into a URL the model can fetch directly. Without a resolver, `public_url(...)` returns `None`.
@@ -110,8 +114,6 @@ async def presign(uri: str, ctx: MediaContext) -> str:
 
 store = S3MediaStore(..., public_url=presign)
 ```
-
-This is what the forthcoming `MediaExternalizer` will use to swap `BinaryContent` parts for `ImageUrl` / `AudioUrl` / other URL parts before the model sees the message, letting providers fetch big media over the wire without re-encoding bytes into the request body. Emitting a URL is always safe: pydantic-ai providers transparently download the bytes when the target model does not natively accept that URL type, so you only ever lose wire savings, never correctness.
 
 ## `MediaContext`
 

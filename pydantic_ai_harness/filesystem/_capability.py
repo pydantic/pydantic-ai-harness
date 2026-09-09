@@ -1,4 +1,4 @@
-"""Filesystem capability that provides sandboxed file system access."""
+"""Filesystem capability that provides workspace file system access."""
 
 from __future__ import annotations
 
@@ -25,14 +25,14 @@ _DEFAULT_PROTECTED: list[str] = [
 
 @dataclass
 class FileSystem(AbstractCapability[AgentDepsT]):
-    """File system access inside the run's sandbox, scoped to a root directory.
+    """File system access inside the run's workspace, scoped to a root directory.
 
     All paths are resolved relative to `root_dir`. Traversal above the root
-    is rejected; the sandbox is the isolation boundary.
+    is rejected; the workspace is the isolation boundary.
     """
 
     root_dir: str | Path = '.'
-    """Root directory for all file operations: a sandbox path, absolute or relative to the sandbox working directory."""
+    """Root directory for all file operations: a workspace path, absolute or relative to the workspace working directory."""
 
     allowed_patterns: Sequence[str] = field(default_factory=list[str])
     """If non-empty, only paths matching at least one glob pattern are accessible."""
@@ -86,6 +86,7 @@ class FileSystem(AbstractCapability[AgentDepsT]):
             max_list_results=self.max_list_results,
             max_search_results=self.max_search_results,
             max_find_results=self.max_find_results,
+            id=self.id or 'file_system',
         )
         if self.read_only:
             return FilteredToolset(toolset, lambda ctx, tool: tool.name in READ_ONLY_TOOL_NAMES)

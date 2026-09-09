@@ -10,8 +10,8 @@ import pytest
 from acp import Client, schema
 from pydantic_ai import RunContext
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox, Sandbox
 from pydantic_ai.usage import RunUsage
+from pydantic_ai.workspaces import LocalWorkspace, Workspace
 
 from pydantic_ai_harness.code_mode import CodeMode, CodeModeToolset
 from pydantic_ai_harness.experimental.acp import (
@@ -26,10 +26,10 @@ from tests.experimental.acp._acp_clients import RecordingClient  # pyright: igno
 pytestmark = pytest.mark.anyio
 
 
-def _ctx(sandbox: Sandbox | None = None) -> RunContext[None]:
+def _ctx(workspace: Workspace | None = None) -> RunContext[None]:
     ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
-    if sandbox is not None:
-        ctx.sandbox = sandbox
+    if workspace is not None:
+        ctx.workspace = workspace
     return ctx
 
 
@@ -116,8 +116,8 @@ async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_in_the_s
 
     assert await toolset.read_file('notes.txt') == 'hello'
     assert client.reads == [(str(tmp_path / 'notes.txt'), 'sid')]  # the read routed through the editor
-    async with LocalSandbox(root=tmp_path) as backend:
-        await toolset.write_file(_ctx(Sandbox.wrap(backend)), 'out.txt', 'data')
+    async with LocalWorkspace(root=tmp_path) as backend:
+        await toolset.write_file(_ctx(Workspace(backend)), 'out.txt', 'data')
     assert client.writes == []  # the client was never asked to write
     assert (tmp_path / 'out.txt').read_text() == 'data'  # the write landed on local disk
 

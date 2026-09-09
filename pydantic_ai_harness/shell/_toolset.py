@@ -17,12 +17,12 @@ from typing import Any, Concatenate, ParamSpec
 import anyio
 from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelRetry, UserError
-from pydantic_ai.sandboxes import Sandbox, SandboxError, SandboxTimeoutError, SandboxUnavailableError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
+from pydantic_ai.workspaces import Workspace, WorkspaceError, WorkspaceTimeoutError, WorkspaceUnavailableError
 
 from pydantic_ai_harness._output import truncate_tail
-from pydantic_ai_harness._sandbox import sandbox_path
+from pydantic_ai_harness._workspace import workspace_path
 
 _KILL_GRACE_PERIOD: float = 2.0
 
@@ -31,7 +31,7 @@ _P = ParamSpec('_P')
 # Spawning a command fails with a bare `OSError` for causes that have no
 # dedicated subclass, and with `FileNotFoundError`/`NotADirectoryError` for
 # causes that do. The errno says whose fault it is: these are the model's, and
-# it can act on them. Every other errno (EMFILE, ENOMEM) is the sandbox's, and
+# it can act on them. Every other errno (EMFILE, ENOMEM) is the workspace's, and
 # must keep aborting the run rather than sending the model into a retry loop it
 # can't win.
 #
@@ -53,7 +53,7 @@ def _recoverable(
 
     pyai only feeds `ModelRetry` back to the model as a retry prompt; any other
     exception propagates and aborts the whole run. A denied command, a command
-    the sandbox refuses to spawn, and a working directory the model's own earlier
+    the workspace refuses to spawn, and a working directory the model's own earlier
     command destroyed are all things the model can recover from, so surface them
     as a retry instead of crashing the agent.
     """
@@ -64,12 +64,12 @@ def _recoverable(
             return await fn(self, *args, **kwargs)
         except PermissionError as e:
             raise ModelRetry(str(e)) from e
-        # A dead sandbox and a misconfigured one (`UserError`, e.g. no sandbox attached) are the
+        # A dead workspace and a misconfigured one (`UserError`, e.g. no workspace attached) are the
         # application's to fix; deliberate backend failures are recoverable, but programming
         # errors still propagate.
-        except (SandboxUnavailableError, UserError):
+        except (WorkspaceUnavailableError, UserError):
             raise
-        except SandboxError as e:
+        except WorkspaceError as e:
             raise ModelRetry(str(e)) from e
         except OSError as e:
             reason = _RECOVERABLE_ERRNOS.get(e.errno)
@@ -95,19 +95,19 @@ def _is_interactive_command(command: str) -> bool:
 
 
 class _BackgroundProcess:
-    """State for a background command running inside the sandbox."""
+    """State for a background command running inside the workspace."""
 
-    __slots__ = ('sandbox', 'pid', 'stdout_path', 'stderr_path', 'exit_code_path', 'finished', 'exit_code')
+    __slots__ = ('workspace', 'pid', 'stdout_path', 'stderr_path', 'exit_code_path', 'finished', 'exit_code')
 
     def __init__(
         self,
-        sandbox: Sandbox,
+        workspace: Workspace,
         pid: int,
         stdout_path: str,
         stderr_path: str,
         exit_code_path: str,
     ) -> None:
-        self.sandbox = sandbox
+        self.workspace = workspace
         self.pid = pid
         self.stdout_path = stdout_path
         self.stderr_path = stderr_path
@@ -117,7 +117,7 @@ class _BackgroundProcess:
 
 
 class ShellToolset(FunctionToolset[AgentDepsT]):
-    """Gives an agent the ability to execute shell commands inside the run's sandbox.
+    """Gives an agent the ability to execute shell commands inside the run's workspace.
 
     Supports synchronous execution (run_command) and background processes
     (start_command / check_command / stop_command). Output is truncated to fit
@@ -139,10 +139,10 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         denied_env_patterns: Sequence[str] = (),
     ) -> None:
         super().__init__()
-        # The configured starting directory: a sandbox path, absolute or relative to the
-        # sandbox working directory.
+        # The configured starting directory: a workspace path, absolute or relative to the
+        # workspace working directory.
         self._initial_cwd = cwd
-        self._cwd = sandbox_path(cwd)
+        self._cwd = workspace_path(cwd)
         self._allowed_commands = list(allowed_commands)
         self._denied_commands = list(denied_commands)
         self._denied_operators = list(denied_operators)
@@ -229,16 +229,16 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         }
 
     def _run_env(self) -> dict[str, str] | None:
-        """The environment handed to the sandbox: the explicit `env`, deny-filtered.
+        """The environment handed to the workspace: the explicit `env`, deny-filtered.
 
-        `None` leaves environment selection to the sandbox backend; denied patterns
+        `None` leaves environment selection to the workspace backend; denied patterns
         only filter an explicit `env` mapping.
         """
         return None if self._env is None else self._filter_env(self._env)
 
     async def _cwd_for(self, ctx: RunContext[AgentDepsT]) -> str:
         """Resolve the configured working directory for this command."""
-        return await ctx.sandbox.resolve(self._cwd)
+        return await ctx.workspace.resolve(self._cwd)
 
     async def __aexit__(self, *args: Any) -> None:
         """Terminate all remaining background processes and clean up their output files."""
@@ -269,7 +269,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         """Validate command against allow/deny lists.
 
         These checks are best-effort and are not a security boundary -- a
-        sufficiently motivated agent can bypass them. The sandbox is the
+        sufficiently motivated agent can bypass them. The workspace is the
         isolation boundary.
 
         Rejecting a command the OS could not accept belongs here rather than in
@@ -340,14 +340,14 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         timeout = timeout_seconds if timeout_seconds is not None else self._default_timeout
 
         try:
-            result = await ctx.sandbox.run(
+            result = await ctx.workspace.run(
                 command,
                 shell=True,
                 timeout=timeout,
                 cwd=await self._cwd_for(ctx),
                 env=self._run_env(),
             )
-        except SandboxTimeoutError as e:
+        except WorkspaceTimeoutError as e:
             parts: list[str] = []
             if e.stdout:
                 parts.append(f'[stdout]\n{e.stdout}')
@@ -391,7 +391,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         # works on every provider: the protocol has no background-process API, and Modal has
         # no per-process kill operation or output-so-far handle.
         wrapped = f'setsid sh -c {shlex.quote(inner)} < /dev/null > {stdout_path} 2> {stderr_path} & echo $!'
-        result = await ctx.sandbox.run(
+        result = await ctx.workspace.run(
             wrapped,
             shell=True,
             cwd=await self._cwd_for(ctx),
@@ -400,11 +400,11 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         try:
             pid = int(result.stdout.strip())
         except ValueError as e:
-            message = result.stderr.strip() or 'Sandbox did not return a background process ID.'
+            message = result.stderr.strip() or 'Workspace did not return a background process ID.'
             raise ModelRetry(message) from e
 
         self._background[command_id] = _BackgroundProcess(
-            sandbox=ctx.sandbox,
+            workspace=ctx.workspace,
             pid=pid,
             stdout_path=stdout_path,
             stderr_path=stderr_path,
@@ -480,7 +480,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         if bg.finished:
             return
         try:
-            value = (await bg.sandbox.read_bytes(bg.exit_code_path)).decode('utf-8', errors='replace').strip()
+            value = (await bg.workspace.read_bytes(bg.exit_code_path)).decode('utf-8', errors='replace').strip()
         except FileNotFoundError:
             return
         try:
@@ -491,7 +491,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
     async def _read_bg_file(self, bg: _BackgroundProcess, path: str) -> str:
         try:
-            result = await bg.sandbox.run(
+            result = await bg.workspace.run(
                 ['tail', '-c', str(self._max_output_chars * 4), path], timeout=self._default_timeout
             )
             if result.exit_code != 0:
@@ -504,14 +504,14 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
     async def _terminate(self, bg: _BackgroundProcess) -> None:
         """SIGTERM the process group, escalating to SIGKILL after the grace period."""
-        result = await bg.sandbox.run(['kill', '-TERM', f'-{bg.pid}'])
+        result = await bg.workspace.run(['kill', '-TERM', f'-{bg.pid}'])
         if result.exit_code != 0:
             await self._refresh(bg)
             if bg.finished or 'No such process' in result.stderr:
                 return
             raise RuntimeError(result.stderr.strip() or f'Failed to terminate background process {bg.pid}.')
         await anyio.sleep(_KILL_GRACE_PERIOD)
-        result = await bg.sandbox.run(['kill', '-KILL', f'-{bg.pid}'])
+        result = await bg.workspace.run(['kill', '-KILL', f'-{bg.pid}'])
         if result.exit_code != 0:  # pragma: no branch - macOS may reap the group after SIGTERM
             await self._refresh(bg)
             if bg.finished or 'No such process' in result.stderr:
@@ -522,7 +522,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         errors: list[Exception] = []
         for path in (bg.stdout_path, bg.stderr_path, bg.exit_code_path):
             try:
-                await bg.sandbox.remove(path)
+                await bg.workspace.remove(path)
             except FileNotFoundError:
                 pass
             except Exception as e:
