@@ -23,8 +23,8 @@ is fiddly boilerplate that every agent reinvents.
 
 `Shell` bundles that plumbing into a single [capability](/ai/capabilities/overview/):
 configurable allow/deny lists, output truncation tuned to keep the useful tail,
-an optional sticky working directory, control over the environment commands run
-with, and automatic cleanup of background processes when the run finishes.
+control over the environment commands run with, and automatic cleanup of
+background processes when the run finishes.
 
 ## Usage
 
@@ -139,10 +139,10 @@ names from it by glob before it is handed to the workspace.
 
 `denied_env_patterns` requires an explicit `env` mapping and filters that mapping
 only; it cannot remove a variable the workspace itself provides.
-`LocalWorkspace` runs commands on the agent process's own machine, so local
-secrets reach them whatever you pass; a container- or VM-backed workspace starts
-from its own image instead. If a command must not see a credential, that is a
-choice of workspace, not of `env`.
+`LocalWorkspace` runs commands on the agent process's own machine, but passes
+only its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` variables plus the explicit
+`env`. It is not an isolation boundary: commands can still access other host
+files. A container- or VM-backed workspace starts from its own image instead.
 
 ```python
 import os
@@ -164,10 +164,10 @@ its prefixes are coarse, so `GOOGLE_*` also strips non-credential vars like
 `GOOGLE_APPLICATION_CREDENTIALS`. Treat it as a starting point and add your own
 patterns.
 
-How `env` combines with what the workspace already provides is the workspace backend's
-decision: `LocalWorkspace` adds yours to its own fixed `PATH`, `HOME`, `LANG` and
-`TMPDIR`, others may replace it outright. Supply what a command needs rather
-than assuming the agent process's environment reaches it.
+How `env` combines with what the workspace already provides is the workspace
+backend's decision: `LocalWorkspace` adds yours to its own fixed `PATH`, `HOME`,
+`LANG` and `TMPDIR`; others may replace it outright. Supply what a command needs
+rather than assuming the agent process's environment reaches it.
 
 ## Background processes
 

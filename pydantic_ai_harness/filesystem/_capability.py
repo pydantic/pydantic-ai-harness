@@ -1,4 +1,4 @@
-"""Filesystem capability that provides workspace file system access."""
+"""Filesystem capability that provides workspace-rooted file system access."""
 
 from __future__ import annotations
 

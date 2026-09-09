@@ -379,6 +379,10 @@ class TestShellCapability:
         with pytest.raises(ValueError, match='denied_env_patterns requires an explicit env mapping'):
             Shell(denied_env_patterns=['SECRET_*'])
 
+    def test_capability_assigns_a_stable_toolset_id(self) -> None:
+        assert Shell[None]().get_toolset().id == 'shell'
+        assert Shell[None](id='build_shell').get_toolset().id == 'build_shell'
+
     async def test_capability_passes_the_environment_to_the_toolset(self, workspace: Workspace) -> None:
         toolset = Shell[None](
             env={'HARNESS_VISIBLE': 'yes', 'HARNESS_DENIED': 'secret'},
@@ -424,7 +428,7 @@ class TestCodeModeInterop:
 
     Folding them into `run_code` would make the model write a Monty script whose argument is a
     shell script quoted as a Python string. The command-id tools carry no command line, so they
-    stay workspace like any other tool.
+    stay workspace-backed like any other tool.
     """
 
     @pytest.mark.parametrize('shell_first', [True, False], ids=['shell-first', 'code-mode-first'])
@@ -439,7 +443,7 @@ class TestCodeModeInterop:
         assert 'async def start_command' not in run_code_description
 
     @pytest.mark.parametrize('shell_first', [True, False], ids=['shell-first', 'code-mode-first'])
-    async def test_command_id_tools_are_still_sandboxed(self, shell_first: bool) -> None:
+    async def test_command_id_tools_are_still_workspace_backed(self, shell_first: bool) -> None:
         tools = await _tools_offered_to_model(shell_first=shell_first)
 
         assert 'check_command' not in tools
@@ -538,7 +542,7 @@ async def test_recording_backend_delegates_the_complete_flat_filesystem(tmp_path
 
 
 class _FailingBackend:
-    ref = WorkspaceRef(provider='local', id='failing-1')
+    ref = WorkspaceRef(provider='test', id='failing-1')
 
     def __init__(self, error: BaseException) -> None:
         self.error = error
@@ -592,11 +596,11 @@ async def _await_finished(toolset: ShellToolset[None], ctx: RunContext[None], st
 
 
 class TestRunCommand:
-    async def test_runs_in_sandbox_root_and_labels_output(self, tmp_path: Path, workspace: Workspace) -> None:
+    async def test_runs_in_workspace_root_and_labels_output(self, tmp_path: Path, workspace: Workspace) -> None:
         result = await call_tool(shell_toolset(), run_context(workspace), 'run_command', command='pwd')
         assert result == f'[stdout]\n{tmp_path}\n'
 
-    async def test_relative_cwd_resolves_against_the_sandbox_working_directory(
+    async def test_relative_cwd_resolves_against_the_workspace_working_directory(
         self, tmp_path: Path, workspace: Workspace
     ) -> None:
         (tmp_path / 'sub').mkdir()
@@ -664,7 +668,7 @@ class TestRunCommand:
         with pytest.raises(OSError, match='Cannot allocate memory'):
             await call_tool(shell_toolset(), run_context(workspace), 'run_command', command='echo hello')
 
-    async def test_missing_sandbox_asks_the_application_to_attach_one(self) -> None:
+    async def test_missing_workspace_asks_the_application_to_attach_one(self) -> None:
         # The unavailable default raises `UserError`, itself a `RuntimeError`: without an explicit
         # re-raise the attachment instructions would reach the model as a retry prompt instead.
         with pytest.raises(UserError, match='No workspace is attached'):
@@ -767,7 +771,7 @@ class TestBackgroundCommands:
             f'[Error: unknown command ID {started_id!r}]'
         )
 
-    async def test_exit_surfaces_sandbox_cleanup_failure_and_keeps_record(self, tmp_path: Path) -> None:
+    async def test_exit_surfaces_workspace_cleanup_failure_and_keeps_record(self, tmp_path: Path) -> None:
         async with LocalWorkspace(root=tmp_path) as local:
             backend = _RecordingLocalBackend(local)
             workspace = Workspace(backend)
@@ -952,7 +956,7 @@ class TestBackgroundCommands:
             await call_tool(toolset, ctx, 'stop_command', command_id=started_id)
 
 
-async def test_shell_capability_runs_through_an_agent_with_a_sandbox(tmp_path: Path) -> None:
+async def test_shell_capability_runs_through_an_agent_with_a_workspace(tmp_path: Path) -> None:
     responses = [
         ModelResponse(parts=[ToolCallPart('run_command', {'command': 'printf hello'})]),
         ModelResponse(parts=[TextPart('done')]),
@@ -967,6 +971,6 @@ async def test_shell_capability_runs_through_an_agent_with_a_sandbox(tmp_path: P
     assert result.output == 'done'
 
 
-async def test_shell_capability_requires_a_sandbox_on_the_public_agent_path() -> None:
+async def test_shell_capability_requires_a_workspace_on_the_public_agent_path() -> None:
     with pytest.raises(UserError, match='No workspace is attached'):
         await Agent(TestModel(call_tools=['run_command']), capabilities=[Shell()]).run('run')

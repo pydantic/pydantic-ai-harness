@@ -11,7 +11,7 @@ import os
 import posixpath
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any, Concatenate, ParamSpec
+from typing import Any, Concatenate, ParamSpec, TypedDict
 
 from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -57,6 +57,13 @@ _OUTSIDE_WORKSPACE = '<outside-workspace>'
 
 _NOT_A_PATH = '<not-a-path>'
 """Shown when an error's `filename` is not a path value at all."""
+
+
+class _EventLocation(TypedDict):
+    """The `path` and `root_dir` fields shared by every filesystem event."""
+
+    path: str
+    root_dir: str
 
 
 def _model_safe_filename(filename: str | bytes, root: str) -> str:
@@ -276,6 +283,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._check_access(posixpath.relpath(resolved, root), write=write, check_allowed=check_allowed)
         return root, resolved
 
+    def _event_location(self, root: str, resolved: str) -> _EventLocation:
+        """Path fields for an event about `resolved` inside the active workspace."""
+        return _EventLocation(path=self._relative(root, resolved), root_dir=root)
+
     @staticmethod
     def _relative(root: str, path: str) -> str:
         return posixpath.relpath(posixpath.normpath(path), root)
@@ -318,28 +329,27 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             # Reading the file just to count its lines would defeat the bounded read.
             raise ValueError(f'Offset {offset} exceeds file length.')
 
-        location = _model_safe_filename(resolved, root)
         if window.binary:
-            # The event reports the whole-file hash, so read the bytes the marker stands in for.
-            raw = await ctx.workspace.read_bytes(resolved)
-            content_hash = hashlib.sha256(raw).hexdigest()[:12]
-            await ctx.emit(FileReadEvent(path=location, root_dir=root, content_hash=content_hash))
-            return f'[Binary file: {window.byte_size if window.byte_size is not None else len(raw)} bytes. Use a binary-aware tool to inspect.]'
+            size = window.byte_size
+            await ctx.emit(FileReadEvent(**self._event_location(root, resolved), content_hash=None))
+            size_label = f'{size} bytes' if size is not None else 'size unavailable'
+            return f'[Binary file: {size_label}. Use a binary-aware tool to inspect.]'
 
         lines = window.lines
         if offset == 0 and not window.has_more:
             # The whole file is in the window, so report the hash write_file and edit_file verify
             # against. It comes from the file itself: a window drops the trailing newline and any
-            # `\r`, so hashing the window text would report a hash they never accept.
-            content_hash = _content_hash((await ctx.workspace.read_bytes(resolved)).decode('utf-8', errors='replace'))
+            # `\r`, so hashing the window text would report a hash they never accept. A partial
+            # window has no whole-file hash to report, so it omits one.
+            content = (await ctx.workspace.read_bytes(resolved)).decode('utf-8', errors='replace')
+            content_hash = _content_hash(content)
             header = f'[{path} | {len(lines)} lines | hash:{content_hash}]\n'
         else:
-            # A partial window has no whole-file hash, so the event reports the hash of the window
-            # read rather than dragging the whole file across to hash it.
-            content_hash = _content_hash(window.text)
+            content_hash = None
             header = f'[{path} | lines {offset + 1}-{offset + len(lines)}]\n'
-        await ctx.emit(FileReadEvent(path=location, root_dir=root, content_hash=content_hash))
-        return header + _format_lines(lines, first_line_number=offset + 1, has_more=window.has_more)
+        body = _format_lines(lines, first_line_number=offset + 1, has_more=window.has_more)
+        await ctx.emit(FileReadEvent(**self._event_location(root, resolved), content_hash=content_hash))
+        return header + body
 
     @_recoverable
     async def write_file(
@@ -393,10 +403,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         await ctx.workspace.write_bytes(resolved, content.encode('utf-8'))
         new_hash = _content_hash(content)
-        await ctx.emit(
-            FileWrittenEvent(path=_model_safe_filename(resolved, root), root_dir=root, content_hash=new_hash)
-        )
         lines = len(content.splitlines())
+        await ctx.emit(FileWrittenEvent(**self._event_location(root, resolved), content_hash=new_hash))
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
 
     @_recoverable
@@ -449,9 +457,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         new_content = text.replace(old_text, new_text, 1)
         await ctx.workspace.write_bytes(resolved, new_content.encode('utf-8'))
         new_hash = _content_hash(new_content)
-        await ctx.emit(
-            FileWrittenEvent(path=_model_safe_filename(resolved, root), root_dir=root, content_hash=new_hash)
-        )
+        await ctx.emit(FileWrittenEvent(**self._event_location(root, resolved), content_hash=new_hash))
         return f'Edited {path}. [hash:{new_hash}]'
 
     @_recoverable
@@ -485,9 +491,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 break
             entries.append(line)
             entry_count += 1
-        await ctx.emit(
-            DirectoryListedEvent(path=_model_safe_filename(resolved, root), root_dir=root, entry_count=entry_count)
-        )
+        await ctx.emit(DirectoryListedEvent(**self._event_location(root, resolved), entry_count=entry_count))
         return '\n'.join(entries) if entries else '(empty directory)'
 
     @_recoverable

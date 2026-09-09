@@ -107,10 +107,11 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
     # Root file and shell tools at the workspace the client opened.
     return AcpSessionConfig(
         deps=None,
-        toolsets=[
-            FileSystem[None](root_dir=session.cwd).get_toolset(),
-            Shell[None](cwd=session.cwd).get_toolset(),
+        capabilities=[
+            FileSystem[None](root_dir=session.cwd),
+            Shell[None](cwd=session.cwd),
         ],
+        workspace=LocalWorkspace(root=Path(session.cwd)),
     )
 
 
@@ -118,32 +119,46 @@ if __name__ == '__main__':
     run_acp_stdio_sync(agent, session_config=session_config)
 ```
 
-The factory runs once per session with the client's `AcpSession` setup (its `cwd`, `mcp_servers`, and capabilities) and returns an `AcpSessionConfig` whose `deps` and `toolsets` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
+The factory runs once per session with the client's `AcpSession` setup (its `cwd`, `mcp_servers`, and capabilities) and returns an `AcpSessionConfig` whose `deps`, `capabilities`, `toolsets`, and optional `workspace` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
 
 ## Editor-native filesystem and shell (optional)
 
-The local [`FileSystem`](filesystem.md) and [`Shell`](shell.md) above operate on the agent process's own disk and subprocesses. An editor's source of truth is different: unsaved buffers, its own idea of the workspace layout, and -- for a remote or containerized editor -- the machine the code actually lives on. When the client advertises support, `acp_filesystem` and `acp_terminal` give the agent `read_file`/`write_file`/`run_command` tools that route through the client, so it acts where the user is:
+The local [`FileSystem`](filesystem.md) and [`Shell`](shell.md) above operate through the session's `LocalWorkspace`. An editor's source of truth is different: unsaved buffers, its own idea of the workspace layout, and -- for a remote or containerized editor -- the machine the code actually lives on. When the client advertises support, `acp_filesystem` and `acp_terminal` give the agent `read_file`/`write_file`/`run_command` tools that route through the client, so it acts where the user is:
 
 ```python
 from pathlib import Path
 
+from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, acp_filesystem, acp_terminal
 
 
 def session_config(session: AcpSession) -> AcpSessionConfig[None]:
-    # Use the editor's filesystem/terminal when offered; otherwise fall back to local.
-    fs = acp_filesystem(session) or FileSystem[None](root_dir=session.cwd).get_toolset()
-    shell = acp_terminal(session) or Shell[None](cwd=session.cwd).get_toolset()
+    capabilities: list[AbstractCapability[None]] = []
+    toolsets: list[AbstractToolset[None]] = []
+    fs = acp_filesystem(session)
+    if fs is None:
+        capabilities.append(FileSystem(root_dir=session.cwd))
+    else:
+        toolsets.append(fs)
+    shell = acp_terminal(session)
+    if shell is None:
+        capabilities.append(Shell(cwd=session.cwd))
+    else:
+        toolsets.append(shell)
     return AcpSessionConfig(
         deps=None,
-        toolsets=[fs, shell],
+        capabilities=capabilities,
+        toolsets=toolsets,
         workspace=LocalWorkspace(root=Path(session.cwd)),
     )
 ```
 
-Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The local fallback requires the `workspace` on `AcpSessionConfig` shown above. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
+Each helper returns `None` when the client did not advertise support. Add local fallbacks as capabilities so their hooks and events remain attached; add editor-native helpers as toolsets. The local fallbacks use the `workspace` on `AcpSessionConfig`. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
+
+If a client advertises filesystem reads but not writes, `acp_filesystem` exposes `read_file` only. It does not silently send writes to a different filesystem. A product that requires local writes in that case should choose the full local `FileSystem` fallback instead.
 
 ## Tool approval
 
@@ -226,7 +241,7 @@ run_acp_stdio(            # async; serve until the client disconnects
     deps=None,
     name=None,            # advertised name; defaults to the agent's name
     version='0.1.0',
-    session_config=None,  # per-session deps/toolsets from the client's setup
+    session_config=None,  # per-session deps/capabilities/toolsets/workspace from the client's setup
     permission_policy=None,   # scope of remembered "always" approval decisions
     prompt_capabilities=None, # defaults to text-only
     mcp_capabilities=None,    # MCP transports to advertise; needs a session_config to connect them

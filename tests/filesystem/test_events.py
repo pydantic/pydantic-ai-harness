@@ -54,10 +54,9 @@ async def _run_and_collect(
     # Named explicitly: an anonymous capability gets a run-local synthetic id
     # on newer pydantic-ai, which the event assertions could not pin down.
     capability = FileSystem(root_dir=root, denied_patterns=denied_patterns or [], id='file_system')
-    async with LocalWorkspace(root=root) as workspace:
-        await Agent(_tool_model(tool_name, json_args), capabilities=[capability]).run(
-            'go', event_stream_handler=handler, workspace=workspace
-        )
+    await Agent(_tool_model(tool_name, json_args), capabilities=[capability]).run(
+        'go', workspace=LocalWorkspace(root=root), event_stream_handler=handler
+    )
     return events
 
 
@@ -87,7 +86,7 @@ class TestFileSystemEvents:
             )
         ]
 
-    async def test_binary_read_emits_raw_content_hash(self, tmp_path: Path) -> None:
+    async def test_binary_read_keeps_the_event_bounded(self, tmp_path: Path) -> None:
         content = b'hello\x00world'
         (tmp_path / 'binary.bin').write_bytes(content)
 
@@ -96,7 +95,16 @@ class TestFileSystemEvents:
         read_events = [event for event in events if isinstance(event, FileReadEvent)]
         assert len(read_events) == 1
         assert read_events[0].path == 'binary.bin'
-        assert read_events[0].content_hash == hashlib.sha256(content).hexdigest()[:12]
+        assert read_events[0].content_hash is None
+
+    async def test_partial_read_does_not_claim_a_whole_file_hash(self, tmp_path: Path) -> None:
+        (tmp_path / 'target.txt').write_text('one\ntwo\nthree\n')
+
+        events = await _run_and_collect(tmp_path, 'read_file', '{"path":"target.txt","limit":1}')
+
+        read_events = [event for event in events if isinstance(event, FileReadEvent)]
+        assert len(read_events) == 1
+        assert read_events[0].content_hash is None
 
     async def test_list_emits_normalized_path_and_entry_count(self, tmp_path: Path) -> None:
         sub = tmp_path / 'sub'

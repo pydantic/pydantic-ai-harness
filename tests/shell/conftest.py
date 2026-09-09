@@ -17,7 +17,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from pydantic_ai.workspaces import LocalWorkspace, Workspace
 
-from pydantic_ai_harness.filesystem import FileSystem
+from pydantic_ai_harness.shell import Shell
 from pydantic_ai_harness.shell import _toolset as shell_toolset_module
 from pydantic_ai_harness.shell._toolset import ShellToolset
 
@@ -39,12 +39,8 @@ async def workspace(tmp_path: Path) -> AsyncIterator[Workspace]:
 
 
 def run_context(workspace: Workspace | None = None) -> RunContext[None]:
-    """A `RunContext` for calling tools, with `workspace` attached when given.
-
-    A throwaway event-stream buffer and an owning capability stand in for what a real run provides,
-    so a tool's `ctx.emit` (e.g. the filesystem tools' events) has somewhere to write and clears the
-    capability-event guard when a test drives it outside an agent run.
-    """
+    """A `RunContext` for calling tools, with `workspace` attached when given."""
+    capability = Shell(id='shell')
     ctx = RunContext[None](
         deps=None,
         model=TestModel(),
@@ -52,8 +48,9 @@ def run_context(workspace: Workspace | None = None) -> RunContext[None]:
         prompt=None,
         messages=[],
         run_step=0,
+        capabilities={'shell': capability},
+        _capability=capability,
         _event_stream_buffer=[],
-        _capability=FileSystem(id='file_system'),
     )
     if workspace is not None:
         ctx.workspace = workspace

@@ -2211,7 +2211,7 @@ class TestPathAbsolutization:
         assert resolved.content == presentation.content
 
     def test_relative_traversal_escaping_the_workspace_drops_the_location(self) -> None:
-        # A `..` path that normalizes outside cwd is not shown as a location: the tool workspace
+        # A `..` path that normalizes outside cwd is not shown as a location: the tool sandbox
         # rejects it, and an editor should never get a click-to-file link outside the workspace.
         presentation = default_coding_presenter(_tool_call('read_file', {'path': '../../etc/passwd'}))
         assert presentation is not None

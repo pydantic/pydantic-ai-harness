@@ -48,7 +48,7 @@ nothing; for untrusted work attach a container- or VM-backed workspace instead.
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read a UTF-8 text file with line numbers and a content hash. Binary or undecodable files are detected and not dumped. Supports `offset`/`limit` paging. |
+| `read_file` | Read a UTF-8 text file with line numbers and a content hash. NUL-containing files are detected and not dumped; other undecodable bytes use replacement characters. Supports `offset`/`limit` paging. |
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement; `old_text` must match exactly once. Optional `expected_hash`. |
 | `list_directory` | List a directory's entries with type indicators and sizes. |
@@ -66,15 +66,14 @@ workspace image needs both.
 
 | Event | Operation | Payload |
 |---|---|---|
-| `FileReadEvent` | `read_file` | `path`, `root_dir`, `content_hash` |
+| `FileReadEvent` | `read_file` | `path`, `root_dir`, `content_hash` (whole-file hash for complete text reads, otherwise `None`) |
 | `DirectoryListedEvent` | `list_directory` | `path`, `root_dir`, `entry_count` |
 | `FileWrittenEvent` | `write_file`, `edit_file` | `path`, `root_dir`, `content_hash` |
 
-`path` is the normalized, symlink-resolved location relative to `root_dir`,
-never an absolute host path, so it is safe to echo to the model or a UI.
-`root_dir` is the emitting filesystem's resolved root, so a subscriber rooted
-elsewhere can locate the file as `Path(root_dir) / path` instead of assuming
-it shares the emitter's root.
+`path` is normalized relative to `root_dir`, never an absolute host path, so it
+is safe to echo to the model or a UI. `root_dir` is an absolute path inside the
+active workspace, not necessarily a host filesystem path. A subscriber sharing
+the run resolves the location through `ctx.workspace`.
 
 Every event path has passed the containment check and the denied patterns. A
 `DirectoryListedEvent` names the listing root, which is not gated by
@@ -107,9 +106,10 @@ When an OS error supplies a filename, `FileSystem` reports it relative to
   and shapes policy, not isolation. Symlink targets are not resolved for
   pattern matching; the workspace is the isolation boundary, so scope it to what
   the agent is allowed to reach.
-- **Binary detection.** `read_file` and `file_info` treat NUL-containing or
-  undecodable UTF-8 content in the first 8 KiB sample as binary. `read_file` returns a placeholder instead
-  of dumping binary bytes into the model context.
+- **Binary detection.** `read_file` treats a NUL byte in the sampled head as
+  binary and returns a placeholder instead of dumping the file into model
+  context. `file_info` can additionally classify undecodable UTF-8 because it
+  reads the exact bytes needed for metadata.
 - **Optimistic concurrency.** `write_file`/`edit_file` accept an
   `expected_hash` so an agent operating on a stale read is told to re-read
   rather than silently overwriting newer content.
@@ -122,11 +122,14 @@ Three independent glob lists control access. Patterns are matched with
 `fnmatch`, whose `*` spans `/`, so `*.py` matches `src/main.py` and you rarely
 need `**`.
 
+These patterns inspect normalized path spellings, not symlink targets. They are
+guardrails for ordinary agent actions, not a filesystem security boundary.
+
 | Field | Effect |
 |---|---|
 | `allowed_patterns` | If non-empty, only matching paths are accessible (allowlist). |
 | `denied_patterns` | Matching paths are always rejected (denylist). |
-| `protected_patterns` | Matching paths are read-only -- reads succeed, writes are rejected. |
+| `protected_patterns` | Matching path spellings are read-only -- reads succeed, writes are rejected. |
 
 `protected_patterns` defaults to `.git/*`, `.env`/`.env.*`, `*.pem`, `*.key`,
 and `**/secrets*`. Pass an empty list to disable protection.

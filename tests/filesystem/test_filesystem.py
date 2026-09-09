@@ -17,6 +17,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 from pydantic_ai.workspaces import (
     CommandResult,
+    FileWindow,
     LocalWorkspace,
     Workspace,
     WorkspaceCommand,
@@ -49,10 +50,7 @@ def _hash(content: str) -> str:
 
 
 def _ctx(workspace: Workspace | None = None) -> RunContext[None]:
-    # A throwaway event-stream buffer and an owning capability stand in for what a real run
-    # provides, so the tools' `ctx.emit` calls have somewhere to write and clear the capability-event
-    # guard when a test drives them outside an agent run.
-    capability = FileSystem[None](id='file_system')
+    capability = FileSystem(id='file_system')
     if workspace is None:
         return RunContext[None](
             deps=None,
@@ -61,8 +59,9 @@ def _ctx(workspace: Workspace | None = None) -> RunContext[None]:
             prompt=None,
             messages=[],
             run_step=0,
-            _event_stream_buffer=[],
+            capabilities={'file_system': capability},
             _capability=capability,
+            _event_stream_buffer=[],
         )
     return RunContext[None](
         deps=None,
@@ -72,8 +71,9 @@ def _ctx(workspace: Workspace | None = None) -> RunContext[None]:
         messages=[],
         run_step=0,
         workspace=workspace,
-        _event_stream_buffer=[],
+        capabilities={'file_system': capability},
         _capability=capability,
+        _event_stream_buffer=[],
     )
 
 
@@ -143,7 +143,7 @@ class _ErrorFilesystem:
 class _ErrorBackend(_ErrorFilesystem):
     """A backend whose filesystem and commands always raise the same error."""
 
-    ref = WorkspaceRef(provider='local', id='error-1')
+    ref = WorkspaceRef(provider='test', id='error-1')
 
     def __init__(self, error: Exception) -> None:
         super().__init__(error)
@@ -215,7 +215,7 @@ class _TimeoutBackend(_LocalFilesystemBackend):
 class _ResultBackend(_LocalFilesystemBackend):
     """A real local filesystem, with a canned result for every command."""
 
-    ref = WorkspaceRef(provider='local', id='result-1')
+    ref = WorkspaceRef(provider='test', id='result-1')
 
     def __init__(self, backend: LocalWorkspace, result: CommandResult) -> None:
         super().__init__(backend)
@@ -289,7 +289,7 @@ async def test_the_toolset_exposes_one_tool_per_file_operation(tmp_path: Path) -
     }
 
 
-async def test_a_relative_root_resolves_against_the_sandbox_working_directory(
+async def test_a_relative_root_resolves_against_the_workspace_working_directory(
     tmp_path: Path, workspace: Workspace
 ) -> None:
     content = 'nested\n'
@@ -364,21 +364,37 @@ async def test_read_file_rejects_an_offset_past_the_end_of_the_file(
 
 
 async def test_read_file_reports_binary_content_instead_of_text(tmp_path: Path, workspace: Workspace) -> None:
-    (tmp_path / 'binary.bin').write_bytes(b'hello\x00world')
+    data = b'hello\x00world'
+    (tmp_path / 'binary.bin').write_bytes(data)
 
     result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'binary.bin'})
 
     assert result == '[Binary file: 11 bytes. Use a binary-aware tool to inspect.]'
 
 
-async def test_read_file_decodes_undecodable_bytes_with_replacement(tmp_path: Path, workspace: Workspace) -> None:
-    # The workspace read classifies binary by NUL byte, so a null-free file with undecodable bytes
-    # is decoded as text with the U+FFFD replacement character, not reported as binary.
-    (tmp_path / 'text.bin').write_bytes(b'undecodable \xff\xfe\n')
+async def test_read_file_reports_unknown_binary_size_without_a_second_lookup(
+    tmp_path: Path, workspace: Workspace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def read_binary(_: str, *, offset: int = 1, limit: int | None = None) -> FileWindow:
+        return FileWindow(lines=(), start_line=offset, has_more=False, total_lines=None, binary=True, byte_size=None)
 
-    result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'text.bin'})
+    async def unexpected_stat(_: str) -> WorkspaceFileEntry:
+        raise AssertionError('read_file must not require a second metadata lookup')
 
-    assert 'undecodable' in result and '�' in result
+    monkeypatch.setattr(workspace, 'read_file', read_binary)
+    monkeypatch.setattr(workspace, 'stat', unexpected_stat)
+
+    result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'binary.bin'})
+
+    assert result == '[Binary file: size unavailable. Use a binary-aware tool to inspect.]'
+
+
+async def test_read_file_replaces_undecodable_utf8(tmp_path: Path, workspace: Workspace) -> None:
+    (tmp_path / 'text.txt').write_bytes(b'undecodable \xff\xfe\n')
+
+    result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'text.txt'})
+
+    assert 'undecodable ��' in result
 
 
 async def test_read_file_allows_a_symlink_alias_not_matching_a_denied_target_pattern(
@@ -394,14 +410,13 @@ async def test_read_file_allows_a_symlink_alias_not_matching_a_denied_target_pat
     assert 'secret' in result
 
 
-async def test_read_file_reads_large_multibyte_text_as_text(tmp_path: Path, workspace: Workspace) -> None:
-    # A file larger than the binary-sniff window with multibyte characters must read as text, not be
-    # misreported as binary because a character straddles the sniff boundary.
-    (tmp_path / 'unicode.txt').write_bytes(('a\n' * 5000 + 'émore text\n').encode())
+async def test_read_file_caps_a_long_utf8_line_without_calling_it_binary(tmp_path: Path, workspace: Workspace) -> None:
+    (tmp_path / 'unicode.txt').write_bytes(('a' * 8191 + 'é' + 'more text').encode())
 
-    result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'unicode.txt', 'offset': 5000})
+    result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'unicode.txt'})
 
-    assert 'émore text' in result
+    assert '[Binary file:' not in result
+    assert '[line truncated]' in result
 
 
 @pytest.mark.parametrize(
@@ -1011,7 +1026,7 @@ async def test_walkers_hide_dotfiles(
 # --- error mapping ---
 
 
-async def test_tools_report_an_unattached_sandbox_to_the_user(tmp_path: Path) -> None:
+async def test_tools_report_an_unattached_workspace_to_the_user(tmp_path: Path) -> None:
     with pytest.raises(UserError, match='No workspace is attached'):
         await _call(_toolset(tmp_path), _ctx(), 'read_file', {'path': 'a.txt'})
 
@@ -1146,7 +1161,7 @@ async def test_error_messages_never_expose_a_path_outside_the_root(filename: obj
 # --- the FileSystem capability ---
 
 
-def test_the_capability_defaults_to_the_sandbox_working_directory() -> None:
+def test_the_capability_defaults_to_the_workspace_working_directory() -> None:
     capability = FileSystem[None]()
 
     assert capability.root_dir == '.'
@@ -1154,6 +1169,11 @@ def test_the_capability_defaults_to_the_sandbox_working_directory() -> None:
     assert capability.max_list_results == 1000
     assert capability.max_search_results == 1000
     assert capability.max_find_results == 1000
+    assert capability.get_toolset().id == 'file_system'
+
+
+def test_the_capability_preserves_a_custom_toolset_id() -> None:
+    assert FileSystem[None](id='repo_files').get_toolset().id == 'repo_files'
 
 
 def test_the_capability_protects_secrets_and_vcs_metadata_by_default() -> None:
@@ -1207,7 +1227,7 @@ async def test_a_read_only_capability_exposes_exactly_the_read_only_tools(tmp_pa
     assert set(tools) == READ_ONLY_TOOL_NAMES
 
 
-async def test_filesystem_capability_runs_through_an_agent_with_a_sandbox(tmp_path: Path) -> None:
+async def test_filesystem_capability_runs_through_an_agent_with_a_workspace(tmp_path: Path) -> None:
     (tmp_path / 'note.txt').write_text('hello\n')
     responses = [
         ModelResponse(parts=[ToolCallPart('read_file', {'path': 'note.txt'})]),
@@ -1223,6 +1243,6 @@ async def test_filesystem_capability_runs_through_an_agent_with_a_sandbox(tmp_pa
     assert result.output == 'done'
 
 
-async def test_filesystem_capability_requires_a_sandbox_on_the_public_agent_path() -> None:
+async def test_filesystem_capability_requires_a_workspace_on_the_public_agent_path() -> None:
     with pytest.raises(UserError, match='No workspace is attached'):
         await Agent(TestModel(call_tools=['read_file']), capabilities=[FileSystem()]).run('read')
