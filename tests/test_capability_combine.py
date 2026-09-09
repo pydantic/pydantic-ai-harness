@@ -237,6 +237,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
     'Researcher': Anonymous('a packaged harness; composing two is composing their members'),
     'ClampOversizedMessages': Anonymous('clamping twice is a no-op; several thresholds compose'),
+    'CliBridge': Anonymous('a renderer: one per output stream, and two on one stream print twice'),
     'ClearToolResults': Anonymous('several form an escalation ladder, like `TieredCompaction` tiers'),
     'DeduplicateFileReads': Anonymous('file-read identification is agent-specific; one per `file_key`'),
     'DynamicWorkflow': Anonymous('one per workflow definition'),
