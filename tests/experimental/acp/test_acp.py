@@ -48,6 +48,7 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.toolsets import CombinedToolset, FunctionToolset
 from pydantic_ai.usage import UsageLimits
+from pydantic_ai.workspaces import LocalWorkspace
 
 from pydantic_ai_harness import FileSystem, Shell
 from pydantic_ai_harness.experimental import HarnessExperimentalWarning
@@ -437,6 +438,26 @@ class TestSessionConfig:
         await adapter.prompt(prompt=[acp.text_block('go')], session_id=session.session_id)
 
         assert 'extra_tool' in {title for _id, title, _status in client.tool_starts()}
+
+    async def test_session_sandbox_is_attached_to_the_run(self, tmp_path: Path) -> None:
+        agent: Agent[object, str] = Agent(TestModel(call_tools=['sandbox_working_dir']))
+
+        @agent.tool
+        async def sandbox_working_dir(ctx: RunContext[object]) -> str:
+            return await ctx.workspace.working_dir()
+
+        client = FakeClient()
+        async with LocalWorkspace(root=tmp_path) as backend:
+            adapter = PydanticAIACPAgent(
+                agent, session_config=lambda _session: AcpSessionConfig(deps=None, workspace=backend)
+            )
+            adapter.on_connect(client)
+            await adapter.initialize(protocol_version=1)
+            session = await adapter.new_session(cwd='.')
+            await adapter.prompt(prompt=[acp.text_block('where')], session_id=session.session_id)
+
+        [(_id, _status, raw_output)] = client.tool_completions()
+        assert raw_output == str(tmp_path)
 
     async def test_without_factory_falls_back_to_constructor_deps(self) -> None:
         adapter = PydanticAIACPAgent(_workspace_agent(), deps=_Workspace(cwd='/fixed'))

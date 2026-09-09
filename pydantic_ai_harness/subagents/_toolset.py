@@ -358,6 +358,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
             usage_limits=usage_limits,
             toolsets=toolsets,
             capabilities=capabilities,
+            workspace=ctx.workspace,
             event_stream_handler=self._event_stream_handler,
         )
         timeout = sub_agent.timeout_seconds

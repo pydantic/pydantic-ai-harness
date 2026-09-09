@@ -10,6 +10,7 @@ from pathlib import Path
 
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
+from pydantic_ai.workspaces import LocalWorkspace
 
 from pydantic_ai_harness import (
     LLM_API_KEY_ENV_PATTERNS,
@@ -82,8 +83,9 @@ def build_agent(model: Model | str = DEFAULT_MODEL, workspace: Path | None = Non
 
 
 def main() -> None:
-    """Start an interactive session in the current repository."""
-    build_agent().to_cli_sync()
+    """Run the coding agent interactively in the current repository."""
+    workspace = Path.cwd()
+    build_agent(workspace=workspace).to_cli_sync(workspace=LocalWorkspace(root=workspace))
 
 
 if __name__ == '__main__':

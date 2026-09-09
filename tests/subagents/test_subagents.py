@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,8 +26,9 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
+from pydantic_ai.workspaces import LocalWorkspace, ReadOnlyWorkspace, UnavailableWorkspace, Workspace
 
-from pydantic_ai_harness.subagents import SubAgent, SubAgents, SubAgentToolset
+from pydantic_ai_harness.subagents import ModelOption, SubAgent, SubAgents, SubAgentToolset
 
 
 @dataclass
@@ -52,6 +54,26 @@ pytestmark = pytest.mark.anyio
 def anyio_backend() -> str:
     """Run async tests on the asyncio backend (matching upstream pydantic-ai)."""
     return 'asyncio'
+
+
+async def test_workspace_free_temporal_delegate() -> None:
+    pytest.importorskip('temporalio')
+    from pydantic_ai.durable_exec.temporal import TemporalRunContext  # noqa: PLC0415
+
+    toolset = SubAgentToolset[object](
+        agents={'worker': SubAgent(Agent[object, str](TestModel(custom_output_text='worker'), name='worker'))},
+        forward_usage=False,
+        inherit_tools=False,
+        shared_capabilities=[],
+        event_stream_handler=None,
+        tool_name='delegate_task',
+        tool_retries=None,
+        contain_errors=False,
+        call_counts={},
+        models={'test': ModelOption(TestModel(custom_output_text='worker'))},
+    )
+    result = await toolset.delegate_task(TemporalRunContext[object](deps=None), 'worker', 'hello', model='test')
+    assert result == 'worker'
 
 
 def _delegate_then_finish(agent_name: str, *, retries_before: int = 0) -> FunctionModel:
@@ -221,6 +243,39 @@ class TestDelegation:
             if isinstance(part, ToolReturnPart) and part.tool_name == 'delegate_task'
         ]
         assert returns == ['WORKER RESULT']
+
+    async def test_delegate_inherits_parent_workspace(self, tmp_path: Path) -> None:
+        facade = ReadOnlyWorkspace(Workspace(LocalWorkspace(root=tmp_path)))
+        worker: Agent[object, str] = Agent(TestModel(call_tools=['workspace_details']), name='worker')
+
+        @worker.tool
+        async def workspace_details(ctx: RunContext[object]) -> str:
+            assert ctx.workspace is facade
+            working_dir = await ctx.workspace.working_dir()
+            with pytest.raises(UserError, match='read-only'):
+                await ctx.workspace.run(['echo', 'blocked'])
+            return working_dir
+
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
+        )
+        result = await parent.run('go', workspace=facade)
+
+        assert str(tmp_path) in _delegate_returns(result)[0]
+
+    async def test_unavailable_parent_workspace_is_forwarded(self) -> None:
+        worker: Agent[object, str] = Agent(TestModel(call_tools=['workspace_working_dir']), name='worker')
+
+        @worker.tool
+        async def workspace_working_dir(ctx: RunContext[object]) -> str:
+            return await ctx.workspace.working_dir()
+
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
+        )
+
+        with pytest.raises(UserError, match='workspace disabled by policy'):
+            await parent.run('go', workspace=UnavailableWorkspace('workspace disabled by policy'))
 
     async def test_delegates_via_name_override(self) -> None:
         worker = Agent(TestModel(custom_output_text='WORKER RESULT'), name='internal')

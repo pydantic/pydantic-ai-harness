@@ -235,6 +235,9 @@ COMBINE_POLICY: dict[str, Policy] = {
     ),
     # -- Several of these is the normal case, so they stay anonymous. --
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
+    '_CoderWorkspace': Rejected(
+        'the bundled agent supplies one workspace; multiple suppliers require explicit selection'
+    ),
     'Researcher': Anonymous('a packaged harness; composing two is composing their members'),
     'ClampOversizedMessages': Anonymous('clamping twice is a no-op; several thresholds compose'),
     'ClearToolResults': Anonymous('several form an escalation ladder, like `TieredCompaction` tiers'),

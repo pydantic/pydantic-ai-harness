@@ -22,21 +22,29 @@ uv add "pydantic-ai-harness[anthropic]"
 ```
 
 ```python
+from pathlib import Path
+
 from pydantic_ai import Agent
+from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import Coder
 
 agent = Agent('anthropic:claude-fable-5', capabilities=[Coder()])
 
-result = agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
+result = agent.run_sync(
+    'Find out why tests/test_parser.py fails and fix the bug it caught.',
+    workspace=LocalWorkspace(root=Path.cwd()),
+)
 print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-That's a complete [coding agent](coder.md): [workspace-rooted file access](filesystem.md), [allowlisted shell](shell.md), [repo orientation](repo-context.md), [planning](planning.md), a read-only [explorer sub-agent](subagents.md), and [context management](compaction.md) that survives long sessions, and it runs anywhere a Pydantic AI agent runs. [`agent.to_cli_sync()`](/ai/cli/) opens it as a chat in your terminal, [`agent.to_web()`](/ai/web/) in the browser, and [`Coder`](coder.md)'s exported [`coder_agent`](coder.md#api-reference) runs without writing a file at all, combined with [`clai`](/ai/cli/) (the Pydantic AI CLI) and [`uvx`](https://docs.astral.sh/uv/guides/tools/):
+That's a complete [coding agent](coder.md): [workspace-rooted file access](filesystem.md), [allowlisted shell](shell.md), [repo orientation](repo-context.md), [planning](planning.md), a read-only [explorer sub-agent](subagents.md), and [context management](compaction.md) that survives long sessions, and it runs anywhere a Pydantic AI agent runs. [`agent.to_cli_sync(workspace=...)`](/ai/cli/) opens it as a chat in your terminal and [`agent.to_web(workspace=...)`](/ai/web/) in the browser, passing the workspace just as `run()` does. [`Coder`](coder.md)'s exported [`coder_agent`](coder.md#api-reference) runs without writing a file at all, combined with [`clai`](/ai/cli/) (the Pydantic AI CLI) and [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
 ```bash
 uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
 ```
+
+The bundled `coder_agent` explicitly supplies the current checkout as a local workspace.
 
 Every model works: swap the string for [any provider's](/ai/models/overview/). Need more? Add capabilities to the list; here's the same coder on `gpt-5.6-sol`, with web search and cross-session memory:
 
@@ -64,7 +72,7 @@ agent = Agent(
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is not a framework inside the framework; it's a [`CombinedCapability`](/ai/capabilities/custom/) bundling the same blocks you can use directly. This is the exact agent the [Coder page](coder.md)'s exported `coder_agent` gives you, written out block by block:
+`Coder` is not a framework inside the framework; it's a [`CombinedCapability`](/ai/capabilities/custom/) bundling the same blocks you can use directly. This expands the capabilities used by `coder_agent`. Pass a local workspace when running this agent, as in the example above:
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
