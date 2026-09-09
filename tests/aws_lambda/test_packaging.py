@@ -33,6 +33,11 @@ def _documented_install_resolution() -> subprocess.CompletedProcess[str]:
             'uv',
             'run',
             '--isolated',
+            # --no-project keeps the repo's uv.lock out of the resolution, like a user's
+            # `pip install`: the lowest-versions CI job re-locks `uv.lock` to lowest-direct
+            # while pytest still runs under UV_LOCKED=1, so a project-aware run here would
+            # be refused the re-lock and exit 2.
+            '--no-project',
             '--no-progress',
             '--with',
             f'{_DOCUMENTED_INSTALL} @ file://{_ROOT}',
