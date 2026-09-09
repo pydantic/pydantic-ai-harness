@@ -37,7 +37,7 @@ LLM_API_KEY_ENV_PATTERNS: tuple[str, ...] = (
 """Glob patterns for common LLM provider credentials, for `denied_env_patterns`.
 
 Pass these to keep provider credentials in an explicit `env` out of commands.
-With `LocalSandbox`, commands also receive its fixed `PATH`, `HOME`, `LANG` and
+With `LocalWorkspace`, commands also receive its fixed `PATH`, `HOME`, `LANG` and
 `TMPDIR`. This is not an isolation boundary. Covers provider prefixes only --
 not other secrets, and the prefixes are coarse (`GOOGLE_*` also strips
 `GOOGLE_APPLICATION_CREDENTIALS`), so treat it as a starting point.
@@ -48,12 +48,12 @@ not other secrets, and the prefixes are coarse (`GOOGLE_*` also strips
 class Shell(AbstractCapability[AgentDepsT]):
     """Shell command execution for agents.
 
-    Commands execute inside the run's sandbox, starting in `cwd`. Use
+    Commands execute inside the run's workspace, starting in `cwd`. Use
     `allowed_commands` or `denied_commands` to control what the agent can invoke.
     """
 
     cwd: str | Path = '.'
-    """Working directory for command execution: a sandbox path, absolute or relative to the sandbox working directory."""
+    """Working directory for command execution: a workspace path, absolute or relative to its working directory."""
 
     allowed_commands: Sequence[str] = field(default_factory=list[str])
     """If non-empty, only these command names may be executed (allowlist)."""
@@ -83,9 +83,10 @@ class Shell(AbstractCapability[AgentDepsT]):
     env: Mapping[str, str] | None = None
     """Explicit environment for commands.
 
-    Passes these variables explicitly to the sandbox. With `LocalSandbox`, they
-    are added to its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` environment. This
-    is not a security boundary: use OS-level isolation for untrusted commands.
+    The mapping is passed to the workspace backend. `None` leaves environment
+    selection to that backend. With `LocalWorkspace`, explicit variables are
+    added to its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` environment. This is
+    not a security boundary; use OS-level isolation for untrusted commands.
     """
 
     denied_env_patterns: Sequence[str] = field(default_factory=list[str])
@@ -94,8 +95,8 @@ class Shell(AbstractCapability[AgentDepsT]):
     Follows the `denied_*` naming convention but matches by glob (`fnmatch`,
     e.g. `OPENAI_*`), since env secrets cluster by prefix -- unlike
     `denied_commands`, which matches executable names exactly. Only an explicit
-    `env` is filtered; the sandbox's own environment is not visible to the
-    toolset. If `env` is `None`, the sandbox backend decides what environment commands receive.
+    `env` is filtered; the workspace's own environment is not visible to the
+    toolset. If `env` is `None`, the workspace backend decides what environment commands receive.
     See `LLM_API_KEY_ENV_PATTERNS` for a ready-made provider-credential denylist.
     """
 
@@ -119,4 +120,5 @@ class Shell(AbstractCapability[AgentDepsT]):
             allow_interactive=self.allow_interactive,
             env=self.env,
             denied_env_patterns=self.denied_env_patterns,
+            id=self.id or 'shell',
         )

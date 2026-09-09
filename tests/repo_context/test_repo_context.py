@@ -2,22 +2,24 @@
 
 from __future__ import annotations
 
-import asyncio
+import json
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart
-from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart, UserPromptPart
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox, Sandbox, UnavailableSandbox
-from pydantic_ai.tools import ToolDefinition
 from pydantic_ai.usage import RunUsage
+from pydantic_ai.workspaces import LocalWorkspace, UnavailableWorkspace, Workspace
 
+from pydantic_ai_harness import HarnessDeprecationWarning
+from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.repo_context import (
     AgentContextInventory,
     ContextFile,
@@ -40,19 +42,15 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-async def sandbox(tmp_path: Path) -> AsyncIterator[Sandbox]:
-    async with LocalSandbox(root=tmp_path) as backend:
-        yield Sandbox.wrap(backend)
+async def workspace(tmp_path: Path) -> AsyncIterator[Workspace]:
+    async with LocalWorkspace(root=tmp_path) as backend:
+        yield Workspace(backend)
 
 
-def _run_context(sandbox: Sandbox) -> RunContext[object]:
+def _run_context(workspace: Workspace) -> RunContext[object]:
     return RunContext[object](
-        deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0, sandbox=sandbox
+        deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0, workspace=workspace
     )
-
-
-def _call(tool_name: str, **args: str) -> tuple[ToolCallPart, ToolDefinition, dict[str, str]]:
-    return ToolCallPart(tool_name=tool_name, args=args), ToolDefinition(name=tool_name), args
 
 
 def _write(path: Path, content: str) -> Path:
@@ -64,104 +62,121 @@ def _write(path: Path, content: str) -> Path:
 def _render_capability_instructions(capability: RepoContext[object], ctx: RunContext[object]) -> str | None:
     instructions = capability.get_instructions()
     assert callable(instructions)
-    rendered: object = instructions(ctx)  # pyright: ignore[reportCallIssue, reportUnknownVariableType]
+    rendered = instructions(ctx)
     assert isinstance(rendered, str) or rendered is None
     return rendered
 
 
+def _tool_returns(messages: list[ModelMessage]) -> int:
+    return sum(isinstance(part, ToolReturnPart) for message in messages for part in message.parts)
+
+
+def _repo_notes(messages: list[ModelMessage]) -> list[str]:
+    notes: list[str] = []
+    for message in messages:
+        for part in message.parts:
+            if (
+                isinstance(part, UserPromptPart)
+                and isinstance(part.content, str)
+                and ('<repo-context>' in part.content or '<context-file ' in part.content)
+            ):
+                notes.append(part.content)
+    return notes
+
+
 class TestDiscoverInstructionFiles:
-    async def test_walk_up_ancestor_first(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_walk_up_ancestor_first(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'root')
-        workspace = tmp_path / 'a' / 'b'
-        _write(workspace / 'CLAUDE.md', 'leaf')
-        files = await discover_instruction_files(sandbox, workspace, tmp_path, ('CLAUDE.md',))
+        workspace_dir = tmp_path / 'a' / 'b'
+        _write(workspace_dir / 'CLAUDE.md', 'leaf')
+        files = await discover_instruction_files(workspace, workspace_dir, tmp_path, ('CLAUDE.md',))
         assert [f.content for f in files] == ['root', 'leaf']
 
-    async def test_home_none_only_workspace(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_home_none_only_workspace(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'root')
-        workspace = tmp_path / 'a'
-        _write(workspace / 'CLAUDE.md', 'leaf')
-        files = await discover_instruction_files(sandbox, workspace, None, ('CLAUDE.md',))
+        workspace_dir = tmp_path / 'a'
+        _write(workspace_dir / 'CLAUDE.md', 'leaf')
+        files = await discover_instruction_files(workspace, workspace_dir, None, ('CLAUDE.md',))
         assert [f.content for f in files] == ['leaf']
 
-    async def test_home_equals_workspace(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_home_equals_workspace(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'only')
-        files = await discover_instruction_files(sandbox, tmp_path, tmp_path, ('CLAUDE.md',))
+        files = await discover_instruction_files(workspace, tmp_path, tmp_path, ('CLAUDE.md',))
         assert [f.content for f in files] == ['only']
 
-    async def test_home_not_ancestor_falls_back_to_workspace(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        workspace = tmp_path / 'a'
-        _write(workspace / 'CLAUDE.md', 'leaf')
+    async def test_home_not_ancestor_falls_back_to_workspace(self, tmp_path: Path, workspace: Workspace) -> None:
+        workspace_dir = tmp_path / 'a'
+        _write(workspace_dir / 'CLAUDE.md', 'leaf')
         unrelated = tmp_path / 'other'
         unrelated.mkdir()
-        files = await discover_instruction_files(sandbox, workspace, unrelated, ('CLAUDE.md',))
+        files = await discover_instruction_files(workspace, workspace_dir, unrelated, ('CLAUDE.md',))
         assert [f.content for f in files] == ['leaf']
 
-    async def test_both_filenames_within_dir_order(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_both_filenames_within_dir_order(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'claude')
         _write(tmp_path / 'AGENTS.md', 'agents')
-        files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md', 'AGENTS.md'))
+        files = await discover_instruction_files(workspace, tmp_path, None, ('CLAUDE.md', 'AGENTS.md'))
         assert [f.content for f in files] == ['claude', 'agents']
 
     @pytest.mark.skipif(sys.platform == 'win32', reason='symlinks need privileges on Windows')
-    async def test_symlink_deduped_by_content_hash(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        # Symlink-realpath dedup is dropped with the sandbox migration (isolation is
-        # the sandbox's job); the content-hash dedup still catches shared bytes.
+    async def test_symlink_deduped_by_content_hash(self, tmp_path: Path, workspace: Workspace) -> None:
+        # Symlink-realpath dedup is dropped with the workspace migration (isolation is
+        # the workspace's job); the content-hash dedup still catches shared bytes.
         _write(tmp_path / 'CLAUDE.md', 'shared')
         (tmp_path / 'AGENTS.md').symlink_to(tmp_path / 'CLAUDE.md')
-        files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md', 'AGENTS.md'))
+        files = await discover_instruction_files(workspace, tmp_path, None, ('CLAUDE.md', 'AGENTS.md'))
         assert len(files) == 1
 
-    async def test_identical_content_deduped_by_hash(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_identical_content_deduped_by_hash(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'same')
-        workspace = tmp_path / 'a'
-        _write(workspace / 'CLAUDE.md', 'same')
-        files = await discover_instruction_files(sandbox, workspace, tmp_path, ('CLAUDE.md',))
+        workspace_dir = tmp_path / 'a'
+        _write(workspace_dir / 'CLAUDE.md', 'same')
+        files = await discover_instruction_files(workspace, workspace_dir, tmp_path, ('CLAUDE.md',))
         assert [f.content for f in files] == ['same']
 
-    async def test_missing_files_skipped(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md',))
+    async def test_missing_files_skipped(self, tmp_path: Path, workspace: Workspace) -> None:
+        files = await discover_instruction_files(workspace, tmp_path, None, ('CLAUDE.md',))
         assert files == []
 
     @pytest.mark.parametrize('error', [FileNotFoundError(), NotADirectoryError()])
     async def test_unreadable_model_path_does_not_block_capability_setup(self, tmp_path: Path, error: OSError) -> None:
-        sandbox = MagicMock(spec=Sandbox)
-        sandbox.resolve = AsyncMock(return_value=tmp_path.as_posix())
-        sandbox.stat = AsyncMock(side_effect=error)
+        workspace = MagicMock(spec=Workspace)
+        workspace.resolve = AsyncMock(return_value=tmp_path.as_posix())
+        workspace.stat = AsyncMock(side_effect=error)
         cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
-        ctx = _run_context(sandbox=sandbox)
+        ctx = _run_context(workspace=workspace)
 
         await cap.before_run(ctx)
 
         assert cap.get_instructions() is not None
 
-    async def test_duplicate_filename_is_read_once(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_duplicate_filename_is_read_once(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'once')
 
-        files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md', 'CLAUDE.md'))
+        files = await discover_instruction_files(workspace, tmp_path, None, ('CLAUDE.md', 'CLAUDE.md'))
 
         assert [file.content for file in files] == ['once']
 
-    async def test_non_utf8_file_does_not_crash(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_non_utf8_file_does_not_crash(self, tmp_path: Path, workspace: Workspace) -> None:
         (tmp_path / 'CLAUDE.md').write_bytes(b'caf\xe9 instructions')
-        files = await discover_instruction_files(sandbox, tmp_path, None, ('CLAUDE.md',))
+        files = await discover_instruction_files(workspace, tmp_path, None, ('CLAUDE.md',))
         assert len(files) == 1
         assert 'instructions' in files[0].content
 
 
 class TestFindDirContextFile:
-    async def test_first_existing_wins(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_first_existing_wins(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'AGENTS.md', 'agents')
-        found = await find_dir_context_file(sandbox, tmp_path, ('CLAUDE.md', 'AGENTS.md'))
+        found = await find_dir_context_file(workspace, tmp_path, ('CLAUDE.md', 'AGENTS.md'))
         assert found is not None
         assert found.content == 'agents'
 
-    async def test_none_when_absent(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        assert await find_dir_context_file(sandbox, tmp_path, ('CLAUDE.md',)) is None
+    async def test_none_when_absent(self, tmp_path: Path, workspace: Workspace) -> None:
+        assert await find_dir_context_file(workspace, tmp_path, ('CLAUDE.md',)) is None
 
-    async def test_non_utf8_file_does_not_crash(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_non_utf8_file_does_not_crash(self, tmp_path: Path, workspace: Workspace) -> None:
         (tmp_path / 'CLAUDE.md').write_bytes(b'caf\xe9 instructions')
-        found = await find_dir_context_file(sandbox, tmp_path, ('CLAUDE.md',))
+        found = await find_dir_context_file(workspace, tmp_path, ('CLAUDE.md',))
         assert found is not None
         assert 'instructions' in found.content
 
@@ -184,10 +199,10 @@ class TestRender:
 
 
 class TestInstructions:
-    async def test_includes_files_and_inventory_hint(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_includes_files_and_inventory_hint(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'be nice')
         cap = RepoContext[object](workspace_dir=tmp_path)
-        ctx = _run_context(sandbox=sandbox)
+        ctx = _run_context(workspace=workspace)
         await cap.before_run(ctx)
         instructions = _render_capability_instructions(cap, ctx)
         assert isinstance(instructions, str)
@@ -198,35 +213,35 @@ class TestInstructions:
         cap = RepoContext[object](workspace_dir=tmp_path, autoload_instructions=False, expose_inventory_tool=False)
         assert cap.get_instructions() is None
 
-    async def test_autoload_off_keeps_inventory_hint(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_autoload_off_keeps_inventory_hint(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'ignored')
         cap = RepoContext[object](workspace_dir=tmp_path, autoload_instructions=False)
-        await cap.before_run(_run_context(sandbox=sandbox))
+        await cap.before_run(_run_context(workspace=workspace))
         instructions = cap.get_instructions()
         assert isinstance(instructions, str)
         assert 'ignored' not in instructions
         assert 'inventory_agent_context' in instructions
 
-    async def test_autoload_off_does_not_require_sandbox_file_access(self, tmp_path: Path) -> None:
+    async def test_autoload_off_does_not_require_workspace_file_access(self, tmp_path: Path) -> None:
         agent = Agent(
             TestModel(call_tools=[]),
             capabilities=[RepoContext[object](workspace_dir=tmp_path, autoload_instructions=False)],
         )
 
-        result = await agent.run('go', sandbox=UnavailableSandbox('sandbox file access is disabled'))
+        result = await agent.run('go', workspace=UnavailableWorkspace('workspace file access is disabled'))
 
         assert result.output is not None
 
-    async def test_no_files_no_inventory_is_none(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_no_files_no_inventory_is_none(self, tmp_path: Path, workspace: Workspace) -> None:
         cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
-        ctx = _run_context(sandbox=sandbox)
+        ctx = _run_context(workspace=workspace)
         await cap.before_run(ctx)
         assert _render_capability_instructions(cap, ctx) is None
 
-    async def test_files_cached_across_calls(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_files_cached_across_calls(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'first')
         cap = RepoContext[object](workspace_dir=tmp_path)
-        ctx = _run_context(sandbox=sandbox)
+        ctx = _run_context(workspace=workspace)
         await cap.before_run(ctx)
         first = _render_capability_instructions(cap, ctx)
         assert first is not None and 'first' in first
@@ -235,11 +250,11 @@ class TestInstructions:
         # Read-once: `before_run` loaded the file, so subsequent edits are not picked up.
         assert second is not None and 'second' not in second
 
-    async def test_autoload_without_sandbox_raises(self, tmp_path: Path) -> None:
+    async def test_autoload_without_workspace_raises(self, tmp_path: Path) -> None:
         _write(tmp_path / 'CLAUDE.md', 'host instructions')
         agent = Agent(TestModel(), capabilities=[RepoContext[object](workspace_dir=tmp_path)])
 
-        with pytest.raises(UserError, match='No sandbox is attached'):
+        with pytest.raises(UserError, match='No workspace is attached'):
             await agent.run('go')
 
 
@@ -256,17 +271,17 @@ class TestToolset:
             TestModel(call_tools=['inventory_agent_context']),
             capabilities=[RepoContext[object](workspace_dir=tmp_path)],
         )
-        async with LocalSandbox(root=tmp_path) as backend:
-            result = await agent.run('go', sandbox=backend)
+        async with LocalWorkspace(root=tmp_path) as backend:
+            result = await agent.run('go', workspace=backend)
         assert 'inventory_agent_context' in result.output
 
 
 class TestScanAssets:
-    async def test_full_shape(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_full_shape(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / '.claude' / 'skills' / 'foo' / 'SKILL.md', 's')
         _write(tmp_path / '.claude' / 'agents' / 'bar.md', 'a')
         _write(tmp_path / '.claude' / 'settings.json', '{}')
-        inv = await scan_assets(sandbox, tmp_path, ('.claude', '.agents', '.codex', '.grok'))
+        inv = await scan_assets(workspace, tmp_path, ('.claude', '.agents', '.codex', '.grok'))
         by_root = {r.root: r for r in inv.roots}
         claude = by_root['.claude']
         assert claude.exists
@@ -277,62 +292,57 @@ class TestScanAssets:
         assert by_root['.codex'].notes is not None
         assert by_root['.grok'].notes is not None
 
-    async def test_existing_root_without_settings(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_existing_root_without_settings(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / '.claude' / 'skills' / 'foo' / 'SKILL.md', 's')
-        inv = await scan_assets(sandbox, tmp_path, ('.claude',))
+        inv = await scan_assets(workspace, tmp_path, ('.claude',))
         assert inv.roots[0].settings is None
         assert inv.roots[0].notes is None
 
-    async def test_root_without_skills_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_root_without_skills_directory(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / '.claude' / 'agents' / 'helper.md', 'agent')
-        inv = await scan_assets(sandbox, tmp_path, ('.claude',))
+        inv = await scan_assets(workspace, tmp_path, ('.claude',))
         assert inv.roots[0].skills == []
         assert inv.roots[0].agents == ['.claude/agents/helper.md']
 
-    @pytest.mark.parametrize('root', ('/outside', '../outside'))
-    async def test_asset_roots_must_be_relative_to_workspace(self, tmp_path: Path, sandbox: Sandbox, root: str) -> None:
-        with pytest.raises(ValueError, match='relative to the workspace'):
-            await scan_assets(sandbox, tmp_path, (root,))
-
-    async def test_skill_walk_has_a_depth_bound(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_skill_walk_has_a_depth_bound(self, tmp_path: Path, workspace: Workspace) -> None:
         near = tmp_path / '.claude' / 'skills'
         for index in range(8):
             near /= f'level-{index}'
         _write(near / 'SKILL.md', 'near')
         _write(near / 'level-8' / 'SKILL.md', 'deep')
 
-        inventory = await scan_assets(sandbox, tmp_path, ('.claude',))
+        inventory = await scan_assets(workspace, tmp_path, ('.claude',))
 
         assert inventory.roots[0].skills == [f'.claude/skills/{"/".join(f"level-{i}" for i in range(8))}/SKILL.md']
 
-    async def test_file_at_asset_root_is_not_a_directory(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_file_at_asset_root_is_not_a_directory(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / '.claude', 'not a directory')
 
-        inv = await scan_assets(sandbox, tmp_path, ('.claude',))
+        inv = await scan_assets(workspace, tmp_path, ('.claude',))
 
         assert inv.roots[0].exists is False
 
-    async def test_unrecognized_inventory_entries_are_ignored(self, tmp_path: Path, sandbox: Sandbox) -> None:
+    async def test_unrecognized_inventory_entries_are_ignored(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / '.claude' / 'README.md', 'not an agent')
         _write(tmp_path / '.claude' / 'skills' / 'README.md', 'not a skill')
         _write(tmp_path / '.claude' / 'settings.json', '{}')
 
-        inv = await scan_assets(sandbox, tmp_path, ('.claude',))
+        inv = await scan_assets(workspace, tmp_path, ('.claude',))
 
         assert inv.roots[0].settings == '.claude/settings.json'
         assert inv.roots[0].skills == []
 
-    async def test_returns_model(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        assert isinstance(await scan_assets(sandbox, tmp_path, ()), AgentContextInventory)
+    async def test_returns_model(self, tmp_path: Path, workspace: Workspace) -> None:
+        assert isinstance(await scan_assets(workspace, tmp_path, ()), AgentContextInventory)
 
     @pytest.mark.skipif(sys.platform == 'win32', reason='symlinks need privileges on Windows')
-    async def test_symlinked_asset_uses_confined_display_path(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        workspace = tmp_path / 'ws'
+    async def test_symlinked_asset_uses_confined_display_path(self, tmp_path: Path, workspace: Workspace) -> None:
+        workspace_dir = tmp_path / 'ws'
         outside = _write(tmp_path / 'outside' / 'foo' / 'SKILL.md', 's')
-        link = workspace / '.claude' / 'skills' / 'foo' / 'SKILL.md'
+        link = workspace_dir / '.claude' / 'skills' / 'foo' / 'SKILL.md'
         link.parent.mkdir(parents=True)
         link.symlink_to(outside)
-        inv = await scan_assets(sandbox, workspace, ('.claude',))
+        inv = await scan_assets(workspace, workspace_dir, ('.claude',))
         claude = inv.roots[0]
         assert claude.exists
         assert len(claude.skills) == 1
@@ -340,176 +350,252 @@ class TestScanAssets:
 
 
 class TestNestedTraversal:
-    async def test_off_by_default_returns_result(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        cap = RepoContext[object](workspace_dir=tmp_path)
-        call, tool_def, args = _call('list_directory', path='sub')
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='listing'
-        )
-        assert out == 'listing'
+    @pytest.mark.parametrize(('nested_inject', 'includes_body'), [('pointer', False), ('contents', True)])
+    async def test_filesystem_event_enqueues_once_before_next_request(
+        self, tmp_path: Path, nested_inject: Literal['pointer', 'contents'], includes_body: bool
+    ) -> None:
+        _write(tmp_path / 'sub' / 'AGENTS.md', 'NESTED BODY')
+        _write(tmp_path / 'sub' / 'one.py', 'one')
+        _write(tmp_path / 'sub' / 'two.py', 'two')
 
-    async def test_pointer_appended_on_first_traversal(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call, tool_def, args = _call('list_directory', path='sub')
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='listing'
-        )
-        assert out.startswith('listing')
-        assert 'sub/CLAUDE.md' in out
-        assert 'nested' not in out
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            returns = _tool_returns(messages)
+            if returns == 0:
+                yield {0: DeltaToolCall(name='read_file', json_args='{"path":"sub/one.py"}', tool_call_id='one')}
+            elif returns == 1:
+                notes = _repo_notes(messages)
+                assert len(notes) == 1
+                assert 'sub/AGENTS.md' in notes[0]
+                assert ('NESTED BODY' in notes[0]) is includes_body
+                yield {0: DeltaToolCall(name='read_file', json_args='{"path":"sub/two.py"}', tool_call_id='two')}
+            else:
+                assert len(_repo_notes(messages)) == 1
+                yield 'done'
 
-    async def test_second_traversal_no_reappend(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call, tool_def, args = _call('list_directory', path='sub')
-        ctx = _run_context(sandbox=sandbox)
-        first = await cap.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='one')
-        second = await cap.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='two')
-        assert 'CLAUDE.md' in first
-        assert second == 'two'
+        await Agent(
+            FunctionModel(stream_function=stream),
+            capabilities=[
+                FileSystem(root_dir=tmp_path),
+                RepoContext(
+                    workspace_dir=tmp_path,
+                    autoload_instructions=False,
+                    expose_inventory_tool=False,
+                    nested_traversal=True,
+                    nested_inject=nested_inject,
+                ),
+            ],
+        ).run('go', workspace=LocalWorkspace(root=tmp_path))
 
-    async def test_concurrent_traversal_injects_directory_once(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call, tool_def, args = _call('list_directory', path='sub')
-        ctx = _run_context(sandbox=sandbox)
+    async def test_filesystem_rooted_below_the_workspace_resolves_against_its_own_root(self, tmp_path: Path) -> None:
+        project = tmp_path / 'project'
+        _write(project / 'sub' / 'AGENTS.md', 'NESTED BODY')
+        _write(project / 'sub' / 'one.py', 'one')
+        # A decoy at the path the event would name if it were wrongly rebased onto the workspace.
+        _write(tmp_path / 'sub' / 'AGENTS.md', 'DECOY BODY')
 
-        outputs = await asyncio.gather(
-            cap.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='one'),
-            cap.after_tool_execute(ctx, call=call, tool_def=tool_def, args=args, result='two'),
-        )
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _tool_returns(messages) == 0:
+                yield {0: DeltaToolCall(name='read_file', json_args='{"path":"sub/one.py"}', tool_call_id='one')}
+            else:
+                notes = _repo_notes(messages)
+                assert len(notes) == 1
+                assert 'project/sub/AGENTS.md' in notes[0]
+                yield 'done'
 
-        assert sum('CLAUDE.md' in output for output in outputs) == 1
+        await Agent(
+            FunctionModel(stream_function=stream),
+            capabilities=[
+                FileSystem(root_dir=project),
+                RepoContext(
+                    workspace_dir=tmp_path,
+                    autoload_instructions=False,
+                    expose_inventory_tool=False,
+                    nested_traversal=True,
+                ),
+            ],
+        ).run('go', workspace=LocalWorkspace(root=tmp_path))
 
-    async def test_tool_name_not_matched(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call, tool_def, args = _call('write_file', path='sub')
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='r'
-        )
-        assert out == 'r'
-
-    async def test_non_str_path_arg_ignored(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call = ToolCallPart(tool_name='list_directory', args={'path': 123})
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox),
-            call=call,
-            tool_def=ToolDefinition(name='list_directory'),
-            args={'path': 123},
-            result='r',
-        )
-        assert out == 'r'
-
-    async def test_dir_without_context_file_untouched(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        (tmp_path / 'sub').mkdir()
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call, tool_def, args = _call('list_directory', path='sub')
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='r'
-        )
-        assert out == 'r'
-
-    async def test_read_file_uses_parent_dir(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        target = _write(tmp_path / 'sub' / 'code.py', 'x = 1')
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call, tool_def, args = _call('read_file', path=str(target))
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='file body'
-        )
-        assert 'CLAUDE.md' in out
-
-    @pytest.mark.parametrize('error', [FileNotFoundError(), NotADirectoryError()])
-    async def test_unreadable_tool_path_leaves_result_unchanged(self, tmp_path: Path, error: OSError) -> None:
-        sandbox = MagicMock(spec=Sandbox)
-        sandbox.resolve = AsyncMock(side_effect=(tmp_path.as_posix(), (tmp_path / 'gone').as_posix()))
-        sandbox.stat = AsyncMock(side_effect=error)
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call, tool_def, args = _call('list_directory', path='gone')
-
-        result = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='listing'
-        )
-
-        assert result == 'listing'
-
-    async def test_contents_mode_inlines_body(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'NESTED BODY')
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True, nested_inject='contents')
-        call, tool_def, args = _call('list_directory', path='sub')
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='r'
-        )
-        assert 'NESTED BODY' in out
-
-    async def test_label_falls_back_when_dir_outside_workspace(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        workspace = tmp_path / 'ws'
+    async def test_filesystem_rooted_outside_the_workspace_enqueues_nothing(self, tmp_path: Path) -> None:
+        workspace = tmp_path / 'workspace'
         workspace.mkdir()
-        outside = _write(tmp_path / 'outside' / 'CLAUDE.md', 'nested').parent
-        cap = RepoContext[object](workspace_dir=workspace, nested_traversal=True)
-        call, tool_def, args = _call('list_directory', path=str(outside))
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='r'
-        )
-        assert outside.as_posix() in out
+        elsewhere = tmp_path / 'elsewhere'
+        _write(elsewhere / 'AGENTS.md', 'OUTSIDE BODY')
+        _write(elsewhere / 'one.py', 'one')
 
-    async def test_non_str_result_returned_unchanged(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        cap = RepoContext[object](
-            workspace_dir=tmp_path, nested_traversal=True, traversal_tool_names=frozenset({'list_dir', 'read_file'})
-        )
-        call, tool_def, args = _call('list_dir', path='sub')
-        listing = [{'name': 'CLAUDE.md'}, {'name': 'code.py'}]
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result=listing
-        )
-        assert out is listing
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _tool_returns(messages) == 0:
+                yield {0: DeltaToolCall(name='list_directory', json_args='{"path":"."}', tool_call_id='list')}
+            else:
+                assert _repo_notes(messages) == []
+                yield 'done'
 
-    async def test_string_result_still_gets_note(self, tmp_path: Path, sandbox: Sandbox) -> None:
-        _write(tmp_path / 'sub' / 'CLAUDE.md', 'nested')
-        cap = RepoContext[object](workspace_dir=tmp_path, nested_traversal=True)
-        call, tool_def, args = _call('list_directory', path='sub')
-        out = await cap.after_tool_execute(
-            _run_context(sandbox=sandbox), call=call, tool_def=tool_def, args=args, result='listing'
+        await Agent(
+            FunctionModel(stream_function=stream),
+            capabilities=[
+                FileSystem(root_dir=elsewhere),
+                RepoContext(
+                    workspace_dir=workspace,
+                    autoload_instructions=False,
+                    expose_inventory_tool=False,
+                    nested_traversal=True,
+                ),
+            ],
+        ).run('go', workspace=LocalWorkspace(root=tmp_path))
+
+    @pytest.mark.parametrize('remove_before_return', [False, True])
+    async def test_customized_sniff_fallback_warns_and_supports_non_event_tool(
+        self, tmp_path: Path, remove_before_return: bool
+    ) -> None:
+        _write(tmp_path / 'sub' / 'AGENTS.md', 'NESTED BODY')
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _tool_returns(messages) == 0:
+                yield {0: DeltaToolCall(name='list_dir', json_args='{"target":"sub"}', tool_call_id='list')}
+            else:
+                assert len(_repo_notes(messages)) == (0 if remove_before_return else 1)
+                yield 'done'
+
+        def list_dir(target: str) -> list[dict[str, str]]:
+            if remove_before_return:
+                (tmp_path / target / 'AGENTS.md').unlink()
+                (tmp_path / target).rmdir()
+            return [{'name': 'AGENTS.md'}, {'name': 'one.py'}]
+
+        with pytest.warns(
+            HarnessDeprecationWarning,
+            match='Traversal detection now reacts to `FileReadEvent` and `DirectoryListedEvent`',
+        ):
+            capability = RepoContext(
+                workspace_dir=tmp_path,
+                autoload_instructions=False,
+                expose_inventory_tool=False,
+                nested_traversal=True,
+                traversal_tool_names=frozenset({'list_dir'}),
+                traversal_path_arg='target',
+            )
+
+        await Agent(FunctionModel(stream_function=stream), capabilities=[capability], tools=[list_dir]).run(
+            'go', workspace=LocalWorkspace(root=tmp_path)
         )
-        assert out.startswith('listing')
-        assert 'CLAUDE.md' in out
+
+    async def test_traversal_into_a_directory_without_a_context_file_enqueues_nothing(self, tmp_path: Path) -> None:
+        _write(tmp_path / 'sub' / 'one.py', 'one')
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _tool_returns(messages) == 0:
+                yield {0: DeltaToolCall(name='read_file', json_args='{"path":"sub/one.py"}', tool_call_id='one')}
+            else:
+                assert _repo_notes(messages) == []
+                yield 'done'
+
+        await Agent(
+            FunctionModel(stream_function=stream),
+            capabilities=[
+                FileSystem(root_dir=tmp_path),
+                RepoContext(
+                    workspace_dir=tmp_path,
+                    autoload_instructions=False,
+                    expose_inventory_tool=False,
+                    nested_traversal=True,
+                ),
+            ],
+        ).run('go', workspace=LocalWorkspace(root=tmp_path))
+
+    async def test_customized_sniff_ignores_a_non_string_path_and_accepts_an_absolute_one(self, tmp_path: Path) -> None:
+        _write(tmp_path / 'sub' / 'AGENTS.md', 'NESTED BODY')
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            returns = _tool_returns(messages)
+            if returns == 0:
+                yield {0: DeltaToolCall(name='list_dir', json_args='{"target":7}', tool_call_id='bad')}
+            elif returns == 1:
+                assert _repo_notes(messages) == []
+                args = json.dumps({'target': str(tmp_path / 'sub')})
+                yield {0: DeltaToolCall(name='list_dir', json_args=args, tool_call_id='abs')}
+            else:
+                assert len(_repo_notes(messages)) == 1
+                yield 'done'
+
+        def list_dir(target: Any) -> str:
+            return 'listed'
+
+        with pytest.warns(HarnessDeprecationWarning, match='Traversal detection now reacts'):
+            capability = RepoContext(
+                workspace_dir=tmp_path,
+                autoload_instructions=False,
+                expose_inventory_tool=False,
+                nested_traversal=True,
+                traversal_tool_names=frozenset({'list_dir'}),
+                traversal_path_arg='target',
+            )
+
+        await Agent(FunctionModel(stream_function=stream), capabilities=[capability], tools=[list_dir]).run(
+            'go', workspace=LocalWorkspace(root=tmp_path)
+        )
+
+    async def test_customized_sniff_labels_a_context_file_outside_the_workspace(self, tmp_path: Path) -> None:
+        workspace = tmp_path / 'workspace'
+        workspace.mkdir()
+        outside = _write(tmp_path / 'outside' / 'AGENTS.md', 'OUTSIDE BODY')
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if _tool_returns(messages) == 0:
+                args = json.dumps({'target': str(outside.parent)})
+                yield {0: DeltaToolCall(name='list_dir', json_args=args, tool_call_id='out')}
+            else:
+                notes = _repo_notes(messages)
+                assert len(notes) == 1
+                assert outside.as_posix() in notes[0]
+                yield 'done'
+
+        def list_dir(target: Any) -> str:
+            return 'listed'
+
+        with pytest.warns(HarnessDeprecationWarning, match='Traversal detection now reacts'):
+            capability = RepoContext(
+                workspace_dir=workspace,
+                autoload_instructions=False,
+                expose_inventory_tool=False,
+                nested_traversal=True,
+                traversal_tool_names=frozenset({'list_dir'}),
+                traversal_path_arg='target',
+            )
+
+        await Agent(FunctionModel(stream_function=stream), capabilities=[capability], tools=[list_dir]).run(
+            'go', workspace=LocalWorkspace(root=tmp_path)
+        )
 
 
 class TestForRunAndMisc:
-    async def test_agent_reuse_isolates_instruction_state_between_sandboxes(self, tmp_path: Path) -> None:
+    async def test_agent_reuse_isolates_instruction_state_between_workspaces(self, tmp_path: Path) -> None:
         first_root = tmp_path / 'first'
         second_root = tmp_path / 'second'
-        _write(first_root / 'CLAUDE.md', 'first sandbox instructions')
-        _write(second_root / 'CLAUDE.md', 'second sandbox instructions')
+        _write(first_root / 'CLAUDE.md', 'first workspace instructions')
+        _write(second_root / 'CLAUDE.md', 'second workspace instructions')
         captured: list[list[ModelMessage]] = []
 
-        def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
             del info
             captured.append(messages)
-            return ModelResponse(parts=[TextPart('done')])
+            yield 'done'
 
         agent = Agent(
-            FunctionModel(model),
+            FunctionModel(stream_function=model),
             capabilities=[RepoContext[object](workspace_dir=Path('.'), expose_inventory_tool=False)],
         )
 
         instructions: list[str] = []
         for root in (first_root, second_root):
-            async with LocalSandbox(root=root) as backend:
-                await agent.run('go', sandbox=backend)
+            async with LocalWorkspace(root=root) as backend:
+                await agent.run('go', workspace=backend)
             first_request = captured[-1][0]
             assert isinstance(first_request, ModelRequest)
             instructions.append(first_request.instructions or '')
 
-        assert 'first sandbox instructions' in instructions[0]
-        assert 'second sandbox instructions' not in instructions[0]
-        assert 'second sandbox instructions' in instructions[1]
-        assert 'first sandbox instructions' not in instructions[1]
+        assert 'first workspace instructions' in instructions[0]
+        assert 'second workspace instructions' not in instructions[0]
+        assert 'second workspace instructions' in instructions[1]
+        assert 'first workspace instructions' not in instructions[1]
 
     def test_serialization_name(self) -> None:
         assert RepoContext.get_serialization_name() == 'RepoContext'

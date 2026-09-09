@@ -8,10 +8,11 @@ from dataclasses import dataclass, field
 from typing import Generic, Protocol, TypeAlias
 
 from acp import Client, schema
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage
-from pydantic_ai.sandboxes import SandboxBackend, SandboxRef
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.workspaces import WorkspaceBackend, WorkspaceRef
 
 # A single MCP server configuration, in any of the transports ACP carries.
 McpServer: TypeAlias = schema.HttpMcpServer | schema.SseMcpServer | schema.AcpMcpServer | schema.McpServerStdio
@@ -62,19 +63,24 @@ class AcpSession:
 class AcpSessionConfig(Generic[AgentDepsT]):
     """Per-session run configuration returned by a `session_config` factory.
 
-    `deps`, `toolsets`, and `sandbox` are applied to every agent run in that session, mirroring
-    `Agent.run(..., deps=..., toolsets=..., sandbox=...)`. `toolsets` is added to the agent's own
-    toolsets rather than replacing them. `deps` is required; pass `deps=None` for an agent with no
-    dependencies.
+    `deps`, `capabilities`, `toolsets`, and `workspace` are applied to every agent run in that
+    session, mirroring `Agent.run(..., deps=..., capabilities=..., toolsets=..., workspace=...)`.
+    `capabilities` and `toolsets` are added to the agent's own configuration rather than replacing
+    it. `deps` is required; pass `deps=None` for an agent with no dependencies.
 
-    Without a `sandbox`, runs get the unavailable default and any tool touching `ctx.sandbox`
-    fails with attachment instructions. The session owns the backend's lifecycle: the adapter
-    never tears it down.
+    Prefer `capabilities` for anything that is a capability. A capability contributes its tools
+    along with its hooks, instructions, and event ownership, whereas reaching past it for its
+    toolset alone (`FileSystem(...).get_toolset()`) drops the rest -- and a
+    [`CapabilityEvent`][pydantic_ai.messages.CapabilityEvent] its tools emit then has no owning
+    capability to be attributed to, which is an error.
+
+    The session owns the workspace backend's lifecycle; the adapter does not tear it down.
     """
 
     deps: AgentDepsT
+    capabilities: Sequence[AbstractCapability[AgentDepsT]] | None = None
     toolsets: Sequence[AbstractToolset[AgentDepsT]] | None = None
-    sandbox: SandboxBackend | SandboxRef | None = None
+    workspace: WorkspaceBackend | WorkspaceRef | None = None
 
 
 # A `Protocol` rather than a `Callable` alias so it stays subscriptable (`SessionConfigFunc[MyDeps]`)

@@ -1,13 +1,13 @@
 ---
 title: FileSystem
-description: Give a Pydantic AI agent glob-filtered file access scoped to a single directory tree inside the run's sandbox.
+description: Give a Pydantic AI agent glob-filtered file access scoped to a single directory tree inside the run's workspace.
 ---
 
 # FileSystem
 
 `FileSystem` gives an agent a fixed set of file tools -- read, write, edit, list,
 search, find, create, and inspect -- all scoped to a single `root_dir` inside the
-run's sandbox. Access is filtered through allow / deny / protected glob
+run's workspace. Access is filtered through allow / deny / protected glob
 patterns.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/filesystem/)
@@ -21,7 +21,7 @@ Letting an agent loose on a whole filesystem is risky: path traversal
 Hand-rolling the guards around every tool call is repetitive and easy to get
 subtly wrong.
 
-`FileSystem` centralizes those guards. It exposes one bounded, sandboxed
+`FileSystem` centralizes those guards. It exposes one bounded, workspace-rooted
 toolset so you configure the boundary once and reuse it across agents.
 Relative paths always resolve from the configured root, regardless of which
 other tools ran before them.
@@ -29,7 +29,7 @@ other tools ran before them.
 ## Usage
 
 Add `FileSystem` to your agent's `capabilities` with a `root_dir`. The capability
-applies textual path checks relative to that directory inside the sandbox
+applies textual path checks relative to that directory inside the workspace
 attached to the run, so every run needs one; without it the first tool call
 raises an error that says how to attach one.
 
@@ -37,7 +37,7 @@ raises an error that says how to attach one.
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.sandboxes import LocalSandbox
+from pydantic_ai.workspaces import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 
 agent = Agent(
@@ -47,15 +47,15 @@ agent = Agent(
 
 result = agent.run_sync(
     'Read config.toml and tell me the package name.',
-    sandbox=LocalSandbox(root=Path.cwd()),  # the agent process's own filesystem
+    workspace=LocalWorkspace(root=Path.cwd()),  # the agent process's own filesystem
 )
 print(result.output)
 ```
 
-`root_dir` is a sandbox path: absolute, or relative to the sandbox working
+`root_dir` is a workspace path: absolute, or relative to the workspace working
 directory, which is what the default `.` means. `~` is not expanded.
-`LocalSandbox` reads and writes the agent process's own filesystem and isolates
-nothing; for untrusted work attach a container- or VM-backed sandbox instead.
+`LocalWorkspace` reads and writes the agent process's own filesystem and isolates
+nothing; for untrusted work attach a container- or VM-backed workspace instead.
 
 ## Tools
 
@@ -63,7 +63,7 @@ nothing; for untrusted work attach a container- or VM-backed sandbox instead.
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read a UTF-8 text file with line numbers and a content hash. Binary or undecodable files are detected and not dumped. Supports `offset`/`limit` paging. |
+| `read_file` | Read a UTF-8 text file with line numbers and a content hash. NUL-containing files are detected and not dumped; other undecodable bytes use replacement characters. Supports `offset`/`limit` paging. |
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement; `old_text` must match exactly once. Optional `expected_hash`. |
 | `list_directory` | List a directory's entries with type indicators and sizes. |
@@ -72,8 +72,35 @@ nothing; for untrusted work attach a container- or VM-backed sandbox instead.
 | `create_directory` | Create a directory and any missing parents. |
 | `file_info` | Metadata for a file or directory (type, size and, for text files, line count and content hash). |
 
-`search_files` and `find_files` run `grep` and `find` inside the sandbox, so the
-sandbox image needs both.
+`search_files` and `find_files` run `grep` and `find` inside the workspace, so the
+workspace image needs both.
+
+## Events
+
+`FileSystem` emits typed capability events after successful operations:
+
+| Event | Operation | Payload |
+|---|---|---|
+| `FileReadEvent` | `read_file` | `path`, `root_dir`, `content_hash` (whole-file hash for complete text reads, otherwise `None`) |
+| `DirectoryListedEvent` | `list_directory` | `path`, `root_dir`, `entry_count` |
+| `FileWrittenEvent` | `write_file`, `edit_file` | `path`, `root_dir`, `content_hash` |
+
+`path` is normalized relative to `root_dir`, never an absolute host path, so it
+is safe to echo to the model or a UI. `root_dir` is an absolute path inside the
+active workspace, not necessarily a host filesystem path. A subscriber sharing
+the run resolves the location through `ctx.workspace`.
+
+Every event path has passed the containment check and the denied patterns. A
+`DirectoryListedEvent` names the listing root, which is not gated by
+`allowed_patterns` (see [Security model](#security-model)); only its entries
+are. A denied or failed operation emits no event, including a `read_file`
+whose `offset` is past the end of the file.
+
+Other capabilities can subscribe with `@on_event`, and application code with
+`@agent.on_event`. A host with its own file
+tools can emit the same event types by importing them from
+`pydantic_ai_harness.filesystem`, which lets subscribers such as `RepoContext`
+react without depending on tool names or raw model arguments.
 
 Tool errors the model can correct -- a missing file, a denied path, a stale
 edit, a directory that collides with an existing file, an invalid glob pattern,
@@ -92,11 +119,12 @@ When an OS error supplies a filename, `FileSystem` reports it relative to
 - **Containment.** Paths resolve relative to `root_dir`; anything landing
   outside it, via `..` or an absolute path, is rejected. The check is textual
   and shapes policy, not isolation. Symlink targets are not resolved for
-  pattern matching; the sandbox is the isolation boundary, so scope it to what
+  pattern matching; the workspace is the isolation boundary, so scope it to what
   the agent is allowed to reach.
-- **Binary detection.** `read_file` and `file_info` sample up to the first 8 KiB
-  for NUL-containing or undecodable UTF-8 content. `read_file` returns a
-  placeholder instead of dumping binary bytes into the model context.
+- **Binary detection.** `read_file` treats a NUL byte in the sampled head as
+  binary and returns a placeholder instead of dumping the file into model
+  context. `file_info` can additionally classify undecodable UTF-8 because it
+  reads the exact bytes needed for metadata.
 - **Optimistic concurrency.** `write_file`/`edit_file` accept an
   `expected_hash` so an agent operating on a stale read is told to re-read
   rather than silently overwriting newer content.
@@ -167,7 +195,7 @@ reject them.
 from pydantic_ai_harness import FileSystem
 
 FileSystem(
-    root_dir='.',                  # str | Path -- root inside the sandbox
+    root_dir='.',                  # str | Path -- root inside the workspace
     allowed_patterns=[],           # allowlist globs (empty = allow all)
     denied_patterns=[],            # denylist globs
     protected_patterns=[...],      # read-only globs (defaults to secrets/.git)

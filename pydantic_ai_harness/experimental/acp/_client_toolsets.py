@@ -39,7 +39,7 @@ from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
 
 
 class _LocalFileWriter(Protocol):
-    """Something that can write a file in the run's sandbox -- structurally satisfied by `FileSystemToolset`."""
+    """Something that can write a file in the run's workspace -- structurally satisfied by `FileSystemToolset`."""
 
     # `ctx` is positional-only: `FileSystemToolset.write_file` is wrapped by a decorator
     # that takes it through a `Concatenate` prefix, which drops the parameter name.
@@ -58,7 +58,7 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
     ACP requires absolute paths, but models routinely produce workspace-relative ones (the local
     `FileSystem` tools take them, and the same agent may run against either backend): when `cwd`
     is set, relative paths are resolved against it before reaching the wire. The client still
-    resolves and authorizes every path itself (this toolset adds no sandboxing of its own).
+    resolves and authorizes every path itself (this toolset adds no isolation of its own).
 
     If `local_writer` is set (a read-only client -- see [`acp_filesystem`][pydantic_ai_harness.experimental.acp.acp_filesystem]),
     `write_file` goes there instead of to the client, while reads still route through the editor.
@@ -112,17 +112,20 @@ def acp_filesystem(session: AcpSession) -> AcpFileSystemToolset[None] | None:
 
     - read + write advertised: reads and writes both route through the editor.
     - read only (no `fs/write_text_file`): reads route through the editor, while writes go to the
-      run's sandbox through a [`FileSystem`][pydantic_ai_harness.FileSystem] rooted at `session.cwd`.
-      This is coherent only when that sandbox shares the workspace disk with the editor (a
-      `LocalSandbox` on the same machine, or an agent running inside the editor's container) -- for
-      a *remote* editor the writes land in the sandbox, not the editor.
+      run's workspace through a [`FileSystem`][pydantic_ai_harness.FileSystem] rooted at `session.cwd`.
+      This is coherent only when that workspace shares the workspace disk with the editor (a
+      `LocalWorkspace` on the same machine, or an agent running inside the editor's container) -- for
+      a *remote* editor the writes land in the workspace, not the editor.
 
     Returns `None` only when the client advertised no readable filesystem, so the caller can fall
     back to a fully local toolset:
 
     ```python
     def session_config(session: AcpSession) -> AcpSessionConfig[None]:
-        fs = acp_filesystem(session) or FileSystem(root_dir=session.cwd).get_toolset()
+        fs = acp_filesystem(session)
+        if fs is None:
+            # No client filesystem: register the capability, so its tools keep their owner.
+            return AcpSessionConfig(deps=None, capabilities=[FileSystem(root_dir=session.cwd)])
         return AcpSessionConfig(deps=None, toolsets=[fs])
     ```
 

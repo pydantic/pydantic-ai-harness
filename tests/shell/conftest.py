@@ -1,7 +1,7 @@
 """Fixtures and helpers shared by the shell toolset tests.
 
-`ShellToolset` runs every command inside the run's sandbox, so each test needs a
-`RunContext` carrying one. `LocalSandbox(root=tmp_path)` is that sandbox: commands
+`ShellToolset` runs every command inside the run's workspace, so each test needs a
+`RunContext` carrying one. `LocalWorkspace(root=tmp_path)` is that workspace: commands
 really run, in a directory the test owns.
 """
 
@@ -14,9 +14,10 @@ from pathlib import Path
 import pytest
 from pydantic_ai import RunContext
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox, Sandbox
 from pydantic_ai.usage import RunUsage
+from pydantic_ai.workspaces import LocalWorkspace, Workspace
 
+from pydantic_ai_harness.shell import Shell
 from pydantic_ai_harness.shell import _toolset as shell_toolset_module
 from pydantic_ai_harness.shell._toolset import ShellToolset
 
@@ -32,16 +33,27 @@ def short_kill_grace_period(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture
-async def sandbox(tmp_path: Path) -> AsyncIterator[Sandbox]:
-    async with LocalSandbox(root=tmp_path) as backend:
-        yield Sandbox.wrap(backend)
+async def workspace(tmp_path: Path) -> AsyncIterator[Workspace]:
+    async with LocalWorkspace(root=tmp_path) as backend:
+        yield Workspace(backend)
 
 
-def run_context(sandbox: Sandbox | None = None) -> RunContext[None]:
-    """A `RunContext` for calling tools, with `sandbox` attached when given."""
-    ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
-    if sandbox is not None:
-        ctx.sandbox = sandbox
+def run_context(workspace: Workspace | None = None) -> RunContext[None]:
+    """A `RunContext` for calling tools, with `workspace` attached when given."""
+    capability = Shell(id='shell')
+    ctx = RunContext[None](
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=0,
+        capabilities={'shell': capability},
+        _capability=capability,
+        _event_stream_buffer=[],
+    )
+    if workspace is not None:
+        ctx.workspace = workspace
     return ctx
 
 
