@@ -132,8 +132,6 @@ class E2BWorkspaceBackend(WorkspaceBackend, SupportsFilesystem):
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'e2b'")
         if workspace is not None and ref is not None:
             raise ValueError('pass either `workspace` or `ref`, not both')
-        if sandbox_timeout <= 0:
-            raise ValueError(f'sandbox_timeout must be positive, got {sandbox_timeout!r}')
         self._workspace = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='e2b', id=workspace.sandbox_id)
         self._template = template
