@@ -21,13 +21,26 @@ from pydantic_ai_harness.experimental.acp import (
     acp_filesystem,
     acp_terminal,
 )
+from pydantic_ai_harness.filesystem import FileSystem
 from tests.experimental.acp._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 
 
 def _ctx(workspace: Workspace | None = None) -> RunContext[None]:
-    ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
+    # A throwaway event-stream buffer and an owning capability stand in for what a real run
+    # provides, so the delegated filesystem write's `ctx.emit` has somewhere to write and clears the
+    # capability-event guard when a test drives it outside an agent run.
+    ctx = RunContext[None](
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=1,
+        _event_stream_buffer=[],
+        _capability=FileSystem(id='file_system'),
+    )
     if workspace is not None:
         ctx.workspace = workspace
     return ctx
