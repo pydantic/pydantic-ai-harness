@@ -469,6 +469,21 @@ as binary, so it cannot validate a snapshot containing an externalized text
 marker. Keep a current reader for persisted snapshots that contain those
 markers.
 
+Reserved-key escaping is a second marker-format generation with the same rule
+for these stores: a payload using the marker format's namespaced keys is moved
+into a versioned reserved mapping (the `__harness_external_escaped_keys__`
+stash, stamped with the format version under `__harness_external_marker_format__`),
+and the current reader moves those values back to their own keys. Compatibility
+the other way is upgrade-only. A reader that predates the escaping format
+re-inlines the externalized field correctly, but it leaves both reserved keys
+sitting in the restored payload rather than removing them. A marker carrying
+both, stamped with a version this reader does not know, is rejected rather than
+restored with the reserved values stripped: `restore_media` raises `ValueError`,
+which the stores do not wrap, so it propagates out of `latest_snapshot` and
+`list_snapshots` for the file, sqlite, and mongo stores. That rejection is the
+version gate and is intended, but store users have to anticipate it. Keep a
+current reader for persisted snapshots that contain escaped markers.
+
 | StepStore           | Default `media_store`                  | Where blobs live                      |
 | ------------------- | --------------------------------------- | ------------------------------------- |
 | `InMemoryStepStore` | _(not applicable)_                     | bytes stay in the in-memory snapshot  |
