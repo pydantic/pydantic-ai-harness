@@ -5,7 +5,7 @@ import io
 import pytest
 from pydantic_ai.models.test import TestModel
 
-from pydantic_ai_harness.cli import cli_agent, main
+from pydantic_ai_harness.cli import Config, cli_agent, main
 
 
 class TestMain:
@@ -28,3 +28,31 @@ class TestMain:
             main(['-p', 'hi', '--model', 'anthropic:claude-fable-5'])
         assert exc.value.code == 2
         assert 'ANTHROPIC_API_KEY' in capsys.readouterr().err
+
+    def test_model_comes_from_the_config_file(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+        Config(model='openai:gpt-5.6-sol').save()
+        with pytest.raises(SystemExit) as exc:
+            main(['-p', 'hi'])
+        assert exc.value.code == 2
+        assert 'OPENAI_API_KEY' in capsys.readouterr().err
+
+    def test_model_flag_beats_the_config_file(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+        Config(model='openai:gpt-5.6-sol').save()
+        with pytest.raises(SystemExit):
+            main(['-p', 'hi', '--model', 'anthropic:claude-fable-5'])
+        assert 'ANTHROPIC_API_KEY' in capsys.readouterr().err
+
+    def test_invalid_config_file_exits_with_its_path(self, capsys: pytest.CaptureFixture[str]) -> None:
+        path = Config.default_path()
+        path.parent.mkdir()
+        path.write_text('{"show_thinking": "maybe"}')
+        with pytest.raises(SystemExit) as exc:
+            main(['-p', 'hi'])
+        assert exc.value.code == 2
+        assert f'Invalid config file {path}' in capsys.readouterr().err

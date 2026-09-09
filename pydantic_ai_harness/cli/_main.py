@@ -9,10 +9,9 @@ from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 
 from pydantic_ai_harness.cli._bridge import CliBridge
+from pydantic_ai_harness.cli._config import Config
 from pydantic_ai_harness.cli._repl import Lines, Repl
 from pydantic_ai_harness.coder import Coder
-
-DEFAULT_MODEL = 'anthropic:claude-fable-5'
 
 cli_agent: Agent[None, str] = Agent(
     name='harness',
@@ -21,7 +20,8 @@ cli_agent: Agent[None, str] = Agent(
 )
 """Model-less agent the CLI drives: `Coder` rooted at the current directory, rendered by `CliBridge`.
 
-The model comes from `--model` at run time, so tests swap it with `cli_agent.override(model=...)`.
+The model comes from the config file or `--model` at run time, so tests swap it with
+`cli_agent.override(model=...)`. The bridge reads the same config file when a run starts.
 Later plan items insert the CLI's own capabilities before the bridge, which stays last so it
 observes every other capability's events.
 """
@@ -41,10 +41,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         '-p', '--prompt', help='Run one prompt, print the response, and exit instead of starting a session.'
     )
     parser.add_argument(
-        '--model', default=DEFAULT_MODEL, help=f'Model in Pydantic AI `provider:name` form (default: {DEFAULT_MODEL}).'
+        '--model',
+        help=f'Model in Pydantic AI `provider:name` form. Overrides the config file at {Config.default_path()}.',
     )
     args = parser.parse_args(argv)
     try:
-        asyncio.run(_session(model=args.model, prompt=args.prompt))
+        model = args.model or Config.load().model
+        asyncio.run(_session(model=model, prompt=args.prompt))
     except UserError as exc:
         parser.error(str(exc))

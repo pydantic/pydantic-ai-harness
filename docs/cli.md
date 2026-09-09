@@ -7,7 +7,7 @@ description: A terminal client for the Coder harness. An interactive session (or
 
 A terminal client for the [Coder](coder.md) harness. `harness` starts an interactive session with `Coder` in the current directory, and `harness -p "..."` runs one prompt and exits. Either way the run renders as it happens: streamed Markdown for the model's text, one line per tool call and result.
 
-This is an early slice of a larger client. The config file, slash commands, and a richer line editor land one plan item at a time; the plan is [`agent_docs/harness-cli-plan.md`](https://github.com/pydantic/pydantic-ai-harness/blob/main/agent_docs/harness-cli-plan.md). `harness` is a placeholder command name.
+This is an early slice of a larger client. Slash commands, sessions, and a richer line editor land one plan item at a time; the plan is [`agent_docs/harness-cli-plan.md`](https://github.com/pydantic/pydantic-ai-harness/blob/main/agent_docs/harness-cli-plan.md). `harness` is a placeholder command name.
 
 See the [source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/cli/).
 
@@ -29,7 +29,7 @@ harness --model openai:gpt-5.6-sol
 harness -p "Explain what tests/test_parser.py covers."
 ```
 
-`--model` takes any name Pydantic AI's [`infer_model`](/ai/models/overview/) accepts and defaults to `anthropic:claude-fable-5`. The provider's API key comes from the environment as usual; a missing key exits with the provider's own message.
+`--model` takes any name Pydantic AI's [`infer_model`](/ai/models/overview/) accepts. It overrides the config file's `model`, which defaults to `anthropic:claude-fable-5`. The provider's API key comes from the environment as usual; a missing key exits with the provider's own message.
 
 The agent is `Coder` rooted at the current directory: it can read and edit files under it and run the commands on `Coder`'s allowlist. That allowlist is a guardrail against accidents, not a security boundary; see the [Coder docs](coder.md) for the exact composition and how to sandbox it.
 
@@ -44,13 +44,32 @@ Without `-p`, `harness` shows a `harness>` prompt and reads one line per prompt.
 
 Line editing is what the terminal itself provides (Backspace, Ctrl+U, Ctrl+W); history search, completion, and paste handling are later plan items. With `-p`, the session's stdin is not read, so piped input is neither a prompt nor a steer.
 
+## Configuration
+
+Settings live in `~/.pydantic-ai-harness/config.json`. A missing file means the defaults; an invalid one exits with the path and what is wrong with it. Every key is optional:
+
+```json
+{
+  "model": "anthropic:claude-fable-5",
+  "theme": {"palette": "default", "code_style": "monokai"},
+  "show_thinking": false
+}
+```
+
+- **`model`** is the model for every run unless `--model` overrides it.
+- **`theme.palette`** picks the Termflow colors for Markdown, tool lines, and status notes: `default`, `dracula`, `gruvbox`, or `nord`.
+- **`theme.code_style`** is the [Pygments style](https://pygments.org/styles/) for code blocks. An unknown name falls back to `monokai`.
+- **`show_thinking`** prints the model's thinking parts, dimmed, as they stream. They are hidden by default.
+
+The file is read when `harness` starts and again at the start of each run, so a change made during a session applies to the next prompt. From Python, `Config.load()` and `Config.save()` read and write the same file (or a path you pass), and `Config.default_path()` is where it lives.
+
 ## What you see
 
 `CliBridge` is the capability that renders the run. It subscribes to the run's event stream and writes to the terminal as events arrive:
 
 - Model text streams through Termflow as Markdown: headings, emphasis, lists, code blocks with syntax highlighting, and tables render as the text completes each line.
 - Each tool call prints as `> tool_name {"arg": ...}` and its result as `< tool_name` followed by the first line of the return value. When a result spans several lines, the line ends with `(+N lines)`; every line is cut to the terminal width. A tool that asks the model to retry prints as `! tool_name` with the retry reason.
-- Thinking parts and capability events (a file read, a plan update) are not rendered yet; the plan schedules them.
+- Thinking parts print dimmed, as plain text, when `show_thinking` is on. Capability events (a file read, a plan update) are not rendered yet; the plan schedules them.
 
 The session's own lines, the prompt and the dimmed `(cancelled)` and `(steer queued: ...)` notes, come from `Repl`, not the bridge.
 
@@ -65,7 +84,7 @@ from pydantic_ai_harness.coder import Coder
 agent = Agent('anthropic:claude-fable-5', capabilities=[Coder(), CliBridge()])
 ```
 
-`CliBridge(output=..., width=..., style=...)` chooses the stream to write to (`sys.stdout` when unset, resolved at the start of each run), the column width (detected from the terminal when unset), and the Termflow `RenderStyle` palette. Each run renders on a fresh bridge, so nothing carries over between runs.
+`CliBridge(output=..., width=..., config=...)` chooses the stream to write to (`sys.stdout` when unset, resolved at the start of each run), the column width (detected from the terminal when unset), and the `Config` whose `theme` and `show_thinking` it renders with (read from the config file at the start of each run when unset, so a bridge on your own agent follows the same theme as `harness`). Each run renders on a fresh bridge, so nothing carries over between runs.
 
 ## Testing against the CLI agent
 
@@ -116,6 +135,10 @@ asyncio.run(main())
 The CLI adds no spans of its own, and neither does `CliBridge` or `Repl`: rendering and prompt reading record no decision that core's spans do not already show, and a cancel or steer is visible in core's run span through `RunCancelled` and `EnqueuedMessagesEvent`. Core's [instrumentation](/ai/capabilities/instrumentation/) covers the run: `logfire.instrument_pydantic_ai()` before `main()` traces every model and tool call.
 
 ::: pydantic_ai_harness.cli.CliBridge
+
+::: pydantic_ai_harness.cli.Config
+
+::: pydantic_ai_harness.cli.Theme
 
 ::: pydantic_ai_harness.cli.Repl
 

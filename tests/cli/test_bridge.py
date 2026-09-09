@@ -9,9 +9,9 @@ from pydantic_ai import Agent, ModelRetry
 from pydantic_ai.messages import ModelMessage
 from pydantic_ai.models.function import AgentInfo, DeltaThinkingCalls, DeltaThinkingPart, FunctionModel
 from pydantic_ai.models.test import TestModel
-from termflow.ansi import visible  # pyright: ignore[reportMissingTypeStubs]
+from termflow.ansi import DIM_OFF, DIM_ON, visible  # pyright: ignore[reportMissingTypeStubs]
 
-from pydantic_ai_harness.cli import CliBridge
+from pydantic_ai_harness.cli import CliBridge, Config
 from pydantic_ai_harness.coder import Coder
 
 pytestmark = pytest.mark.anyio
@@ -19,6 +19,14 @@ pytestmark = pytest.mark.anyio
 
 def _transcript(buffer: io.StringIO) -> str:
     return visible(buffer.getvalue())
+
+
+async def _think_then_answer(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaThinkingCalls]:
+    yield {0: DeltaThinkingPart(content='pondering')}
+    yield {0: DeltaThinkingPart(content=' more')}
+    yield {1: DeltaThinkingPart(content='second thought\n')}
+    yield 'visible '
+    yield 'answer'
 
 
 class TestCliBridge:
@@ -70,20 +78,38 @@ class TestCliBridge:
 
         assert _transcript(buffer) == '> flaky {}\n! flaky try again (+2 lines)\n> flaky {}\n< flaky fine\nok\n'
 
-    async def test_thinking_is_not_rendered(self) -> None:
-        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaThinkingCalls]:
-            yield {0: DeltaThinkingPart(content='pondering')}
-            yield {0: DeltaThinkingPart(content=' more')}
-            yield 'visible '
-            yield 'answer'
-
+    async def test_thinking_is_not_rendered_by_default(self) -> None:
         buffer = io.StringIO()
-        agent = Agent(FunctionModel(stream_function=stream), capabilities=[CliBridge(output=buffer, width=80)])
+        agent = Agent(
+            FunctionModel(stream_function=_think_then_answer), capabilities=[CliBridge(output=buffer, width=80)]
+        )
 
         result = await agent.run('go')
 
         assert result.output == 'visible answer'
         assert _transcript(buffer) == 'visible answer\n'
+
+    async def test_thinking_is_rendered_dimmed_when_configured(self) -> None:
+        buffer = io.StringIO()
+        bridge = CliBridge(output=buffer, width=80, config=Config(show_thinking=True))
+        agent = Agent(FunctionModel(stream_function=_think_then_answer), capabilities=[bridge])
+
+        await agent.run('go')
+
+        assert _transcript(buffer) == 'pondering more\nsecond thought\nvisible answer\n'
+        assert f'{DIM_ON}pondering{DIM_OFF}{DIM_ON} more{DIM_OFF}' in buffer.getvalue()
+
+    async def test_config_file_is_read_at_run_start(self) -> None:
+        buffer = io.StringIO()
+        agent = Agent(
+            FunctionModel(stream_function=_think_then_answer), capabilities=[CliBridge(output=buffer, width=80)]
+        )
+
+        await agent.run('one')
+        Config(show_thinking=True).save()
+        await agent.run('two')
+
+        assert _transcript(buffer) == 'visible answer\npondering more\nsecond thought\nvisible answer\n'
 
     async def test_output_defaults_to_stdout_at_run_start(self, capsys: pytest.CaptureFixture[str]) -> None:
         agent = Agent(TestModel(custom_output_text='to stdout'), capabilities=[CliBridge(width=80)])
