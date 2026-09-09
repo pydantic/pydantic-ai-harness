@@ -246,6 +246,11 @@ def _anchor_cache_breakpoint(messages: list[ModelMessage], ttl: Literal['5m', '1
     The breakpoint must not lead its part: a leading one is rejected by OpenAI-compatible
     and OpenRouter providers, and a breakpoint on ephemeral content would not describe a
     prefix of the next request. With no eligible durable content, no breakpoint is placed.
+
+    A capability earlier in the capabilities list applies its request mutations first,
+    so one that appends a `UserPromptPart` each request (for example `SystemReminders`)
+    displaces the anchor onto that part; the prefix then stays cache-stable only while
+    that content is stable across turns.
     """
     for i in range(len(messages) - 1, -1, -1):
         message = messages[i]
