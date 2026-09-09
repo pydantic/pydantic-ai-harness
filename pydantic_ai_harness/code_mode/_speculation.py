@@ -138,6 +138,9 @@ class _PartWatch:
     """Accumulated state for one streamed `run_code` tool call part."""
 
     tool_call_id: str
+    run_step: int
+    """The model step that produced the part; launches survive one retry step, then retire."""
+
     args_text: str = ''
     args_dict: dict[str, Any] | None = None
     halted: bool = False
@@ -377,7 +380,9 @@ def _text_literal_calls(code: str, eligible: frozenset[str]) -> tuple[list[_Extr
             walked += end - match.start()
             try:
                 expression = ast.parse(code[match.start() : end], mode='eval')
-            except SyntaxError:
+            except (SyntaxError, ValueError, RecursionError, MemoryError):
+                # Same set `closed_statements` guards: a NUL character is a `ValueError`, not
+                # a `SyntaxError`, and adversarial nesting can exhaust the parser.
                 continue
             if not isinstance(expression.body, ast.Call):
                 continue  # pragma: no cover - a `name(...)` span that parses is always a Call
@@ -416,6 +421,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
     _step: _StepIngredients[AgentDepsT] | None = field(default=None, init=False)
     _parts: dict[str, _PartWatch] = field(default_factory=dict[str, _PartWatch], init=False)
     _index_to_part: dict[int, str] = field(default_factory=dict[int, str], init=False)
+    _run_step: int | None = field(default=None, init=False)
 
     def stash_step(
         self,
@@ -454,9 +460,12 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
 
     async def observe(self, event: AgentStreamEvent, ctx: RunContext[AgentDepsT]) -> None:
         """Feed one stream event; launches tasks for any newly speculatable calls."""
+        if self._run_step != ctx.run_step:
+            self._run_step = ctx.run_step
+            await self._retire_stale(ctx)
         match event:
             case PartStartEvent(part=ToolCallPart() as part) if part.tool_name == _RUN_CODE_TOOL_NAME:
-                watch = _PartWatch(tool_call_id=part.tool_call_id)
+                watch = _PartWatch(tool_call_id=part.tool_call_id, run_step=ctx.run_step)
                 if isinstance(part.args, str):
                     watch.args_text = part.args
                 elif isinstance(part.args, dict):
@@ -485,6 +494,19 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
             case _:
                 pass
         await self._emit_settles(ctx)
+
+    async def _retire_stale(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Evict launches no snippet can legitimately claim any more.
+
+        A failed snippet keeps its launches for the retry, which is the next model step. By the
+        step after that the retry has either claimed them or gone cold, so anything still queued
+        is stale: adopting it later would hand an unrelated snippet a result from minutes ago.
+        """
+        for part_id, watch in list(self._parts.items()):
+            if watch.run_step >= ctx.run_step - 1:
+                continue
+            del self._parts[part_id]
+            await self._evict(replace(ctx, tool_call_id=part_id, tool_name=_RUN_CODE_TOOL_NAME), watch)
 
     def _watch_at(self, part_index: int, tool_call_id: str | None) -> _PartWatch | None:
         """Route a delta by part index, following a call id the provider rewrites mid-stream.
@@ -683,7 +705,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         extracted_calls = _literal_calls(body, step.eligible)
         if not extracted_calls:
             return
-        watch = self._watch_for(execution)
+        watch = self._watch_for(ctx, execution)
         demanded: dict[str, int] = {}
         for extracted in extracted_calls:
             key = _canonical_key(extracted.sandbox_name, extracted.kwargs)
@@ -694,10 +716,10 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
                 return
             await self._launch(ctx, watch, step, extracted, phase='execution')
 
-    def _watch_for(self, execution: RunCodeExecution) -> _PartWatch:
+    def _watch_for(self, ctx: RunContext[AgentDepsT], execution: RunCodeExecution) -> _PartWatch:
         """The watch for an executing part, created when the stream never showed the part."""
         parent_id = execution.parent_tool_call_id
-        return self._parts.setdefault(parent_id, _PartWatch(tool_call_id=parent_id))
+        return self._parts.setdefault(parent_id, _PartWatch(tool_call_id=parent_id, run_step=ctx.run_step))
 
     def eligible(self, sandbox_name: str) -> bool:
         """Whether this sandbox function may speculate this step; drives miss reporting."""
@@ -738,7 +760,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         ready_at_claim = claimed.task.done()
         outcome = await claimed.task
         self.stats.adopted += 1
-        watch = self._watch_for(execution)
+        watch = self._watch_for(ctx, execution)
         watch.hits += 1
         watch.hidden_ms += claimed.elapsed_ms()
         await ctx.emit(
@@ -760,7 +782,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         call_part: ToolCallPart,
     ) -> None:
         """Record a speculation-eligible dispatch that found no launch and runs cold."""
-        self._watch_for(execution).misses += 1
+        self._watch_for(ctx, execution).misses += 1
         await ctx.emit(
             SpeculativeCallMissedEvent(
                 sandbox_function=sandbox_name,
@@ -779,15 +801,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         watch = self._parts.pop(parent_tool_call_id, None)
         if watch is None:
             return None
-        evicted = await self._cancel_watch(watch)
-        for call, state in evicted:
-            await ctx.emit(
-                SpeculativeCallEvictedEvent(
-                    launch_id=call.launch_id,
-                    wrapped_tool_name=call.original_name,
-                    state=state,
-                )
-            )
+        evicted = await self._evict(ctx, watch)
         if not watch.hits and not watch.misses and not evicted:
             return None
         return {
@@ -803,6 +817,21 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         self._index_to_part.clear()
         for watch in parts.values():
             await self._cancel_watch(watch)
+
+    async def _evict(
+        self, ctx: RunContext[AgentDepsT], watch: _PartWatch
+    ) -> list[tuple[SpeculativeCall, Literal['pending', 'ready', 'failed']]]:
+        """Cancel a watch's unclaimed launches and report each one."""
+        evicted = await self._cancel_watch(watch)
+        for call, state in evicted:
+            await ctx.emit(
+                SpeculativeCallEvictedEvent(
+                    launch_id=call.launch_id,
+                    wrapped_tool_name=call.original_name,
+                    state=state,
+                )
+            )
+        return evicted
 
     async def _cancel_watch(
         self, watch: _PartWatch

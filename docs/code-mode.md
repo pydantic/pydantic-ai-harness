@@ -299,8 +299,8 @@ agent = Agent(
 Name only tools that are safe to run early: a speculated call can run for a branch the
 snippet never takes, so it must be harmless to repeat or discard. Calls the snippet never
 claims are cancelled when the snippet finishes successfully. A snippet that fails before it
-runs (a syntax or type error) keeps its launches so the retry can claim them; they are
-cancelled when the run ends if no retry does.
+runs (a syntax or type error) keeps its launches so the retry can claim them; whatever the
+retry leaves unclaimed is cancelled when the following model step starts.
 
 Instead of naming tools, pass `speculate='declared'` to trust what the tools say about
 themselves: tools marked `Tool(..., metadata={'read_only': True})`, and MCP tools whose

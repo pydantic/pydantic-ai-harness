@@ -913,6 +913,73 @@ class TestSpeculationEdgeCases:
         assert seen.count("{'1': 'x'}") == 1
         assert seen.count('[3, 1, 2]') == 1
 
+    async def test_a_nul_character_in_streamed_code_does_not_abort_the_watcher(self):
+        """`ast.parse` rejects NUL with `ValueError`, not `SyntaxError`; the scan must survive it."""
+        log = ToolLog()
+        capability = CodeMode[None](speculate=['search'])
+        code = 'a = await search(query="al\x00pha")\nprint(a)'
+        agent = build_agent(log, code, capability, chunk_size=1 << 16)
+
+        result = await agent.run('go')
+
+        assert result.output == 'done'
+        assert capability.speculation_stats.launched == 0
+
+    async def test_stale_launches_from_a_failed_attempt_retire_after_one_retry(self):
+        """A failed snippet's launches survive the retry step, then retire before anyone else can adopt them.
+
+        Attempt 1 launches `search(query="alpha")` and dies. The retry never asks for it, so the
+        launch sits unclaimed; without retirement a third snippet asking the same question would
+        adopt a result from two steps ago. Instead it is evicted when the third step streams, and
+        the third snippet's call runs fresh.
+        """
+        log = ToolLog()
+        events: list[CapabilityEvent] = []
+        capability = CodeMode[None](speculate=['search'])
+        snippets = [
+            'a = await search(query="alpha")\nundefined_name',
+            padded('b = 1\nprint(b)'),
+            padded('c = await search(query="alpha")\nprint(c)'),
+        ]
+
+        async def stream_attempts(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            prior_calls = sum(
+                1 for m in messages if isinstance(m, ModelResponse) for p in m.parts if isinstance(p, ToolCallPart)
+            )
+            if prior_calls >= len(snippets):
+                yield 'done'
+                return
+            args = json.dumps({'code': snippets[prior_calls]})
+            yield {1: DeltaToolCall(name='run_code')}
+            for offset in range(0, len(args), 16):
+                yield {1: DeltaToolCall(json_args=args[offset : offset + 16])}
+                await asyncio.sleep(0)
+
+        async def search(query: str) -> str:
+            """Return a canned result."""
+            log.calls.append(('search', query))
+            await asyncio.sleep(0)
+            return f'result:{query}'
+
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream_attempts),
+            deps_type=type(None),
+            capabilities=[capability],
+            tools=[Tool(search)],
+        )
+
+        result = await agent.run('go', event_stream_handler=event_collector(events))
+
+        assert result.output == 'done'
+        # The stale launch was evicted when the third step streamed; the third snippet launched
+        # and claimed its own fresh call.
+        assert capability.speculation_stats.launched == 2
+        assert capability.speculation_stats.adopted == 1
+        assert capability.speculation_stats.evicted == 1
+        evictions = [e for e in events if isinstance(e, SpeculativeCallEvictedEvent)]
+        launches = [e for e in events if isinstance(e, SpeculativeCallLaunchedEvent)]
+        assert [e.launch_id for e in evictions] == [launches[0].launch_id]
+
     async def test_paren_walks_count_against_the_scan_budget(self, monkeypatch: pytest.MonkeyPatch):
         """Nested calls make the paren scanner walk overlapping spans; that work is bounded too."""
         monkeypatch.setattr('pydantic_ai_harness.code_mode._speculation.MAX_SCAN_WORK_CHARS', 20_000)
