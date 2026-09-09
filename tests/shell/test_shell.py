@@ -26,10 +26,14 @@ from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.code_mode import CodeMode
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
-from pydantic_ai_harness.shell._toolset import (
-    ShellToolset,
-    _is_interactive_command,
+from pydantic_ai_harness.shell._process import (
+    cleanup_bg_files,
+    drain_with_timeout,
+    is_interactive_command,
+    kill_process_group,
+    read_bg_output,
 )
+from pydantic_ai_harness.shell._toolset import ShellToolset
 
 
 def _env_toolset(
@@ -94,6 +98,11 @@ def _run_context() -> RunContext[None]:
         prompt=None,
         messages=[],
         run_step=0,
+        # The tools emit capability events, which core only accepts from a
+        # context that has a buffer to hold them and a capability to attribute
+        # them to; neither exists outside an agent run.
+        _event_stream_buffer=[],
+        _capability=Shell[None](id='shell'),
     )
 
 
@@ -112,63 +121,63 @@ def _parse_command_id(result: str) -> str:
 
 class TestIsInteractiveCommand:
     def test_vi(self) -> None:
-        assert _is_interactive_command('vi file.txt') is True
+        assert is_interactive_command('vi file.txt') is True
 
     def test_vim(self) -> None:
-        assert _is_interactive_command('vim file.txt') is True
+        assert is_interactive_command('vim file.txt') is True
 
     def test_nano(self) -> None:
-        assert _is_interactive_command('nano file.txt') is True
+        assert is_interactive_command('nano file.txt') is True
 
     def test_less(self) -> None:
-        assert _is_interactive_command('less file.txt') is True
+        assert is_interactive_command('less file.txt') is True
 
     def test_top(self) -> None:
-        assert _is_interactive_command('top') is True
+        assert is_interactive_command('top') is True
 
     def test_sudo(self) -> None:
-        assert _is_interactive_command('sudo rm -rf /') is True
+        assert is_interactive_command('sudo rm -rf /') is True
 
     def test_ssh(self) -> None:
-        assert _is_interactive_command('ssh host') is True
+        assert is_interactive_command('ssh host') is True
 
     def test_regular_command(self) -> None:
-        assert _is_interactive_command('ls -la') is False
+        assert is_interactive_command('ls -la') is False
 
     def test_echo(self) -> None:
-        assert _is_interactive_command('echo hello') is False
+        assert is_interactive_command('echo hello') is False
 
     def test_grep(self) -> None:
-        assert _is_interactive_command('grep pattern file') is False
+        assert is_interactive_command('grep pattern file') is False
 
     def test_emacs(self) -> None:
-        assert _is_interactive_command('emacs file.txt') is True
+        assert is_interactive_command('emacs file.txt') is True
 
     def test_man(self) -> None:
-        assert _is_interactive_command('man ls') is True
+        assert is_interactive_command('man ls') is True
 
     def test_htop(self) -> None:
-        assert _is_interactive_command('htop') is True
+        assert is_interactive_command('htop') is True
 
     def test_telnet(self) -> None:
-        assert _is_interactive_command('telnet localhost 80') is True
+        assert is_interactive_command('telnet localhost 80') is True
 
     def test_ftp(self) -> None:
-        assert _is_interactive_command('ftp host') is True
+        assert is_interactive_command('ftp host') is True
 
     def test_passwd(self) -> None:
-        assert _is_interactive_command('passwd') is True
+        assert is_interactive_command('passwd') is True
 
     def test_more(self) -> None:
-        assert _is_interactive_command('more file.txt') is True
+        assert is_interactive_command('more file.txt') is True
 
     def test_not_prefix_match(self) -> None:
-        assert _is_interactive_command('view file.txt') is False
-        assert _is_interactive_command('vishnu') is False
+        assert is_interactive_command('view file.txt') is False
+        assert is_interactive_command('vishnu') is False
 
     def test_leading_spaces(self) -> None:
-        assert _is_interactive_command('  vi file.txt') is True
-        assert _is_interactive_command('  sudo rm') is True
+        assert is_interactive_command('  vi file.txt') is True
+        assert is_interactive_command('  sudo rm') is True
 
 
 @pytest.fixture
@@ -300,8 +309,9 @@ class TestCommandValidation:
     async def test_unparseable_command_allowed(self, toolset: ShellToolset[None]) -> None:
         toolset._check_command("echo 'unterminated")
 
-    async def test_empty_command_allowed(self, toolset: ShellToolset[None]) -> None:
-        toolset._check_command('')
+    async def test_empty_command_rejected(self, toolset: ShellToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match='empty'):
+            toolset._check_command('   ')
 
     async def test_denied_operator_substring_match(self, shell_dir: Path) -> None:
         ts = ShellToolset(
@@ -329,19 +339,6 @@ class TestCommandValidation:
             allow_interactive=False,
         )
         ts._check_command("echo 'unterminated")
-
-    async def test_empty_tokens(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=['echo'],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        ts._check_command('')
 
     def test_first_denied_operator_match(self, toolset: ShellToolset[None]) -> None:
         ts = ShellToolset(
@@ -477,7 +474,7 @@ class TestPersistCwdHardening:
 
 
 class TestSpawnFailures:
-    """Failures raised by the spawn itself, which reached past `_recoverable`
+    """Failures raised by the spawn itself, which reached past `recoverable`
     when it only caught `PermissionError` and aborted the whole run."""
 
     def _toolset_in(self, cwd: Path) -> ShellToolset[None]:
@@ -1375,34 +1372,14 @@ class TestCodeModeInterop:
 class TestKillProcessGroupEdgeCases:
     async def test_sigterm_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGTERM raises ProcessLookupError, method returns without SIGKILL."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         proc = MagicMock()
         proc.pid = 99999
         with patch('os.killpg', side_effect=ProcessLookupError):
-            await ts._kill_process_group(proc)
+            await kill_process_group(proc)
         # No exception raised, method returned early
 
     async def test_sigkill_escalation(self, tmp_path: Path) -> None:
         """When process doesn't exit within grace period, SIGKILL is sent."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         proc = MagicMock()
         proc.pid = 99999
 
@@ -1420,9 +1397,9 @@ class TestKillProcessGroupEdgeCases:
         with (
             patch('os.killpg', side_effect=fake_killpg),
             patch('os.getpgid', return_value=12345),
-            patch('pydantic_ai_harness.shell._toolset._KILL_GRACE_PERIOD', 0.01),
+            patch('pydantic_ai_harness.shell._process._KILL_GRACE_PERIOD', 0.01),
         ):
-            await ts._kill_process_group(proc)
+            await kill_process_group(proc)
 
         assert len(kill_calls) == 2
         assert kill_calls[0][1] == signal.SIGTERM
@@ -1430,16 +1407,6 @@ class TestKillProcessGroupEdgeCases:
 
     async def test_sigkill_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGKILL raises ProcessLookupError (process exited between SIGTERM and SIGKILL)."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         proc = MagicMock()
         proc.pid = 99999
 
@@ -1459,9 +1426,9 @@ class TestKillProcessGroupEdgeCases:
         with (
             patch('os.killpg', side_effect=fake_killpg),
             patch('os.getpgid', return_value=12345),
-            patch('pydantic_ai_harness.shell._toolset._KILL_GRACE_PERIOD', 0.01),
+            patch('pydantic_ai_harness.shell._process._KILL_GRACE_PERIOD', 0.01),
         ):
-            await ts._kill_process_group(proc)
+            await kill_process_group(proc)
 
         assert call_count == 2
 
@@ -1469,16 +1436,6 @@ class TestKillProcessGroupEdgeCases:
 class TestDrainWithTimeoutEdgeCases:
     async def test_stdout_closed_resource_error(self, tmp_path: Path) -> None:
         """ClosedResourceError on stdout is caught silently after yielding data."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         proc = MagicMock()
 
         # Yield one chunk then raise ClosedResourceError
@@ -1500,21 +1457,11 @@ class TestDrainWithTimeoutEdgeCases:
 
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
-        await ts._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
+        await drain_with_timeout(stdout_chunks, stderr_chunks, proc)
         assert stdout_chunks == [b'partial']
 
     async def test_stderr_broken_resource_error(self, tmp_path: Path) -> None:
         """BrokenResourceError on stderr is caught silently after yielding data."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         proc = MagicMock()
         proc.stdout = None
 
@@ -1535,43 +1482,23 @@ class TestDrainWithTimeoutEdgeCases:
 
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
-        await ts._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
+        await drain_with_timeout(stdout_chunks, stderr_chunks, proc)
         assert stderr_chunks == [b'partial']
 
 
 class TestReadBgOutputEdgeCases:
     def test_stdout_oserror(self, tmp_path: Path) -> None:
         """OSError reading stdout file returns empty string."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         bg = MagicMock()
         bg.stdout_path = '/nonexistent/path/stdout'
         bg.stderr_path = '/nonexistent/path/stderr'
 
-        stdout, stderr = ts._read_bg_output(bg)
+        stdout, stderr = read_bg_output(bg)
         assert stdout == ''
         assert stderr == ''
 
     def test_stderr_oserror_only(self, tmp_path: Path) -> None:
         """OSError reading stderr file only, stdout succeeds."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         # Create a valid stdout file but invalid stderr path
         stdout_file = tmp_path / 'stdout.txt'
         stdout_file.write_text('hello')
@@ -1580,7 +1507,7 @@ class TestReadBgOutputEdgeCases:
         bg.stdout_path = str(stdout_file)
         bg.stderr_path = '/nonexistent/path/stderr'
 
-        stdout, stderr = ts._read_bg_output(bg)
+        stdout, stderr = read_bg_output(bg)
         assert stdout == 'hello'
         assert stderr == ''
 
@@ -1588,22 +1515,12 @@ class TestReadBgOutputEdgeCases:
 class TestCleanupBgFilesEdgeCases:
     def test_unlink_oserror(self, tmp_path: Path) -> None:
         """OSError on unlink is caught silently."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         bg = MagicMock()
         bg.stdout_path = '/nonexistent/path/stdout'
         bg.stderr_path = '/nonexistent/path/stderr'
 
         # Should not raise
-        ts._cleanup_bg_files(bg)
+        cleanup_bg_files(bg)
 
 
 class TestStopCommandAlreadyFinished:

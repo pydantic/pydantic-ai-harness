@@ -154,6 +154,57 @@ file, and that directory is carried into subsequent calls. The path is only
 updated when the command exits `0`, and the record is written out-of-band (not
 to stdout) so command output can never spoof the tracked directory.
 
+## Events
+
+`Shell` emits typed capability events in the `shell` namespace so a host can
+show a command as it runs, or veto it, without parsing tool arguments:
+
+| Event | Dispatch | When | Payload |
+|---|---|---|---|
+| `ShellCommandRequestEvent` | immediate | before a command is checked against the policy and spawned | `command`, `cwd`, `timeout`, `background`; `cancel(reason)`, `rewrite(command, reason=...)` |
+| `ShellCommandStartEvent` | stream | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
+| `ShellOutputLineEvent` | stream | a foreground command wrote a line | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
+| `ShellCommandEndEvent` | stream | the command exited, timed out, or was stopped | `command_id`, `command`, `background`, `exit_code`, `timed_out`, `duration_seconds`, `stdout`, `stderr`, `truncated` |
+
+`ShellCommandRequestEvent` is a decision. A listener that calls `cancel(reason)`
+stops the command before it runs; the model gets the reason as the tool result.
+A listener that calls `rewrite(command, reason=...)` replaces the command; the
+rewrite goes through the same allow and deny checks as the original, and the
+model is told the command was rewritten and why. The other three are
+notifications.
+
+`command_id` ties a command's lines and its end to its start when several run
+at once. For a background command it is the same ID `check_command` and
+`stop_command` take, so the model and a subscriber name the process alike.
+Background commands write to files instead of pipes, so they emit no line
+events; their end event fires when `check_command` first sees the exit or when
+`stop_command` kills the process.
+
+Payloads are bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256) and an end
+event carries the same tail the model receives (`max_output_chars`), each with
+a `truncated` flag, so a persisted or forwarded event stream cannot be flooded
+by one chatty command. A run cancelled mid-command ends without an end event.
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import Shell
+from pydantic_ai_harness.shell import ShellCommandRequestEvent
+
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Shell()])
+
+@agent.on_event(ShellCommandRequestEvent)
+async def hold_pushes(ctx, event):
+    if event.command.startswith('git push'):
+        event.cancel('pushes need a human')
+```
+
+Other capabilities subscribe with `@on_event` on a method, the same way
+`RepoContext` follows `FileSystem` events.
+
+`Shell` emits no OpenTelemetry spans of its own: the core tool-call span
+already records the command and its result, and the events above carry the
+per-line detail a trace would not.
+
 ## Configuration
 
 ```python

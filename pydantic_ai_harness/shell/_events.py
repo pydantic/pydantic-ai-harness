@@ -1,0 +1,101 @@
+"""Events emitted by the shell capability.
+
+Every command gets a `command_id` at start so a subscriber can correlate its
+lines and its end with its start when several commands run at once. For a
+background command the same id is the handle `check_command` and
+`stop_command` take, so the model and the subscriber name the process alike.
+
+Output in these events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS`
+and an end event keeps the tail its emitter keeps for the model, each with a
+`truncated` flag, so an event stream that is persisted or forwarded to a UI
+cannot be flooded by one chatty command.
+"""
+
+from dataclasses import dataclass
+from typing import Literal
+
+from pydantic_ai import CapabilityEvent
+
+SHELL_EVENTS = 'shell'
+
+MAX_EVENT_LINE_CHARS = 256
+"""Characters kept per `ShellOutputLineEvent.line` before it is cut."""
+
+OutputStream = Literal['stdout', 'stderr']
+
+
+@dataclass(kw_only=True)
+class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='command_request', dispatch='immediate'):
+    """A command is about to run; listeners may cancel or rewrite it first.
+
+    A cancelled command returns `cancel_reason` to the model as the tool
+    result instead of running. A rewritten command runs in place of the
+    original and the model is told it was rewritten and why; the rewrite is
+    subject to the same allow and deny policy as the original.
+    """
+
+    command: str
+    cwd: str
+    timeout: float | None
+    """Seconds the command may run, or `None` for a background command."""
+    background: bool
+    cancelled: bool = False
+    cancel_reason: str | None = None
+    rewrite_reason: str | None = None
+
+    def cancel(self, reason: str | None = None) -> None:
+        """Stop the command from running."""
+        self.cancelled = True
+        self.cancel_reason = reason
+
+    def rewrite(self, command: str, *, reason: str) -> None:
+        """Replace the command that will run, recording why."""
+        self.command = command
+        self.rewrite_reason = reason
+
+
+@dataclass(kw_only=True)
+class ShellCommandStartEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='command_start'):
+    """A command process was spawned."""
+
+    command_id: str
+    command: str
+    cwd: str
+    timeout: float | None
+    background: bool
+    pid: int
+
+
+@dataclass(kw_only=True)
+class ShellOutputLineEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='output_line'):
+    """A foreground command wrote one line to stdout or stderr.
+
+    Background commands write to files the model reads through
+    `check_command`, so they emit no line events.
+    """
+
+    command_id: str
+    stream: OutputStream
+    line: str
+    truncated: bool
+
+
+@dataclass(kw_only=True)
+class ShellCommandEndEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='command_end'):
+    """A command finished, timed out, or was stopped.
+
+    `exit_code` is `None` when the process was killed before it reported one.
+    A background command ends when `check_command` first sees it exited or
+    when `stop_command` kills it. A run cancelled mid-command ends without
+    this event.
+    """
+
+    command_id: str
+    command: str
+    background: bool
+    exit_code: int | None
+    timed_out: bool
+    duration_seconds: float
+    stdout: str
+    stderr: str
+    truncated: bool
