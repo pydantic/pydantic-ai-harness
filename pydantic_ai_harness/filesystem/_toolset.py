@@ -763,16 +763,20 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 break
 
         if ctx is not None:
-            await ctx.emit(self._searched(resolved, pattern, kind='grep', match_count=len(results), truncated=capped))
+            await ctx.emit(self._searched(resolved, pattern, search='grep', match_count=len(results), truncated=capped))
         if capped:
             results.append(f'[... truncated at {self._max_search_results} matches]')
         return '\n'.join(results) if results else 'No matches found.'
 
     def _searched(
-        self, resolved: Path, pattern: str, *, kind: SearchKind, match_count: int, truncated: bool
+        self, resolved: Path, pattern: str, *, search: SearchKind, match_count: int, truncated: bool
     ) -> FilesSearchedEvent:
         return FilesSearchedEvent(
-            **self._event_location(resolved), pattern=pattern, kind=kind, match_count=match_count, truncated=truncated
+            **self._event_location(resolved),
+            pattern=pattern,
+            search=search,
+            match_count=match_count,
+            truncated=truncated,
         )
 
     async def find_files(self, pattern: str, *, path: str = '.') -> str:
@@ -843,7 +847,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             matches.append(f'{rel}{suffix}')
 
         if ctx is not None:
-            await ctx.emit(self._searched(resolved, pattern, kind='find', match_count=len(matches), truncated=capped))
+            await ctx.emit(self._searched(resolved, pattern, search='find', match_count=len(matches), truncated=capped))
         if capped:
             matches.append(f'[... truncated at {self._max_find_results} matches]')
         return '\n'.join(matches) if matches else 'No matches found.'

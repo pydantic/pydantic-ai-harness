@@ -89,7 +89,7 @@ class FilesSearchedEvent(CapabilityEvent, namespace=FILE_SYSTEM_EVENTS, name='fi
     path: str
     root_dir: str
     pattern: str
-    kind: SearchKind
+    search: SearchKind
     match_count: int
     truncated: bool
 
