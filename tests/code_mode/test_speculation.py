@@ -1001,10 +1001,11 @@ class TestSpeculationEdgeCases:
         """A provider that re-keys the part mid-stream still gets its unclaimed launches evicted."""
         released = asyncio.Event()
 
-        async def search(query: str) -> str:
+        # Whether the body starts before eviction cancels it depends on scheduling.
+        async def search(query: str) -> str:  # pragma: no cover
             """Block until released, so eviction has to cancel it."""
             await released.wait()
-            return f'result:{query}'  # pragma: no cover - always cancelled or unreached
+            return f'result:{query}'
 
         code = 'if False:\n    a = await search(query="never")\nb = 1\nb'
         async with prepared_toolset([Tool(search)], CodeMode[None](speculate=['search'])) as (
@@ -1037,7 +1038,8 @@ class TestSpeculationEdgeCases:
         monkeypatch.setattr('pydantic_ai_harness.code_mode._speculation.CANCEL_TIMEOUT_SECONDS', 0.05)
         stubborn_started = asyncio.Event()
 
-        async def search(query: str) -> str:
+        # The run moves on before the swallowed cancellation unwinds, so the tail is unreachable.
+        async def search(query: str) -> str:  # pragma: no cover
             """Ignore cancellation for longer than the eviction budget."""
             stubborn_started.set()
             while True:
