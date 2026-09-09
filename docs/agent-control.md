@@ -34,7 +34,7 @@ together.
 
 ## Usage
 
-Write the agent exactly as you would anyway, give it a `name`, and add the capability:
+Write the agent exactly as you would anyway, give it an explicit `name`, and add the capability:
 
 ```python
 import logfire
@@ -110,7 +110,29 @@ marks both in the editor so you can see which of your blocks they are:
 **A block computed on every request is shown but not editable.** That's any instruction *function* --
 `@agent.instructions` and its toolset and capability equivalents -- even one that returns fixed text.
 Rewriting it would freeze whatever it happened to return once, and removing it would delete the
-computation. If you want that text editable, write it as text rather than as a function.
+computation.
+
+Only the *fact* of such a block goes to Logfire, never its text. An instruction function reads the
+run -- a tenant, a signed-in user, a retrieved document -- and what Logfire is told is the block's id
+and that it is recomputed, which is all the editor needs to show it and to not offer to change it.
+
+So if one function today produces a prompt that is mostly fixed with a dynamic piece in it, split it
+in two: the fixed part as text, the varying part as its own function. The fixed half becomes editable
+and the varying half stays where it belongs.
+
+```python {test="skip"}
+agent = Agent(
+    'openai:gpt-5',
+    name='checkout_assistant',
+    instructions='You are a concise checkout assistant.',  # editable in Logfire
+    capabilities=[AgentControl()],
+)
+
+
+@agent.instructions(name='today')  # shown, never edited, never sent
+def today(_ctx: RunContext[None]) -> str:
+    return f'Today is {date.today()}.'
+```
 
 **A block with nothing to identify it isn't offered at all.** That's text from a toolset or capability
 with no `id` of its own, an unnamed callable in `Agent(instructions=...)`, or anything passed to
@@ -163,30 +185,47 @@ skipped, rather than once per run.
 Changes are picked up **once per run**. Publishing mid-run takes effect on the next run, which is what
 lets every span of a run agree on the version that produced it.
 
-## What Logfire compares against
+## Registration and the baseline
 
-The editor shows published values as changes *to something*, and that something is a snapshot of what
-your agent does in code -- its prompt block by block, its model, its settings, its tool definitions.
-`AgentControl` sends that snapshot in the background, on a run that reaches the model, and only when
-it has changed. It is documentation: never resolved, never applied to a run, so a stale or failed
-snapshot cannot change what your agent does.
+You never have to create anything in Logfire by hand. The two write-backs that make that true both
+run in the background, off the run's thread, and neither can fail or slow a run.
 
-Because it comes from one request, a prompt or toolset that varies with `deps`, the run's input, or
-the step within a run is captured as it was at that moment.
+**Registering the agent.** On a run where Logfire has no config for this agent yet, `AgentControl`
+creates one, seeded with the code baseline below. It first confirms with Logfire that the agent
+really is unknown -- "there is no config" and "there is no config *for you*" are different answers,
+and only the first should create anything. It is attempted **once per process per agent**, so a
+failed attempt does not retry in a loop. Because what it creates is visible to everyone with access
+to the project, the outcome is reported there: a log record on success, a log record and a
+`UserWarning` on failure. `auto_create=False` opts out.
 
-Inside a Temporal, DBOS, or other Pydantic AI durable workflow, published config still applies, but
-the first-run registration and the snapshot are skipped with a warning: both write from background
-threads, which is not replay-safe. Set the agent up by running it outside the workflow once. Pass
-`auto_create=False` or `publish_baseline=False` to turn either off anywhere else -- for instance when
-the process deliberately holds a read-only token.
+**The baseline.** Logfire's editor shows published values as changes *to something*, and that
+something is a snapshot of what your agent does in code: its prompt block by block, its model, its
+settings, its tool definitions. It is documentation -- never resolved, never applied to a run -- so a
+stale or failed snapshot cannot change what your agent does.
+
+It is captured on the first model request of the process that has one to capture, which means an
+agent that never reaches a model never publishes, and a prompt or toolset that varies with `deps`,
+the run's input, or the step within a run is a point-in-time sample. Publishing is attempted once per
+process per agent, is a no-op when the snapshot already matches what Logfire holds, and writes only
+the baseline -- your published config, labels, and rollout are preserved. `publish_baseline=False`
+opts out, for instance when the process deliberately holds a read-only token.
+
+**Inside a durable workflow** (Temporal, DBOS, ...) published config still applies, but both
+write-backs are skipped with one warning: they write from background threads, which is not
+replay-safe. Run the agent outside the workflow once to get it registered.
 
 ## Which agent in Logfire it controls
 
-By default, the one matching your agent's `name`, normalized the way Logfire normalizes an agent's
-name in your traces. That normalization is lossy -- `checkout-assistant`, `Checkout Assistant`, and
-`checkout_assistant` are one agent to Logfire, including across services reporting to the same
-project -- so two agents differing only in punctuation share one config. Pass an explicit `name` to
-`AgentControl` to keep them apart, or to deliberately point several agents at one config.
+The agent's `name` -- so **set one explicitly**. An `Agent` without a `name` gets one inferred from
+the Python variable it was assigned to, which means renaming a local variable silently points the
+agent at a different config, and an agent built somewhere that inference can't see has no name at all
+(`AgentControl` raises rather than guessing).
+
+The name is normalized the way Logfire normalizes an agent's name in your traces, and that is lossy:
+`checkout-assistant`, `Checkout Assistant`, and `checkout_assistant` are one agent to Logfire,
+including across services reporting to the same project, so two agents differing only in punctuation
+share one config. Pass an explicit `name` to `AgentControl` to decouple it from the agent's name
+entirely -- to keep two such agents apart, or to deliberately point several at one config.
 
 `targeting_key`, `attributes`, and `render_template` work exactly as they do for
 [`ManagedPrompt`](managed-prompt.md#targeting). `AgentControl.resolved` exposes the config the
