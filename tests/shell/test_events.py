@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
+import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator, Sequence
@@ -230,7 +230,30 @@ class TestRequestDecisions:
         listener, results = await _run(tmp_path, [_run_command('echo hi')], listener=Listener(rewrite_to='vim x'))
 
         assert [type(event) for event in listener.events] == [ShellCommandRequestEvent]
-        assert results == ["Interactive commands are not allowed. Command: 'vim x'"]
+        assert results == ["[Command rewritten (proxy): vim x]\nInteractive commands are not allowed. Command: 'vim x'"]
+
+    async def test_cancel_beats_rewrite_whatever_the_listener_order(self, tmp_path: Path) -> None:
+        canceller = Listener(decision='cancel')
+        rewriter = Listener(rewrite_to='echo rewritten')
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        for order in ([canceller, rewriter], [rewriter, canceller]):
+            agent = Agent(_calls_model([_run_command('echo hi')]), deps_type=type(None), capabilities=[shell, *order])
+
+            result = await agent.run('go')
+
+            assert _tool_results(result.all_messages()) == ['[Command was not run: the user said no]']
+
+    async def test_last_rewrite_wins(self, tmp_path: Path) -> None:
+        first = Listener(rewrite_to='echo first')
+        second = Listener(rewrite_to='echo second')
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        agent = Agent(
+            _calls_model([_run_command('echo hi')]), deps_type=type(None), capabilities=[shell, first, second]
+        )
+
+        result = await agent.run('go')
+
+        assert _tool_results(result.all_messages()) == ['[Command rewritten (proxy): echo second]\n[stdout]\nsecond\n']
 
 
 @dataclass
@@ -247,13 +270,24 @@ class CancelOnStart(AbstractCapability[None]):
         self.run.cancel()
 
 
+def _live_group_members(pgid: int) -> list[str]:
+    """`ps` rows for group members that are not zombies.
+
+    `os.killpg(pgid, 0)` still succeeds while an orphaned member sits unreaped
+    under a PID 1 that never waits (some container sandboxes), so the check
+    reads process state instead. `ps -eo pgid=,stat=` is the same on Linux
+    and macOS; a zombie's state starts with `Z`.
+    """
+    table = subprocess.run(['ps', '-eo', 'pgid=,stat='], capture_output=True, text=True, check=True).stdout
+    rows = [row.split() for row in table.splitlines()]
+    return [' '.join(row) for row in rows if len(row) == 2 and row[0] == str(pgid) and not row[1].startswith('Z')]
+
+
 async def _process_group_is_gone(pgid: int) -> bool:
-    """Usually true on the first check; the polling below only runs when reaping lags."""
+    """Usually true on the first check; the polling below only runs when the kill lags."""
     with anyio.move_on_after(3):
         while True:
-            try:
-                os.killpg(pgid, 0)
-            except ProcessLookupError:
+            if not _live_group_members(pgid):
                 return True
             await anyio.sleep(0.05)  # pragma: no cover
     return False  # pragma: no cover
