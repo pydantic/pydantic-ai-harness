@@ -143,9 +143,10 @@ the branch. Each item names its acceptance check.
 
 ### Phase 0: skeleton that runs
 
-- [ ] 0.1 `pydantic_ai_harness/cli/` package, `pyproject.toml` console script and `cli` extra
+- [x] 0.1 `pydantic_ai_harness/cli/` package, `pyproject.toml` console script and `cli` extra
       with `termflow`, `docs/cli.md` + package `README.md`. Acceptance: `uv run harness -p "hi"`
-      with `TestModel` prints a response; `tests/cli/` passes.
+      with `TestModel` prints a response; `tests/cli/` passes. (on `feat/experimental-cli`,
+      no PR yet)
 - [ ] 0.2 `CliBridge` capability: subscribes to core stream events, renders text and tool calls via
       Termflow. Acceptance: a transcript test drives `Agent(capabilities=[Coder(), CliBridge()])`
       with `TestModel` and asserts rendered output.
@@ -189,6 +190,9 @@ the branch. Each item names its acceptance check.
 - [ ] 3.5 Attachments and clipboard images via `media`.
 - [ ] 3.6 Custom prompt-template commands, shell passthrough, chords, `$EDITOR`.
 - [ ] 3.7 Splash, onboarding, theme menus, version check.
+- [ ] 3.8 Partner PR to pydantic-ai `docs/navigation.yml` adding `harness/cli` (the sidebar lives
+      there, see `agent_docs/docs-conventions.md`). Do this when `feat/experimental-cli` opens its
+      PR against `main`, not before.
 
 ### Phase 4: remaining event families (wave 2 and 3 of the events plan)
 
@@ -220,6 +224,30 @@ Append-only. Date, item, decision, why.
   `PermissionPolicy` is open and targets the same decisions.
 - 2026-09-09, plan: the `agent_docs/index.md` link to this file is parked in a stash named
   "cli-plan: agent_docs/index.md" on `feat/experimental-cli`; re-apply it when committing the plan.
+- 2026-09-09, 0.1: the existing `cli` extra (a pass-through for core's `clai`) gains
+  `termflow-md>=0.9.1 ; python_full_version >= '3.11'` instead of a new `harness-cli` extra, so
+  `pydantic-ai-harness[cli]` means "the CLI" and a 3.10 install still resolves. Nothing imports
+  `termflow` until 0.2, so the one-shot mode runs on 3.10; 0.2 adds the version gate with the
+  renderer.
+- 2026-09-09, 0.1: `cli_agent` is a module-level, model-less `Agent` exported from
+  `pydantic_ai_harness.cli` (same shape as `coder_agent`); `--model` is passed at run time and
+  tests swap it with `cli_agent.override(model=TestModel(call_tools=[], ...))`. `--model test`
+  from the shell builds a bare `TestModel` that calls every `Coder` tool with schema-default
+  arguments (it writes a file named `a` and exceeds `start_command`'s retries), so the acceptance
+  check is the override test in `tests/cli/`, not a shell invocation with `test`.
+- 2026-09-09, 0.1: no `--workspace` flag; the current directory is the workspace, matching Code
+  Puppy (`/cd` is item 3.1). `-p` is required until 0.3 adds the interactive session.
+- 2026-09-09, 0.1: `UserError` from model resolution or the run is reported through
+  `parser.error` (one line, exit 2) so a missing API key does not print a traceback. Other
+  exceptions propagate; the stash's blanket `except (ModelAPIError, OSError, ...)` hid too much.
+- 2026-09-09, 0.1: `cli` is registered in `tests/test_docs_parity.py` as `_NOT_A_CAPABILITY` and
+  `cli.md` as a non-capability page, like `media`. It keeps a README, a docs page, a source link,
+  and a top-README link anyway; only the capability-specific checks (H1 registry, autodoc) do not
+  apply.
+- 2026-09-09, 0.1: no `__main__.py`; the console script is the entry point and `uv run harness`
+  works in the checkout. Add `python -m` only if someone asks.
+- 2026-09-09, 0.1: `pyproject.toml` and `uv.lock` changed, so the eventual PR from
+  `feat/experimental-cli` needs the `dependencies:approved` label (pre-approved per this plan).
 
 ## Open questions for Mike
 
