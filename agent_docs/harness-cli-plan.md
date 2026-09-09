@@ -147,9 +147,10 @@ the branch. Each item names its acceptance check.
       with `termflow`, `docs/cli.md` + package `README.md`. Acceptance: `uv run harness -p "hi"`
       with `TestModel` prints a response; `tests/cli/` passes. (on `feat/experimental-cli`,
       no PR yet)
-- [ ] 0.2 `CliBridge` capability: subscribes to core stream events, renders text and tool calls via
+- [x] 0.2 `CliBridge` capability: subscribes to core stream events, renders text and tool calls via
       Termflow. Acceptance: a transcript test drives `Agent(capabilities=[Coder(), CliBridge()])`
-      with `TestModel` and asserts rendered output.
+      with `TestModel` and asserts rendered output. (on `feat/experimental-cli` at a7e221bb,
+      no PR yet)
 - [ ] 0.3 REPL loop: line editor, `-p` one-shot mode, Ctrl+C cancel via `AgentRun.cancel`, steer
       via `AgentRun.enqueue`. Acceptance: tests for cancel and steer.
 - [ ] 0.4 Config file and `Theme`; model selection from config via core `infer_model`. Acceptance:
@@ -174,6 +175,8 @@ the branch. Each item names its acceptance check.
 
 - [ ] 2.1 `AskUser` capability PR (`puppy/ask-user`, closes #42). Bridge renders the question TUI.
 - [ ] 2.2 `SelectModel` capability PR (`puppy/select-model`); host `/model`, `/pin_model`, `/unpin`.
+      Core already ships `pydantic_ai.capabilities.SelectModel` with this shape (see Decisions,
+      2026-09-09, 0.2); the item is now host wiring plus a `ModelSelectedEvent` only if needed.
 - [ ] 2.3 `FileSystem` undo option PR (`puppy/filesystem-undo`); host `/undo`.
 - [ ] 2.4 `CommandHooks` capability PR (`puppy/command-hooks`).
 - [ ] 2.5 `McpServers` capability PR (`puppy/mcp-servers`), thin config wrapper only; host `/mcp`
@@ -248,6 +251,39 @@ Append-only. Date, item, decision, why.
   works in the checkout. Add `python -m` only if someone asks.
 - 2026-09-09, 0.1: `pyproject.toml` and `uv.lock` changed, so the eventual PR from
   `feat/experimental-cli` needs the `dependencies:approved` label (pre-approved per this plan).
+
+- 2026-09-09, 0.2: `CliBridge` listens with `@on_event` on the core stream events
+  (`PartStartEvent`, `PartDeltaEvent`, `PartEndEvent`, `FunctionToolCallEvent`,
+  `FunctionToolResultEvent`); core auto-enables streaming for `agent.run()` when a capability
+  has listeners, so `main` needs no `event_stream_handler`. `wrap_run_event_stream` was
+  rejected: the bridge only observes, and a wrapper would make it a global filter.
+- 2026-09-09, 0.2: Termflow parses whole lines, so text deltas buffer until a newline and flush on
+  `PartEndEvent` (`_MarkdownStream`). Smooth pacing (Termflow's `StreamSmoother`) is host chrome
+  for 0.3 or later, not part of the bridge.
+- 2026-09-09, 0.2: tool calls and results render as one line each (`> name args`,
+  `< name first-line (+N lines)`, `! name retry-reason`), cut to the terminal width with
+  Termflow's `truncate_ansi`. The full return value is the model's, not the transcript's; a
+  richer view (diffs, grep hits) comes from capability events in phase 1.
+- 2026-09-09, 0.2: thinking parts are not rendered. The inventory lists the thinking display
+  filter as host render policy, so it lands with config (0.4) rather than as a hard-coded choice
+  in the bridge. Pinned by `test_thinking_is_not_rendered`.
+- 2026-09-09, 0.2: `CliBridge.output` defaults to `None` and resolves `sys.stdout` inside
+  `for_run` (via `replace(self)` re-running `__post_init__`) because `cli_agent` is built at
+  import time; a construction-time default would capture stdout before pytest's capture or any
+  redirect exists. `for_run` also gives each run fresh stream state.
+- 2026-09-09, 0.2: `main` no longer prints `result.output`; the bridge already rendered it.
+- 2026-09-09, 0.2: the CLI is Python 3.11+ because Termflow is. `tests/cli/conftest.py` skips on
+  a missing `termflow`, and the import error names the `cli` extra. Tests pin the asyncio anyio
+  backend like `tests/coder` (the CLI runs under `asyncio.run`).
+- 2026-09-09, 0.2: `CliBridge` is `Anonymous` in `tests/test_capability_combine.py`: a renderer
+  per output stream; two on one stream print twice, which is the user's mistake to see.
+- 2026-09-09, 0.2: finding for 2.2: core ships `pydantic_ai.capabilities.SelectModel` (a
+  `selector` returning a model or model ID per request step, with `ModelSelectionContext`). Do
+  not build a harness one; 2.2 becomes host wiring over core's, plus a `ModelSelectedEvent` PR
+  only if the bridge needs to render the switch.
+- 2026-09-09, 0.2: CI runs on `main` pushes and PRs only, so `feat/experimental-cli` gets no CI
+  until its PR opens. A focused branch-coverage run on `pydantic_ai_harness/cli/*` is the
+  substitute for host items (100% at a7e221bb); repo-wide runs stay off.
 
 ## Open questions for Mike
 
