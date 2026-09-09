@@ -29,12 +29,11 @@ import os
 import posixpath
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
-from functools import cached_property
-from typing import NoReturn, TypeVar
+from typing import NoReturn
 
 import anyio
-import anyio.to_thread
 from anyio.lowlevel import checkpoint
+from pydantic_ai._utils import run_in_executor  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.workspaces import (
     CommandResult,
     WorkspaceBackend,
@@ -57,13 +56,8 @@ except ImportError as exc:  # pragma: no cover - exercised by the isolated missi
     raise ImportError('Install `pydantic-ai-harness[sprites]` to use SpriteWorkspace.') from exc
 
 logger = logging.getLogger(__name__)
-T = TypeVar('T')
 _CONTROL_TIMEOUT = 6.0
 _AUTH_MESSAGE = 'Sprites rejected the credentials. Set SPRITE_TOKEN or pass token= and try again.'
-
-
-async def _call(call: Callable[[], T]) -> T:
-    return await anyio.to_thread.run_sync(call, abandon_on_cancel=True)
 
 
 async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float) -> Exception | None:
@@ -74,14 +68,13 @@ async def cleanup_call(call: Callable[[], Awaitable[object]], *, timeout: float)
     cancelled; bounded so a wedged control plane cannot hang teardown.
     """
     error: Exception | None = None
-    with anyio.CancelScope(shield=True):
-        with anyio.move_on_after(timeout) as scope:
-            try:
-                await call()
-            except Exception as exc:
-                error = exc
-        if scope.cancel_called:
-            return TimeoutError()
+    with anyio.move_on_after(timeout, shield=True) as scope:
+        try:
+            await call()
+        except Exception as exc:
+            error = exc
+    if scope.cancel_called:
+        return TimeoutError()
     return error
 
 
@@ -155,50 +148,53 @@ class SpriteWorkspaceBackend(WorkspaceBackend):
         self._canonical_working_dir: str | None = None
         self._client = client
         self._owns_client = client is None
+        self._lock = anyio.Lock()
 
     @property
     def workspace(self) -> Awaitable[Sprite]:
-        return self._get_workspace()
-
-    async def _get_workspace(self) -> Sprite:
-        if self._workspace is None:
-            async with self._lock:
-                if self._workspace is None:
-                    self._workspace = await self._create_or_attach(self._ref)
-                    self._ref = WorkspaceRef(provider='sprites', id=self._workspace.name)
-        assert self._workspace is not None
-        return self._workspace
-
-    @cached_property
-    def _lock(self) -> anyio.Lock:
-        return anyio.Lock()
+        return self._create_or_attach()
 
     @property
     def ref(self) -> WorkspaceRef | None:
         return self._ref
 
-    def _ensure_client(self) -> SpritesClient:
-        if self._client is None:
-            token = self._token or os.getenv('SPRITE_TOKEN')
-            if not token:
-                raise WorkspaceUnavailableError(_AUTH_MESSAGE)
-            self._client = SpritesClient(token=token, base_url=self._base_url, timeout=self._api_timeout)
-            self._owns_client = True
-        return self._client
+    async def _create_or_attach(self) -> Sprite:
+        """Hydrate the client and the Sprite on first use, once.
 
-    async def _create_or_attach(self, ref: WorkspaceRef | None) -> Sprite:
-        """Acquire once; a missing explicit reference never creates a replacement."""
-        client = self._ensure_client()
+        The only place `_client` and `_workspace` are read, so nothing can reach an
+        unhydrated one: both stay optional and every other method goes through here.
+        The lock serializes concurrent first uses -- two callers each creating a Sprite
+        would leave the loser billed and unreferenced. The acquisition deliberately runs
+        without `abandon_threads_on_cancel`: an abandoned create finishes in a detached
+        thread and produces a Sprite this backend never recorded.
+        """
+        async with self._lock:
+            if (workspace := self._workspace) is not None:
+                return workspace
 
-        def acquire() -> Sprite:
-            if ref is not None:
-                return client.get_sprite(ref.id)
-            return client.create_sprite(self._name, runtime=self._runtime)
+            client = self._client
+            if client is None:
+                token = self._token or os.getenv('SPRITE_TOKEN')
+                if not token:
+                    raise WorkspaceUnavailableError(_AUTH_MESSAGE)
+                client = SpritesClient(token=token, base_url=self._base_url, timeout=self._api_timeout)
+                self._client = client
 
-        try:
-            return await _call(acquire)
-        except SpriteError as error:
-            raise _operation_error(error, 'Could not acquire Sprite') from error
+            ref = self._ref
+
+            def acquire() -> Sprite:
+                if ref is not None:
+                    return client.get_sprite(ref.id)
+                return client.create_sprite(self._name, runtime=self._runtime)
+
+            try:
+                workspace = await run_in_executor(acquire)
+            except SpriteError as error:
+                raise _operation_error(error, 'Could not acquire Sprite') from error
+
+            self._workspace = workspace
+            self._ref = WorkspaceRef(provider='sprites', id=workspace.name)
+            return workspace
 
     async def working_dir(self) -> str:
         if self._canonical_working_dir is None:
@@ -322,9 +318,8 @@ class SpriteWorkspaceBackend(WorkspaceBackend):
     async def disconnect(self) -> None:
         """Detach local state while leaving the remote Sprite unchanged.
 
-        A supplied SDK client is never closed. An owned client is closed with bounded cleanup;
-        a successful disconnect clears local caches and later operations reattach using the saved
-        ref. A failure retains the client and ref so disconnect can be retried. Finish in-flight
+        A supplied SDK client is never closed. A successful disconnect clears local caches and
+        later operations reattach using the saved ref. A failure retains the client and ref so disconnect can be retried. Finish in-flight
         commands first.
         """
         async with self._lock:
@@ -333,7 +328,13 @@ class SpriteWorkspaceBackend(WorkspaceBackend):
                 self._workspace = None
                 self._canonical_working_dir = None
                 return
-            error = await cleanup_call(lambda: _call(client.close), timeout=self._api_timeout)
+            error: Exception | None = None
+            try:
+                # Closing an `httpx.Client` drops a local connection pool: no remote party
+                # can stall it, so this needs no deadline of its own.
+                await run_in_executor(client.close)
+            except Exception as exc:
+                error = exc
             if error is not None:
                 await raise_after_cleanup(
                     _operation_error(error, 'Could not disconnect from Sprite SDK client'), cause=error
