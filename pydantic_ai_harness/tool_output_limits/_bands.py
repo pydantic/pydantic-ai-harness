@@ -13,7 +13,7 @@ works, a bounded truncation otherwise, never a silent drop.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import KW_ONLY, dataclass
 from typing import TYPE_CHECKING
 
 from pydantic_ai_harness.tool_output_limits._payload import TruncationStrategy
@@ -46,7 +46,9 @@ class Truncate:
     strategy: TruncationStrategy = TruncationStrategy.head_tail
     max_chars: int = _DEFAULT_TRUNCATE_CHARS
     then: Action | None = None
-    keep_tail_lines: int = field(default=0, kw_only=True)
+
+    _: KW_ONLY
+    keep_tail_lines: int = 0
     """Prioritize the last N newline-delimited lines before truncating the remaining text.
 
     Zero preserves the selected strategy's usual behavior. LF and CRLF endings are kept.
