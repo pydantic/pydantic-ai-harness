@@ -52,7 +52,8 @@ Settings live in `~/.pydantic-ai-harness/config.json`. A missing file means the 
 {
   "model": "anthropic:claude-fable-5",
   "theme": {"palette": "default", "code_style": "monokai"},
-  "show_thinking": false
+  "show_thinking": false,
+  "yolo": false
 }
 ```
 
@@ -60,6 +61,7 @@ Settings live in `~/.pydantic-ai-harness/config.json`. A missing file means the 
 - **`theme.palette`** picks the Termflow colors for Markdown, tool lines, and status notes: `default`, `dracula`, `gruvbox`, or `nord`.
 - **`theme.code_style`** is the [Pygments style](https://pygments.org/styles/) for code blocks. An unknown name falls back to `monokai`.
 - **`show_thinking`** prints the model's thinking parts, dimmed, as they stream. They are hidden by default.
+- **`yolo`** approves every shell command without asking. `--yolo` on the command line turns it on for one invocation.
 
 The file is read when `harness` starts and again at the start of each run, so a change made during a session applies to the next prompt. From Python, `Config.load()` and `Config.save()` read and write the same file (or a path you pass), and `Config.default_path()` is where it lives.
 
@@ -69,7 +71,22 @@ The file is read when `harness` starts and again at the start of each run, so a 
 
 - Model text streams through Termflow as Markdown: headings, emphasis, lists, code blocks with syntax highlighting, and tables render as the text completes each line.
 - Each tool call prints as `> tool_name {"arg": ...}` and its result as `< tool_name` followed by the first line of the return value. When a result spans several lines, the line ends with `(+N lines)`; every line is cut to the terminal width. A tool that asks the model to retry prints as `! tool_name` with the retry reason.
-- Thinking parts print dimmed, as plain text, when `show_thinking` is on. Capability events (a file read, a plan update) are not rendered yet; the plan schedules them.
+- Thinking parts print dimmed, as plain text, when `show_thinking` is on.
+- A shell command renders from the `shell.*` events `Shell` emits rather than from the tool's return value: `$ command` as the process starts, each output line as it arrives (stderr dimmed), and a dimmed `exit 0 (0.3s)`, `timed out (...)`, or `stopped (...)` summary, with `output truncated` added when the model saw only the tail. The generic `< run_command` line is skipped for these calls. Other capability events (a file edit, a plan update) are not rendered yet; the plan schedules them.
+
+## Approving commands
+
+Before `Shell` runs a command it emits a `ShellCommandRequestEvent`, and the bridge puts it to the run's approver. In a session that is a prompt on the terminal:
+
+```text
+? run git push origin main [y/N]
+```
+
+`y` or `yes` lets the command run; anything else, including the end of input, declines it, and the model is told `[Command was not run: declined by the user]`. The answer is read ahead of the steer queue, so it is never forwarded to the model as a message.
+
+`--yolo` (or `"yolo": true` in the config file) approves everything without asking. One-shot mode (`-p`) has no terminal to ask, so without `--yolo` every command is declined with a reason that says so.
+
+The approver is a run-time dependency, not part of the bridge: `Repl` passes `CliDeps(approver=...)` to each run and the bridge reads it from `ctx.deps`. `Approver` is a protocol, `async (event, *, description) -> Verdict`, so a policy engine can answer instead of a person. `allow_all`, `DeclineAll(reason=...)`, and `TerminalApprover(answers=..., output=...)` are the three that ship; `Repl(approver=...)` installs one for a session, and `CliBridge(approver=...)` pins one on the bridge for an agent that does not use `CliDeps`. A bridge with neither declines every request and says why.
 
 The session's own lines, the prompt and the dimmed `(cancelled)` and `(steer queued: ...)` notes, come from `Repl`, not the bridge.
 
