@@ -289,9 +289,10 @@ class RedisSpendStore:
         warn_unreachable_overrides(self, RedisSpendStore)
 
     async def get(self, key: str) -> Spent:
-        """What `key` has accumulated. Deprecated in favour of `get_many`, removed in 0.28.0."""
+        """What `key` has accumulated. Deprecated in favour of `get_many`; call it with a sequence of keys."""
         warnings.warn(
-            '`RedisSpendStore.get` is deprecated in favour of `get_many`; the single-key pair is removed in 0.28.0.',
+            '`RedisSpendStore.get` is deprecated in favour of `get_many`. Use the batched `get_many` to read '
+            'several keys in one call. This method will be removed in a future release.',
             HarnessDeprecationWarning,
             stacklevel=2,
         )
@@ -307,14 +308,15 @@ class RedisSpendStore:
         unpriced: int,
         ttl: timedelta | None,
     ) -> Spent:
-        """Add to `key` and return the result. Deprecated in favour of `add_many`, removed in 0.28.0.
+        """Add to `key` and return the result. Deprecated in favour of `add_many`; call it with a sequence of entries.
 
         One window per call, so a response counting against a day and a month budget is
         two calls and a failure between them leaves the day counted and the month not.
         `add_many` is one script over every window, which is what closes that.
         """
         warnings.warn(
-            '`RedisSpendStore.add` is deprecated in favour of `add_many`; the single-key pair is removed in 0.28.0.',
+            '`RedisSpendStore.add` is deprecated in favour of `add_many`. Use the batched `add_many` to apply '
+            'several entries in one call. This method will be removed in a future release.',
             HarnessDeprecationWarning,
             stacklevel=2,
         )
