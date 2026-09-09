@@ -154,8 +154,8 @@ the branch. Each item names its acceptance check.
 - [x] 0.3 REPL loop: line editor, `-p` one-shot mode, Ctrl+C cancel via `AgentRun.cancel`, steer
       via `AgentRun.enqueue`. Acceptance: tests for cancel and steer. (on `feat/experimental-cli`
       at c164b433, no PR yet; the line editor is the terminal's own until 3.6, see Decisions)
-- [ ] 0.4 Config file and `Theme`; model selection from config via core `infer_model`. Acceptance:
-      config round-trip test.
+- [x] 0.4 Config file and `Theme`; model selection from config via core `infer_model`. Acceptance:
+      config round-trip test. (on `feat/experimental-cli` at 73172635, no PR yet)
 
 ### Phase 1: the transcript (events the CLI needs to be usable)
 
@@ -317,6 +317,39 @@ Append-only. Date, item, decision, why.
   `AgentRunError`s still propagate and end the session (3.9).
 - 2026-09-09, 0.3: a size-less pty reports 0 columns and Termflow's `truncate_ansi` then blanks
   the bridge's tool lines. Real terminals report a size; noted, not handled.
+
+- 2026-09-09, 0.4: the config file is JSON at `~/.pydantic-ai-harness/config.json` (the
+  directory the stashed skeleton already used for credentials). TOML would need `tomli-w` to
+  write and the round trip is the acceptance check; JSON is stdlib both ways and `Config` is a
+  Pydantic `BaseModel` (the file is a boundary, so validation is earned) with `load`, `save`,
+  and `default_path`. A missing file is the defaults; an invalid one raises `UserError` with the
+  path and the validation detail, which `main` reports through `parser.error`. Pydantic ignores
+  unknown keys, so an older CLI reads a newer file.
+- 2026-09-09, 0.4: `Theme` is a `kw_only` dataclass nested in `Config` with `palette` (a
+  `Literal` over Termflow's named `RenderStyle`s: `default`, `dracula`, `gruvbox`, `nord`) and
+  `code_style` (a Pygments style name; Termflow falls back to `monokai` on an unknown one, so
+  it is not validated). Code Puppy's `prompt_text_color` is not ported: the prompt is a plain
+  string until the inline line editor (3.6) owns the prompt line.
+- 2026-09-09, 0.4: `CliBridge.style` became `CliBridge.config: Config | None`, read from the
+  file at the start of each run when `None`, the same rule `output` already follows for
+  `sys.stdout`. Capabilities are fixed at agent construction and `Agent.override` has no
+  `capabilities` (checked on core 2.38.0), so the module-level `cli_agent` cannot be handed a
+  theme any other way. `main` reads the same file for the model; two readers of one file, no
+  in-memory copy to keep in sync, so 3.1's `/set` only needs `Config.save` and the next run
+  picks it up. A `CliBridge` on a user's own agent follows the harness theme for the same
+  reason; documented.
+- 2026-09-09, 0.4: `--model` beats the file, the file beats `DEFAULT_MODEL`. No env var (YAGNI)
+  and no eager `infer_model` in `main`: it would resolve the provider before
+  `cli_agent.override(model=TestModel(...))` applies and fail CI on a missing API key. The
+  config string reaches core's `infer_model` through `agent.iter(model=...)`, which is the
+  "via core `infer_model`" the item asks for.
+- 2026-09-09, 0.4: `show_thinking: bool = False` lives on `Config`, not `Theme` (it is policy,
+  not color), and closes the thinking-display decision 0.2 deferred here. Thinking parts stream
+  as dimmed plain text through `_DimStream`, not Markdown; `_MarkdownStream` and `_DimStream`
+  share a `_Stream` protocol so the part hooks stay one code path.
+- 2026-09-09, 0.4: `tests/cli/conftest.py` sets `HOME` to `tmp_path` for every CLI test so
+  `Config.default_path()` never reaches the developer's real file. `Path.home()` reads `HOME`
+  on POSIX; Windows would need `USERPROFILE`, and CI is Ubuntu.
 
 ## Open questions for Mike
 
