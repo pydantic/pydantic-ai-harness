@@ -27,6 +27,9 @@ quadratic. Characters are the honest unit because parser work scales with them; 
 equivalent UTF-8 byte size can be up to four times larger.
 """
 
+MAX_SCAN_WORK_CHARS = 1 << 20
+"""Cumulative characters a streamed call may hand to host parsers."""
+
 
 def decode_partial_args(args_text: str) -> PartialArgs | None:
     """Recover what has streamed so far of the `run_code` arguments, or `None` if undecodable.
