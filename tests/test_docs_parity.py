@@ -134,6 +134,7 @@ _CAPABILITY_PAGE_META = {
     'memory.md': ('memory', 'Memory'),
     'modal-sandbox.md': ('modal_sandbox', 'Modal Sandbox'),
     'modal-workspace.md': ('modal_workspace', 'Modal Workspace'),
+    'e2b-workspace.md': ('e2b_workspace', 'E2B Workspace'),
     'repo-context.md': ('repo_context', 'Repo Context'),
     'researcher.md': ('researcher', 'Researcher'),
     'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),

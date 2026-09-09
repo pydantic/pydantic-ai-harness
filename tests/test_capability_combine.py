@@ -240,6 +240,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         'the bundled agent supplies one workspace; multiple suppliers require explicit selection'
     ),
     ModalWorkspace.__name__: Rejected('multiple Modal workspace suppliers require explicit selection'),
+    'E2BWorkspace': Rejected('multiple E2B workspace suppliers require explicit selection'),
     'Researcher': Anonymous('a packaged harness; composing two is composing their members'),
     'ClampOversizedMessages': Anonymous('clamping twice is a no-op; several thresholds compose'),
     'ClearToolResults': Anonymous('several form an escalation ladder, like `TieredCompaction` tiers'),
