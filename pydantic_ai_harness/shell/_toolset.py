@@ -39,8 +39,6 @@ from pydantic_ai_harness.shell._process import (
     recoverable,
 )
 
-__all__ = ['ShellToolset', 'is_interactive_command']
-
 
 def _format_output(stdout: str, stderr: str, *, empty: str) -> str:
     sections: list[str] = []
@@ -245,7 +243,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         Returns the command to run (possibly rewritten) and a note for the
         model, or `None` as the command when a listener cancelled it. A
         rewrite goes through `_check_command` again so a listener cannot hand
-        the model a command the policy would have refused.
+        the model a command the policy would have refused; the retry names the
+        rewrite so the model is not blamed for a command it never proposed.
         """
         request = ShellCommandRequestEvent(command=command, cwd=str(self._cwd), timeout=timeout, background=background)
         await ctx.emit(request)
@@ -253,8 +252,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             return '', f'[Command was not run: {request.cancel_reason or "cancelled by a listener"}]'
         if request.rewrite_reason is None:
             return command, None
-        self._check_command(request.command)
-        return request.command, f'[Command rewritten ({request.rewrite_reason}): {request.command}]'
+        note = f'[Command rewritten ({request.rewrite_reason}): {request.command}]'
+        try:
+            self._check_command(request.command)
+        except (PermissionError, ModelRetry) as e:
+            raise ModelRetry(f'{note}\n{e}') from e
+        return request.command, note
 
     def _line_sink(self, ctx: RunContext[AgentDepsT] | None, command_id: str, stream: OutputStream) -> LineSink | None:
         if ctx is None:
