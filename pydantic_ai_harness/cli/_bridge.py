@@ -31,6 +31,7 @@ except ImportError as _import_error:  # pragma: no cover
 
 from pydantic_ai_harness.cli._approve import Approver, CliDeps, DeclineAll
 from pydantic_ai_harness.cli._config import Config, Theme
+from pydantic_ai_harness.filesystem import FileChangeRequestEvent, FileOperation, FilesSearchedEvent
 from pydantic_ai_harness.shell import (
     ShellCommandEndEvent,
     ShellCommandRequestEvent,
@@ -39,6 +40,21 @@ from pydantic_ai_harness.shell import (
 )
 
 NO_APPROVER = DeclineAll(reason='nobody can approve this; give the run `CliDeps` or the bridge an `approver`')
+
+_FILE_VERBS: dict[FileOperation, str] = {'write': 'write', 'edit': 'edit', 'create_directory': 'create directory'}
+
+
+def _diff_color(line: str) -> str | None:
+    """The color a unified diff line renders in, or `None` for context lines."""
+    if line.startswith(('+++', '---')):
+        return None
+    if line.startswith('+'):
+        return 'green'
+    if line.startswith('-'):
+        return 'red'
+    if line.startswith('@@'):
+        return 'cyan'
+    return None
 
 
 class _Stream(Protocol):
@@ -99,8 +115,10 @@ class CliBridge(AbstractCapability[AgentDepsT]):
     is set. Wire it last in `capabilities=[...]` so it observes every other capability's events.
 
     Shell commands render from `shell.*` events: the command as it starts, each output line, and
-    an exit summary that replaces the generic result line. A `ShellCommandRequestEvent` is put to
-    the `approver` first and cancelled with the approver's reason when declined.
+    an exit summary that replaces the generic result line. File changes render from `file_system.*`
+    events: the proposed diff, and a match count that replaces a search's result line. A
+    `ShellCommandRequestEvent` or `FileChangeRequestEvent` is put to the `approver` first and
+    cancelled with the approver's reason when declined.
     """
 
     output: TextIO | None = None
@@ -169,12 +187,34 @@ class CliBridge(AbstractCapability[AgentDepsT]):
 
     @on_event(ShellCommandRequestEvent)
     async def _on_shell_request(self, ctx: RunContext[AgentDepsT], event: ShellCommandRequestEvent) -> None:
-        approver = self.approver
-        if approver is None:
-            approver = ctx.deps.approver if isinstance(ctx.deps, CliDeps) else NO_APPROVER
-        verdict = await approver(event, description=f'run {event.command}')
+        verdict = await self._approver(ctx)(event, description=f'run {event.command}')
         if not verdict.allowed:
             event.cancel(verdict.reason)
+
+    @on_event(FileChangeRequestEvent)
+    async def _on_file_change_request(self, ctx: RunContext[AgentDepsT], event: FileChangeRequestEvent) -> None:
+        """Show the proposed diff, then ask; the user decides on what they can see."""
+        for line in event.diff.splitlines():
+            color = _diff_color(line)
+            self._write(line if color is None else f'{fg_color(color)}{line}{RESET}')
+        if event.truncated:
+            self._write(f'{DIM_ON}(diff truncated){DIM_OFF}')
+        verdict = await self._approver(ctx)(event, description=f'{_FILE_VERBS[event.operation]} {event.path}')
+        if not verdict.allowed:
+            event.cancel(verdict.reason)
+
+    @on_event(FilesSearchedEvent)
+    async def _on_files_searched(self, ctx: RunContext[AgentDepsT], event: FilesSearchedEvent) -> None:
+        if event.tool_call_id is not None:
+            self._summarised.add(event.tool_call_id)
+        noun = 'match' if event.match_count == 1 else 'matches'
+        note = ', truncated' if event.truncated else ''
+        self._write(f'{DIM_ON}{event.match_count} {noun} for {event.pattern!r} in {event.path}{note}{DIM_OFF}')
+
+    def _approver(self, ctx: RunContext[AgentDepsT]) -> Approver:
+        if self.approver is not None:
+            return self.approver
+        return ctx.deps.approver if isinstance(ctx.deps, CliDeps) else NO_APPROVER
 
     @on_event(ShellCommandStartEvent)
     async def _on_shell_start(self, ctx: RunContext[AgentDepsT], event: ShellCommandStartEvent) -> None:
