@@ -291,6 +291,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ConversationSearch': Collides('its toolset registers `search_conversation_history` under a fixed name'),
     'ExaAgent': Collides('its toolset registers `web_search` and friends under fixed names'),
     'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'GitHub': Collides('provider connections expose fixed tool names; use PrefixTools for multiple connections'),
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
 }
