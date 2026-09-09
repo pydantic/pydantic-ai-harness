@@ -122,11 +122,14 @@ Three independent glob lists control access. Patterns are matched with
 `fnmatch`, whose `*` spans `/`, so `*.py` matches `src/main.py` and you rarely
 need `**`.
 
+These patterns inspect normalized path spellings, not symlink targets. They are
+guardrails for ordinary agent actions, not a filesystem security boundary.
+
 | Field | Effect |
 |---|---|
 | `allowed_patterns` | If non-empty, only matching paths are accessible (allowlist). |
 | `denied_patterns` | Matching paths are always rejected (denylist). |
-| `protected_patterns` | Matching paths are read-only -- reads succeed, writes are rejected. |
+| `protected_patterns` | Matching path spellings are read-only -- reads succeed, writes are rejected. |
 
 `protected_patterns` defaults to `.git/*`, `.env`/`.env.*`, `*.pem`, `*.key`,
 and `**/secrets*`. Pass an empty list to disable protection.
