@@ -182,11 +182,16 @@ before writing cleanup.
 - Reach the real trigger. Level-cancellation behavior needs a real outer
   `anyio` cancel scope, not a bare `CancelledError` raise; Trio behavior needs
   the `trio` parametrization this suite already runs, not a mental model of it.
-- Only some suites run under Trio. `tests/shell` and `tests/filesystem`
-  parametrize `anyio_backend` over asyncio and Trio; the rest run asyncio only
-  (`anyio_mode = 'auto'` with the plugin's asyncio default). That is why
-  `SubAgentToolset.delegate_task` can use `asyncio.wait_for` today: its suite
-  never runs under Trio. Reach for `anyio` primitives by default
-  (`fail_after`, `Lock`, task groups); before you add Trio parametrization to a
-  suite, grep its package for `asyncio.` and convert or skip each hit, and keep
-  `aws_lambda` asyncio-only because its bridge owns a real asyncio loop.
+- Know which backend a suite runs under before you trust it. anyio's pytest
+  plugin parametrizes `anyio_backend` over every installed backend, and
+  `anyio[trio]` is in the dev group, so the default is asyncio and Trio:
+  `tests/shell` and `tests/filesystem` take that default (collect them and
+  every test id ends in `[asyncio]` or `[trio]`), with individual tests opting
+  out via `@pytest.mark.anyio(backends=['asyncio'])`. A suite goes asyncio-only
+  by overriding the `anyio_backend` fixture at module level to return
+  `'asyncio'`, which `tests/subagents` and `tests/filesystem/test_events.py`
+  do. That override is why `SubAgentToolset.delegate_task` can use
+  `asyncio.wait_for` today. Reach for `anyio` primitives by default
+  (`fail_after`, `Lock`, task groups); before you remove an `anyio_backend`
+  override, grep the package for `asyncio.` and convert or skip each hit, and
+  keep `aws_lambda` asyncio-only because its bridge owns a real asyncio loop.
