@@ -3943,6 +3943,7 @@ browser-use = [
 ]
 cli = [
     { name = "pydantic-ai-slim", extra = ["cli"] },
+    { name = "termflow-md", marker = "python_full_version >= '3.11'" },
 ]
 code-mode = [
     { name = "pydantic-ai-slim", extra = ["duckduckgo"] },
@@ -4051,6 +4052,7 @@ requires-dist = [
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
     { name = "stackone-defender", marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender'", specifier = ">=0.7.3,<0.8" },
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
+    { name = "termflow-md", marker = "python_full_version >= '3.11' and extra == 'cli'", specifier = ">=0.9.1" },
     { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.2,<4" },
 ]
 provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "stackone", "temporal", "youdotcom"]
@@ -8614,6 +8616,19 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
+]
+
+[[package]]
+name = "termflow-md"
+version = "0.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pygments" },
+    { name = "wcwidth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cb/f7/c8754f90f13edc4008d16ee3923654520a839ff123f0f054a12f485c2282/termflow_md-0.9.1.tar.gz", hash = "sha256:5c0500a1b7937b1a7ea0eeb205ee8b8739823b44b61201de93b76faf8d04e452", size = 162387, upload-time = "2026-09-03T11:18:38.594Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d4/55/5973340923f3fbfaaeddc0cb5c19b24aeced2b332937a84729a4a72d4131/termflow_md-0.9.1-py3-none-any.whl", hash = "sha256:22ce1e7d4e14bbe61af7bfc4207a0c9ed057c1cc26951fec83f2b5a9931459cb", size = 95775, upload-time = "2026-09-03T11:18:37.477Z" },
 ]
 
 [[package]]
