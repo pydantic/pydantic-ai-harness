@@ -1,11 +1,12 @@
-"""Regression tests for the launcher inside `gh-aw/pydantic.md`.
+"""Regression tests for the JavaScript inside `gh-aw/pydantic.md`.
 
-The definition is the shipped artifact, so the script under test is read out of it
+The definition is the shipped artifact, so the scripts under test are read out of it
 rather than copied here: gh-aw runs those exact bytes, and a copy would let the two
-drift. The script is JavaScript, so `node` runs it, and a shell script standing in
-for the interpreter records the argv and environment it is handed. The Python
-program the launcher passes to `-c` is then run with the real interpreter, using the
-recorded bytes.
+drift. They are JavaScript, so `node` runs them, and a shell script standing in
+for the interpreter records the argv and environment the launcher hands it. The
+Python program the launcher passes to `-c` is then run with the real interpreter,
+using the recorded bytes. The `log-parser` is driven the same way, over a log
+holding the line shapes a run emits.
 """
 
 from __future__ import annotations
@@ -80,6 +81,24 @@ with Path(os.environ['GH_AW_TEST_IMPORTS']).open('a') as handle:
 agent = Agent(name='NAME', instructions='Answer briefly.')
 """
 
+LOG_PARSER_DRIVER = """
+const fs = require("fs");
+const { parseLog } = require("./parser.cjs");
+
+process.stdout.write(JSON.stringify(parseLog(fs.readFileSync(process.argv[2], "utf8"))));
+"""
+
+# One line of each shape the parser branches on, in the order a run emits them: an
+# infra line it drops, text, a usage record, a reply that is bare JSON, a tool call,
+# and text after it.
+AGENT_LOG = """[pydantic-ai] starting the agent
+{"msg": "Reading the issue."}
+{"input_tokens": 10, "output_tokens": 5}
+{"answer": 42}
+{"type": "tool_call", "tool": "read_file", "msg": "read 12 lines"}
+{"msg": "Done."}
+"""
+
 PROMPT = 'summarize the issue'
 
 # One configured endpoint per api-proxy backend, in the shape `/reflect` reports.
@@ -101,6 +120,7 @@ class _Behaviors(BaseModel):
     model_config = ConfigDict(extra='ignore')
 
     harness_script: str = Field(alias='harness-script')
+    log_parser: str = Field(alias='log-parser')
 
 
 class _Engine(BaseModel):
@@ -139,18 +159,57 @@ class _Invocation(BaseModel):
         return [Path(entry) for entry in self.env['PYTHONPATH'].split(':')]
 
 
-def harness_script() -> str:
-    """The `harness-script` gh-aw runs, read from the definition it ships in."""
+class _Block(BaseModel):
+    """One content block of a reconstructed log entry."""
+
+    model_config = ConfigDict(extra='ignore')
+
+    type: str
+    text: str = ''
+    name: str = ''
+    id: str = ''
+    tool_use_id: str = ''
+    content: str = ''
+
+
+class _Message(BaseModel):
+    content: list[_Block] = Field(default_factory=list[_Block])
+
+
+class _Entry(BaseModel):
+    model_config = ConfigDict(extra='ignore')
+
+    type: str
+    message: _Message = Field(default_factory=_Message)
+    num_turns: int = 0
+    usage: dict[str, int] = Field(default_factory=dict[str, int])
+
+
+class _ParsedLog(BaseModel):
+    """What the log parser reconstructed from a run's output."""
+
+    model_config = ConfigDict(extra='ignore')
+
+    markdown: str
+    log_entries: list[_Entry] = Field(alias='logEntries')
+
+    @property
+    def texts(self) -> list[str]:
+        return [block.text for entry in self.log_entries for block in entry.message.content if block.type == 'text']
+
+
+def behaviors() -> _Behaviors:
+    """The `engine.behaviors` block, read from the definition gh-aw consumes."""
     lines = DEFINITION.read_text(encoding='utf-8').splitlines()
     frontmatter: object = yaml.safe_load('\n'.join(lines[1 : lines.index('---', 1)]))
-    return _Frontmatter.model_validate(frontmatter).engine.behaviors.harness_script
+    return _Frontmatter.model_validate(frontmatter).engine.behaviors
 
 
 def launch(tmp_path: Path, env: dict[str, str]) -> _Invocation:
     """Run the harness script against an interpreter that records instead of running."""
     actions = tmp_path / 'actions'
     actions.mkdir(parents=True, exist_ok=True)
-    (actions / 'harness.cjs').write_text(harness_script(), encoding='utf-8')
+    (actions / 'harness.cjs').write_text(behaviors().harness_script, encoding='utf-8')
     (actions / 'awf_reflect.cjs').write_text(REFLECT_STUB, encoding='utf-8')
 
     # `pythonLocation` is what `actions/setup-python` exports, and the script joins
@@ -197,6 +256,28 @@ def launch(tmp_path: Path, env: dict[str, str]) -> _Invocation:
     )
     assert completed.returncode == 0, completed.stderr
     return _Invocation.model_validate_json(record.read_text(encoding='utf-8'))
+
+
+def parse_log(tmp_path: Path, log: str) -> _ParsedLog:
+    """Run the shipped `log-parser` over `log`, exported the way gh-aw exports it."""
+    # gh-aw wraps the block in a module that exports the `parseLog` the block defines,
+    # so the driver requires it under that name.
+    parser = tmp_path / 'parser.cjs'
+    parser.write_text(f'{behaviors().log_parser}\nmodule.exports = {{ parseLog }};\n', encoding='utf-8')
+    driver = tmp_path / 'driver.cjs'
+    driver.write_text(LOG_PARSER_DRIVER, encoding='utf-8')
+    agent_log = tmp_path / 'agent.log'
+    agent_log.write_text(log, encoding='utf-8')
+
+    completed = subprocess.run(
+        ['node', str(driver), str(agent_log)],
+        env={'PATH': os.environ['PATH']},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    return _ParsedLog.model_validate_json(completed.stdout)
 
 
 def gateway_config(tmp_path: Path) -> Path:
@@ -396,3 +477,39 @@ class TestLauncherProgram:
         assert 'RuntimeError: the agent could not be built' in completed.stderr
         # The message `pai` prints instead of a traceback when its own load fails.
         assert 'Could not load agent' not in completed.stderr + completed.stdout
+
+
+class TestLogParser:
+    """The `log-parser` gh-aw runs over the agent step's output."""
+
+    def test_a_reply_that_is_bare_json_is_kept(self, tmp_path: Path) -> None:
+        parsed = parse_log(tmp_path, AGENT_LOG)
+
+        # The line carries no field the parser reads text from, so it survives only as
+        # the line itself.
+        assert parsed.texts == ['Reading the issue.\n{"answer": 42}', 'Done.']
+
+    def test_a_usage_record_is_counted_and_not_repeated_as_text(self, tmp_path: Path) -> None:
+        parsed = parse_log(tmp_path, AGENT_LOG)
+
+        assert parsed.log_entries[-1].usage == {'input_tokens': 10, 'output_tokens': 5}
+        assert 'input_tokens' not in '\n'.join(parsed.texts)
+        assert '**Tokens:** 15' in parsed.markdown
+
+    def test_infra_lines_are_dropped_and_a_tool_call_becomes_a_pair(self, tmp_path: Path) -> None:
+        parsed = parse_log(tmp_path, AGENT_LOG)
+
+        assert '[pydantic-ai]' not in '\n'.join(parsed.texts)
+        assert [entry.type for entry in parsed.log_entries] == [
+            'system',
+            'assistant',
+            'assistant',
+            'user',
+            'assistant',
+            'result',
+        ]
+        (call,) = parsed.log_entries[2].message.content
+        (result,) = parsed.log_entries[3].message.content
+        assert (call.type, call.name) == ('tool_use', 'read_file')
+        assert (result.type, result.tool_use_id, result.content) == ('tool_result', call.id, 'read 12 lines')
+        assert parsed.log_entries[-1].num_turns == 2

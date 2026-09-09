@@ -447,6 +447,11 @@ engine:
               logEntries.push({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: toolId, content: msg }] } });
             } else if (msg) {
               pendingText.push(msg);
+            } else if (!parsed.input_tokens && !parsed.output_tokens) {
+              // A JSON line carrying none of the text fields is still assistant output --
+              // a reply that is bare JSON, say -- so it is kept as written. A usage record
+              // is not: its numbers were just added to the totals.
+              pendingText.push(line.trim());
             }
           } else {
             pendingText.push(line.trim());
