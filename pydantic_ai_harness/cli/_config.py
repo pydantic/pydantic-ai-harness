@@ -52,6 +52,8 @@ class Config(BaseModel):
     theme: Theme = Theme()
     show_thinking: bool = False
     """Render the model's thinking parts, dimmed, as they stream."""
+    yolo: bool = False
+    """Approve every shell command and file change without asking."""
 
     @staticmethod
     def default_path() -> Path:

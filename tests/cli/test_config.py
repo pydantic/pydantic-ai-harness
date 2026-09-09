@@ -13,7 +13,9 @@ from pydantic_ai_harness.cli import DEFAULT_MODEL, Config, Theme
 class TestConfig:
     def test_round_trip(self, tmp_path: Path) -> None:
         path = tmp_path / 'nested' / 'config.json'
-        config = Config(model='openai:gpt-5.6-sol', theme=Theme(palette='nord', code_style='vim'), show_thinking=True)
+        config = Config(
+            model='openai:gpt-5.6-sol', theme=Theme(palette='nord', code_style='vim'), show_thinking=True, yolo=True
+        )
 
         config.save(path)
 
@@ -22,11 +24,12 @@ class TestConfig:
             'model': 'openai:gpt-5.6-sol',
             'theme': {'palette': 'nord', 'code_style': 'vim'},
             'show_thinking': True,
+            'yolo': True,
         }
 
     def test_default_path_is_under_home(self, home: Path) -> None:
         assert Config.default_path() == home / '.pydantic-ai-harness' / 'config.json'
-        assert Config.load() == Config(model=DEFAULT_MODEL, theme=Theme(), show_thinking=False)
+        assert Config.load() == Config(model=DEFAULT_MODEL, theme=Theme(), show_thinking=False, yolo=False)
 
         Config(model='test').save()
 

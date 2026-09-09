@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import io
+import json
+from collections.abc import AsyncIterator
 
 import pytest
+from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart
+from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
+from termflow.ansi import visible  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_ai_harness.cli import Config, cli_agent, main
+
+
+def _echo_model() -> FunctionModel:
+    """Call `run_command` with `ls -d .` once, then answer `ran`."""
+
+    async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+        returned = any(isinstance(p, ToolReturnPart) for m in messages if isinstance(m, ModelRequest) for p in m.parts)
+        if returned:
+            yield 'ran'
+        else:
+            yield {0: DeltaToolCall(name='run_command', json_args=json.dumps({'command': 'ls -d .'}))}
+
+    return FunctionModel(stream_function=stream)
 
 
 class TestMain:
@@ -47,6 +65,30 @@ class TestMain:
         with pytest.raises(SystemExit):
             main(['-p', 'hi', '--model', 'anthropic:claude-fable-5'])
         assert 'ANTHROPIC_API_KEY' in capsys.readouterr().err
+
+    def test_one_shot_mode_declines_commands_unless_yolo(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.chdir(Config.default_path().parent.parent)
+
+        with cli_agent.override(model=_echo_model()):
+            main(['-p', 'list'])
+        declined = visible(capsys.readouterr().out)
+        assert '< run_command [Command was not run: one-shot mode has no terminal' in declined
+        assert '$ ls -d .' not in declined
+
+        with cli_agent.override(model=_echo_model()):
+            main(['-p', 'list', '--yolo'])
+        assert '$ ls -d .\n.\nexit 0 (' in visible(capsys.readouterr().out)
+
+    def test_yolo_comes_from_the_config_file(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        monkeypatch.chdir(Config.default_path().parent.parent)
+        Config(yolo=True).save()
+        with cli_agent.override(model=_echo_model()):
+            main(['-p', 'list'])
+        assert '$ ls -d .\n.\nexit 0 (' in visible(capsys.readouterr().out)
 
     def test_invalid_config_file_exits_with_its_path(self, capsys: pytest.CaptureFixture[str]) -> None:
         path = Config.default_path()

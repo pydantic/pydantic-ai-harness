@@ -18,6 +18,8 @@ from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.run import AgentRun
 from termflow.ansi import DIM_OFF, DIM_ON  # pyright: ignore[reportMissingTypeStubs]
 
+from pydantic_ai_harness.cli._approve import Approver, CliDeps, TerminalApprover
+
 
 class Lines:
     """Lines the user submits, in order. `read` returns `None` once input has ended.
@@ -28,13 +30,36 @@ class Lines:
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._answer: asyncio.Future[str | None] | None = None
 
     def push(self, line: str | None) -> None:
-        """Append a line, or `None` to mark the end of input. Call from the event loop's thread."""
+        """Append a line, or `None` to mark the end of input. Call from the event loop's thread.
+
+        A line pushed while `ask` is waiting answers it instead of joining the queue. The end of
+        input answers the question too, and still reaches `read`.
+        """
+        if self._answer is not None and not self._answer.done():
+            self._answer.set_result(line)
+            if line is not None:
+                return
         self._queue.put_nowait(line)
 
     async def read(self) -> str | None:
         return await self._queue.get()
+
+    async def ask(self) -> str | None:
+        """Take the next line for a question, ahead of whoever is waiting in `read`.
+
+        Approval prompts use this so the user's answer is not swallowed by the steer task
+        draining `read` during a run. One question at a time.
+        """
+        if self._answer is not None and not self._answer.done():
+            raise RuntimeError('a question is already waiting for an answer')
+        self._answer = asyncio.get_running_loop().create_future()
+        try:
+            return await self._answer
+        finally:
+            self._answer = None
 
     @classmethod
     def from_stdin(cls) -> Lines:
@@ -67,10 +92,11 @@ class Repl:
 
     Rendering is `CliBridge`'s job; the REPL only writes the prompt and its own status lines to
     `output`. Message history carries across prompts, including the partial history of a run
-    that was cancelled.
+    that was cancelled. Each run gets `CliDeps` carrying the `approver` that answers decision
+    events such as a shell command request.
     """
 
-    agent: AbstractAgent[None, str]
+    agent: AbstractAgent[CliDeps, str]
     model: Model | KnownModelName | str
     output: TextIO
     lines: Lines = field(default_factory=Lines)
@@ -79,7 +105,14 @@ class Repl:
     """Written before each prompt is read."""
     history: list[ModelMessage] = field(default_factory=list[ModelMessage])
     """The conversation so far; each run starts from it and replaces it, a cancelled run included."""
-    _run: AgentRun[None, object] | None = field(init=False, default=None, repr=False)
+    approver: Approver | None = None
+    """Answers decision events. `None` asks the user through `lines` and `output`."""
+    _run: AgentRun[CliDeps, object] | None = field(init=False, default=None, repr=False)
+    _deps: CliDeps = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        approver = TerminalApprover(answers=self.lines, output=self.output) if self.approver is None else self.approver
+        self._deps = CliDeps(approver=approver)
 
     async def run(self) -> None:
         """Read prompts until the end of input, running each one. Ctrl+C while idle re-shows the prompt."""
@@ -101,7 +134,7 @@ class Repl:
     async def submit(self, prompt: str) -> None:
         """Run `prompt` against the current history, forwarding lines read meanwhile as steer messages."""
         try:
-            async with self.agent.iter(prompt, model=self.model, message_history=self.history) as run:
+            async with self.agent.iter(prompt, model=self.model, message_history=self.history, deps=self._deps) as run:
                 self._run = run
                 steer = asyncio.create_task(self._steer(run))
                 try:
@@ -124,7 +157,7 @@ class Repl:
             self.output.write('\n')
             self._show_prompt()
 
-    async def _steer(self, run: AgentRun[None, object]) -> None:
+    async def _steer(self, run: AgentRun[CliDeps, object]) -> None:
         while True:
             line = await self.lines.read()
             if line is None:
