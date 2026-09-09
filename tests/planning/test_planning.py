@@ -12,6 +12,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    TextContent,
     TextPart,
     ToolCallPart,
     UserPromptPart,
@@ -1147,4 +1148,14 @@ class TestEndToEnd:
         assert prefixes[0] == ['go']
         assert prefixes[1] == ['go', 'continue']
         assert prefixes[1][: len(prefixes[0])] == prefixes[0]
+        prefix = durable_prefix(
+            [
+                ModelRequest(
+                    parts=[UserPromptPart(content=[TextContent(content='tagged'), 'after', CachePoint(ttl='5m')])]
+                )
+            ]
+        )
+        assert prefix == ['after']
+        with pytest.raises(AssertionError, match='no CachePoint'):
+            durable_prefix([ModelRequest(parts=[UserPromptPart('no breakpoint')])])
         assert breakpoints([*result_1.all_messages(), *result_2.all_messages()]) == []
