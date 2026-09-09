@@ -163,9 +163,13 @@ the branch. Each item names its acceptance check.
       PR, bridge renders `ShellCommandStartEvent` / `ShellOutputLineEvent` / `ShellCommandEndEvent`
       and answers `ShellCommandRequestEvent` with an approval prompt (yolo auto-approves). PR #845
       (draft, CI green, pydanty labelled); bridge half merged into `feat/experimental-cli`.
-- [ ] 1.1b Work pydanty's review of #845 (`gh pr view 845 --comments`; the label
+- [x] 1.1b Work pydanty's review of #845 (`gh pr view 845 --comments`; the label
       `pydanty:is-working` clears when it lands), address the findings in `../harness-shell`,
-      merge the fixes into `feat/experimental-cli`, then mark #845 ready for review.
+      merge the fixes into `feat/experimental-cli`, then mark #845 ready for review. Six required
+      findings fixed at 5013ee2c; the blocking one is the floor (1.1c), answered on the PR.
+- [ ] 1.1c Floor on `pydantic-ai` 2.40.0 (issue #850, branch `puppy/floor-2-40`, worktree
+      `../harness-floor`): `@agent.on_event` is 2.40.0+ and six merged docs pages plus shell
+      use it. Dependency PR, needs `dependencies:approved`. Unblocks pydanty on #845.
 - [ ] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`): `FileChangeRequestEvent`,
       `FileEditedEvent`, `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and
       grep results, answers the request event.
@@ -387,6 +391,26 @@ Append-only. Date, item, decision, why.
   matching the planning and spend pages; snippets are ruff-checked, not run.
 - 2026-09-09, loop: issuing several `edit` calls against one file in a single tool batch loses
   all but one of them (they apply against the same base). One edit per file per call.
+
+- 2026-09-09, 1.1b: pydanty's blocking finding on #845 (`Agent.on_event` missing on the 2.38.0
+  floor) is not fixed on the shell page. `@agent.on_event` landed in core 2.40.0
+  (pydantic-ai#8101) and the merged planning, spend, compaction, filesystem, and
+  system-reminders pages already use it, so shell keeps the sibling style and the floor bump
+  is its own dependency PR (issue #850, item 1.1c). Supersedes nothing; the 1.1 snippet-style
+  decision stands.
+- 2026-09-09, 1.1b: a rewrite the policy refuses now raises `ModelRetry` prefixed with the
+  same `[Command rewritten (...)]` note the success path uses, so the model is not told off
+  for a command a listener wrote. Precedence between listeners is documented and pinned:
+  cancel beats rewrite in either order (`rewrite()` never clears `cancelled`), last rewrite
+  wins. Not changed to raise on rewrite-after-cancel: a listener cannot see the others.
+- 2026-09-09, 1.1b: the cancellation test checks group liveness through
+  `ps -eo pgid=,stat=` (zombie state `Z`) rather than `killpg(pgid, 0)`, which succeeds
+  while an orphan sits unreaped under a non-reaping PID 1 (pydanty's sandbox). Chosen over the
+  suggested `/proc` scan because the suite runs on macOS too.
+- 2026-09-09, 1.1b: the `../harness-shell` worktree venv has no `pyright`; run the main
+  checkout's binary with `--pythonpath .venv/bin/python` against the worktree.
+- 2026-09-09, 1.1b: pydanty took 42 minutes on #845 (labelled 21:03Z, verdict 21:45Z), at the
+  long end of the 20-57 range. Budget for it before polling.
 
 ## Open questions for Mike
 
