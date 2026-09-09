@@ -23,12 +23,12 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.sandboxes import LocalSandbox, UnavailableSandbox
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
+from pydantic_ai.workspaces import LocalWorkspace, ReadOnlyWorkspace, UnavailableWorkspace, Workspace
 
-from pydantic_ai_harness.subagents import SubAgent, SubAgents, SubAgentToolset
+from pydantic_ai_harness.subagents import ModelOption, SubAgent, SubAgents, SubAgentToolset
 
 
 @dataclass
@@ -54,6 +54,26 @@ pytestmark = pytest.mark.anyio
 def anyio_backend() -> str:
     """Run async tests on the asyncio backend (matching upstream pydantic-ai)."""
     return 'asyncio'
+
+
+async def test_workspace_free_temporal_delegate() -> None:
+    pytest.importorskip('temporalio')
+    from pydantic_ai.durable_exec.temporal import TemporalRunContext  # noqa: PLC0415
+
+    toolset = SubAgentToolset[object](
+        agents={'worker': SubAgent(Agent[object, str](TestModel(custom_output_text='worker'), name='worker'))},
+        forward_usage=False,
+        inherit_tools=False,
+        shared_capabilities=[],
+        event_stream_handler=None,
+        tool_name='delegate_task',
+        tool_retries=None,
+        contain_errors=False,
+        call_counts={},
+        models={'test': ModelOption(TestModel(custom_output_text='worker'))},
+    )
+    result = await toolset.delegate_task(TemporalRunContext[object](deps=None), 'worker', 'hello', model='test')
+    assert result == 'worker'
 
 
 def _delegate_then_finish(agent_name: str, *, retries_before: int = 0) -> FunctionModel:
@@ -224,33 +244,38 @@ class TestDelegation:
         ]
         assert returns == ['WORKER RESULT']
 
-    async def test_delegate_inherits_parent_sandbox(self, tmp_path: Path) -> None:
-        worker: Agent[object, str] = Agent(TestModel(call_tools=['sandbox_working_dir']), name='worker')
+    async def test_delegate_inherits_parent_workspace(self, tmp_path: Path) -> None:
+        facade = ReadOnlyWorkspace(Workspace(LocalWorkspace(root=tmp_path)))
+        worker: Agent[object, str] = Agent(TestModel(call_tools=['workspace_details']), name='worker')
 
         @worker.tool
-        async def sandbox_working_dir(ctx: RunContext[object]) -> str:
-            return await ctx.sandbox.working_dir()
+        async def workspace_details(ctx: RunContext[object]) -> str:
+            assert ctx.workspace is facade
+            working_dir = await ctx.workspace.working_dir()
+            with pytest.raises(UserError, match='read-only'):
+                await ctx.workspace.run(['echo', 'blocked'])
+            return working_dir
 
         parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
         )
-        result = await parent.run('go', sandbox=LocalSandbox(root=tmp_path))
+        result = await parent.run('go', workspace=facade)
 
         assert str(tmp_path) in _delegate_returns(result)[0]
 
-    async def test_unavailable_parent_sandbox_is_forwarded(self) -> None:
-        worker: Agent[object, str] = Agent(TestModel(call_tools=['sandbox_working_dir']), name='worker')
+    async def test_unavailable_parent_workspace_is_forwarded(self) -> None:
+        worker: Agent[object, str] = Agent(TestModel(call_tools=['workspace_working_dir']), name='worker')
 
         @worker.tool
-        async def sandbox_working_dir(ctx: RunContext[object]) -> str:
-            return await ctx.sandbox.working_dir()
+        async def workspace_working_dir(ctx: RunContext[object]) -> str:
+            return await ctx.workspace.working_dir()
 
         parent: Agent[object, str] = Agent(
             _delegate_then_finish('worker'), capabilities=[SubAgents(agents=[SubAgent(worker)])]
         )
 
-        with pytest.raises(UserError, match='sandbox disabled by policy'):
-            await parent.run('go', sandbox=UnavailableSandbox('sandbox disabled by policy'))
+        with pytest.raises(UserError, match='workspace disabled by policy'):
+            await parent.run('go', workspace=UnavailableWorkspace('workspace disabled by policy'))
 
     async def test_delegates_via_name_override(self) -> None:
         worker = Agent(TestModel(custom_output_text='WORKER RESULT'), name='internal')
@@ -780,6 +805,30 @@ class TestContainErrors:
         # A setup bug must reach the developer even under containment, not become a retry.
         with pytest.raises(UserError):
             await parent.run('go')
+
+    async def test_first_party_cancellation_bypasses_containment(self) -> None:
+        def call_stop(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart('stop', {}, tool_call_id='s1')])
+
+        canceller = Agent(FunctionModel(call_stop), name='canceller')
+
+        @canceller.tool
+        def stop(ctx: RunContext[object]) -> str:
+            ctx.cancel()
+            return 'ignored'
+
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('canceller'),
+            capabilities=[SubAgents(agents=[SubAgent(canceller, contain_errors=True)])],
+        )
+        result = await parent.run('go')
+        # `RunCancelled` is a plain `Exception`: a deliberate `ctx.cancel()` in the child must
+        # escape containment so pydantic-ai isolates it as a failed delegate return, not become
+        # a `Sub-agent ... crashed` retry that invites the parent to re-delegate.
+        assert result.output == 'all done'
+        assert not _delegate_retries(result)
+        returns = _delegate_returns(result)
+        assert any('The sub-agent run was cancelled' in r for r in returns)
 
     async def test_on_failure_does_not_soften_contained_crash(self) -> None:
         boomer = Agent(_crash(), name='boomer')
