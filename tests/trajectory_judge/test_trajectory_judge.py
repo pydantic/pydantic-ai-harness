@@ -7,6 +7,7 @@ from dataclasses import is_dataclass
 from typing import Any
 from unittest.mock import MagicMock
 
+import anyio
 import pytest
 from pydantic import ValidationError
 from pydantic_ai import Agent
@@ -112,6 +113,21 @@ def _text_response(text: str = 'ok') -> ModelResponse:
     return ModelResponse(parts=[TextPart(text)])
 
 
+async def _run_hook_until(
+    capability: TrajectoryJudge[Any],
+    ctx: Any,
+    request_context: ModelRequestContext,
+    response: ModelResponse,
+    done: asyncio.Event,
+) -> None:
+    async def handler() -> Any:
+        await capability.after_model_request(ctx, request_context=request_context, response=response)
+        await asyncio.wait_for(done.wait(), timeout=_WAIT)
+        return 'run-result'
+
+    await capability.wrap_run(ctx, handler=handler)
+
+
 class TestConfigValidation:
     def test_is_a_dataclass_with_capability_fields(self) -> None:
         cap = TrajectoryJudge(model='test', id='judge', description='reviews trajectory', defer_loading=True)
@@ -189,10 +205,7 @@ class TestJudgeInstructions:
         )
         ctx = _ctx()
         run_cap = await cap.for_run(ctx)
-        await run_cap.after_model_request(
-            ctx, request_context=_request_context(_hi_request()), response=_text_response()
-        )
-        await asyncio.wait_for(done.wait(), timeout=_WAIT)
+        await _run_hook_until(run_cap, ctx, _request_context(_hi_request()), _text_response(), done)
 
         assert judge_instructions[0] is not None
         assert 'You are a trajectory judge' in judge_instructions[0]
@@ -305,15 +318,16 @@ class TestSteering:
         cap = TrajectoryJudge(model=_steer_model('back on task'), every=1)
         ctx = _ctx()
         run_cap = await cap.for_run(ctx)
-        await run_cap.after_model_request(
-            ctx, request_context=_request_context(_hi_request()), response=_text_response()
-        )
 
-        async def wait_for_enqueue() -> None:
+        async def handler() -> Any:
+            await run_cap.after_model_request(
+                ctx, request_context=_request_context(_hi_request()), response=_text_response()
+            )
             while not ctx.enqueue.called:
                 await asyncio.sleep(0.01)
+            return 'run-result'
 
-        await asyncio.wait_for(wait_for_enqueue(), timeout=_WAIT)
+        await asyncio.wait_for(run_cap.wrap_run(ctx, handler=handler), timeout=_WAIT)
         ctx.enqueue.assert_called_once_with("Steering from trajectory judge 'trajectory-judge': back on task")
         # The judge's own model call was threaded onto the run's usage.
         assert ctx.usage.requests >= 1
@@ -405,19 +419,23 @@ class TestCadence:
         run_cap = await cap.for_run(ctx)
         request_context = _request_context(_hi_request())
 
-        await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
-        await asyncio.sleep(0)  # let the evaluation task start
-        # Due again, but the first evaluation is still blocked on the gate: skipped.
-        await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
-        gate.set()
-        await asyncio.wait_for(done.wait(), timeout=_WAIT)
-        assert calls == 1
+        async def handler() -> Any:
+            await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
+            await asyncio.sleep(0)  # let the evaluation task start
+            # Due again, but the first evaluation is still blocked on the gate: skipped.
+            await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
+            gate.set()
+            await asyncio.wait_for(done.wait(), timeout=_WAIT)
+            assert calls == 1
 
-        # The next tick reaps the finished evaluation and launches a fresh one.
-        done.clear()
-        await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
-        await asyncio.wait_for(done.wait(), timeout=_WAIT)
-        assert calls == 2
+            # The next tick reaps the finished evaluation and launches a fresh one.
+            done.clear()
+            await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
+            await asyncio.wait_for(done.wait(), timeout=_WAIT)
+            assert calls == 2
+            return 'run-result'
+
+        await run_cap.wrap_run(ctx, handler=handler)
 
     async def test_fresh_state_per_run(self) -> None:
         """Cadence counting starts over each run: `every=3` never fires across two 2-step runs."""
@@ -451,15 +469,15 @@ class TestFailureHandling:
         ctx = _ctx()
         run_cap = await cap.for_run(ctx)
         request_context = _request_context(_hi_request())
-        await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
 
-        async def tick_until_raise() -> None:
+        async def handler() -> Any:
+            await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
             while True:
                 await asyncio.sleep(0.01)
                 await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
 
         with pytest.raises(RuntimeError, match='judge exploded'):
-            await asyncio.wait_for(tick_until_raise(), timeout=_WAIT)
+            await asyncio.wait_for(run_cap.wrap_run(ctx, handler=handler), timeout=_WAIT)
 
     async def test_run_end_cancels_an_in_flight_evaluation(self) -> None:
         """A run that ends mid-evaluation completes normally; the evaluation is cancelled."""
@@ -526,6 +544,45 @@ class TestFailureHandling:
         with pytest.raises(RuntimeError, match='run exploded'):
             await run_cap.wrap_run(ctx, handler=handler)
 
+    async def test_run_cancellation_unwinds_the_evaluation(self) -> None:
+        """External cancellation propagates after the task group has unwound the judge."""
+        started = anyio.Event()
+        unwound = anyio.Event()
+
+        async def judge_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            started.set()
+            try:
+                await anyio.sleep_forever()
+                raise AssertionError('sleep_forever returned')  # pragma: no cover
+            finally:
+                unwound.set()
+
+        cap = TrajectoryJudge(model=FunctionModel(judge_fn), every=1)
+        ctx = _ctx()
+        run_cap = await cap.for_run(ctx)
+        completed = False
+
+        async def handler() -> Any:
+            await run_cap.after_model_request(
+                ctx, request_context=_request_context(_hi_request()), response=_text_response()
+            )
+            await anyio.sleep_forever()
+
+        async def cancel_when_started(scope: anyio.CancelScope) -> None:
+            await started.wait()
+            scope.cancel()
+
+        with anyio.fail_after(_WAIT):
+            with anyio.CancelScope() as run_scope:
+                async with anyio.create_task_group() as task_group:
+                    task_group.start_soon(cancel_when_started, run_scope)
+                    await run_cap.wrap_run(ctx, handler=handler)
+                    completed = True  # pragma: no cover - cancellation must leave the scope first
+
+        assert not completed
+        assert unwound.is_set()
+        assert ctx.usage.requests == 0
+
 
 class TestTranscript:
     async def test_escapes_trajectory_delimiters_in_content(self) -> None:
@@ -546,10 +603,7 @@ class TestTranscript:
             )
         ]
 
-        await run_cap.after_model_request(
-            ctx, request_context=_request_context(messages), response=_text_response('wrap-up')
-        )
-        await asyncio.wait_for(done.wait(), timeout=_WAIT)
+        await _run_hook_until(run_cap, ctx, _request_context(messages), _text_response('wrap-up'), done)
 
         assert seen[0].count('</trajectory>') == 1
         assert '&lt;/trajectory&gt;' in seen[0]
@@ -597,10 +651,7 @@ class TestTranscript:
                 ]
             ),
         ]
-        await run_cap.after_model_request(
-            ctx, request_context=_request_context(messages), response=_text_response('wrap-up')
-        )
-        await asyncio.wait_for(done.wait(), timeout=_WAIT)
+        await _run_hook_until(run_cap, ctx, _request_context(messages), _text_response('wrap-up'), done)
 
         transcript = seen[0]
         assert 'user: hello' in transcript
@@ -629,10 +680,7 @@ class TestTranscript:
         run_cap = await cap.for_run(ctx)
 
         messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('x' * 2000)])]
-        await run_cap.after_model_request(
-            ctx, request_context=_request_context(messages), response=_text_response('recent-marker')
-        )
-        await asyncio.wait_for(done.wait(), timeout=_WAIT)
+        await _run_hook_until(run_cap, ctx, _request_context(messages), _text_response('recent-marker'), done)
 
         transcript = seen[0].split('<trajectory>\n', 1)[1].rsplit('\n</trajectory>', 1)[0]
         assert 'recent-marker' in transcript
@@ -715,19 +763,18 @@ class TestUsageCoordination:
         ]
 
         request_context = _request_context(_hi_request())
-        for run_cap in run_caps:
-            await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
-        assert ctx.usage.requests == 2  # exactly one claim landed; the skipped launches claimed nothing
-        gate.set()
-        await asyncio.wait_for(done.wait(), timeout=_WAIT)
 
-        async def passthrough() -> Any:
+        async def run_nested(index: int = 0) -> Any:
+            if index < len(run_caps):
+                return await run_caps[index].wrap_run(ctx, handler=lambda: run_nested(index + 1))
+            for run_cap in run_caps:
+                await run_cap.after_model_request(ctx, request_context=request_context, response=_text_response())
+            assert ctx.usage.requests == 2  # exactly one claim landed; the skipped launches claimed nothing
+            gate.set()
+            await asyncio.wait_for(done.wait(), timeout=_WAIT)
             return 'run-result'
 
-        # The winner's `wrap_run` reaps its finished task; the skipped judges have nothing
-        # to reap and nothing to raise.
-        for run_cap in run_caps:
-            assert await run_cap.wrap_run(ctx, handler=passthrough) == 'run-result'
+        assert await run_nested() == 'run-result'
         assert judge_calls == 1
         assert ctx.usage.requests == 2  # parent + the single winning evaluation, within the limit of 3
 
@@ -742,15 +789,17 @@ class TestUsageCoordination:
         ctx = _ctx()
         ctx.usage_limits = UsageLimits(request_limit=5)
         run_cap = await cap.for_run(ctx)
-        await run_cap.after_model_request(
-            ctx, request_context=_request_context(_hi_request()), response=_text_response()
-        )
-        assert ctx.usage.requests == 1  # the claim, made synchronously at launch
+        requests_at_launch: list[int] = []
 
         async def handler() -> Any:
+            await run_cap.after_model_request(
+                ctx, request_context=_request_context(_hi_request()), response=_text_response()
+            )
+            requests_at_launch.append(ctx.usage.requests)
             return 'run-result'
 
         assert await run_cap.wrap_run(ctx, handler=handler) == 'run-result'
+        assert requests_at_launch == [1]  # the claim was made synchronously at launch
         assert ctx.usage.requests == 0  # the never-started evaluation released its claim
 
     async def test_unbounded_limits_pass_through(self) -> None:
@@ -759,15 +808,16 @@ class TestUsageCoordination:
         ctx = _ctx()
         ctx.usage_limits = UsageLimits()
         run_cap = await cap.for_run(ctx)
-        await run_cap.after_model_request(
-            ctx, request_context=_request_context(_hi_request()), response=_text_response()
-        )
 
-        async def wait_for_enqueue() -> None:
+        async def handler() -> Any:
+            await run_cap.after_model_request(
+                ctx, request_context=_request_context(_hi_request()), response=_text_response()
+            )
             while not ctx.enqueue.called:
                 await asyncio.sleep(0.01)
+            return 'run-result'
 
-        await asyncio.wait_for(wait_for_enqueue(), timeout=_WAIT)
+        await asyncio.wait_for(run_cap.wrap_run(ctx, handler=handler), timeout=_WAIT)
         assert ctx.usage.requests == 1  # the judge's real request; the launch claim was released
 
 

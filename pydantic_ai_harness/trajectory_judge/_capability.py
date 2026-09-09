@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import html
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Annotated, Any, Protocol, TypeAlias, runtime_checkable
 
+import anyio
+from anyio.abc import TaskGroup
 from pydantic import Field, TypeAdapter
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
@@ -151,7 +151,9 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
 
     _judge: Agent[None, object] = field(init=False, repr=False, compare=False)
     _steps: int = field(default=0, init=False, repr=False, compare=False)
-    _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False, compare=False)
+    _task_group: TaskGroup | None = field(default=None, init=False, repr=False, compare=False)
+    _evaluation_running: bool = field(default=False, init=False, repr=False, compare=False)
+    _evaluation_error: BaseException | None = field(default=None, init=False, repr=False, compare=False)
     _claim_held: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -183,8 +185,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> TrajectoryJudge[AgentDepsT]:
         """Return a fresh per-run instance so step counts and in-flight evaluations are not shared.
 
-        `replace` re-runs `__init__` and `__post_init__`, resetting the `init=False` fields:
-        `_steps` to `0`, `_task` to `None`, and `_judge` rebuilt from the same config.
+        `replace` re-runs `__init__` and `__post_init__`, resetting the `init=False` fields,
+        including the cadence and evaluation state, and rebuilding `_judge` from the same config.
         """
         return replace(self)
 
@@ -213,17 +215,30 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     ) -> ModelResponse:
         """Count the model request and launch an evaluation when the cadence is due.
 
-        A finished evaluation is reaped first, so a failure surfaces here rather than being
-        silently dropped. The evaluation itself runs as a background task: the trajectory is
+        A finished evaluation's failure surfaces here rather than being silently dropped.
+        The evaluation itself runs as a background task: the trajectory is
         rendered synchronously (no race with later mutation), the judge call and any
         steering enqueue happen concurrently with the run, and the steering is delivered
         when the run next drains its pending messages.
         """
-        self._collect_finished()
+        if not self._evaluation_running and self._evaluation_error is not None:
+            error, self._evaluation_error = self._evaluation_error, None
+            raise error
         self._steps += 1
-        if self._steps % self.every == 0 and self._task is None and self._claim_request(ctx):
+        if self._steps % self.every == 0 and not self._evaluation_running:
+            task_group = self._task_group
+            if task_group is None:  # pragma: no cover - core invokes model hooks inside `wrap_run`
+                raise RuntimeError('TrajectoryJudge.after_model_request called outside its run scope')
+            if not self._claim_request(ctx):
+                return response
             prompt = _judge_prompt([*request_context.messages, response], self.window)
-            self._task = asyncio.create_task(self._evaluate(ctx, prompt), name=f'trajectory-judge:{self._judge_name()}')
+            self._evaluation_running = True
+            task_group.start_soon(
+                self._evaluate,
+                ctx,
+                prompt,
+                name=f'trajectory-judge:{self._judge_name()}',
+            )
         return response
 
     def _claim_request(self, ctx: RunContext[AgentDepsT]) -> bool:
@@ -245,19 +260,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         self._claim_held = True
         return True
 
-    def _release_claim(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Release the launch's claim exactly once.
-
-        Both `_evaluate`'s `finally` and `_discard_in_flight` call this: whichever settles
-        the evaluation first wins, and the other is a no-op. The guard is what covers a task
-        cancelled before its coroutine ever starts, where the `finally` never runs.
-        """
-        if self._claim_held:
-            self._claim_held = False
-            ctx.usage.requests -= 1
-
     async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
-        """Run the agent, then settle the judge: surface a finished failure, cancel the rest.
+        """Run the agent and its evaluations in one task group, then settle the judge.
 
         An evaluation still in flight when the run ends is cancelled rather than awaited;
         its steering has nowhere to go. One that already finished with an error is
@@ -265,13 +269,42 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         failing, the evaluation's outcome is discarded entirely so it cannot mask the run's
         own error.
         """
+        result: AgentRunResult[Any] | None = None
+        handler_error: BaseException | None = None
+        evaluation_error: BaseException | None = None
+        handler_done = anyio.Event()
+
+        async def run_handler() -> None:
+            nonlocal result, handler_error
+            try:
+                result = await handler()
+            except BaseException as exc:
+                handler_error = exc
+            finally:
+                handler_done.set()
+
         try:
-            result = await handler()
-        except BaseException:
-            await self._discard_in_flight(ctx)
-            raise
-        self._collect_finished()
-        await self._discard_in_flight(ctx)
+            async with anyio.create_task_group() as task_group:
+                self._task_group = task_group
+                task_group.start_soon(run_handler, name='trajectory-judge:agent-run')
+                await handler_done.wait()
+                if handler_error is None and not self._evaluation_running:
+                    evaluation_error, self._evaluation_error = self._evaluation_error, None
+                elif handler_error is not None:
+                    self._evaluation_error = None
+                task_group.cancel_scope.cancel()
+        finally:
+            self._task_group = None
+            self._evaluation_running = False
+            if self._claim_held:
+                self._claim_held = False
+                ctx.usage.requests -= 1
+
+        if handler_error is not None:
+            raise handler_error
+        if evaluation_error is not None:
+            raise evaluation_error
+        assert result is not None
         return result
 
     async def _evaluate(self, ctx: RunContext[AgentDepsT], prompt: str) -> None:
@@ -284,54 +317,35 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         one: the launch's claim occupies a slot in `usage.requests` for the whole
         evaluation, so the unadjusted limit would count this evaluation against itself
         twice. The claim is released once the run has recorded the judge's real spend (or
-        recorded nothing, on failure or cancellation); a task cancelled before this
-        coroutine starts never reaches the `finally`, so `_discard_in_flight` releases the
-        claim instead.
+        recorded nothing, on failure or cancellation); an evaluation cancelled before this
+        coroutine starts never reaches the `finally`, so `wrap_run` releases the claim instead.
 
-        Provider failures propagate out of this task as-is (`ModelAPIError` subclasses from
-        the model layer) and are re-raised on the run by `_collect_finished`.
+        Provider failures are recorded as-is (`ModelAPIError` subclasses from the model
+        layer) and re-raised on the next cadence tick or at run end.
         """
         try:
-            result = await self._judge.run(
-                prompt,
-                output_type=[AllGood, Steer],
-                usage=ctx.usage,
-                usage_limits=_claim_offset_limits(ctx.usage_limits),
-            )
+            try:
+                result = await self._judge.run(
+                    prompt,
+                    output_type=[AllGood, Steer],
+                    usage=ctx.usage,
+                    usage_limits=_claim_offset_limits(ctx.usage_limits),
+                )
+            finally:
+                if self._claim_held:
+                    self._claim_held = False
+                    ctx.usage.requests -= 1
+            verdict = result.output
+            if isinstance(verdict, Steer):
+                ctx.enqueue(f'Steering from trajectory judge {self._judge_name()!r}: {verdict.message}')
+            if self.on_verdict is not None:
+                self.on_verdict(verdict)
+        except BaseException as exc:
+            if isinstance(exc, anyio.get_cancelled_exc_class()):
+                raise
+            self._evaluation_error = exc
         finally:
-            self._release_claim(ctx)
-        verdict = result.output
-        if isinstance(verdict, Steer):
-            ctx.enqueue(f'Steering from trajectory judge {self._judge_name()!r}: {verdict.message}')
-        if self.on_verdict is not None:
-            self.on_verdict(verdict)
-
-    def _collect_finished(self) -> None:
-        """Reap a finished evaluation, re-raising its failure on the run."""
-        task = self._task
-        if task is None or not task.done():
-            return
-        self._task = None
-        task.result()
-
-    async def _discard_in_flight(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Cancel and reap the current evaluation without inspecting its outcome.
-
-        The task may already be done, in which case `cancel` is a no-op and awaiting it
-        re-raises its failure; both that and the cancellation are discarded deliberately.
-        The claim is released after the task settles: a task cancelled before its coroutine
-        first ran never reached `_evaluate`'s `finally`, so the release here is what keeps
-        a reused `RunUsage` free of phantom requests, and `_release_claim`'s guard makes it
-        a no-op when the `finally` already ran.
-        """
-        task = self._task
-        self._task = None
-        if task is None:
-            return
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await task
-        self._release_claim(ctx)
+            self._evaluation_running = False
 
     def _judge_name(self) -> str:
         """The attribution name: `name`, then the judge `agent`'s name, then the default."""
