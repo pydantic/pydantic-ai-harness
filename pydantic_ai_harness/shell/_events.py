@@ -12,7 +12,7 @@ line events is not bounded; a host that persists or forwards events applies
 its own budget.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic_ai import CapabilityEvent
@@ -30,11 +30,13 @@ class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='co
     """A command is about to run; listeners may cancel or rewrite it first.
 
     A cancelled command returns `cancel_reason` to the model as the tool
-    result instead of running. A rewritten command runs in place of the
-    original and the model is told it was rewritten and why; the rewrite is
-    subject to the same allow and deny policy as the original. Decisions go
-    through `cancel()` and `rewrite()` only: assigning fields such as
-    `command` directly has no effect on what runs.
+    result instead of running. A cancel is final: `cancelled` is read-only,
+    so a later listener cannot lift an earlier veto, which is what lets a
+    cancel from any listener beat every rewrite. A rewritten command runs in
+    place of the original and the model is told it was rewritten and why; the
+    rewrite is subject to the same allow and deny policy as the original.
+    Decisions go through `cancel()` and `rewrite()` only: assigning fields
+    such as `command` directly has no effect on what runs.
     """
 
     command: str
@@ -42,13 +44,18 @@ class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='co
     timeout: float | None
     """Seconds the command may run, or `None` for a background command."""
     background: bool
-    cancelled: bool = False
+    _cancelled: bool = field(default=False, init=False)
     cancel_reason: str | None = None
     rewrite_reason: str | None = None
 
+    @property
+    def cancelled(self) -> bool:
+        """Whether any listener vetoed the command. Once set, it stays set."""
+        return self._cancelled
+
     def cancel(self, reason: str | None = None) -> None:
-        """Stop the command from running."""
-        self.cancelled = True
+        """Stop the command from running. A cancel is final; later listeners cannot lift it."""
+        self._cancelled = True
         self.cancel_reason = reason
 
     def rewrite(self, command: str, *, reason: str) -> None:

@@ -274,6 +274,22 @@ class TestRequestDecisions:
 
             assert _tool_results(result.all_messages()) == ['[Command was not run: the user said no]']
 
+    async def test_a_later_listener_cannot_lift_an_earlier_cancel(self, tmp_path: Path) -> None:
+        marker = tmp_path / 'ran'
+        lifter = LiftCancel()
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        agent = Agent(
+            _calls_model([_run_command(f'touch {marker}')]),
+            deps_type=type(None),
+            capabilities=[shell, Listener(decision='cancel'), lifter],
+        )
+
+        result = await agent.run('go')
+
+        assert not lifter.lifted
+        assert not marker.exists()
+        assert _tool_results(result.all_messages()) == ['[Command was not run: the user said no]']
+
     async def test_last_rewrite_wins(self, tmp_path: Path) -> None:
         first = Listener(rewrite_to='echo first')
         second = Listener(rewrite_to='echo second')
@@ -313,6 +329,21 @@ class RaiseOnStart(AbstractCapability[None]):
         self.pid = event.pid
         self.command_id = event.command_id
         raise RuntimeError('listener blew up')
+
+
+@dataclass
+class LiftCancel(AbstractCapability[None]):
+    """Tries to lift an earlier listener's veto by assigning the field directly."""
+
+    lifted: bool = False
+
+    @on_event(ShellCommandRequestEvent)
+    async def _on_request(self, ctx: RunContext[None], event: ShellCommandRequestEvent) -> None:
+        try:
+            event.cancelled = False  # type: ignore[prop-value]
+            self.lifted = True
+        except AttributeError:
+            pass
 
 
 def _live_group_members(pgid: int) -> list[str]:
@@ -399,12 +430,15 @@ class TestKillAfterLeaderExit:
         pidfile = tmp_path / 'child.pid'
         # The shell exits right after forking; the backgrounded sleep keeps the group alive.
         proc = await anyio.open_process(['sh', '-c', f'sleep 60 & echo $! > {pidfile}'], start_new_session=True)
-        await proc.wait()
-        child_pid = int(pidfile.read_text())
-        # The leader is reaped, but the group must still show the surviving member.
-        os.kill(child_pid, 0)
-        assert _live_group_members(proc.pid)
-        await kill_process_group(proc)
+        # The sweep runs in `finally` so a failing check leaves no member behind.
+        try:
+            await proc.wait()
+            child_pid = int(pidfile.read_text())
+            # The leader is reaped, but the group must still show the surviving member.
+            os.kill(child_pid, 0)
+            assert _live_group_members(proc.pid)
+        finally:
+            await kill_process_group(proc)
         assert await _process_group_is_gone(proc.pid)
 
 

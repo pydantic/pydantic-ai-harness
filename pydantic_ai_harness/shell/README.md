@@ -178,13 +178,16 @@ stops the command before it runs; the model gets the reason as the tool result.
 A listener that calls `rewrite(command, reason=...)` replaces the command; the
 rewrite goes through the same allow and deny checks as the original, and the
 model is told the command was rewritten and why, whether the rewrite ran or
-the policy refused it. The new command itself is not shown to the model, so a
-rewrite can add a credential without it reaching the transcript; put the
-command in `reason` if the model should see it. A command the policy refuses
+the policy refused it. The new command is normally not shown to the model, so
+a rewrite can add a credential that stays out of the transcript; put the
+command in `reason` if the model should see it. A policy refusal is the
+exception: the interactive check reports the complete command it refused, so a
+credential in a rewrite the policy refuses does reach the transcript. A command the policy refuses
 emits no request, so a
 listener cannot approve what the configuration denies. Listeners run in
 registration order: the last rewrite wins, and a cancel from any listener
-beats every rewrite. The other three events are notifications.
+beats every rewrite and every later listener, because `cancelled` is
+read-only. The other three events are notifications.
 `ShellCommandStartEvent` is dispatched immediately: its listeners run as the
 tool spawns the process, so a listener that raises ends the run from inside
 the tool and the toolset kills the process group. No command is left running
