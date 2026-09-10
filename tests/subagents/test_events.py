@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 
@@ -265,16 +266,20 @@ class TestOutcomes:
         ]
         assert [retry.content for retry in retries] == [end.output]
 
-    async def test_contained(self) -> None:
+    async def test_contained(self, caplog: pytest.LogCaptureFixture) -> None:
         def crash(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             raise ModelAPIError('m', 'provider down')
 
         worker = Agent(FunctionModel(crash), name='worker')
-        listener, _ = await _run(_delegate_once(), SubAgents(agents=[SubAgent(worker, contain_errors=True)]))
+        with caplog.at_level(logging.WARNING, logger='pydantic_ai_harness.subagents._toolset'):
+            listener, _ = await _run(_delegate_once(), SubAgents(agents=[SubAgent(worker, contain_errors=True)]))
 
         _, end = _pair(listener)
         assert end.outcome == 'contained'
         assert end.output.startswith("Sub-agent 'worker' crashed: ModelAPIError: provider down")
+        # Containment stays loud: the crash is logged with the original exception attached.
+        (record,) = [record for record in caplog.records if 'Contained crash' in record.getMessage()]
+        assert record.exc_info is not None and record.exc_info[0] is ModelAPIError
 
     async def test_propagating_crash_ends_without_an_end_event(self) -> None:
         def crash(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
