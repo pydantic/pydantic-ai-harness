@@ -4039,7 +4039,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", specifier = ">=2.40.0" },
     { name = "pydantic-ai-slim", marker = "extra == 'aws-lambda'", specifier = ">=2.40.0" },
     { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'anthropic'", specifier = ">=2.40.0" },
-    { name = "pydantic-ai-slim", extras = ["bedrock"], marker = "extra == 'bedrock'", specifier = ">=2.38.0" },
+    { name = "pydantic-ai-slim", extras = ["bedrock"], marker = "extra == 'bedrock'", specifier = ">=2.40.0" },
     { name = "pydantic-ai-slim", extras = ["cli"], marker = "extra == 'cli'", specifier = ">=2.40.0" },
     { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", specifier = ">=2.40.0" },
