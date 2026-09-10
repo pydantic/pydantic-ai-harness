@@ -1465,6 +1465,46 @@ class TestKillProcessGroupEdgeCases:
 
         assert call_count == 2
 
+    async def test_windows_uses_proc_kill_not_killpg(self, tmp_path: Path) -> None:
+        """On Windows there's no process-group signal API; must kill via proc.kill() instead."""
+        ts = ShellToolset(
+            cwd=tmp_path,
+            allowed_commands=[],
+            denied_commands=[],
+            denied_operators=[],
+            default_timeout=5.0,
+            max_output_chars=50_000,
+            persist_cwd=False,
+            allow_interactive=False,
+        )
+        proc = MagicMock()
+        proc.pid = 99999
+
+        with patch('sys.platform', 'win32'):
+            await ts._kill_process_group(proc)
+
+        proc.kill.assert_called_once()
+
+    async def test_windows_kill_raises_process_lookup_error(self, tmp_path: Path) -> None:
+        """On Windows, killing a process that already exited must not raise."""
+        ts = ShellToolset(
+            cwd=tmp_path,
+            allowed_commands=[],
+            denied_commands=[],
+            denied_operators=[],
+            default_timeout=5.0,
+            max_output_chars=50_000,
+            persist_cwd=False,
+            allow_interactive=False,
+        )
+        proc = MagicMock()
+        proc.pid = 99999
+        proc.kill.side_effect = ProcessLookupError
+
+        with patch('sys.platform', 'win32'):
+            await ts._kill_process_group(proc)
+        # No exception raised, method returned after catching it
+
 
 class TestDrainWithTimeoutEdgeCases:
     async def test_stdout_closed_resource_error(self, tmp_path: Path) -> None:
