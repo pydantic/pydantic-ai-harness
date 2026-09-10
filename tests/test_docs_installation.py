@@ -14,17 +14,25 @@ _INSTALL = re.compile(r'^\s*(pip install|uv add) (.+)$', re.MULTILINE)
 @pytest.mark.parametrize('path', [*_PAGES, *_READMES], ids=lambda path: str(path.relative_to(_ROOT)))
 def test_installation_commands_are_paired(path: Path) -> None:
     text = path.read_text(encoding='utf-8')
-    commands = _INSTALL.findall(text)
-    pip_args = [args for command, args in commands if command == 'pip install']
-    uv_args = [args for command, args in commands if command == 'uv add']
-    assert pip_args == uv_args, f'{path}: pip and uv must install the same packages in the same order'
-    for manager, command in commands:
-        label = 'pip' if manager == 'pip install' else 'uv'
-        if path in _PAGES:
-            expected = f'=== "{label}"\n\n    ```bash\n    {manager} {command}\n'
-        else:
-            expected = f'{label}:\n\n```bash\n{manager} {command}\n'
-        assert expected in text, f'{path}: installation command needs its {label} label or tab'
+    indent = '    ' if path in _PAGES else ''
+    pip_label = '=== "pip"' if path in _PAGES else 'pip:'
+    uv_label = '=== "uv"' if path in _PAGES else 'uv:'
+    pair = re.compile(
+        rf'^{re.escape(pip_label)}\n\n{indent}```bash\n'
+        rf'{indent}pip install (?P<args>[^\n]+)\n'
+        rf'(?P<pip_followup>(?:(?!{indent}```)[^\n]*\n)*){indent}```\n\n'
+        rf'{re.escape(uv_label)}\n\n{indent}```bash\n'
+        rf'{indent}uv add (?P=args)\n'
+        rf'(?P<uv_followup>(?:(?!{indent}```)[^\n]*\n)*){indent}```',
+        re.MULTILINE,
+    )
+    for match in pair.finditer(text):
+        assert not _INSTALL.search(match['pip_followup'] + match['uv_followup']), (
+            f'{path}: additional installation commands need their own paired blocks'
+        )
+    assert not _INSTALL.search(pair.sub('', text)), (
+        f'{path}: each installation needs adjacent labeled pip / uv blocks with identical package arguments'
+    )
 
 
 @pytest.mark.parametrize('path', [*_PAGES, *_READMES], ids=lambda path: str(path.relative_to(_ROOT)))
