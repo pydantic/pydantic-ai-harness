@@ -578,6 +578,34 @@ class TestFileChangeRequests:
         assert (tmp_path / 'huge.txt').read_text(encoding='utf-8') == content
         assert any(isinstance(event, FileWrittenEvent) for event in events)
 
+    @pytest.mark.skipif(os.name == 'nt', reason='Windows rejects the name before the request.')
+    async def test_headers_of_an_oversized_name_are_cut_at_the_bound(self, tmp_path: Path) -> None:
+        """A quoted name that passes the cap on its own leaves the headers cut at `MAX_EVENT_DIFF_CHARS`."""
+        # Each control byte becomes a four-character escape in the quoted name;
+        # five components of 220 of them push the two headers past the cap.
+        chunk = '\x01' * 220
+        parts = [chunk] * 5 + ['f.txt']
+        directory = tmp_path
+        for part in parts[:-1]:
+            directory = directory / part
+            try:
+                directory.mkdir()
+            except OSError:
+                pytest.skip('the OS path limit is too short to carry a name this wide (macOS)')
+        listener = Listener(cancel=True)
+
+        await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps({'path': '/'.join(parts), 'content': 'y\n' * 20000}),
+            listeners=[listener],
+        )
+
+        (request,) = listener.requests
+        assert request.truncated
+        assert len(request.diff) == MAX_EVENT_DIFF_CHARS
+        assert request.diff.startswith('--- "a/')
+
     @pytest.mark.parametrize(
         ('lines', 'cut'),
         [

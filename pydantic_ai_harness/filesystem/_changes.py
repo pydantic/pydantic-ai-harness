@@ -70,7 +70,10 @@ def unified_diff(old: str | None, new: str, *, path: str) -> tuple[str, bool]:
     caller found the current content that large and did not decode it.
     """
     if old is None or len(old) > MAX_DIFF_SOURCE_CHARS or len(new) > MAX_DIFF_SOURCE_CHARS:
-        return f'--- {_quoted(f"a/{path}")}\n+++ {_quoted(f"b/{path}")}', True
+        # The quoted name of a control-character-heavy path can pass the cap
+        # on its own, so the headers are cut like every other return.
+        header = f'--- {_quoted(f"a/{path}")}\n+++ {_quoted(f"b/{path}")}'
+        return header[:MAX_EVENT_DIFF_CHARS], True
     diff = '\n'.join(_diff_lines(old, new, path=path))
     if len(diff) <= MAX_EVENT_DIFF_CHARS:
         return diff, False
