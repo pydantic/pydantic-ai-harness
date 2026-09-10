@@ -1504,7 +1504,7 @@ class _FailingStream(anyio.abc.ByteReceiveStream):
             return b'partial'
         raise self._error
 
-    async def aclose(self) -> None:
+    async def aclose(self) -> None:  # pragma: no cover
         pass
 
 
