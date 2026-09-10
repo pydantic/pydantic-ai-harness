@@ -151,17 +151,24 @@ A delegation refused before the child runs (an unknown sub-agent, a model key of
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai_harness.subagents import DelegationEndEvent, SubAgent, SubAgents
 
-researcher = Agent('anthropic:claude-sonnet-4-6', name='researcher')
-agent = Agent('anthropic:claude-opus-4-7', capabilities=[SubAgents(agents=[SubAgent(researcher)])])
 
-@agent.on_event(DelegationEndEvent)
-async def report(ctx, event):
-    print(f'{event.agent_name}: {event.outcome} in {event.duration_seconds:.1f}s')
+class ReportDelegations(AbstractCapability):
+    @on_event(DelegationEndEvent)
+    async def on_delegation_end(self, ctx, event: DelegationEndEvent) -> None:
+        print(f'{event.agent_name}: {event.outcome} in {event.duration_seconds:.1f}s')
+
+
+researcher = Agent('anthropic:claude-sonnet-4-6', name='researcher')
+agent = Agent(
+    'anthropic:claude-opus-4-7',
+    capabilities=[SubAgents(agents=[SubAgent(researcher)]), ReportDelegations()],
+)
 ```
 
-Other capabilities subscribe with `@on_event` on a method, the same way `RepoContext` follows `FileSystem` events. Nested model streaming from the child run is not an event concern; pass an `event_stream_handler` for that.
+Nested model streaming from the child run is not an event concern; pass an `event_stream_handler` for that.
 
 `SubAgents` emits no OpenTelemetry spans of its own: the child run is a core agent run with its own spans nested under the parent's tool-call span, and the events above carry the outcome a trace would only show as an exception or a tool result.
 

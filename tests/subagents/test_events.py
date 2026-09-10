@@ -24,6 +24,8 @@ from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage, UsageLimits
 
+from pydantic_ai_harness import ToolGuardrail
+from pydantic_ai_harness.guardrails import GuardrailResult
 from pydantic_ai_harness.subagents import (
     MAX_EVENT_TEXT_CHARS,
     DelegationEndEvent,
@@ -164,6 +166,7 @@ class TestDelegationEvents:
         assert end.usage.requests == 1
 
     async def test_task_and_output_are_bounded(self) -> None:
+        assert MAX_EVENT_TEXT_CHARS == 4096  # the documented published bound, not just the mechanism
         long_task = 't' * (MAX_EVENT_TEXT_CHARS + 1)
         long_output = 'o' * (MAX_EVENT_TEXT_CHARS + 1)
         listener, _ = await _run(_delegate_once(task=long_task), SubAgents(agents=[SubAgent(_worker(long_output))]))
@@ -179,6 +182,19 @@ class TestDelegationEvents:
         start, end = _pair(listener)
         assert (start.task, start.truncated) == (at_bound, False)
         assert (end.output, end.truncated) == (at_bound, False)
+
+    async def test_end_event_carries_the_text_before_result_guards_screen_it(self) -> None:
+        def screen(info: object) -> GuardrailResult:
+            return GuardrailResult.replace('SCREENED')
+
+        listener = Listener()
+        await Agent(
+            _delegate_once(),
+            capabilities=[SubAgents(agents=[SubAgent(_worker('W'))]), ToolGuardrail(result_guard=screen), listener],
+        ).run('go')
+
+        _, end = _pair(listener)
+        assert end.output == 'W'  # emitted inside the tool, before the result guard screens it
 
     async def test_renamed_tool_inside_a_combined_capability_still_emits(self) -> None:
         listener = Listener()
