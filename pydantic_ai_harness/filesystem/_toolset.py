@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import codecs
 import errno
 import fnmatch
 import functools
 import hashlib
+import itertools
 import os
 import re
 import stat
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Concatenate, ParamSpec, TypedDict
+from typing import BinaryIO, Concatenate, ParamSpec, TypedDict
 
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -195,14 +197,33 @@ def _bytes_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:12]
 
 
-def _disk_hash(raw: bytes) -> str:
-    """The hash `read_file` reports for these bytes: of the bytes for a binary file, of the decoded text otherwise.
+_HASH_CHUNK_BYTES = 1 << 20
+
+
+def _chunks(source: BinaryIO) -> Iterator[bytes]:
+    """`source` in `_HASH_CHUNK_BYTES` pieces, so hashing a file never holds it whole."""
+    return iter(functools.partial(source.read, _HASH_CHUNK_BYTES), b'')
+
+
+def _disk_hash(chunks: Iterable[bytes]) -> str:
+    """The hash `read_file` reports for a file: of the bytes for a binary file, of the decoded text otherwise.
 
     Decoding is lenient, as `read_file` decodes, so a text file holding an
     invalid byte hashes to what the model was told and its `expected_hash`
-    handshake holds. Every check against the disk uses this one rule.
+    handshake holds. Every check against the disk uses this one rule. The
+    first chunk decides whether the file is binary, so it must cover the
+    `_is_binary` sample: a whole file, or at least `_HASH_CHUNK_BYTES`.
     """
-    return _bytes_hash(raw) if _is_binary(raw) else _content_hash(raw.decode('utf-8', errors='replace'))
+    digest = hashlib.sha256()
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    binary = False
+    for index, chunk in enumerate(chunks):
+        if index == 0:
+            binary = _is_binary(chunk)
+        digest.update(chunk if binary else decoder.decode(chunk).encode('utf-8'))
+    if not binary:
+        digest.update(decoder.decode(b'', final=True).encode('utf-8'))
+    return digest.hexdigest()[:12]
 
 
 def _read_canonical_text(path: Path) -> str:
@@ -226,21 +247,22 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     file the process cannot read (a write-only mode, say) diffs from empty and
     is written unguarded, since the diff is for display; an `expected_hash`
     it cannot check propagates the error instead. Past `MAX_DIFF_SOURCE_CHARS`
-    the text is `None`: it would not be diffed, so it is neither decoded nor
-    held while the listener decides.
+    the text is `None`: it would not be diffed, so only that much is read
+    into memory and the rest is hashed in chunks.
     """
     if not resolved.is_file():
-        return '', _disk_hash(b'')
+        return '', _disk_hash([b''])
     try:
-        data = resolved.read_bytes()
+        with resolved.open('rb') as source:
+            head = source.read(MAX_DIFF_SOURCE_CHARS + 1)
+            current_hash = _disk_hash(itertools.chain([head], _chunks(source)))
     except OSError:
         if expected_hash is not None:
             raise
         return '', None
-    current_hash = _disk_hash(data)
     if expected_hash is not None:
         _check_expected_hash(path, current_hash, expected_hash)
-    old = data.decode('utf-8', errors='replace') if len(data) <= MAX_DIFF_SOURCE_CHARS else None
+    old = head.decode('utf-8', errors='replace') if len(head) <= MAX_DIFF_SOURCE_CHARS else None
     return old, current_hash
 
 
@@ -317,7 +339,7 @@ def _write_content(resolved: Path, path: str, content: str, *, expected_hash: st
         descriptor = -1
         with binary_file:
             if expected_hash is not None and not created:
-                _check_expected_hash(path, _disk_hash(binary_file.read()), expected_hash)
+                _check_expected_hash(path, _disk_hash(_chunks(binary_file)), expected_hash)
 
             binary_file.seek(0)
             binary_file.truncate(0)
@@ -527,7 +549,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise FileNotFoundError(f'File not found: {path}')
 
         raw = resolved.read_bytes()
-        content_hash = _disk_hash(raw)
+        content_hash = _disk_hash([raw])
         if _is_binary(raw):
             size = len(raw)
             if ctx is not None:
@@ -1003,7 +1025,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if not is_bin:
                 text = raw.decode('utf-8', errors='replace')
                 parts.append(f'lines: {len(text.splitlines())}')
-                parts.append(f'hash: {_disk_hash(raw)}')
+                parts.append(f'hash: {_disk_hash([raw])}')
 
         if is_link:
             target = _model_safe_filename(os.readlink(original), self._real_root)

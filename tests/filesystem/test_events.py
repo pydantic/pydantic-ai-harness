@@ -535,19 +535,25 @@ class TestFileChangeRequests:
     @pytest.mark.parametrize('big_side', ['old', 'new'])
     async def test_oversized_change_is_not_diffed(self, tmp_path: Path, big_side: str) -> None:
         """Past `MAX_DIFF_SOURCE_CHARS` on either side nothing is diffed: the event carries the headers, marked as cut."""
-        huge = 'x' * (MAX_DIFF_SOURCE_CHARS + 1)
+        # Well past the bound, so the existing file is hashed in more than one chunk.
+        huge = 'x\u00e9' * MAX_DIFF_SOURCE_CHARS
         content = 'small\n' if big_side == 'old' else huge
         if big_side == 'old':
-            (tmp_path / 'huge.txt').write_text(huge)
+            (tmp_path / 'huge.txt').write_text(huge, encoding='utf-8')
         listener = Listener()
 
         events = await _run_and_collect(
-            tmp_path, 'write_file', json.dumps({'path': 'huge.txt', 'content': content}), listeners=[listener]
+            tmp_path,
+            'write_file',
+            json.dumps(
+                {'path': 'huge.txt', 'content': content, 'expected_hash': _hash(huge) if big_side == 'old' else None}
+            ),
+            listeners=[listener],
         )
 
         (request,) = listener.requests
         assert (request.diff, request.truncated) == ('--- a/huge.txt\n+++ b/huge.txt', True)
-        assert (tmp_path / 'huge.txt').read_text() == content
+        assert (tmp_path / 'huge.txt').read_text(encoding='utf-8') == content
         assert any(isinstance(event, FileWrittenEvent) for event in events)
 
     @pytest.mark.parametrize(
