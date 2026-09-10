@@ -6,7 +6,7 @@ import errno
 import hashlib
 import json
 import os
-from collections.abc import AsyncIterable, AsyncIterator, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -138,20 +138,13 @@ class Listener(AbstractCapability[None]):
 
 @dataclass(kw_only=True)
 class MeddlingListener(AbstractCapability[None]):
-    """Changes the file while its edit is announced, as another writer could during a slow approval.
+    """Runs `act` on the workspace while a change is announced, as another writer could during a slow approval."""
 
-    Writes `content` to `target`, or deletes it when `content` is `None`.
-    """
-
-    target: Path
-    content: str | None = None
+    act: Callable[[], object]
 
     @on_event(FileChangeRequestEvent)
     async def _on_request(self, ctx: RunContext[None], event: FileChangeRequestEvent) -> None:
-        if self.content is None:
-            self.target.unlink()
-        else:
-            self.target.write_text(self.content)
+        self.act()
 
 
 def _hash(content: str) -> str:
@@ -590,21 +583,94 @@ class TestFileChangeRequests:
         assert target.read_text() == 'new\n'
         assert any(isinstance(event, FileWrittenEvent) for event in events)
 
-    async def test_edit_refuses_a_file_changed_while_announced(self, tmp_path: Path) -> None:
-        """An edit computed from one content is not written over another, however long a listener took."""
+    @needs_mode_bits
+    async def test_unreadable_target_with_expected_hash_is_refused(self, tmp_path: Path) -> None:
+        """An `expected_hash` the process cannot check is an error, not a write that skips the check."""
+        target = tmp_path / 'target.txt'
+        target.write_text('old\n')
+        target.chmod(0o222)
+        listener = Listener()
+
+        events = await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps({'path': 'target.txt', 'content': 'new\n', 'expected_hash': _hash('old\n')}),
+            listeners=[listener],
+        )
+
+        assert listener.requests == []
+        assert 'Permission denied' in _retry_reason(events)
+        target.chmod(0o644)
+        assert target.read_text() == 'old\n'
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args'),
+        [
+            ('write_file', '{"path":"target.txt","content":"new\\n"}'),
+            ('edit_file', '{"path":"target.txt","old_text":"old","new_text":"new"}'),
+        ],
+    )
+    async def test_file_changed_while_announced_is_refused(
+        self, tmp_path: Path, tool_name: str, json_args: str
+    ) -> None:
+        """The diff a listener approved describes the change applied, however long the listener took."""
         target = tmp_path / 'target.txt'
         target.write_text('old\n')
 
         events = await _run_and_collect(
-            tmp_path,
-            'edit_file',
-            '{"path":"target.txt","old_text":"old","new_text":"new"}',
-            listeners=[MeddlingListener(target=target, content='other\n')],
+            tmp_path, tool_name, json_args, listeners=[MeddlingListener(act=lambda: target.write_text('other\n'))]
         )
 
         assert 'Conflict' in _retry_reason(events)
         assert target.read_text() == 'other\n'
         assert not any(isinstance(event, FileWrittenEvent) for event in events)
+
+    async def test_file_that_appeared_while_announced_is_refused(self, tmp_path: Path) -> None:
+        """A write announced as creating the file does not overwrite one that appeared in the meantime."""
+        target = tmp_path / 'fresh.txt'
+
+        events = await _run_and_collect(
+            tmp_path,
+            'write_file',
+            '{"path":"fresh.txt","content":"new\\n"}',
+            listeners=[MeddlingListener(act=lambda: target.write_text('other\n'))],
+        )
+
+        assert 'Conflict' in _retry_reason(events)
+        assert target.read_text() == 'other\n'
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args'),
+        [
+            ('write_file', '{"path":"sub/target.txt","content":"new\\n"}'),
+            ('edit_file', '{"path":"sub/target.txt","old_text":"old","new_text":"new"}'),
+            ('create_directory', '{"path":"sub/made"}'),
+        ],
+    )
+    @pytest.mark.parametrize('outside', [True, False])
+    async def test_path_replaced_while_announced_is_refused(
+        self, tmp_path: Path, tool_name: str, json_args: str, outside: bool
+    ) -> None:
+        """Swapping a directory on the path for a symlink during the request does not redirect the change."""
+        root = tmp_path / 'root'
+        sub = root / 'sub'
+        sub.mkdir(parents=True)
+        (sub / 'target.txt').write_text('old\n')
+        elsewhere = tmp_path / 'outside' if outside else root / 'elsewhere'
+        elsewhere.mkdir()
+
+        def swap() -> None:
+            sub.rename(root / 'moved')
+            sub.symlink_to(elsewhere, target_is_directory=True)
+
+        events = await _run_and_collect(root, tool_name, json_args, listeners=[MeddlingListener(act=swap)])
+
+        reason = _retry_reason(events)
+        assert (
+            'resolves outside the root directory' if outside else 'was replaced while the change was announced'
+        ) in reason
+        assert list(elsewhere.iterdir()) == []
+        assert not any(isinstance(event, (FileWrittenEvent, DirectoryCreatedEvent)) for event in events)
 
     async def test_edit_does_not_recreate_a_file_deleted_while_announced(self, tmp_path: Path) -> None:
         target = tmp_path / 'target.txt'
@@ -614,7 +680,7 @@ class TestFileChangeRequests:
             tmp_path,
             'edit_file',
             '{"path":"target.txt","old_text":"old","new_text":"new"}',
-            listeners=[MeddlingListener(target=target)],
+            listeners=[MeddlingListener(act=target.unlink)],
         )
 
         reason = _retry_reason(events)

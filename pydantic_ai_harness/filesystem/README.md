@@ -66,16 +66,19 @@ so a listener only sees changes that would otherwise go ahead: a denied path,
 a missing parent for `write_file`, a parent that is not a directory, a stale
 `expected_hash`, or a directory that collides with a file emits no request, so
 a listener cannot approve what the policy or the filesystem refuses. A
-listener may take a while (a human approving the diff, say), so a write
-re-checks the hash under its open descriptor and an edit checks that the file
-still holds the text the edit was computed from: a file replaced or deleted in
-the meantime fails after it was announced instead of being overwritten or
-recreated. A listener that calls `cancel(reason)` stops the change before it
-touches the disk, and the model gets the reason as the tool result. A listener
-that raises instead aborts the run, as any raising event listener does, and
-the change is not applied. `diff` is the unified diff from the current content
-to the proposed content: a new file diffs from empty, so does a file the
-process cannot read, and a `create_directory` has no diff. A
+listener may take a while (a human approving the diff, say), so once the
+request returns the path is resolved and checked again, and a write or edit
+checks under its open descriptor that the file still holds what the listener
+was shown: a path or file replaced in the meantime fails after it was
+announced instead of being redirected or overwritten, and an edit does not
+recreate a file deleted in the meantime. This holds the window between the
+containment check and the I/O (see [Security model](#security-model)) to what
+it is without a listener. A listener that calls `cancel(reason)` stops the
+change before it touches the disk, and the model gets the reason as the tool
+result. A listener that raises instead aborts the run, as any raising event
+listener does, and the change is not applied. `diff` is the unified diff from
+the current content to the proposed content: a new file diffs from empty, so
+does a file the process cannot read, and a `create_directory` has no diff. A
 `create_directory` on a directory that already exists changes nothing and
 emits nothing. The other events are notifications.
 
