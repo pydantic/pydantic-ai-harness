@@ -190,13 +190,14 @@ Background commands write to files instead of pipes, so they emit no line
 events; their end event fires when `check_command` first sees the exit or when
 `stop_command` kills the process.
 
-Each event is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256), and an
-end event keeps the tail of `stdout` and of `stderr` separately, each up to
-`max_output_chars` (the model's combined result is cut to that limit once),
-with a `truncated` flag on both. The number of line events is not bounded: a
-command that prints in a loop emits one event per line until it finishes or
-times out, so a host that persists or forwards events applies its own budget.
-A run cancelled mid-command ends without an end event.
+Output in events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256),
+and an end event keeps the tail of `stdout` and of `stderr` separately, each
+up to `max_output_chars` (the model's combined result is cut to that limit
+once), with a `truncated` flag on both. `command` and `cwd` are carried as is.
+The number of line events is not bounded: a command that prints in a loop
+emits one event per line until it finishes or times out, so a host that
+persists or forwards events applies its own budget. A run cancelled
+mid-command ends without an end event.
 
 ```python
 from pydantic_ai import Agent
