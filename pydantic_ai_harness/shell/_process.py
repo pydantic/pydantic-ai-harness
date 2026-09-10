@@ -161,7 +161,8 @@ async def kill_process_group(proc: anyio.abc.Process) -> None:
     gone or the grace period is up, and the sweep runs in `finally` because a
     cancelled caller (a native `Task.cancel()`, which no anyio shield stops)
     must still leave nothing behind. On an already empty group the sweep is
-    a no-op.
+    a no-op. The final SIGKILL is not reaped: a caller that keeps the process
+    pairs this with `proc.wait()` and `proc.aclose()`.
     """
     try:
         pgid = os.getpgid(proc.pid)

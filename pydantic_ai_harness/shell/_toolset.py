@@ -393,8 +393,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 except BaseException:
                     # A raising or cancelled listener ends the run; killing
                     # the group first is what keeps the process from
-                    # outliving it.
+                    # outliving it. The shielded reap and close keep this path
+                    # at parity with the background one.
                     await kill_process_group(proc)
+                    with anyio.CancelScope(shield=True):
+                        await proc.wait()
+                        await proc.aclose()
                     raise
             assert proc.stdout is not None
             assert proc.stderr is not None

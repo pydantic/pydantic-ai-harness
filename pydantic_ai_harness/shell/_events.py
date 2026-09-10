@@ -32,7 +32,9 @@ class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='co
     A cancelled command returns `cancel_reason` to the model as the tool
     result instead of running. A rewritten command runs in place of the
     original and the model is told it was rewritten and why; the rewrite is
-    subject to the same allow and deny policy as the original.
+    subject to the same allow and deny policy as the original. Decisions go
+    through `cancel()` and `rewrite()` only: assigning fields such as
+    `command` directly has no effect on what runs.
     """
 
     command: str

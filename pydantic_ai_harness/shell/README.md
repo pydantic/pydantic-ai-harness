@@ -206,23 +206,26 @@ once), with a `truncated` flag on both. `command` and `cwd` are carried as is.
 The number of line events is not bounded: a command that prints in a loop
 emits one event per line until it finishes or times out, so a host that
 persists or forwards events applies its own budget. A run cancelled
-mid-command ends without an end event.
+mid-command ends without an end event, and so does a background command
+still running when the run finishes: the toolset's cleanup kills it at
+teardown, where no run context exists to emit one.
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai_harness import Shell
 from pydantic_ai_harness.shell import ShellCommandRequestEvent
 
-agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Shell()])
 
-@agent.on_event(ShellCommandRequestEvent)
-async def hold_pushes(ctx, event):
-    if event.command.startswith('git push'):
-        event.cancel('pushes need a human')
+class HoldPushes(AbstractCapability):
+    @on_event(ShellCommandRequestEvent)
+    async def on_shell_request(self, ctx, event: ShellCommandRequestEvent) -> None:
+        if event.command.startswith('git push'):
+            event.cancel('pushes need a human')
+
+
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Shell(), HoldPushes()])
 ```
-
-Other capabilities subscribe with `@on_event` on a method, the same way
-`RepoContext` follows `FileSystem` events.
 
 `Shell` emits no OpenTelemetry spans of its own: the core tool-call span
 already records the command and its result, and the events above carry the
