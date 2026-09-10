@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -12,9 +13,10 @@ from pathlib import Path
 
 import anyio
 import pytest
+import sniffio
 from pydantic_ai import Agent, RunCancelled, RunContext
 from pydantic_ai.capabilities import AbstractCapability, on_event
-from pydantic_ai.messages import CapabilityEvent, ModelMessage, RetryPromptPart, ToolReturnPart
+from pydantic_ai.messages import CapabilityEvent, ModelMessage, ModelResponse, RetryPromptPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.run import AgentRun
 
@@ -26,6 +28,7 @@ from pydantic_ai_harness.shell import (
     ShellCommandStartEvent,
     ShellOutputLineEvent,
 )
+from pydantic_ai_harness.shell._process import kill_process_group
 
 pytestmark = pytest.mark.anyio
 
@@ -44,20 +47,28 @@ def _tool_results(messages: list[ModelMessage]) -> list[str]:
     ]
 
 
-def _calls_model(calls: Sequence[tuple[str, str]]) -> FunctionModel:
-    """Issue each `(tool_name, json_args)` on its own step, then finish."""
+Call = tuple[str, str]
+
+
+def _calls_model(steps: Sequence[Call | list[Call]]) -> FunctionModel:
+    """Issue each `(tool_name, json_args)` on its own step, a list of them in parallel, then finish."""
 
     async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
         results = _tool_results(messages)
-        step = len(results)
-        if step < len(calls):
-            name, json_args = calls[step]
+        step = sum(isinstance(message, ModelResponse) for message in messages)
+        if step >= len(steps):
+            yield 'done'
+            return
+        calls = steps[step]
+        calls = calls if isinstance(calls, list) else [calls]
+        deltas: DeltaToolCalls = {}
+        for index, (name, json_args) in enumerate(calls):
             if '$ID' in json_args:
                 command_id = next(result.split('ID: ')[1].strip() for result in results if 'ID: ' in result)
                 json_args = json_args.replace('$ID', command_id)
-            yield {0: DeltaToolCall(name=name, json_args=json_args, tool_call_id=f'call_{step}')}
-        else:
-            yield 'done'
+            tool_call_id = f'call_{step}' if len(calls) == 1 else f'call_{step}_{index}'
+            deltas[index] = DeltaToolCall(name=name, json_args=json_args, tool_call_id=tool_call_id)
+        yield deltas
 
     return FunctionModel(stream_function=stream)
 
@@ -89,7 +100,7 @@ class Listener(AbstractCapability[None]):
 
 async def _run(
     tmp_path: Path,
-    calls: Sequence[tuple[str, str]],
+    calls: Sequence[Call | list[Call]],
     *,
     listener: Listener | None = None,
     max_output_chars: int = 50_000,
@@ -162,6 +173,17 @@ class TestForegroundEvents:
         assert end.stdout == 'partial\n'
         assert results == ['[Command timed out after 0.3s]']
 
+    async def test_timeout_still_delivers_the_unterminated_line(self, tmp_path: Path) -> None:
+        # The deadline cancels the readers before end of file, so the tail is
+        # flushed by the drain that follows the kill instead.
+        listener, _ = await _run(tmp_path, [_run_command('printf hello; sleep 5', timeout_seconds=0.3)])
+
+        lines = [(event.line, event.truncated) for event in listener.events if isinstance(event, ShellOutputLineEvent)]
+        end = listener.events[-1]
+        assert isinstance(end, ShellCommandEndEvent)
+        assert lines == [('hello', False)]
+        assert end.stdout == 'hello'
+
     async def test_long_line_is_cut_for_the_event_but_not_the_model(self, tmp_path: Path) -> None:
         width = MAX_EVENT_LINE_CHARS * 20
         command = f'{sys.executable} -c "print(\'x\' * {width})"'
@@ -192,6 +214,15 @@ class TestForegroundEvents:
         listener, _ = await _run(tmp_path, [_run_command("printf 'a\\r\\nb'")])
 
         assert [event.line for event in listener.events if isinstance(event, ShellOutputLineEvent)] == ['a', 'b']
+
+    async def test_line_split_across_reads_is_reassembled(self, tmp_path: Path) -> None:
+        # Two writes with a pause between them arrive as two pipe reads, and
+        # the boundary falls inside a three-byte character.
+        listener, results = await _run(tmp_path, [_run_command("printf '\\344\\270'; sleep 0.2; printf '\\255!\\n'")])
+
+        lines = [(event.line, event.truncated) for event in listener.events if isinstance(event, ShellOutputLineEvent)]
+        assert lines == [('中!', False)]
+        assert results == ['[stdout]\n中!\n']
 
     async def test_denied_command_emits_no_request(self, tmp_path: Path) -> None:
         listener, results = await _run(tmp_path, [_run_command('vim file')])
@@ -224,13 +255,13 @@ class TestRequestDecisions:
         start = listener.events[1]
         assert isinstance(start, ShellCommandStartEvent)
         assert start.command == 'echo rewritten'
-        assert results == ['[Command rewritten (proxy): echo rewritten]\n[stdout]\nrewritten\n']
+        assert results == ['[Command rewritten: proxy]\n[stdout]\nrewritten\n']
 
     async def test_rewrite_is_checked_against_the_policy(self, tmp_path: Path) -> None:
         listener, results = await _run(tmp_path, [_run_command('echo hi')], listener=Listener(rewrite_to='vim x'))
 
         assert [type(event) for event in listener.events] == [ShellCommandRequestEvent]
-        assert results == ["[Command rewritten (proxy): vim x]\nInteractive commands are not allowed. Command: 'vim x'"]
+        assert results == ["[Command rewritten: proxy]\nInteractive commands are not allowed. Command: 'vim x'"]
 
     async def test_cancel_beats_rewrite_whatever_the_listener_order(self, tmp_path: Path) -> None:
         canceller = Listener(decision='cancel')
@@ -243,6 +274,22 @@ class TestRequestDecisions:
 
             assert _tool_results(result.all_messages()) == ['[Command was not run: the user said no]']
 
+    async def test_a_later_listener_cannot_lift_an_earlier_cancel(self, tmp_path: Path) -> None:
+        marker = tmp_path / 'ran'
+        lifter = LiftCancel()
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        agent = Agent(
+            _calls_model([_run_command(f'touch {marker}')]),
+            deps_type=type(None),
+            capabilities=[shell, Listener(decision='cancel'), lifter],
+        )
+
+        result = await agent.run('go')
+
+        assert not lifter.lifted
+        assert not marker.exists()
+        assert _tool_results(result.all_messages()) == ['[Command was not run: the user said no]']
+
     async def test_last_rewrite_wins(self, tmp_path: Path) -> None:
         first = Listener(rewrite_to='echo first')
         second = Listener(rewrite_to='echo second')
@@ -253,7 +300,26 @@ class TestRequestDecisions:
 
         result = await agent.run('go')
 
-        assert _tool_results(result.all_messages()) == ['[Command rewritten (proxy): echo second]\n[stdout]\nsecond\n']
+        assert _tool_results(result.all_messages()) == ['[Command rewritten: proxy]\n[stdout]\nsecond\n']
+
+    async def test_direct_assignment_changes_nothing_with_or_without_a_rewrite(self, tmp_path: Path) -> None:
+        rewritten = tmp_path / 'rewritten'
+        clobbered = tmp_path / 'clobbered'
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        clobberer = ClobberRewrite(f'touch {rewritten}', f'touch {clobbered}')
+        agent = Agent(
+            _calls_model([_run_command('echo first'), _run_command('echo second')]),
+            deps_type=type(None),
+            capabilities=[shell, clobberer],
+        )
+
+        result = await agent.run('go')
+
+        # First command: the rewrite won over the clobber. Second command: no rewrite, so
+        # the proposed command ran; the clobbered field never ran either way.
+        assert rewritten.exists()
+        assert not clobbered.exists()
+        assert _tool_results(result.all_messages()) == ['[Command rewritten: proxy]\n(no output)', '[stdout]\nsecond\n']
 
 
 @dataclass
@@ -268,6 +334,51 @@ class CancelOnStart(AbstractCapability[None]):
         assert self.run is not None
         self.pid = event.pid
         self.run.cancel()
+
+
+@dataclass
+class RaiseOnStart(AbstractCapability[None]):
+    """Raises in the start listener, the way a faulty host handler could."""
+
+    pid: int | None = None
+    command_id: str | None = None
+
+    @on_event(ShellCommandStartEvent)
+    async def _on_start(self, ctx: RunContext[None], event: ShellCommandStartEvent) -> None:
+        self.pid = event.pid
+        self.command_id = event.command_id
+        raise RuntimeError('listener blew up')
+
+
+@dataclass
+class LiftCancel(AbstractCapability[None]):
+    """Tries to lift an earlier listener's veto by assigning the field directly."""
+
+    lifted: bool = False
+
+    @on_event(ShellCommandRequestEvent)
+    async def _on_request(self, ctx: RunContext[None], event: ShellCommandRequestEvent) -> None:
+        try:
+            event.cancelled = False  # type: ignore[prop-value]
+            self.lifted = True  # pragma: no cover - only reachable if `cancelled` becomes settable again
+        except AttributeError:
+            pass
+
+
+@dataclass
+class ClobberRewrite(AbstractCapability[None]):
+    """Rewrites once, then assigns `command` directly on every request, trying to steer what runs."""
+
+    rewritten: str
+    clobbered: str
+    _rewrote: bool = field(default=False, init=False)
+
+    @on_event(ShellCommandRequestEvent)
+    async def _on_request(self, ctx: RunContext[None], event: ShellCommandRequestEvent) -> None:
+        if not self._rewrote:
+            self._rewrote = True
+            event.rewrite(self.rewritten, reason='proxy')
+        event.command = self.clobbered
 
 
 def _live_group_members(pgid: int) -> list[str]:
@@ -293,7 +404,7 @@ async def _process_group_is_gone(pgid: int) -> bool:
     return False  # pragma: no cover
 
 
-class TestCancellation:
+class TestRunFailure:
     async def test_cancelling_the_run_kills_the_whole_process_group(self, tmp_path: Path) -> None:
         shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
         canceller = CancelOnStart()
@@ -313,21 +424,107 @@ class TestCancellation:
         # outlive a kill aimed at the shell alone.
         assert await _process_group_is_gone(canceller.pid)
 
+    async def test_a_raising_start_listener_kills_the_process_group(self, tmp_path: Path) -> None:
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        raiser = RaiseOnStart()
+        agent = Agent(
+            _calls_model([_run_command('sleep 30; echo never')]), deps_type=type(None), capabilities=[shell, raiser]
+        )
+        with pytest.raises(RuntimeError, match='listener blew up'):
+            await agent.run('go')
+
+        assert raiser.pid is not None
+        # The listener's exception skips the foreground wait, the only other
+        # cleanup path, so the kill must come from the toolset itself.
+        assert await _process_group_is_gone(raiser.pid)
+
+    async def test_a_raising_start_listener_stops_the_background_command(self, tmp_path: Path) -> None:
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        raiser = RaiseOnStart()
+        agent = Agent(
+            _calls_model([('start_command', json.dumps({'command': 'sleep 30'}))]),
+            deps_type=type(None),
+            capabilities=[shell, raiser],
+        )
+        with pytest.raises(RuntimeError, match='listener blew up'):
+            await agent.run('go')
+
+        assert raiser.pid is not None
+        assert raiser.command_id is not None
+        # The ID never reached the model, so no one is left to call
+        # `stop_command`; the kill must come from the toolset itself.
+        assert await _process_group_is_gone(raiser.pid)
+
+
+async def _orphaned_group_member_survives(tmp_path: Path) -> bool:
+    """Whether a group member outlives its session leader by a full second.
+
+    Some CI sandboxes run the step under a supervisor that tears a session down
+    the moment its `setsid` leader exits, while leaving orphaned members of the
+    supervisor's own session alone. There, the surviving member this test needs
+    cannot outlive the leader, so the sweep reaching it cannot be demonstrated.
+    """
+    probe_pidfile = tmp_path / 'probe.pid'
+    probe = await anyio.open_process(['sh', '-c', f'sleep 30 & echo $! > {probe_pidfile}'], start_new_session=True)
+    try:
+        await probe.wait()
+        pid = int(probe_pidfile.read_text())
+        await anyio.sleep(1)
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, ValueError):
+        return False
+    finally:
+        # A hostile supervisor may have torn the group down already; the sweep
+        # is a no-op on an empty group.
+        await kill_process_group(probe)
+
+
+class TestKillAfterLeaderExit:
+    @pytest.mark.anyio(backends=['asyncio'])
+    async def test_the_sweep_reaches_group_members_after_the_leader_was_reaped(self, tmp_path: Path) -> None:
+        """A leader that exits leaving a child in the group is reaped, but the sweep still reaches the child."""
+        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
+            pytest.skip('start_new_session is an asyncio spawn option')
+        if not await _orphaned_group_member_survives(tmp_path):
+            pytest.skip('this environment tears a session down when its leader exits')
+        pidfile = tmp_path / 'child.pid'
+        # The shell exits right after forking; the backgrounded sleep keeps the group alive.
+        proc = await anyio.open_process(['sh', '-c', f'sleep 60 & echo $! > {pidfile}'], start_new_session=True)
+        # The sweep runs in `finally` so a failing check leaves no member behind.
+        try:
+            await proc.wait()
+            child_pid = int(pidfile.read_text())
+            # The leader is reaped, but the group must still show the surviving member.
+            os.kill(child_pid, 0)
+            assert _live_group_members(proc.pid)
+        finally:
+            await kill_process_group(proc)
+        assert await _process_group_is_gone(proc.pid)
+
 
 class TestBackgroundEvents:
     async def test_start_check_stop(self, tmp_path: Path) -> None:
+        # The foreground wait orders the steps: on a loaded machine `stop` can
+        # otherwise land before the background shell has even run `echo`.
         listener, results = await _run(
             tmp_path,
             [
-                ('start_command', '{"command": "echo bg; sleep 30"}'),
+                ('start_command', '{"command": "echo bg; touch ready; sleep 30"}'),
+                _run_command('while [ ! -e ready ]; do sleep 0.05; done'),
                 ('check_command', '{"command_id": "$ID"}'),
                 ('stop_command', '{"command_id": "$ID"}'),
             ],
         )
 
-        request, start, end = listener.events
+        request, start, end = [
+            event
+            for event in listener.events
+            if isinstance(event, (ShellCommandRequestEvent, ShellCommandStartEvent, ShellCommandEndEvent))
+            and event.background
+        ]
         assert isinstance(request, ShellCommandRequestEvent)
-        assert (request.command, request.timeout, request.background) == ('echo bg; sleep 30', None, True)
+        assert (request.command, request.timeout, request.background) == ('echo bg; touch ready; sleep 30', None, True)
         assert isinstance(start, ShellCommandStartEvent)
         assert (start.timeout, start.background) == (None, True)
         assert isinstance(end, ShellCommandEndEvent)
@@ -336,7 +533,7 @@ class TestBackgroundEvents:
         assert end.timed_out is False
         assert end.exit_code not in (None, 0)
         assert end.stdout == 'bg\n'
-        assert results[2].endswith('[stopped]\n[exit code: -15]')
+        assert results[3].endswith('[stopped]\n[exit code: -15]')
 
     async def test_check_emits_end_once_when_it_sees_the_exit(self, tmp_path: Path) -> None:
         listener, _ = await _run(
@@ -353,6 +550,44 @@ class TestBackgroundEvents:
         ends = [event for event in listener.events if isinstance(event, ShellCommandEndEvent) and event.background]
         assert len(ends) == 1
         assert ends[0].exit_code == 0
+
+    async def test_parallel_check_and_stop_during_a_stop_emit_one_end(self, tmp_path: Path) -> None:
+        # Ignoring SIGTERM makes the stop last the whole grace period, so the
+        # parallel calls are certain to run while it is in progress. Whether
+        # the check lands before or after the stop claims the process, it must
+        # leave the end event to the stop; the duplicate stop waits for the
+        # first and reports the same exit.
+        listener, results = await _run(
+            tmp_path,
+            [
+                ('start_command', '{"command": "trap \'\' TERM; sleep 30"}'),
+                [
+                    ('stop_command', '{"command_id": "$ID"}'),
+                    ('check_command', '{"command_id": "$ID"}'),
+                    ('stop_command', '{"command_id": "$ID"}'),
+                ],
+            ],
+        )
+
+        ends = [event for event in listener.events if isinstance(event, ShellCommandEndEvent)]
+        assert len(ends) == 1
+        assert ends[0].exit_code == -9
+        first_stop, check, second_stop = results[1:]
+        assert first_stop == second_stop == '(no output)\n[stopped]\n[exit code: -9]'
+        assert check in ('(no output yet)\n[status: running]', '(no output yet)\n[status: finished]')
+
+    async def test_rewritten_background_command_is_not_echoed(self, tmp_path: Path) -> None:
+        listener, results = await _run(
+            tmp_path,
+            [('start_command', '{"command": "echo original"}'), ('stop_command', '{"command_id": "$ID"}')],
+            listener=Listener(rewrite_to='echo rewritten'),
+        )
+
+        start = listener.events[1]
+        assert isinstance(start, ShellCommandStartEvent)
+        assert start.command == 'echo rewritten'
+        assert results[0].startswith('[Command rewritten: proxy]\nStarted background command\nID: ')
+        assert 'echo rewritten' not in results[0]
 
     async def test_cancelled_background_request(self, tmp_path: Path) -> None:
         listener, results = await _run(

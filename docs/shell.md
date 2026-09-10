@@ -70,10 +70,11 @@ which all land at the end -- survive truncation. Background command status and
 exit metadata follow the captured output so they remain in the retained tail.
 
 Commands run with stdin closed: a command that reads it (`cat`, `wc`) sees end
-of file and exits instead of waiting on the host's terminal. Each command
-starts its own process group, and cancelling the run kills the whole group
-(`SIGTERM`, then `SIGKILL` after a short grace period), so a shell's children
-do not outlive the run.
+of file and exits instead of waiting on the host's terminal. On POSIX systems
+each command starts its own process group, and cancelling the run kills the
+whole group: `SIGTERM`, then `SIGKILL` for anything still running once the
+shell has exited or a short grace period has passed, so a shell's children do
+not outlive the run.
 
 ## Command controls
 
@@ -173,7 +174,8 @@ but don't rely on it -- set `PATH` explicitly when you replace the environment.
 `check_command(command_id)` to poll and `stop_command(command_id)` to terminate
 and collect final output. Processes are launched in their own session
 (`start_new_session`) so the whole process group can be signalled -- `SIGTERM`,
-escalating to `SIGKILL` after a grace period.
+then `SIGKILL` for whatever is left once the leader exits or a grace period
+passes.
 
 On run end, the toolset's cleanup terminates every still-running background
 process and deletes its temp files. The agent runtime enters toolsets via an
@@ -227,7 +229,7 @@ show a command as it runs, or veto it, without parsing tool arguments:
 | Event | Dispatch | When | Payload |
 |---|---|---|---|
 | `ShellCommandRequestEvent` | immediate | after a command passes the policy checks and before it is spawned | `command`, `cwd`, `timeout`, `background`; `cancel(reason)`, `rewrite(command, reason=...)` |
-| `ShellCommandStartEvent` | stream | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
+| `ShellCommandStartEvent` | immediate | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
 | `ShellOutputLineEvent` | stream | a foreground command wrote a line | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
 | `ShellCommandEndEvent` | stream | the command exited, timed out, or was stopped | `command_id`, `command`, `background`, `exit_code`, `timed_out`, `duration_seconds`, `stdout`, `stderr`, `truncated` |
 
@@ -236,41 +238,62 @@ stops the command before it runs; the model gets the reason as the tool result.
 A listener that calls `rewrite(command, reason=...)` replaces the command; the
 rewrite goes through the same allow and deny checks as the original, and the
 model is told the command was rewritten and why, whether the rewrite ran or
-the policy refused it. A command the policy refuses emits no request, so a
+the policy refused it. The new command is normally not shown to the model, so
+a rewrite can add a credential that stays out of the transcript; put the
+command in `reason` if the model should see it. A policy refusal is the
+exception: the interactive check reports the complete command it refused, so a
+credential in a rewrite the policy refuses does reach the transcript. A command the policy refuses
+emits no request, so a
 listener cannot approve what the configuration denies. Listeners run in
 registration order: the last rewrite wins, and a cancel from any listener
-beats every rewrite. The other three events are notifications.
+beats every rewrite and every later listener, because `cancelled` is
+read-only. A rewrite is final in the same way: the toolset runs the command
+`rewrite()` set, so a direct assignment to `command` changes nothing. The
+other three events are notifications.
+`ShellCommandStartEvent` is dispatched immediately: its listeners run as the
+tool spawns the process, so a listener that raises ends the run from inside
+the tool and the toolset kills the process group. No command is left running
+after a failed run, background command included (its record is removed with
+it).
 
 `command_id` ties a command's lines and its end to its start when several run
 at once. For a background command it is the same ID `check_command` and
 `stop_command` take, so the model and a subscriber name the process alike.
 Background commands write to files instead of pipes, so they emit no line
 events; their end event fires when `check_command` first sees the exit or when
-`stop_command` kills the process.
+`stop_command` kills the process. Events come from the tools inside a run; the
+same methods called directly on the toolset outside a run emit nothing.
 
-Payloads are bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256) and an end
-event carries the same tail the model receives (`max_output_chars`), each with
-a `truncated` flag, so a persisted or forwarded event stream cannot be flooded
-by one chatty command. A run cancelled mid-command ends without an end event.
+Output in events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256),
+and an end event keeps the tail of `stdout` and of `stderr` separately, each
+up to `max_output_chars` (the model's combined result is cut to that limit
+once), with a `truncated` flag on both. `command` and `cwd` are carried as is.
+The number of line events is not bounded: a command that prints in a loop
+emits one event per line until it finishes or times out, so a host that
+persists or forwards events applies its own budget. A run cancelled
+mid-command ends without an end event, and so does a background command
+still running when the run finishes: the toolset's cleanup kills it at
+teardown, where no run context exists to emit one.
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai_harness import Shell
 from pydantic_ai_harness.shell import ShellCommandRequestEvent
 
-agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Shell()])
 
-@agent.on_event(ShellCommandRequestEvent)
-async def hold_pushes(ctx, event):
-    if event.command.startswith('git push'):
-        event.cancel('pushes need a human')
+class HoldPushes(AbstractCapability):
+    @on_event(ShellCommandRequestEvent)
+    async def on_shell_request(self, ctx, event: ShellCommandRequestEvent) -> None:
+        if event.command.startswith('git push'):
+            event.cancel('pushes need a human')
+
+
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Shell(), HoldPushes()])
 ```
 
-Other capabilities subscribe with `@on_event` on a method, the same way
-`RepoContext` follows `FileSystem` events.
-
-See [capability events](/ai/core-concepts/hooks/) for how `@on_event` and
-`dispatch='immediate'` work.
+See [capability events](/ai/core-concepts/capabilities/#capability-events) for
+how `@on_event` and `dispatch='immediate'` work.
 
 `Shell` emits no OpenTelemetry spans of its own: the core tool-call span
 already records the command and its result, and the events above carry the

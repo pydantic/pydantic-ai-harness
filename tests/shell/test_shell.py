@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import shlex
@@ -14,6 +15,7 @@ from typing import Any, NoReturn
 from unittest.mock import MagicMock, patch
 
 import anyio
+import anyio.abc
 import pytest
 import sniffio
 from pydantic_ai import Agent, RunContext
@@ -27,6 +29,7 @@ from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.code_mode import CodeMode
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 from pydantic_ai_harness.shell._process import (
+    OutputReader,
     cleanup_bg_files,
     drain_with_timeout,
     is_interactive_command,
@@ -1369,6 +1372,13 @@ class TestCodeModeInterop:
         assert 'async def stop_command' in run_code_description
 
 
+def _record_signal(signals: list[int]) -> Callable[[int, int], None]:
+    def killpg(_pgid: int, sig: int) -> None:
+        signals.append(sig)
+
+    return killpg
+
+
 class TestKillProcessGroupEdgeCases:
     async def test_sigterm_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGTERM raises ProcessLookupError, method returns without SIGKILL."""
@@ -1396,14 +1406,11 @@ class TestKillProcessGroupEdgeCases:
 
         with (
             patch('os.killpg', side_effect=fake_killpg),
-            patch('os.getpgid', return_value=12345),
             patch('pydantic_ai_harness.shell._process._KILL_GRACE_PERIOD', 0.01),
         ):
             await kill_process_group(proc)
 
-        assert len(kill_calls) == 2
-        assert kill_calls[0][1] == signal.SIGTERM
-        assert kill_calls[1][1] == signal.SIGKILL
+        assert kill_calls == [(99999, signal.SIGTERM), (99999, signal.SIGKILL)]
 
     async def test_sigkill_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGKILL raises ProcessLookupError (process exited between SIGTERM and SIGKILL)."""
@@ -1425,65 +1432,86 @@ class TestKillProcessGroupEdgeCases:
 
         with (
             patch('os.killpg', side_effect=fake_killpg),
-            patch('os.getpgid', return_value=12345),
             patch('pydantic_ai_harness.shell._process._KILL_GRACE_PERIOD', 0.01),
         ):
             await kill_process_group(proc)
 
         assert call_count == 2
 
+    async def test_group_is_swept_after_the_leader_exits(self) -> None:
+        """A child forked while the SIGTERM was in flight misses it, so the group is swept regardless."""
+        proc = MagicMock()
+        proc.pid = 99999
+
+        async def exits_at_once() -> int:
+            return 0
+
+        proc.wait = exits_at_once
+        signals: list[int] = []
+
+        with patch('os.killpg', side_effect=_record_signal(signals)):
+            await kill_process_group(proc)
+
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+    @pytest.mark.anyio(backends=['asyncio'])
+    async def test_group_is_swept_when_the_grace_wait_is_cancelled(self) -> None:
+        """A native `Task.cancel()` mid-wait, which no anyio shield stops, still ends in the sweep."""
+        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
+            pytest.skip('Task.cancel() is an asyncio primitive')
+        proc = MagicMock()
+        proc.pid = 99999
+        parked = anyio.Event()
+
+        async def wait_forever() -> int:
+            parked.set()
+            await anyio.sleep(999)
+            return 0  # pragma: no cover
+
+        proc.wait = wait_forever
+        signals: list[int] = []
+
+        with patch('os.killpg', side_effect=_record_signal(signals)):
+            task = asyncio.ensure_future(kill_process_group(proc))
+            await parked.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+class _FailingStream(anyio.abc.ByteReceiveStream):
+    """Yields one chunk, then fails the way a pipe closed under the reader does."""
+
+    def __init__(self, error: type[Exception]) -> None:
+        self._error = error
+        self._yielded = False
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if not self._yielded:
+            self._yielded = True
+            return b'partial'
+        raise self._error
+
+    async def aclose(self) -> None:  # pragma: no cover
+        pass
+
 
 class TestDrainWithTimeoutEdgeCases:
-    async def test_stdout_closed_resource_error(self, tmp_path: Path) -> None:
-        """ClosedResourceError on stdout is caught silently after yielding data."""
-        proc = MagicMock()
+    @pytest.mark.parametrize('error', [anyio.ClosedResourceError, anyio.BrokenResourceError])
+    async def test_closed_pipe_ends_the_drain(self, error: type[Exception]) -> None:
+        """The data read before the pipe failed is kept and its tail still reaches the sink."""
+        lines: list[tuple[str, bool]] = []
 
-        # Yield one chunk then raise ClosedResourceError
-        class FailingStream:
-            def __init__(self) -> None:
-                self._yielded = False
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
 
-            def __aiter__(self) -> FailingStream:
-                return self
+        reader = OutputReader(_FailingStream(error), on_line=sink)
+        await drain_with_timeout(reader)
 
-            async def __anext__(self) -> bytes:
-                if not self._yielded:
-                    self._yielded = True
-                    return b'partial'
-                raise anyio.ClosedResourceError
-
-        proc.stdout = FailingStream()
-        proc.stderr = None
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        await drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-        assert stdout_chunks == [b'partial']
-
-    async def test_stderr_broken_resource_error(self, tmp_path: Path) -> None:
-        """BrokenResourceError on stderr is caught silently after yielding data."""
-        proc = MagicMock()
-        proc.stdout = None
-
-        class FailingStream:
-            def __init__(self) -> None:
-                self._yielded = False
-
-            def __aiter__(self) -> FailingStream:
-                return self
-
-            async def __anext__(self) -> bytes:
-                if not self._yielded:
-                    self._yielded = True
-                    return b'partial'
-                raise anyio.BrokenResourceError
-
-        proc.stderr = FailingStream()
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        await drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-        assert stderr_chunks == [b'partial']
+        assert reader.chunks == [b'partial']
+        assert lines == [('partial', False)]
 
 
 class TestReadBgOutputEdgeCases:

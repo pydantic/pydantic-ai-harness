@@ -8,6 +8,7 @@ for a background process. Policy (allow and deny lists, environment) stays in
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import functools
 import os
@@ -92,7 +93,17 @@ def is_interactive_command(command: str) -> bool:
 class BackgroundProcess:
     """State for a background command using temp files for output."""
 
-    __slots__ = ('command', 'command_id', 'proc', 'stdout_path', 'stderr_path', 'started_at', 'finished', 'exit_code')
+    __slots__ = (
+        'command',
+        'command_id',
+        'proc',
+        'stdout_path',
+        'stderr_path',
+        'started_at',
+        'finished',
+        'exit_code',
+        'stop_lock',
+    )
 
     def __init__(
         self,
@@ -111,6 +122,9 @@ class BackgroundProcess:
         self.started_at = time.monotonic()
         self.finished = False
         self.exit_code: int | None = None
+        # Serializes duplicate stops: the second waits for the first to
+        # finish tearing down instead of racing its cleanup.
+        self.stop_lock = anyio.Lock()
 
 
 def read_bg_output(bg: BackgroundProcess) -> tuple[str, str]:
@@ -139,44 +153,34 @@ def cleanup_bg_files(bg: BackgroundProcess) -> None:
 
 
 async def kill_process_group(proc: anyio.abc.Process) -> None:
-    """SIGTERM the process group, escalating to SIGKILL after the grace period."""
-    pid = proc.pid
+    """SIGTERM the process group, then SIGKILL whatever is left of it.
+
+    The child was spawned with `start_new_session=True`, so its pid is the
+    group id for the group's whole life. It stays addressable through
+    `os.killpg` while any member lives, even after the leader exited and was
+    reaped; resolving the group with `os.getpgid` at kill time would miss
+    exactly that window and leave surviving members unkillable.
+
+    Waiting only for the group leader is not enough: a child the shell forked
+    while the SIGTERM was in flight misses it, and a leader that traps the
+    signal never exits. So the group is swept with SIGKILL once the leader is
+    gone or the grace period is up, and the sweep runs in `finally` because a
+    cancelled caller (a native `Task.cancel()`, which no anyio shield stops)
+    must still leave nothing behind. On an already empty group the sweep is
+    a no-op. The final SIGKILL is not reaped: a caller that keeps the process
+    pairs this with `proc.wait()` and `proc.aclose()`.
+    """
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
+        os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:
         return
 
-    with anyio.move_on_after(_KILL_GRACE_PERIOD):
-        await proc.wait()
-        return
-
-    # Still alive after grace period -- hard kill
     try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
-
-
-async def drain_with_timeout(
-    stdout_chunks: list[bytes],
-    stderr_chunks: list[bytes],
-    proc: anyio.abc.Process,
-) -> None:
-    """Drain remaining pipe data after kill (grandchildren may still hold the pipe)."""
-
-    async def _drain(stream: anyio.abc.ByteReceiveStream | None, chunks: list[bytes]) -> None:
-        if stream is None:
-            return
-        try:
-            async for chunk in stream:
-                chunks.append(chunk)
-        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
-            pass
-
-    with anyio.move_on_after(_IO_DRAIN_TIMEOUT):
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_drain, proc.stdout, stdout_chunks)
-            tg.start_soon(_drain, proc.stderr, stderr_chunks)
+        with anyio.CancelScope(shield=True), anyio.move_on_after(_KILL_GRACE_PERIOD):
+            await proc.wait()
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
 
 
 LineSink = Callable[[str, bool], Awaitable[None]]
@@ -231,14 +235,78 @@ class _LineBuffer:
         return text[:MAX_EVENT_LINE_CHARS], truncated
 
 
-async def pump(stream: anyio.abc.ByteReceiveStream, chunks: list[bytes], on_line: LineSink | None) -> None:
-    """Collect a pipe into `chunks`, handing each completed line to `on_line`."""
-    lines = _LineBuffer()
-    async for chunk in stream:
-        chunks.append(chunk)
-        if on_line is None:
-            continue
-        for line, truncated in lines.feed(chunk):
-            await on_line(line, truncated)
-    if on_line is not None and (last := lines.flush()) is not None:
-        await on_line(*last)
+class OutputReader:
+    """Collect one pipe into bytes, handing each completed line to a sink.
+
+    Reading resumes where a cancelled `read` stopped: after a timeout kills
+    the command, `drain_with_timeout` picks up the same line buffer, so a
+    tail written before the deadline still reaches the sink as one line.
+    """
+
+    def __init__(self, stream: anyio.abc.ByteReceiveStream, *, on_line: LineSink | None) -> None:
+        self._stream = stream
+        self._on_line = on_line
+        self._lines = _LineBuffer()
+        self.chunks: list[bytes] = []
+
+    @property
+    def text(self) -> str:
+        return b''.join(self.chunks).decode('utf-8', errors='replace')
+
+    async def read(self) -> None:
+        """Read to end of file."""
+        async for chunk in self._stream:
+            self.chunks.append(chunk)
+            if self._on_line is None:
+                continue
+            for line, truncated in self._lines.feed(chunk):
+                await self._on_line(line, truncated)
+        await self.flush()
+
+    async def flush(self) -> None:
+        """Hand the sink the unterminated last line, if any."""
+        if self._on_line is not None and (last := self._lines.flush()) is not None:
+            await self._on_line(*last)
+
+    async def drain(self) -> None:
+        """Read to end of file, treating a pipe closed under us as the end."""
+        try:
+            await self.read()
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+
+
+async def drain_with_timeout(*readers: OutputReader) -> None:
+    """Finish reading after a kill, for as long as a grandchild may hold the pipe, then flush."""
+    with anyio.move_on_after(_IO_DRAIN_TIMEOUT):
+        async with anyio.create_task_group() as tg:
+            for reader in readers:
+                tg.start_soon(reader.drain)
+    for reader in readers:
+        await reader.flush()
+
+
+async def run_to_exit(proc: anyio.abc.Process, *readers: OutputReader, timeout: float) -> tuple[int, bool]:
+    """Read the pipes to end of file and reap the process; return its exit code and whether the deadline hit.
+
+    The whole group is killed on timeout and on cancellation alike:
+    `proc.aclose()` kills only the shell, and its children would outlive
+    the run.
+    """
+    try:
+        with anyio.fail_after(timeout):
+            async with anyio.create_task_group() as tg:
+                for reader in readers:
+                    tg.start_soon(reader.read)
+            return await proc.wait(), False
+    except TimeoutError:
+        await kill_process_group(proc)
+        exit_code = await proc.wait()
+        with anyio.CancelScope(shield=True):
+            await drain_with_timeout(*readers)
+        return exit_code, True
+    except BaseException:
+        await kill_process_group(proc)
+        raise
+    finally:
+        await proc.aclose()
