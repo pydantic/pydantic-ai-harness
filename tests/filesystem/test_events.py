@@ -590,7 +590,7 @@ class TestFileChangeRequests:
             directory = directory / part
             try:
                 directory.mkdir()
-            except OSError:
+            except OSError:  # pragma: no cover - unreachable in CI; macOS PATH_MAX is 1024 bytes
                 pytest.skip('the OS path limit is too short to carry a name this wide (macOS)')
         listener = Listener(cancel=True)
 
