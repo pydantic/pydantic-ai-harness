@@ -80,23 +80,36 @@ lands, without parsing tool arguments:
 `FileChangeRequestEvent` is a decision. It fires after the path has passed the
 access checks and, for `write_file` and `edit_file`, after the conflict check,
 so a listener only sees changes that would otherwise go ahead: a denied path,
-a missing parent directory, a stale `expected_hash`, or a directory that
-collides with a file emits no request, so a listener cannot approve what the
-policy or the filesystem refuses. A write re-checks the hash under its open
-descriptor, so a file replaced in the meantime can still fail after it was
-announced. A listener that calls `cancel(reason)` stops the change before it
-touches the disk, and the model gets the reason as the tool result. `diff` is
-the unified diff from the current content to the proposed content: a new file
-diffs from empty, and a `create_directory` has no diff. A `create_directory`
-on a directory that already exists changes nothing and emits nothing. The
-other events are notifications.
+a missing parent for `write_file`, a parent that is not a directory, a stale
+`expected_hash`, or a directory that collides with a file emits no request, so
+a listener cannot approve what the policy or the filesystem refuses. A
+listener may take a while (a human approving the diff, say), so a write
+re-checks the hash under its open descriptor and an edit checks that the file
+still holds the text the edit was computed from: a file replaced or deleted in
+the meantime fails after it was announced instead of being overwritten or
+recreated. A listener that calls `cancel(reason)` stops the change before it
+touches the disk, and the model gets the reason as the tool result. A listener
+that raises instead aborts the run, as any raising event listener does, and
+the change is not applied. `diff` is the unified diff from the current content
+to the proposed content: a new file diffs from empty, so does a file the
+process cannot read, and a `create_directory` has no diff. A
+`create_directory` on a directory that already exists changes nothing and
+emits nothing. The other events are notifications.
 
 `FileEditedEvent` subclasses `FileWrittenEvent`, so a listener for writes
-receives edits too and can read the `diff` when it has one. Diffs are cut at
+receives edits too and can read the `diff` when it has one. Before this
+release `edit_file` emitted a plain `FileWrittenEvent`, so a serialized edit
+had the kind `file_system.file_written`; it is now `file_system.file_edited`.
+A listener registered for `FileWrittenEvent` still receives it; code that
+matches on the serialized kind needs to accept both. Diffs are cut at
 `MAX_EVENT_DIFF_CHARS` (8192) with a `truncated` flag, so a persisted or
-forwarded event stream cannot be flooded by one large write. A
-`FilesSearchedEvent` counts the matches the model received; `truncated` says
-the search stopped at `max_search_results` or `max_find_results`.
+forwarded event stream cannot be flooded by one large write, and a change
+whose text is longer than `MAX_DIFF_SOURCE_CHARS` (32768) on either side is
+not diffed at all: the `diff` is the two file headers and `truncated` is set.
+A final line without a newline is marked the way `git diff` marks it, so a
+change to the final newline alone is visible. A `FilesSearchedEvent` counts
+the matches the model received; `truncated` says the search stopped at
+`max_search_results` or `max_find_results`.
 
 `path` is the normalized, symlink-resolved location relative to `root_dir`,
 never an absolute host path, so it is safe to echo to the model or a UI.
