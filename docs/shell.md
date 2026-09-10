@@ -238,7 +238,10 @@ stops the command before it runs; the model gets the reason as the tool result.
 A listener that calls `rewrite(command, reason=...)` replaces the command; the
 rewrite goes through the same allow and deny checks as the original, and the
 model is told the command was rewritten and why, whether the rewrite ran or
-the policy refused it. A command the policy refuses emits no request, so a
+the policy refused it. The new command itself is not shown to the model, so a
+rewrite can add a credential without it reaching the transcript; put the
+command in `reason` if the model should see it. A command the policy refuses
+emits no request, so a
 listener cannot approve what the configuration denies. Listeners run in
 registration order: the last rewrite wins, and a cancel from any listener
 beats every rewrite. The other three events are notifications.

@@ -50,7 +50,7 @@ class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='co
         self.cancel_reason = reason
 
     def rewrite(self, command: str, *, reason: str) -> None:
-        """Replace the command that will run, recording why."""
+        """Replace the command that will run; `reason` is all the model sees of it."""
         self.command = command
         self.rewrite_reason = reason
 

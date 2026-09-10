@@ -245,6 +245,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         rewrite goes through `_check_command` again so a listener cannot hand
         the model a command the policy would have refused; the retry names the
         rewrite so the model is not blamed for a command it never proposed.
+        The rewritten command itself stays out of the note: a host may have
+        put a credential in it, and the reason is the host's to word.
         """
         request = ShellCommandRequestEvent(command=command, cwd=str(self._cwd), timeout=timeout, background=background)
         await ctx.emit(request)
@@ -252,7 +254,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             return '', f'[Command was not run: {request.cancel_reason or "cancelled by a listener"}]'
         if request.rewrite_reason is None:
             return command, None
-        note = f'[Command rewritten ({request.rewrite_reason}): {request.command}]'
+        note = f'[Command rewritten: {request.rewrite_reason}]'
         try:
             self._check_command(request.command)
         except (PermissionError, ModelRetry) as e:

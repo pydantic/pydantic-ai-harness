@@ -233,13 +233,13 @@ class TestRequestDecisions:
         start = listener.events[1]
         assert isinstance(start, ShellCommandStartEvent)
         assert start.command == 'echo rewritten'
-        assert results == ['[Command rewritten (proxy): echo rewritten]\n[stdout]\nrewritten\n']
+        assert results == ['[Command rewritten: proxy]\n[stdout]\nrewritten\n']
 
     async def test_rewrite_is_checked_against_the_policy(self, tmp_path: Path) -> None:
         listener, results = await _run(tmp_path, [_run_command('echo hi')], listener=Listener(rewrite_to='vim x'))
 
         assert [type(event) for event in listener.events] == [ShellCommandRequestEvent]
-        assert results == ["[Command rewritten (proxy): vim x]\nInteractive commands are not allowed. Command: 'vim x'"]
+        assert results == ["[Command rewritten: proxy]\nInteractive commands are not allowed. Command: 'vim x'"]
 
     async def test_cancel_beats_rewrite_whatever_the_listener_order(self, tmp_path: Path) -> None:
         canceller = Listener(decision='cancel')
@@ -262,7 +262,7 @@ class TestRequestDecisions:
 
         result = await agent.run('go')
 
-        assert _tool_results(result.all_messages()) == ['[Command rewritten (proxy): echo second]\n[stdout]\nsecond\n']
+        assert _tool_results(result.all_messages()) == ['[Command rewritten: proxy]\n[stdout]\nsecond\n']
 
 
 @dataclass
