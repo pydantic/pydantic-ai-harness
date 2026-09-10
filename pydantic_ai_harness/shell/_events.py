@@ -56,8 +56,13 @@ class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='co
 
 
 @dataclass(kw_only=True)
-class ShellCommandStartEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='command_start'):
-    """A command process was spawned."""
+class ShellCommandStartEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='command_start', dispatch='immediate'):
+    """A command process was spawned.
+
+    Listeners run as the tool spawns the process, not when the stream consumer
+    reaches the event: a raising listener must end the run from inside the
+    tool, which kills the process group instead of leaving it running.
+    """
 
     command_id: str
     command: str

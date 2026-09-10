@@ -169,7 +169,7 @@ show a command as it runs, or veto it, without parsing tool arguments:
 | Event | Dispatch | When | Payload |
 |---|---|---|---|
 | `ShellCommandRequestEvent` | immediate | after a command passes the policy checks and before it is spawned | `command`, `cwd`, `timeout`, `background`; `cancel(reason)`, `rewrite(command, reason=...)` |
-| `ShellCommandStartEvent` | stream | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
+| `ShellCommandStartEvent` | immediate | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
 | `ShellOutputLineEvent` | stream | a foreground command wrote a line | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
 | `ShellCommandEndEvent` | stream | the command exited, timed out, or was stopped | `command_id`, `command`, `background`, `exit_code`, `timed_out`, `duration_seconds`, `stdout`, `stderr`, `truncated` |
 
@@ -185,6 +185,11 @@ emits no request, so a
 listener cannot approve what the configuration denies. Listeners run in
 registration order: the last rewrite wins, and a cancel from any listener
 beats every rewrite. The other three events are notifications.
+`ShellCommandStartEvent` is dispatched immediately: its listeners run as the
+tool spawns the process, so a listener that raises ends the run from inside
+the tool and the toolset kills the process group. No command is left running
+after a failed run, background command included (its record is removed with
+it).
 
 `command_id` ties a command's lines and its end to its start when several run
 at once. For a background command it is the same ID `check_command` and

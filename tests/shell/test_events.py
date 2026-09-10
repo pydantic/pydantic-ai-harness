@@ -298,6 +298,20 @@ class CancelOnStart(AbstractCapability[None]):
         self.run.cancel()
 
 
+@dataclass
+class RaiseOnStart(AbstractCapability[None]):
+    """Raises in the start listener, the way a faulty host handler could."""
+
+    pid: int | None = None
+    command_id: str | None = None
+
+    @on_event(ShellCommandStartEvent)
+    async def _on_start(self, ctx: RunContext[None], event: ShellCommandStartEvent) -> None:
+        self.pid = event.pid
+        self.command_id = event.command_id
+        raise RuntimeError('listener blew up')
+
+
 def _live_group_members(pgid: int) -> list[str]:
     """`ps` rows for group members that are not zombies.
 
@@ -321,7 +335,7 @@ async def _process_group_is_gone(pgid: int) -> bool:
     return False  # pragma: no cover
 
 
-class TestCancellation:
+class TestRunFailure:
     async def test_cancelling_the_run_kills_the_whole_process_group(self, tmp_path: Path) -> None:
         shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
         canceller = CancelOnStart()
@@ -340,6 +354,37 @@ class TestCancellation:
         # The shell is the group leader; `sleep` is its child and would
         # outlive a kill aimed at the shell alone.
         assert await _process_group_is_gone(canceller.pid)
+
+    async def test_a_raising_start_listener_kills_the_process_group(self, tmp_path: Path) -> None:
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        raiser = RaiseOnStart()
+        agent = Agent(
+            _calls_model([_run_command('sleep 30; echo never')]), deps_type=type(None), capabilities=[shell, raiser]
+        )
+        with pytest.raises(RuntimeError, match='listener blew up'):
+            await agent.run('go')
+
+        assert raiser.pid is not None
+        # The listener's exception skips the foreground wait, the only other
+        # cleanup path, so the kill must come from the toolset itself.
+        assert await _process_group_is_gone(raiser.pid)
+
+    async def test_a_raising_start_listener_stops_the_background_command(self, tmp_path: Path) -> None:
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        raiser = RaiseOnStart()
+        agent = Agent(
+            _calls_model([('start_command', json.dumps({'command': 'sleep 30'}))]),
+            deps_type=type(None),
+            capabilities=[shell, raiser],
+        )
+        with pytest.raises(RuntimeError, match='listener blew up'):
+            await agent.run('go')
+
+        assert raiser.pid is not None
+        assert raiser.command_id is not None
+        # The ID never reached the model, so no one is left to call
+        # `stop_command`; the kill must come from the toolset itself.
+        assert await _process_group_is_gone(raiser.pid)
 
 
 class TestBackgroundEvents:

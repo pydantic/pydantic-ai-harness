@@ -379,16 +379,23 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 env=self._resolve_env(),
             )
             if ctx is not None:
-                await ctx.emit(
-                    ShellCommandStartEvent(
-                        command_id=command_id,
-                        command=command,
-                        cwd=str(self._cwd),
-                        timeout=timeout,
-                        background=False,
-                        pid=proc.pid,
+                try:
+                    await ctx.emit(
+                        ShellCommandStartEvent(
+                            command_id=command_id,
+                            command=command,
+                            cwd=str(self._cwd),
+                            timeout=timeout,
+                            background=False,
+                            pid=proc.pid,
+                        )
                     )
-                )
+                except BaseException:
+                    # A raising or cancelled listener ends the run; killing
+                    # the group first is what keeps the process from
+                    # outliving it.
+                    await kill_process_group(proc)
+                    raise
             assert proc.stdout is not None
             assert proc.stderr is not None
             stdout = OutputReader(proc.stdout, on_line=self._line_sink(ctx, command_id, 'stdout'))
@@ -475,24 +482,37 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         stdout_file.close()
         stderr_file.close()
 
-        self._background[command_id] = BackgroundProcess(
+        bg = BackgroundProcess(
             command=command,
             command_id=command_id,
             proc=proc,
             stdout_path=stdout_file.name,
             stderr_path=stderr_file.name,
         )
+        self._background[command_id] = bg
         if ctx is not None:
-            await ctx.emit(
-                ShellCommandStartEvent(
-                    command_id=command_id,
-                    command=command,
-                    cwd=str(self._cwd),
-                    timeout=None,
-                    background=True,
-                    pid=proc.pid,
+            try:
+                await ctx.emit(
+                    ShellCommandStartEvent(
+                        command_id=command_id,
+                        command=command,
+                        cwd=str(self._cwd),
+                        timeout=None,
+                        background=True,
+                        pid=proc.pid,
+                    )
                 )
-            )
+            except BaseException:
+                # Symmetric with `_run`: the run ends and the ID never
+                # reaches the model, so nothing is left to stop the
+                # process. Kill it and drop the record.
+                await kill_process_group(bg.proc)
+                with anyio.CancelScope(shield=True):
+                    await bg.proc.wait()
+                cleanup_bg_files(bg)
+                self._background.pop(command_id)
+                await bg.proc.aclose()
+                raise
 
         if note is None:
             return f'Started background command: {command!r}\nID: {command_id}'
