@@ -565,6 +565,49 @@ class TestFileChangeRequests:
         assert (tmp_path / 'huge.txt').read_text(encoding='utf-8') == content
         assert any(isinstance(event, FileWrittenEvent) for event in events)
 
+    @pytest.mark.parametrize(
+        ('lines', 'cut'),
+        [
+            # `-aa` against 2716 `+z` lines makes the diff exactly `MAX_EVENT_DIFF_CHARS`: kept whole.
+            (2716, False),
+            (2717, True),
+        ],
+    )
+    async def test_event_diff_bound_is_inclusive(self, tmp_path: Path, lines: int, cut: bool) -> None:
+        (tmp_path / 'f.txt').write_text('aa\n')
+        listener = Listener()
+
+        await _run_and_collect(
+            tmp_path, 'write_file', json.dumps({'path': 'f.txt', 'content': 'z\n' * lines}), listeners=[listener]
+        )
+
+        (request,) = listener.requests
+        assert request.truncated is cut
+        assert len(request.diff) == MAX_EVENT_DIFF_CHARS
+        assert request.diff.splitlines()[-1] == '+z'
+
+    @pytest.mark.parametrize(
+        ('extra', 'diffed'),
+        [(0, True), (1, False)],
+    )
+    async def test_diff_source_bound_is_inclusive(self, tmp_path: Path, extra: int, diffed: bool) -> None:
+        """Exactly `MAX_DIFF_SOURCE_CHARS` on a side is still diffed; one more character is not."""
+        old = 'x\n' * (MAX_DIFF_SOURCE_CHARS // 2 - 1) + 'a' + 'y' * extra + '\n'
+        assert len(old) == MAX_DIFF_SOURCE_CHARS + extra
+        (tmp_path / 'f.txt').write_text(old)
+        listener = Listener()
+
+        await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps({'path': 'f.txt', 'content': old.replace('\na', '\nb')}),
+            listeners=[listener],
+        )
+
+        (request,) = listener.requests
+        assert request.truncated is not diffed
+        assert ('\n+b' in request.diff) is diffed
+
     async def test_multibyte_text_within_the_bound_is_diffed(self, tmp_path: Path) -> None:
         """The bound is in characters: a file of multibyte characters under it is diffed, whatever its byte size."""
         old = '\u00e9\u00e9\n' * (MAX_DIFF_SOURCE_CHARS // 3)

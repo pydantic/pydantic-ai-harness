@@ -358,7 +358,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
     Security model:
     - All paths resolved relative to root with canonical path checks
-    - Symlinks resolved before authorization (prevents TOCTTOU)
+    - Symlinks resolved before authorization, and again after a listener has
+      held a change request; a rename on the path between that check and the
+      by-name I/O remains possible, as the documented security model says
     - Glob-based allow/deny filtering
     - Protected path patterns (e.g. `.git/`, `.env`)
     - Binary file detection blocks text operations
