@@ -661,6 +661,15 @@ Append-only. Date, item, decision, why.
 - 2026-09-10, 1.2c: #853 CI is fully green on 87984c83 (26 passed, 8 standard skips, one
   cancelled no-op "evaluate dependency approval"). The pydantic re-review retriggered for
   the new head is in flight.
+- 2026-09-10, 1.3b: the #855 pydantic re-trigger from the previous session was stuck:
+  the 17:27:58Z run was published-withheld ("PR head changed after review", the 424c9634
+  main-merge push landed mid-run), its `pydanty:is-working` label was never cleared, and
+  the 18:26:20Z label re-add did not start a new run while that label sat. Cleared the
+  stale `is-working` and re-applied `pydantic-ai:review-lite` at ~19:52Z. Note: the bot
+  also holds a 24h-old `is-working` on PR #589 (someone else's PR) and had not picked up
+  the #845 or #855 labels by 20:00Z, so both fresh runs are queued and may be delayed by
+  that clog. If #845 still shows no `is-working` an hour after the label, cycle the label
+  once more and, if that fails too, flag it to Mike.
 - 2026-09-10, 1.1e: root-caused the `TestKillAfterLeaderExit` CI failures (all 3.11/3.12
   cells, none on 3.10/3.13/3.14) with two diagnostic pushes. The GHA host runs steps under
   a `hosted-compute-agent` systemd service that is the step's session and group leader; it
