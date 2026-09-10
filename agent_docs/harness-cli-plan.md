@@ -171,9 +171,14 @@ the branch. Each item names its acceptance check.
       `../harness-floor`): `@agent.on_event` is 2.40.0+ and six merged docs pages plus shell
       use it. Dependency PR, needs `dependencies:approved`. Unblocks pydanty on #845. PR #851
       (draft, pydanty labelled); waiting on a maintainer for `dependencies:approved`.
-- [ ] 1.1d When #851 merges: rebase `puppy/shell-events` on `main`, answer pydanty's floor
+- [x] 1.1d When #851 merges: rebase `puppy/shell-events` on `main`, answer pydanty's floor
       finding on #845 with the merged PR, mark #845 ready for review, and merge `main` into
-      `feat/experimental-cli` so the CLI lock picks up the floor.
+      `feat/experimental-cli` so the CLI lock picks up the floor. #851 merged at 16:07Z
+      (by Mike); the branch already carried the `main` merge (6a3791c5), so no rebase was
+      needed. Replied on #845 that the floor finding is answered on both sides and marked
+      it ready for review. `main` merged into `feat/experimental-cli` at eed149a0; the
+      `cli` extra conflict resolved to the 2.40.0 floor plus `termflow`, and the lock now
+      resolves pydantic-ai-slim 2.42.0.
 - [x] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`, worktree
       `../harness-filesystem-change-events`): `FileChangeRequestEvent`, `FileEditedEvent`,
       `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and search counts,
@@ -189,12 +194,17 @@ the branch. Each item names its acceptance check.
       The `FileEditedEvent` subclass question for Douwe is in the PR body.
 - [ ] 1.2c When #853 merges: merge `main` into `feat/experimental-cli` and drop the
       `puppy/filesystem-change-events` worktree.
-- [ ] 1.2d Work pydanty's second pass on #853 (landed 00:04Z: one blocking, the floor finding
+- [x] 1.2d Work pydanty's second pass on #853 (landed 00:04Z: one blocking, the floor finding
       again, answered with #851; five required) plus the Macroscope and Veria threads it picked
       up at 23:41Z (edit-after-await staleness, `parent_file/child.txt` passing the parent
       check, final-newline-only diffs coming out empty, diff cost on large files). Fix in
       `../harness-filesystem-change-events`, merge into `feat/experimental-cli`, reply per
-      finding, re-apply `pydanty:review-lite`.
+      finding, re-apply `pydanty:review-lite`. The five required were fixed across c70f442c
+      to f5b9134d (the last, oversized diff headers cut at the bound); the blocking one
+      cleared when #851 merged. The re-applied pass landed 16:59Z green on f5b9134d: zero
+      blocking, zero required, one informational note with a skip verdict (a mutation
+      window inherent to the by-name design, documented in the security model). Fixes
+      merged into `feat/experimental-cli` at ffda2f55.
 - [x] 1.3 `subagents` events PR (`puppy/subagents-events`, worktree
       `../harness-subagents-events`): `DelegationStartEvent`, `DelegationEndEvent`. Bridge renders
       a `>>` start line and a `<<` end line per delegation. PR #855 (draft, CI green, pydanty
@@ -203,6 +213,10 @@ the branch. Each item names its acceptance check.
       `pydanty:is-working` clears when it lands), address the findings in
       `../harness-subagents-events`, merge the fixes into `feat/experimental-cli`, then mark
       #855 ready for review. The floor finding, if it comes, is answered with #851 as on #845.
+      In flight at the end of this iteration: the 17:20Z verdict (one blocking, a child
+      `HookTimeoutError` misread as the delegation timeout; one required, `__all__`
+      grouping) was fixed at f5dc6fd6 and the review re-triggered at ~17:38Z. The verdict
+      is pending, and the fixes are not yet merged into `feat/experimental-cli`.
 - [ ] 1.3c When #855 merges: merge `main` into `feat/experimental-cli` and drop the
       `puppy/subagents-events` worktree.
 - [ ] 1.4 `skills` events PR (`puppy/skills-events`): `SkillsLoadedEvent`, `SkillActivatedEvent`.
@@ -574,6 +588,21 @@ Append-only. Date, item, decision, why.
   prompts too; nothing before this produced both.
 - 2026-09-09, 1.3 bridge: merged `puppy/subagents-events` into `feat/experimental-cli` rather
   than a local `uv` source, as 1.1 and 1.2 did.
+- 2026-09-10, 1.1d: merging `main` into `feat/experimental-cli` for the floor conflicts in
+  the `cli` extra; the resolution keeps the 2.40.0 floor and `termflow` in the same extra and
+  re-resolves the lock (now pydantic-ai-slim 2.42.0). A plain `uv sync` drops `termflow` and
+  the CLI tests then skip silently, so sync the CLI worktree with `--extra cli` before
+  running `tests/cli`.
+- 2026-09-10, 1.2d: the pydantic dogfooding runs were flaky on 2026-09-10 afternoon (several
+  "did not produce an accepted result" or silently dropped runs across #845, #853, and #855).
+  Re-applying `pydanty:review-lite` is the only remedy; nothing in the PRs needs changing for
+  them. Runs that did complete landed within ~25-45 minutes.
+- 2026-09-10, 1.3b: a child `HookTimeoutError` is a child crash, not a delegation timeout, so
+  `_settle` routes child-sourced timeouts (a `HookTimeoutError`, or any `TimeoutError` when no
+  budget is set) through the same contain decision as any other crash, rather than the
+  re-raise the suggested patch used. `contain_errors` documents what happens to unexpected
+  child crashes, and a hook overrunning its budget is one; the suggested re-raise would have
+  aborted the parent even with containment on.
 
 ## Open questions for Mike
 
