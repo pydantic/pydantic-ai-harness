@@ -13,6 +13,14 @@ lookup cannot settle.
 The examples below use an Anthropic model and `Agent.from_file`, so they also
 pull in the `anthropic` provider and the `spec` YAML support:
 
+pip:
+
+```bash
+pip install "pydantic-ai-harness[youdotcom,anthropic]" "pydantic-ai-slim[spec]"
+```
+
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[youdotcom,anthropic]" "pydantic-ai-slim[spec]"
 ```

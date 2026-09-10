@@ -33,6 +33,13 @@ PR that updates pydantic-ai's `docs/navigation.yml`. Keep slugs
 
 ## Page Conventions
 
+- **Installation commands**: show equivalent `pip install` and `uv add` commands in
+  `=== "pip"` / `=== "uv"` tabs on docs pages. In READMEs, use plain `pip:` / `uv:`
+  labels and fenced blocks because GitHub does not render these tabs. Keep package
+  arguments identical, including extras. Put inline dependency-install examples in
+  paired blocks too. Use `uv run` for follow-up executables installed in the uv
+  project environment. Workflow YAML and repository-development commands retain
+  their required execution environment rather than becoming `uv add` examples.
 - **Purpose-first lead**: the opening paragraph says what the capability is for and when to use
   it. Lifecycle hook names (`before_model_request`, …) never appear in the lead — mechanism goes
   below the purpose.

@@ -41,6 +41,14 @@ Editors like [Zed](https://zed.dev/docs/ai/external-agents) speak ACP: a stdio J
 
 ## Installation
 
+pip:
+
+```bash
+pip install "pydantic-ai-harness[acp]"
+```
+
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[acp]"
 ```

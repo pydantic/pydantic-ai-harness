@@ -20,6 +20,14 @@ You also need an API key for the model your agent uses.
 
 ## Installation
 
+pip:
+
+```bash
+pip install "pydantic-ai-harness[stackone]" "pydantic-ai-slim[openai,spec]"
+```
+
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[stackone]" "pydantic-ai-slim[openai,spec]"
 ```

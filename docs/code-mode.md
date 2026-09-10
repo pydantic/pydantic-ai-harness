@@ -32,9 +32,17 @@ Durable execution integrations can record nested calls for deterministic replay.
 
 Code mode requires the Monty sandbox, available via the `codemode` extra (the `code-mode` extra is an equivalent alias):
 
-```bash
-uv add "pydantic-ai-harness[codemode]"
-```
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[codemode]"
+    ```
+
+=== "uv"
+
+    ```bash
+    uv add "pydantic-ai-harness[codemode]"
+    ```
 
 ## Usage
 
@@ -279,9 +287,17 @@ Keep these limitations in mind:
 
 Install both integrations:
 
-```bash
-uv add "pydantic-ai-harness[codemode,temporal]"
-```
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[codemode,temporal]"
+    ```
+
+=== "uv"
+
+    ```bash
+    uv add "pydantic-ai-harness[codemode,temporal]"
+    ```
 
 Construct the named agent and its stable-ID toolsets outside the workflow, then attach
 `TemporalDurability` alongside `CodeMode`:

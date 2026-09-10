@@ -56,6 +56,14 @@ catalog without changing the sub-agents themselves.
 
 The script runs inside the [Monty](https://github.com/pydantic/monty) sandbox, so install the extra:
 
+pip:
+
+```bash
+pip install "pydantic-ai-harness[dynamic-workflow]"
+```
+
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[dynamic-workflow]"
 ```

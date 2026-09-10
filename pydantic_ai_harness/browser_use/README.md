@@ -19,6 +19,14 @@ the tool returns a text result.
 
 ## Installation
 
+pip:
+
+```bash
+pip install "pydantic-ai-harness[browser-use]"
+```
+
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[browser-use]"
 ```

@@ -18,6 +18,14 @@ Everything here is one primitive: a [capability](https://ai.pydantic.dev/capabil
 
 Install with [`uv`](https://docs.astral.sh/uv/):
 
+pip:
+
+```bash
+pip install "pydantic-ai-harness[anthropic]"
+```
+
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[anthropic]"
 ```
@@ -40,6 +48,14 @@ uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m 
 ```
 
 Every model works: swap the string for [any provider's](https://ai.pydantic.dev/models/). Need more? Add capabilities to the list; here's the same coder on `gpt-5.6-sol`, with web search and cross-session memory:
+
+pip:
+
+```bash
+pip install "pydantic-ai-slim[openai]"
+```
+
+uv:
 
 ```bash
 uv add "pydantic-ai-slim[openai]"
@@ -292,6 +308,14 @@ Everything is observable: `logfire.instrument_pydantic_ai()` gives you [a full t
 "Harness" is the field's term for everything around the model that turns it into an agent: the loop, the tools, the context management. Reach for this package when your agent should *do* more than core's lean harness covers: touch files, run code, browse, remember, delegate, or stay coherent through hours-long runs. The boundary between the packages is mechanical, not a maturity tier: core ships the capabilities that require model or framework support (provider-native tools like [image generation](https://ai.pydantic.dev/capabilities/image-generation/), provider APIs like [compaction](https://ai.pydantic.dev/capabilities/compaction/), deep loop integration like [tool search](https://ai.pydantic.dev/capabilities/tool-search/), and fundamentals like [thinking](https://ai.pydantic.dev/capabilities/thinking/), [MCP](https://ai.pydantic.dev/capabilities/mcp/), and [web search](https://ai.pydantic.dev/capabilities/web-search/)) and the Harness ships everything else, as a separate package so capabilities can iterate at the speed the field moves while Pydantic AI itself stays lean.
 
 ## Installation
+
+pip:
+
+```bash
+pip install pydantic-ai-harness
+```
+
+uv:
 
 ```bash
 uv add pydantic-ai-harness

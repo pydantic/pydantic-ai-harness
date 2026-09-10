@@ -69,6 +69,14 @@ The [harness Quick start](../../README.md#quick-start) wires `CodeMode` up again
 
 Code mode requires the Monty sandbox:
 
+pip:
+
+```bash
+pip install "pydantic-ai-harness[codemode]"
+```
+
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[codemode]"
 ```
@@ -297,6 +305,14 @@ Keep these limitations in mind:
 ## Temporal durability
 
 Install both integrations:
+
+pip:
+
+```bash
+pip install "pydantic-ai-harness[codemode,temporal]"
+```
+
+uv:
 
 ```bash
 uv add "pydantic-ai-harness[codemode,temporal]"

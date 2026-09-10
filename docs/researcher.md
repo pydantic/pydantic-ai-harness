@@ -14,9 +14,17 @@ It is a regular [combined capability](https://pydantic.dev/docs/ai/capabilities/
 
 Install the local search and fetch fallbacks (DuckDuckGo search, page-to-Markdown fetching):
 
-```bash
-uv add "pydantic-ai-harness[researcher]"
-```
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[researcher]"
+    ```
+
+=== "uv"
+
+    ```bash
+    uv add "pydantic-ai-harness[researcher]"
+    ```
 
 Then ask it a question:
 

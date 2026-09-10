@@ -5,8 +5,16 @@ so you can iterate on it from the Logfire UI -- versioned, labelled, and rolled 
 
 Install the extra:
 
+pip:
+
 ```bash
 pip install 'pydantic-ai-harness[logfire]'
+```
+
+uv:
+
+```bash
+uv add 'pydantic-ai-harness[logfire]'
 ```
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/logfire/)

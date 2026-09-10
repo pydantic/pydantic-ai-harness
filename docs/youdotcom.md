@@ -35,9 +35,17 @@ Install the `youdotcom` extra and set the `YDC_API_KEY` environment variable
 honored). The examples below use an Anthropic model and `Agent.from_file`, so
 they also pull in the `anthropic` provider and the `spec` YAML support:
 
-```bash
-uv add "pydantic-ai-harness[youdotcom,anthropic]" "pydantic-ai-slim[spec]"
-```
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[youdotcom,anthropic]" "pydantic-ai-slim[spec]"
+    ```
+
+=== "uv"
+
+    ```bash
+    uv add "pydantic-ai-harness[youdotcom,anthropic]" "pydantic-ai-slim[spec]"
+    ```
 
 Then pass the capabilities to an `Agent` via the `capabilities` parameter:
 

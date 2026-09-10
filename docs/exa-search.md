@@ -34,9 +34,17 @@ output budgets, and short research guidance in the system prompt.
 Install the `exa` extra and set the `EXA_API_KEY` environment variable (create
 a key at <https://dashboard.exa.ai>):
 
-```bash
-uv add "pydantic-ai-harness[exa]"
-```
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[exa]"
+    ```
+
+=== "uv"
+
+    ```bash
+    uv add "pydantic-ai-harness[exa]"
+    ```
 
 Then pass `ExaSearch` to an `Agent` via the `capabilities` parameter:
 

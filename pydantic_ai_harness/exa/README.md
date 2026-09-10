@@ -11,6 +11,14 @@ Exa Agent API as deferred tool calls.
 
 ## Installation
 
+pip:
+
+```bash
+pip install "pydantic-ai-harness[exa]"
+```
+
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[exa]"
 ```
