@@ -5,6 +5,7 @@ from pydantic_ai_harness.subagents._disk import AgentOverride
 from pydantic_ai_harness.subagents._effort import MINIMUM_EFFORT_FLOOR, clamp_effort
 from pydantic_ai_harness.subagents._events import (
     MAX_EVENT_TEXT_CHARS,
+    SUB_AGENTS_EVENTS,
     DelegationEndEvent,
     DelegationOutcome,
     DelegationStartEvent,
@@ -20,6 +21,7 @@ __all__ = [
     'DelegationOutcome',
     'DelegationStartEvent',
     'ModelOption',
+    'SUB_AGENTS_EVENTS',
     'SubAgent',
     'SubAgentToolset',
     'SubAgents',

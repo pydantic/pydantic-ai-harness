@@ -180,6 +180,17 @@ class TestDelegationEvents:
         assert (start.tool_name, end.tool_name) == ('hand_off', 'hand_off')
         assert start.capability_id == end.capability_id == 'sub_agents'
 
+    async def test_listener_that_raises_aborts_the_parent_run(self) -> None:
+        @dataclass
+        class Boom(AbstractCapability[object]):
+            @on_event(DelegationStartEvent)
+            async def _boom(self, ctx: RunContext[object], event: DelegationStartEvent) -> None:
+                raise RuntimeError('listener blew up')
+
+        parent = Agent(_delegate_once(), capabilities=[SubAgents(agents=[SubAgent(_worker())]), Boom()])
+        with pytest.raises(RuntimeError, match='listener blew up'):
+            await parent.run('go')
+
     async def test_parallel_delegations_pair_by_tool_call_id(self) -> None:
         listener, _ = await _run(
             _delegations([[{'agent_name': 'worker', 'task': 'a'}, {'agent_name': 'worker', 'task': 'b'}]]),
