@@ -179,7 +179,7 @@ the branch. Each item names its acceptance check.
       it ready for review. `main` merged into `feat/experimental-cli` at eed149a0; the
       `cli` extra conflict resolved to the 2.40.0 floor plus `termflow`, and the lock now
       resolves pydantic-ai-slim 2.42.0.
-- [ ] 1.1e Work the #845 re-review pass. Round one: the 18:13Z pydantic required finding
+- [x] 1.1e Work the #845 re-review pass. Round one: the 18:13Z pydantic required finding
       fixed at aa50d07c; the Macroscope round it triggered (three findings, two high) fixed
       at 89dfdfdf and replied to. The CI failure on 89dfdfdf (the `TestKillAfterLeaderExit`
       test on every 3.11/3.12 cell) is root-caused and fixed at 42e985f9 (see journal: the
@@ -695,6 +695,17 @@ Append-only. Date, item, decision, why.
   two-command test pinning both halves of the guarantee (rewrite wins over clobber,
   then proposed command wins over clobber). A fresh run was dispatched at 21:50Z on
   e85e6b9d; the 21:38Z run will publish-withheld on the head change.
+- 2026-09-10, 1.1e (done): the 21:50Z run (df_run_c0a7672f90c34be58126) landed 22:13Z on
+  the real head e85e6b9d: reviewed, 0 blocking, all 5 charters passed; the single
+  informational (cancellation mid-emit can drop complete lines from live events while
+  the end event and model string stay correct) was triaged skip by the bot itself.
+  `pydanty:reviewed` is on. The fix was merged into feat/experimental-cli at c86b079e
+  (synced pydantic_ai_harness/shell, tests/shell, docs/shell.md from the PR head; the
+  host only reads events and calls cancel(), so it is behavior-compatible; tests/shell
+  and tests/cli pass, 337 passed / 6 skipped). Two Macroscope threads from the 18:27Z
+  round (the veto 3982252751 and the try/finally 3982252753) were fixed in 89dfdfdf and
+  still await the bot's self-verification, as the docs thread it resolved at 18:40Z did;
+  nothing left for us on this PR until a maintainer merges it.
 - 2026-09-10, 1.3b: the #855 run dispatched at 20:50Z (df_run_30cc80e36c544267ad60)
   landed 21:25Z: reviewed, 0 blocking, 0 required, all 5 charters passed, on the real
   head 424c9634. #855 is clear of pydantic; only Macroscope on 424c9634 remains (it
