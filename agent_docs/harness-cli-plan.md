@@ -179,6 +179,11 @@ the branch. Each item names its acceptance check.
       it ready for review. `main` merged into `feat/experimental-cli` at eed149a0; the
       `cli` extra conflict resolved to the 2.40.0 floor plus `termflow`, and the lock now
       resolves pydantic-ai-slim 2.42.0.
+- [ ] 1.1e Work the #845 re-review pass (label re-applied ~18:26Z for head aa50d07c, which
+      fixes the 18:13Z required finding; the same push retriggers Macroscope, which had not
+      evaluated any head since c9d61bce). When the verdict lands: fix what is real, reply per
+      finding, re-apply the label if there is a new head, and merge the fixes into
+      `feat/experimental-cli`.
 - [x] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`, worktree
       `../harness-filesystem-change-events`): `FileChangeRequestEvent`, `FileEditedEvent`,
       `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and search counts,
@@ -213,10 +218,12 @@ the branch. Each item names its acceptance check.
       `pydanty:is-working` clears when it lands), address the findings in
       `../harness-subagents-events`, merge the fixes into `feat/experimental-cli`, then mark
       #855 ready for review. The floor finding, if it comes, is answered with #851 as on #845.
-      In flight at the end of this iteration: the 17:20Z verdict (one blocking, a child
-      `HookTimeoutError` misread as the delegation timeout; one required, `__all__`
-      grouping) was fixed at f5dc6fd6 and the review re-triggered at ~17:38Z. The verdict
-      is pending, and the fixes are not yet merged into `feat/experimental-cli`.
+      The 17:20Z verdict (one blocking, a child `HookTimeoutError` misread as the delegation
+      timeout; one required, `__all__` grouping) was fixed at f5dc6fd6. The re-triggered run
+      withheld publication at 17:27:58Z ("PR head changed after review", Mike's `main` merge
+      landed a minute later), so no verdict is on the current head 424c9634; the label was
+      re-applied at ~18:30Z to start a fresh run there. The fixes are not yet merged into
+      `feat/experimental-cli`.
 - [ ] 1.3c When #855 merges: merge `main` into `feat/experimental-cli` and drop the
       `puppy/subagents-events` worktree.
 - [ ] 1.4 `skills` events PR (`puppy/skills-events`): `SkillsLoadedEvent`, `SkillActivatedEvent`.
@@ -610,6 +617,25 @@ Append-only. Date, item, decision, why.
   re-raise the suggested patch used. `contain_errors` documents what happens to unexpected
   child crashes, and a hook overrunning its budget is one; the suggested re-raise would have
   aborted the parent even with containment on.
+- 2026-09-10, 1.1b: the #845 re-review on 6a3791c5 landed 18:13Z: zero blocking, one required
+  (`kill_process_group` resolved the group with `os.getpgid` at kill time; once a naturally
+  exited leader was reaped that raised `ProcessLookupError` and the sweep was skipped while
+  surviving group members stayed alive and unreachable), and the `process-group-kill-sweep`
+  charter did not run, so the verdict is an "incomplete review" that asks for a re-run.
+  Fixed at aa50d07c: the child is spawned with `start_new_session=True`, so the leader's pid
+  is the group id for the group's whole life and the sweep now signals `os.killpg(proc.pid)`
+  directly. `TestKillAfterLeaderExit` in `tests/shell/test_events.py` forks a child that
+  outlives the shell, waits for the leader to be reaped, and asserts the sweep still reaches
+  the child; it fails against the old code. Replied on the PR and re-applied the label.
+- 2026-09-10, 1.1b/1.3b: Macroscope is a check-run bot with no comment trigger; it
+  re-evaluates on push and skips heads whose diff is unchanged since its last completed
+  review (it says so in the skip title). The @mention comments on #845/#855 are inert. The
+  aa50d07c push on #845 is the retrigger for that PR; #855's last real verdict (12:23Z)
+  predates the f5dc6fd6 fix, and a fresh push is the only way to move its "diff unchanged"
+  skip. If a future #855 fix lands, the re-evaluation happens automatically.
+- 2026-09-10, 1.2c: #853 CI is fully green on 87984c83 (26 passed, 8 standard skips, one
+  cancelled no-op "evaluate dependency approval"). The pydantic re-review retriggered for
+  the new head is in flight.
 
 ## Open questions for Mike
 
