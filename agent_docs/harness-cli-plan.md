@@ -189,6 +189,12 @@ the branch. Each item names its acceptance check.
       The `FileEditedEvent` subclass question for Douwe is in the PR body.
 - [ ] 1.2c When #853 merges: merge `main` into `feat/experimental-cli` and drop the
       `puppy/filesystem-change-events` worktree.
+- [ ] 1.2d Work pydanty's second pass on #853 (landed 00:04Z: one blocking, the floor finding
+      again, answered with #851; five required) plus the Macroscope and Veria threads it picked
+      up at 23:41Z (edit-after-await staleness, `parent_file/child.txt` passing the parent
+      check, final-newline-only diffs coming out empty, diff cost on large files). Fix in
+      `../harness-filesystem-change-events`, merge into `feat/experimental-cli`, reply per
+      finding, re-apply `pydanty:review-lite`.
 - [x] 1.3 `subagents` events PR (`puppy/subagents-events`, worktree
       `../harness-subagents-events`): `DelegationStartEvent`, `DelegationEndEvent`. Bridge renders
       a `>>` start line and a `<<` end line per delegation. PR #855 (draft, CI green, pydanty
