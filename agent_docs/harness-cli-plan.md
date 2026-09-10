@@ -689,7 +689,12 @@ Append-only. Date, item, decision, why.
   must not crash on out-of-contract direct `rewrite_reason` assignment): the
   `_rewritten is None` check treats that corner as "no rewrite". The 0c32dca7 commit
   body is garbled (backticks in a double-quoted `-m` ran command substitution); left
-  in place per the no-force-push rule.
+  in place per the no-force-push rule. 0c32dca7 then failed coverage (the new
+  clobber test never ran its listener without a rewrite: branch 374->exit); fixed at
+  e85e6b9d by making the capability rewrite once and clobber every request, with a
+  two-command test pinning both halves of the guarantee (rewrite wins over clobber,
+  then proposed command wins over clobber). A fresh run was dispatched at 21:50Z on
+  e85e6b9d; the 21:38Z run will publish-withheld on the head change.
 - 2026-09-10, 1.3b: the #855 run dispatched at 20:50Z (df_run_30cc80e36c544267ad60)
   landed 21:25Z: reviewed, 0 blocking, 0 required, all 5 charters passed, on the real
   head 424c9634. #855 is clear of pydantic; only Macroscope on 424c9634 remains (it
