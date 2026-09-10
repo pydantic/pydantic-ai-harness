@@ -33,9 +33,21 @@ def _lines(text: str) -> list[str]:
     return [f'{line}\n' for line in lines] + ([last] if last else [])
 
 
+def _quoted(name: str) -> str:
+    """`name` as a diff header label, quoted as `git diff` quotes a name with a control character in it.
+
+    A model-supplied name with a newline in it would otherwise forge a
+    header or a hunk in the diff a listener is shown.
+    """
+    if name.isprintable():
+        return name
+    return '"' + name.encode('unicode_escape').decode('ascii').replace('"', '\\"') + '"'
+
+
 def _diff_lines(old: str, new: str, *, path: str) -> Iterator[str]:
     """The diff lines without terminators, marking a final line that has none the way `git diff` does."""
-    lines = difflib.unified_diff(_lines(old), _lines(new), fromfile=f'a/{path}', tofile=f'b/{path}', lineterm='')
+    fromfile, tofile = _quoted(f'a/{path}'), _quoted(f'b/{path}')
+    lines = difflib.unified_diff(_lines(old), _lines(new), fromfile=fromfile, tofile=tofile, lineterm='')
     for index, line in enumerate(lines):
         if line.endswith('\n'):
             yield line[:-1]
@@ -58,7 +70,7 @@ def unified_diff(old: str | None, new: str, *, path: str) -> tuple[str, bool]:
     caller found the current content that large and did not decode it.
     """
     if old is None or len(old) > MAX_DIFF_SOURCE_CHARS or len(new) > MAX_DIFF_SOURCE_CHARS:
-        return f'--- a/{path}\n+++ b/{path}', True
+        return f'--- {_quoted(f"a/{path}")}\n+++ {_quoted(f"b/{path}")}', True
     diff = '\n'.join(_diff_lines(old, new, path=path))
     if len(diff) <= MAX_EVENT_DIFF_CHARS:
         return diff, False

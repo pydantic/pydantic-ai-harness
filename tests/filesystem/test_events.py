@@ -569,6 +569,22 @@ class TestFileChangeRequests:
         assert edited.diff == f'--- a/target.txt\n+++ b/target.txt\n{hunk}'
         assert (tmp_path / 'target.txt').read_bytes() == new.encode()
 
+    @pytest.mark.skipif(os.name == 'nt', reason='Windows rejects the name before the request.')
+    async def test_control_character_in_the_name_cannot_forge_the_diff(self, tmp_path: Path) -> None:
+        """A name with a newline in it is quoted in the headers, as `git diff` quotes it."""
+        listener = Listener(cancel=True)
+
+        await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps({'path': 'we\nird.txt', 'content': 'x\n'}),
+            listeners=[listener],
+        )
+
+        (request,) = listener.requests
+        assert request.path == 'we\nird.txt'
+        assert request.diff == '--- "a/we\\nird.txt"\n+++ "b/we\\nird.txt"\n@@ -0,0 +1 @@\n+x'
+
     @needs_mode_bits
     async def test_unreadable_target_diffs_from_empty(self, tmp_path: Path) -> None:
         """A file the process can write but not read is still written; only the diff loses its old side."""
