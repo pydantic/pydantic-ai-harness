@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import pytest
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, on_event
-from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior
+from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import (
     CapabilityEvent,
     ModelMessage,
@@ -254,6 +254,33 @@ class TestOutcomes:
         listener = Listener()
         with pytest.raises(ModelAPIError):
             await Agent(_delegate_once(), capabilities=[SubAgents(agents=[SubAgent(worker)]), listener]).run('go')
+
+        assert [type(event) for event in listener.events] == [DelegationStartEvent]
+
+    async def test_shared_usage_limit_ends_without_an_end_event(self) -> None:
+        listener = Listener()
+        parent = Agent(_delegate_once(), capabilities=[SubAgents(agents=[SubAgent(_worker())]), listener])
+        # Seeded so the parent's request is the last one core's default limit (50)
+        # allows, and the child's first request is the one over it.
+        with pytest.raises(UsageLimitExceeded, match='request_limit of 50'):
+            await parent.run('go', usage=RunUsage(requests=49))
+
+        assert [type(event) for event in listener.events] == [DelegationStartEvent]
+
+    async def test_cancellation_ends_without_an_end_event(self) -> None:
+        async def slow(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            await asyncio.sleep(1)
+            return ModelResponse(parts=[TextPart('late')])  # pragma: no cover - cancelled mid-delegation
+
+        worker = Agent(FunctionModel(slow), name='worker')
+        listener = Listener()
+        parent = Agent(_delegate_once(), capabilities=[SubAgents(agents=[SubAgent(worker)]), listener])
+        run = asyncio.ensure_future(parent.run('go'))
+        while not listener.events:
+            await asyncio.sleep(0)
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
 
         assert [type(event) for event in listener.events] == [DelegationStartEvent]
 
