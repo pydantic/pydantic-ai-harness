@@ -544,8 +544,8 @@ class TestFileChangeRequests:
     @pytest.mark.parametrize('big_side', ['old', 'new'])
     async def test_oversized_change_is_not_diffed(self, tmp_path: Path, big_side: str) -> None:
         """Past `MAX_DIFF_SOURCE_CHARS` on either side nothing is diffed: the event carries the headers, marked as cut."""
-        # Well past the bound, so the existing file is hashed in more than one chunk.
-        huge = 'x\u00e9' * MAX_DIFF_SOURCE_CHARS
+        # Well past the bound in bytes too, so the existing file is hashed in more than one chunk.
+        huge = 'x\u00e9\u00e9\u00e9' * MAX_DIFF_SOURCE_CHARS
         content = 'small\n' if big_side == 'old' else huge
         if big_side == 'old':
             (tmp_path / 'huge.txt').write_text(huge, encoding='utf-8')
@@ -564,6 +564,21 @@ class TestFileChangeRequests:
         assert (request.diff, request.truncated) == ('--- a/huge.txt\n+++ b/huge.txt', True)
         assert (tmp_path / 'huge.txt').read_text(encoding='utf-8') == content
         assert any(isinstance(event, FileWrittenEvent) for event in events)
+
+    async def test_multibyte_text_within_the_bound_is_diffed(self, tmp_path: Path) -> None:
+        """The bound is in characters: a file of multibyte characters under it is diffed, whatever its byte size."""
+        old = '\u00e9\u00e9\n' * (MAX_DIFF_SOURCE_CHARS // 3)
+        (tmp_path / 'target.txt').write_text(old, encoding='utf-8')
+        listener = Listener()
+
+        await _run_and_collect(
+            tmp_path, 'write_file', '{"path":"target.txt","content":"small\\n"}', listeners=[listener]
+        )
+
+        (request,) = listener.requests
+        assert request.diff.startswith('--- a/target.txt\n+++ b/target.txt\n@@ -1,')
+        assert '\n-\u00e9\u00e9\n' in request.diff
+        assert request.truncated
 
     @pytest.mark.parametrize(
         ('old', 'new', 'hunk'),

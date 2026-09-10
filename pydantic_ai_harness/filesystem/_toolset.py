@@ -199,6 +199,9 @@ def _bytes_hash(data: bytes) -> str:
 
 _HASH_CHUNK_BYTES = 1 << 20
 
+_DIFF_SOURCE_BYTES = 4 * MAX_DIFF_SOURCE_CHARS
+"""Bytes that can hold `MAX_DIFF_SOURCE_CHARS` of UTF-8; a longer file is past the bound whatever it holds."""
+
 
 def _chunks(source: BinaryIO) -> Iterator[bytes]:
     """`source` in `_HASH_CHUNK_BYTES` pieces, so hashing a file never holds it whole."""
@@ -247,14 +250,15 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     file the process cannot read (a write-only mode, say) diffs from empty and
     is written unguarded, since the diff is for display; an `expected_hash`
     it cannot check propagates the error instead. Past `MAX_DIFF_SOURCE_CHARS`
-    the text is `None`: it would not be diffed, so only that much is read
-    into memory and the rest is hashed in chunks.
+    the text is `None`: it would not be diffed, so only as many bytes as can
+    hold that many characters are read into memory and the rest is hashed in
+    chunks.
     """
     if not resolved.is_file():
         return '', _disk_hash([b''])
     try:
         with resolved.open('rb') as source:
-            head = source.read(MAX_DIFF_SOURCE_CHARS + 1)
+            head = source.read(_DIFF_SOURCE_BYTES + 1)
             current_hash = _disk_hash(itertools.chain([head], _chunks(source)))
     except OSError:
         if expected_hash is not None:
@@ -262,7 +266,7 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
         return '', None
     if expected_hash is not None:
         _check_expected_hash(path, current_hash, expected_hash)
-    old = head.decode('utf-8', errors='replace') if len(head) <= MAX_DIFF_SOURCE_CHARS else None
+    old = head.decode('utf-8', errors='replace') if len(head) <= _DIFF_SOURCE_BYTES else None
     return old, current_hash
 
 
