@@ -162,6 +162,14 @@ class TestDelegationEvents:
         assert (start.task, start.truncated) == ('t' * MAX_EVENT_TEXT_CHARS, True)
         assert (end.output, end.truncated) == ('o' * MAX_EVENT_TEXT_CHARS, True)
 
+    async def test_text_at_the_bound_is_kept_whole(self) -> None:
+        at_bound = 'b' * MAX_EVENT_TEXT_CHARS
+        listener, _ = await _run(_delegate_once(task=at_bound), SubAgents(agents=[SubAgent(_worker(at_bound))]))
+
+        start, end = _pair(listener)
+        assert (start.task, start.truncated) == (at_bound, False)
+        assert (end.output, end.truncated) == (at_bound, False)
+
     async def test_renamed_tool_inside_a_combined_capability_still_emits(self) -> None:
         listener = Listener()
         packaged = CombinedCapability[object]([SubAgents(agents=[SubAgent(_worker())], tool_name='hand_off'), listener])
@@ -303,15 +311,22 @@ class TestNothingEmitted:
         listener, _ = await _run(
             _delegations(
                 [
-                    [{'agent_name': 'ghost', 'task': 't'}],
+                    [{'agent_name': 'worker', 'task': 't', 'model': 'nope'}],
+                    [{'agent_name': 'worker', 'task': 't', 'model': 'deep'}],
                     [{'agent_name': 'worker', 'task': 't'}],
+                    [{'agent_name': 'ghost', 'task': 't'}],
                     [{'agent_name': 'worker', 'task': 't'}],
                 ]
             ),
-            SubAgents(agents=[SubAgent(_worker(), max_calls=1)]),
+            SubAgents(
+                agents=[SubAgent(_worker(), max_calls=1, models=['fast'])],
+                models={'fast': TestModel(), 'deep': TestModel()},
+            ),
         )
 
-        # The unknown sub-agent and the over-budget call never start; one delegation ran.
+        # The key off the menu, the key outside the delegate's restriction, the unknown
+        # sub-agent, and the over-budget call never start; one delegation ran (third step,
+        # which also resets the tool's retry count between the refusals).
         assert [type(event) for event in listener.events] == [DelegationStartEvent, DelegationEndEvent]
 
     async def test_directly_registered_toolset_emits_nothing(self) -> None:
