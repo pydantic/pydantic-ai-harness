@@ -7,6 +7,8 @@ how a subscriber pairs them when several delegations run at once.
 Text in these events is bounded: `task` and `output` are cut at
 `MAX_EVENT_TEXT_CHARS` with a `truncated` flag, so an event stream that is
 persisted or forwarded to a UI cannot be flooded by one verbose delegation.
+
+As with any capability event, a listener that raises aborts the parent run.
 """
 
 from dataclasses import dataclass
@@ -42,9 +44,9 @@ def bounded_text(text: str) -> tuple[str, bool]:
 class DelegationStartEvent(CapabilityEvent, namespace=SUB_AGENTS_EVENTS, name='delegation_start'):
     """A sub-agent run is about to start for one delegation.
 
-    Emitted after the delegation passed every check that could refuse it (an
+    Emitted once the delegation has passed every check that could refuse it (an
     unknown sub-agent, a model key off the menu, an exhausted `max_calls`
-    budget), so a start is always followed by a run.
+    budget), immediately before the child run starts.
     """
 
     agent_name: str
@@ -53,16 +55,18 @@ class DelegationStartEvent(CapabilityEvent, namespace=SUB_AGENTS_EVENTS, name='d
     model: str | None
     """The menu key the delegation runs on, or `None` when no menu applies."""
     inherits_tools: bool
+    """Whether the parent's own tools were passed to the child run (`SubAgents.inherit_tools`)."""
 
 
 @dataclass(kw_only=True)
 class DelegationEndEvent(CapabilityEvent, namespace=SUB_AGENTS_EVENTS, name='delegation_end'):
     """A delegation settled into what the parent receives.
 
-    `output` is the text the parent model gets: the child's output on `ok`,
-    otherwise the steering message it is returned or the `ModelRetry` it is
-    raised. An exception that propagates out of the delegate tool (a shared
-    usage limit, an uncontained crash, a cancellation) ends without this event.
+    `output` is what the delegate tool hands back to the parent: the child's
+    output on `ok`, otherwise the steering message it returns or the
+    `ModelRetry` it raises. An exception that propagates out of the delegate
+    tool (a shared usage limit, an uncontained crash, a cancellation) ends
+    without this event.
     """
 
     agent_name: str
@@ -73,3 +77,4 @@ class DelegationEndEvent(CapabilityEvent, namespace=SUB_AGENTS_EVENTS, name='del
     """The child's own usage when it has separate accounting (`SubAgent.usage_limits`
     set, or `forward_usage` off); `None` when it accrues into the parent's usage."""
     duration_seconds: float
+    """Wall-clock seconds from just after the start event was emitted until the delegation settled."""
