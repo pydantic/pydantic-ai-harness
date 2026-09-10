@@ -21,16 +21,16 @@ Pydantic AI's `load_capability` tool to receive that skill's instructions.
 
 Install the `skills` extra for YAML frontmatter support:
 
-=== "pip"
-
-    ```bash
-    pip install "pydantic-ai-harness[skills]"
-    ```
-
 === "uv"
 
     ```bash
     uv add "pydantic-ai-harness[skills]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[skills]"
     ```
 
 ## Quick start

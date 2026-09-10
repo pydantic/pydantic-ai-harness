@@ -91,16 +91,16 @@ sqlite_memory = Memory(SqliteMemoryStore(database='.agent-memory.db'))
 
 `PostgresMemoryStore` accepts the driver-neutral `PostgresPool` protocol, so the harness does not require a particular PostgreSQL driver. Install and manage the driver in your application, for example:
 
-pip:
-
-```bash
-pip install asyncpg
-```
-
 uv:
 
 ```bash
 uv add asyncpg
+```
+
+pip:
+
+```bash
+pip install asyncpg
 ```
 
 ```python

@@ -69,16 +69,16 @@ The [harness Quick start](../../README.md#quick-start) wires `CodeMode` up again
 
 Code mode requires the Monty sandbox:
 
-pip:
-
-```bash
-pip install "pydantic-ai-harness[codemode]"
-```
-
 uv:
 
 ```bash
 uv add "pydantic-ai-harness[codemode]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-harness[codemode]"
 ```
 
 The `code-mode` extra is also supported as an alias.
@@ -306,16 +306,16 @@ Keep these limitations in mind:
 
 Install both integrations:
 
-pip:
-
-```bash
-pip install "pydantic-ai-harness[codemode,temporal]"
-```
-
 uv:
 
 ```bash
 uv add "pydantic-ai-harness[codemode,temporal]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-harness[codemode,temporal]"
 ```
 
 Construct the named agent and its stable-ID toolsets outside the workflow, then attach

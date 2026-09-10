@@ -15,16 +15,16 @@ wire it in through the `capabilities=` parameter on `Agent`.
 
 Install the `logfire` extra:
 
-=== "pip"
-
-    ```bash
-    pip install "pydantic-ai-harness[logfire]"
-    ```
-
 === "uv"
 
     ```bash
     uv add "pydantic-ai-harness[logfire]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[logfire]"
     ```
 
 !!! note "A first-party `Managed` capability is in flight"

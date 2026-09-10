@@ -48,16 +48,16 @@ Install the `browser-use` extra (Python 3.11+; the rest of the harness
 supports 3.10). browser-use talks to Chromium directly over CDP and downloads
 a browser on first run when none is found locally:
 
-=== "pip"
-
-    ```bash
-    pip install "pydantic-ai-harness[browser-use]"
-    ```
-
 === "uv"
 
     ```bash
     uv add "pydantic-ai-harness[browser-use]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[browser-use]"
     ```
 
 Then pass `BrowserUse` to an `Agent` via the `capabilities` parameter, with a

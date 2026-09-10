@@ -30,16 +30,16 @@ Start with `SubAgents` if you are not sure. A `delegate_task` orchestrator conve
 
 The script runs inside the Monty sandbox, so install the extra:
 
-=== "pip"
-
-    ```bash
-    pip install "pydantic-ai-harness[dynamic-workflow]"
-    ```
-
 === "uv"
 
     ```bash
     uv add "pydantic-ai-harness[dynamic-workflow]"
+    ```
+
+=== "pip"
+
+    ```bash
+    pip install "pydantic-ai-harness[dynamic-workflow]"
     ```
 
 ## Your first workflow

@@ -33,9 +33,10 @@ PR that updates pydantic-ai's `docs/navigation.yml`. Keep slugs
 
 ## Page Conventions
 
-- **Installation commands**: show equivalent `pip install` and `uv add` commands in
-  `=== "pip"` / `=== "uv"` tabs on docs pages. In READMEs, use plain `pip:` / `uv:`
-  labels and fenced blocks because GitHub does not render these tabs. Keep package
+- **Installation commands**: show equivalent `uv add` and `pip install` commands in
+  `=== "uv"` / `=== "pip"` tabs on docs pages, with uv first as the default tab.
+  In READMEs, use plain `uv:` / `pip:` labels in the same order
+  and fenced blocks because GitHub does not render these tabs. Keep package
   arguments identical, including extras. Put inline dependency-install examples in
   paired blocks too. Use `uv run` for follow-up executables installed in the uv
   project environment. Workflow YAML and repository-development commands retain

@@ -18,12 +18,12 @@ def test_installation_commands_are_paired(path: Path) -> None:
     pip_label = '=== "pip"' if path in _PAGES else 'pip:'
     uv_label = '=== "uv"' if path in _PAGES else 'uv:'
     pair = re.compile(
-        rf'^{re.escape(pip_label)}\n\n{indent}```bash\n'
-        rf'{indent}pip install (?P<args>[^\n]+)\n'
-        rf'(?P<pip_followup>(?:(?!{indent}```)[^\n]*\n)*){indent}```\n\n'
-        rf'{re.escape(uv_label)}\n\n{indent}```bash\n'
-        rf'{indent}uv add (?P=args)\n'
-        rf'(?P<uv_followup>(?:(?!{indent}```)[^\n]*\n)*){indent}```',
+        rf'^{re.escape(uv_label)}\n\n{indent}```bash\n'
+        rf'{indent}uv add (?P<args>[^\n]+)\n'
+        rf'(?P<uv_followup>(?:(?!{indent}```)[^\n]*\n)*){indent}```\n\n'
+        rf'{re.escape(pip_label)}\n\n{indent}```bash\n'
+        rf'{indent}pip install (?P=args)\n'
+        rf'(?P<pip_followup>(?:(?!{indent}```)[^\n]*\n)*){indent}```',
         re.MULTILINE,
     )
     for match in pair.finditer(text):
@@ -31,7 +31,7 @@ def test_installation_commands_are_paired(path: Path) -> None:
             f'{path}: additional installation commands need their own paired blocks'
         )
     assert not _INSTALL.search(pair.sub('', text)), (
-        f'{path}: each installation needs adjacent labeled pip / uv blocks with identical package arguments'
+        f'{path}: each installation needs adjacent labeled uv / pip blocks, uv first, with identical package arguments'
     )
 
 

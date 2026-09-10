@@ -404,16 +404,16 @@ reaches the server. CI exercises both Mongo backends against `mongo:8`.
 
 Install MongoDB support:
 
-pip:
-
-```bash
-pip install "pydantic-ai-harness[mongodb]"
-```
-
 uv:
 
 ```bash
 uv add "pydantic-ai-harness[mongodb]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-harness[mongodb]"
 ```
 
 ## Bounding snapshot growth
