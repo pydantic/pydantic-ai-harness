@@ -341,7 +341,7 @@ class LiftCancel(AbstractCapability[None]):
     async def _on_request(self, ctx: RunContext[None], event: ShellCommandRequestEvent) -> None:
         try:
             event.cancelled = False  # type: ignore[prop-value]
-            self.lifted = True
+            self.lifted = True  # pragma: no cover - only reachable if `cancelled` becomes settable again
         except AttributeError:
             pass
 
