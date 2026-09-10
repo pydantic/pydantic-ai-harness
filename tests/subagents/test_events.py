@@ -138,6 +138,15 @@ class TestDelegationEvents:
         start, _ = _pair(listener)
         assert start.model == 'fast'
 
+    async def test_unrestricted_delegate_without_a_key_reports_no_selection(self) -> None:
+        listener, _ = await _run(
+            _delegate_once(),
+            SubAgents(agents=[SubAgent(_worker())], models={'fast': TestModel(), 'deep': TestModel()}),
+        )
+
+        start, _ = _pair(listener)
+        assert start.model is None
+
     async def test_own_accounting_reports_child_usage(self) -> None:
         listener, _ = await _run(
             _delegate_once(), SubAgents(agents=[SubAgent(_worker(), usage_limits=UsageLimits(request_limit=5))])
@@ -319,6 +328,29 @@ class TestOutcomes:
         with pytest.raises(asyncio.CancelledError):
             await run
 
+        assert [type(event) for event in listener.events] == [DelegationStartEvent]
+
+    async def test_run_cancelled_in_child_ends_without_an_end_event(self) -> None:
+        def call_stop(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart('stop', {}, tool_call_id='s1')])
+
+        canceller = Agent(FunctionModel(call_stop), name='canceller')
+
+        @canceller.tool
+        def stop(ctx: RunContext[object]) -> str:
+            """Cancel the run."""
+            ctx.cancel()
+            return 'ignored'
+
+        listener = Listener()
+        parent = Agent(
+            _delegate_once(agent_name='canceller'),
+            capabilities=[SubAgents(agents=[SubAgent(canceller, contain_errors=True)]), listener],
+        )
+        result = await parent.run('go')
+
+        assert result.output == 'all done'
+        # A first-party cancellation ends the delegation without an end event.
         assert [type(event) for event in listener.events] == [DelegationStartEvent]
 
 
