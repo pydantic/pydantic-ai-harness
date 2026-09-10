@@ -280,8 +280,10 @@ def _check_expected_hash(path: str, current_hash: str, expected_hash: str) -> No
 
 
 def _nearest_existing(path: Path) -> Path:
-    """The path itself or its closest ancestor that exists."""
-    while not path.exists():
+    """The path itself or its closest ancestor that exists, or its anchor when nothing on the chain does."""
+    # The anchor is its own parent, so an absent one (a Windows drive that
+    # went away) would otherwise never end the walk.
+    while not path.exists() and path.parent != path:
         path = path.parent
     return path
 

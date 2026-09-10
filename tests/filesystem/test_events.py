@@ -523,6 +523,8 @@ class TestFileChangeRequests:
         assert isinstance(event, FileEditedEvent)
         assert event.path == 'target.txt'
         assert event.diff.endswith('-old\n+new')
+        # The serialized kind the docs promise, where `main` emitted `file_system.file_written`.
+        assert event.kind == 'file_system.file_edited'
 
     async def test_large_diff_is_cut_and_marked(self, tmp_path: Path) -> None:
         content = ''.join(f'line {i}\n' for i in range(2000))

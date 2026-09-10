@@ -74,10 +74,12 @@ def unified_diff(old: str | None, new: str, *, path: str) -> tuple[str, bool]:
     diff = '\n'.join(_diff_lines(old, new, path=path))
     if len(diff) <= MAX_EVENT_DIFF_CHARS:
         return diff, False
-    # Cut on a line boundary so the kept part is still whole diff lines; the
-    # two header lines guarantee a newline well before the cap.
+    # Cut on a line boundary so the kept part is still whole diff lines. A
+    # path so long that the first header alone passes the cap (possible only
+    # where the OS allows such paths) leaves no newline to cut at; the bound
+    # holds regardless.
     cut = diff.rfind('\n', 0, MAX_EVENT_DIFF_CHARS + 1)
-    return diff[:cut], True
+    return diff[: cut if cut >= 0 else MAX_EVENT_DIFF_CHARS], True
 
 
 @dataclass(kw_only=True)
