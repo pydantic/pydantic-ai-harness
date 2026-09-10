@@ -78,10 +78,11 @@ it is without a listener. A listener that calls `cancel(reason)` stops the
 change before it touches the disk, and the model gets the reason as the tool
 result. A listener that raises instead aborts the run, as any raising event
 listener does, and the change is not applied. `diff` is the unified diff from
-the current content to the proposed content: a new file diffs from empty, so
-does a file the process cannot read, and a `create_directory` has no diff. A
-`create_directory` on a directory that already exists changes nothing and
-emits nothing. The other events are notifications.
+the current content to the proposed content: a new file diffs from empty, a
+file the process cannot read is announced with the file headers alone and
+`truncated` set, since what it holds cannot be shown, and a `create_directory`
+has no diff. A `create_directory` on a directory that already exists changes
+nothing and emits nothing. The other events are notifications.
 
 `FileEditedEvent` subclasses `FileWrittenEvent`, so a listener for writes
 receives edits too and can read the `diff` when it has one. Before this

@@ -672,8 +672,8 @@ class TestFileChangeRequests:
         assert request.diff == '--- "a/we\\nird.txt"\n+++ "b/we\\nird.txt"\n@@ -0,0 +1 @@\n+x'
 
     @needs_mode_bits
-    async def test_unreadable_target_diffs_from_empty(self, tmp_path: Path) -> None:
-        """A file the process can write but not read is still written; only the diff loses its old side."""
+    async def test_unreadable_target_is_announced_as_cut(self, tmp_path: Path) -> None:
+        """A file the process can write but not read is still written; the listener is told the diff is not shown."""
         target = tmp_path / 'target.txt'
         target.write_text('old\n')
         target.chmod(0o222)
@@ -684,7 +684,7 @@ class TestFileChangeRequests:
         )
 
         (request,) = listener.requests
-        assert request.diff == '--- a/target.txt\n+++ b/target.txt\n@@ -0,0 +1 @@\n+new'
+        assert (request.diff, request.truncated) == ('--- a/target.txt\n+++ b/target.txt', True)
         target.chmod(0o644)
         assert target.read_text() == 'new\n'
         assert any(isinstance(event, FileWrittenEvent) for event in events)

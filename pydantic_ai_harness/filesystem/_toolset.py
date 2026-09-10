@@ -248,13 +248,13 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     a listener only sees a write that would go ahead; for a missing file the
     hash is ignored, as documented, and the write is announced as a create.
     A new file diffs from empty and is guarded as empty, so one that appears
-    while the write is announced is a conflict. A
-    file the process cannot read (a write-only mode, say) diffs from empty and
-    is written unguarded, since the diff is for display; an `expected_hash`
-    it cannot check propagates the error instead. Past `MAX_DIFF_SOURCE_CHARS`
-    the text is `None`: it would not be diffed, so only as many bytes as can
-    hold that many characters are read into memory and the rest is hashed in
-    chunks.
+    while the write is announced is a conflict. The
+    text is `None` when it cannot be shown: a file the process cannot read (a
+    write-only mode, say) is announced as headers alone, marked as cut, and
+    written unguarded, while an `expected_hash` it cannot check propagates the
+    error; past `MAX_DIFF_SOURCE_CHARS` it would not be diffed, so only as
+    many bytes as can hold that many characters are read into memory and the
+    rest is hashed in chunks.
     """
     if not resolved.is_file():
         return '', _disk_hash([b''])
@@ -265,7 +265,7 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     except OSError:
         if expected_hash is not None:
             raise
-        return '', None
+        return None, None
     if expected_hash is not None:
         _check_expected_hash(path, current_hash, expected_hash)
     old = head.decode('utf-8', errors='replace') if len(head) <= _DIFF_SOURCE_BYTES else None
