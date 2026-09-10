@@ -815,6 +815,16 @@ class TestLLMReminder:
         assert 'ship the fix' in result  # GoalReanchor fallback, no nested request spent
         assert ctx.usage.requests == 1
 
+    async def test_count_tokens_before_request_is_not_forwarded(self) -> None:
+        """The reminder model may lack `count_tokens` support; inheriting the parent's flag
+        would abort the nested run and swap the generated reminder for fallback text."""
+        store: dict[str, str] = {}
+        ctx = _ctx(
+            messages=[ModelRequest(parts=[UserPromptPart('g')])],
+            usage_limits=UsageLimits(count_tokens_before_request=True),
+        )
+        assert await LLMReminder(model=_capture_model(store))(ctx) == 'generated'
+
     async def test_generates_while_budget_remains(self) -> None:
         store: dict[str, str] = {}
         ctx = _ctx(

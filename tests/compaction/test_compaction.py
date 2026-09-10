@@ -2212,6 +2212,24 @@ class TestSummarizingCompactionModel:
         )
 
     @pytest.mark.anyio
+    async def test_count_tokens_before_request_is_not_forwarded(self) -> None:
+        comp = SummarizingCompaction(max_messages=3, keep_messages=1, preserve_first_user_message=False)
+        messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]
+        ctx = _make_ctx(usage_limits=UsageLimits(request_limit=None, count_tokens_before_request=True))
+
+        mock_result = AsyncMock()
+        mock_result.output = 'Counting-free summary.'
+        with patch('pydantic_ai.Agent') as MockAgent:
+            mock_agent_instance = AsyncMock()
+            mock_agent_instance.run.return_value = mock_result
+            MockAgent.return_value = mock_agent_instance
+            await comp.before_model_request(ctx, _make_request_context(messages))
+
+        assert mock_agent_instance.run.call_args.kwargs['usage_limits'] == UsageLimits(
+            request_limit=None, count_tokens_before_request=False
+        )
+
+    @pytest.mark.anyio
     async def test_summarizer_agent_gets_the_default_instructions(self):
         comp = SummarizingCompaction(max_messages=3, keep_messages=1, preserve_first_user_message=False)
         messages: list[ModelMessage] = [_user('a'), _assistant('b'), _user('c'), _assistant('d')]

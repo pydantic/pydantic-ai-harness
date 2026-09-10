@@ -819,6 +819,24 @@ class TestSummarize:
         assert out == 'THE SUMMARY'
         assert mock_agent.run.call_args.kwargs['usage_limits'] == UsageLimits(request_limit=4, tool_calls_limit=2)
 
+    async def test_count_tokens_before_request_is_not_forwarded(self) -> None:
+        ctx = _make_ctx(
+            model=_fixed_model('THE SUMMARY'),
+            usage_limits=UsageLimits(request_limit=None, count_tokens_before_request=True),
+        )
+        cap: ToolOutputLimits[object] = ToolOutputLimits(bands=[Band(over=5, action=Summarize())])
+        mock_result = AsyncMock()
+        mock_result.output = 'THE SUMMARY'
+        mock_agent = AsyncMock()
+        mock_agent.run.return_value = mock_result
+
+        with patch('pydantic_ai.Agent', return_value=mock_agent):
+            await _run(cap, 'x' * 100, ctx=ctx)
+
+        assert mock_agent.run.call_args.kwargs['usage_limits'] == UsageLimits(
+            request_limit=None, count_tokens_before_request=False
+        )
+
     async def test_explicit_model_overrides_ctx(self):
         ctx = _make_ctx(model=_fixed_model('FROM CTX MODEL'))
         cap: ToolOutputLimits[object] = ToolOutputLimits(

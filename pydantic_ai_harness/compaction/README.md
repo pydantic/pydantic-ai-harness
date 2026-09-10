@@ -384,8 +384,9 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 ## Model inheritance
 
 `SummarizingCompaction(model=...)` accepts a model name or `Model`; when left `None` it inherits the
-running agent's model. Its nested summary run inherits the parent usage limits and reserves one request from a
-finite request limit for the pending parent request. Pass `model_settings` to give the dedicated summary call
+running agent's model. Its nested summary run carries over the parent ceilings except
+`count_tokens_before_request`, and reserves one request from a finite request limit for the pending parent
+request. Pass `model_settings` to give the dedicated summary call
 settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
 without mutating the model or the settings dictionary.
 
@@ -433,8 +434,11 @@ history messages are retained; they do not cap the summary-request payload.
 The summary call is a real request to the model, so its full usage -- tokens **and** the request
 itself -- is folded into the run's `ctx.usage`. This is deliberate: it keeps cost honest, keeps the
 request count consistent (a model request that didn't count as one would be the surprise), and lets a
-`UsageLimits` request limit catch a runaway compaction. The nested run receives the other parent limits unchanged;
-the finite request limit is reduced by one so it cannot spend the slot already approved for the parent request.
+`UsageLimits` request limit catch a runaway compaction. Every other parent ceiling carries over except
+`count_tokens_before_request`, which selects a request pipeline rather than setting a budget: the summarizer can
+be a different model from the run's, and `count_tokens` support varies by provider, so input-token ceilings apply
+to the summary request checked against the response rather than ahead of it. The finite request limit is reduced by
+one so it cannot spend the slot already approved for the parent request.
 A run-request / iteration limiter will therefore see compaction calls among its requests.
 
 With a durable-execution capability attached, the summary call runs as a contributed durable

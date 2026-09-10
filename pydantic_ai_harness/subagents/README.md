@@ -44,7 +44,7 @@ A delegate's name -- how the parent model refers to it, and how it is listed in 
 ## Deps, usage, tools, and capabilities
 
 - **Deps are forwarded.** The parent run's `deps` are passed to each sub-agent, so sub-agents share the parent's `AgentDepsT` (enforced by the type signature -- every sub-agent is an `AbstractAgent[AgentDepsT, Any]`).
-- **Usage is shared by default.** The parent's `usage` is passed to each sub-agent run, so token usage aggregates and a parent `usage_limits` applies across the whole agent tree. Set `forward_usage=False` to give each sub-agent run its own accounting.
+- **Usage is shared by default.** The parent's `usage` is passed to each sub-agent run, so token usage aggregates and a parent `usage_limits` applies across the whole agent tree. Every ceiling carries over, `tool_calls_limit` included, and each `delegate_task` call counts toward it alongside the child's own tool calls. `count_tokens_before_request` is not forwarded: it selects a request pipeline rather than setting a budget, and a delegation can route the child to a model with no `count_tokens` support. Input-token ceilings still apply to the child's requests, checked against each response rather than ahead of it. Under concurrent delegations the ceiling is approximate rather than exact, and the overshoot scales with the width of the fan-out: sub-agents dispatched in the same step each reserve only their own delegation, and core checks a limit before a request and increments after it. Eight parallel delegations spent nine requests under `request_limit=5`, and sixteen tool calls under `tool_calls_limit=9`. Set `forward_usage=False` to give each sub-agent run its own accounting.
 - **Tools can be inherited.** With `inherit_tools=True`, the parent agent's own tools (registered directly or via `toolsets`) are added to each sub-agent run, on top of the sub-agent's own. Tools contributed by the parent's capabilities are not inherited: they are bound to capability instances registered in the parent run, and would arrive without the hooks and instructions they depend on. Use `shared_capabilities` to give sub-agents a capability. This also excludes the delegate tool itself, so a sub-agent can't recurse into further delegation. Off by default.
 - **Capabilities can be shared.** `shared_capabilities` are applied to every sub-agent run -- e.g. give all sub-agents a common guardrail, memory, or planning capability without rebuilding each `Agent`.
 - **Sub-agent events can be streamed.** Pass an `event_stream_handler` and it's forwarded to each sub-agent run, so the sub-agent's model-streaming and tool events surface to the caller (the handler receives the sub-agent's own `RunContext`).
@@ -247,7 +247,7 @@ SubAgent(
 
 ## Notes
 
-- Sub-agents can themselves have `SubAgents`, forming a tree. Share `usage` (the default) and set a `usage_limits` on the top-level run to bound the whole tree.
+- Sub-agents can themselves have `SubAgents`, forming a tree. Share `usage` (the default) and set a `usage_limits` on the top-level run to bound the whole tree -- exactly for sequential delegations, approximately under a parallel fan-out (see "Deps, usage, tools, and capabilities").
 - Delegations the model issues in parallel run as independent sub-agent runs.
 
 ## Further reading

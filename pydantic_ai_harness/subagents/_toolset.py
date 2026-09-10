@@ -32,6 +32,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
 from pydantic_ai.toolsets._capability_owned import CapabilityOwnedToolset
 from pydantic_ai.usage import UsageLimits
 
+from pydantic_ai_harness._usage import forwarded_usage_limits
 from pydantic_ai_harness.subagents._models import ModelOption, validate_restriction
 
 logger = logging.getLogger(__name__)
@@ -325,7 +326,11 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         else:
             own_budget = False
             usage = ctx.usage if self._forward_usage else None
-            usage_limits = None
+            # The parent's ceilings ride along with its usage, so the budget is tree-wide.
+            # See `forwarded_usage_limits` for the two fields that cannot pass through as-is.
+            usage_limits = (
+                forwarded_usage_limits(ctx.usage_limits, reserve_tool_call=True) if self._forward_usage else None
+            )
 
         # A selected menu option decides the model and how it runs. Without one, a
         # sub-agent with no model of its own (e.g. one loaded from disk) inherits the
