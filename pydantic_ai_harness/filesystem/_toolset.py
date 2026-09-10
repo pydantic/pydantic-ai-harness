@@ -19,7 +19,6 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.filesystem._changes import Change
 from pydantic_ai_harness.filesystem._events import (
-    MAX_DIFF_SOURCE_CHARS,
     DirectoryCreatedEvent,
     DirectoryListedEvent,
     FileReadEvent,
@@ -188,7 +187,12 @@ def _content_hash(content: str) -> str:
     the same bytes on disk and the optimistic-concurrency handshake holds
     regardless of line endings.
     """
-    return hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]
+    return _bytes_hash(content.encode('utf-8'))
+
+
+def _bytes_hash(data: bytes) -> str:
+    """The content hash of the bytes on disk: what `_content_hash` reports for the text they decode to."""
+    return hashlib.sha256(data).hexdigest()[:12]
 
 
 def _read_canonical_text(path: Path) -> str:
@@ -203,21 +207,28 @@ def _read_canonical_text(path: Path) -> str:
         return f.read()
 
 
-def _current_text(resolved: Path) -> str:
-    """The text a write would replace, for the diff: the file's content, or nothing for a new file.
+def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) -> tuple[str, str | None]:
+    """The text a listener is shown a write replacing, and the hash the write is then guarded with.
 
-    This is for display, so decoding is lenient, a file the process cannot
-    read (a write-only mode, say) diffs from empty, and the read stops past
-    `MAX_DIFF_SOURCE_CHARS`, where nothing is diffed anyway. The hash check
-    that guards the write reads strictly through the descriptor.
+    A stale `expected_hash` is rejected here first, so a listener only sees a
+    write that would go ahead. A new file diffs from empty and is guarded as
+    empty, so one that appears while the write is announced is a conflict. A
+    file the process cannot read (a write-only mode, say) diffs from empty and
+    is written unguarded, since the diff is for display; an `expected_hash`
+    it cannot check propagates the error instead.
     """
     if not resolved.is_file():
-        return ''
+        return '', _bytes_hash(b'')
     try:
-        with resolved.open(encoding='utf-8', errors='replace', newline='') as f:
-            return f.read(MAX_DIFF_SOURCE_CHARS + 1)
+        data = resolved.read_bytes()
     except OSError:
-        return ''
+        if expected_hash is not None:
+            raise
+        return '', None
+    current_hash = _bytes_hash(data)
+    if expected_hash is not None:
+        _check_expected_hash(path, current_hash, expected_hash)
+    return data.decode('utf-8', errors='replace'), current_hash
 
 
 def _check_expected_hash(path: str, current_hash: str, expected_hash: str) -> None:
@@ -246,9 +257,9 @@ def _open_for_write(resolved: Path, path: str, *, read_back: bool, create: bool)
     non-blocking mode keeps a FIFO swapped into place from waiting for a
     reader; O_NOFOLLOW keeps a final-component symlink swap from redirecting
     the descriptor. Windows has no filesystem FIFO equivalent, and O_BINARY
-    plus `newline=''` on the caller's text wrapper means the written bytes
-    reproduce the content argument exactly: no newline translation, so the
-    reported hash always matches the bytes a later `read_file` hashes.
+    with the caller's binary I/O means the written bytes are exactly the
+    encoded content: no newline translation, so the reported hash always
+    matches the bytes a later `read_file` hashes.
     """
     platform_flags = os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW
     access_flags = os.O_RDWR if read_back else os.O_WRONLY
@@ -277,27 +288,27 @@ def _open_for_write(resolved: Path, path: str, *, read_back: bool, create: bool)
 
 
 def _write_content(resolved: Path, path: str, content: str, *, expected_hash: str | None, create: bool) -> None:
-    """Replace the file's content, checking `expected_hash` under the open descriptor first.
+    """Replace the file's content, checking that an existing file hashes to `expected_hash` under the open descriptor.
 
     Checking under the descriptor is what guards the write: the file cannot
     change between the check and the write the way it can while a change is
-    announced.
+    announced. The bytes are hashed as they are, so a file that is not valid
+    UTF-8 mismatches instead of failing to decode.
     """
     descriptor, created = _open_for_write(resolved, path, read_back=expected_hash is not None, create=create)
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
 
-        mode = 'r+' if expected_hash is not None else 'w'
-        text_file = os.fdopen(descriptor, mode, encoding='utf-8', newline='')
+        binary_file = os.fdopen(descriptor, 'rb+' if expected_hash is not None else 'wb')
         descriptor = -1
-        with text_file:
+        with binary_file:
             if expected_hash is not None and not created:
-                _check_expected_hash(path, _content_hash(text_file.read()), expected_hash)
+                _check_expected_hash(path, _bytes_hash(binary_file.read()), expected_hash)
 
-            text_file.seek(0)
-            text_file.truncate(0)
-            text_file.write(content)
+            binary_file.seek(0)
+            binary_file.truncate(0)
+            binary_file.write(content.encode('utf-8'))
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -570,12 +581,18 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if not resolved.parent.is_dir():
             raise ModelRetry(f'Path {path!r} has a parent that is not a directory.')
 
-        if (
-            refusal := await self._announce_write(ctx, resolved, path, content, expected_hash=expected_hash)
-        ) is not None:
-            return refusal
+        # `O_CREAT` in `_open_for_write` would already have created the file
+        # the listener is about to refuse, so the request cannot wait for the
+        # descriptor. Outside a run nothing is read: the diff is for listeners,
+        # and the descriptor check of `expected_hash` is the whole contract.
+        guard = expected_hash
+        if ctx is not None:
+            old, guard = _announced_state(resolved, path, expected_hash=expected_hash)
+            change = Change.propose(**self._event_location(resolved), operation='write', old=old, new=content)
+            if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
+                return refusal
 
-        _write_content(resolved, path, content, expected_hash=expected_hash, create=True)
+        _write_content(resolved, path, content, expected_hash=guard, create=True)
 
         new_hash = _content_hash(content)
         lines = len(content.splitlines())
@@ -583,26 +600,23 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             await ctx.emit(FileWrittenEvent(**self._event_location(resolved), content_hash=new_hash))
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
 
-    async def _announce_write(
-        self, ctx: RunContext[AgentDepsT] | None, resolved: Path, path: str, content: str, *, expected_hash: str | None
+    async def _request(
+        self, ctx: RunContext[AgentDepsT] | None, change: Change, *, path: str, resolved: Path
     ) -> str | None:
-        """Check the conflict and announce the write before the file is opened.
+        """Announce `change` and confirm that `path` still names `resolved` afterwards.
 
-        `O_CREAT` in `_open_for_write` would already have created the file
-        the listener is about to refuse, so the request cannot wait for the
-        descriptor. The hash is checked here first so a listener only sees a
-        write that would go ahead, and again under the descriptor, which is
-        what actually guards the write. Outside a run nothing is read: the
-        diff is for listeners.
+        A listener can hold the request for as long as a human takes, and the
+        change is then applied by name, so the path is resolved and checked
+        again: the announcement must not widen the window between the
+        containment check and the I/O. Outside a run there is nobody to ask.
         """
-        if expected_hash is not None and resolved.is_file():
-            _check_expected_hash(path, _content_hash(_read_canonical_text(resolved)), expected_hash)
         if ctx is None:
             return None
-        change = Change.propose(
-            **self._event_location(resolved), operation='write', old=_current_text(resolved), new=content
-        )
-        return await change.request(ctx)
+        if (refusal := await change.request(ctx)) is not None:
+            return refusal
+        if self._safe_resolve(path, write=True) != resolved:
+            raise ModelRetry(f'Path {path!r} was replaced while the change was announced. Retry.')
+        return None
 
     async def edit_file(self, path: str, old_text: str, new_text: str, *, expected_hash: str | None = None) -> str:
         """Edit a text file directly, outside an agent run."""
@@ -669,7 +683,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         new_content = text.replace(old_text, new_text, 1)
         change = Change.propose(**self._event_location(resolved), operation='edit', old=text, new=new_content)
-        if (refusal := await change.request(ctx)) is not None:
+        if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
             return refusal
         # A listener may take a while (a human approving the diff, say). The
         # edit was computed from `text`, so the write checks that the file
@@ -932,7 +946,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if not _nearest_existing(resolved.parent).is_dir():
             raise ModelRetry(f'Path {path!r} has a parent that is not a directory.')
         change = Change.propose(**self._event_location(resolved), operation='create_directory')
-        if (refusal := await change.request(ctx)) is not None:
+        if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
             return refusal
         # The checks above already named these collisions; here they mean the
         # path changed under us between the check and the `mkdir`.

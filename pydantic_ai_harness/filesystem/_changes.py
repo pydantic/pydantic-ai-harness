@@ -82,15 +82,12 @@ class Change:
         diff, truncated = unified_diff(old, new, path=path)
         return cls(path=path, root_dir=root_dir, operation=operation, diff=diff, truncated=truncated)
 
-    async def request(self, ctx: RunContext[AgentDepsT] | None) -> str | None:
+    async def request(self, ctx: RunContext[AgentDepsT]) -> str | None:
         """Announce the change to the run's listeners.
 
         Returns the tool result for the model when a listener cancelled the
-        change, or `None` when it may proceed. Outside a run there is nobody
-        to ask, so a direct call always proceeds.
+        change, or `None` when it may proceed.
         """
-        if ctx is None:
-            return None
         event = FileChangeRequestEvent(
             path=self.path, root_dir=self.root_dir, operation=self.operation, diff=self.diff, truncated=self.truncated
         )
