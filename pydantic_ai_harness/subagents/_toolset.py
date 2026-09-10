@@ -355,6 +355,18 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         key: str | None,
     ) -> str:
         """Run one accepted delegation, announcing its start and how it ended."""
+        # Announced before the child coroutine exists, so an emit that does not return
+        # (a cancellation landing on the await) leaves no never-awaited coroutine behind.
+        emits = _emits_events(ctx)
+        if emits:
+            text, truncated = bounded_text(task)
+            await ctx.emit(
+                DelegationStartEvent(
+                    agent_name=agent_name, task=text, truncated=truncated, model=key, inherits_tools=self._inherit_tools
+                )
+            )
+        started = time.perf_counter()
+
         toolsets = self._inherited_toolsets(ctx) if self._inherit_tools else None
         capabilities = self._shared_capabilities or None
         usage_limits: UsageLimits | None
@@ -402,16 +414,6 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
             capabilities=capabilities,
             event_stream_handler=self._event_stream_handler,
         )
-
-        emits = _emits_events(ctx)
-        if emits:
-            text, truncated = bounded_text(task)
-            await ctx.emit(
-                DelegationStartEvent(
-                    agent_name=agent_name, task=text, truncated=truncated, model=key, inherits_tools=self._inherit_tools
-                )
-            )
-        started = time.perf_counter()
         ended = await self._settle(agent_name, sub_agent, run, own_budget=own_budget)
         if emits:
             text, truncated = bounded_text(ended.output)
