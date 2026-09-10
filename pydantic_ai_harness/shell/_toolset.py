@@ -558,16 +558,18 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
         stopped: int | None = None
         if not bg.finished:
+            # Claimed before the first await: a check running while the kill
+            # is in progress must not report the exit and emit a second end.
+            bg.finished = True
             await kill_process_group(bg.proc)
             with anyio.CancelScope(shield=True):
                 stopped = await bg.proc.wait()
             bg.exit_code = stopped
-            bg.finished = True
 
         stdout, stderr = read_bg_output(bg)
 
         cleanup_bg_files(bg)
-        del self._background[command_id]
+        self._background.pop(command_id, None)
         await bg.proc.aclose()
 
         if stopped is not None and ctx is not None:

@@ -14,7 +14,7 @@ import anyio
 import pytest
 from pydantic_ai import Agent, RunCancelled, RunContext
 from pydantic_ai.capabilities import AbstractCapability, on_event
-from pydantic_ai.messages import CapabilityEvent, ModelMessage, RetryPromptPart, ToolReturnPart
+from pydantic_ai.messages import CapabilityEvent, ModelMessage, ModelResponse, RetryPromptPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.run import AgentRun
 
@@ -44,20 +44,28 @@ def _tool_results(messages: list[ModelMessage]) -> list[str]:
     ]
 
 
-def _calls_model(calls: Sequence[tuple[str, str]]) -> FunctionModel:
-    """Issue each `(tool_name, json_args)` on its own step, then finish."""
+Call = tuple[str, str]
+
+
+def _calls_model(steps: Sequence[Call | list[Call]]) -> FunctionModel:
+    """Issue each `(tool_name, json_args)` on its own step, a list of them in parallel, then finish."""
 
     async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
         results = _tool_results(messages)
-        step = len(results)
-        if step < len(calls):
-            name, json_args = calls[step]
+        step = sum(isinstance(message, ModelResponse) for message in messages)
+        if step >= len(steps):
+            yield 'done'
+            return
+        calls = steps[step]
+        calls = calls if isinstance(calls, list) else [calls]
+        deltas: DeltaToolCalls = {}
+        for index, (name, json_args) in enumerate(calls):
             if '$ID' in json_args:
                 command_id = next(result.split('ID: ')[1].strip() for result in results if 'ID: ' in result)
                 json_args = json_args.replace('$ID', command_id)
-            yield {0: DeltaToolCall(name=name, json_args=json_args, tool_call_id=f'call_{step}')}
-        else:
-            yield 'done'
+            tool_call_id = f'call_{step}' if len(calls) == 1 else f'call_{step}_{index}'
+            deltas[index] = DeltaToolCall(name=name, json_args=json_args, tool_call_id=tool_call_id)
+        yield deltas
 
     return FunctionModel(stream_function=stream)
 
@@ -89,7 +97,7 @@ class Listener(AbstractCapability[None]):
 
 async def _run(
     tmp_path: Path,
-    calls: Sequence[tuple[str, str]],
+    calls: Sequence[Call | list[Call]],
     *,
     listener: Listener | None = None,
     max_output_chars: int = 50_000,
@@ -381,6 +389,24 @@ class TestBackgroundEvents:
         ends = [event for event in listener.events if isinstance(event, ShellCommandEndEvent) and event.background]
         assert len(ends) == 1
         assert ends[0].exit_code == 0
+
+    async def test_check_during_stop_emits_one_end(self, tmp_path: Path) -> None:
+        # Ignoring SIGTERM makes the stop last the whole grace period, so the
+        # parallel check is certain to run while the stop is in progress. It
+        # must see the command as finished and leave the end event to the stop.
+        listener, results = await _run(
+            tmp_path,
+            [
+                ('start_command', '{"command": "trap \'\' TERM; sleep 30"}'),
+                [('stop_command', '{"command_id": "$ID"}'), ('check_command', '{"command_id": "$ID"}')],
+            ],
+        )
+
+        ends = [event for event in listener.events if isinstance(event, ShellCommandEndEvent)]
+        assert len(ends) == 1
+        assert ends[0].exit_code == -9
+        assert results[1].endswith('[stopped]\n[exit code: -9]')
+        assert results[2].endswith('[status: finished]')
 
     async def test_rewritten_background_command_is_not_echoed(self, tmp_path: Path) -> None:
         listener, results = await _run(
