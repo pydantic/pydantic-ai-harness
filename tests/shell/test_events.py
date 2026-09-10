@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import anyio
 import pytest
+import sniffio
 from pydantic_ai import Agent, RunCancelled, RunContext
 from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai.messages import CapabilityEvent, ModelMessage, ModelResponse, RetryPromptPart, ToolReturnPart
@@ -26,6 +28,7 @@ from pydantic_ai_harness.shell import (
     ShellCommandStartEvent,
     ShellOutputLineEvent,
 )
+from pydantic_ai_harness.shell._process import kill_process_group
 
 pytestmark = pytest.mark.anyio
 
@@ -385,6 +388,24 @@ class TestRunFailure:
         # The ID never reached the model, so no one is left to call
         # `stop_command`; the kill must come from the toolset itself.
         assert await _process_group_is_gone(raiser.pid)
+
+
+class TestKillAfterLeaderExit:
+    @pytest.mark.anyio(backends=['asyncio'])
+    async def test_the_sweep_reaches_group_members_after_the_leader_was_reaped(self, tmp_path: Path) -> None:
+        """A leader that exits leaving a child in the group is reaped, but the sweep still reaches the child."""
+        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
+            pytest.skip('start_new_session is an asyncio spawn option')
+        pidfile = tmp_path / 'child.pid'
+        # The shell exits right after forking; the backgrounded sleep keeps the group alive.
+        proc = await anyio.open_process(['sh', '-c', f'sleep 60 & echo $! > {pidfile}'], start_new_session=True)
+        await proc.wait()
+        child_pid = int(pidfile.read_text())
+        # The leader is reaped, but the group must still show the surviving member.
+        os.kill(child_pid, 0)
+        assert _live_group_members(proc.pid)
+        await kill_process_group(proc)
+        assert await _process_group_is_gone(proc.pid)
 
 
 class TestBackgroundEvents:

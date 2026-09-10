@@ -155,6 +155,12 @@ def cleanup_bg_files(bg: BackgroundProcess) -> None:
 async def kill_process_group(proc: anyio.abc.Process) -> None:
     """SIGTERM the process group, then SIGKILL whatever is left of it.
 
+    The child was spawned with `start_new_session=True`, so its pid is the
+    group id for the group's whole life. It stays addressable through
+    `os.killpg` while any member lives, even after the leader exited and was
+    reaped; resolving the group with `os.getpgid` at kill time would miss
+    exactly that window and leave surviving members unkillable.
+
     Waiting only for the group leader is not enough: a child the shell forked
     while the SIGTERM was in flight misses it, and a leader that traps the
     signal never exits. So the group is swept with SIGKILL once the leader is
@@ -165,8 +171,7 @@ async def kill_process_group(proc: anyio.abc.Process) -> None:
     pairs this with `proc.wait()` and `proc.aclose()`.
     """
     try:
-        pgid = os.getpgid(proc.pid)
-        os.killpg(pgid, signal.SIGTERM)
+        os.killpg(proc.pid, signal.SIGTERM)
     except OSError:
         return
 
@@ -175,7 +180,7 @@ async def kill_process_group(proc: anyio.abc.Process) -> None:
             await proc.wait()
     finally:
         with contextlib.suppress(OSError):
-            os.killpg(pgid, signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGKILL)
 
 
 LineSink = Callable[[str, bool], Awaitable[None]]

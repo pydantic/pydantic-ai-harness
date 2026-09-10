@@ -1406,14 +1406,11 @@ class TestKillProcessGroupEdgeCases:
 
         with (
             patch('os.killpg', side_effect=fake_killpg),
-            patch('os.getpgid', return_value=12345),
             patch('pydantic_ai_harness.shell._process._KILL_GRACE_PERIOD', 0.01),
         ):
             await kill_process_group(proc)
 
-        assert len(kill_calls) == 2
-        assert kill_calls[0][1] == signal.SIGTERM
-        assert kill_calls[1][1] == signal.SIGKILL
+        assert kill_calls == [(99999, signal.SIGTERM), (99999, signal.SIGKILL)]
 
     async def test_sigkill_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGKILL raises ProcessLookupError (process exited between SIGTERM and SIGKILL)."""
@@ -1435,7 +1432,6 @@ class TestKillProcessGroupEdgeCases:
 
         with (
             patch('os.killpg', side_effect=fake_killpg),
-            patch('os.getpgid', return_value=12345),
             patch('pydantic_ai_harness.shell._process._KILL_GRACE_PERIOD', 0.01),
         ):
             await kill_process_group(proc)
@@ -1453,10 +1449,7 @@ class TestKillProcessGroupEdgeCases:
         proc.wait = exits_at_once
         signals: list[int] = []
 
-        with (
-            patch('os.killpg', side_effect=_record_signal(signals)),
-            patch('os.getpgid', return_value=12345),
-        ):
+        with patch('os.killpg', side_effect=_record_signal(signals)):
             await kill_process_group(proc)
 
         assert signals == [signal.SIGTERM, signal.SIGKILL]
@@ -1478,10 +1471,7 @@ class TestKillProcessGroupEdgeCases:
         proc.wait = wait_forever
         signals: list[int] = []
 
-        with (
-            patch('os.killpg', side_effect=_record_signal(signals)),
-            patch('os.getpgid', return_value=12345),
-        ):
+        with patch('os.killpg', side_effect=_record_signal(signals)):
             task = asyncio.ensure_future(kill_process_group(proc))
             await parked.wait()
             task.cancel()
