@@ -268,7 +268,10 @@ class TestOutcomes:
         assert [type(event) for event in listener.events] == [DelegationStartEvent]
 
     async def test_cancellation_ends_without_an_end_event(self) -> None:
+        child_requesting = asyncio.Event()
+
         async def slow(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            child_requesting.set()
             await asyncio.sleep(1)
             return ModelResponse(parts=[TextPart('late')])  # pragma: no cover - cancelled mid-delegation
 
@@ -276,8 +279,7 @@ class TestOutcomes:
         listener = Listener()
         parent = Agent(_delegate_once(), capabilities=[SubAgents(agents=[SubAgent(worker)]), listener])
         run = asyncio.ensure_future(parent.run('go'))
-        while not listener.events:
-            await asyncio.sleep(0)
+        await child_requesting.wait()
         run.cancel()
         with pytest.raises(asyncio.CancelledError):
             await run
