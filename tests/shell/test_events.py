@@ -428,14 +428,24 @@ class TestKillAfterLeaderExit:
         if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
             pytest.skip('start_new_session is an asyncio spawn option')
         pidfile = tmp_path / 'child.pid'
+        cgroupfile = tmp_path / 'child.cgroup'
         # The shell exits right after forking; the backgrounded sleep keeps the group alive.
-        proc = await anyio.open_process(['sh', '-c', f'sleep 60 & echo $! > {pidfile}'], start_new_session=True)
+        script = f'sleep 60 & echo $! > {pidfile}; cat /proc/$!/cgroup > {cgroupfile} 2>/dev/null || echo none > {cgroupfile}'
+        proc = await anyio.open_process(['sh', '-c', script], start_new_session=True)
         # The sweep runs in `finally` so a failing check leaves no member behind.
         try:
             await proc.wait()
             child_pid = int(pidfile.read_text())
             # The leader is reaped, but the group must still show the surviving member.
-            os.kill(child_pid, 0)
+            try:
+                os.kill(child_pid, 0)
+            except ProcessLookupError:  # pragma: no cover - diagnostic for a CI that reaps orphans
+                table = subprocess.run(
+                    ['ps', '-eo', 'pid,ppid,pgid,sess,stat,comm'], capture_output=True, text=True
+                ).stdout
+                raise AssertionError(
+                    f'child {child_pid} died with the leader\ncgroup: {cgroupfile.read_text()}\n{table}'
+                ) from None
             assert _live_group_members(proc.pid)
         finally:
             await kill_process_group(proc)
