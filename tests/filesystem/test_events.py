@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
-from collections.abc import AsyncIterable, AsyncIterator, Sequence
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 
 from pydantic_ai_harness.filesystem import (
+    MAX_DIFF_SOURCE_CHARS,
     MAX_EVENT_DIFF_CHARS,
     DirectoryCreatedEvent,
     DirectoryListedEvent,
@@ -37,6 +39,11 @@ from pydantic_ai_harness.filesystem import (
 )
 
 pytestmark = pytest.mark.anyio
+
+# Mode bits do not bind root, and Windows has no write-only mode.
+needs_mode_bits = pytest.mark.skipif(
+    os.name == 'nt' or getattr(os, 'geteuid', lambda: 1)() == 0, reason='POSIX mode bits must apply to this process.'
+)
 
 
 @pytest.fixture
@@ -127,6 +134,26 @@ class Listener(AbstractCapability[None]):
         self.requests.append(event)
         if self.cancel:
             event.cancel(self.reason)
+
+
+@dataclass(kw_only=True)
+class MeddlingListener(AbstractCapability[None]):
+    """Runs `act` on the workspace while a change is announced, as another writer could during a slow approval."""
+
+    act: Callable[[], object]
+
+    @on_event(FileChangeRequestEvent)
+    async def _on_request(self, ctx: RunContext[None], event: FileChangeRequestEvent) -> None:
+        self.act()
+
+
+def _file_at_leaf(root: Path) -> None:
+    (root / 'made').write_text('x')
+
+
+def _file_at_parent(root: Path) -> None:
+    (root / 'sub').rmdir()
+    (root / 'sub').write_text('x')
 
 
 def _hash(content: str) -> str:
@@ -310,6 +337,21 @@ class TestFileSystemEvents:
         assert [(event.match_count, event.truncated) for event in searched] == [(2, True)]
         assert 'truncated at 2 matches' in _tool_result(events)
 
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args'),
+        [('search_files', '{"pattern":"x"}'), ('find_files', '{"pattern":"*.py"}')],
+    )
+    async def test_exact_fill_is_not_marked_truncated(self, tmp_path: Path, tool_name: str, json_args: str) -> None:
+        """Filling the cap exactly is not truncation: nothing was dropped."""
+        for name in ('a', 'b'):
+            (tmp_path / f'{name}.py').write_text('x = 1\n')
+
+        events = await _run_and_collect(tmp_path, tool_name, json_args, max_results=2)
+
+        searched = [event for event in events if isinstance(event, FilesSearchedEvent)]
+        assert [(event.match_count, event.truncated) for event in searched] == [(2, False)]
+        assert 'truncated at' not in _tool_result(events)
+
     async def test_subdirectory_root_is_carried_on_the_event(self, tmp_path: Path) -> None:
         project = tmp_path / 'project'
         project.mkdir()
@@ -419,6 +461,17 @@ class TestFileChangeRequests:
 
         assert _tool_result(events) == "['fresh.txt' was not written: cancelled by a listener]"
 
+    async def test_a_later_bare_cancel_keeps_the_reason(self, tmp_path: Path) -> None:
+        """Listeners run in turn; one that cancels without a reason does not erase the reason another gave."""
+        events = await _run_and_collect(
+            tmp_path,
+            'write_file',
+            '{"path":"fresh.txt","content":"new\\n"}',
+            listeners=[Listener(cancel=True, reason='not today'), Listener(cancel=True)],
+        )
+
+        assert _tool_result(events) == "['fresh.txt' was not written: not today]"
+
     async def test_denied_write_emits_no_request(self, tmp_path: Path) -> None:
         listener = Listener()
 
@@ -453,6 +506,7 @@ class TestFileChangeRequests:
         ('tool_name', 'json_args', 'reason'),
         [
             ('write_file', '{"path":"missing/target.txt","content":"x"}', 'does not exist'),
+            ('write_file', '{"path":"file.txt/child.txt","content":"x"}', 'parent that is not a directory'),
             ('create_directory', '{"path":"file.txt"}', 'exists and is not a directory'),
             ('create_directory', '{"path":"file.txt/deeper/still"}', 'parent that is not a directory'),
         ],
@@ -480,6 +534,8 @@ class TestFileChangeRequests:
         assert isinstance(event, FileEditedEvent)
         assert event.path == 'target.txt'
         assert event.diff.endswith('-old\n+new')
+        # The serialized kind the docs promise, where `main` emitted `file_system.file_written`.
+        assert event.kind == 'file_system.file_edited'
 
     async def test_large_diff_is_cut_and_marked(self, tmp_path: Path) -> None:
         content = ''.join(f'line {i}\n' for i in range(2000))
@@ -497,6 +553,321 @@ class TestFileChangeRequests:
         assert not request.diff.endswith('\n')
         assert (tmp_path / 'big.txt').read_text() == content
         assert any(isinstance(event, FileWrittenEvent) for event in events)
+
+    @pytest.mark.parametrize('big_side', ['old', 'new'])
+    async def test_oversized_change_is_not_diffed(self, tmp_path: Path, big_side: str) -> None:
+        """Past `MAX_DIFF_SOURCE_CHARS` on either side nothing is diffed: the event carries the headers, marked as cut."""
+        # Well past the bound in bytes too, so the existing file is hashed in more than one chunk.
+        huge = 'x\u00e9\u00e9\u00e9' * MAX_DIFF_SOURCE_CHARS
+        content = 'small\n' if big_side == 'old' else huge
+        if big_side == 'old':
+            (tmp_path / 'huge.txt').write_text(huge, encoding='utf-8')
+        listener = Listener()
+
+        events = await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps(
+                {'path': 'huge.txt', 'content': content, 'expected_hash': _hash(huge) if big_side == 'old' else None}
+            ),
+            listeners=[listener],
+        )
+
+        (request,) = listener.requests
+        assert (request.diff, request.truncated) == ('--- a/huge.txt\n+++ b/huge.txt', True)
+        assert (tmp_path / 'huge.txt').read_text(encoding='utf-8') == content
+        assert any(isinstance(event, FileWrittenEvent) for event in events)
+
+    @pytest.mark.skipif(os.name == 'nt', reason='Windows rejects the name before the request.')
+    async def test_headers_of_an_oversized_name_are_cut_at_the_bound(self, tmp_path: Path) -> None:
+        """A quoted name that passes the cap on its own leaves the headers cut at `MAX_EVENT_DIFF_CHARS`."""
+        # Each control byte becomes a four-character escape in the quoted name;
+        # five components of 220 of them push the two headers past the cap.
+        chunk = '\x01' * 220
+        parts = [chunk] * 5 + ['f.txt']
+        directory = tmp_path
+        for part in parts[:-1]:
+            directory = directory / part
+            try:
+                directory.mkdir()
+            except OSError:
+                pytest.skip('the OS path limit is too short to carry a name this wide (macOS)')
+        listener = Listener(cancel=True)
+
+        await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps({'path': '/'.join(parts), 'content': 'y\n' * 20000}),
+            listeners=[listener],
+        )
+
+        (request,) = listener.requests
+        assert request.truncated
+        assert len(request.diff) == MAX_EVENT_DIFF_CHARS
+        assert request.diff.startswith('--- "a/')
+
+    @pytest.mark.parametrize(
+        ('lines', 'cut'),
+        [
+            # `-aa` against 2716 `+z` lines makes the diff exactly `MAX_EVENT_DIFF_CHARS`: kept whole.
+            (2716, False),
+            (2717, True),
+        ],
+    )
+    async def test_event_diff_bound_is_inclusive(self, tmp_path: Path, lines: int, cut: bool) -> None:
+        (tmp_path / 'f.txt').write_text('aa\n')
+        listener = Listener()
+
+        await _run_and_collect(
+            tmp_path, 'write_file', json.dumps({'path': 'f.txt', 'content': 'z\n' * lines}), listeners=[listener]
+        )
+
+        (request,) = listener.requests
+        assert request.truncated is cut
+        assert len(request.diff) == MAX_EVENT_DIFF_CHARS
+        assert request.diff.splitlines()[-1] == '+z'
+
+    @pytest.mark.parametrize(
+        ('extra', 'diffed'),
+        [(0, True), (1, False)],
+    )
+    async def test_diff_source_bound_is_inclusive(self, tmp_path: Path, extra: int, diffed: bool) -> None:
+        """Exactly `MAX_DIFF_SOURCE_CHARS` on a side is still diffed; one more character is not."""
+        old = 'x\n' * (MAX_DIFF_SOURCE_CHARS // 2 - 1) + 'a' + 'y' * extra + '\n'
+        assert len(old) == MAX_DIFF_SOURCE_CHARS + extra
+        (tmp_path / 'f.txt').write_text(old)
+        listener = Listener()
+
+        await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps({'path': 'f.txt', 'content': old.replace('\na', '\nb')}),
+            listeners=[listener],
+        )
+
+        (request,) = listener.requests
+        assert request.truncated is not diffed
+        assert ('\n+b' in request.diff) is diffed
+
+    async def test_multibyte_text_within_the_bound_is_diffed(self, tmp_path: Path) -> None:
+        """The bound is in characters: a file of multibyte characters under it is diffed, whatever its byte size."""
+        old = '\u00e9\u00e9\n' * (MAX_DIFF_SOURCE_CHARS // 3)
+        (tmp_path / 'target.txt').write_text(old, encoding='utf-8')
+        listener = Listener()
+
+        await _run_and_collect(
+            tmp_path, 'write_file', '{"path":"target.txt","content":"small\\n"}', listeners=[listener]
+        )
+
+        (request,) = listener.requests
+        assert request.diff.startswith('--- a/target.txt\n+++ b/target.txt\n@@ -1,')
+        assert '\n-\u00e9\u00e9\n' in request.diff
+        assert request.truncated
+
+    @pytest.mark.parametrize(
+        ('old', 'new', 'hunk'),
+        [
+            ('text\n', 'text', '@@ -1 +1 @@\n-text\n+text\n\\ No newline at end of file'),
+            ('text', 'text\n', '@@ -1 +1 @@\n-text\n\\ No newline at end of file\n+text'),
+        ],
+    )
+    async def test_final_newline_change_has_a_diff(self, tmp_path: Path, old: str, new: str, hunk: str) -> None:
+        """A change to the final newline alone is still a change, marked the way `git diff` marks it."""
+        (tmp_path / 'target.txt').write_bytes(old.encode())
+
+        events = await _run_and_collect(
+            tmp_path, 'edit_file', json.dumps({'path': 'target.txt', 'old_text': old, 'new_text': new})
+        )
+
+        (edited,) = [event for event in events if isinstance(event, FileEditedEvent)]
+        assert edited.diff == f'--- a/target.txt\n+++ b/target.txt\n{hunk}'
+        assert (tmp_path / 'target.txt').read_bytes() == new.encode()
+
+    @pytest.mark.skipif(os.name == 'nt', reason='Windows rejects the name before the request.')
+    async def test_control_character_in_the_name_cannot_forge_the_diff(self, tmp_path: Path) -> None:
+        """A name with a newline in it is quoted in the headers, as `git diff` quotes it."""
+        listener = Listener(cancel=True)
+
+        await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps({'path': 'we\nird.txt', 'content': 'x\n'}),
+            listeners=[listener],
+        )
+
+        (request,) = listener.requests
+        assert request.path == 'we\nird.txt'
+        assert request.diff == '--- "a/we\\nird.txt"\n+++ "b/we\\nird.txt"\n@@ -0,0 +1 @@\n+x'
+
+    @needs_mode_bits
+    async def test_unreadable_target_is_announced_as_cut(self, tmp_path: Path) -> None:
+        """A file the process can write but not read is still written; the listener is told the diff is not shown."""
+        target = tmp_path / 'target.txt'
+        target.write_text('old\n')
+        target.chmod(0o222)
+        listener = Listener()
+
+        events = await _run_and_collect(
+            tmp_path, 'write_file', '{"path":"target.txt","content":"new\\n"}', listeners=[listener]
+        )
+
+        (request,) = listener.requests
+        assert (request.diff, request.truncated) == ('--- a/target.txt\n+++ b/target.txt', True)
+        target.chmod(0o644)
+        assert target.read_text() == 'new\n'
+        assert any(isinstance(event, FileWrittenEvent) for event in events)
+
+    @needs_mode_bits
+    async def test_unreadable_target_with_expected_hash_is_refused(self, tmp_path: Path) -> None:
+        """An `expected_hash` the process cannot check is an error, not a write that skips the check."""
+        target = tmp_path / 'target.txt'
+        target.write_text('old\n')
+        target.chmod(0o222)
+        listener = Listener()
+
+        events = await _run_and_collect(
+            tmp_path,
+            'write_file',
+            json.dumps({'path': 'target.txt', 'content': 'new\n', 'expected_hash': _hash('old\n')}),
+            listeners=[listener],
+        )
+
+        assert listener.requests == []
+        assert 'Permission denied' in _retry_reason(events)
+        target.chmod(0o644)
+        assert target.read_text() == 'old\n'
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args'),
+        [
+            ('write_file', '{"path":"target.txt","content":"new\\n"}'),
+            ('edit_file', '{"path":"target.txt","old_text":"old","new_text":"new"}'),
+        ],
+    )
+    async def test_file_changed_while_announced_is_refused(
+        self, tmp_path: Path, tool_name: str, json_args: str
+    ) -> None:
+        """The diff a listener approved describes the change applied, however long the listener took."""
+        target = tmp_path / 'target.txt'
+        target.write_text('old\n')
+
+        events = await _run_and_collect(
+            tmp_path, tool_name, json_args, listeners=[MeddlingListener(act=lambda: target.write_text('other\n'))]
+        )
+
+        assert 'Conflict' in _retry_reason(events)
+        assert target.read_text() == 'other\n'
+        assert not any(isinstance(event, FileWrittenEvent) for event in events)
+
+    async def test_invalid_utf8_text_keeps_the_hash_handshake(self, tmp_path: Path) -> None:
+        """The guard hashes a text file with an invalid byte the way `read_file` reported it."""
+        (tmp_path / 'target.txt').write_bytes(b'a\xffb\n')
+        reported = _hash('a\ufffdb\n')
+
+        read_events = await _run_and_collect(tmp_path, 'read_file', '{"path":"target.txt"}')
+        (read,) = [event for event in read_events if isinstance(event, FileReadEvent)]
+        assert read.content_hash == reported
+
+        events = await _run_and_collect(
+            tmp_path, 'write_file', json.dumps({'path': 'target.txt', 'content': 'new\n', 'expected_hash': reported})
+        )
+
+        assert (tmp_path / 'target.txt').read_text() == 'new\n'
+        assert any(isinstance(event, FileWrittenEvent) for event in events)
+
+    async def test_file_that_appeared_while_announced_is_refused(self, tmp_path: Path) -> None:
+        """A write announced as creating the file does not overwrite one that appeared in the meantime."""
+        target = tmp_path / 'fresh.txt'
+
+        events = await _run_and_collect(
+            tmp_path,
+            'write_file',
+            '{"path":"fresh.txt","content":"new\\n"}',
+            listeners=[MeddlingListener(act=lambda: target.write_text('other\n'))],
+        )
+
+        assert 'Conflict' in _retry_reason(events)
+        assert target.read_text() == 'other\n'
+
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args'),
+        [
+            ('write_file', '{"path":"sub/target.txt","content":"new\\n"}'),
+            ('edit_file', '{"path":"sub/target.txt","old_text":"old","new_text":"new"}'),
+            ('create_directory', '{"path":"sub/made"}'),
+        ],
+    )
+    @pytest.mark.parametrize('outside', [True, False])
+    async def test_path_replaced_while_announced_is_refused(
+        self, tmp_path: Path, tool_name: str, json_args: str, outside: bool
+    ) -> None:
+        """Swapping a directory on the path for a symlink during the request does not redirect the change."""
+        root = tmp_path / 'root'
+        sub = root / 'sub'
+        sub.mkdir(parents=True)
+        (sub / 'target.txt').write_text('old\n')
+        elsewhere = tmp_path / 'outside' if outside else root / 'elsewhere'
+        elsewhere.mkdir()
+
+        def swap() -> None:
+            sub.rename(root / 'moved')
+            sub.symlink_to(elsewhere, target_is_directory=True)
+
+        events = await _run_and_collect(root, tool_name, json_args, listeners=[MeddlingListener(act=swap)])
+
+        reason = _retry_reason(events)
+        assert (
+            'resolves outside the root directory' if outside else 'was replaced while the change was announced'
+        ) in reason
+        assert list(elsewhere.iterdir()) == []
+        assert not any(isinstance(event, (FileWrittenEvent, DirectoryCreatedEvent)) for event in events)
+
+    async def test_directory_that_appeared_while_announced_is_not_reported(self, tmp_path: Path) -> None:
+        made = tmp_path / 'made'
+
+        events = await _run_and_collect(
+            tmp_path, 'create_directory', '{"path":"made"}', listeners=[MeddlingListener(act=made.mkdir)]
+        )
+
+        assert _tool_result(events) == 'Created directory: made'
+        assert not any(isinstance(event, DirectoryCreatedEvent) for event in events)
+
+    @pytest.mark.parametrize(
+        ('json_args', 'collide', 'reason'),
+        [
+            ('{"path":"made"}', _file_at_leaf, 'exists and is not a directory'),
+            ('{"path":"sub/made"}', _file_at_parent, 'parent that is not a directory'),
+        ],
+    )
+    async def test_collision_that_appeared_while_announced_is_refused(
+        self, tmp_path: Path, json_args: str, collide: Callable[[Path], None], reason: str
+    ) -> None:
+        (tmp_path / 'sub').mkdir()
+
+        events = await _run_and_collect(
+            tmp_path, 'create_directory', json_args, listeners=[MeddlingListener(act=lambda: collide(tmp_path))]
+        )
+
+        assert reason in _retry_reason(events)
+        assert not any(isinstance(event, DirectoryCreatedEvent) for event in events)
+
+    async def test_edit_does_not_recreate_a_file_deleted_while_announced(self, tmp_path: Path) -> None:
+        target = tmp_path / 'target.txt'
+        target.write_text('old\n')
+
+        events = await _run_and_collect(
+            tmp_path,
+            'edit_file',
+            '{"path":"target.txt","old_text":"old","new_text":"new"}',
+            listeners=[MeddlingListener(act=target.unlink)],
+        )
+
+        reason = _retry_reason(events)
+        assert f'[Errno {errno.ENOENT}]' in reason
+        assert "'target.txt'" in reason
+        assert _root(tmp_path) not in reason
+        assert not target.exists()
+        assert not any(isinstance(event, FileWrittenEvent) for event in events)
 
     async def test_direct_call_asks_nobody(self, tmp_path: Path) -> None:
         toolset = FileSystem[None](root_dir=tmp_path).get_toolset()

@@ -10,7 +10,8 @@ Each event carries two path fields:
 
 A diff in an event is a unified diff cut at `MAX_EVENT_DIFF_CHARS` with a
 `truncated` flag, so an event stream that is persisted or forwarded to a UI
-cannot be flooded by one large write.
+cannot be flooded by one large write. A change whose text is longer than
+`MAX_DIFF_SOURCE_CHARS` on either side is not diffed at all.
 """
 
 from dataclasses import dataclass
@@ -22,6 +23,9 @@ FILE_SYSTEM_EVENTS = 'file_system'
 
 MAX_EVENT_DIFF_CHARS = 8192
 """Characters kept in an event's `diff` before it is cut."""
+
+MAX_DIFF_SOURCE_CHARS = 4 * MAX_EVENT_DIFF_CHARS
+"""Longest text on either side of a change that is still diffed; past it the `diff` is the headers alone."""
 
 FileOperation = Literal['write', 'edit', 'create_directory']
 """The change a `FileChangeRequestEvent` announces."""
@@ -120,6 +124,7 @@ class FileChangeRequestEvent(
     cancel_reason: str | None = None
 
     def cancel(self, reason: str | None = None) -> None:
-        """Stop the change from being applied."""
+        """Stop the change from being applied; a `reason` given by any listener reaches the model."""
         self.cancelled = True
-        self.cancel_reason = reason
+        if reason is not None or self.cancel_reason is None:
+            self.cancel_reason = reason

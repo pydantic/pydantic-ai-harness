@@ -3,6 +3,7 @@
 from pydantic_ai_harness.filesystem._capability import FileSystem
 from pydantic_ai_harness.filesystem._events import (
     FILE_SYSTEM_EVENTS,
+    MAX_DIFF_SOURCE_CHARS,
     MAX_EVENT_DIFF_CHARS,
     DirectoryCreatedEvent,
     DirectoryListedEvent,
@@ -18,6 +19,7 @@ from pydantic_ai_harness.filesystem._toolset import READ_ONLY_TOOL_NAMES, FileSy
 
 __all__ = [
     'FILE_SYSTEM_EVENTS',
+    'MAX_DIFF_SOURCE_CHARS',
     'MAX_EVENT_DIFF_CHARS',
     'READ_ONLY_TOOL_NAMES',
     'DirectoryCreatedEvent',

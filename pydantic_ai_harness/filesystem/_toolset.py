@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import codecs
 import errno
 import fnmatch
 import functools
 import hashlib
+import itertools
 import os
 import re
 import stat
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 from pathlib import Path
-from typing import Concatenate, ParamSpec, TypedDict
+from typing import BinaryIO, Concatenate, ParamSpec, TypedDict
 
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -19,6 +21,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.filesystem._changes import Change
 from pydantic_ai_harness.filesystem._events import (
+    MAX_DIFF_SOURCE_CHARS,
     DirectoryCreatedEvent,
     DirectoryListedEvent,
     FileReadEvent,
@@ -187,7 +190,43 @@ def _content_hash(content: str) -> str:
     the same bytes on disk and the optimistic-concurrency handshake holds
     regardless of line endings.
     """
-    return hashlib.sha256(content.encode('utf-8')).hexdigest()[:12]
+    return _bytes_hash(content.encode('utf-8'))
+
+
+def _bytes_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:12]
+
+
+_HASH_CHUNK_BYTES = 1 << 20
+
+_DIFF_SOURCE_BYTES = 4 * MAX_DIFF_SOURCE_CHARS
+"""Bytes that can hold `MAX_DIFF_SOURCE_CHARS` of UTF-8; a longer file is past the bound whatever it holds."""
+
+
+def _chunks(source: BinaryIO) -> Iterator[bytes]:
+    """`source` in `_HASH_CHUNK_BYTES` pieces, so hashing a file never holds it whole."""
+    return iter(functools.partial(source.read, _HASH_CHUNK_BYTES), b'')
+
+
+def _disk_hash(chunks: Iterable[bytes]) -> str:
+    """The hash `read_file` reports for a file: of the bytes for a binary file, of the decoded text otherwise.
+
+    Decoding is lenient, as `read_file` decodes, so a text file holding an
+    invalid byte hashes to what the model was told and its `expected_hash`
+    handshake holds. Every check against the disk uses this one rule. The
+    first chunk decides whether the file is binary, so it must cover the
+    `_is_binary` sample: a whole file, or at least that sample's 8192 bytes.
+    """
+    digest = hashlib.sha256()
+    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+    binary = False
+    for index, chunk in enumerate(chunks):
+        if index == 0:
+            binary = _is_binary(chunk)
+        digest.update(chunk if binary else decoder.decode(chunk).encode('utf-8'))
+    if not binary:
+        digest.update(decoder.decode(b'', final=True).encode('utf-8'))
+    return digest.hexdigest()[:12]
 
 
 def _read_canonical_text(path: Path) -> str:
@@ -202,16 +241,35 @@ def _read_canonical_text(path: Path) -> str:
         return f.read()
 
 
-def _current_text(resolved: Path) -> str:
-    """The text a write would replace, for the diff: the file's content, or nothing for a new file.
+def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) -> tuple[str | None, str | None]:
+    """The text a listener is shown a write replacing, and the hash the write is then guarded with.
 
-    Decoding is lenient because this is for display; the hash check that
-    guards the write reads strictly through the descriptor.
+    A stale `expected_hash` for a file that exists is rejected here first, so
+    a listener only sees a write that would go ahead; for a missing file the
+    hash is ignored, as documented, and the write is announced as a create.
+    A new file diffs from empty and is guarded as empty, so one that appears
+    while the write is announced is a conflict. The
+    text is `None` when it cannot be shown: a file the process cannot read (a
+    write-only mode, say) is announced as headers alone, marked as cut, and
+    written unguarded, while an `expected_hash` it cannot check propagates the
+    error; past `MAX_DIFF_SOURCE_CHARS` it would not be diffed, so only as
+    many bytes as can hold that many characters are read into memory and the
+    rest is hashed in chunks.
     """
     if not resolved.is_file():
-        return ''
-    with resolved.open(encoding='utf-8', errors='replace', newline='') as f:
-        return f.read()
+        return '', _disk_hash([b''])
+    try:
+        with resolved.open('rb') as source:
+            head = source.read(_DIFF_SOURCE_BYTES + 1)
+            current_hash = _disk_hash(itertools.chain([head], _chunks(source)))
+    except OSError:
+        if expected_hash is not None:
+            raise
+        return None, None
+    if expected_hash is not None:
+        _check_expected_hash(path, current_hash, expected_hash)
+    old = head.decode('utf-8', errors='replace') if len(head) <= _DIFF_SOURCE_BYTES else None
+    return old, current_hash
 
 
 def _check_expected_hash(path: str, current_hash: str, expected_hash: str) -> None:
@@ -224,28 +282,33 @@ def _check_expected_hash(path: str, current_hash: str, expected_hash: str) -> No
 
 
 def _nearest_existing(path: Path) -> Path:
-    """The path itself or its closest ancestor that exists."""
-    while not path.exists():
+    """The path itself or its closest ancestor that exists, or its anchor when nothing on the chain does."""
+    # The anchor is its own parent, so an absent one (a Windows drive that
+    # went away) would otherwise never end the walk.
+    while not path.exists() and path.parent != path:
         path = path.parent
     return path
 
 
-def _open_for_write(resolved: Path, path: str, *, read_back: bool) -> tuple[int, bool]:
+def _open_for_write(resolved: Path, path: str, *, read_back: bool, create: bool) -> tuple[int, bool]:
     """Open `resolved` for writing without truncating it; returns the descriptor and whether it was created.
 
     Opening without O_TRUNC lets the caller classify the descriptor and check
     the expected hash before changing the file (`read_back` opens it
-    read-write for that). POSIX non-blocking mode keeps a FIFO swapped into
-    place from waiting for a reader; O_NOFOLLOW keeps a final-component
-    symlink swap from redirecting the descriptor. Windows has no filesystem
-    FIFO equivalent, and O_BINARY plus `newline=''` on the caller's text
-    wrapper means the written bytes reproduce the content argument exactly:
-    no newline translation, so the reported hash always matches the bytes a
-    later `read_file` hashes.
+    read-write for that). An edit passes `create=False`: a file that vanished
+    while its change was announced is reported missing, not recreated. POSIX
+    non-blocking mode keeps a FIFO swapped into place from waiting for a
+    reader; O_NOFOLLOW keeps a final-component symlink swap from redirecting
+    the descriptor. Windows has no filesystem FIFO equivalent, and O_BINARY
+    with the caller's binary I/O means the written bytes are exactly the
+    encoded content: no newline translation, so the reported hash always
+    matches the bytes a later `read_file` hashes.
     """
     platform_flags = os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW
     access_flags = os.O_RDWR if read_back else os.O_WRONLY
     try:
+        if not create:
+            return os.open(resolved, access_flags | platform_flags), False
         # The target can disappear after O_EXCL reports that it exists. Retry
         # the complete atomic classification so an ordinary write still
         # recreates it, while bounding churn from a concurrently replaced path.
@@ -267,12 +330,41 @@ def _open_for_write(resolved: Path, path: str, *, read_back: bool) -> tuple[int,
         raise
 
 
+def _write_content(resolved: Path, path: str, content: str, *, expected_hash: str | None, create: bool) -> None:
+    """Replace the file's content, checking that an existing file hashes to `expected_hash` under the open descriptor.
+
+    Checking under the descriptor is what guards the write: the file cannot
+    change between the check and the write the way it can while a change is
+    announced. The bytes are hashed as `read_file` hashes them, so a file that
+    is not valid UTF-8 is compared instead of failing to decode.
+    """
+    descriptor, created = _open_for_write(resolved, path, read_back=expected_hash is not None, create=create)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
+
+        binary_file = os.fdopen(descriptor, 'rb+' if expected_hash is not None else 'wb')
+        descriptor = -1
+        with binary_file:
+            if expected_hash is not None and not created:
+                _check_expected_hash(path, _disk_hash(_chunks(binary_file)), expected_hash)
+
+            binary_file.seek(0)
+            binary_file.truncate(0)
+            binary_file.write(content.encode('utf-8'))
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 class FileSystemToolset(FunctionToolset[AgentDepsT]):
     """Toolset providing filesystem operations scoped to a root directory.
 
     Security model:
     - All paths resolved relative to root with canonical path checks
-    - Symlinks resolved before authorization (prevents TOCTTOU)
+    - Symlinks resolved before authorization, and again after a listener has
+      held a change request; a rename on the path between that check and the
+      by-name I/O remains possible, as the documented security model says
     - Glob-based allow/deny filtering
     - Protected path patterns (e.g. `.git/`, `.env`)
     - Binary file detection blocks text operations
@@ -467,16 +559,15 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise FileNotFoundError(f'File not found: {path}')
 
         raw = resolved.read_bytes()
+        content_hash = _disk_hash([raw])
         if _is_binary(raw):
             size = len(raw)
             if ctx is not None:
-                content_hash = hashlib.sha256(raw).hexdigest()[:12]
                 await ctx.emit(FileReadEvent(**self._event_location(resolved), content_hash=content_hash))
             return f'[Binary file: {size} bytes. Use a binary-aware tool to inspect.]'
 
         text = raw.decode('utf-8', errors='replace')
         lines = text.splitlines(keepends=True)
-        content_hash = _content_hash(text)
         # Format before emitting: an out-of-range offset is a failed read, and
         # a failed read must not look like a successful one to subscribers.
         body = _format_lines(lines, offset, limit)
@@ -529,30 +620,23 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if not resolved.parent.exists():
             parent_rel = str(resolved.parent.relative_to(self._root))
             raise FileNotFoundError(f"Parent directory '{parent_rel}' does not exist. Use create_directory first.")
+        # Checked before the announcement, like `create_directory` does, so a
+        # listener is only asked about a write the filesystem would accept.
+        if not resolved.parent.is_dir():
+            raise ModelRetry(f'Path {path!r} has a parent that is not a directory.')
 
-        if (
-            refusal := await self._announce_write(ctx, resolved, path, content, expected_hash=expected_hash)
-        ) is not None:
-            return refusal
+        # `O_CREAT` in `_open_for_write` would already have created the file
+        # the listener is about to refuse, so the request cannot wait for the
+        # descriptor. Outside a run nothing is read: the diff is for listeners,
+        # and the descriptor check of `expected_hash` is the whole contract.
+        guard = expected_hash
+        if ctx is not None:
+            old, guard = _announced_state(resolved, path, expected_hash=expected_hash)
+            change = Change.propose(**self._event_location(resolved), operation='write', old=old, new=content)
+            if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
+                return refusal
 
-        descriptor, created = _open_for_write(resolved, path, read_back=expected_hash is not None)
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
-
-            mode = 'r+' if expected_hash is not None else 'w'
-            text_file = os.fdopen(descriptor, mode, encoding='utf-8', newline='')
-            descriptor = -1
-            with text_file:
-                if expected_hash is not None and not created:
-                    _check_expected_hash(path, _content_hash(text_file.read()), expected_hash)
-
-                text_file.seek(0)
-                text_file.truncate(0)
-                text_file.write(content)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
+        _write_content(resolved, path, content, expected_hash=guard, create=True)
 
         new_hash = _content_hash(content)
         lines = len(content.splitlines())
@@ -560,26 +644,23 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             await ctx.emit(FileWrittenEvent(**self._event_location(resolved), content_hash=new_hash))
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
 
-    async def _announce_write(
-        self, ctx: RunContext[AgentDepsT] | None, resolved: Path, path: str, content: str, *, expected_hash: str | None
+    async def _request(
+        self, ctx: RunContext[AgentDepsT] | None, change: Change, *, path: str, resolved: Path
     ) -> str | None:
-        """Check the conflict and announce the write before the file is opened.
+        """Announce `change` and confirm that `path` still names `resolved` afterwards.
 
-        `O_CREAT` in `_open_for_write` would already have made the file a
-        listener is about to refuse, so the request cannot wait for the
-        descriptor. The hash is checked here first so a listener only sees a
-        write that would go ahead, and again under the descriptor, which is
-        what actually guards the write. Outside a run nothing is read: the
-        diff is for listeners.
+        A listener can hold the request for as long as a human takes, and the
+        change is then applied by name, so the path is resolved and checked
+        again: the announcement must not widen the window between the
+        containment check and the I/O. Outside a run there is nobody to ask.
         """
-        if expected_hash is not None and resolved.is_file():
-            _check_expected_hash(path, _content_hash(_read_canonical_text(resolved)), expected_hash)
         if ctx is None:
             return None
-        change = Change.propose(
-            **self._event_location(resolved), operation='write', old=_current_text(resolved), new=content
-        )
-        return await change.request(ctx)
+        if (refusal := await change.request(ctx)) is not None:
+            return refusal
+        if self._safe_resolve(path, write=True) != resolved:
+            raise ModelRetry(f'Path {path!r} was replaced while the change was announced. Retry.')
+        return None
 
     async def edit_file(self, path: str, old_text: str, new_text: str, *, expected_hash: str | None = None) -> str:
         """Edit a text file directly, outside an agent run."""
@@ -646,9 +727,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         new_content = text.replace(old_text, new_text, 1)
         change = Change.propose(**self._event_location(resolved), operation='edit', old=text, new=new_content)
-        if (refusal := await change.request(ctx)) is not None:
+        if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
             return refusal
-        resolved.write_text(new_content, encoding='utf-8', newline='')
+        # A listener may take a while (a human approving the diff, say). The
+        # edit was computed from `text`, so the write checks that the file
+        # still holds it, and reports a file deleted in the meantime as missing.
+        _write_content(resolved, path, new_content, expected_hash=current_hash, create=False)
         new_hash = _content_hash(new_content)
         if ctx is not None:
             await ctx.emit(change.edited(content_hash=new_hash))
@@ -906,15 +990,18 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if not _nearest_existing(resolved.parent).is_dir():
             raise ModelRetry(f'Path {path!r} has a parent that is not a directory.')
         change = Change.propose(**self._event_location(resolved), operation='create_directory')
-        if (refusal := await change.request(ctx)) is not None:
+        if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
             return refusal
         # The checks above already named these collisions; here they mean the
-        # path changed under us between the check and the `mkdir`.
+        # path changed while the change was announced. A directory that
+        # appeared in the meantime was not created here, so it is not reported.
         try:
-            resolved.mkdir(parents=True, exist_ok=True)
-        except FileExistsError as e:  # pragma: no cover
+            resolved.mkdir(parents=True)
+        except FileExistsError as e:
+            if resolved.is_dir():
+                return f'Created directory: {path}'
             raise ModelRetry(f'Path {path!r} exists and is not a directory.') from e
-        except NotADirectoryError as e:  # pragma: no cover
+        except NotADirectoryError as e:
             raise ModelRetry(f'Path {path!r} has a parent that is not a directory.') from e
         if ctx is not None:
             await ctx.emit(DirectoryCreatedEvent(**self._event_location(resolved)))
@@ -951,7 +1038,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if not is_bin:
                 text = raw.decode('utf-8', errors='replace')
                 parts.append(f'lines: {len(text.splitlines())}')
-                parts.append(f'hash: {_content_hash(text)}')
+                parts.append(f'hash: {_disk_hash([raw])}')
 
         if is_link:
             target = _model_safe_filename(os.readlink(original), self._real_root)
