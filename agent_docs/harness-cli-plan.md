@@ -186,10 +186,12 @@ the branch. Each item names its acceptance check.
       GHA hosted-compute supervisor tears a `setsid` session down when its leader exits;
       the test now pre-probes and skips where the scenario cannot be demonstrated); a
       one-line coverage pragma landed at 95c7db06 and CI is fully green (16/16 test cells,
-      coverage 100, check, correctness). `pydantic-ai:review-lite` re-applied 19:41Z for a
-      fresh run on 95c7db06. Macroscope verified the docs-echo fix (18:40Z); the veto and
-      try/finally threads still await its verification. When the pydantic verdict lands:
-      fix what is real, reply per finding, and merge the fixes into `feat/experimental-cli`.
+      coverage 100, check, correctness). A fresh pydantic run on 95c7db06 was dispatched
+      at 20:49Z with the correct trigger label `pydanty:review-lite` (earlier attempts
+      used the wrong label and were ignored, see journal). Macroscope verified the
+      docs-echo fix (18:40Z); the veto and try/finally threads still await its
+      verification. When the pydantic verdict lands: fix what is real, reply per finding,
+      and merge the fixes into `feat/experimental-cli`.
 - [x] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`, worktree
       `../harness-filesystem-change-events`): `FileChangeRequestEvent`, `FileEditedEvent`,
       `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and search counts,
@@ -208,8 +210,9 @@ the branch. Each item names its acceptance check.
       predates the f5b9134d header-cut fix, so the required is already fixed and the
       verdict untrustworthy). Make `FileChangeRequestEvent.cancelled` monotonic/read-only
       the way #845's was just fixed (private field + property, `cancel()` the only setter,
-      a `LiftCancel`-style test, docs parity), push, and re-apply the label so a fresh run
-      analyzes the real head. Merge the fix into `feat/experimental-cli`.
+      a `LiftCancel`-style test, docs parity), push, and re-apply the trigger label
+      `pydanty:review-lite` (not `pydantic-ai:review-lite`) so a fresh run analyzes the
+      real head. Merge the fix into `feat/experimental-cli`.
 - [ ] 1.2c When #853 merges: merge `main` into `feat/experimental-cli` and drop the
       `puppy/filesystem-change-events` worktree.
 - [x] 1.2d Work pydanty's second pass on #853 (landed 00:04Z: one blocking, the floor finding
@@ -661,15 +664,17 @@ Append-only. Date, item, decision, why.
 - 2026-09-10, 1.2c: #853 CI is fully green on 87984c83 (26 passed, 8 standard skips, one
   cancelled no-op "evaluate dependency approval"). The pydantic re-review retriggered for
   the new head is in flight.
-- 2026-09-10, 1.3b: the #855 pydantic re-trigger from the previous session was stuck:
-  the 17:27:58Z run was published-withheld ("PR head changed after review", the 424c9634
-  main-merge push landed mid-run), its `pydanty:is-working` label was never cleared, and
-  the 18:26:20Z label re-add did not start a new run while that label sat. Cleared the
-  stale `is-working` and re-applied `pydantic-ai:review-lite` at ~19:52Z. Note: the bot
-  also holds a 24h-old `is-working` on PR #589 (someone else's PR) and had not picked up
-  the #845 or #855 labels by 20:00Z, so both fresh runs are queued and may be delayed by
-  that clog. If #845 still shows no `is-working` an hour after the label, cycle the label
-  once more and, if that fails too, flag it to Mike.
+- 2026-09-10, 1.3b: the #855 pydantic re-trigger from the previous session was stuck,
+  and the root cause was a wrong label. The label that dispatches a pydantic/pydanty
+  review run is `pydanty:review-lite` (description: "Trigger: freeform AI-decomposed
+  review of this PR. No CI precondition. Consumed on dispatch."), NOT
+  `pydantic-ai:review-lite`. The previous session (and this one, for an hour) had been
+  cycling `pydantic-ai:review-lite` on #845 and #855, which the bot ignores; the stuck
+  `pydanty:is-working` on #855 (17:27:58Z, a published-withheld run) and the 24h-old
+  `is-working` on PR #589 are bot bookkeeping artifacts, not the clog. Cleared the stale
+  #855 `is-working`, applied `pydanty:review-lite` to #845 and #855 at 20:49Z: both
+  picked up within 25 seconds. Earlier sessions' notes that "the review label is
+  pydantic-ai:review-lite" were wrong. Verdicts expected ~21:15-21:50Z.
 - 2026-09-10, 1.1e: root-caused the `TestKillAfterLeaderExit` CI failures (all 3.11/3.12
   cells, none on 3.10/3.13/3.14) with two diagnostic pushes. The GHA host runs steps under
   a `hosted-compute-agent` systemd service that is the step's session and group leader; it
