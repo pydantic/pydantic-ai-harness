@@ -189,8 +189,16 @@ the branch. Each item names its acceptance check.
       The `FileEditedEvent` subclass question for Douwe is in the PR body.
 - [ ] 1.2c When #853 merges: merge `main` into `feat/experimental-cli` and drop the
       `puppy/filesystem-change-events` worktree.
-- [ ] 1.3 `subagents` events PR (`puppy/subagents-events`): `DelegationStartEvent`,
-      `DelegationEndEvent`. Bridge renders nested invocation panels.
+- [x] 1.3 `subagents` events PR (`puppy/subagents-events`, worktree
+      `../harness-subagents-events`): `DelegationStartEvent`, `DelegationEndEvent`. Bridge renders
+      a `>>` start line and a `<<` end line per delegation. PR #855 (draft, CI green, pydanty
+      labelled at 23:55Z); bridge half merged into `feat/experimental-cli` at eeed7062.
+- [ ] 1.3b Work pydanty's review of #855 (`gh pr view 855 --comments`; the label
+      `pydanty:is-working` clears when it lands), address the findings in
+      `../harness-subagents-events`, merge the fixes into `feat/experimental-cli`, then mark
+      #855 ready for review. The floor finding, if it comes, is answered with #851 as on #845.
+- [ ] 1.3c When #855 merges: merge `main` into `feat/experimental-cli` and drop the
+      `puppy/subagents-events` worktree.
 - [ ] 1.4 `skills` events PR (`puppy/skills-events`): `SkillsLoadedEvent`, `SkillActivatedEvent`.
 - [ ] 1.5 `tool_output_limits` events (`ToolOutputLimitedEvent`), coordinated with #729.
 - [ ] 1.6 Consume `SpendRecordedEvent`, `ContextUsageEvent`, planning events in the status bar.
@@ -514,6 +522,52 @@ Append-only. Date, item, decision, why.
   its `check_bots.sh` watermark must be after the "Review started" ack or every poll re-prints
   it. Replying in one comment that maps each finding to the fix, then re-applying
   `pydanty:review-lite`, is the ritual; the second pass is what a maintainer sees first.
+
+- 2026-09-09, loop: 1.1d and 1.2c were both gated shut at the start of this iteration (#851
+  still a draft without `dependencies:approved`, #853 under pydanty's second pass with
+  `pydanty:is-working` set), so 1.3 was the first unchecked item, per the earlier loop rule.
+- 2026-09-09, 1.3: no `delegation_id`. One delegation is one `delegate_task` call, so the
+  `tool_call_id` core stamps on both events is the pair key, unlike shell's `command_id`, which
+  exists because a background command spans several tool calls. Pinned by the parallel test.
+- 2026-09-09, 1.3: `DelegationStartEvent.model` is the menu key (explicit, or the restricted
+  delegate's default), not a resolved model name. The key is the user's own vocabulary and is
+  safe to persist; resolving a name would mean `infer_model` on a child that may not have a
+  model until run time. `_resolve_model` became `_resolve_model_key` so the event and the run
+  read the same value.
+- 2026-09-09, 1.3: `DelegationEndEvent.usage` is the child's own `RunUsage` only when its
+  accounting is separate (`usage_limits` set, or `forward_usage=False`); the child then runs on
+  a fresh `RunUsage` the toolset holds, so usage is reported on every outcome, not just `ok`.
+  With shared usage it is `None`: `result.usage()` would be the whole tree's total, which
+  misleads more than it informs.
+- 2026-09-09, 1.3: the events fire only from a capability-owned tool. Core raises `UserError`
+  on a capability event from a tool with no owning capability, and `SubAgentToolset` is a
+  public export an existing test registers directly in `Agent(toolsets=[...])`. The toolset
+  checks `ctx.tools[name].capability_id` (both public) rather than taking an "I am owned"
+  flag whose only correct value depends on the caller. Neither shell nor filesystem guards
+  this; they have no direct-registration test. Documented and pinned.
+- 2026-09-09, 1.3: a refused delegation (unknown sub-agent, key off the menu, `max_calls`
+  exhausted) emits nothing, and a propagating exception ends without an end event, the shell
+  rule. `outcome` therefore has five values and no `error`; the parent run's own failure is
+  what a host sees for the sixth case.
+- 2026-09-09, 1.3: `delegate_task` split three ways (`delegate_task` validates,
+  `_run_delegation` sets up and brackets with the events, `_settle` awaits and classifies into
+  a frozen `_Ended`) because the emit branches pushed the one method over ruff's complexity
+  cap. `_Ended.cause` set means "raise `ModelRetry(output) from cause`" after the end event,
+  which keeps the chaining the old inline raises had.
+- 2026-09-09, 1.3: text bound is one constant, `MAX_EVENT_TEXT_CHARS` (4096), for `task` and
+  `output` alike; a task is a paragraph and an output is a summary, and neither needed its
+  own knob.
+- 2026-09-09, 1.3: the docs snippet uses `@agent.on_event`, the sibling style, so pydanty will
+  raise the 2.38.0 floor finding a third time; it is answered with #851, as on #845 and #853.
+- 2026-09-09, 1.3 bridge: "nested invocation panels" is a `>>` line as the child starts and a
+  `<<` line as it ends, with the outcome word (omitted on `ok`), the duration, and the text the
+  parent got. The child's own stream renders nothing in between: the child run has no bridge
+  unless `shared_capabilities` passes one, and the events plan says nested streaming is an
+  `event_stream_handler` concern. A failed or contained delegation raises a retry prompt with
+  the same text as the end line, so `_on_tool_result` now skips summarised call IDs for retry
+  prompts too; nothing before this produced both.
+- 2026-09-09, 1.3 bridge: merged `puppy/subagents-events` into `feat/experimental-cli` rather
+  than a local `uv` source, as 1.1 and 1.2 did.
 
 ## Open questions for Mike
 
