@@ -193,6 +193,15 @@ class TestForegroundEvents:
 
         assert [event.line for event in listener.events if isinstance(event, ShellOutputLineEvent)] == ['a', 'b']
 
+    async def test_line_split_across_reads_is_reassembled(self, tmp_path: Path) -> None:
+        # Two writes with a pause between them arrive as two pipe reads, and
+        # the boundary falls inside a three-byte character.
+        listener, results = await _run(tmp_path, [_run_command("printf '\\344\\270'; sleep 0.2; printf '\\255!\\n'")])
+
+        lines = [(event.line, event.truncated) for event in listener.events if isinstance(event, ShellOutputLineEvent)]
+        assert lines == [('中!', False)]
+        assert results == ['[stdout]\n中!\n']
+
     async def test_denied_command_emits_no_request(self, tmp_path: Path) -> None:
         listener, results = await _run(tmp_path, [_run_command('vim file')])
 
