@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import difflib
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 from pydantic_ai.tools import AgentDepsT, RunContext
 
 from pydantic_ai_harness.filesystem._events import (
+    MAX_DIFF_SOURCE_CHARS,
     MAX_EVENT_DIFF_CHARS,
     FileChangeRequestEvent,
     FileEditedEvent,
@@ -20,17 +22,43 @@ _REFUSALS: dict[FileOperation, str] = {
     'create_directory': 'was not created',
 }
 
+_NO_NEWLINE = '\\ No newline at end of file'
+"""The marker `git diff` prints after a final line that lacks a newline."""
+
+
+def _lines(text: str) -> list[str]:
+    """Split on newlines only, keeping each one, so a final line without one stays distinguishable."""
+    lines = text.split('\n')
+    last = lines.pop()
+    return [f'{line}\n' for line in lines] + ([last] if last else [])
+
+
+def _diff_lines(old: str, new: str, *, path: str) -> Iterator[str]:
+    """The diff lines without terminators, marking a final line that has none the way `git diff` does."""
+    lines = difflib.unified_diff(_lines(old), _lines(new), fromfile=f'a/{path}', tofile=f'b/{path}', lineterm='')
+    for index, line in enumerate(lines):
+        if line.endswith('\n'):
+            yield line[:-1]
+            continue
+        yield line
+        # The first two lines name the files and a hunk header starts with
+        # `@@`; only a content line can be missing its newline.
+        if index >= 2 and not line.startswith('@@'):
+            yield _NO_NEWLINE
+
 
 def unified_diff(old: str, new: str, *, path: str) -> tuple[str, bool]:
     """Unified diff from `old` to `new`, cut at `MAX_EVENT_DIFF_CHARS`.
 
     Returns the diff and whether it was cut. Two equal texts diff to an
-    empty string, so a `create_directory` proposes no diff at all.
+    empty string, so a `create_directory` proposes no diff at all. A text
+    longer than `MAX_DIFF_SOURCE_CHARS` on either side is not diffed: the
+    result is the two file headers, marked as cut, so a large write does
+    not pay for a diff that would be cut anyway.
     """
-    lines = difflib.unified_diff(
-        old.splitlines(), new.splitlines(), fromfile=f'a/{path}', tofile=f'b/{path}', lineterm=''
-    )
-    diff = '\n'.join(lines)
+    if len(old) > MAX_DIFF_SOURCE_CHARS or len(new) > MAX_DIFF_SOURCE_CHARS:
+        return f'--- a/{path}\n+++ b/{path}', True
+    diff = '\n'.join(_diff_lines(old, new, path=path))
     if len(diff) <= MAX_EVENT_DIFF_CHARS:
         return diff, False
     # Cut on a line boundary so the kept part is still whole diff lines; the
