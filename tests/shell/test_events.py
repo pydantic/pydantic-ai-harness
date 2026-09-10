@@ -429,8 +429,18 @@ class TestKillAfterLeaderExit:
             pytest.skip('start_new_session is an asyncio spawn option')
         pidfile = tmp_path / 'child.pid'
         cgroupfile = tmp_path / 'child.cgroup'
+        watchlog = tmp_path / 'child.watch'
         # The shell exits right after forking; the backgrounded sleep keeps the group alive.
-        script = f'sleep 60 & echo $! > {pidfile}; cat /proc/$!/cgroup > {cgroupfile} 2>/dev/null || echo none > {cgroupfile}'
+        # The watcher is a group member too: it polls the child and records the first
+        # moment it is gone, so a CI that reaps orphans reports when, not just that.
+        watcher = (
+            f'( for i in 1 2 3 4 5 6 7 8 9 10; do if ! kill -0 $(cat {pidfile}) 2>/dev/null; then '
+            f'echo "child-gone-~$((i / 2))s" > {watchlog}; break; fi; sleep 0.5; done ) &'
+        )
+        script = (
+            f'sleep 60 & echo $! > {pidfile}; '
+            f'cat /proc/$!/cgroup > {cgroupfile} 2>/dev/null || echo none > {cgroupfile}; ' + watcher
+        )
         proc = await anyio.open_process(['sh', '-c', script], start_new_session=True)
         # The sweep runs in `finally` so a failing check leaves no member behind.
         try:
@@ -440,11 +450,25 @@ class TestKillAfterLeaderExit:
             try:
                 os.kill(child_pid, 0)
             except ProcessLookupError:  # pragma: no cover - diagnostic for a CI that reaps orphans
+                # Control probe: is the reaping aimed at this session, or at any orphan?
+                probe_pidfile = tmp_path / 'probe.pid'
+                subprocess.run(['sh', '-c', f'sleep 60 & echo $! > {probe_pidfile}'], timeout=1.5)
+                probe_alive = False
+                try:
+                    probe_pid = int(probe_pidfile.read_text())
+                    os.kill(probe_pid, 0)
+                    probe_alive = True
+                    os.kill(probe_pid, 9)
+                except (ProcessLookupError, ValueError):
+                    pass
                 table = subprocess.run(
                     ['ps', '-eo', 'pid,ppid,pgid,sess,stat,comm'], capture_output=True, text=True
                 ).stdout
                 raise AssertionError(
-                    f'child {child_pid} died with the leader\ncgroup: {cgroupfile.read_text()}\n{table}'
+                    f'child {child_pid} died with the leader; '
+                    f'no-setsid probe alive: {probe_alive}; '
+                    f'watch: {watchlog.read_text().strip() if watchlog.exists() else "(no watch log)"}'
+                    f'\ncgroup: {cgroupfile.read_text()}\n{table}'
                 ) from None
             assert _live_group_members(proc.pid)
         finally:
