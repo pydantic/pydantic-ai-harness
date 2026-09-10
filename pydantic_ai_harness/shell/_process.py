@@ -93,7 +93,17 @@ def is_interactive_command(command: str) -> bool:
 class BackgroundProcess:
     """State for a background command using temp files for output."""
 
-    __slots__ = ('command', 'command_id', 'proc', 'stdout_path', 'stderr_path', 'started_at', 'finished', 'exit_code')
+    __slots__ = (
+        'command',
+        'command_id',
+        'proc',
+        'stdout_path',
+        'stderr_path',
+        'started_at',
+        'finished',
+        'exit_code',
+        'stop_lock',
+    )
 
     def __init__(
         self,
@@ -112,6 +122,9 @@ class BackgroundProcess:
         self.started_at = time.monotonic()
         self.finished = False
         self.exit_code: int | None = None
+        # Serializes duplicate stops: the second waits for the first to
+        # finish tearing down instead of racing its cleanup.
+        self.stop_lock = anyio.Lock()
 
 
 def read_bg_output(bg: BackgroundProcess) -> tuple[str, str]:

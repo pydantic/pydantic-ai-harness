@@ -390,23 +390,30 @@ class TestBackgroundEvents:
         assert len(ends) == 1
         assert ends[0].exit_code == 0
 
-    async def test_check_during_stop_emits_one_end(self, tmp_path: Path) -> None:
+    async def test_parallel_check_and_stop_during_a_stop_emit_one_end(self, tmp_path: Path) -> None:
         # Ignoring SIGTERM makes the stop last the whole grace period, so the
-        # parallel check is certain to run while the stop is in progress. It
-        # must see the command as finished and leave the end event to the stop.
+        # parallel calls are certain to run while it is in progress. Whether
+        # the check lands before or after the stop claims the process, it must
+        # leave the end event to the stop; the duplicate stop waits for the
+        # first and reports the same exit.
         listener, results = await _run(
             tmp_path,
             [
                 ('start_command', '{"command": "trap \'\' TERM; sleep 30"}'),
-                [('stop_command', '{"command_id": "$ID"}'), ('check_command', '{"command_id": "$ID"}')],
+                [
+                    ('stop_command', '{"command_id": "$ID"}'),
+                    ('check_command', '{"command_id": "$ID"}'),
+                    ('stop_command', '{"command_id": "$ID"}'),
+                ],
             ],
         )
 
         ends = [event for event in listener.events if isinstance(event, ShellCommandEndEvent)]
         assert len(ends) == 1
         assert ends[0].exit_code == -9
-        assert results[1].endswith('[stopped]\n[exit code: -9]')
-        assert results[2].endswith('[status: finished]')
+        first_stop, check, second_stop = results[1:]
+        assert first_stop == second_stop == '(no output)\n[stopped]\n[exit code: -9]'
+        assert check in ('(no output yet)\n[status: running]', '(no output yet)\n[status: finished]')
 
     async def test_rewritten_background_command_is_not_echoed(self, tmp_path: Path) -> None:
         listener, results = await _run(

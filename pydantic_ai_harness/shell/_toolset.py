@@ -556,21 +556,23 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         if bg is None:
             return f'[Error: unknown command ID {command_id!r}]'
 
-        stopped: int | None = None
-        if not bg.finished:
-            # Claimed before the first await: a check running while the kill
-            # is in progress must not report the exit and emit a second end.
-            bg.finished = True
-            await kill_process_group(bg.proc)
-            with anyio.CancelScope(shield=True):
-                stopped = await bg.proc.wait()
-            bg.exit_code = stopped
+        async with bg.stop_lock:
+            stopped: int | None = None
+            if not bg.finished:
+                # Claimed before the first await: a check running while the
+                # kill is in progress must not report the exit and emit a
+                # second end.
+                bg.finished = True
+                await kill_process_group(bg.proc)
+                with anyio.CancelScope(shield=True):
+                    stopped = await bg.proc.wait()
+                bg.exit_code = stopped
 
-        stdout, stderr = read_bg_output(bg)
+            stdout, stderr = read_bg_output(bg)
 
-        cleanup_bg_files(bg)
-        self._background.pop(command_id, None)
-        await bg.proc.aclose()
+            cleanup_bg_files(bg)
+            self._background.pop(command_id, None)
+            await bg.proc.aclose()
 
         if stopped is not None and ctx is not None:
             await ctx.emit(self._bg_end_event(bg, exit_code=stopped, stdout=stdout, stderr=stderr))
