@@ -64,8 +64,9 @@ lands, without parsing tool arguments:
 access checks and, for `write_file` and `edit_file`, after the conflict check,
 so a listener only sees changes that would otherwise go ahead: a denied path,
 a missing parent for `write_file`, a parent that is not a directory, a stale
-`expected_hash`, or a directory that collides with a file emits no request, so
-a listener cannot approve what the policy or the filesystem refuses. A
+`expected_hash` for a file that exists, or a directory that collides with a
+file emits no request, so a listener cannot approve what the policy or the
+filesystem refuses. A
 listener may take a while (a human approving the diff, say), so once the
 request returns the path is resolved and checked again, and a write or edit
 checks under its open descriptor that the file still holds what the listener

@@ -215,7 +215,7 @@ def _disk_hash(chunks: Iterable[bytes]) -> str:
     invalid byte hashes to what the model was told and its `expected_hash`
     handshake holds. Every check against the disk uses this one rule. The
     first chunk decides whether the file is binary, so it must cover the
-    `_is_binary` sample: a whole file, or at least `_HASH_CHUNK_BYTES`.
+    `_is_binary` sample: a whole file, or at least that sample's 8192 bytes.
     """
     digest = hashlib.sha256()
     decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
@@ -244,9 +244,11 @@ def _read_canonical_text(path: Path) -> str:
 def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) -> tuple[str | None, str | None]:
     """The text a listener is shown a write replacing, and the hash the write is then guarded with.
 
-    A stale `expected_hash` is rejected here first, so a listener only sees a
-    write that would go ahead. A new file diffs from empty and is guarded as
-    empty, so one that appears while the write is announced is a conflict. A
+    A stale `expected_hash` for a file that exists is rejected here first, so
+    a listener only sees a write that would go ahead; for a missing file the
+    hash is ignored, as documented, and the write is announced as a create.
+    A new file diffs from empty and is guarded as empty, so one that appears
+    while the write is announced is a conflict. A
     file the process cannot read (a write-only mode, say) diffs from empty and
     is written unguarded, since the diff is for display; an `expected_hash`
     it cannot check propagates the error instead. Past `MAX_DIFF_SOURCE_CHARS`
