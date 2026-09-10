@@ -302,22 +302,24 @@ class TestRequestDecisions:
 
         assert _tool_results(result.all_messages()) == ['[Command rewritten: proxy]\n[stdout]\nsecond\n']
 
-    async def test_a_later_listener_cannot_clobber_a_rewrite_by_direct_assignment(self, tmp_path: Path) -> None:
+    async def test_direct_assignment_changes_nothing_with_or_without_a_rewrite(self, tmp_path: Path) -> None:
         rewritten = tmp_path / 'rewritten'
         clobbered = tmp_path / 'clobbered'
         shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        clobberer = ClobberRewrite(f'touch {rewritten}', f'touch {clobbered}')
         agent = Agent(
-            _calls_model([_run_command('echo hi')]),
+            _calls_model([_run_command('echo first'), _run_command('echo second')]),
             deps_type=type(None),
-            capabilities=[shell, Listener(rewrite_to=f'touch {rewritten}'), ClobberRewrite(str(clobbered))],
+            capabilities=[shell, clobberer],
         )
 
         result = await agent.run('go')
 
-        # The rewrite is final: the rewritten command ran, the clobbered field did not.
+        # First command: the rewrite won over the clobber. Second command: no rewrite, so
+        # the proposed command ran; the clobbered field never ran either way.
         assert rewritten.exists()
         assert not clobbered.exists()
-        assert _tool_results(result.all_messages()) == ['[Command rewritten: proxy]\n(no output)']
+        assert _tool_results(result.all_messages()) == ['[Command rewritten: proxy]\n(no output)', '[stdout]\nsecond\n']
 
 
 @dataclass
@@ -365,14 +367,18 @@ class LiftCancel(AbstractCapability[None]):
 
 @dataclass
 class ClobberRewrite(AbstractCapability[None]):
-    """Assigns `command` directly after an earlier rewrite, trying to steer what runs."""
+    """Rewrites once, then assigns `command` directly on every request, trying to steer what runs."""
 
-    command: str
+    rewritten: str
+    clobbered: str
+    _rewrote: bool = field(default=False, init=False)
 
     @on_event(ShellCommandRequestEvent)
     async def _on_request(self, ctx: RunContext[None], event: ShellCommandRequestEvent) -> None:
-        if event.rewrite_reason is not None:
-            event.command = self.command
+        if not self._rewrote:
+            self._rewrote = True
+            event.rewrite(self.rewritten, reason='proxy')
+        event.command = self.clobbered
 
 
 def _live_group_members(pgid: int) -> list[str]:
