@@ -47,16 +47,17 @@ def _diff_lines(old: str, new: str, *, path: str) -> Iterator[str]:
             yield _NO_NEWLINE
 
 
-def unified_diff(old: str, new: str, *, path: str) -> tuple[str, bool]:
+def unified_diff(old: str | None, new: str, *, path: str) -> tuple[str, bool]:
     """Unified diff from `old` to `new`, cut at `MAX_EVENT_DIFF_CHARS`.
 
     Returns the diff and whether it was cut. Two equal texts diff to an
     empty string, so a `create_directory` proposes no diff at all. A text
     longer than `MAX_DIFF_SOURCE_CHARS` on either side is not diffed: the
     result is the two file headers, marked as cut, so a large write does
-    not pay for a diff that would be cut anyway.
+    not pay for a diff that would be cut anyway. `old` is `None` when the
+    caller found the current content that large and did not decode it.
     """
-    if len(old) > MAX_DIFF_SOURCE_CHARS or len(new) > MAX_DIFF_SOURCE_CHARS:
+    if old is None or len(old) > MAX_DIFF_SOURCE_CHARS or len(new) > MAX_DIFF_SOURCE_CHARS:
         return f'--- a/{path}\n+++ b/{path}', True
     diff = '\n'.join(_diff_lines(old, new, path=path))
     if len(diff) <= MAX_EVENT_DIFF_CHARS:
@@ -78,7 +79,9 @@ class Change:
     truncated: bool
 
     @classmethod
-    def propose(cls, *, path: str, root_dir: str, operation: FileOperation, old: str = '', new: str = '') -> Change:
+    def propose(
+        cls, *, path: str, root_dir: str, operation: FileOperation, old: str | None = '', new: str = ''
+    ) -> Change:
         diff, truncated = unified_diff(old, new, path=path)
         return cls(path=path, root_dir=root_dir, operation=operation, diff=diff, truncated=truncated)
 
