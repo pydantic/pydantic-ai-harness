@@ -147,6 +147,15 @@ class MeddlingListener(AbstractCapability[None]):
         self.act()
 
 
+def _file_at_leaf(root: Path) -> None:
+    (root / 'made').write_text('x')
+
+
+def _file_at_parent(root: Path) -> None:
+    (root / 'sub').rmdir()
+    (root / 'sub').write_text('x')
+
+
 def _hash(content: str) -> str:
     return hashlib.sha256(content.encode()).hexdigest()[:12]
 
@@ -713,6 +722,35 @@ class TestFileChangeRequests:
         ) in reason
         assert list(elsewhere.iterdir()) == []
         assert not any(isinstance(event, (FileWrittenEvent, DirectoryCreatedEvent)) for event in events)
+
+    async def test_directory_that_appeared_while_announced_is_not_reported(self, tmp_path: Path) -> None:
+        made = tmp_path / 'made'
+
+        events = await _run_and_collect(
+            tmp_path, 'create_directory', '{"path":"made"}', listeners=[MeddlingListener(act=made.mkdir)]
+        )
+
+        assert _tool_result(events) == 'Created directory: made'
+        assert not any(isinstance(event, DirectoryCreatedEvent) for event in events)
+
+    @pytest.mark.parametrize(
+        ('json_args', 'collide', 'reason'),
+        [
+            ('{"path":"made"}', _file_at_leaf, 'exists and is not a directory'),
+            ('{"path":"sub/made"}', _file_at_parent, 'parent that is not a directory'),
+        ],
+    )
+    async def test_collision_that_appeared_while_announced_is_refused(
+        self, tmp_path: Path, json_args: str, collide: Callable[[Path], None], reason: str
+    ) -> None:
+        (tmp_path / 'sub').mkdir()
+
+        events = await _run_and_collect(
+            tmp_path, 'create_directory', json_args, listeners=[MeddlingListener(act=lambda: collide(tmp_path))]
+        )
+
+        assert reason in _retry_reason(events)
+        assert not any(isinstance(event, DirectoryCreatedEvent) for event in events)
 
     async def test_edit_does_not_recreate_a_file_deleted_while_announced(self, tmp_path: Path) -> None:
         target = tmp_path / 'target.txt'

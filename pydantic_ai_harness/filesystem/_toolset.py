@@ -983,12 +983,15 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if (refusal := await self._request(ctx, change, path=path, resolved=resolved)) is not None:
             return refusal
         # The checks above already named these collisions; here they mean the
-        # path changed under us between the check and the `mkdir`.
+        # path changed while the change was announced. A directory that
+        # appeared in the meantime was not created here, so it is not reported.
         try:
-            resolved.mkdir(parents=True, exist_ok=True)
-        except FileExistsError as e:  # pragma: no cover
+            resolved.mkdir(parents=True)
+        except FileExistsError as e:
+            if resolved.is_dir():
+                return f'Created directory: {path}'
             raise ModelRetry(f'Path {path!r} exists and is not a directory.') from e
-        except NotADirectoryError as e:  # pragma: no cover
+        except NotADirectoryError as e:
             raise ModelRetry(f'Path {path!r} has a parent that is not a directory.') from e
         if ctx is not None:
             await ctx.emit(DirectoryCreatedEvent(**self._event_location(resolved)))
