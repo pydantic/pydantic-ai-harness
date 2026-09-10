@@ -316,18 +316,26 @@ class TestCancellation:
 
 class TestBackgroundEvents:
     async def test_start_check_stop(self, tmp_path: Path) -> None:
+        # The foreground wait orders the steps: on a loaded machine `stop` can
+        # otherwise land before the background shell has even run `echo`.
         listener, results = await _run(
             tmp_path,
             [
-                ('start_command', '{"command": "echo bg; sleep 30"}'),
+                ('start_command', '{"command": "echo bg; touch ready; sleep 30"}'),
+                _run_command('while [ ! -e ready ]; do sleep 0.05; done'),
                 ('check_command', '{"command_id": "$ID"}'),
                 ('stop_command', '{"command_id": "$ID"}'),
             ],
         )
 
-        request, start, end = listener.events
+        request, start, end = [
+            event
+            for event in listener.events
+            if isinstance(event, (ShellCommandRequestEvent, ShellCommandStartEvent, ShellCommandEndEvent))
+            and event.background
+        ]
         assert isinstance(request, ShellCommandRequestEvent)
-        assert (request.command, request.timeout, request.background) == ('echo bg; sleep 30', None, True)
+        assert (request.command, request.timeout, request.background) == ('echo bg; touch ready; sleep 30', None, True)
         assert isinstance(start, ShellCommandStartEvent)
         assert (start.timeout, start.background) == (None, True)
         assert isinstance(end, ShellCommandEndEvent)
@@ -336,7 +344,7 @@ class TestBackgroundEvents:
         assert end.timed_out is False
         assert end.exit_code not in (None, 0)
         assert end.stdout == 'bg\n'
-        assert results[2].endswith('[stopped]\n[exit code: -15]')
+        assert results[3].endswith('[stopped]\n[exit code: -15]')
 
     async def test_check_emits_end_once_when_it_sees_the_exit(self, tmp_path: Path) -> None:
         listener, _ = await _run(

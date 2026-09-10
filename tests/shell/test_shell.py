@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import shlex
@@ -1369,6 +1370,13 @@ class TestCodeModeInterop:
         assert 'async def stop_command' in run_code_description
 
 
+def _record_signal(signals: list[int]) -> Callable[[int, int], None]:
+    def killpg(_pgid: int, sig: int) -> None:
+        signals.append(sig)
+
+    return killpg
+
+
 class TestKillProcessGroupEdgeCases:
     async def test_sigterm_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGTERM raises ProcessLookupError, method returns without SIGKILL."""
@@ -1431,6 +1439,54 @@ class TestKillProcessGroupEdgeCases:
             await kill_process_group(proc)
 
         assert call_count == 2
+
+    async def test_group_is_swept_after_the_leader_exits(self) -> None:
+        """A child forked while the SIGTERM was in flight misses it, so the group is swept regardless."""
+        proc = MagicMock()
+        proc.pid = 99999
+
+        async def exits_at_once() -> int:
+            return 0
+
+        proc.wait = exits_at_once
+        signals: list[int] = []
+
+        with (
+            patch('os.killpg', side_effect=_record_signal(signals)),
+            patch('os.getpgid', return_value=12345),
+        ):
+            await kill_process_group(proc)
+
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+    @pytest.mark.anyio(backends=['asyncio'])
+    async def test_group_is_swept_when_the_grace_wait_is_cancelled(self) -> None:
+        """A native `Task.cancel()` mid-wait, which no anyio shield stops, still ends in the sweep."""
+        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
+            pytest.skip('Task.cancel() is an asyncio primitive')
+        proc = MagicMock()
+        proc.pid = 99999
+        parked = anyio.Event()
+
+        async def wait_forever() -> int:
+            parked.set()
+            await anyio.sleep(999)
+            return 0  # pragma: no cover
+
+        proc.wait = wait_forever
+        signals: list[int] = []
+
+        with (
+            patch('os.killpg', side_effect=_record_signal(signals)),
+            patch('os.getpgid', return_value=12345),
+        ):
+            task = asyncio.ensure_future(kill_process_group(proc))
+            await parked.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
 
 
 class TestDrainWithTimeoutEdgeCases:

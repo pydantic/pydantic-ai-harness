@@ -8,6 +8,7 @@ for a background process. Policy (allow and deny lists, environment) stays in
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import functools
 import os
@@ -139,22 +140,28 @@ def cleanup_bg_files(bg: BackgroundProcess) -> None:
 
 
 async def kill_process_group(proc: anyio.abc.Process) -> None:
-    """SIGTERM the process group, escalating to SIGKILL after the grace period."""
-    pid = proc.pid
+    """SIGTERM the process group, then SIGKILL whatever is left of it.
+
+    Waiting only for the group leader is not enough: a child the shell forked
+    while the SIGTERM was in flight misses it, and a leader that traps the
+    signal never exits. So the group is swept with SIGKILL once the leader is
+    gone or the grace period is up, and the sweep runs in `finally` because a
+    cancelled caller (a native `Task.cancel()`, which no anyio shield stops)
+    must still leave nothing behind. On an already empty group the sweep is
+    a no-op.
+    """
     try:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, OSError):
+        pgid = os.getpgid(proc.pid)
+        os.killpg(pgid, signal.SIGTERM)
+    except OSError:
         return
 
-    with anyio.move_on_after(_KILL_GRACE_PERIOD):
-        await proc.wait()
-        return
-
-    # Still alive after grace period -- hard kill
     try:
-        os.killpg(os.getpgid(pid), signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        pass
+        with anyio.CancelScope(shield=True), anyio.move_on_after(_KILL_GRACE_PERIOD):
+            await proc.wait()
+    finally:
+        with contextlib.suppress(OSError):
+            os.killpg(pgid, signal.SIGKILL)
 
 
 async def drain_with_timeout(

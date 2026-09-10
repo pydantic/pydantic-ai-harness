@@ -407,8 +407,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             except BaseException:
                 # A cancelled run or a failed reader: `proc.aclose()` below
                 # kills only the shell, and its children would outlive the run.
-                with anyio.CancelScope(shield=True):
-                    await kill_process_group(proc)
+                await kill_process_group(proc)
                 raise
             finally:
                 await proc.aclose()

@@ -47,10 +47,11 @@ which all land at the end -- survive truncation. Background command status and
 exit metadata follow the captured output so they remain in the retained tail.
 
 Commands run with stdin closed: a command that reads it (`cat`, `wc`) sees end
-of file and exits instead of waiting on the host's terminal. Each command
-starts its own process group, and cancelling the run kills the whole group
-(`SIGTERM`, then `SIGKILL` after a short grace period), so a shell's children
-do not outlive the run.
+of file and exits instead of waiting on the host's terminal. On POSIX systems
+each command starts its own process group, and cancelling the run kills the
+whole group: `SIGTERM`, then `SIGKILL` for anything still running once the
+shell has exited or a short grace period has passed, so a shell's children do
+not outlive the run.
 
 ## Command controls
 
@@ -143,8 +144,8 @@ but don't rely on it -- set `PATH` explicitly when you replace the environment.
 `start_command` writes stdout/stderr to temp files and returns a short ID. Use
 `check_command(command_id)` to poll and `stop_command(command_id)` to terminate
 and collect final output. Processes are launched in their own session (`start_new_session`)
-so the whole process group can be signalled -- `SIGTERM`, escalating to
-`SIGKILL` after a grace period.
+so the whole process group can be signalled -- `SIGTERM`, then `SIGKILL` for
+whatever is left once the leader exits or a grace period passes.
 
 On run end, the toolset's `__aexit__` terminates every still-running background
 process and deletes its temp files. The agent runtime enters toolsets via an
@@ -189,10 +190,13 @@ Background commands write to files instead of pipes, so they emit no line
 events; their end event fires when `check_command` first sees the exit or when
 `stop_command` kills the process.
 
-Payloads are bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256) and an end
-event carries the same tail the model receives (`max_output_chars`), each with
-a `truncated` flag, so a persisted or forwarded event stream cannot be flooded
-by one chatty command. A run cancelled mid-command ends without an end event.
+Each event is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256), and an
+end event keeps the tail of `stdout` and of `stderr` separately, each up to
+`max_output_chars` (the model's combined result is cut to that limit once),
+with a `truncated` flag on both. The number of line events is not bounded: a
+command that prints in a loop emits one event per line until it finishes or
+times out, so a host that persists or forwards events applies its own budget.
+A run cancelled mid-command ends without an end event.
 
 ```python
 from pydantic_ai import Agent

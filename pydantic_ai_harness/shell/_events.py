@@ -5,10 +5,10 @@ lines and its end with its start when several commands run at once. For a
 background command the same id is the handle `check_command` and
 `stop_command` take, so the model and the subscriber name the process alike.
 
-Output in these events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS`
-and an end event keeps the tail its emitter keeps for the model, each with a
-`truncated` flag, so an event stream that is persisted or forwarded to a UI
-cannot be flooded by one chatty command.
+Each event's output is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` and
+an end event keeps the tail of each stream up to `max_output_chars`, with a
+`truncated` flag. The number of line events is not bounded; a host that
+persists or forwards events applies its own budget.
 """
 
 from dataclasses import dataclass
