@@ -7,7 +7,7 @@ import gc
 import re
 import threading
 import time
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -761,6 +761,28 @@ class TestBridgeFailureModes:
         finally:
             release_close.set()
             join(timeout=_READINESS_WAIT_TIMEOUT)
+
+    def test_shutdown_handles_the_owner_closing_before_the_stop_request(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        loops = _bridge._AgentLoop()  # pyright: ignore[reportPrivateUsage]
+        loop = loops.get()
+        thread = loops._thread  # pyright: ignore[reportPrivateUsage]
+        assert thread is not None
+        request_stop = loop.call_soon_threadsafe
+
+        def request_stop_after_close(callback: Callable[[], None]) -> asyncio.Handle:
+            request_stop(loop.stop)
+            thread.join(timeout=_READINESS_WAIT_TIMEOUT)
+            assert not thread.is_alive()
+            assert loop.is_closed()
+            return request_stop(callback)
+
+        monkeypatch.setattr(loop, 'call_soon_threadsafe', request_stop_after_close)
+        try:
+            shutdown(loop, owner=thread)
+            assert not thread.is_alive()
+            assert loop.is_closed()
+        finally:
+            shutdown(loop, owner=thread)
 
     def test_a_cancelled_step_operation_does_not_hang_the_handler(self) -> None:
         # `Task.exception()` raises for a cancelled task, so a naive done-callback would strand the
