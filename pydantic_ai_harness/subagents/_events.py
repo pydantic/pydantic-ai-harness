@@ -53,7 +53,8 @@ class DelegationStartEvent(CapabilityEvent, namespace=SUB_AGENTS_EVENTS, name='d
     task: str
     truncated: bool
     model: str | None
-    """The menu key the delegation runs on, or `None` when no menu applies."""
+    """The menu key the delegation runs on, or `None` when no option was selected: there is
+    no menu, or the delegate allows the whole menu and the parent named no key."""
     inherits_tools: bool
     """Whether the parent's own tools were passed to the child run (`SubAgents.inherit_tools`)."""
 
