@@ -222,7 +222,7 @@ no streaming list API), so listing a directory with a very large number of
 entries costs memory proportional to the entry count. Point the model at a
 narrowed `run_command` (`ls | head`, `find -maxdepth`) for directories that big.
 
-## Not yet supported
+## Limitations
 
 - Streaming command output: `run_command` returns once the command finishes (or
   hits its deadline), not incrementally.

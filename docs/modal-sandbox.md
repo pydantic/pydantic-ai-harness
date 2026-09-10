@@ -207,7 +207,7 @@ Settings used only when creating a sandbox cannot be combined with
 `sandbox_id` or an injected `session`. These conflicts fail at construction
 instead of being ignored.
 
-## Not yet supported
+## Limitations
 
 - Streaming command output: `run_command` returns once the command finishes (or
   hits its deadline), not incrementally.
