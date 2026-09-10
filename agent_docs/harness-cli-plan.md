@@ -181,10 +181,13 @@ the branch. Each item names its acceptance check.
       resolves pydantic-ai-slim 2.42.0.
 - [ ] 1.1e Work the #845 re-review pass. Round one: the 18:13Z pydantic required finding
       fixed at aa50d07c; the Macroscope round it triggered (three findings, two high) fixed
-      at 89dfdfdf and replied to. Head is 89dfdfdf with a fresh pydantic run and a fresh
-      Macroscope review in flight. When they land: fix what is real, reply per finding,
-      re-apply the label if there is a new head, and merge the fixes into
-      `feat/experimental-cli`.
+      at 89dfdfdf and replied to. The CI failure on 89dfdfdf (the `TestKillAfterLeaderExit`
+      test on every 3.11/3.12 cell) is root-caused and fixed at 42e985f9 (see journal: the
+      GHA hosted-compute supervisor tears a `setsid` session down when its leader exits;
+      the test now pre-probes and skips where the scenario cannot be demonstrated).
+      When 42e985f9 is green: re-apply `pydantic-ai:review-lite` for a fresh run (the
+      89dfdfdf run is stale), take the new Macroscope verdict, fix what is real, reply per
+      finding, and merge the fixes into `feat/experimental-cli`.
 - [x] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`, worktree
       `../harness-filesystem-change-events`): `FileChangeRequestEvent`, `FileEditedEvent`,
       `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and search counts,
@@ -656,6 +659,18 @@ Append-only. Date, item, decision, why.
 - 2026-09-10, 1.2c: #853 CI is fully green on 87984c83 (26 passed, 8 standard skips, one
   cancelled no-op "evaluate dependency approval"). The pydantic re-review retriggered for
   the new head is in flight.
+- 2026-09-10, 1.1e: root-caused the `TestKillAfterLeaderExit` CI failures (all 3.11/3.12
+  cells, none on 3.10/3.13/3.14) with two diagnostic pushes. The GHA host runs steps under
+  a `hosted-compute-agent` systemd service that is the step's session and group leader; it
+  tears a `setsid` session down (the whole group, in under half a second) the moment its
+  leader exits, while orphaned members of the supervisor's own session survive (a no-setsid
+  control probe stayed alive). The test lost a race between its post-reap assertion and the
+  supervisor's kill, and the race odds are interpreter-speed dependent (asyncio reaping
+  latency), which is why 3.11/3.12 failed near-100% and the others passed. The fix
+  (42e985f9) keeps the test unchanged and adds a one-second pre-probe that skips it where
+  the host destroys the very scenario under test; verified both paths locally and in
+  Docker, including a simulated hostile supervisor. Reproduction note: a plain
+  `python:3.12-slim` container never shows it (no systemd supervisor).
 - 2026-09-10, 1.2e: the third pass landed 18:53Z (33 minutes, run df_run_090c5c00b8474ed6ac20,
   "Reviewed at ... head 4f8e1c438ca8"): zero blocking, one required, incomplete (2/5
   charters did not run). The required is a stale-snapshot artifact: 4f8e1c43 is an
