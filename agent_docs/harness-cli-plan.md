@@ -184,10 +184,12 @@ the branch. Each item names its acceptance check.
       at 89dfdfdf and replied to. The CI failure on 89dfdfdf (the `TestKillAfterLeaderExit`
       test on every 3.11/3.12 cell) is root-caused and fixed at 42e985f9 (see journal: the
       GHA hosted-compute supervisor tears a `setsid` session down when its leader exits;
-      the test now pre-probes and skips where the scenario cannot be demonstrated).
-      When 42e985f9 is green: re-apply `pydantic-ai:review-lite` for a fresh run (the
-      89dfdfdf run is stale), take the new Macroscope verdict, fix what is real, reply per
-      finding, and merge the fixes into `feat/experimental-cli`.
+      the test now pre-probes and skips where the scenario cannot be demonstrated); a
+      one-line coverage pragma landed at 95c7db06 and CI is fully green (16/16 test cells,
+      coverage 100, check, correctness). `pydantic-ai:review-lite` re-applied 19:41Z for a
+      fresh run on 95c7db06. Macroscope verified the docs-echo fix (18:40Z); the veto and
+      try/finally threads still await its verification. When the pydantic verdict lands:
+      fix what is real, reply per finding, and merge the fixes into `feat/experimental-cli`.
 - [x] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`, worktree
       `../harness-filesystem-change-events`): `FileChangeRequestEvent`, `FileEditedEvent`,
       `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and search counts,
