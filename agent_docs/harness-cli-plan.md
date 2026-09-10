@@ -186,12 +186,14 @@ the branch. Each item names its acceptance check.
       GHA hosted-compute supervisor tears a `setsid` session down when its leader exits;
       the test now pre-probes and skips where the scenario cannot be demonstrated); a
       one-line coverage pragma landed at 95c7db06 and CI is fully green (16/16 test cells,
-      coverage 100, check, correctness). A fresh pydantic run on 95c7db06 was dispatched
-      at 20:49Z with the correct trigger label `pydanty:review-lite` (earlier attempts
-      used the wrong label and were ignored, see journal). Macroscope verified the
-      docs-echo fix (18:40Z); the veto and try/finally threads still await its
-      verification. When the pydantic verdict lands: fix what is real, reply per finding,
-      and merge the fixes into `feat/experimental-cli`.
+      coverage 100, check, correctness). Round two (journal): the 20:50Z run on 95c7db06
+      found one real required (a rewrite was not final: after `rewrite()`, the toolset
+      ran `request.command`, so a later listener's direct assignment steered the command
+      policy had cleared). Fixed at 0c32dca7 (private `_rewritten` set by `rewrite()`,
+      toolset runs it, clobber regression test, docs parity), replied, and a fresh run
+      was dispatched at 21:38Z. The first-round Macroscope threads (veto, try/finally)
+      still await its verification. When the new verdict lands clean: merge the fixes
+      into `feat/experimental-cli`.
 - [x] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`, worktree
       `../harness-filesystem-change-events`): `FileChangeRequestEvent`, `FileEditedEvent`,
       `DirectoryCreatedEvent`, `FilesSearchedEvent`. Bridge renders diffs and search counts,
@@ -675,6 +677,23 @@ Append-only. Date, item, decision, why.
   #855 `is-working`, applied `pydanty:review-lite` to #845 and #855 at 20:49Z: both
   picked up within 25 seconds. Earlier sessions' notes that "the review label is
   pydantic-ai:review-lite" were wrong. Verdicts expected ~21:15-21:50Z.
+- 2026-09-10, 1.1e: the 20:50Z pydantic run (df_run_ac9eec9dec294f5bb632) on 95c7db06
+  landed 21:30Z: 0 blocking, 1 required. The required is real: the event docstring
+  guarantees "assigning fields such as `command` directly has no effect on what runs",
+  but `_request` returned `request.command` after a rewrite, so a later listener's
+  direct assignment replaced the command the policy had already checked. Fixed at
+  0c32dca7: `rewrite()` records the command in a private `_rewritten` field and the
+  toolset runs that, making a rewrite final like a cancel; new test
+  `test_a_later_listener_cannot_clobber_a_rewrite_by_direct_assignment`; docs parity in
+  both hand-maintained docs. I did not take the suggested `assert` (production code
+  must not crash on out-of-contract direct `rewrite_reason` assignment): the
+  `_rewritten is None` check treats that corner as "no rewrite". The 0c32dca7 commit
+  body is garbled (backticks in a double-quoted `-m` ran command substitution); left
+  in place per the no-force-push rule.
+- 2026-09-10, 1.3b: the #855 run dispatched at 20:50Z (df_run_30cc80e36c544267ad60)
+  landed 21:25Z: reviewed, 0 blocking, 0 required, all 5 charters passed, on the real
+  head 424c9634. #855 is clear of pydantic; only Macroscope on 424c9634 remains (it
+  was skipped in the check runs; needs a diff change or a re-run).
 - 2026-09-10, 1.1e: root-caused the `TestKillAfterLeaderExit` CI failures (all 3.11/3.12
   cells, none on 3.10/3.13/3.14) with two diagnostic pushes. The GHA host runs steps under
   a `hosted-compute-agent` systemd service that is the step's session and group leader; it
