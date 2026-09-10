@@ -597,6 +597,13 @@ Append-only. Date, item, decision, why.
   "did not produce an accepted result" or silently dropped runs across #845, #853, and #855).
   Re-applying `pydanty:review-lite` is the only remedy; nothing in the PRs needs changing for
   them. Runs that did complete landed within ~25-45 minutes.
+- 2026-09-10, 1.2d: the 16:59Z green verdict was not the whole story: CI's 100% coverage gate
+  had failed on #853 at 15:22Z on `tests/filesystem/test_events.py:593-594`, the macOS-only skip
+  branch of the oversized-name test that never runs on the Linux matrix (220-byte name components
+  fit under Linux NAME_MAX, only a 1024-byte PATH_MAX like macOS's trips it). Fixed at 27557f0e
+  with `# pragma: no cover`, the repo convention for unreachable except branches. `main` (floor)
+  also merged into the #853 branch at 87984c83 and both are in `feat/experimental-cli` at 8d2d5013;
+  `pydanty:review-lite` re-applied for the new head.
 - 2026-09-10, 1.3b: a child `HookTimeoutError` is a child crash, not a delegation timeout, so
   `_settle` routes child-sourced timeouts (a `HookTimeoutError`, or any `TimeoutError` when no
   budget is set) through the same contain decision as any other crash, rather than the
