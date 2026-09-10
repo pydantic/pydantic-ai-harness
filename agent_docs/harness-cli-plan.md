@@ -179,10 +179,11 @@ the branch. Each item names its acceptance check.
       it ready for review. `main` merged into `feat/experimental-cli` at eed149a0; the
       `cli` extra conflict resolved to the 2.40.0 floor plus `termflow`, and the lock now
       resolves pydantic-ai-slim 2.42.0.
-- [ ] 1.1e Work the #845 re-review pass (label re-applied ~18:26Z for head aa50d07c, which
-      fixes the 18:13Z required finding; the same push retriggers Macroscope, which had not
-      evaluated any head since c9d61bce). When the verdict lands: fix what is real, reply per
-      finding, re-apply the label if there is a new head, and merge the fixes into
+- [ ] 1.1e Work the #845 re-review pass. Round one: the 18:13Z pydantic required finding
+      fixed at aa50d07c; the Macroscope round it triggered (three findings, two high) fixed
+      at 89dfdfdf and replied to. Head is 89dfdfdf with a fresh pydantic run and a fresh
+      Macroscope review in flight. When they land: fix what is real, reply per finding,
+      re-apply the label if there is a new head, and merge the fixes into
       `feat/experimental-cli`.
 - [x] 1.2 `filesystem` round 2 PR (`puppy/filesystem-change-events`, worktree
       `../harness-filesystem-change-events`): `FileChangeRequestEvent`, `FileEditedEvent`,
@@ -627,6 +628,18 @@ Append-only. Date, item, decision, why.
   directly. `TestKillAfterLeaderExit` in `tests/shell/test_events.py` forks a child that
   outlives the shell, waits for the leader to be reaped, and asserts the sweep still reaches
   the child; it fails against the old code. Replied on the PR and re-applied the label.
+- 2026-09-10, 1.1b: the aa50d07c push did retrigger Macroscope (it reviewed within a
+  minute, where a full pass usually takes ~30). Three findings, all addressed at 89dfdfdf:
+  (1) the interactive refusal in `_check_command` echoes the complete command, so a
+  credential in a policy-refused rewrite reaches the transcript, contradicting the docs'
+  "not shown to the model"; documented the exception in `docs/shell.md` and the README,
+  kept the echo for consistency with the other refusal messages. (2) `cancelled` was a
+  plain field, so a later listener could lift an earlier veto; it is now a read-only
+  property over a private field with `cancel()` as the only setter, docs say the cancel
+  is final, new test `test_a_later_listener_cannot_lift_an_earlier_cancel`. (3) the new
+  kill test wrapped in try/finally so a failed check sweeps the group anyway. The same
+  mutable-veto shape exists in `FileChangeRequestEvent` on #853; noted for that PR's next
+  round rather than pushed, to avoid invalidating its in-flight pydantic run again.
 - 2026-09-10, 1.1b/1.3b: Macroscope is a check-run bot with no comment trigger; it
   re-evaluates on push and skips heads whose diff is unchanged since its last completed
   review (it says so in the skip title). The @mention comments on #845/#855 are inert. The
