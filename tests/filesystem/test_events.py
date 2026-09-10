@@ -532,9 +532,13 @@ class TestFileChangeRequests:
         assert (tmp_path / 'big.txt').read_text() == content
         assert any(isinstance(event, FileWrittenEvent) for event in events)
 
-    async def test_oversized_change_is_not_diffed(self, tmp_path: Path) -> None:
-        """Past `MAX_DIFF_SOURCE_CHARS` nothing is diffed: the event carries the headers, marked as cut."""
-        content = 'x' * (MAX_DIFF_SOURCE_CHARS + 1)
+    @pytest.mark.parametrize('big_side', ['old', 'new'])
+    async def test_oversized_change_is_not_diffed(self, tmp_path: Path, big_side: str) -> None:
+        """Past `MAX_DIFF_SOURCE_CHARS` on either side nothing is diffed: the event carries the headers, marked as cut."""
+        huge = 'x' * (MAX_DIFF_SOURCE_CHARS + 1)
+        content = 'small\n' if big_side == 'old' else huge
+        if big_side == 'old':
+            (tmp_path / 'huge.txt').write_text(huge)
         listener = Listener()
 
         events = await _run_and_collect(
@@ -624,6 +628,22 @@ class TestFileChangeRequests:
         assert 'Conflict' in _retry_reason(events)
         assert target.read_text() == 'other\n'
         assert not any(isinstance(event, FileWrittenEvent) for event in events)
+
+    async def test_invalid_utf8_text_keeps_the_hash_handshake(self, tmp_path: Path) -> None:
+        """The guard hashes a text file with an invalid byte the way `read_file` reported it."""
+        (tmp_path / 'target.txt').write_bytes(b'a\xffb\n')
+        reported = _hash('a\ufffdb\n')
+
+        read_events = await _run_and_collect(tmp_path, 'read_file', '{"path":"target.txt"}')
+        (read,) = [event for event in read_events if isinstance(event, FileReadEvent)]
+        assert read.content_hash == reported
+
+        events = await _run_and_collect(
+            tmp_path, 'write_file', json.dumps({'path': 'target.txt', 'content': 'new\n', 'expected_hash': reported})
+        )
+
+        assert (tmp_path / 'target.txt').read_text() == 'new\n'
+        assert any(isinstance(event, FileWrittenEvent) for event in events)
 
     async def test_file_that_appeared_while_announced_is_refused(self, tmp_path: Path) -> None:
         """A write announced as creating the file does not overwrite one that appeared in the meantime."""

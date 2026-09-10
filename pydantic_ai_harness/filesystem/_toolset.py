@@ -19,6 +19,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.filesystem._changes import Change
 from pydantic_ai_harness.filesystem._events import (
+    MAX_DIFF_SOURCE_CHARS,
     DirectoryCreatedEvent,
     DirectoryListedEvent,
     FileReadEvent,
@@ -191,8 +192,17 @@ def _content_hash(content: str) -> str:
 
 
 def _bytes_hash(data: bytes) -> str:
-    """The content hash of the bytes on disk: what `_content_hash` reports for the text they decode to."""
     return hashlib.sha256(data).hexdigest()[:12]
+
+
+def _disk_hash(raw: bytes) -> str:
+    """The hash `read_file` reports for these bytes: of the bytes for a binary file, of the decoded text otherwise.
+
+    Decoding is lenient, as `read_file` decodes, so a text file holding an
+    invalid byte hashes to what the model was told and its `expected_hash`
+    handshake holds. Every check against the disk uses this one rule.
+    """
+    return _bytes_hash(raw) if _is_binary(raw) else _content_hash(raw.decode('utf-8', errors='replace'))
 
 
 def _read_canonical_text(path: Path) -> str:
@@ -207,7 +217,7 @@ def _read_canonical_text(path: Path) -> str:
         return f.read()
 
 
-def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) -> tuple[str, str | None]:
+def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) -> tuple[str | None, str | None]:
     """The text a listener is shown a write replacing, and the hash the write is then guarded with.
 
     A stale `expected_hash` is rejected here first, so a listener only sees a
@@ -215,20 +225,23 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     empty, so one that appears while the write is announced is a conflict. A
     file the process cannot read (a write-only mode, say) diffs from empty and
     is written unguarded, since the diff is for display; an `expected_hash`
-    it cannot check propagates the error instead.
+    it cannot check propagates the error instead. Past `MAX_DIFF_SOURCE_CHARS`
+    the text is `None`: it would not be diffed, so it is neither decoded nor
+    held while the listener decides.
     """
     if not resolved.is_file():
-        return '', _bytes_hash(b'')
+        return '', _disk_hash(b'')
     try:
         data = resolved.read_bytes()
     except OSError:
         if expected_hash is not None:
             raise
         return '', None
-    current_hash = _bytes_hash(data)
+    current_hash = _disk_hash(data)
     if expected_hash is not None:
         _check_expected_hash(path, current_hash, expected_hash)
-    return data.decode('utf-8', errors='replace'), current_hash
+    old = data.decode('utf-8', errors='replace') if len(data) <= MAX_DIFF_SOURCE_CHARS else None
+    return old, current_hash
 
 
 def _check_expected_hash(path: str, current_hash: str, expected_hash: str) -> None:
@@ -292,8 +305,8 @@ def _write_content(resolved: Path, path: str, content: str, *, expected_hash: st
 
     Checking under the descriptor is what guards the write: the file cannot
     change between the check and the write the way it can while a change is
-    announced. The bytes are hashed as they are, so a file that is not valid
-    UTF-8 mismatches instead of failing to decode.
+    announced. The bytes are hashed as `read_file` hashes them, so a file that
+    is not valid UTF-8 is compared instead of failing to decode.
     """
     descriptor, created = _open_for_write(resolved, path, read_back=expected_hash is not None, create=create)
     try:
@@ -304,7 +317,7 @@ def _write_content(resolved: Path, path: str, content: str, *, expected_hash: st
         descriptor = -1
         with binary_file:
             if expected_hash is not None and not created:
-                _check_expected_hash(path, _bytes_hash(binary_file.read()), expected_hash)
+                _check_expected_hash(path, _disk_hash(binary_file.read()), expected_hash)
 
             binary_file.seek(0)
             binary_file.truncate(0)
@@ -514,16 +527,15 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise FileNotFoundError(f'File not found: {path}')
 
         raw = resolved.read_bytes()
+        content_hash = _disk_hash(raw)
         if _is_binary(raw):
             size = len(raw)
             if ctx is not None:
-                content_hash = hashlib.sha256(raw).hexdigest()[:12]
                 await ctx.emit(FileReadEvent(**self._event_location(resolved), content_hash=content_hash))
             return f'[Binary file: {size} bytes. Use a binary-aware tool to inspect.]'
 
         text = raw.decode('utf-8', errors='replace')
         lines = text.splitlines(keepends=True)
-        content_hash = _content_hash(text)
         # Format before emitting: an out-of-range offset is a failed read, and
         # a failed read must not look like a successful one to subscribers.
         body = _format_lines(lines, offset, limit)
@@ -991,7 +1003,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if not is_bin:
                 text = raw.decode('utf-8', errors='replace')
                 parts.append(f'lines: {len(text.splitlines())}')
-                parts.append(f'hash: {_content_hash(text)}')
+                parts.append(f'hash: {_disk_hash(raw)}')
 
         if is_link:
             target = _model_safe_filename(os.readlink(original), self._real_root)
