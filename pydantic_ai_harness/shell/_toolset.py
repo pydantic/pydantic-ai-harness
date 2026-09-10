@@ -252,14 +252,15 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         await ctx.emit(request)
         if request.cancelled:
             return '', f'[Command was not run: {request.cancel_reason or "cancelled by a listener"}]'
-        if request.rewrite_reason is None:
+        rewritten = request._rewritten  # pyright: ignore[reportPrivateUsage]
+        if rewritten is None:
             return command, None
         note = f'[Command rewritten: {request.rewrite_reason}]'
         try:
-            self._check_command(request.command)
+            self._check_command(rewritten)
         except (PermissionError, ModelRetry) as e:
             raise ModelRetry(f'{note}\n{e}') from e
-        return request.command, note
+        return rewritten, note
 
     def _line_sink(self, ctx: RunContext[AgentDepsT] | None, command_id: str, stream: OutputStream) -> LineSink | None:
         if ctx is None:

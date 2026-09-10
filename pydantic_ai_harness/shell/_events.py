@@ -45,6 +45,7 @@ class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='co
     """Seconds the command may run, or `None` for a background command."""
     background: bool
     _cancelled: bool = field(default=False, init=False)
+    _rewritten: str | None = field(default=None, init=False)
     cancel_reason: str | None = None
     rewrite_reason: str | None = None
 
@@ -59,8 +60,13 @@ class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='co
         self.cancel_reason = reason
 
     def rewrite(self, command: str, *, reason: str) -> None:
-        """Replace the command that will run; `reason` is all the model sees of it."""
+        """Replace the command that will run; `reason` is all the model sees of it.
+
+        A rewrite is final, like a cancel: a later listener's direct assignment
+        to `command` steers nothing.
+        """
         self.command = command
+        self._rewritten = command
         self.rewrite_reason = reason
 
 

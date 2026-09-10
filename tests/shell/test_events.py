@@ -302,6 +302,23 @@ class TestRequestDecisions:
 
         assert _tool_results(result.all_messages()) == ['[Command rewritten: proxy]\n[stdout]\nsecond\n']
 
+    async def test_a_later_listener_cannot_clobber_a_rewrite_by_direct_assignment(self, tmp_path: Path) -> None:
+        rewritten = tmp_path / 'rewritten'
+        clobbered = tmp_path / 'clobbered'
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        agent = Agent(
+            _calls_model([_run_command('echo hi')]),
+            deps_type=type(None),
+            capabilities=[shell, Listener(rewrite_to=f'touch {rewritten}'), ClobberRewrite(str(clobbered))],
+        )
+
+        result = await agent.run('go')
+
+        # The rewrite is final: the rewritten command ran, the clobbered field did not.
+        assert rewritten.exists()
+        assert not clobbered.exists()
+        assert _tool_results(result.all_messages()) == ['[Command rewritten: proxy]\n(no output)']
+
 
 @dataclass
 class CancelOnStart(AbstractCapability[None]):
@@ -344,6 +361,18 @@ class LiftCancel(AbstractCapability[None]):
             self.lifted = True  # pragma: no cover - only reachable if `cancelled` becomes settable again
         except AttributeError:
             pass
+
+
+@dataclass
+class ClobberRewrite(AbstractCapability[None]):
+    """Assigns `command` directly after an earlier rewrite, trying to steer what runs."""
+
+    command: str
+
+    @on_event(ShellCommandRequestEvent)
+    async def _on_request(self, ctx: RunContext[None], event: ShellCommandRequestEvent) -> None:
+        if event.rewrite_reason is not None:
+            event.command = self.command
 
 
 def _live_group_members(pgid: int) -> list[str]:

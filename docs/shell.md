@@ -247,7 +247,9 @@ emits no request, so a
 listener cannot approve what the configuration denies. Listeners run in
 registration order: the last rewrite wins, and a cancel from any listener
 beats every rewrite and every later listener, because `cancelled` is
-read-only. The other three events are notifications.
+read-only. A rewrite is final in the same way: the toolset runs the command
+`rewrite()` set, so a direct assignment to `command` changes nothing. The
+other three events are notifications.
 `ShellCommandStartEvent` is dispatched immediately: its listeners run as the
 tool spawns the process, so a listener that raises ends the run from inside
 the tool and the toolset kills the process group. No command is left running
