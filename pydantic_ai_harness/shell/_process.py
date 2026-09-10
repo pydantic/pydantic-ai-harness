@@ -164,28 +164,6 @@ async def kill_process_group(proc: anyio.abc.Process) -> None:
             os.killpg(pgid, signal.SIGKILL)
 
 
-async def drain_with_timeout(
-    stdout_chunks: list[bytes],
-    stderr_chunks: list[bytes],
-    proc: anyio.abc.Process,
-) -> None:
-    """Drain remaining pipe data after kill (grandchildren may still hold the pipe)."""
-
-    async def _drain(stream: anyio.abc.ByteReceiveStream | None, chunks: list[bytes]) -> None:
-        if stream is None:
-            return
-        try:
-            async for chunk in stream:
-                chunks.append(chunk)
-        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
-            pass
-
-    with anyio.move_on_after(_IO_DRAIN_TIMEOUT):
-        async with anyio.create_task_group() as tg:
-            tg.start_soon(_drain, proc.stdout, stdout_chunks)
-            tg.start_soon(_drain, proc.stderr, stderr_chunks)
-
-
 LineSink = Callable[[str, bool], Awaitable[None]]
 """Receives each completed output line and whether it was cut at `MAX_EVENT_LINE_CHARS`."""
 
@@ -238,14 +216,78 @@ class _LineBuffer:
         return text[:MAX_EVENT_LINE_CHARS], truncated
 
 
-async def pump(stream: anyio.abc.ByteReceiveStream, chunks: list[bytes], on_line: LineSink | None) -> None:
-    """Collect a pipe into `chunks`, handing each completed line to `on_line`."""
-    lines = _LineBuffer()
-    async for chunk in stream:
-        chunks.append(chunk)
-        if on_line is None:
-            continue
-        for line, truncated in lines.feed(chunk):
-            await on_line(line, truncated)
-    if on_line is not None and (last := lines.flush()) is not None:
-        await on_line(*last)
+class OutputReader:
+    """Collect one pipe into bytes, handing each completed line to a sink.
+
+    Reading resumes where a cancelled `read` stopped: after a timeout kills
+    the command, `drain_with_timeout` picks up the same line buffer, so a
+    tail written before the deadline still reaches the sink as one line.
+    """
+
+    def __init__(self, stream: anyio.abc.ByteReceiveStream, *, on_line: LineSink | None) -> None:
+        self._stream = stream
+        self._on_line = on_line
+        self._lines = _LineBuffer()
+        self.chunks: list[bytes] = []
+
+    @property
+    def text(self) -> str:
+        return b''.join(self.chunks).decode('utf-8', errors='replace')
+
+    async def read(self) -> None:
+        """Read to end of file."""
+        async for chunk in self._stream:
+            self.chunks.append(chunk)
+            if self._on_line is None:
+                continue
+            for line, truncated in self._lines.feed(chunk):
+                await self._on_line(line, truncated)
+        await self.flush()
+
+    async def flush(self) -> None:
+        """Hand the sink the unterminated last line, if any."""
+        if self._on_line is not None and (last := self._lines.flush()) is not None:
+            await self._on_line(*last)
+
+    async def drain(self) -> None:
+        """Read to end of file, treating a pipe closed under us as the end."""
+        try:
+            await self.read()
+        except (anyio.ClosedResourceError, anyio.BrokenResourceError):
+            pass
+
+
+async def drain_with_timeout(*readers: OutputReader) -> None:
+    """Finish reading after a kill, for as long as a grandchild may hold the pipe, then flush."""
+    with anyio.move_on_after(_IO_DRAIN_TIMEOUT):
+        async with anyio.create_task_group() as tg:
+            for reader in readers:
+                tg.start_soon(reader.drain)
+    for reader in readers:
+        await reader.flush()
+
+
+async def run_to_exit(proc: anyio.abc.Process, *readers: OutputReader, timeout: float) -> tuple[int, bool]:
+    """Read the pipes to end of file and reap the process; return its exit code and whether the deadline hit.
+
+    The whole group is killed on timeout and on cancellation alike:
+    `proc.aclose()` kills only the shell, and its children would outlive
+    the run.
+    """
+    try:
+        with anyio.fail_after(timeout):
+            async with anyio.create_task_group() as tg:
+                for reader in readers:
+                    tg.start_soon(reader.read)
+            return await proc.wait(), False
+    except TimeoutError:
+        await kill_process_group(proc)
+        exit_code = await proc.wait()
+        with anyio.CancelScope(shield=True):
+            await drain_with_timeout(*readers)
+        return exit_code, True
+    except BaseException:
+        await kill_process_group(proc)
+        raise
+    finally:
+        await proc.aclose()

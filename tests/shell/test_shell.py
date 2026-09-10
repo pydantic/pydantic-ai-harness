@@ -15,6 +15,7 @@ from typing import Any, NoReturn
 from unittest.mock import MagicMock, patch
 
 import anyio
+import anyio.abc
 import pytest
 import sniffio
 from pydantic_ai import Agent, RunContext
@@ -28,6 +29,7 @@ from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.code_mode import CodeMode
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 from pydantic_ai_harness.shell._process import (
+    OutputReader,
     cleanup_bg_files,
     drain_with_timeout,
     is_interactive_command,
@@ -1489,57 +1491,37 @@ class TestKillProcessGroupEdgeCases:
         assert signals == [signal.SIGTERM, signal.SIGKILL]
 
 
+class _FailingStream(anyio.abc.ByteReceiveStream):
+    """Yields one chunk, then fails the way a pipe closed under the reader does."""
+
+    def __init__(self, error: type[Exception]) -> None:
+        self._error = error
+        self._yielded = False
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if not self._yielded:
+            self._yielded = True
+            return b'partial'
+        raise self._error
+
+    async def aclose(self) -> None:
+        pass
+
+
 class TestDrainWithTimeoutEdgeCases:
-    async def test_stdout_closed_resource_error(self, tmp_path: Path) -> None:
-        """ClosedResourceError on stdout is caught silently after yielding data."""
-        proc = MagicMock()
+    @pytest.mark.parametrize('error', [anyio.ClosedResourceError, anyio.BrokenResourceError])
+    async def test_closed_pipe_ends_the_drain(self, error: type[Exception]) -> None:
+        """The data read before the pipe failed is kept and its tail still reaches the sink."""
+        lines: list[tuple[str, bool]] = []
 
-        # Yield one chunk then raise ClosedResourceError
-        class FailingStream:
-            def __init__(self) -> None:
-                self._yielded = False
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
 
-            def __aiter__(self) -> FailingStream:
-                return self
+        reader = OutputReader(_FailingStream(error), on_line=sink)
+        await drain_with_timeout(reader)
 
-            async def __anext__(self) -> bytes:
-                if not self._yielded:
-                    self._yielded = True
-                    return b'partial'
-                raise anyio.ClosedResourceError
-
-        proc.stdout = FailingStream()
-        proc.stderr = None
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        await drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-        assert stdout_chunks == [b'partial']
-
-    async def test_stderr_broken_resource_error(self, tmp_path: Path) -> None:
-        """BrokenResourceError on stderr is caught silently after yielding data."""
-        proc = MagicMock()
-        proc.stdout = None
-
-        class FailingStream:
-            def __init__(self) -> None:
-                self._yielded = False
-
-            def __aiter__(self) -> FailingStream:
-                return self
-
-            async def __anext__(self) -> bytes:
-                if not self._yielded:
-                    self._yielded = True
-                    return b'partial'
-                raise anyio.BrokenResourceError
-
-        proc.stderr = FailingStream()
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        await drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-        assert stderr_chunks == [b'partial']
+        assert reader.chunks == [b'partial']
+        assert lines == [('partial', False)]
 
 
 class TestReadBgOutputEdgeCases:

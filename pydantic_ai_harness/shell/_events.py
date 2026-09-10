@@ -85,16 +85,16 @@ class ShellOutputLineEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='output
 class ShellCommandEndEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='command_end'):
     """A command finished, timed out, or was stopped.
 
-    `exit_code` is `None` when the process was killed before it reported one.
-    A background command ends when `check_command` first sees it exited or
-    when `stop_command` kills it. A run cancelled mid-command ends without
-    this event.
+    A process killed by a signal reports a negative `exit_code` (`-15` for
+    SIGTERM). A background command ends when `check_command` first sees it
+    exited or when `stop_command` kills it. A run cancelled mid-command ends
+    without this event.
     """
 
     command_id: str
     command: str
     background: bool
-    exit_code: int | None
+    exit_code: int
     timed_out: bool
     duration_seconds: float
     stdout: str

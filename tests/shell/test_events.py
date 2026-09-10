@@ -162,6 +162,17 @@ class TestForegroundEvents:
         assert end.stdout == 'partial\n'
         assert results == ['[Command timed out after 0.3s]']
 
+    async def test_timeout_still_delivers_the_unterminated_line(self, tmp_path: Path) -> None:
+        # The deadline cancels the readers before end of file, so the tail is
+        # flushed by the drain that follows the kill instead.
+        listener, _ = await _run(tmp_path, [_run_command('printf hello; sleep 5', timeout_seconds=0.3)])
+
+        lines = [(event.line, event.truncated) for event in listener.events if isinstance(event, ShellOutputLineEvent)]
+        end = listener.events[-1]
+        assert isinstance(end, ShellCommandEndEvent)
+        assert lines == [('hello', False)]
+        assert end.stdout == 'hello'
+
     async def test_long_line_is_cut_for_the_event_but_not_the_model(self, tmp_path: Path) -> None:
         width = MAX_EVENT_LINE_CHARS * 20
         command = f'{sys.executable} -c "print(\'x\' * {width})"'
@@ -370,6 +381,19 @@ class TestBackgroundEvents:
         ends = [event for event in listener.events if isinstance(event, ShellCommandEndEvent) and event.background]
         assert len(ends) == 1
         assert ends[0].exit_code == 0
+
+    async def test_rewritten_background_command_is_not_echoed(self, tmp_path: Path) -> None:
+        listener, results = await _run(
+            tmp_path,
+            [('start_command', '{"command": "echo original"}'), ('stop_command', '{"command_id": "$ID"}')],
+            listener=Listener(rewrite_to='echo rewritten'),
+        )
+
+        start = listener.events[1]
+        assert isinstance(start, ShellCommandStartEvent)
+        assert start.command == 'echo rewritten'
+        assert results[0].startswith('[Command rewritten: proxy]\nStarted background command\nID: ')
+        assert 'echo rewritten' not in results[0]
 
     async def test_cancelled_background_request(self, tmp_path: Path) -> None:
         listener, results = await _run(

@@ -30,13 +30,13 @@ from pydantic_ai_harness.shell._events import (
 from pydantic_ai_harness.shell._process import (
     BackgroundProcess,
     LineSink,
+    OutputReader,
     cleanup_bg_files,
-    drain_with_timeout,
     is_interactive_command,
     kill_process_group,
-    pump,
     read_bg_output,
     recoverable,
+    run_to_exit,
 )
 
 
@@ -276,7 +276,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         command_id: str,
         command: str,
         background: bool,
-        exit_code: int | None,
+        exit_code: int,
         timed_out: bool,
         started_at: float,
         stdout: str,
@@ -389,34 +389,11 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                         pid=proc.pid,
                     )
                 )
-            stdout_chunks: list[bytes] = []
-            stderr_chunks: list[bytes] = []
-            timed_out = False
-            try:
-                assert proc.stdout is not None
-                assert proc.stderr is not None
-                with anyio.fail_after(timeout):
-                    async with anyio.create_task_group() as tg:
-                        tg.start_soon(pump, proc.stdout, stdout_chunks, self._line_sink(ctx, command_id, 'stdout'))
-                        tg.start_soon(pump, proc.stderr, stderr_chunks, self._line_sink(ctx, command_id, 'stderr'))
-                    await proc.wait()
-            except TimeoutError:
-                timed_out = True
-                await kill_process_group(proc)
-                with anyio.CancelScope(shield=True):
-                    await proc.wait()
-                    await drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-            except BaseException:
-                # A cancelled run or a failed reader: `proc.aclose()` below
-                # kills only the shell, and its children would outlive the run.
-                await kill_process_group(proc)
-                raise
-            finally:
-                await proc.aclose()
-
-            stdout = b''.join(stdout_chunks).decode('utf-8', errors='replace')
-            stderr = b''.join(stderr_chunks).decode('utf-8', errors='replace')
-            exit_code = proc.returncode if proc.returncode is not None else 0
+            assert proc.stdout is not None
+            assert proc.stderr is not None
+            stdout = OutputReader(proc.stdout, on_line=self._line_sink(ctx, command_id, 'stdout'))
+            stderr = OutputReader(proc.stderr, on_line=self._line_sink(ctx, command_id, 'stderr'))
+            exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=timeout)
 
             if ctx is not None:
                 await ctx.emit(
@@ -427,15 +404,15 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                         exit_code=exit_code,
                         timed_out=timed_out,
                         started_at=started_at,
-                        stdout=stdout,
-                        stderr=stderr,
+                        stdout=stdout.text,
+                        stderr=stderr.text,
                     )
                 )
 
             if timed_out:
                 output = f'[Command timed out after {timeout}s]'
             else:
-                output = _format_output(stdout, stderr, empty='(no output)')
+                output = _format_output(stdout.text, stderr.text, empty='(no output)')
                 if cwd_file is not None and exit_code == 0:
                     self._apply_captured_cwd(cwd_file)
                 if exit_code != 0:
@@ -517,8 +494,10 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 )
             )
 
-        output = f'Started background command: {command!r}\nID: {command_id}'
-        return output if note is None else f'{note}\n{output}'
+        if note is None:
+            return f'Started background command: {command!r}\nID: {command_id}'
+        # The rewritten command stays out of the result, as in `_request`.
+        return f'{note}\nStarted background command\nID: {command_id}'
 
     async def check_command(self, command_id: str) -> str:
         """Check a background command directly, outside an agent run."""
@@ -541,14 +520,14 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         if bg is None:
             return f'[Error: unknown command ID {command_id!r}]'
 
-        just_finished = not bg.finished and bg.proc.returncode is not None
-        if just_finished:
-            bg.exit_code = bg.proc.returncode
+        just_exited = None if bg.finished else bg.proc.returncode
+        if just_exited is not None:
+            bg.exit_code = just_exited
             bg.finished = True
 
         stdout, stderr = read_bg_output(bg)
-        if just_finished and ctx is not None:
-            await ctx.emit(self._bg_end_event(bg, stdout=stdout, stderr=stderr))
+        if just_exited is not None and ctx is not None:
+            await ctx.emit(self._bg_end_event(bg, exit_code=just_exited, stdout=stdout, stderr=stderr))
 
         status = 'finished' if bg.finished else 'running'
         parts = [_format_output(stdout, stderr, empty='(no output yet)'), f'[status: {status}]']
@@ -577,12 +556,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         if bg is None:
             return f'[Error: unknown command ID {command_id!r}]'
 
-        just_finished = not bg.finished
-        if just_finished:
+        stopped: int | None = None
+        if not bg.finished:
             await kill_process_group(bg.proc)
             with anyio.CancelScope(shield=True):
-                await bg.proc.wait()
-            bg.exit_code = bg.proc.returncode
+                stopped = await bg.proc.wait()
+            bg.exit_code = stopped
             bg.finished = True
 
         stdout, stderr = read_bg_output(bg)
@@ -591,20 +570,20 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         del self._background[command_id]
         await bg.proc.aclose()
 
-        if just_finished and ctx is not None:
-            await ctx.emit(self._bg_end_event(bg, stdout=stdout, stderr=stderr))
+        if stopped is not None and ctx is not None:
+            await ctx.emit(self._bg_end_event(bg, exit_code=stopped, stdout=stdout, stderr=stderr))
 
         parts = [_format_output(stdout, stderr, empty='(no output)'), '[stopped]']
         if bg.exit_code is not None:
             parts.append(f'[exit code: {bg.exit_code}]')
         return '\n'.join(parts)
 
-    def _bg_end_event(self, bg: BackgroundProcess, *, stdout: str, stderr: str) -> ShellCommandEndEvent:
+    def _bg_end_event(self, bg: BackgroundProcess, *, exit_code: int, stdout: str, stderr: str) -> ShellCommandEndEvent:
         return self._end_event(
             command_id=bg.command_id,
             command=bg.command,
             background=True,
-            exit_code=bg.exit_code,
+            exit_code=exit_code,
             timed_out=False,
             started_at=bg.started_at,
             stdout=stdout,

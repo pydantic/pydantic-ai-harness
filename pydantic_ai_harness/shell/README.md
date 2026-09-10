@@ -191,7 +191,8 @@ at once. For a background command it is the same ID `check_command` and
 `stop_command` take, so the model and a subscriber name the process alike.
 Background commands write to files instead of pipes, so they emit no line
 events; their end event fires when `check_command` first sees the exit or when
-`stop_command` kills the process.
+`stop_command` kills the process. Events come from the tools inside a run; the
+same methods called directly on the toolset outside a run emit nothing.
 
 Output in events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256),
 and an end event keeps the tail of `stdout` and of `stderr` separately, each
