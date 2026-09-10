@@ -461,6 +461,17 @@ class TestFileChangeRequests:
 
         assert _tool_result(events) == "['fresh.txt' was not written: cancelled by a listener]"
 
+    async def test_a_later_bare_cancel_keeps_the_reason(self, tmp_path: Path) -> None:
+        """Listeners run in turn; one that cancels without a reason does not erase the reason another gave."""
+        events = await _run_and_collect(
+            tmp_path,
+            'write_file',
+            '{"path":"fresh.txt","content":"new\\n"}',
+            listeners=[Listener(cancel=True, reason='not today'), Listener(cancel=True)],
+        )
+
+        assert _tool_result(events) == "['fresh.txt' was not written: not today]"
+
     async def test_denied_write_emits_no_request(self, tmp_path: Path) -> None:
         listener = Listener()
 

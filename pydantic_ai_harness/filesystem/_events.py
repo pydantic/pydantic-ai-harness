@@ -124,6 +124,7 @@ class FileChangeRequestEvent(
     cancel_reason: str | None = None
 
     def cancel(self, reason: str | None = None) -> None:
-        """Stop the change from being applied."""
+        """Stop the change from being applied; a `reason` given by any listener reaches the model."""
         self.cancelled = True
-        self.cancel_reason = reason
+        if reason is not None or self.cancel_reason is None:
+            self.cancel_reason = reason
