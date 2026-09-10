@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.capabilities import AbstractCapability, on_event
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, on_event
 from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import (
     CapabilityEvent,
@@ -51,7 +51,7 @@ class Listener(AbstractCapability[object]):
         self.events.append(event)
 
 
-def _delegations(calls: Sequence[Sequence[dict[str, str]]]) -> FunctionModel:
+def _delegations(calls: Sequence[Sequence[dict[str, str]]], *, tool_name: str = 'delegate_task') -> FunctionModel:
     """A parent model that issues each step's delegations together, then replies with text.
 
     Streams, because a listener capability on the parent makes core stream the run.
@@ -62,7 +62,7 @@ def _delegations(calls: Sequence[Sequence[dict[str, str]]]) -> FunctionModel:
         step['n'] += 1
         if step['n'] <= len(calls):
             yield {
-                i: DeltaToolCall(name='delegate_task', json_args=json.dumps(args), tool_call_id=f'c{step["n"]}_{i}')
+                i: DeltaToolCall(name=tool_name, json_args=json.dumps(args), tool_call_id=f'c{step["n"]}_{i}')
                 for i, args in enumerate(calls[step['n'] - 1])
             }
         else:
@@ -161,6 +161,16 @@ class TestDelegationEvents:
         start, end = _pair(listener)
         assert (start.task, start.truncated) == ('t' * MAX_EVENT_TEXT_CHARS, True)
         assert (end.output, end.truncated) == ('o' * MAX_EVENT_TEXT_CHARS, True)
+
+    async def test_renamed_tool_inside_a_combined_capability_still_emits(self) -> None:
+        listener = Listener()
+        packaged = CombinedCapability[object]([SubAgents(agents=[SubAgent(_worker())], tool_name='hand_off'), listener])
+        parent_model = _delegations([[{'agent_name': 'worker', 'task': 'do it'}]], tool_name='hand_off')
+        await Agent(parent_model, capabilities=[packaged]).run('go')
+
+        start, end = _pair(listener)
+        assert (start.tool_name, end.tool_name) == ('hand_off', 'hand_off')
+        assert start.capability_id == end.capability_id == 'sub_agents'
 
     async def test_parallel_delegations_pair_by_tool_call_id(self) -> None:
         listener, _ = await _run(
