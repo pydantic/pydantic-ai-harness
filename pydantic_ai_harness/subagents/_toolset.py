@@ -10,7 +10,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Generic, cast
 
 from pydantic_ai.agent import AbstractAgent, AgentRunResult, EventStreamHandler
-from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.capabilities import AgentCapability, HookTimeoutError
 from pydantic_ai.exceptions import (
     ApprovalRequired,
     CallDeferred,
@@ -448,7 +448,12 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         timeout = sub_agent.timeout_seconds
         try:
             result = await (asyncio.wait_for(run, timeout) if timeout is not None else run)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
+            if timeout is None or isinstance(exc, HookTimeoutError):
+                # The child itself timed out: a hook overran its own budget, or no
+                # delegation budget is set at all. That is a child crash, so the
+                # crash handlers decide what the parent sees.
+                return self._crash_outcome(agent_name, sub_agent, exc)
             return _Ended(
                 outcome='timeout',
                 output=self._steer(
@@ -477,22 +482,26 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         except _ALWAYS_PROPAGATE:
             raise
         except Exception as exc:
-            contain = sub_agent.contain_errors if sub_agent.contain_errors is not None else self._contain_errors
-            if not contain:
-                raise
-            # Contain the crash so it cannot abort the parent, but keep it loud: the
-            # exception rides the retry message and is logged, and `tool_retries`
-            # bounds consecutive crashes into an abort.
-            logger.warning('Contained crash from sub-agent %r', agent_name, exc_info=exc)
-            return _Ended(
-                outcome='contained',
-                output=(
-                    f'Sub-agent {agent_name!r} crashed: {type(exc).__name__}: {exc}. '
-                    f'Treat this as a recoverable failure and decide from existing evidence.'
-                ),
-                cause=exc,
-            )
+            return self._crash_outcome(agent_name, sub_agent, exc)
         return _Ended(outcome='ok', output=str(result.output))
+
+    def _crash_outcome(self, agent_name: str, sub_agent: SubAgent[AgentDepsT], exc: Exception) -> _Ended:
+        """Contain an unexpected child crash, or let it abort the parent."""
+        contain = sub_agent.contain_errors if sub_agent.contain_errors is not None else self._contain_errors
+        if not contain:
+            raise exc
+        # Contain the crash so it cannot abort the parent, but keep it loud: the
+        # exception rides the retry message and is logged, and `tool_retries`
+        # bounds consecutive crashes into an abort.
+        logger.warning('Contained crash from sub-agent %r', agent_name, exc_info=exc)
+        return _Ended(
+            outcome='contained',
+            output=(
+                f'Sub-agent {agent_name!r} crashed: {type(exc).__name__}: {exc}. '
+                f'Treat this as a recoverable failure and decide from existing evidence.'
+            ),
+            cause=exc,
+        )
 
     @staticmethod
     def _steer(on_failure: str | None, default: str) -> str:

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from pydantic_ai import Agent, RunContext
-from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, on_event
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, HookTimeoutError, on_event
 from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded
 from pydantic_ai.messages import (
     CapabilityEvent,
@@ -242,6 +242,33 @@ class TestOutcomes:
         _, end = _pair(listener)
         assert end.outcome == 'timeout'
         assert "Sub-agent 'worker' exceeded its 0.01s time budget" in end.output
+
+    async def test_child_hook_timeout_is_not_the_delegation_timeout(self) -> None:
+        def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            # A hook inside the child overran its own budget; the delegation budget
+            # is 60s and has not expired.
+            raise HookTimeoutError('before_model_request', 'slow_hook', 0.05)
+
+        worker = Agent(FunctionModel(boom), name='worker')
+        listener, _ = await _run(
+            _delegate_once(), SubAgents(agents=[SubAgent(worker, timeout_seconds=60, contain_errors=True)])
+        )
+
+        _, end = _pair(listener)
+        assert end.outcome == 'contained'
+        assert "Sub-agent 'worker' crashed: HookTimeoutError" in end.output
+
+    async def test_child_hook_timeout_without_budget_propagates(self) -> None:
+        def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            raise HookTimeoutError('before_model_request', 'slow_hook', 0.05)
+
+        worker = Agent(FunctionModel(boom), name='worker')
+        listener = Listener()
+        with pytest.raises(HookTimeoutError):
+            await Agent(_delegate_once(), capabilities=[SubAgents(agents=[SubAgent(worker)]), listener]).run('go')
+
+        # A crash from the child is not a soft timeout; with containment off it aborts.
+        assert [type(event) for event in listener.events] == [DelegationStartEvent]
 
     async def test_budget(self) -> None:
         def worker_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
