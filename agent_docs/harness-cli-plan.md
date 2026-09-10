@@ -198,6 +198,13 @@ the branch. Each item names its acceptance check.
       finding is answered with #851 as on #845. A second pydanty pass was requested at 23:32Z
       and had not landed when this iteration ended: check it at the start of the next one.
       The `FileEditedEvent` subclass question for Douwe is in the PR body.
+- [ ] 1.2e Work the third pydanty pass on #853 (landed 18:53Z: zero blocking, one
+      required, incomplete review -- but it analyzed stale head 4f8e1c43, an ancestor that
+      predates the f5b9134d header-cut fix, so the required is already fixed and the
+      verdict untrustworthy). Make `FileChangeRequestEvent.cancelled` monotonic/read-only
+      the way #845's was just fixed (private field + property, `cancel()` the only setter,
+      a `LiftCancel`-style test, docs parity), push, and re-apply the label so a fresh run
+      analyzes the real head. Merge the fix into `feat/experimental-cli`.
 - [ ] 1.2c When #853 merges: merge `main` into `feat/experimental-cli` and drop the
       `puppy/filesystem-change-events` worktree.
 - [x] 1.2d Work pydanty's second pass on #853 (landed 00:04Z: one blocking, the floor finding
@@ -649,6 +656,15 @@ Append-only. Date, item, decision, why.
 - 2026-09-10, 1.2c: #853 CI is fully green on 87984c83 (26 passed, 8 standard skips, one
   cancelled no-op "evaluate dependency approval"). The pydantic re-review retriggered for
   the new head is in flight.
+- 2026-09-10, 1.2e: the third pass landed 18:53Z (33 minutes, run df_run_090c5c00b8474ed6ac20,
+  "Reviewed at ... head 4f8e1c438ca8"): zero blocking, one required, incomplete (2/5
+  charters did not run). The required is a stale-snapshot artifact: 4f8e1c43 is an
+  ancestor three commits below the real head 87984c83 -- it predates f5b9134d, the commit
+  that added the very `header[:MAX_EVENT_DIFF_CHARS]` cut the pass "suggests", which is
+  pinned by `test_headers_of_an_oversized_name_are_cut_at_the_bound`. The run was
+  retriggered for 87984c83 but analyzed an old state; the verdict (and the incomplete
+  flag) are untrustworthy. No reply needed on the PR beyond re-applying the label for a
+  fresh run; do the `FileChangeRequestEvent` monotonic-veto fix in the same round.
 
 ## Open questions for Mike
 
