@@ -1188,7 +1188,7 @@ class TestCompactNowSpan:
         assert len(spans) == 1
         attrs = spans[0]['attributes']
         assert attrs['gen_ai.conversation.compacted'] is True
-        assert attrs['compaction.strategy'] == 'SlidingWindowCompaction'
+        assert attrs['compaction.strategy'] == 'sliding_window'
         assert attrs['compaction.messages_before'] > attrs['compaction.messages_after']
 
     async def test_the_span_is_measured_with_the_tokenizer_it_was_given(self, capfire: CaptureLogfire):
@@ -1223,7 +1223,7 @@ class TestCompactNowSpan:
 
         await compact_now(tiered, _history(6), model=TestModel(), focus='auth', tracer=get_tracer('test'))
 
-        assert self._spans(capfire)[0]['attributes']['compaction.strategy'] == 'TieredCompaction'
+        assert self._spans(capfire)[0]['attributes']['compaction.strategy'] == 'tiered'
 
     async def test_a_default_tracer_records_nothing(self, capfire: CaptureLogfire):
         strategy: SlidingWindowCompaction[None] = SlidingWindowCompaction(max_tokens=1, keep_messages=2)
