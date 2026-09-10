@@ -170,7 +170,7 @@ async def report(ctx, event):
 
 Other capabilities subscribe with `@on_event` on a method, the same way `RepoContext` follows `FileSystem` events. Nested model streaming from the child run is not an event concern; pass an `event_stream_handler` for that.
 
-See [capability events](/ai/core-concepts/hooks/) for how `@on_event` works.
+See [capability events](/ai/core-concepts/capabilities/#capability-events) for how `@on_event` works.
 
 `SubAgents` emits no OpenTelemetry spans of its own: the child run is a core agent run with its own spans nested under the parent's tool-call span, and the events above carry the outcome a trace would only show as an exception or a tool result.
 
