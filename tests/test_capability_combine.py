@@ -56,6 +56,7 @@ from pydantic_ai.capabilities.abstract import (
 )
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
 
 import pydantic_ai_harness
 from pydantic_ai_harness import (
@@ -80,6 +81,10 @@ _TMP_A = Path(tempfile.mkdtemp(prefix='combine-a-'))
 _TMP_B = Path(tempfile.mkdtemp(prefix='combine-b-'))
 """Two distinct roots, so a `Collides` pair differs in the way its `Anonymous` reason once claimed
 mattered -- and still collides."""
+
+
+def _no_event_stream_handler(_ctx: RunContext[Any], _agent_name: str) -> None:
+    return None
 
 
 @dataclass
@@ -496,6 +501,12 @@ async def test_two_of_a_colliding_capability_still_raise(name: str, anyio_backen
         pytest.param('inherit_tools', {'inherit_tools': True}, {'inherit_tools': False}, id='inherit_tools'),
         pytest.param('tool_name', {'tool_name': 'delegate_task'}, {'tool_name': 'ask_specialist'}, id='tool_name'),
         pytest.param('forward_usage', {'forward_usage': False}, {'forward_usage': True}, id='forward_usage'),
+        pytest.param(
+            'event_stream_handler_factory',
+            {'event_stream_handler_factory': _no_event_stream_handler},
+            {},
+            id='event_stream_handler_factory',
+        ),
         pytest.param('tool_retries', {'tool_retries': 5}, {'tool_retries': 2}, id='tool_retries'),
         pytest.param('contain_errors', {'contain_errors': True}, {'contain_errors': False}, id='contain_errors'),
         # `None` disables disk loading entirely. The generic merge reads `None` as "not stated" and
@@ -509,7 +520,7 @@ def test_sub_agents_compose_the_roster_and_nothing_else(
 ) -> None:
     """Only `agents` and `models` merge; every other field has to already agree.
 
-    `SubAgents` has fifteen public fields and all but those two say *how* the delegates run rather
+    `SubAgents` has fourteen public fields and all but those two say *how* the delegates run rather
     than who they are, so merging one applies one harness's policy to the other's sub-agents. An
     allow-list is what keeps that true for fields added later: they are refused until someone
     decides, rather than merged by a default nobody chose.

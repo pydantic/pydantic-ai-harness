@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from pydantic_ai import Agent
+from pydantic_ai.agent import EventStreamHandler
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelAPIError, UnexpectedModelBehavior, UsageLimitExceeded, UserError
 from pydantic_ai.messages import (
@@ -136,6 +137,13 @@ class TestConstruction:
 
     def test_empty_agents_no_toolset(self) -> None:
         assert SubAgents[object]().get_toolset() is None
+
+    def test_event_stream_handler_and_factory_are_mutually_exclusive(self) -> None:
+        async def handler(_ctx: RunContext[object], _stream: AsyncIterable[AgentStreamEvent]) -> None:
+            pass
+
+        with pytest.raises(ValueError, match='mutually exclusive'):
+            SubAgents[object](event_stream_handler=handler, event_stream_handler_factory=lambda _ctx, _name: handler)
 
 
 class TestInstructions:
@@ -404,6 +412,36 @@ class TestDelegation:
         result = await parent.run('go')
         assert result.output == 'all done'
         assert events  # the sub-agent's run streamed events to the handler
+
+    async def test_event_stream_handler_factory_receives_each_parent_delegation_context(self) -> None:
+        parent_calls: list[tuple[str | None, str]] = []
+        child_run_ids: list[str | None] = []
+        handlers: list[object] = []
+
+        def factory(ctx: RunContext[object], agent_name: str) -> EventStreamHandler[object]:
+            parent_calls.append((ctx.tool_call_id, agent_name))
+
+            async def handler(child_ctx: RunContext[object], stream: AsyncIterable[AgentStreamEvent]) -> None:
+                child_run_ids.append(child_ctx.run_id)
+                async for _event in stream:
+                    pass
+
+            handlers.append(handler)
+            return handler
+
+        worker = Agent(TestModel(custom_output_text='W'), name='worker')
+        parent: Agent[object, str] = Agent(
+            _delegate_n_then_finish('worker', 2),
+            capabilities=[SubAgents(agents=[SubAgent(worker)], event_stream_handler_factory=factory)],
+        )
+
+        result = await parent.run('go')
+
+        assert result.output == 'all done'
+        assert parent_calls == [('c1', 'worker'), ('c2', 'worker')]
+        assert len(handlers) == 2
+        assert handlers[0] is not handlers[1]
+        assert len(set(child_run_ids)) == 2
 
     async def test_hard_limit_propagates(self) -> None:
         def boom(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:

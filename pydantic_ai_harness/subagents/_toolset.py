@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Generic, cast
 
@@ -61,6 +61,9 @@ _ALWAYS_PROPAGATE: tuple[type[Exception], ...] = (
     UserError,
     RunCancelled,
 )
+
+SubAgentEventStreamHandlerFactory = Callable[[RunContext[AgentDepsT], str], EventStreamHandler[AgentDepsT] | None]
+"""Builds an event stream handler for one delegation from its parent context and agent name."""
 
 
 @dataclass(frozen=True)
@@ -179,6 +182,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         tool_retries: int | None,
         contain_errors: bool,
         call_counts: dict[str, dict[str, int]],
+        event_stream_handler_factory: SubAgentEventStreamHandlerFactory[AgentDepsT] | None = None,
         models: Mapping[str, ModelOption] | None = None,
     ) -> None:
         super().__init__()
@@ -187,6 +191,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         self._inherit_tools = inherit_tools
         self._shared_capabilities = list(shared_capabilities)
         self._event_stream_handler = event_stream_handler
+        self._event_stream_handler_factory = event_stream_handler_factory
         self._tool_name = tool_name
         self._contain_errors = contain_errors
         self._models: dict[str, ModelOption] = dict(models or {})
@@ -349,6 +354,11 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
                 else None
             )
             settings = None
+        event_stream_handler = (
+            self._event_stream_handler_factory(ctx, agent_name)
+            if self._event_stream_handler_factory is not None
+            else self._event_stream_handler
+        )
         run = sub_agent.agent.run(
             task,
             deps=ctx.deps,
@@ -358,7 +368,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
             usage_limits=usage_limits,
             toolsets=toolsets,
             capabilities=capabilities,
-            event_stream_handler=self._event_stream_handler,
+            event_stream_handler=event_stream_handler,
         )
         timeout = sub_agent.timeout_seconds
         try:

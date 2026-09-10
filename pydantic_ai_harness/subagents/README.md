@@ -4,6 +4,8 @@ Let an agent delegate self-contained tasks to named child agents.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/subagents/)
 
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
+
 ## The problem
 
 A single agent that does everything accumulates a large tool set and a long context. Splitting the work across specialized sub-agents keeps each context focused, but wiring up delegation by hand means writing a tool per agent, forwarding deps, threading usage limits, and telling the model what it can delegate to.
@@ -47,7 +49,7 @@ A delegate's name -- how the parent model refers to it, and how it is listed in 
 - **Usage is shared by default.** The parent's `usage` is passed to each sub-agent run, so token usage aggregates and a parent `usage_limits` applies across the whole agent tree. Set `forward_usage=False` to give each sub-agent run its own accounting.
 - **Tools can be inherited.** With `inherit_tools=True`, the parent agent's own tools (registered directly or via `toolsets`) are added to each sub-agent run, on top of the sub-agent's own. Tools contributed by the parent's capabilities are not inherited: they are bound to capability instances registered in the parent run, and would arrive without the hooks and instructions they depend on. Use `shared_capabilities` to give sub-agents a capability. This also excludes the delegate tool itself, so a sub-agent can't recurse into further delegation. Off by default.
 - **Capabilities can be shared.** `shared_capabilities` are applied to every sub-agent run -- e.g. give all sub-agents a common guardrail, memory, or planning capability without rebuilding each `Agent`.
-- **Sub-agent events can be streamed.** Pass an `event_stream_handler` and it's forwarded to each sub-agent run, so the sub-agent's model-streaming and tool events surface to the caller (the handler receives the sub-agent's own `RunContext`).
+- **Sub-agent events can be streamed.** Pass an `event_stream_handler` to forward every sub-agent's model-streaming and tool events to one handler. Pass `event_stream_handler_factory` instead when each delegation needs its own handler: the factory receives the parent `RunContext` and selected agent name, and its returned handler receives the sub-agent's `RunContext` and event stream. This lets callers correlate or persist child events using the parent `delegate_task` call ID.
 
 ## Per-delegate run controls
 
@@ -223,6 +225,7 @@ SubAgents(
     inherit_tools=False,   # expose the parent's own tools to sub-agents (capability tools excluded)
     shared_capabilities=(),# capabilities applied to every sub-agent run
     event_stream_handler=None,  # forwarded to each sub-agent run to stream its events
+    event_stream_handler_factory=None,  # builds a handler from each parent delegation context
     tool_name='delegate_task',
     tool_retries=2,        # extra delegate-tool attempts after a sub-agent error before aborting (None inherits the agent default)
     contain_errors=False,  # default for SubAgent.contain_errors: contain an unexpected crash as a bounded retry
@@ -249,6 +252,7 @@ SubAgent(
 
 - Sub-agents can themselves have `SubAgents`, forming a tree. Share `usage` (the default) and set a `usage_limits` on the top-level run to bound the whole tree.
 - Delegations the model issues in parallel run as independent sub-agent runs.
+- `SubAgents` adds no spans for event forwarding; the parent tool call and child agent run are already covered by Pydantic AI instrumentation.
 
 ## Further reading
 

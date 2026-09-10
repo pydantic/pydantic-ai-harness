@@ -26,7 +26,11 @@ from pydantic_ai_harness.subagents._disk import (
 )
 from pydantic_ai_harness.subagents._effort import clamp_effort
 from pydantic_ai_harness.subagents._models import ModelOption, as_option, model_label, validate_restriction
-from pydantic_ai_harness.subagents._toolset import SubAgent, SubAgentToolset
+from pydantic_ai_harness.subagents._toolset import (
+    SubAgent,
+    SubAgentEventStreamHandlerFactory,
+    SubAgentToolset,
+)
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
@@ -45,7 +49,7 @@ def _option_line(key: str, option: ModelOption) -> str:
 _MERGEABLE_FIELDS = frozenset({'agents', 'models'})
 """The only fields a merge composes: the roster, and the model options that roster may pick from.
 
-An allow-list rather than a list of exceptions. `SubAgents` has fifteen public fields, and all but
+An allow-list rather than a list of exceptions. `SubAgents` has fourteen public fields, and all but
 these two say *how* the delegates run rather than *who* they are -- so merging them applies one
 harness's policy to the other's sub-agents. Enumerating those instead would mean a field added
 later merges silently by default, which is the wrong way round for a decision nobody made.
@@ -88,7 +92,8 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     shared so usage limits apply across the whole agent tree. Optionally, the
     parent's tools can be inherited (`inherit_tools`), extra capabilities can be
     applied to every sub-agent run (`shared_capabilities`), and sub-agent events
-    can be streamed to a handler (`event_stream_handler`).
+    can be streamed to a shared handler (`event_stream_handler`) or a handler
+    built with each parent delegation context (`event_stream_handler_factory`).
 
     ```python
     from pydantic_ai import Agent
@@ -173,6 +178,12 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     model-streaming and tool events surface to the caller. The handler receives
     the sub-agent's own `RunContext` and event stream."""
 
+    event_stream_handler_factory: SubAgentEventStreamHandlerFactory[AgentDepsT] | None = field(
+        default=None, kw_only=True
+    )
+    """If set, called once per delegation with the parent `RunContext` and selected
+    agent name. The returned handler receives that sub-agent's `RunContext` and event stream."""
+
     tool_name: str = 'delegate_task'
     """Name of the delegate tool exposed to the model."""
 
@@ -222,6 +233,8 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     toolset and cleared per run in `wrap_run`. Backs `SubAgent.max_calls`."""
 
     def __post_init__(self) -> None:
+        if self.event_stream_handler is not None and self.event_stream_handler_factory is not None:
+            raise ValueError('event_stream_handler and event_stream_handler_factory are mutually exclusive')
         self._build_roster(self._load_disk_agents())
 
     def _disk_agents(self) -> list[SubAgent[AgentDepsT]]:
@@ -365,6 +378,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
             inherit_tools=self.inherit_tools,
             shared_capabilities=self.shared_capabilities,
             event_stream_handler=self.event_stream_handler,
+            event_stream_handler_factory=self.event_stream_handler_factory,
             tool_name=self.tool_name,
             tool_retries=self.tool_retries,
             contain_errors=self.contain_errors,
