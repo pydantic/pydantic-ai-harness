@@ -1787,7 +1787,10 @@ class _FakeProcess:
         return self._exit_code
 
     async def aclose(self) -> None:
+        """Close the pipe streams too, as a real `anyio.abc.Process.aclose` does."""
         self._closed = True
+        await self.stdout.aclose()
+        await self.stderr.aclose()
 
 
 class TestRunToExitTimeoutAccounting:
