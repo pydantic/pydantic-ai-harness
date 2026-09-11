@@ -170,7 +170,7 @@ show a command's output, or veto it, without parsing tool arguments:
 |---|---|---|---|
 | `ShellCommandRequestEvent` | immediate | after a command passes the policy checks and before it is spawned | `command`, `cwd`, `timeout`, `background`; `cancel(reason)`, `rewrite(command, reason=...)` |
 | `ShellCommandStartEvent` | immediate | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
-| `ShellOutputLineEvent` | stream | a foreground command wrote a line | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
+| `ShellOutputLineEvent` | stream | the foreground command exited, replaying its buffered lines in order (at most the last 1000) | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
 | `ShellCommandEndEvent` | stream | the command exited, timed out, or was stopped | `command_id`, `command`, `background`, `exit_code`, `timed_out`, `duration_seconds`, `stdout`, `stderr`, `truncated` |
 
 `ShellCommandRequestEvent` is a decision. A listener that calls `cancel(reason)`
