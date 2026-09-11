@@ -535,8 +535,8 @@ def test_merging_reuses_the_delegates_already_loaded_from_disk(tmp_path: Path, m
     (folder / 'helper.md').write_text('---\nname: helper\ndescription: helps\n---\n\nBe helpful.\n', encoding='utf-8')
     monkeypatch.chdir(project)
 
-    first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')])
-    second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')])
+    first = SubAgents[object](agents=[SubAgent(_child('alpha'), description='alpha')], agent_folders='agents')
+    second = SubAgents[object](agents=[SubAgent(_child('beta'), description='beta')], agent_folders='agents')
     assert 'helper' in first._by_name, 'the disk delegate is picked up at construction'  # pyright: ignore[reportPrivateUsage]
 
     # The folder is gone by the time the two are combined, which is what a `chdir` amounts to.

@@ -73,7 +73,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     one of the menu's keys, so the parent routes each task to the model that fits
     it. A `SubAgent` can restrict which keys it accepts (`SubAgent.models`).
 
-    Sub-agents are also loaded from disk by default: each markdown agent definition
+    Sub-agents can also be loaded from disk by setting `agent_folders`: each markdown agent definition
     under `./.agents/agents/` and `~/.agents/agents/` (or the `.claude/` equivalent)
     becomes a delegate, built with the parent's model. Disk delegates get no tools
     by default (`inherit_tools` is `False`); set `inherit_tools=True` to expose the
@@ -129,12 +129,11 @@ class SubAgents(AbstractCapability[AgentDepsT]):
     ```
     """
 
-    agent_folders: str | Sequence[Path] | None = 'agents'
+    agent_folders: str | Sequence[Path] | None = None
     """Where to load markdown agent definitions from, in addition to `agents`.
-    Defaults to the conventional layout, so constructing the capability auto-loads
-    a repo's agent files with no extra configuration.
+    Defaults to `None`: no folders are scanned unless explicitly configured.
 
-    - a folder-name `str` (the default `'agents'` is the conventional layout): for
+    - a folder-name `str` (`'agents'` selects the conventional layout): for
       the project root (cwd) then the home root, load from `<root>/.agents/<name>/`,
       falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
     - a sequence of paths: load from exactly those folders, in order.

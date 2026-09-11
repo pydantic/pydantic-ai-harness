@@ -138,7 +138,7 @@ The sub-agents are listed in the system prompt via `get_instructions`, using eac
 
 ## Loading sub-agents from disk
 
-A repo's markdown agent definitions become delegates without writing any `Agent` code. By default every `*.md` file under the conventional folders is loaded as a sub-agent, alongside the explicitly-passed `agents`.
+A repo's markdown agent definitions become delegates without writing any `Agent` code. Set `agent_folders='agents'` to load every `*.md` file under the conventional folders alongside any explicitly-passed `agents`.
 
 ```python
 from pydantic_ai import Agent
@@ -146,13 +146,13 @@ from pydantic_ai_harness import SubAgents
 
 orchestrator = Agent(
     'anthropic:claude-opus-4-7',
-    capabilities=[SubAgents(inherit_tools=True)],  # auto-loads ./.agents/agents/ and ~/.agents/agents/
+    capabilities=[SubAgents(agent_folders='agents', inherit_tools=True)],  # auto-loads ./.agents/agents/ and ~/.agents/agents/
 )
 ```
 
-`agent_folders` controls where definitions come from. It defaults to `'agents'`, the conventional layout:
+`agent_folders` is optional and defaults to `None`, so no folders are scanned unless explicitly configured. Pass `'agents'` to load the conventional layout:
 
-- A folder-name `str` (the default `'agents'`): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
+- A folder-name `str` (for example, `'agents'`): for the project root (cwd) then the home root, load from `<root>/.agents/<name>/`, falling back to `<root>/.claude/<name>/` when `<root>/.agents/` is absent.
 - A sequence of paths loads from exactly those folders, in order.
 - `None` disables disk loading, exposing only the explicitly-passed `agents`.
 
@@ -210,13 +210,15 @@ SubAgents(agent_folders='agents', tool_resolver=resolve)
 
 When the same name appears in more than one source, the higher-precedence one wins and the others are skipped with a warning: explicitly-passed `agents` first, then the project folder, then the home folder (and, for an explicit path sequence, earlier paths before later ones). A duplicate name within the explicitly-passed `agents` list is still an error.
 
+Earlier releases loaded the conventional folders by default. Pass `agent_folders='agents'` to retain that behavior. `SubAgents()` and `SubAgents(agents=[])` now expose no agents; `SubAgents(agents=[SubAgent(worker)])` exposes only the supplied agent. Import `SubAgent` from `pydantic_ai_harness.subagents` to wrap a worker `Agent`. Combine both sources explicitly with `SubAgents(agents=[SubAgent(worker)], agent_folders='agents')`.
+
 ## Configuration
 
 ```python
 SubAgents(
     agents=(),             # Sequence[SubAgent[AgentDepsT]] -- each pairs an agent with its run controls
     models={},             # Mapping[str, Model | str | ModelOption] -- per-delegation model menu (off when empty)
-    agent_folders='agents',# folder-name str (convention) | Sequence[Path] | None (disable)
+    agent_folders=None,    # folder-name str (convention) | Sequence[Path] | None (disable)
     agent_overrides={},    # Mapping[str, AgentOverride] -- per-disk-agent model/effort override
     tool_resolver=None,    # Callable[[str], Sequence[AgentToolset[object]] | None] -- disk-agent tool mapping
     forward_usage=True,    # share the parent's usage with sub-agent runs
