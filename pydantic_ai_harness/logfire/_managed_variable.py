@@ -9,7 +9,6 @@ capability only declares its own variable and exposes the resolved value through
 
 from __future__ import annotations
 
-import re
 import threading
 import warnings
 from collections.abc import Callable, Mapping
@@ -18,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, ClassVar, Generic
 
 import logfire
+from logfire.agent_control import normalize_agent_name
 from logfire.variables import Variable, VariableAlreadyExistsError
 from logfire.variables.abstract import NoOpVariableProvider
 from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, Instrumentation
@@ -78,21 +78,6 @@ def _reset_auto_create_guard() -> None:  # pyright: ignore[reportUnusedFunction]
     """Clear the once-per-process auto-create guard. Intended for tests only."""
     with _auto_create_lock:
         _auto_create_attempted.clear()
-
-
-def _normalize_agent_name(name: str) -> str:
-    """Normalize a telemetry agent name exactly as the Logfire managed-agents UI does.
-
-    The rule trims and lowercases the name, replaces hyphens and every other non-`[a-z0-9_]`
-    character with `_`, collapses runs of underscores, and strips underscores from both ends. The
-    SDK and UI must apply the same rule so they land on the same variable for a given agent name.
-
-    The rule is lossy, so distinct agents can normalize onto one variable: `checkout-assistant`,
-    `Checkout Assistant`, and `checkout_assistant` all become `agent__checkout_assistant` and share
-    a single managed config, including across services in the same Logfire project. Give the
-    capability an explicit `name` to keep two such agents apart.
-    """
-    return re.sub(r'_+', '_', re.sub(r'[^a-z0-9_]', '_', name.strip().lower().replace('-', '_'))).strip('_')
 
 
 def _spawn_create(variable: Variable[Any], config: VariableConfig) -> None:
@@ -322,6 +307,13 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
         sees a narrower `ModelSelectionContext` before any `RunContext` exists -- derive the same
         variable. Raises [`UserError`][pydantic_ai.exceptions.UserError] when there is no agent name
         to derive from, and when the name has nothing an identifier can be made of.
+
+        The name is reduced to a key by
+        [`normalize_agent_name`][logfire.agent_control.normalize_agent_name], which is the rule the
+        Logfire UI and every other Agent Control SDK apply, so an agent named `checkout-assistant`
+        here and `Checkout Assistant` in another service reach one config. It is lossy in that
+        direction too: two agents whose names differ only in punctuation or case share a variable
+        unless one of them is given an explicit `name`.
         """
         variable = self._built_variable
         if variable is not None:
@@ -335,9 +327,9 @@ class ManagedVariableCapability(AbstractCapability[AgentDepsT], Generic[AgentDep
                 "the agent's `name`, but this agent has none. Give the agent a `name=...`, or pass an "
                 'explicit `name` to the capability.'
             )
-        normalized_name = _normalize_agent_name(agent_name)
+        normalized_name = normalize_agent_name(agent_name)
         if not normalized_name:
-            # `_normalize_agent_name` is lossy by design, but an empty result is not a collision
+            # `normalize_agent_name` is lossy by design, but an empty result is not a collision
             # between two agents that read alike -- it is every such agent landing on the bare prefix,
             # which names no agent at all. Refuse it the way a missing name is refused.
             raise UserError(

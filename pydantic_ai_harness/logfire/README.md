@@ -77,8 +77,8 @@ point-in-time sample rather than a description of the agent. An agent that never
 request never publishes a baseline.
 
 Its `instructions` list one entry per code-defined instruction block -- the agent's own text and each
-toolset's, but not `AgentControl`'s managed contribution -- each carrying the `id` that addresses it and a
-`dynamic` flag. That is what the UI needs to offer an override per block: the joined prompt a trace
+toolset's, snapshotted before any managed block reaches the request -- each carrying the `id` that
+addresses it and a `dynamic` flag. That is what the UI needs to offer an override per block: the joined prompt a trace
 records has no seams in it, so a baseline built from telemetry alone could only ever be copied
 wholesale, and copying it wholesale is exactly [the mistake](#where-your-base-prompt-lives) of
 sending the agent's own text to the model twice with a frozen `Today is <date>` in the middle of it.
@@ -310,7 +310,8 @@ redeploys.
 
 ### The solution
 
-`AgentControl` resolves one `AgentConfig` value per run with **presence semantics**: each section
+`AgentControl` resolves one [`AgentConfig`](https://github.com/pydantic/logfire/tree/main/logfire/agent_control)
+value per run with **presence semantics**: each section
 that is present -- `instructions`, `model`, `settings`, `tool_definitions` -- is managed from
 Logfire, and each absent section keeps the code-defined behavior. The whole config versions and
 rolls out as one unit, so a prompt change and the model change it depends on land atomically.
@@ -340,7 +341,10 @@ agent = Agent(
 )
 ```
 
-The variable holds an `AgentConfig`:
+The variable holds an `AgentConfig`. The contract -- that model, its stored JSON schema, how leniently
+a published value validates, and what each section does to a request -- lives in `logfire.agent_control`,
+where the Logfire UI and every framework's Agent Control adapter share one copy of it. Import it from
+there when you want to publish a value from code; nothing in this package restates it.
 
 ```json
 {
@@ -394,10 +398,13 @@ The variable holds an `AgentConfig`:
   each tool (its `id`, or its label when it has none) -- and an entry without it matches by `name`
   alone. When both match one tool the narrowed entry wins.
 
-`''` is never accepted where a string carries meaning -- `model`, a block's text, `new_name`. Omission
-and `null` already mean "leave this to code", so an empty string is only ever a half-filled field, and
-`"model": ""` in particular is not "no model": Pydantic AI raises `Unknown model:` on every request the
-agent makes, and the config around it is valid, so nothing downstream would catch it.
+`''` is never accepted where a string carries meaning -- `model`, a block's text, `new_name`, a block's
+`id`. Omission and `null` already mean "leave this to code", so an empty string is only ever a
+half-filled field, and `"model": ""` in particular is not "no model": Pydantic AI raises
+`Unknown model:` on every request the agent makes, and the config around it is valid, so nothing
+downstream would catch it. The stored schema refuses it at write time, and a value that reaches an SDK
+anyway costs only the section that carries it -- the instructions published beside a `"model": ""`
+still apply.
 
 Each instruction block is limited to 65,536 characters. An oversized bare `instructions` value drops
 that section; an oversized list entry drops only itself. Both warn once per process, and valid sibling
@@ -458,12 +465,15 @@ agent = Agent(
 > block (`Today is 2026-07-29.`) to whatever it said at the moment it was copied. Take the text over by
 > `id`; don't re-add it.
 
-Added blocks compose the way a capability's instructions always have. Pydantic AI groups static
-instruction text ahead of dynamic text (so providers can cache the stable prefix) and preserves source
-order within each group, which puts them after the agent's own literal and `@agent.instructions` text
-and before dynamic toolset instructions. An override leaves its block's position and its `dynamic` flag
-alone -- replacing a dynamic block does not make it static -- so no override moves the cacheable prefix.
-Only `agent.override(instructions=...)` replaces the lot, and a capability can't reach it.
+Added blocks land at the end of the run of static blocks: after the last static block the agent
+assembles, before the first one it recomputes per request. That is where a managed addition is both
+last in the prompt as written and still inside the prefix a provider can cache; appending it after
+per-request text would put published text in the volatile tail instead. An override leaves its block's
+position and its `dynamic` flag alone -- replacing a dynamic block does not make it static -- so no
+override moves that boundary either. `render_template=True` is the one exception: a rendered block is
+this run's `deps` rather than fixed text, so it is contributed as dynamic and sorts with the rest of
+the per-request text. Only `agent.override(instructions=...)` replaces the lot, and a capability can't
+reach it.
 
 ### Notes
 
@@ -484,12 +494,16 @@ Only `agent.override(instructions=...)` replaces the lot, and a capability can't
   drift from the validator the tool actually runs against.
 - **Renames round-trip:** `new_name` changes the name the model is shown; a call to the renamed
   tool routes back to the original implementation, and `ctx.tool_name` inside the tool is the
-  original name. A rename that collides with a name another tool already advertises is dropped
-  with a warning (other patches still apply) rather than breaking the run.
+  original name. The routing is read off the very tool the model was handed, so a dynamic toolset
+  that put a different tool behind that name in the meantime cannot make a name-based policy
+  authorize one tool and run another. A rename that collides with a name another tool already
+  advertises is dropped (other patches still apply) rather than breaking the run.
 - **`on_unmatched` decides what a published entry that reaches nothing costs:** an override naming a
   tool no toolset advertises (the drift case: the tool was removed or renamed in code), an instruction
-  entry whose `id` no block carries -- or only a per-request block carries -- and a `settings` key
-  this SDK has no field for. `'warn'` (the default) emits a `UserWarning` once per process, at the
+  entry whose `id` no block carries -- or only a per-request block carries -- a `parameters` key the
+  tool has no parameter for, a rename another advertised tool already answers to, a `settings` key
+  this version of the contract has no field for, and a `timeout` that is not a budget a request can
+  be given. `'warn'` (the default) emits a `UserWarning` once per process, at the
   point the entry would have been applied; `'error'` raises `UserError` with the same message there,
   failing the run; `'ignore'` applies nothing and says nothing. Warning rather than raising is the
   default because tool availability is dynamic: one config is applied across deployments that need
@@ -510,7 +524,8 @@ Only `agent.override(instructions=...)` replaces the lot, and a capability can't
 - **One stored schema, two writers:** the variable can be created by this SDK or by the Logfire
   Agent Control UI, and whichever gets there first stores the schema that the UI edits against and
   that Logfire validates every later version of the value against. Both sides therefore write the
-  same hand-maintained schema, exported as `AGENT_CONFIG_JSON_SCHEMA`. It stays permissive on
+  same hand-maintained schema, `logfire.agent_control.AGENT_CONFIG_JSON_SCHEMA`, which both cores and
+  the UI pin by digest so the three copies cannot drift apart quietly. It stays permissive on
   purpose: `AgentConfig` ignores keys it doesn't know so a value written by a newer UI degrades to
   the sections an older SDK understands instead of failing, and a stored schema that rejected those
   keys would break that by refusing the write.

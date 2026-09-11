@@ -19,12 +19,33 @@ from typing import Any
 
 import logfire
 import pytest
+from logfire.agent_control._reporting import reset_warned_messages
 from logfire.testing import CaptureLogfire
 from pydantic import BaseModel
+
+from pydantic_ai_harness.logfire import _agent_control
 
 from ._helpers import Publish, published_value, variables_provider
 
 _LOGFIRE_CREDENTIAL_VARS = ('LOGFIRE_TOKEN', 'LOGFIRE_API_KEY')
+
+
+@pytest.fixture(autouse=True)
+def _forget_process_state() -> Iterator[None]:
+    """Start each test with the once-per-process guards empty, on both sides of the contract.
+
+    A drop warns once per process and a baseline publishes once per process, by design, so without
+    this a test's outcome would depend on which tests ran before it. The parser's guard lives in
+    `logfire.agent_control` and the capability's in this package; the two never emit the same
+    message, and a test that counts warnings has to reach both.
+    """
+    reset_warned_messages()
+    _agent_control._warned_drops.clear()
+    _agent_control._reset_baseline_publish_guard()
+    yield
+    reset_warned_messages()
+    _agent_control._warned_drops.clear()
+    _agent_control._reset_baseline_publish_guard()
 
 
 @pytest.fixture(autouse=True, scope='package')

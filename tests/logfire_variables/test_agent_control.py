@@ -7,6 +7,15 @@ from typing import Any, cast
 
 import logfire
 import pytest
+from logfire.agent_control import (
+    AGENT_CONFIG_JSON_SCHEMA,
+    MAX_MODEL_FACING_TEXT_LENGTH,
+    AgentConfig,
+    AgentConfigSettings,
+    InstructionBlock,
+    ParameterOverride,
+    ToolDefinitionOverride,
+)
 from logfire.testing import CaptureLogfire
 from logfire.variables import Rollout, Variable, VariableConfig, VariablesConfig
 from pydantic_ai import Agent, RunContext, Tool
@@ -21,17 +30,7 @@ from pydantic_ai.toolsets import FunctionToolset, ToolsetTool, WrapperToolset
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness import AgentControl as RootAgentControl
-from pydantic_ai_harness.logfire import (
-    AGENT_CONFIG_JSON_SCHEMA,
-    AgentConfig,
-    AgentConfigSettings,
-    AgentControl,
-    InstructionBlock,
-    ParameterOverride,
-    ToolDefinitionOverride,
-    _agent_control,
-    _managed_variable,
-)
+from pydantic_ai_harness.logfire import AgentControl, _agent_control, _managed_variable
 
 from ._helpers import (
     Publish,
@@ -46,13 +45,6 @@ from ._helpers import (
 pytestmark = pytest.mark.anyio
 
 assert RootAgentControl is AgentControl
-
-
-@pytest.fixture(autouse=True)
-def _forget_warned_drops() -> None:
-    """Start each test with an empty once-per-process guard so every drop warns independently."""
-    _agent_control._warned_drops.clear()
-    _agent_control._reset_baseline_publish_guard()
 
 
 def instructions_seen(messages: list[ModelMessage]) -> list[str]:
@@ -78,10 +70,10 @@ async def test_managed_instructions_are_appended_not_replaced(publish: Publish) 
         return 'dynamic'
 
     result = await agent.run('hello')
-    # An entry with no `id` adds a block, so everything code-defined still reaches the model. Static
-    # text is grouped ahead of dynamic text (for prompt-cache stability) and source order is kept
-    # within each group, putting the added block after the agent's own.
-    assert instructions_seen(result.all_messages()) == ['code\n\ntoolset\n\ndynamic\n\nmanaged']
+    # An entry with no `id` adds a block, so everything code-defined still reaches the model. The
+    # added block lands at the end of the static run -- last in the prompt as written, and still
+    # ahead of the dynamic text a provider cannot cache.
+    assert instructions_seen(result.all_messages()) == ['code\n\ntoolset\n\nmanaged\n\ndynamic']
 
 
 def weather_toolset() -> FunctionToolset[object]:
@@ -145,6 +137,9 @@ def triples(parts: list[InstructionPart]) -> list[tuple[str | None, str, bool]]:
 AGENT_BLOCK = ('agent', 'AGENT: You are a concise checkout assistant.', False)
 TODAY_BLOCK = ('agent:today', 'DYNAMIC: today is Monday.', True)
 TOOLSET_BLOCK = ('toolset:weather', 'TOOLSET: call get_weather first.', True)
+ADDED_BRIEF = (None, 'MANAGED: be brief.', False)
+"""An added block is unaddressable (nothing in code assembled it) and static (it is the same text on
+every request of the run), which is what puts it inside the prefix a provider can cache."""
 
 
 @pytest.mark.parametrize(
@@ -154,27 +149,22 @@ TOOLSET_BLOCK = ('toolset:weather', 'TOOLSET: call get_weather first.', True)
         pytest.param(
             'blocks_bare',
             {'instructions': 'MANAGED: be brief.'},
-            [AGENT_BLOCK, TODAY_BLOCK, ('capability:agent-control', 'MANAGED: be brief.', True), TOOLSET_BLOCK],
+            [AGENT_BLOCK, ADDED_BRIEF, TODAY_BLOCK, TOOLSET_BLOCK],
             id='bare-string-adds-a-block',
         ),
         pytest.param(
             'blocks_list',
             {'instructions': ['MANAGED: be brief.', 'MANAGED: cite sources.']},
-            [
-                AGENT_BLOCK,
-                TODAY_BLOCK,
-                ('capability:agent-control', 'MANAGED: be brief.\n\nMANAGED: cite sources.', True),
-                TOOLSET_BLOCK,
-            ],
-            id='two-added-blocks-join-into-one-contribution',
+            [AGENT_BLOCK, ADDED_BRIEF, (None, 'MANAGED: cite sources.', False), TODAY_BLOCK, TOOLSET_BLOCK],
+            id='each-added-entry-is-its-own-block',
         ),
         pytest.param(
             'blocks_mixed',
             {'instructions': ['MANAGED: be brief.', {'id': 'agent', 'instructions': 'REMOTE: refund specialist.'}]},
             [
                 ('agent', 'REMOTE: refund specialist.', False),
+                ADDED_BRIEF,
                 TODAY_BLOCK,
-                ('capability:agent-control', 'MANAGED: be brief.', True),
                 TOOLSET_BLOCK,
             ],
             id='one-list-can-add-and-address',
@@ -262,6 +252,32 @@ async def test_an_override_never_moves_the_static_prefix(capfire: CaptureLogfire
     ]
 
 
+async def test_a_dropped_block_does_not_shift_what_a_later_entry_replaces(capfire: CaptureLogfire) -> None:
+    # Two blocks the agent assembles under different keys, one dropped and the other replaced. The
+    # replacement has to land on the block that was addressed rather than on whatever moved up into
+    # its position, which is the one thing that can go wrong when the applied blocks are matched back
+    # onto the parts they came from.
+    seen: list[InstructionPart] = []
+    agent = Agent(
+        capture_instructions(seen),
+        instructions=[
+            'AGENT: You are a concise checkout assistant.',
+            InstructionPart(content='AGENT: Confirm the total before refunding.', name='rules'),
+        ],
+        capabilities=[AgentControl('blocks_drop_then_replace', label='production')],
+    )
+    published = {
+        'instructions': [
+            {'id': 'agent', 'instructions': None},
+            {'id': 'agent:rules', 'instructions': 'REMOTE: refund rules.'},
+            'MANAGED: be brief.',
+        ]
+    }
+    with variables_provider(capfire, published_value('agent__blocks_drop_then_replace', published)):
+        await agent.run('hello')
+    assert triples(seen) == [('agent:rules', 'REMOTE: refund rules.', False), ADDED_BRIEF]
+
+
 async def test_two_entries_addressing_the_same_block_keep_the_first(capfire: CaptureLogfire) -> None:
     # A hand-edited value (or a UI bug) can name one `id` twice. Keeping the first makes the run
     # predictable and names the entry that lost, rather than letting JSON ordering decide silently.
@@ -312,19 +328,18 @@ async def test_added_blocks_render_placeholders_against_deps(publish: Publish) -
             ]
         ),
     )
+    seen: list[InstructionPart] = []
     capability: AgentControl[Deps] = AgentControl('render', label='production', render_template=True)
-    agent = Agent(TestModel(), instructions='code', deps_type=Deps, capabilities=[capability])
+    agent = Agent(capture_instructions(seen), instructions='code', deps_type=Deps, capabilities=[capability])
     result = await agent.run('hello', deps=Deps(city='Paris'))
     assert instructions_seen(result.all_messages()) == ['Base for {{city}}.\n\nServe Paris.\n\nBe brief.']
-
-
-def test_instructions_none_outside_run() -> None:
-    # Nothing is resolved until `wrap_run` opens the run's resolution context, so the contribution
-    # hook has to answer for a capability that was never entered -- as a graph built for inspection is.
-    capability = AgentControl('outside_run_instructions')
-    ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
-    assert capability.resolved is None
-    assert capability.get_instructions()(ctx) is None
+    # A rendered block is this run's answer rather than fixed text, so it is contributed as dynamic
+    # and sorts after the static prompt, where Pydantic AI puts every other `TemplateStr`.
+    assert triples(seen) == [
+        ('agent', 'Base for {{city}}.', False),
+        (None, 'Serve Paris.', True),
+        (None, 'Be brief.', True),
+    ]
 
 
 async def test_tool_definition_patches(publish: Publish) -> None:
@@ -384,43 +399,6 @@ async def test_settings_lower_by_canonical_key_and_ignore_the_rest(publish: Publ
         "Managed agent config sets 'provider_options'",
     ]
     assert seen == [{'temperature': 0.9, 'top_k': 3, 'top_p': 0.4}]
-
-
-def test_agent_config_ignores_forward_keys() -> None:
-    assert AgentConfig.model_validate({'instructions': 'x', 'future': True}) == AgentConfig(instructions='x')
-
-
-@pytest.mark.parametrize(
-    'value,expected',
-    [
-        ({'instructions': '', 'model': 'test'}, AgentConfig(model='test')),
-        (
-            {'instructions': 'managed', 'settings': {'temperature': 'bad', 'max_tokens': 10}},
-            AgentConfig(instructions='managed', settings=AgentConfigSettings(max_tokens=10)),
-        ),
-        ({'instructions': 'managed', 'settings': []}, AgentConfig(instructions='managed')),
-        ({'instructions': 'managed', 'tool_definitions': {}}, AgentConfig(instructions='managed')),
-    ],
-)
-def test_malformed_sections_degrade_independently(value: dict[str, Any], expected: AgentConfig) -> None:
-    with pytest.warns(UserWarning):
-        assert AgentConfig.model_validate(value) == expected
-
-
-def test_oversized_bare_instructions_drop_the_section_and_keep_siblings() -> None:
-    oversized = 'x' * 65_537
-    with pytest.warns(UserWarning, match='65536-character limit') as caught:
-        assert AgentConfig.model_validate({'instructions': oversized, 'model': 'test'}) == AgentConfig(model='test')
-        AgentConfig.model_validate({'instructions': oversized, 'model': 'test'})
-    assert len(caught) == 1
-
-
-def test_oversized_instruction_entry_drops_itself_and_keeps_siblings() -> None:
-    value = {'instructions': ['kept', {'id': 'agent', 'instructions': 'x' * 65_537}], 'model': 'test'}
-    with pytest.warns(UserWarning, match='65536-character limit'):
-        assert AgentConfig.model_validate(value) == AgentConfig(
-            instructions=[InstructionBlock(instructions='kept')], model='test'
-        )
 
 
 def test_prebuilt_variable() -> None:
@@ -538,7 +516,14 @@ async def test_auto_create_uses_request_snapshot(capfire: CaptureLogfire, monkey
                 'parameters': {'city': {'description': 'City to look up.'}},
                 'toolset': '<agent>',
             },
-            {'name': 'raw', 'parameters': {'named': {'description': 'Named.'}}, 'toolset': 'raw-tools'},
+            # An undocumented parameter is listed with nothing in it, which is the point: it is
+            # exactly the one somebody wants to describe from Logfire, and a baseline that listed
+            # only the documented ones would hide it until it had been documented in code first.
+            {
+                'name': 'raw',
+                'parameters': {'plain': {}, 'count': {}, 'named': {'description': 'Named.'}},
+                'toolset': 'raw-tools',
+            },
             {'name': 'empty', 'toolset': 'FunctionToolset'},
         ],
     }
@@ -691,7 +676,7 @@ async def test_published_baseline_contains_only_code_side_behavior(
         'instructions': [{'id': 'agent', 'instructions': 'CODE instruction.', 'dynamic': False}],
         'model': 'function:function:<lambda>:',
         'settings': {'temperature': 0.1},
-        'tool_definitions': [{'name': 'get_weather', 'toolset': '<agent>'}],
+        'tool_definitions': [{'name': 'get_weather', 'parameters': {'city': {}}, 'toolset': '<agent>'}],
     }
 
 
@@ -724,21 +709,40 @@ async def test_baseline_publish_failure_does_not_affect_run_and_warns_once(
     assert second.output.startswith('success')
 
 
-async def test_oversized_code_instructions_do_not_affect_run(capfire: CaptureLogfire) -> None:
+async def test_oversized_code_instructions_do_not_affect_run(
+    capfire: CaptureLogfire, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The length bound is about what a managed value may add, not about what the agent already says.
 
-    `AgentConfig` describes what to apply and what exists with the same fields, so building the
-    baseline validates code-side text too. An agent whose own instructions exceed the bound has a
-    snapshot too big to publish -- not a broken run -- so it warns and keeps going.
+    An agent whose own instructions exceed it has a block too big to publish, not a broken run, so the
+    baseline leaves that block out and says so. Nothing about describing the agent may raise into a
+    request, and the rest of the snapshot is still worth publishing.
     """
+    monkeypatch.setattr(_agent_control, '_spawn_baseline_publish', _agent_control._publish_baseline)
+    updates: list[VariableConfig] = []
     with variables_provider(capfire, published_value('agent__oversized_code', {})):
-        with pytest.warns(UserWarning, match='Failed to publish the code baseline'):
-            result = await Agent(
-                TestModel(),
-                instructions='x' * (_agent_control._MAX_MODEL_FACING_TEXT_LENGTH + 1),
-                capabilities=[AgentControl('oversized_code')],
-            ).run('hello')
+        provider = logfire.DEFAULT_LOGFIRE_INSTANCE.config.get_variable_provider()
+        original_update = provider.update_variable
+
+        def record_update(name: str, updated: VariableConfig) -> VariableConfig:
+            updates.append(updated)
+            return original_update(name, updated)
+
+        monkeypatch.setattr(provider, 'update_variable', record_update)
+        agent = Agent(
+            TestModel(),
+            instructions=[
+                'x' * (MAX_MODEL_FACING_TEXT_LENGTH + 1),
+                InstructionPart(content='AGENT: and something publishable.', name='rest'),
+            ],
+            capabilities=[AgentControl('oversized_code')],
+        )
+        with pytest.warns(UserWarning, match='leaving it out of the published baseline'):
+            result = await agent.run('hello')
     assert result.output.startswith('success')
+    assert json.loads(updates[0].example or '{}')['instructions'] == [
+        {'id': 'agent:rest', 'instructions': 'AGENT: and something publishable.', 'dynamic': False}
+    ]
 
 
 async def test_publish_baseline_opt_out(capfire: CaptureLogfire, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -846,9 +850,11 @@ async def test_rename_collision_warns_and_keeps_other_patches(publish: Publish) 
     assert advertised(seen[:2]) == {'first': 'Managed first.', 'second': None}
 
 
-async def test_unknown_parameter_keys_are_inert(publish: Publish) -> None:
-    # A parameter is part of the tool's code-defined shape, so a patch on one the tool does not have
-    # is the tool having changed -- which the baseline shows -- rather than an entry reaching nothing.
+async def test_a_patch_on_a_parameter_the_tool_does_not_have_is_reported(publish: Publish) -> None:
+    # A parameter is part of the tool's code-defined shape, so a patch naming one the tool does not
+    # have is the tool having changed. From the Logfire UI that looks exactly like a patch that
+    # applied, which is why it goes through `on_unmatched` like every other entry that reached
+    # nothing, and why the tool itself is untouched.
     seen: list[ToolDefinition] = []
     publish(
         'unknown_parameter',
@@ -861,9 +867,8 @@ async def test_unknown_parameter_keys_are_inert(publish: Publish) -> None:
         ),
     )
     capability = AgentControl('unknown_parameter', label='production')
-    with warnings.catch_warnings(record=True) as caught:
+    with pytest.warns(UserWarning, match=r"patches parameter 'missing' of tool 'get_weather'"):
         await Agent(capture_tools(seen), tools=[get_weather], capabilities=[capability]).run('hello')
-    assert caught == []
     assert advertised(seen) == {'get_weather': None}
     assert get_weather('Paris') == 'sunny in Paris'
 
@@ -1000,9 +1005,29 @@ UNMATCHED_CASES = [
         id='a-tool-override-narrowed-to-a-toolset-this-agent-lacks',
     ),
     pytest.param(
+        {'tool_definitions': [{'name': 'get_weather', 'parameters': {'missing': {'description': 'never shown'}}}]},
+        r"patches parameter 'missing' of tool 'get_weather'",
+        id='a-parameter-patch-the-tool-has-no-parameter-for',
+    ),
+    pytest.param(
+        {
+            'tool_definitions': [
+                {'name': 'get_weather', 'new_name': 'get_forecast'},
+                {'name': 'get_forecast', 'description': 'The other one.'},
+            ]
+        },
+        r"renames 'get_weather' to 'get_forecast', which is already advertised",
+        id='a-rename-another-advertised-tool-already-answers-to',
+    ),
+    pytest.param(
         {'settings': {'temperature': 0.2, 'service_tier': 'flex'}},
         r"sets 'service_tier', which this version of the SDK has no model setting for",
         id='a-settings-key-this-sdk-has-no-field-for',
+    ),
+    pytest.param(
+        {'settings': {'timeout': -5}},
+        r'sets a request timeout of -5.0 seconds, which is not a budget',
+        id='a-timeout-that-is-not-a-request-budget',
     ),
 ]
 
@@ -1015,6 +1040,7 @@ async def run_with_unmatched(
     agent = Agent(
         capture_instructions(seen),
         instructions='AGENT: You are a concise checkout assistant.',
+        tools=[get_forecast],
         toolsets=[weather_toolset()],
         capabilities=[AgentControl(name, label='production', on_unmatched=on_unmatched)],
     )
@@ -1070,7 +1096,10 @@ async def test_schema_without_properties_is_tolerated(publish: Publish) -> None:
         ),
     )
     capability = AgentControl('raw_schema', label='production')
-    await Agent(capture_tools(seen), tools=[tool], capabilities=[capability]).run('hello')
+    with pytest.warns(
+        UserWarning, match=r"patches parameter 'missing' of tool 'raw_tool'.*has no top-level parameters"
+    ):
+        await Agent(capture_tools(seen), tools=[tool], capabilities=[capability]).run('hello')
     assert seen[0].parameters_json_schema == {'type': 'object'}
 
 
@@ -1141,14 +1170,18 @@ async def test_known_variable_skips_snapshot_build(capfire: CaptureLogfire, monk
         await Agent(TestModel(), capabilities=[AgentControl('known')]).run('hello')
 
 
-async def test_before_model_request_outside_run_is_inert() -> None:
-    # Both halves of the split are asked: each reaches for the run's resolution, so each has to cope
-    # with there not being one.
+async def test_the_hooks_outside_a_run_are_inert() -> None:
+    # Nothing is resolved until `wrap_run` opens the run's resolution context, so every hook that
+    # reaches for it has to answer for a capability that was never entered -- as a graph built for
+    # inspection is. Both halves of the split are asked, because each reaches for the same resolution.
     bound = AgentControl('outside_run').for_agent(Agent(TestModel()))
     assert isinstance(bound, CombinedCapability)
     request = cast(Any, object())
     for half in bound.capabilities:
         assert await half.before_model_request(cast(Any, None), request) is request
+    ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=0)
+    contributed = bound.capabilities[1].get_model_settings()
+    assert callable(contributed) and contributed(ctx) == ModelSettings()
 
 
 async def test_only_canonical_settings_reach_the_published_baseline(

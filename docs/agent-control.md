@@ -91,6 +91,12 @@ The settings are the canonical ones every framework has a knob for, under the na
 [`ModelSettings`](https://ai.pydantic.dev/api/settings/) gives them. Provider-specific settings
 (`openai_reasoning_effort`, `extra_headers`) stay in code, where they always were.
 
+What a config may hold is the same contract in every Agent Control SDK, and it lives in one place:
+the `logfire.agent_control` package that ships with the `logfire` extra. `AgentControl` reads it
+from there, so what the Logfire UI offers, what a TypeScript service reads, and what this agent
+applies cannot drift apart. Import `AgentConfig` from that package when you want to publish a value
+from code rather than from the UI.
+
 A tool's implementation and the shape of its arguments stay code-owned: Logfire edits what the model
 is *told* about a tool, never what it *does*. A renamed tool still routes to the same function, and
 `ctx.tool_name` is still the original name, so nothing in code has to know about the rename. Logfire
@@ -188,13 +194,16 @@ recognize drops that setting; a malformed tool entry drops that tool; a block it
 that block. The rest of the config still applies, and each drop warns once per process naming what it
 skipped, rather than once per run.
 
-A published change can also be perfectly valid and still reach nothing *here*: an instruction block
-this deployment never assembles (or only computes per request), a tool no toolset advertises, a
-setting this version of the SDK has no field for. `on_unmatched` decides what that costs:
+A published change can also be perfectly valid and still reach nothing *here*. `on_unmatched` decides
+what that costs:
 
 ```python {test="skip"}
 AgentControl(label='production', on_unmatched='error')
 ```
+
+That covers an instruction block this deployment never assembles (or only computes per request), a
+tool no toolset advertises, a parameter a patched tool does not have, a rename another tool already
+answers to, a setting the contract has no field for, and a `timeout` no request could be given.
 
 - `'warn'` (the default) emits a `UserWarning` once per process, at the point the change would have
   applied, so a change Logfire shows and the agent isn't making is visible without stopping anything.
@@ -264,10 +273,5 @@ current run picked up (`value`, `label`, `version`, `reason`), and is `None` out
 
 ::: pydantic_ai_harness.logfire.AgentControl
 
-::: pydantic_ai_harness.logfire.AgentConfig
-
-::: pydantic_ai_harness.logfire.InstructionBlock
-
-::: pydantic_ai_harness.logfire.ToolDefinitionOverride
-
-::: pydantic_ai_harness.logfire.AgentConfigSettings
+The config a variable holds -- `AgentConfig` and the models it is built from -- is documented with the
+contract itself, in [`logfire.agent_control`](https://github.com/pydantic/logfire/tree/main/logfire/agent_control).
