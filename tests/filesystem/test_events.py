@@ -114,19 +114,18 @@ def _retry_reason(events: list[AgentStreamEvent]) -> str:
 class WrittenListener(AbstractCapability[None]):
     """Subscribes to writes the way a capability such as `RepoContext` would.
 
-    With `root` set it also reads the file when the event arrives, so a test
-    can pin that the write has landed before the notification fires.
+    It reads the file as the event arrives, so a test can pin that the write
+    has landed before the notification fires.
     """
 
-    root: Path | None = None
+    root: Path
     written: list[FileWrittenEvent] = field(default_factory=list[FileWrittenEvent])
     on_disk: list[str] = field(default_factory=list[str])
 
     @on_event(FileWrittenEvent)
     async def _on_written(self, ctx: RunContext[None], event: FileWrittenEvent) -> None:
         self.written.append(event)
-        if self.root is not None:
-            self.on_disk.append((self.root / event.path).read_text())
+        self.on_disk.append((self.root / event.path).read_text())
 
 
 @dataclass
