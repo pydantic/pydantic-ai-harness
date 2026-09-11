@@ -247,6 +247,7 @@ class OutputReader:
         self._stream = stream
         self._on_line = on_line
         self._lines = _LineBuffer()
+        self._pending: list[tuple[str, bool]] = []
         self.chunks: list[bytes] = []
 
     @property
@@ -254,14 +255,21 @@ class OutputReader:
         return b''.join(self.chunks).decode('utf-8', errors='replace')
 
     async def read(self) -> None:
-        """Read to end of file."""
+        """Read to end of file, buffering lines for later delivery."""
         async for chunk in self._stream:
             self.chunks.append(chunk)
-            if self._on_line is None:
-                continue
-            for line, truncated in self._lines.feed(chunk):
-                await self._on_line(line, truncated)
-        await self.flush()
+            if self._on_line is not None:
+                self._pending.extend(self._lines.feed(chunk))
+
+    async def deliver(self) -> None:
+        """Invoke callbacks for buffered lines and any unterminated final line."""
+        if self._on_line is None:
+            return
+        for line, truncated in self._pending:
+            await self._on_line(line, truncated)
+        self._pending.clear()
+        if (last := self._lines.flush()) is not None:
+            await self._on_line(*last)
 
     async def flush(self) -> None:
         """Hand the sink the unterminated last line, if any."""
@@ -277,13 +285,11 @@ class OutputReader:
 
 
 async def drain_with_timeout(*readers: OutputReader) -> None:
-    """Finish reading after a kill, for as long as a grandchild may hold the pipe, then flush."""
+    """Finish reading after a kill, for as long as a grandchild may hold the pipe."""
     with anyio.move_on_after(_IO_DRAIN_TIMEOUT):
         async with anyio.create_task_group() as tg:
             for reader in readers:
                 tg.start_soon(reader.drain)
-    for reader in readers:
-        await reader.flush()
 
 
 async def run_to_exit(proc: anyio.abc.Process, *readers: OutputReader, timeout: float) -> tuple[int, bool]:
@@ -292,18 +298,27 @@ async def run_to_exit(proc: anyio.abc.Process, *readers: OutputReader, timeout: 
     The whole group is killed on timeout and on cancellation alike:
     `proc.aclose()` kills only the shell, and its children would outlive
     the run.
+
+    Callback latency from `on_line` sinks does not consume the timeout: lines
+    are buffered during the timed IO phase and delivered afterward, so a slow
+    listener cannot turn a completed command into a spurious timeout.
     """
     try:
         with anyio.fail_after(timeout):
             async with anyio.create_task_group() as tg:
                 for reader in readers:
                     tg.start_soon(reader.read)
-            return await proc.wait(), False
+            exit_code = await proc.wait()
+        for reader in readers:
+            await reader.deliver()
+        return exit_code, False
     except TimeoutError:
         await kill_process_group(proc)
         exit_code = await proc.wait()
         with anyio.CancelScope(shield=True):
             await drain_with_timeout(*readers)
+            for reader in readers:
+                await reader.deliver()
         return exit_code, True
     except BaseException:
         await kill_process_group(proc)
