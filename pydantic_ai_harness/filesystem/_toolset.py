@@ -11,7 +11,7 @@ import os
 import posixpath
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any, Concatenate, ParamSpec
+from typing import Any, Concatenate, Literal, ParamSpec
 
 from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
@@ -121,15 +121,53 @@ def _recoverable(
     return wrapper
 
 
-def _format_lines(lines: Sequence[str], *, first_line_number: int, has_more: bool) -> str:
-    """Number a window of lines, with a hint for continuing past its end."""
+_MAX_LINE_CHARS = 2000
+"""Per-line character cap in the model-facing `read_file` string.
+
+Claude Code, OpenCode, and Gemini CLI all clip a rendered line at 2000 characters.
+The workspace facade never mid-line truncates; this clip is FileSystem rendering.
+"""
+
+
+def _clip_line(line: str) -> str:
+    """Clip a single rendered line so one minified row cannot flood the context."""
+    if len(line) <= _MAX_LINE_CHARS:
+        return line
+    return f'{line[:_MAX_LINE_CHARS]} ... [line truncated to {_MAX_LINE_CHARS} chars]'
+
+
+def _format_lines(
+    lines: Sequence[str],
+    *,
+    first_line_number: int,
+    truncated: bool,
+    truncated_by: Literal['lines', 'bytes'] | None,
+    remaining_lines: int | None,
+    first_line_exceeds_limit: bool,
+    total_lines: int | None,
+) -> str:
+    """Number a window of lines, with a notice that cannot be mistaken for the whole file."""
+    if first_line_exceeds_limit:
+        return (
+            f'[truncated: line {first_line_number} exceeds the byte limit; no content returned. '
+            f'Use a smaller window or a byte-range shell read.]\n'
+        )
     if not lines:
         return '(empty file)\n'
 
-    result = ''.join(f'{number:>6}\t{line}\n' for number, line in enumerate(lines, start=first_line_number))
-    if has_more:
-        result += f'... (more lines. Use offset={first_line_number - 1 + len(lines)} to continue reading.)\n'
-    return result
+    result = ''.join(f'{number:>6}\t{_clip_line(line)}\n' for number, line in enumerate(lines, start=first_line_number))
+    if not truncated:
+        return result
+    end_line = first_line_number + len(lines) - 1
+    shown = f'lines {first_line_number}-{end_line}'
+    if total_lines is not None:
+        shown = f'{shown} of {total_lines}'
+    remaining_note = ''
+    if remaining_lines:
+        remaining_note = f'; {remaining_lines} line{"" if remaining_lines == 1 else "s"} remaining'
+    cap = 'byte limit' if truncated_by == 'bytes' else 'line limit'
+    next_offset = first_line_number - 1 + len(lines)
+    return result + f'[truncated: showing {shown}{remaining_note} ({cap}). Use offset={next_offset} to continue.]\n'
 
 
 def _is_binary(data: bytes, sample_size: int = 8192) -> bool:
@@ -299,10 +337,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             ctx: The current agent run context.
             path: Relative paths always resolve from the configured root.
             offset: Zero-based line offset to start reading from.
-            limit: Maximum number of lines to return (default: 2000).
+            limit: Maximum number of lines to return (default: 2000). The workspace
+                also applies a 50 KiB byte cap; the window stops at whichever hits first.
 
         Returns:
-            File content with line numbers, plus metadata header.
+            File content with line numbers and a metadata header. A truncated window
+            ends with a `[truncated: ...]` notice; a line longer than 2000 characters
+            is clipped in the returned string. Neither is silent.
         """
         if limit is None:
             limit = self._max_read_lines
@@ -314,7 +355,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         except FileNotFoundError as e:
             raise FileNotFoundError(f'File not found: {path}') from e
 
-        if offset > 0 and not window.lines:
+        if offset > 0 and not window.lines and not window.first_line_exceeds_limit:
             # Reading the file just to count its lines would defeat the bounded read.
             raise ValueError(f'Offset {offset} exceeds file length.')
 
@@ -327,19 +368,32 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             return f'[Binary file: {window.byte_size if window.byte_size is not None else len(raw)} bytes. Use a binary-aware tool to inspect.]'
 
         lines = window.lines
-        if offset == 0 and not window.has_more:
+        if offset == 0 and not window.truncated:
             # The whole file is in the window, so report the hash write_file and edit_file verify
             # against. It comes from the file itself: a window drops the trailing newline and any
             # `\r`, so hashing the window text would report a hash they never accept.
             content_hash = _content_hash((await ctx.workspace.read_bytes(resolved)).decode('utf-8', errors='replace'))
             header = f'[{path} | {len(lines)} lines | hash:{content_hash}]\n'
+        elif window.first_line_exceeds_limit:
+            # The window is empty on purpose; hashing `window.text` would hash the notice.
+            content_hash = _content_hash('')
+            header = f'[{path} | line {offset + 1} exceeds byte limit]\n'
         else:
-            # A partial window has no whole-file hash, so the event reports the hash of the window
-            # read rather than dragging the whole file across to hash it.
-            content_hash = _content_hash(window.text)
+            # A partial window has no whole-file hash, so the event reports the hash of the
+            # returned lines rather than dragging the whole file across. Hash the lines, not
+            # `window.text`: that string includes the truncation notice.
+            content_hash = _content_hash('\n'.join(lines))
             header = f'[{path} | lines {offset + 1}-{offset + len(lines)}]\n'
         await ctx.emit(FileReadEvent(path=location, root_dir=root, content_hash=content_hash))
-        return header + _format_lines(lines, first_line_number=offset + 1, has_more=window.has_more)
+        return header + _format_lines(
+            lines,
+            first_line_number=offset + 1,
+            truncated=window.truncated,
+            truncated_by=window.truncated_by,
+            remaining_lines=window.remaining_lines,
+            first_line_exceeds_limit=window.first_line_exceeds_limit,
+            total_lines=window.total_lines,
+        )
 
     @_recoverable
     async def write_file(

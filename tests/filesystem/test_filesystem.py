@@ -26,6 +26,7 @@ from pydantic_ai.workspaces import (
     WorkspaceResult,
     WorkspaceTimeoutError,
     WorkspaceUnavailableError,
+    WrapperWorkspace,
 )
 
 from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES, FileSystem, FileSystemToolset
@@ -327,7 +328,8 @@ async def test_read_file_pages_from_a_zero_based_offset(tmp_path: Path, workspac
 
     # A partial window omits the hash: it would never match the whole-file hash writes verify.
     assert first == (
-        '[lines.txt | lines 1-2]\n     1\tone\n     2\ttwo\n... (more lines. Use offset=2 to continue reading.)\n'
+        '[lines.txt | lines 1-2]\n     1\tone\n     2\ttwo\n'
+        '[truncated: showing lines 1-2 (line limit). Use offset=2 to continue.]\n'
     )
     assert second == '[lines.txt | lines 3-4]\n     3\tthree\n     4\tfour\n'
 
@@ -340,7 +342,8 @@ async def test_read_file_stops_at_max_read_lines_without_an_explicit_limit(
     result = await _call(_toolset(tmp_path, max_read_lines=2), _ctx(workspace), 'read_file', {'path': 'a.txt'})
 
     assert result == (
-        '[a.txt | lines 1-2]\n     1\tone\n     2\ttwo\n... (more lines. Use offset=2 to continue reading.)\n'
+        '[a.txt | lines 1-2]\n     1\tone\n     2\ttwo\n'
+        '[truncated: showing lines 1-2 (line limit). Use offset=2 to continue.]\n'
     )
 
 
@@ -402,6 +405,66 @@ async def test_read_file_reads_large_multibyte_text_as_text(tmp_path: Path, work
     result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'unicode.txt', 'offset': 5000})
 
     assert 'émore text' in result
+
+
+async def test_read_file_clips_an_overlong_line_in_the_rendered_string(tmp_path: Path, workspace: Workspace) -> None:
+    line = 'x' * 2500
+    (tmp_path / 'long.txt').write_text(f'{line}\n')
+
+    result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'long.txt'})
+
+    assert '     1\t' + 'x' * 2000 + ' ... [line truncated to 2000 chars]\n' in result
+    assert 'x' * 2001 not in result
+
+
+async def test_read_file_reports_when_the_first_line_exceeds_the_byte_limit(
+    tmp_path: Path, workspace: Workspace
+) -> None:
+    (tmp_path / 'huge.txt').write_text('x' * (50 * 1024 + 1))
+
+    result = await _call(_toolset(tmp_path), _ctx(workspace), 'read_file', {'path': 'huge.txt'})
+
+    assert result == (
+        '[huge.txt | line 1 exceeds byte limit]\n'
+        '[truncated: line 1 exceeds the byte limit; no content returned. '
+        'Use a smaller window or a byte-range shell read.]\n'
+    )
+
+
+async def test_read_file_stops_at_the_workspace_byte_cap(tmp_path: Path, workspace: Workspace) -> None:
+    (tmp_path / 'wide.txt').write_text('\n'.join('x' * 200 for _ in range(400)) + '\n')
+
+    result = await _call(_toolset(tmp_path, max_read_lines=2000), _ctx(workspace), 'read_file', {'path': 'wide.txt'})
+
+    assert '[truncated:' in result
+    assert '(byte limit). Use offset=' in result
+    assert 'xxxxx' in result
+
+
+@pytest.mark.parametrize(
+    ('body', 'footer'),
+    [
+        (
+            'one\ntwo\nthree\n',
+            '[truncated: showing lines 1-2 of 3; 1 line remaining (line limit). Use offset=2 to continue.]\n',
+        ),
+        (
+            'one\ntwo\nthree\nfour\n',
+            '[truncated: showing lines 1-2 of 4; 2 lines remaining (line limit). Use offset=2 to continue.]\n',
+        ),
+    ],
+    ids=['one-remaining', 'two-remaining'],
+)
+async def test_read_file_names_remaining_lines_when_the_workspace_knows_the_total(
+    tmp_path: Path, body: str, footer: str
+) -> None:
+    (tmp_path / 'a.txt').write_text(body)
+    async with LocalWorkspace(root=tmp_path) as backend:
+        # WrapperWorkspace skips the sed fast path, so the window includes `total_lines`.
+        workspace = WrapperWorkspace(Workspace(backend))
+        result = await _call(_toolset(tmp_path, max_read_lines=2), _ctx(workspace), 'read_file', {'path': 'a.txt'})
+
+    assert result.endswith(footer)
 
 
 @pytest.mark.parametrize(

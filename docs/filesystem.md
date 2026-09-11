@@ -63,7 +63,7 @@ nothing; for untrusted work attach a container- or VM-backed workspace instead.
 
 | Tool | Purpose |
 |---|---|
-| `read_file` | Read a UTF-8 text file with line numbers and a content hash. Binary or undecodable files are detected and not dumped. Supports `offset`/`limit` paging. |
+| `read_file` | Read a UTF-8 text file with line numbers and a content hash. Binary or undecodable files are detected and not dumped. Supports `offset`/`limit` paging. A truncated window ends with `[truncated: ...]`; lines longer than 2000 characters are clipped in the returned string. |
 | `write_file` | Create or overwrite a file. Optional `expected_hash` rejects stale writes (optimistic concurrency). |
 | `edit_file` | Exact-string replacement; `old_text` must match exactly once. Optional `expected_hash`. |
 | `list_directory` | List a directory's entries with type indicators and sizes. |
@@ -199,7 +199,7 @@ FileSystem(
     allowed_patterns=[],           # allowlist globs (empty = allow all)
     denied_patterns=[],            # denylist globs
     protected_patterns=[...],      # read-only globs (defaults to secrets/.git)
-    max_read_lines=2000,           # cap for a single read_file
+    max_read_lines=2000,           # line cap for a single read_file (workspace also caps at 50 KiB)
     max_list_results=1000,         # cap for list_directory
     max_search_results=1000,       # cap for search_files
     max_find_results=1000,         # cap for find_files
@@ -210,6 +210,13 @@ The integer limits must be positive; they are validated at construction and
 raise `ValueError` otherwise. A walker that hits its cap ends its output with a
 `[... truncated at N ...]` marker, and only when a further entry was actually
 dropped.
+
+`read_file` stops at `max_read_lines` or the workspace's 50 KiB byte cap,
+whichever hits first — the same pair Pi and OpenCode use. The returned string
+always names a cap with `[truncated: showing lines X-Y ...]`. A single line
+longer than the byte cap returns no content rather than a partial line. Lines
+longer than 2000 characters are clipped in the tool string (Claude Code,
+OpenCode, Gemini CLI); the workspace itself never mid-line truncates.
 
 ## Agent spec (YAML/JSON)
 

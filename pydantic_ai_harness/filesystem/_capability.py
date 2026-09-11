@@ -48,7 +48,11 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     """
 
     max_read_lines: int = 2000
-    """Maximum number of lines returned by a single `read_file` call."""
+    """Maximum number of lines returned by a single `read_file` call.
+
+    Matches Claude Code, Pi, OpenCode, and Gemini CLI. The workspace also applies
+    a 50 KiB byte cap; the window stops at whichever limit hits first.
+    """
 
     max_list_results: int = 1000
     """Maximum number of entries returned by `list_directory`."""
