@@ -72,6 +72,7 @@ from pydantic_ai_harness import (
     SystemReminders,
     ToolOutputLimits,
 )
+from pydantic_ai_harness.logfire import AgentControl
 from pydantic_ai_harness.system_reminders import Reminder
 
 pytestmark = pytest.mark.anyio
@@ -169,6 +170,12 @@ def _check_advisor(merged: Any) -> None:
     assert merged.max_tokens == 4096
 
 
+def _check_agent_control(merged: Any) -> None:
+    # The later variable wins, so the merge is one managed config rather than two resolutions.
+    assert merged._variable.name == 'agent__beta'  # pyright: ignore[reportPrivateUsage]
+    assert merged.render_template is True
+
+
 def _check_sub_agents(merged: Any) -> None:
     # Rosters union: an agent either side could reach stays reachable through one delegate tool.
     assert [entry.agent.name for entry in merged.agents] == ['alpha', 'beta']
@@ -225,6 +232,14 @@ COMBINE_POLICY: dict[str, Policy] = {
         ),
         _check_sub_agents,
     ),
+    'AgentControl': Combines(
+        'one managed config per agent; a second resolution would fight the first over model and settings',
+        lambda: (
+            AgentControl[Any](name='alpha', auto_create=False),
+            AgentControl[Any](name='beta', auto_create=False, render_template=True),
+        ),
+        _check_agent_control,
+    ),
     'Advisor': Combines(
         'one advisor per agent; its tool name is fixed',
         lambda: (
@@ -245,6 +260,13 @@ COMBINE_POLICY: dict[str, Policy] = {
     'PromptInjectionDefender': Anonymous('one per `tool_filter`; several scopes compose'),
     'ToolGuardrail': Anonymous('several guards is the design'),
     'ManagedPrompt': Anonymous('one per prompt name'),
+    'ManagedVariableCapability': Anonymous(
+        'the base every managed-variable capability derives from; each subclass answers for itself'
+    ),
+    '_AgentControlOverrides': Anonymous(
+        'never user-constructed: `AgentControl.for_agent` stitches exactly one alongside the control '
+        'it shares state with, so there are as many of these as there are `AgentControl`s -- which is one'
+    ),
     'RepoContext': Anonymous('one per workspace root'),
     'ReportContextUsage': Anonymous('a passive observer; several callbacks compose'),
     'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),

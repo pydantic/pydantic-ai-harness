@@ -2427,8 +2427,8 @@ wheels = [
 
 [[package]]
 name = "logfire"
-version = "4.33.0"
-source = { registry = "https://pypi.org/simple" }
+version = "5.0.0"
+source = { git = "https://github.com/pydantic/logfire.git?branch=agent-control-core#7249fc0ee134917b9bb7a8972d0a1ed953172f61" }
 dependencies = [
     { name = "executing" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
@@ -2439,10 +2439,6 @@ dependencies = [
     { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/10/66/716dfae86d49f5861998151d9d10a023c225c9cf553d37bf4a7eb8444475/logfire-4.33.0.tar.gz", hash = "sha256:1f0ac129b4f76fd4a61763bff5e9fcd75aff99348b89071faa2f54e1213f856a", size = 1132586, upload-time = "2026-05-13T15:14:15.588Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/30/526aa2f7f08073d56e9d9d4d8dffb991225dbd02ec537a06b1c1f8f1c4e9/logfire-4.33.0-py3-none-any.whl", hash = "sha256:eb876a497f2f8cc450005541192ca2e87e0f8781dc20f88b952ab0b141a1ae76", size = 339969, upload-time = "2026-05-13T15:14:12.516Z" },
 ]
 
 [package.optional-dependencies]
@@ -4030,7 +4026,7 @@ requires-dist = [
     { name = "genai-prices", specifier = ">=0.0.71" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "idna", marker = "extra == 'playwright'", specifier = ">=3.4" },
-    { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
+    { name = "logfire", marker = "extra == 'logfire'", git = "https://github.com/pydantic/logfire.git?branch=agent-control-core" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.0" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.61.0" },
     { name = "pydantic-ai-slim", specifier = ">=2.40.0" },
@@ -4061,7 +4057,7 @@ dev = [
     { name = "coverage", specifier = ">=7.10.7" },
     { name = "dirty-equals", specifier = ">=0.9.0" },
     { name = "inline-snapshot", specifier = ">=0.32.5" },
-    { name = "logfire", extras = ["httpx"], specifier = ">=4.31.0" },
+    { name = "logfire", extras = ["httpx"], git = "https://github.com/pydantic/logfire.git?branch=agent-control-core" },
     { name = "mongomock-motor", specifier = ">=0.0.36" },
     { name = "pydantic-ai-harness", extras = ["code-mode"] },
     { name = "pydantic-ai-slim", extras = ["anthropic"] },
