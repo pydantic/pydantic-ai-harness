@@ -112,13 +112,21 @@ def _retry_reason(events: list[AgentStreamEvent]) -> str:
 
 @dataclass
 class WrittenListener(AbstractCapability[None]):
-    """Subscribes to writes the way a capability such as `RepoContext` would."""
+    """Subscribes to writes the way a capability such as `RepoContext` would.
 
+    With `root` set it also reads the file when the event arrives, so a test
+    can pin that the write has landed before the notification fires.
+    """
+
+    root: Path | None = None
     written: list[FileWrittenEvent] = field(default_factory=list[FileWrittenEvent])
+    on_disk: list[str] = field(default_factory=list[str])
 
     @on_event(FileWrittenEvent)
     async def _on_written(self, ctx: RunContext[None], event: FileWrittenEvent) -> None:
         self.written.append(event)
+        if self.root is not None:
+            self.on_disk.append((self.root / event.path).read_text())
 
 
 @dataclass
@@ -524,7 +532,7 @@ class TestFileChangeRequests:
 
     async def test_a_listener_for_writes_receives_the_edit(self, tmp_path: Path) -> None:
         (tmp_path / 'target.txt').write_text('old\n')
-        listener = WrittenListener()
+        listener = WrittenListener(root=tmp_path)
 
         await _run_and_collect(
             tmp_path, 'edit_file', '{"path":"target.txt","old_text":"old","new_text":"new"}', listeners=[listener]
@@ -536,6 +544,19 @@ class TestFileChangeRequests:
         assert event.diff.endswith('-old\n+new')
         # The serialized kind the docs promise, where `main` emitted `file_system.file_written`.
         assert event.kind == 'file_system.file_edited'
+        # The event fires only after the edit has landed on disk.
+        assert listener.on_disk == ['new\n']
+
+    async def test_written_event_fires_after_the_content_lands(self, tmp_path: Path) -> None:
+        listener = WrittenListener(root=tmp_path)
+
+        await _run_and_collect(tmp_path, 'write_file', '{"path":"target.txt","content":"new\\n"}', listeners=[listener])
+
+        (event,) = listener.written
+        assert not isinstance(event, FileEditedEvent)
+        assert event.kind == 'file_system.file_written'
+        # The event fires only after the write has landed on disk.
+        assert listener.on_disk == ['new\n']
 
     async def test_large_diff_is_cut_and_marked(self, tmp_path: Path) -> None:
         content = ''.join(f'line {i}\n' for i in range(2000))
