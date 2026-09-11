@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from copy import copy
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Literal
 
-from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import CachePoint, ModelRequest, ModelResponse, UserPromptPart
+from pydantic_ai.capabilities import AbstractCapability, durable_operation
+from pydantic_ai.messages import CachePoint, ModelMessage, ModelRequest, ModelResponse, UserPromptPart
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
 
@@ -18,6 +19,7 @@ from pydantic_ai_harness.planning._toolset import (
     available_tool_names,
     render_plan,
 )
+from pydantic_ai_harness.planning._types import PlanItem
 
 if TYPE_CHECKING:
     from pydantic_ai._instructions import AgentInstructions
@@ -52,9 +54,10 @@ class Planning(AbstractCapability[AgentDepsT]):
     -- when `enable_subtasks` is set -- `add_subtask`, `set_dependency`,
     `get_available_tasks`); `tools` narrows that surface to an allowlist. The
     current plan is surfaced back as an *ephemeral* reminder appended to the
-    tail of each request. Its cache-stable opening tag precedes a `CachePoint`,
-    so the cached prefix stays byte-identical across turns; only the mutable
-    plan content is re-read each turn.
+    tail of each request. A single `CachePoint` is anchored on the last durable
+    user content, so the prefix it saves is a prefix of the next request; the
+    reminder itself carries no breakpoint, so only the mutable plan content is
+    re-read each turn.
 
     By default the plan lives in memory for the duration of a single run (a
     fresh, isolated plan per run). Pass a `store` (or `store_resolver`) to
@@ -85,7 +88,7 @@ class Planning(AbstractCapability[AgentDepsT]):
     """
 
     cache_ttl: Literal['5m', '1h'] = '5m'
-    """TTL for the cache breakpoint placed after the stable plan-reminder opening tag."""
+    """TTL for the cache breakpoint anchored on the last durable user content."""
 
     store: PlanStore | None = None
     """Storage backend. `None` keeps a fresh in-memory plan per run (the original
@@ -98,7 +101,7 @@ class Planning(AbstractCapability[AgentDepsT]):
     """Add the subtask/dependency tools and the `blocked` status when true."""
 
     inject: bool = True
-    """Surface the current plan as a cache-safe tail reminder each turn."""
+    """Surface the current plan as an ephemeral tail reminder each turn."""
 
     tools: Sequence[str] | None = None
     """Optional allowlist of tool names to register; `None` registers all of them.
@@ -115,11 +118,15 @@ class Planning(AbstractCapability[AgentDepsT]):
     descriptions: dict[str, str] | None = None
     """Optional per-tool description overrides, keyed by tool name. Unknown names raise `ValueError`."""
 
+    # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    _: KW_ONLY
+    id: str | None = 'planning'
+
     _resolved_store: PlanStore | None = field(default=None, init=False, repr=False, compare=False)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> Planning[AgentDepsT]:
         """Return a clone with this run's store resolved and cached (per-run isolation)."""
-        clone = replace(self)
+        clone = copy(self)
         clone._resolved_store = clone._resolve_store(ctx)
         return clone
 
@@ -168,20 +175,24 @@ class Planning(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        """Append the current plan as an ephemeral tail reminder with a cache breakpoint."""
+        """Anchor a cache breakpoint on durable user content, then append the ephemeral plan reminder."""
         if not self.inject:
             return await handler(request_context)
-        items = await self.resolve_store(ctx).get_items()
+        items = await self._read_plan(ctx)
         if not items:
             return await handler(request_context)
         messages = request_context.messages
         last = messages[-1]
         if isinstance(last, ModelRequest):
-            reminder = UserPromptPart(
-                content=['<plan-reminder>\n', CachePoint(ttl=self.cache_ttl), _reminder_text(render_plan(items))]
-            )
+            _anchor_cache_breakpoint(messages, self.cache_ttl)
+            last = messages[-1]
+            reminder = UserPromptPart(content=['<plan-reminder>\n', _reminder_text(render_plan(items))])
             messages[-1] = replace(last, parts=[*last.parts, reminder])
         return await handler(request_context)
+
+    @durable_operation('read_plan')
+    async def _read_plan(self, ctx: RunContext[AgentDepsT]) -> list[PlanItem]:
+        return await self.resolve_store(ctx).get_items()
 
     @classmethod
     def from_spec(
@@ -227,3 +238,41 @@ class Planning(AbstractCapability[AgentDepsT]):
 
 def _reminder_text(plan: str) -> str:
     return f'Your current plan (keep it updated with the planning tools):\n\n{plan}\n</plan-reminder>'
+
+
+def _anchor_cache_breakpoint(messages: list[ModelMessage], ttl: Literal['5m', '1h']) -> None:
+    """Place a `ttl` cache breakpoint behind the last durable user content, when any exists.
+
+    The breakpoint must not lead its part: a leading one is rejected by OpenAI-compatible
+    and OpenRouter providers, and a breakpoint on ephemeral content would not describe a
+    prefix of the next request. With no eligible durable content, no breakpoint is placed.
+
+    A capability earlier in the capabilities list applies its request mutations first,
+    so one that appends a `UserPromptPart` each request (for example `SystemReminders`)
+    displaces the anchor onto that part; the prefix then stays cache-stable only while
+    that content is stable across turns.
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        message = messages[i]
+        if not isinstance(message, ModelRequest):
+            continue
+        for j in range(len(message.parts) - 1, -1, -1):
+            part = message.parts[j]
+            if not isinstance(part, UserPromptPart) or not _has_anchorable_content(part):
+                continue
+            anchored = (
+                replace(part, content=[part.content, CachePoint(ttl=ttl)])
+                if isinstance(part.content, str)
+                else replace(part, content=[*part.content, CachePoint(ttl=ttl)])
+            )
+            parts = [*message.parts]
+            parts[j] = anchored
+            messages[i] = replace(message, parts=parts)
+            return
+
+
+def _has_anchorable_content(part: UserPromptPart) -> bool:
+    """Whether a `CachePoint` appended to this part would sit behind existing user content."""
+    if isinstance(part.content, str):
+        return bool(part.content)
+    return any(item for item in part.content if not isinstance(item, CachePoint))

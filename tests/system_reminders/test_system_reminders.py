@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
-from pydantic_ai import Agent
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     BinaryContent,
     CachePoint,
@@ -34,8 +35,19 @@ from pydantic_ai_harness.system_reminders import (
     Reminder,
     SystemReminders,
 )
+from tests._recording_durability import (  # pyright: ignore[reportMissingTypeStubs]
+    RecordingDurability,
+    RestrictedRunContext,
+)
+from tests.conftest import agent_run_names  # pyright: ignore[reportMissingTypeStubs]
 
-pytestmark = pytest.mark.anyio
+if TYPE_CHECKING:
+    from logfire.testing import CaptureLogfire
+
+pytestmark = [
+    pytest.mark.anyio,
+    pytest.mark.filterwarnings('ignore::pydantic_ai_harness.HarnessDeprecationWarning'),
+]
 
 
 @pytest.fixture
@@ -56,6 +68,11 @@ def _ctx(
     ctx.messages = messages if messages is not None else []
     ctx.usage = usage if usage is not None else RunUsage()
     ctx.usage_limits = usage_limits if usage_limits is not None else UsageLimits()
+
+    async def emit(event: Any) -> Any:
+        return event
+
+    ctx.emit = emit
     return ctx
 
 
@@ -587,6 +604,139 @@ def _capture_model(store: dict[str, str], output: str = 'generated') -> Function
 
 
 class TestLLMReminder:
+    @pytest.mark.usefixtures('instrument_all_agents')
+    async def test_generation_run_is_named_after_the_capability(self, capfire: CaptureLogfire) -> None:
+        reminder = LLMReminder(model=FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart('refocus')])))
+        agent = Agent(
+            TestModel(call_tools=[]), name='outer', capabilities=[SystemReminders(dynamic_reminders=[reminder])]
+        )
+
+        await agent.run('stay focused')
+
+        assert 'system_reminders' in agent_run_names(capfire)
+
+    async def test_generation_dispatches_as_durable_operation(self) -> None:
+        durability = RecordingDurability()
+        capability = SystemReminders(
+            dynamic_reminders=[
+                LLMReminder(model=FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart('refocus')])))
+            ],
+        )
+        assert capability.id == 'system_reminders'
+        agent = Agent(TestModel(call_tools=[]), name='system_reminders', capabilities=[capability, durability])
+
+        await agent.run('stay focused')
+
+        bound = RecordingDurability.from_agent(agent)
+        assert bound is not None
+        assert 'system_reminders__capability__system_reminders.generate_reminder' in {name for name, _ in bound.calls}
+
+    async def test_durable_generation_does_not_read_worker_messages(self) -> None:
+        captured: dict[str, str] = {}
+        reminder = LLMReminder(model=_capture_model(captured, output='generated durably'))
+        capability = SystemReminders(dynamic_reminders=[reminder])
+        capability._dynamic_snapshot = (reminder,)  # pyright: ignore[reportPrivateUsage]
+        ctx = RestrictedRunContext(
+            deps=None,
+            model=TestModel(),
+            usage=RunUsage(),
+            usage_limits=UsageLimits(),
+        )
+        ctx.unavailable_fields = frozenset({'messages'})
+
+        result = await capability._generate_reminder(  # pyright: ignore[reportPrivateUsage]
+            ctx, 0, 'user: fix durable reminders'
+        )
+
+        assert result == ('generated durably', None)
+        assert captured['prompt'] == 'user: fix durable reminders'
+
+    def test_restricted_run_context_rejects_an_excluded_field(self) -> None:
+        # Negative control for the test above: without proof that the stand-in actually rejects
+        # `messages`, that test would pass just as well against a stand-in that carried it.
+        ctx = RestrictedRunContext(deps=None, model=TestModel(), usage=RunUsage(), usage_limits=UsageLimits())
+        ctx.unavailable_fields = frozenset({'messages'})
+
+        with pytest.raises(UserError, match="'messages' is not available in this durable operation"):
+            _ = ctx.messages
+
+    async def test_subclass_call_override_is_preserved(self) -> None:
+        class GatedReminder(LLMReminder[None]):
+            async def __call__(self, ctx: RunContext[None]) -> str | None:
+                del ctx
+                return 'subclass override'
+
+        capability = SystemReminders(dynamic_reminders=[GatedReminder(model=_capture_model({}))])
+        messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('keep going')])]
+
+        seen = await _run_wrap(capability, messages, ctx=_ctx(messages=messages))
+
+        assert _fired_text(seen) == 'subclass override'
+
+    async def test_generation_uses_stable_snapshot_when_an_earlier_callback_mutates_configuration(self) -> None:
+        def remove_self(ctx: RunContext[None]) -> None:
+            del ctx
+            capability.dynamic_reminders = ()
+            return None
+
+        capability = SystemReminders(
+            dynamic_reminders=[remove_self, LLMReminder(model=_capture_model({}, output='generated from snapshot'))]
+        )
+        messages: list[ModelMessage] = [ModelRequest(parts=[UserPromptPart('keep going')])]
+
+        seen = await _run_wrap(capability, messages, ctx=_ctx(messages=messages))
+
+        assert _fired_text(seen) == 'generated from snapshot'
+
+    async def test_generation_operation_failure_falls_back_to_goal_reanchor(self) -> None:
+        operation = 'system_reminders__capability__system_reminders.generate_reminder'
+        seen: dict[str, list[ModelMessage]] = {}
+
+        def model(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            seen['messages'] = messages
+            return ModelResponse(parts=[TextPart('done')])
+
+        capability = SystemReminders(
+            id='system_reminders',
+            dynamic_reminders=[LLMReminder(model=_capture_model({}, output='unreachable'))],
+        )
+        durability = RecordingDurability(fail_operations=frozenset({operation}))
+        agent = Agent(FunctionModel(model), name='system_reminders', capabilities=[capability, durability])
+
+        await agent.run('ship the durable fix')
+
+        assert 'Check that your next action advances it.' in _all_text(seen['messages'])
+        assert operation in {name for name, _ in durability.calls}
+
+    async def test_generation_error_is_journaled_as_goal_reanchor(self) -> None:
+        operation = 'system_reminders__capability__system_reminders.generate_reminder'
+        seen: dict[str, list[ModelMessage]] = {}
+
+        def fail_generation(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            raise RuntimeError('reminder unavailable')
+
+        def model(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            seen['messages'] = messages
+            return ModelResponse(parts=[TextPart('done')])
+
+        durability = RecordingDurability()
+        agent = Agent(
+            FunctionModel(model),
+            name='system_reminders',
+            capabilities=[
+                SystemReminders(
+                    id='system_reminders',
+                    dynamic_reminders=[LLMReminder(model=FunctionModel(fail_generation))],
+                ),
+                durability,
+            ],
+        )
+
+        await agent.run('ship the durable fix')
+
+        assert operation in {name for name, _ in durability.calls}
+        assert 'Check that your next action advances it.' in _all_text(seen['messages'])
+
     async def test_generates_from_transcript(self) -> None:
         store: dict[str, str] = {}
         messages: list[ModelMessage] = [

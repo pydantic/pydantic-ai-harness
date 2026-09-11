@@ -29,10 +29,9 @@ _Entries = dict[str, tuple[Spent, 'datetime | None']]
 DEFAULT_DEDUP_RETAIN = timedelta(hours=1)
 """How long a store remembers a `SpendEntry.token` by default.
 
-Long enough for a durable engine to re-execute an accrual it had already committed:
-DBOS recovers a workflow when the process that owned it comes back, and a Prefect
-flow retry replays from its cache. Short enough that the markers are bounded by an
-hour of traffic rather than a day of it.
+Long enough for recovery outside the durable journal to present an accrual again.
+Short enough that the markers are bounded by an hour of traffic rather than a day
+of it.
 """
 
 
@@ -72,11 +71,10 @@ class SpendEntry:
     token: str | None = None
     """Identifies the response this entry came from, so it is applied at most once.
 
-    A capability hook runs in orchestration code, which a durable engine re-executes:
-    DBOS recovers a workflow by running it again, and a Prefect flow retry replays the
-    model request from its cache. Both hand the same response back to the accrual, and
-    without a token the window counts it twice. A store that recognises a token it has
-    already applied to `key` returns the current total instead of adding again.
+    The durable accrual operation handles ordinary replay through its journal. Recovery
+    without that record can still present the same response to the store. A store that
+    recognises a token it has already applied to `key` returns the current total instead
+    of adding again.
 
     `None` means "apply unconditionally", which is what a reconciler posting a delta
     wants: two corrections of the same size are two corrections.
@@ -87,7 +85,7 @@ class SpendEntry:
 class SpendStore(Protocol):
     """Reads and accumulates the counter behind one budget window at a time.
 
-    Deprecated, and removed in 0.28.0. Implement
+    Deprecated. Implement
     [`BatchSpendStore`][pydantic_ai_harness.spend.BatchSpendStore] instead: it takes
     every window of a response in one call, which is what lets a backend apply them
     together, and it carries the replay token that keeps a re-executed accrual from
@@ -206,9 +204,9 @@ def as_batch_store(store: SpendStore | BatchSpendStore) -> BatchSpendStore:
     warnings.warn(
         f'{type(store).__name__} implements the deprecated `SpendStore` protocol, so each response is applied '
         'one window at a time: a response counting against a day and a month budget is two writes, and a failure '
-        'between them leaves the day counted and the month not. `SpendEntry.token` is dropped too, so a durable '
-        'engine that re-executes the accrual (DBOS recovery, a Prefect flow retry) counts the response twice. '
-        'Implement `get_many` and `add_many` (`BatchSpendStore`) to get both. `SpendStore` is removed in 0.28.0.',
+        'between them leaves the day counted and the month not. `SpendEntry.token` is dropped too, so recovery '
+        'that cannot consult the durable journal has no store-side protection against applying a response twice. '
+        'Implement `get_many` and `add_many` (`BatchSpendStore`) to get both.',
         HarnessDeprecationWarning,
         stacklevel=4,
     )
@@ -220,8 +218,8 @@ class InMemorySpendStore:
     """Counters for the lifetime of one process.
 
     Catches a runaway loop inside the worker it runs in. It does not enforce a
-    budget across processes: every worker of a queue would keep its own count,
-    which is what a shared store such as
+    budget across processes and cannot survive durable recovery on a replacement
+    worker: each process has its own counters and deduplication markers. A shared store such as
     [`RedisSpendStore`][pydantic_ai_harness.spend.RedisSpendStore] is for.
     """
 
@@ -273,7 +271,7 @@ class InMemorySpendStore:
             return sum(1 for _, expires_at in self._entries.values() if expires_at is None or now < expires_at)
 
     async def get(self, key: str) -> Spent:
-        """What `key` has accumulated. Deprecated in favour of `get_many`, removed in 0.28.0."""
+        """What `key` has accumulated. Deprecated in favour of `get_many`."""
         return (await self.get_many([key]))[key]
 
     async def add(
@@ -286,7 +284,7 @@ class InMemorySpendStore:
         unpriced: int,
         ttl: timedelta | None,
     ) -> Spent:
-        """Add to `key` and return the result. Deprecated in favour of `add_many`, removed in 0.28.0."""
+        """Add to `key` and return the result. Deprecated in favour of `add_many`."""
         entry = SpendEntry(key=key, usd=usd, tokens=tokens, requests=requests, unpriced=unpriced, ttl=ttl)
         return (await self.add_many([entry]))[key]
 
