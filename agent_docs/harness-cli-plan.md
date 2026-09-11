@@ -706,6 +706,29 @@ Append-only. Date, item, decision, why.
   round (the veto 3982252751 and the try/finally 3982252753) were fixed in 89dfdfdf and
   still await the bot's self-verification, as the docs thread it resolved at 18:40Z did;
   nothing left for us on this PR until a maintainer merges it.
+- 2026-09-11, #845 follow-up (at Mike's request, not a plan item): Mike asked how to
+  retrigger macroscopeapp; the runbook is in kennel (drawer 1095): push (automatic, but
+  moves the head), `@macroscope-app review` comment, Checks-tab re-run, or a mention in
+  a thread. The Checks-tab/API re-run is unavailable: the app exposes no check-run
+  `actions` (rerequest 404s, `actions: null`), so the `@macroscope-app review` comment
+  was posted instead (issuecomment-5636616249, 15:17Z). The bot acknowledged in 15s and
+  ran a full-diff review (merge base 5dd1e0e, head e85e6b9d, 22 code objects, Balanced
+  mode). Result at 15:31Z: correctness `neutral` (non-blocking) with ONE new High
+  finding, thread 3990728944 on `shell/_process.py:263`: the per-line `await
+  ctx.emit(ShellOutputLineEvent)` in `OutputReader.read()` sits inside
+  `run_to_exit()`'s `fail_after(timeout)` scope, so a slow host line listener consumes
+  the deadline and can make a chatty command report `timed_out=True` (or get killed if
+  still in flight). Verified in code: mechanically correct. Assessment: the pipeline-
+  scoped deadline is deliberate and defensible (it is the only backstop against a hung
+  listener; the post-kill drain still delivers the full output, so the model-visible
+  damage is the misleading `timed_out` flag plus killing a still-in-flight command).
+  Decision pending with Mike: reply on the thread with that rationale (no push, keeps
+  pydantic's "Reviewed at head e85e6b9d" verdict intact) vs. change the contract to a
+  command-time-only deadline (would need a push, a pydantic re-run, and leaves a hung
+  listener able to stall the run). Also: the full re-run did NOT auto-verify the two
+  stale threads (3982252751 veto, 3982252753 try/finally); the bot does not re-check
+  old threads on re-runs, so those await a maintainer's manual resolution (replies
+  with the fix pointers were posted earlier today, 14:45-15:00Z).
 - 2026-09-10, 1.3b: the #855 run dispatched at 20:50Z (df_run_30cc80e36c544267ad60)
   landed 21:25Z: reviewed, 0 blocking, 0 required, all 5 charters passed, on the real
   head 424c9634. #855 is clear of pydantic; only Macroscope on 424c9634 remains (it
