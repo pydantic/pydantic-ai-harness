@@ -41,17 +41,9 @@ To plug a Pydantic AI agent into an ACP editor you would otherwise have to imple
 
 ## Installation
 
-=== "uv"
-
-    ```bash
-    uv add "pydantic-ai-harness[acp]"
-    ```
-
-=== "pip"
-
-    ```bash
-    pip install "pydantic-ai-harness[acp]"
-    ```
+```bash
+pip/uv-add "pydantic-ai-harness[acp]"
+```
 
 This pulls in the [`agent-client-protocol`](https://pypi.org/project/agent-client-protocol/) SDK. The rest of the harness does not depend on it -- only `pydantic_ai_harness.experimental.acp` does.
 

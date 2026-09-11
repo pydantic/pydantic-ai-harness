@@ -11,19 +11,27 @@ _READMES = [_ROOT / 'README.md', *sorted((_ROOT / 'pydantic_ai_harness').rglob('
 _INSTALL = re.compile(r'^\s*(pip install|uv add) (.+)$', re.MULTILINE)
 
 
-@pytest.mark.parametrize('path', [*_PAGES, *_READMES], ids=lambda path: str(path.relative_to(_ROOT)))
+@pytest.mark.parametrize('path', _PAGES, ids=lambda path: str(path.relative_to(_ROOT)))
+def test_docs_installation_commands_use_shorthand(path: Path) -> None:
+    text = path.read_text(encoding='utf-8')
+    assert not _INSTALL.search(text), f'{path}: use pip/uv-add in a bash fence instead of hand-written install tabs'
+    shorthand = re.compile(r'^```bash\n(?:pip/uv-add|py-cli) [^\n]+\n```', re.MULTILINE)
+    assert not re.search(r'\b(?:pip/uv-add|py-cli)\b', shorthand.sub('', text)), (
+        f'{path}: each shorthand command needs its own single-line bash fence'
+    )
+
+
+@pytest.mark.parametrize('path', _READMES, ids=lambda path: str(path.relative_to(_ROOT)))
 def test_installation_commands_are_paired(path: Path) -> None:
     text = path.read_text(encoding='utf-8')
-    indent = '    ' if path in _PAGES else ''
-    pip_label = '=== "pip"' if path in _PAGES else 'pip:'
-    uv_label = '=== "uv"' if path in _PAGES else 'uv:'
+    assert not re.search(r'\b(?:pip/uv-add|py-cli)\b', text), f'{path}: READMEs need executable commands'
     pair = re.compile(
-        rf'^{re.escape(uv_label)}\n\n{indent}```bash\n'
-        rf'{indent}uv add (?P<args>[^\n]+)\n'
-        rf'(?P<uv_followup>(?:(?!{indent}```)[^\n]*\n)*){indent}```\n\n'
-        rf'{re.escape(pip_label)}\n\n{indent}```bash\n'
-        rf'{indent}pip install (?P=args)\n'
-        rf'(?P<pip_followup>(?:(?!{indent}```)[^\n]*\n)*){indent}```',
+        r'^uv:\n\n```bash\n'
+        r'uv add (?P<args>[^\n]+)\n'
+        r'(?P<uv_followup>(?:(?!```)[^\n]*\n)*)```\n\n'
+        r'pip:\n\n```bash\n'
+        r'pip install (?P=args)\n'
+        r'(?P<pip_followup>(?:(?!```)[^\n]*\n)*)```',
         re.MULTILINE,
     )
     for match in pair.finditer(text):
@@ -39,5 +47,5 @@ def test_installation_commands_are_paired(path: Path) -> None:
 def test_installation_commands_are_not_inline(path: Path) -> None:
     text = path.read_text(encoding='utf-8')
     assert not re.search(r'`(?:pip install|uv add) [^`]+`', text), (
-        f'{path}: move inline installation commands into paired pip / uv blocks'
+        f'{path}: move inline installation commands into fenced installation examples'
     )

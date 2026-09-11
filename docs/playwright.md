@@ -31,19 +31,13 @@ JavaScript-rendered SPAs, and interactive multi-step flows.
 The `playwright` extra pulls in Playwright, and Chromium is a separate binary
 download:
 
-=== "uv"
+```bash
+pip/uv-add "pydantic-ai-harness[playwright]"
+```
 
-    ```bash
-    uv add "pydantic-ai-harness[playwright]"
-    uv run playwright install chromium
-    ```
-
-=== "pip"
-
-    ```bash
-    pip install "pydantic-ai-harness[playwright]"
-    playwright install chromium
-    ```
+```bash
+py-cli playwright install chromium
+```
 
 If the Chromium binary is missing at runtime, the browser tool returns the
 `playwright install chromium` hint as its result rather than ending the run, so

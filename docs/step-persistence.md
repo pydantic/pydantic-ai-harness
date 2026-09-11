@@ -328,17 +328,9 @@ The store issues `createIndex` on its first write, for ten indexes: `conversatio
 
 Install MongoDB support:
 
-=== "uv"
-
-    ```bash
-    uv add "pydantic-ai-harness[mongodb]"
-    ```
-
-=== "pip"
-
-    ```bash
-    pip install "pydantic-ai-harness[mongodb]"
-    ```
+```bash
+pip/uv-add "pydantic-ai-harness[mongodb]"
+```
 
 ## Bounding snapshot growth
 
