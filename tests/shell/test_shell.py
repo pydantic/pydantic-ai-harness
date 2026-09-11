@@ -35,6 +35,7 @@ from pydantic_ai_harness.shell._process import (
     is_interactive_command,
     kill_process_group,
     read_bg_output,
+    run_to_exit,
 )
 from pydantic_ai_harness.shell._toolset import ShellToolset
 
@@ -1509,6 +1510,7 @@ class TestDrainWithTimeoutEdgeCases:
 
         reader = OutputReader(_FailingStream(error), on_line=sink)
         await drain_with_timeout(reader)
+        await reader.deliver()
 
         assert reader.chunks == [b'partial']
         assert lines == [('partial', False)]
@@ -1732,3 +1734,122 @@ class TestEnvControlPropagation:
             or name == 'PYDANTIC_AI_GATEWAY_API_KEY'
         }
         assert leaked == set()
+
+
+class _SlowStream(anyio.abc.ByteReceiveStream):
+    """Yields chunks quickly, to test that callback latency is not counted against timeout."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = list(chunks)
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if not self._chunks:
+            raise anyio.EndOfStream
+        return self._chunks.pop(0)
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _FakeProcess:
+    """Minimal process stub for testing run_to_exit without spawning."""
+
+    def __init__(
+        self,
+        *,
+        pid: int = 12345,
+        exit_code: int = 0,
+        stdout_chunks: list[bytes],
+        stderr_chunks: list[bytes],
+    ) -> None:
+        self.pid = pid
+        self._exit_code = exit_code
+        self.stdout: anyio.abc.ByteReceiveStream = _SlowStream(stdout_chunks)
+        self.stderr: anyio.abc.ByteReceiveStream = _SlowStream(stderr_chunks)
+        self._closed = False
+
+    async def wait(self) -> int:
+        return self._exit_code
+
+    async def aclose(self) -> None:
+        self._closed = True
+
+
+class TestRunToExitTimeoutAccounting:
+    """Callback latency must not consume the command execution timeout."""
+
+    async def test_slow_callback_does_not_cause_spurious_timeout(self) -> None:
+        """A slow on_line callback should not make an otherwise-fast command appear timed out."""
+        lines: list[tuple[str, bool]] = []
+        callback_delay = 0.5
+
+        async def slow_sink(line: str, truncated: bool) -> None:
+            await anyio.sleep(callback_delay)
+            lines.append((line, truncated))
+
+        proc = _FakeProcess(
+            exit_code=0,
+            stdout_chunks=[b'line1\n', b'line2\n'],
+            stderr_chunks=[],
+        )
+        stdout = OutputReader(proc.stdout, on_line=slow_sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        # Timeout is shorter than total callback time but longer than command execution
+        timeout = 0.2
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=timeout)  # type: ignore[arg-type]
+
+        # Command should complete successfully -- callback latency is outside the timeout scope
+        assert exit_code == 0
+        assert timed_out is False
+        # Lines should still be delivered
+        assert lines == [('line1', False), ('line2', False)]
+        assert proc._closed
+
+    async def test_command_completes_within_timeout(self) -> None:
+        """A fast command with lines completes normally and delivers all output."""
+        lines: list[tuple[str, bool]] = []
+
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+
+        proc = _FakeProcess(
+            exit_code=0,
+            stdout_chunks=[b'hello\n', b'world\n'],
+            stderr_chunks=[b'err\n'],
+        )
+        stdout = OutputReader(proc.stdout, on_line=sink)
+        stderr = OutputReader(proc.stderr, on_line=sink)
+
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=5.0)  # type: ignore[arg-type]
+
+        assert exit_code == 0
+        assert timed_out is False
+        assert stdout.text == 'hello\nworld\n'
+        assert stderr.text == 'err\n'
+        # Lines delivered in order (stdout then stderr from task group)
+        assert ('hello', False) in lines
+        assert ('world', False) in lines
+        assert ('err', False) in lines
+        assert proc._closed
+
+    async def test_unterminated_line_delivered_after_success(self) -> None:
+        """The final unterminated line is delivered outside the timeout scope."""
+        lines: list[tuple[str, bool]] = []
+
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+
+        proc = _FakeProcess(
+            exit_code=0,
+            stdout_chunks=[b'complete\n', b'partial'],
+            stderr_chunks=[],
+        )
+        stdout = OutputReader(proc.stdout, on_line=sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=5.0)  # type: ignore[arg-type]
+
+        assert exit_code == 0
+        assert timed_out is False
+        assert lines == [('complete', False), ('partial', False)]
