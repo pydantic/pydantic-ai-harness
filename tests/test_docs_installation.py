@@ -8,7 +8,7 @@ import pytest
 _ROOT = Path(__file__).parent.parent
 _PAGES = sorted((_ROOT / 'docs').rglob('*.md'))
 _READMES = [_ROOT / 'README.md', *sorted((_ROOT / 'pydantic_ai_harness').rglob('README.md'))]
-_INSTALL = re.compile(r'^\s*(pip install|uv add) (.+)$', re.MULTILINE)
+_INSTALL = re.compile(r'^[ \t]*(?:pip[ \t]+install|uv[ \t]+add)[ \t]+(.+)$', re.MULTILINE)
 
 
 @pytest.mark.parametrize('path', _PAGES, ids=lambda path: str(path.relative_to(_ROOT)))
@@ -46,6 +46,6 @@ def test_installation_commands_are_paired(path: Path) -> None:
 @pytest.mark.parametrize('path', [*_PAGES, *_READMES], ids=lambda path: str(path.relative_to(_ROOT)))
 def test_installation_commands_are_not_inline(path: Path) -> None:
     text = path.read_text(encoding='utf-8')
-    assert not re.search(r'`(?:pip install|uv add) [^`]+`', text), (
+    assert not re.search(r'`(?:pip[ \t]+install|uv[ \t]+add)[ \t]+[^`]+`', text), (
         f'{path}: move inline installation commands into fenced installation examples'
     )
