@@ -336,7 +336,7 @@ All four stores -- `InMemoryStepStore`, `FileStepStore`, `SqliteStepStore`, and 
 - the newest snapshot overall (serves `latest_snapshot(include_interrupted=True)`),
 - the newest `complete` snapshot (serves the default read path).
 
-The last two keep both read modes correct even when the newest `N` snapshots are all `interrupted` and the newest resumable `complete` sits below that window, so the retain set can exceed `N`. `from_spec(..., max_snapshots_per_run=N)` forwards the bound to the store it constructs (`backend='memory'`, `'file'`, or `'sqlite'`; a Mongo store is built directly, not from a spec).
+The last two keep both read modes correct even when the newest `N` snapshots are all `interrupted` and the newest resumable `complete` sits below that window, so the retain set can exceed `N`. `from_spec(..., max_snapshots_per_run=N)` forwards the bound to the store it constructs (`backend='memory'`, `'file'`, or `'sqlite'`; a Mongo store is built directly, not from a spec). `from_spec` rejects a `directory` without `backend='file'` and a `database` without `backend='sqlite'`, so a spec cannot name a location its backend would ignore.
 
 ```python
 from pydantic_ai_harness.step_persistence import FileStepStore
