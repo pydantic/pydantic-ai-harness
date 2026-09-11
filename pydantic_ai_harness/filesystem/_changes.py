@@ -25,6 +25,9 @@ _REFUSALS: dict[FileOperation, str] = {
 _NO_NEWLINE = '\\ No newline at end of file'
 """The marker `git diff` prints after a final line that lacks a newline."""
 
+_MAX_DIFF_LINE_PAIRS = 65536
+"""Bound the quadratic line-matching work before entering `difflib`."""
+
 
 def _lines(text: str) -> list[str]:
     """Split on newlines only, keeping each one, so a final line without one stays distinguishable."""
@@ -67,9 +70,16 @@ def unified_diff(old: str | None, new: str, *, path: str) -> tuple[str, bool]:
     longer than `MAX_DIFF_SOURCE_CHARS` on either side is not diffed: the
     result is the two file headers, marked as cut, so a large write does
     not pay for a diff that would be cut anyway. `old` is `None` when the
-    caller found the current content that large and did not decode it.
+    caller found the current content that large and did not decode it. The
+    headers-only fallback also applies when the product of conservative
+    line counts exceeds `_MAX_DIFF_LINE_PAIRS`, before matching starts.
     """
-    if old is None or len(old) > MAX_DIFF_SOURCE_CHARS or len(new) > MAX_DIFF_SOURCE_CHARS:
+    if (
+        old is None
+        or len(old) > MAX_DIFF_SOURCE_CHARS
+        or len(new) > MAX_DIFF_SOURCE_CHARS
+        or (old.count('\n') + 1) * (new.count('\n') + 1) > _MAX_DIFF_LINE_PAIRS
+    ):
         # The quoted name of a control-character-heavy path can pass the cap
         # on its own, so the headers are cut like every other return.
         header = f'--- {_quoted(f"a/{path}")}\n+++ {_quoted(f"b/{path}")}'

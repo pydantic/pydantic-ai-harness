@@ -91,8 +91,10 @@ was shown: a path or file replaced in the meantime fails after it was
 announced instead of being redirected or overwritten, and an edit does not
 recreate a file deleted in the meantime. This holds the window between the
 containment check and the I/O (see [Security model](#security-model)) to what
-it is without a listener. A listener that calls `cancel(reason)` stops the
-change before it touches the disk, and the model gets the reason as the tool
+it is without a listener for readable targets. For a target the process cannot
+read, an approved write has no content guard; passing `expected_hash` instead
+refuses the write before announcement. A listener that calls `cancel(reason)`
+stops the change before it touches the disk, and the model gets the reason as the tool
 result. A listener that raises instead aborts the run, as any raising event
 listener does, and the change is not applied. `diff` is the unified diff from
 the current content to the proposed content: a new file diffs from empty, a
@@ -111,6 +113,8 @@ matches on the serialized kind needs to accept both. Diffs are cut at
 forwarded event stream cannot be flooded by one large write, and a change
 whose text is longer than `MAX_DIFF_SOURCE_CHARS` (32768) on either side is
 not diffed at all: the `diff` is the two file headers and `truncated` is set.
+The same fallback applies when `(old.count("\n") + 1) * (new.count("\n") + 1)`
+exceeds 65536, bounding line-matching work before calling the differ.
 A final line without a newline is marked the way `git diff` marks it, so a
 change to the final newline alone is visible. A `FilesSearchedEvent` counts
 the matches the model received; `truncated` says the search stopped at

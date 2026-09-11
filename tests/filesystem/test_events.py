@@ -503,8 +503,11 @@ class TestFileChangeRequests:
         """A listener that raises aborts the run, as the docs promise, and the change is not applied."""
         (tmp_path / 'target.txt').write_text('old\n')
 
+        written = WrittenListener(root=tmp_path)
         with pytest.raises(RuntimeError, match='no writes today'):
-            await _run_and_collect(tmp_path, tool_name, json_args, listeners=[RaisingListener()])
+            await _run_and_collect(tmp_path, tool_name, json_args, listeners=[written, RaisingListener()])
+
+        assert written.written == []
 
         # Nothing was written, created or replaced: only the file the test made.
         assert sorted(entry.name for entry in tmp_path.iterdir()) == ['target.txt']
@@ -576,6 +579,29 @@ class TestFileChangeRequests:
         assert event.kind == 'file_system.file_edited'
         # The event fires only after the edit has landed on disk.
         assert listener.on_disk == ['new\n']
+
+    @pytest.mark.parametrize('newlines', [254, 255, 256])
+    async def test_diff_line_work_bound(self, tmp_path: Path, newlines: int) -> None:
+        old = 'a\n' * 255
+        new = 'b\n' * newlines
+        (tmp_path / 'target.txt').write_text(old)
+        listener = Listener()
+        events = await _run_and_collect(
+            tmp_path,
+            'edit_file',
+            json.dumps({'path': 'target.txt', 'old_text': old, 'new_text': new}),
+            listeners=[listener],
+        )
+        (request,) = listener.requests
+        (edited,) = [event for event in events if isinstance(event, FileEditedEvent)]
+        assert request.truncated is (newlines == 256)
+        assert edited.truncated is request.truncated
+        assert edited.diff == request.diff
+        if newlines == 256:
+            assert request.diff == '--- a/target.txt\n+++ b/target.txt'
+        else:
+            assert '@@' in request.diff
+        assert (tmp_path / 'target.txt').read_text() == new
 
     async def test_large_edit_marks_the_edited_event_truncated(self, tmp_path: Path) -> None:
         """An edit whose diff exceeds the bound reports the edited event as cut, not only the request that announced it."""
@@ -703,7 +729,7 @@ class TestFileChangeRequests:
     )
     async def test_diff_source_bound_is_inclusive(self, tmp_path: Path, extra: int, diffed: bool) -> None:
         """Exactly `MAX_DIFF_SOURCE_CHARS` on a side is still diffed; one more character is not."""
-        old = 'x\n' * (MAX_DIFF_SOURCE_CHARS // 2 - 1) + 'a' + 'y' * extra + '\n'
+        old = ('x' * 1023 + '\n') * 31 + 'x' * 1021 + '\na' + 'y' * extra + '\n'
         assert len(old) == MAX_DIFF_SOURCE_CHARS + extra
         (tmp_path / 'f.txt').write_text(old)
         listener = Listener()
@@ -890,6 +916,7 @@ class TestFileChangeRequests:
 
         assert 'Conflict' in _retry_reason(events)
         assert target.read_text() == appeared
+        assert not any(isinstance(event, FileWrittenEvent) for event in events)
 
     @pytest.mark.parametrize(
         ('tool_name', 'json_args'),
