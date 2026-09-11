@@ -834,6 +834,15 @@ Append-only. Date, item, decision, why.
   flag) are untrustworthy. No reply needed on the PR beyond re-applying the label for a
   fresh run; do the `FileChangeRequestEvent` monotonic-veto fix in the same round.
 
+Latest #845 continuation (2026-09-11): review `df_run_61dc9be8b1cc450f88f0`
+on `4716c1f5` reported zero blocking and three required actions. Commit
+`255126ab` on `puppy/shell-events` preserves a reason across a later bare
+cancel, tolerates an already-removed background record during abort, and
+pins record/file cleanup plus stop-then-raise error propagation. Local gates:
+301 shell tests passed, 6 skipped; 785 docs checks passed, 22 skipped;
+Ruff and strict Pyright clean. Pushed and requested a fresh review. CI and
+that review are pending; no additional plan item was selected.
+
 ## Open questions for Mike
 
 1. Console script code name. Placeholder is `harness`.
