@@ -1,4 +1,4 @@
-"""Filesystem capability that provides sandboxed file system access."""
+"""Filesystem capability that provides workspace file system access."""
 
 from __future__ import annotations
 
@@ -25,14 +25,14 @@ _DEFAULT_PROTECTED: list[str] = [
 
 @dataclass
 class FileSystem(AbstractCapability[AgentDepsT]):
-    """File system access scoped to a root directory.
+    """File system access inside the run's workspace, scoped to a root directory.
 
     All paths are resolved relative to `root_dir`. Traversal above the root
-    is rejected. Symlinks are resolved before authorization.
+    is rejected; the workspace is the isolation boundary.
     """
 
     root_dir: str | Path = '.'
-    """Root directory for all file operations. Defaults to the current directory."""
+    """Root directory for all file operations: a workspace path, absolute or relative to the workspace working directory."""
 
     allowed_patterns: Sequence[str] = field(default_factory=list[str])
     """If non-empty, only paths matching at least one glob pattern are accessible."""
@@ -48,7 +48,11 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     """
 
     max_read_lines: int = 2000
-    """Maximum number of lines returned by a single `read_file` call."""
+    """Maximum number of lines returned by a single `read_file` call.
+
+    Matches Claude Code, Pi, OpenCode, and Gemini CLI. The workspace also applies
+    a 50 KiB byte cap; the window stops at whichever limit hits first.
+    """
 
     max_list_results: int = 1000
     """Maximum number of entries returned by `list_directory`."""

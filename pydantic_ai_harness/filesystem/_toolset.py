@@ -1,22 +1,24 @@
-"""Filesystem toolset providing sandboxed file operations."""
+"""Filesystem toolset providing workspace file operations."""
 
 from __future__ import annotations
 
+import codecs
 import errno
 import fnmatch
 import functools
 import hashlib
 import os
-import re
-import stat
+import posixpath
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Concatenate, ParamSpec, TypedDict
+from typing import Any, Concatenate, Literal, ParamSpec
 
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.workspaces import WorkspaceError, WorkspaceUnavailableError
 
+from pydantic_ai_harness._workspace import workspace_path
 from pydantic_ai_harness.filesystem._events import DirectoryListedEvent, FileReadEvent, FileWrittenEvent
 
 _P = ParamSpec('_P')
@@ -30,16 +32,19 @@ READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
 # missing file, a denied path, a stale edit. pyai only feeds `ModelRetry` back
 # to the model; any other exception aborts the whole run. `_recoverable`
 # converts these so the agent can correct itself and continue.
-_RECOVERABLE_ERRORS = (PermissionError, FileNotFoundError, NotADirectoryError, IsADirectoryError, ValueError)
+_RECOVERABLE_ERRORS = (
+    PermissionError,
+    FileNotFoundError,
+    NotADirectoryError,
+    IsADirectoryError,
+    FileExistsError,
+    ValueError,
+)
 
-# The same idea one level down, for failures Python raises as a bare `OSError`
-# with no dedicated subclass for `_RECOVERABLE_ERRORS` to name. Entries are
-# explicit so other errors keep aborting the run; for example, retrying cannot
-# fix `ENOSPC` or `EROFS`.
-#
-# Which operations reach these depends on the Python version. `Path.is_file`
-# and friends stopped propagating `ENAMETOOLONG` in 3.14, so on 3.10 through
-# 3.13 the read operations surface it too, not just the write path.
+# The same idea one level down, for failures the backend raises as a bare
+# `OSError` with no dedicated subclass for `_RECOVERABLE_ERRORS` to name.
+# Entries are explicit so other errors keep aborting the run; for example,
+# retrying cannot fix `ENOSPC` or `EROFS`.
 #
 # Keyed by `OSError.errno`, which the stdlib types as `int | None`.
 _RECOVERABLE_ERRNOS: dict[int | None, str] = {
@@ -47,8 +52,6 @@ _RECOVERABLE_ERRNOS: dict[int | None, str] = {
     errno.ELOOP: 'The path resolves through a symlink loop.',
     errno.EILSEQ: 'The path name contains a byte sequence the filesystem cannot represent.',
 }
-_WINDOWS_ERROR_INVALID_NAME = 123
-
 _OUTSIDE_WORKSPACE = '<outside-workspace>'
 """Shown instead of an absolute path that is not inside the workspace root."""
 
@@ -56,14 +59,7 @@ _NOT_A_PATH = '<not-a-path>'
 """Shown when an error's `filename` is not a path value at all."""
 
 
-class _EventLocation(TypedDict):
-    """The `path` and `root_dir` fields shared by every filesystem event."""
-
-    path: str
-    root_dir: str
-
-
-def _model_safe_filename(filename: str | bytes, real_root: Path) -> str:
+def _model_safe_filename(filename: str | bytes, root: str) -> str:
     """Return the path relative to the workspace root.
 
     Paths not inside the root become `_OUTSIDE_WORKSPACE`; values that are
@@ -73,100 +69,117 @@ def _model_safe_filename(filename: str | bytes, real_root: Path) -> str:
         raw = os.fsdecode(filename)
     except TypeError:
         return _NOT_A_PATH
-    path = Path(raw)
-    if not path.is_absolute():
-        return path.as_posix()
-    try:
-        return path.relative_to(real_root).as_posix()
-    except ValueError:
-        pass
-    try:
-        return Path(os.path.realpath(path)).relative_to(real_root).as_posix()
-    except (ValueError, OSError):
-        return _OUTSIDE_WORKSPACE
+    if not posixpath.isabs(raw):
+        return raw
+    path = posixpath.normpath(raw)
+    if path == root or path.startswith(root + '/'):
+        return posixpath.relpath(path, root)
+    return _OUTSIDE_WORKSPACE
 
 
-def _sanitize_recoverable_error(error: BaseException, real_root: Path) -> str:
-    """Render a recoverable error without exposing absolute host paths.
+def _sanitize_recoverable_error(error: BaseException, root: str) -> str:
+    """Render a recoverable error without exposing absolute paths.
 
     Errors without an OS-supplied `filename` keep their original message.
     OS errors keep `errno` and `strerror`, with the path rewritten relative
-    to `real_root` (see `_model_safe_filename` for the fallback placeholders).
+    to `root` (see `_model_safe_filename` for the fallback placeholders).
     """
     if not isinstance(error, OSError) or error.filename is None:
         return str(error)
 
-    filename = _model_safe_filename(error.filename, real_root)
+    filename = _model_safe_filename(error.filename, root)
     return f'[Errno {error.errno}] {error.strerror}: {filename!r}'
 
 
 def _recoverable(
-    fn: Callable[Concatenate[FileSystemToolset, _P], Awaitable[str]],
-) -> Callable[Concatenate[FileSystemToolset, _P], Awaitable[str]]:
+    fn: Callable[Concatenate[FileSystemToolset, RunContext[Any], _P], Awaitable[str]],
+) -> Callable[Concatenate[FileSystemToolset, RunContext[Any], _P], Awaitable[str]]:
     """Surface model-correctable tool errors as `ModelRetry`."""
 
     @functools.wraps(fn)
-    async def wrapper(self: FileSystemToolset, *args: _P.args, **kwargs: _P.kwargs) -> str:
+    async def wrapper(self: FileSystemToolset, ctx: RunContext[Any], *args: _P.args, **kwargs: _P.kwargs) -> str:
         try:
-            return await fn(self, *args, **kwargs)
+            return await fn(self, ctx, *args, **kwargs)
         except _RECOVERABLE_ERRORS as e:
-            real_root = self._real_root  # pyright: ignore[reportPrivateUsage]
-            raise ModelRetry(_sanitize_recoverable_error(e, real_root)) from e
+            raise ModelRetry(_sanitize_recoverable_error(e, await self._root_for(ctx))) from e  # pyright: ignore[reportPrivateUsage]
+        # A dead workspace and a misconfigured one (`UserError`, e.g. no workspace attached) are the
+        # user's to fix; deliberate backend failures are recoverable, but programming errors
+        # still propagate.
+        except (WorkspaceUnavailableError, UserError):
+            raise
+        except WorkspaceError as e:
+            if isinstance(e, TimeoutError):
+                raise ModelRetry(f'{fn.__name__} timed out.') from e
+            raise ModelRetry(str(e)) from e
         except OSError as e:
             reason = _RECOVERABLE_ERRNOS.get(e.errno)
-            if reason is None and getattr(e, 'winerror', None) == _WINDOWS_ERROR_INVALID_NAME:
-                reason = 'The path name is invalid.'
             if reason is None:
                 raise
-            # The full error may embed the absolute host path; the reason is path-free.
+            # The full error may embed the absolute path; the reason is path-free.
             raise ModelRetry(reason) from e
 
     return wrapper
 
 
-def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
-    """Format pre-split lines with line numbers and continuation hint."""
-    total = len(lines)
+_MAX_LINE_CHARS = 2000
+"""Per-line character cap in the model-facing `read_file` string.
 
-    if total == 0:
+Claude Code, OpenCode, and Gemini CLI all clip a rendered line at 2000 characters.
+The workspace facade never mid-line truncates; this clip is FileSystem rendering.
+"""
+
+
+def _clip_line(line: str) -> str:
+    """Clip a single rendered line so one minified row cannot flood the context."""
+    if len(line) <= _MAX_LINE_CHARS:
+        return line
+    return f'{line[:_MAX_LINE_CHARS]} ... [line truncated to {_MAX_LINE_CHARS} chars]'
+
+
+def _format_lines(
+    lines: Sequence[str],
+    *,
+    first_line_number: int,
+    truncated: bool,
+    truncated_by: Literal['lines', 'bytes'] | None,
+    remaining_lines: int | None,
+    first_line_exceeds_limit: bool,
+    total_lines: int | None,
+) -> str:
+    """Number a window of lines, with a notice that cannot be mistaken for the whole file."""
+    if first_line_exceeds_limit:
+        return (
+            f'[truncated: line {first_line_number} exceeds the byte limit; no content returned. '
+            f'Use a smaller window or a byte-range shell read.]\n'
+        )
+    if not lines:
         return '(empty file)\n'
 
-    if offset >= total:
-        raise ValueError(f'Offset {offset} exceeds file length ({total} lines).')
-
-    selected = lines[offset : offset + limit]
-    numbered = [f'{i:>6}\t{line}' for i, line in enumerate(selected, start=offset + 1)]
-    result = ''.join(numbered)
-    if not result.endswith('\n'):
-        result += '\n'
-
-    remaining = total - (offset + len(selected))
-    if remaining > 0:
-        next_offset = offset + len(selected)
-        result += f'... ({remaining} more lines. Use offset={next_offset} to continue reading.)\n'
-
-    return result
+    result = ''.join(f'{number:>6}\t{_clip_line(line)}\n' for number, line in enumerate(lines, start=first_line_number))
+    if not truncated:
+        return result
+    end_line = first_line_number + len(lines) - 1
+    shown = f'lines {first_line_number}-{end_line}'
+    if total_lines is not None:
+        shown = f'{shown} of {total_lines}'
+    remaining_note = ''
+    if remaining_lines:
+        remaining_note = f'; {remaining_lines} line{"" if remaining_lines == 1 else "s"} remaining'
+    cap = 'byte limit' if truncated_by == 'bytes' else 'line limit'
+    next_offset = first_line_number - 1 + len(lines)
+    return result + f'[truncated: showing {shown}{remaining_note} ({cap}). Use offset={next_offset} to continue.]\n'
 
 
 def _is_binary(data: bytes, sample_size: int = 8192) -> bool:
-    """Detect binary content by checking for null bytes in the sample."""
-    return b'\x00' in data[:sample_size]
-
-
-def _matching_lines(text: str, compiled: re.Pattern[str], rel_str: str, limit: int) -> tuple[list[str], bool]:
-    """Match one file's lines, keeping at most `limit` of them.
-
-    Returns the formatted matches and whether a further match had to be
-    dropped, so the caller reports truncation only when output was cut. A
-    `limit` of zero or less keeps nothing.
-    """
-    matches: list[str] = []
-    for line_num, line in enumerate(text.splitlines(), start=1):
-        if compiled.search(line):
-            if len(matches) >= limit:
-                return matches, True
-            matches.append(f'{rel_str}:{line_num}:{line}')
-    return matches, False
+    """Detect binary content by checking for null bytes or invalid UTF-8 in the sample."""
+    sample = data[:sample_size]
+    if b'\x00' in sample:
+        return True
+    try:
+        codecs.getincrementaldecoder('utf-8')().decode(sample, final=False)
+    except UnicodeDecodeError:
+        return True
+    return False
 
 
 def _content_hash(content: str) -> str:
@@ -175,11 +188,12 @@ def _content_hash(content: str) -> str:
 
 
 class FileSystemToolset(FunctionToolset[AgentDepsT]):
-    """Toolset providing filesystem operations scoped to a root directory.
+    """Toolset providing filesystem operations inside the run's workspace, scoped to a root directory.
 
     Security model:
-    - All paths resolved relative to root with canonical path checks
-    - Symlinks resolved before authorization (prevents TOCTTOU)
+    - All paths resolved relative to the root inside the workspace, with textual
+      containment checks; symlinks are not resolved for pattern matching, and
+      the workspace itself is the isolation boundary
     - Glob-based allow/deny filtering
     - Protected path patterns (e.g. `.git/`, `.env`)
     - Binary file detection blocks text operations
@@ -199,8 +213,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         id: str | None = None,
     ) -> None:
         super().__init__(id=id)
-        self._root = root_dir.resolve()
-        self._real_root = Path(os.path.realpath(self._root))
+        # A workspace path: absolute, or relative to the workspace working directory.
+        self._root = workspace_path(root_dir)
         self._allowed_patterns = list(allowed_patterns)
         self._denied_patterns = list(denied_patterns)
         self._protected_patterns = list(protected_patterns)
@@ -209,10 +223,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._max_search_results = max_search_results
         self._max_find_results = max_find_results
 
-        self.add_function(self._read_file_tool, name='read_file')
-        self.add_function(self._write_file_tool, name='write_file')
-        self.add_function(self._edit_file_tool, name='edit_file')
-        self.add_function(self._list_directory_tool, name='list_directory')
+        self.add_function(self.read_file, name='read_file')
+        self.add_function(self.write_file, name='write_file')
+        self.add_function(self.edit_file, name='edit_file')
+        self.add_function(self.list_directory, name='list_directory')
         self.add_function(self.search_files, name='search_files')
         self.add_function(self.find_files, name='find_files')
         self.add_function(self.create_directory, name='create_directory')
@@ -235,31 +249,6 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Return the first pattern that matches path, or None."""
         return next((p for p in patterns if self._matches(path, p)), None)
 
-    def _resolve_path(self, path: str) -> Path:
-        """Resolve path relative to root, rejecting traversal.
-
-        Uses os.path.realpath for symlink resolution before checking containment.
-        """
-        try:
-            candidate = (self._root / path).resolve()
-        except RuntimeError as e:
-            # Python 3.10-3.12 signal a symlink loop this way.
-            raise ModelRetry(f'Path {path!r} resolves through a symlink loop.') from e
-
-        if not candidate.exists():
-            try:
-                candidate.stat()
-            except OSError as e:
-                # Python 3.13+ suppresses `ELOOP` in `resolve` and `exists`, so
-                # probe the path before treating it as missing.
-                if e.errno == errno.ELOOP:
-                    raise ModelRetry(f'Path {path!r} resolves through a symlink loop.') from e
-        real = Path(os.path.realpath(candidate))
-        if not real.is_relative_to(self._real_root):
-            raise PermissionError(f'Path {path!r} resolves outside the root directory.')
-
-        return real
-
     def _check_access(self, path: str, *, write: bool = False, check_allowed: bool = True) -> None:
         """Validate path against allow/deny/protected patterns.
 
@@ -268,7 +257,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         directory isn't required to match `allowed_patterns` itself -- `.` or
         `src` would never match a file pattern like `src/*.py`. The walk's
         entries are still filtered against `allowed_patterns` per-entry via
-        `_resolve_walk_entry`. Denied patterns continue to gate the root.
+        `_is_accessible`. Denied patterns continue to gate the root.
         """
         if write and self._protected_patterns:
             matched = self._first_matching_pattern(path, self._protected_patterns)
@@ -297,107 +286,117 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             return False
         return True
 
-    def _resolve_walk_entry(self, entry: Path) -> Path | None:
-        """Authorize one entry of a directory walk, or return `None` to skip it.
+    async def _root_for(self, ctx: RunContext[AgentDepsT]) -> str:
+        """The absolute workspace path of the configured root."""
+        return posixpath.normpath(await ctx.workspace.resolve(self._root))
 
-        Callers must do their I/O on the returned path. Resolving once means the
-        path that was authorized is the path that gets read, and matching the
-        patterns against the resolved location keeps the walkers in step with
-        direct access: a symlink can neither escape the root nor alias a file
-        past a rule its own name would trip.
-        """
-        target = Path(os.path.realpath(entry))
-        if not target.is_relative_to(self._real_root):
-            return None
-        if not self._is_accessible(self._relative_to_root(target)):
-            return None
-        return target
-
-    def _relative_to_root(self, resolved: Path) -> str:
-        """Canonical path of a resolved location relative to the real root."""
-        return str(resolved.relative_to(self._real_root))
-
-    def _event_location(self, resolved: Path) -> _EventLocation:
-        """Path fields for an event about `resolved`.
-
-        `path` is relative to the real root and `root_dir` is that root, so a
-        subscriber rooted elsewhere can rebuild the absolute location instead
-        of assuming the event came from its own root.
-        """
-        return _EventLocation(
-            path=_model_safe_filename(os.fspath(resolved), self._real_root),
-            root_dir=os.fspath(self._real_root),
-        )
-
-    def _safe_resolve(self, path: str, *, write: bool = False, check_allowed: bool = True) -> Path:
-        """Resolve and access-check a path in one step.
+    async def _resolve(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        *,
+        write: bool = False,
+        check_allowed: bool = True,
+    ) -> tuple[str, str]:
+        """Resolve and access-check a path in one step, returning `(root, resolved)`.
 
         Resolution happens first so the access check matches patterns against
         the canonical path relative to the root, collapsing `.`/`..`/`//`
         segments that would otherwise slip past a literal pattern (e.g.
         `config/./secret.txt` evading a `config/secret.txt` deny rule).
         """
-        resolved = self._resolve_path(path)
-        self._check_access(self._relative_to_root(resolved), write=write, check_allowed=check_allowed)
-        return resolved
+        root = await self._root_for(ctx)
+        resolved = await ctx.workspace.resolve(path, base=root)
+        # `resolve` is spelling, not confinement (its own contract): the containment check is
+        # ours and shapes policy only. Symlinks are left to the workspace isolation boundary.
+        if resolved != root and not resolved.startswith(root + '/'):
+            raise PermissionError(f'Path {path!r} resolves outside the root directory.')
+        self._check_access(posixpath.relpath(resolved, root), write=write, check_allowed=check_allowed)
+        return root, resolved
 
-    async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
-        """Read a text file directly, outside an agent run."""
-        return await self._read_file(None, path, offset=offset, limit=limit)
+    @staticmethod
+    def _relative(root: str, path: str) -> str:
+        return posixpath.relpath(posixpath.normpath(path), root)
 
-    async def _read_file_tool(
-        self, ctx: RunContext[AgentDepsT], path: str, *, offset: int = 0, limit: int | None = None
+    @staticmethod
+    def _is_hidden(path: str) -> bool:
+        return any(part.startswith('.') and part != '.' for part in path.split('/'))
+
+    @_recoverable
+    async def read_file(
+        self,
+        ctx: RunContext[AgentDepsT],
+        path: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
     ) -> str:
         """Read a text file with line numbers.
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
             offset: Zero-based line offset to start reading from.
-            limit: Maximum number of lines to return (default: 2000).
+            limit: Maximum number of lines to return (default: 2000). The workspace
+                also applies a 50 KiB byte cap; the window stops at whichever hits first.
 
         Returns:
-            File content with line numbers, plus metadata header.
+            File content with line numbers and a metadata header. A truncated window
+            ends with a `[truncated: ...]` notice; a line longer than 2000 characters
+            is clipped in the returned string. Neither is silent.
         """
-        return await self._read_file(ctx, path, offset=offset, limit=limit)
-
-    @_recoverable
-    async def _read_file(
-        self, ctx: RunContext[AgentDepsT] | None, path: str, *, offset: int = 0, limit: int | None = None
-    ) -> str:
         if limit is None:
             limit = self._max_read_lines
-        resolved = self._safe_resolve(path)
-        if not resolved.is_file():
-            if resolved.is_dir():
-                raise FileNotFoundError(f"'{path}' is a directory, not a file.")
-            raise FileNotFoundError(f'File not found: {path}')
+        root, resolved = await self._resolve(ctx, path)
+        try:
+            window = await ctx.workspace.read_file(resolved, offset=offset + 1, limit=limit)
+        except IsADirectoryError as e:
+            raise FileNotFoundError(f"'{path}' is a directory, not a file.") from e
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f'File not found: {path}') from e
 
-        raw = resolved.read_bytes()
-        if _is_binary(raw):
-            size = len(raw)
-            if ctx is not None:
-                content_hash = hashlib.sha256(raw).hexdigest()[:12]
-                await ctx.emit(FileReadEvent(**self._event_location(resolved), content_hash=content_hash))
-            return f'[Binary file: {size} bytes. Use a binary-aware tool to inspect.]'
+        if offset > 0 and not window.lines and not window.first_line_exceeds_limit:
+            # Reading the file just to count its lines would defeat the bounded read.
+            raise ValueError(f'Offset {offset} exceeds file length.')
 
-        text = raw.decode('utf-8', errors='replace')
-        lines = text.splitlines(keepends=True)
-        content_hash = _content_hash(text)
-        # Format before emitting: an out-of-range offset is a failed read, and
-        # a failed read must not look like a successful one to subscribers.
-        body = _format_lines(lines, offset, limit)
-        if ctx is not None:
-            await ctx.emit(FileReadEvent(**self._event_location(resolved), content_hash=content_hash))
+        location = _model_safe_filename(resolved, root)
+        if window.binary:
+            # The event reports the whole-file hash, so read the bytes the marker stands in for.
+            raw = await ctx.workspace.read_bytes(resolved)
+            content_hash = hashlib.sha256(raw).hexdigest()[:12]
+            await ctx.emit(FileReadEvent(path=location, root_dir=root, content_hash=content_hash))
+            return f'[Binary file: {window.byte_size if window.byte_size is not None else len(raw)} bytes. Use a binary-aware tool to inspect.]'
 
-        header = f'[{path} | {len(lines)} lines | hash:{content_hash}]\n'
-        return header + body
+        lines = window.lines
+        if offset == 0 and not window.truncated:
+            # The whole file is in the window, so report the hash write_file and edit_file verify
+            # against. It comes from the file itself: a window drops the trailing newline and any
+            # `\r`, so hashing the window text would report a hash they never accept.
+            content_hash = _content_hash((await ctx.workspace.read_bytes(resolved)).decode('utf-8', errors='replace'))
+            header = f'[{path} | {len(lines)} lines | hash:{content_hash}]\n'
+        elif window.first_line_exceeds_limit:
+            # The window is empty on purpose; hashing `window.text` would hash the notice.
+            content_hash = _content_hash('')
+            header = f'[{path} | line {offset + 1} exceeds byte limit]\n'
+        else:
+            # A partial window has no whole-file hash, so the event reports the hash of the
+            # returned lines rather than dragging the whole file across. Hash the lines, not
+            # `window.text`: that string includes the truncation notice.
+            content_hash = _content_hash('\n'.join(lines))
+            header = f'[{path} | lines {offset + 1}-{offset + len(lines)}]\n'
+        await ctx.emit(FileReadEvent(path=location, root_dir=root, content_hash=content_hash))
+        return header + _format_lines(
+            lines,
+            first_line_number=offset + 1,
+            truncated=window.truncated,
+            truncated_by=window.truncated_by,
+            remaining_lines=window.remaining_lines,
+            first_line_exceeds_limit=window.first_line_exceeds_limit,
+            total_lines=window.total_lines,
+        )
 
-    async def write_file(self, path: str, content: str, *, expected_hash: str | None = None) -> str:
-        """Write a text file directly, outside an agent run."""
-        return await self._write_file(None, path, content, expected_hash=expected_hash)
-
-    async def _write_file_tool(
+    @_recoverable
+    async def write_file(
         self,
         ctx: RunContext[AgentDepsT],
         path: str,
@@ -409,7 +408,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
             content: The text content to write.
             expected_hash: If provided, the write is rejected when the file exists
                 and its current hash doesn't match (optimistic concurrency).
@@ -417,96 +416,45 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Confirmation message with new hash.
         """
-        return await self._write_file(ctx, path, content, expected_hash=expected_hash)
-
-    @_recoverable
-    async def _write_file(
-        self,
-        ctx: RunContext[AgentDepsT] | None,
-        path: str,
-        content: str,
-        *,
-        expected_hash: str | None = None,
-    ) -> str:
-        resolved = self._safe_resolve(path, write=True)
-
-        if resolved.exists() and not resolved.is_file():
+        root, resolved = await self._resolve(ctx, path, write=True)
+        try:
+            entry = await ctx.workspace.stat(resolved)
+        except (FileNotFoundError, NotADirectoryError):
+            entry = None
+        if entry is not None and entry.is_dir:
             raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
 
-        if not resolved.parent.exists():
-            parent_rel = str(resolved.parent.relative_to(self._root))
+        parent = posixpath.dirname(resolved)
+        try:
+            parent_entry = await ctx.workspace.stat(parent)
+        except FileNotFoundError as e:
+            parent_rel = self._relative(root, parent)
+            raise FileNotFoundError(
+                f"Parent directory '{parent_rel}' does not exist. Use create_directory first."
+            ) from e
+        if not parent_entry.is_dir:
+            parent_rel = self._relative(root, parent)
             raise FileNotFoundError(f"Parent directory '{parent_rel}' does not exist. Use create_directory first.")
 
-        # Opening without O_TRUNC lets us classify the descriptor and check the
-        # expected hash before changing the file. POSIX non-blocking mode keeps
-        # a FIFO swapped into place from waiting for a reader; O_NOFOLLOW keeps
-        # a final-component symlink swap from redirecting the descriptor. Windows
-        # has no filesystem FIFO equivalent, and O_BINARY leaves newline handling
-        # to the text wrapper just as Path.write_text does.
-        platform_flags = os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW
-        access_flags = os.O_RDWR if expected_hash is not None else os.O_WRONLY
-        created = False
-        descriptor = -1
-        try:
-            # The target can disappear after O_EXCL reports that it exists. Retry
-            # the complete atomic classification so an ordinary write still
-            # recreates it, while bounding churn from a concurrently replaced path.
-            for _ in range(3):
-                try:
-                    descriptor = os.open(resolved, access_flags | platform_flags | os.O_CREAT | os.O_EXCL, 0o666)
-                except FileExistsError:
-                    try:
-                        descriptor = os.open(resolved, access_flags | platform_flags)
-                    except FileNotFoundError:
-                        continue
-                else:
-                    created = True
-                break
-            else:
-                raise ModelRetry(f'Path {path!r} changed repeatedly while opening. Retry the write.')
-        except OSError as e:
-            if e.errno == errno.ELOOP:
-                raise ModelRetry(
-                    f'Path {path!r} encountered a symlink loop or changed to a symlink before opening.'
-                ) from e
-            if e.errno in (errno.EISDIR, errno.ENODEV, errno.ENXIO):
-                raise ModelRetry(f'Path {path!r} exists and is not a regular file.') from e
-            raise
+        if expected_hash is not None and entry is not None:
+            current = (await ctx.workspace.read_bytes(resolved)).decode('utf-8', errors='replace')
+            current_hash = _content_hash(current)
+            if current_hash != expected_hash:
+                raise ValueError(
+                    f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
+                    f'got hash:{current_hash}). Re-read the file and retry.'
+                )
 
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise ModelRetry(f'Path {path!r} exists and is not a regular file.')
-
-            mode = 'r+' if expected_hash is not None else 'w'
-            text_file = os.fdopen(descriptor, mode, encoding='utf-8', newline=None)
-            descriptor = -1
-            with text_file:
-                if expected_hash is not None and not created:
-                    current_hash = _content_hash(text_file.read())
-                    if current_hash != expected_hash:
-                        raise ValueError(
-                            f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
-                            f'got hash:{current_hash}). Re-read the file and retry.'
-                        )
-
-                text_file.seek(0)
-                text_file.truncate(0)
-                text_file.write(content)
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-
+        await ctx.workspace.write_bytes(resolved, content.encode('utf-8'))
         new_hash = _content_hash(content)
+        await ctx.emit(
+            FileWrittenEvent(path=_model_safe_filename(resolved, root), root_dir=root, content_hash=new_hash)
+        )
         lines = len(content.splitlines())
-        if ctx is not None:
-            await ctx.emit(FileWrittenEvent(**self._event_location(resolved), content_hash=new_hash))
         return f'Wrote {len(content)} chars ({lines} lines) to {path}. [hash:{new_hash}]'
 
-    async def edit_file(self, path: str, old_text: str, new_text: str, *, expected_hash: str | None = None) -> str:
-        """Edit a text file directly, outside an agent run."""
-        return await self._edit_file(None, path, old_text, new_text, expected_hash=expected_hash)
-
-    async def _edit_file_tool(
+    @_recoverable
+    async def edit_file(
         self,
         ctx: RunContext[AgentDepsT],
         path: str,
@@ -522,7 +470,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
             old_text: The exact text to find (must appear exactly once).
             new_text: The replacement text.
             expected_hash: If provided, rejects the edit when the file's
@@ -531,26 +479,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Returns:
             Summary with new hash for subsequent operations.
         """
-        return await self._edit_file(ctx, path, old_text, new_text, expected_hash=expected_hash)
-
-    @_recoverable
-    async def _edit_file(
-        self,
-        ctx: RunContext[AgentDepsT] | None,
-        path: str,
-        old_text: str,
-        new_text: str,
-        *,
-        expected_hash: str | None = None,
-    ) -> str:
-        resolved = self._safe_resolve(path, write=True)
-        if not resolved.is_file():
-            raise FileNotFoundError(f'File not found: {path}')
-
-        text = resolved.read_text(encoding='utf-8')
+        root, resolved = await self._resolve(ctx, path, write=True)
+        try:
+            raw = await ctx.workspace.read_bytes(resolved)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f'File not found: {path}') from e
+        text = raw.decode('utf-8', errors='replace')
         current_hash = _content_hash(text)
-
-        # Optimistic concurrency check
         if expected_hash is not None and current_hash != expected_hash:
             raise ValueError(
                 f'Conflict: file {path!r} has changed (expected hash:{expected_hash}, '
@@ -566,247 +501,191 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             )
 
         new_content = text.replace(old_text, new_text, 1)
-        resolved.write_text(new_content, encoding='utf-8')
+        await ctx.workspace.write_bytes(resolved, new_content.encode('utf-8'))
         new_hash = _content_hash(new_content)
-        if ctx is not None:
-            await ctx.emit(FileWrittenEvent(**self._event_location(resolved), content_hash=new_hash))
+        await ctx.emit(
+            FileWrittenEvent(path=_model_safe_filename(resolved, root), root_dir=root, content_hash=new_hash)
+        )
         return f'Edited {path}. [hash:{new_hash}]'
 
-    async def list_directory(self, path: str = '.') -> str:
-        """List a directory directly, outside an agent run."""
-        return await self._list_directory(None, path)
-
-    async def _list_directory_tool(self, ctx: RunContext[AgentDepsT], path: str = '.') -> str:
+    @_recoverable
+    async def list_directory(self, ctx: RunContext[AgentDepsT], path: str = '.') -> str:
         """List the contents of a directory.
 
         Args:
             ctx: The current agent run context.
-            path: Directory path relative to the root directory.
+            path: Relative paths always resolve from the configured root.
 
         Returns:
             A newline-separated listing with type indicators and sizes.
         """
-        return await self._list_directory(ctx, path)
-
-    @_recoverable
-    async def _list_directory(self, ctx: RunContext[AgentDepsT] | None, path: str = '.') -> str:
-        # The listing root is gated by denied patterns but not by
-        # allowed_patterns: a directory like '.' never matches a file pattern.
-        # Entries are filtered per-entry against allowed_patterns below.
-        resolved = self._safe_resolve(path, check_allowed=False)
-        if not resolved.is_dir():
+        root, resolved = await self._resolve(ctx, path, check_allowed=False)
+        try:
+            root_entry = await ctx.workspace.stat(resolved)
+        except FileNotFoundError as e:
+            raise NotADirectoryError(f'Not a directory: {path}') from e
+        if not root_entry.is_dir:
             raise NotADirectoryError(f'Not a directory: {path}')
 
         entries: list[str] = []
         entry_count = 0
-        for entry in sorted(resolved.iterdir()):
-            try:
-                rel_path = entry.relative_to(self._real_root)
-            except ValueError:  # pragma: no cover
+        for entry in sorted(await ctx.workspace.list_dir(resolved), key=lambda item: item.path):
+            rel = self._relative(root, entry.path)
+            if self._is_hidden(rel) or not self._is_accessible(rel):
                 continue
-            # Skip dotfiles and dot-directories, matching search_files and
-            # find_files so the three walkers agree on what exists.
-            if any(part.startswith('.') for part in rel_path.parts):
-                continue
-            target = self._resolve_walk_entry(entry)
-            if target is None:
-                continue
-            rel = str(rel_path)
-            if target.is_dir():
-                line = f'{rel}/'
-            else:
-                try:
-                    size = target.stat().st_size
-                except OSError:
-                    # A dangling symlink, or an entry deleted mid-walk: it has
-                    # no size to report, so leave it out of the listing.
-                    continue
-                line = f'{rel}  ({size} bytes)'
-            # Only a listing that actually dropped an entry is marked truncated,
-            # so one that merely fills the cap reads as complete.
+            line = f'{rel}/' if entry.is_dir else f'{rel}  ({entry.size or 0} bytes)'
             if len(entries) >= self._max_list_results:
                 entries.append(f'[... truncated at {self._max_list_results} entries]')
                 break
             entries.append(line)
             entry_count += 1
-        if ctx is not None:
-            await ctx.emit(DirectoryListedEvent(**self._event_location(resolved), entry_count=entry_count))
+        await ctx.emit(
+            DirectoryListedEvent(path=_model_safe_filename(resolved, root), root_dir=root, entry_count=entry_count)
+        )
         return '\n'.join(entries) if entries else '(empty directory)'
 
     @_recoverable
-    async def search_files(self, pattern: str, *, path: str = '.', include_glob: str | None = None) -> str:
+    async def search_files(
+        self,
+        ctx: RunContext[AgentDepsT],
+        pattern: str,
+        *,
+        path: str = '.',
+        include_glob: str | None = None,
+    ) -> str:
         """Search file contents using a regular expression.
 
         Args:
+            ctx: The current agent run context.
             pattern: Regex pattern to search for.
-            path: Directory to search in, relative to the root directory.
+            path: Relative paths always resolve from the configured root.
             include_glob: If provided, only search files matching this glob (e.g. '*.py').
 
         Returns:
             str: Matching lines formatted as file:line_number:text.
         """
-        # See list_directory: the search root isn't gated by allowed_patterns;
-        # matched files are filtered per-entry below.
-        resolved = self._safe_resolve(path, check_allowed=False)
-        try:
-            compiled = re.compile(pattern)
-        except re.error as e:
-            raise ValueError(f'Invalid regex pattern: {e}') from e
+        root, resolved = await self._resolve(ctx, path, check_allowed=False)
+        per_file_cap = max(1, self._max_search_results + 1)
+        result = await ctx.workspace.run(
+            ['grep', '-rn', '-I', '-H', '-m', str(per_file_cap), '--', pattern, resolved],
+            timeout=30,
+        )
+        if result.exit_code >= 2:
+            raise ModelRetry(result.stderr.strip() or f'grep exited with code {result.exit_code}.')
+        if result.exit_code != 0 and not result.stdout:
+            return 'No matches found.'
 
-        results: list[str] = []
-
-        if resolved.is_file():
-            files = [resolved]
-        else:
-            files = sorted(resolved.rglob('*'))
-
-        for file_path in files:
-            try:
-                rel_path = file_path.relative_to(self._real_root)
-            except ValueError:  # pragma: no cover
+        matches: list[str] = []
+        for line in result.stdout.splitlines():
+            parts = line.split(':', 2)
+            if len(parts) != 3:
                 continue
-            if any(part.startswith('.') for part in rel_path.parts):
+            absolute, line_number, text = parts
+            rel = self._relative(root, absolute)
+            if self._is_hidden(rel) or not self._is_accessible(rel):
                 continue
-            rel_str = str(rel_path)
-            if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
+            if include_glob is not None and not self._matches(rel, include_glob):
                 continue
-            target = self._resolve_walk_entry(file_path)
-            if target is None:
-                continue
-            if not target.is_file():
-                continue
-            try:
-                raw = target.read_bytes()
-            except OSError:  # pragma: no cover
-                continue
-            if _is_binary(raw):
-                continue
-            text = raw.decode('utf-8', errors='replace')
-            matches, truncated = _matching_lines(text, compiled, rel_str, self._max_search_results - len(results))
-            results.extend(matches)
-            if truncated:
-                results.append(f'[... truncated at {self._max_search_results} matches]')
+            if len(matches) >= self._max_search_results:
+                matches.append(f'[... truncated at {self._max_search_results} matches]')
                 break
-
-        return '\n'.join(results) if results else 'No matches found.'
+            matches.append(f'{rel}:{line_number}:{text}')
+        return '\n'.join(matches) if matches else 'No matches found.'
 
     @_recoverable
-    async def find_files(self, pattern: str, *, path: str = '.') -> str:
+    async def find_files(self, ctx: RunContext[AgentDepsT], pattern: str, *, path: str = '.') -> str:
         """Find files by glob pattern (name matching, not content search).
 
         Args:
+            ctx: The current agent run context.
             pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
                 '**/*.json'). Absolute patterns are rejected.
-            path: Directory to search in, relative to the root directory.
+            path: Relative paths always resolve from the configured root.
 
         Returns:
             Newline-separated list of matching file paths relative to root.
         """
-        if os.path.isabs(pattern):
+        if posixpath.isabs(pattern):
             raise ValueError(f'Pattern {pattern!r} must be relative to the search path, not absolute.')
-
-        # See list_directory: the find root isn't gated by allowed_patterns;
-        # matched entries are filtered per-entry below.
-        resolved = self._safe_resolve(path, check_allowed=False)
-        if not resolved.is_dir():
+        root, resolved = await self._resolve(ctx, path, check_allowed=False)
+        try:
+            root_entry = await ctx.workspace.stat(resolved)
+        except FileNotFoundError as e:
+            raise NotADirectoryError(f'Not a directory: {path}') from e
+        if not root_entry.is_dir:
             raise NotADirectoryError(f'Not a directory: {path}')
 
-        try:
-            found = sorted(resolved.glob(pattern))
-        except NotImplementedError as e:
-            # The `isabs` guard above takes a rooted pattern first on POSIX. On
-            # Windows it does not: since 3.13 `os.path.isabs` reports a single
-            # leading slash as relative, so `/etc/*.conf` reaches `glob`, which
-            # rejects any rooted pattern. `NotImplementedError` is not an
-            # `OSError`, so neither the recoverable tuple nor the errno table
-            # can reach it.
-            raise ModelRetry(f'Pattern {pattern!r} must be relative to {path!r}, not an absolute path.') from e
-        except IndexError as e:
-            # Python 3.10 through 3.12 raise this for a pattern whose last
-            # component is a bare `.`. On 3.13+ the same pattern raises
-            # `ValueError`, which the recoverable tuple already covers.
-            raise ModelRetry(f'Pattern {pattern!r} is not a valid glob pattern.') from e
+        # Patterns follow glob semantics: `*` stays in one directory and `**/` recurses.
+        # `find -name` always recurses, so translate the two documented pattern shapes;
+        # other shapes anchor on `-path` (whose `*` may cross separators).
+        if pattern.startswith('**/') and '/' not in pattern[3:]:
+            argv = ['find', resolved, '-name', pattern[3:]]
+        elif '/' not in pattern:
+            argv = ['find', resolved, '-mindepth', '1', '-maxdepth', '1', '-name', pattern]
+        else:
+            argv = ['find', resolved, '-path', posixpath.join(resolved, pattern)]
+        result = await ctx.workspace.run(argv, timeout=30)
+        if result.exit_code != 0:
+            raise ModelRetry(result.stderr.strip() or f'find exited with code {result.exit_code}.')
 
         matches: list[str] = []
-        for match in found:
-            try:
-                rel_path = match.relative_to(self._real_root)
-            except ValueError:  # pragma: no cover
-                continue
-            if any(part.startswith('.') for part in rel_path.parts):
-                continue
-            target = self._resolve_walk_entry(match)
-            if target is None:
-                continue
-            if not target.exists():
-                # A dangling symlink resolves inside the root but names nothing.
+        for absolute in sorted(result.stdout.splitlines()):
+            rel = self._relative(root, absolute)
+            if self._is_hidden(rel) or not self._is_accessible(rel):
                 continue
             if len(matches) >= self._max_find_results:
                 matches.append(f'[... truncated at {self._max_find_results} matches]')
                 break
-            rel = str(rel_path)
-            suffix = '/' if target.is_dir() else ''
-            matches.append(f'{rel}{suffix}')
-
+            try:
+                entry = await ctx.workspace.stat(absolute)
+            except FileNotFoundError:  # deleted mid-walk
+                continue
+            matches.append(f'{rel}{"/" if entry.is_dir else ""}')
         return '\n'.join(matches) if matches else 'No matches found.'
 
     @_recoverable
-    async def create_directory(self, path: str) -> str:
+    async def create_directory(self, ctx: RunContext[AgentDepsT], path: str) -> str:
         """Create a directory and any missing parents.
 
         Args:
-            path: Directory path relative to the root directory.
+            ctx: The current agent run context.
+            path: Relative paths always resolve from the configured root.
 
         Returns:
             Confirmation message.
         """
-        resolved = self._safe_resolve(path, write=True)
-        try:
-            resolved.mkdir(parents=True, exist_ok=True)
-        except FileExistsError as e:
-            # `exist_ok` only suppresses the error when the existing path is a
-            # directory; name the conflicting model-supplied path directly.
-            raise ModelRetry(f'Path {path!r} exists and is not a directory.') from e
-        except NotADirectoryError as e:
-            # Distinguish a parent collision from a collision at the leaf.
-            raise ModelRetry(f'Path {path!r} has a parent that is not a directory.') from e
+        _, resolved = await self._resolve(ctx, path, write=True)
+        await ctx.workspace.make_dir(resolved)
         return f'Created directory: {path}'
 
     @_recoverable
-    async def file_info(self, path: str) -> str:
+    async def file_info(self, ctx: RunContext[AgentDepsT], path: str) -> str:
         """Get metadata about a file or directory.
 
         Args:
-            path: File or directory path relative to the root directory.
+            ctx: The current agent run context.
+            path: Relative paths always resolve from the configured root.
 
         Returns:
             Formatted metadata including size, type, and permissions.
         """
-        resolved = self._safe_resolve(path)
-        if not resolved.exists():
-            raise FileNotFoundError(f'Path not found: {path}')
+        _, resolved = await self._resolve(ctx, path)
+        try:
+            entry = await ctx.workspace.stat(resolved)
+        except FileNotFoundError as e:
+            raise FileNotFoundError(f'Path not found: {path}') from e
 
-        # Check if the original (pre-resolve) path is a symlink
-        original = self._root / path
-        is_link = original.is_symlink()
-
-        stat = resolved.stat()
-        kind = 'directory' if resolved.is_dir() else 'file'
-        size = stat.st_size
-
-        parts = [f'path: {path}', f'type: {kind}', f'size: {size} bytes']
-
-        if resolved.is_file():
-            raw = resolved.read_bytes()
+        parts = [
+            f'path: {path}',
+            f'type: {"directory" if entry.is_dir else "file"}',
+            f'size: {entry.size or 0} bytes',
+        ]
+        if not entry.is_dir:
+            raw = await ctx.workspace.read_bytes(resolved)
             is_bin = _is_binary(raw)
             parts.append(f'binary: {is_bin}')
             if not is_bin:
                 text = raw.decode('utf-8', errors='replace')
                 parts.append(f'lines: {len(text.splitlines())}')
                 parts.append(f'hash: {_content_hash(text)}')
-
-        if is_link:
-            target = _model_safe_filename(os.readlink(original), self._real_root)
-            parts.append(f'symlink_target: {target}')
-
         return '\n'.join(parts)

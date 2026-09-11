@@ -20,7 +20,7 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-Programmatic callers pass a workspace explicitly. Coder's Shell and FileSystem tools operate on the host; attaching another workspace does not redirect those tools. Interfaces that start runs for you accept `workspace=` too, so pass it to [`agent.to_cli_sync(workspace=...)`](https://pydantic.dev/docs/ai/cli/) or [`agent.to_web(workspace=...)`](https://pydantic.dev/docs/ai/web/) the same way you pass it to `run()`.
+Programmatic callers pass a workspace explicitly. Coder's Shell and FileSystem tools run against the run's workspace, so passing `workspace=` (or a `WorkspaceRef`) directs them at that environment, and the bundled `coder_agent` supplies the current checkout as a local workspace when none is given. Interfaces that start runs for you accept `workspace=` too, so pass it to [`agent.to_cli_sync(workspace=...)`](https://pydantic.dev/docs/ai/cli/) or [`agent.to_web(workspace=...)`](https://pydantic.dev/docs/ai/web/) the same way you pass it to `run()`.
 
 Or skip the file entirely and run the exported `coder_agent` with [`clai`](https://pydantic.dev/docs/ai/cli/#custom-agents) (the Pydantic AI CLI), via [`uvx`](https://docs.astral.sh/uv/guides/tools/):
 
