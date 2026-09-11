@@ -165,6 +165,67 @@ or is not an `Agent` fails the step with the Python traceback. A spec file, and 
 dotted `module.attribute` form `pai` also accepts, are left to the CLI, which reports
 its own error.
 
+## Observability
+
+The engine instruments the agent whenever gh-aw supplies an OTLP endpoint. A workflow
+turns that on with `observability.otlp`, plus an allowlist entry for the backend's host,
+because the egress firewall otherwise drops the export:
+
+```yaml
+network:
+  allowed:
+    - logfire-us.pydantic.dev
+observability:
+  otlp:
+    endpoint:
+      - url: https://logfire-us.pydantic.dev
+        headers:
+          Authorization: ${{ secrets.LOGFIRE_TOKEN }}
+```
+
+gh-aw injects `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`,
+`OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` and `TRACEPARENT` into the workflow
+environment when, and only when, an endpoint is configured, and workflow-level environment
+reaches both the pre-agent step and the agent container. The endpoint variable is what the
+engine keys on: with it set, the install step adds `logfire` and the launcher calls
+`logfire.configure()` and `logfire.instrument_pydantic_ai()` before importing the agent
+target, then attaches the W3C context from `TRACEPARENT`. With it unset, neither happens
+and the install costs nothing.
+
+Four of those choices are not defaults, and each is load-bearing.
+
+- **`send_to_logfire="if-token-present"`.** The default requires a `LOGFIRE_TOKEN` in the
+  environment and raises without one. The credential here is a header value gh-aw holds,
+  not an environment variable, so the export is driven by the endpoint alone and works
+  against any backend.
+- **`console=False`.** logfire's console exporter writes every span to stderr, which is the
+  stream this definition's `log-parser` reads.
+- **The `TRACEPARENT` attach, with `distributed_tracing=True`.** gh-aw sets the variable for
+  behavior-defined engines (`applyTraceContextEnvToMap` in
+  `pkg/workflow/behavior_defined_engine.go`) so that an engine can nest its spans under the
+  workflow run's span, but neither logfire nor the OpenTelemetry SDK reads it from the
+  environment. Without the attach each run produces a second, unrelated trace. The flag is
+  what marks the propagated context as deliberate; logfire warns on every run without it,
+  because extracting incoming context is usually accidental.
+- **`OTEL_METRICS_EXPORTER` and `OTEL_LOGS_EXPORTER` default to `none`.** logfire's OTLP
+  setup is per signal, so an endpoint alone also builds metrics and logs exporters that POST
+  to `/v1/metrics` and `/v1/logs`. A traces-only backend answers `404`, and the step log then
+  carries `Failed to export metrics batch code: 404` once per export while the run still
+  succeeds. These are the standard OpenTelemetry switches rather than a logfire argument, so
+  a workflow that has a backend for those signals can set either one back to `otlp`.
+
+The engine contributes no resource attributes of its own. `OTEL_RESOURCE_ATTRIBUTES`
+already carries `gh-aw.engine.id` (`pydantic-ai`), `gh-aw.workflow.name`,
+`gh-aw.repository`, `gh-aw.run.id` and `github.run_id`, and `logfire.configure()` merges
+the variable into the resource, so `gh-aw.engine.id` is the filter that finds runs of this
+engine in a backend. The configuration line the engine logs gains an `otlp=` segment while
+this is active.
+
+A `PAI_AGENT` module that calls `logfire.configure()` itself runs after the engine's call
+and replaces it. Such a module has to pass `send_to_logfire` for the reason above, and to
+install `logfire` through the workflow's own `steps:` if it imports it on runs that
+configure no endpoint.
+
 ## gh-aw compatibility
 
 This definition requires the gh-aw action/runtime at
