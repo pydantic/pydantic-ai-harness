@@ -18,7 +18,7 @@ and the agent you already wrote becomes editable from Logfire.
 Install the `logfire` extra:
 
 ```bash
-uv add "pydantic-ai-harness[logfire]"
+pip/uv-add "pydantic-ai-harness[logfire]"
 ```
 
 ## The problem it solves
