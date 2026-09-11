@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import os
 import shlex
 import shutil
 import signal
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
 from unittest.mock import MagicMock, patch
 
 import anyio
+import anyio.abc
 import pytest
 import sniffio
+from anyio.lowlevel import checkpoint
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
@@ -25,11 +29,18 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.code_mode import CodeMode
-from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
-from pydantic_ai_harness.shell._toolset import (
-    ShellToolset,
-    _is_interactive_command,
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell, ShellCommandEndEvent
+from pydantic_ai_harness.shell._process import (
+    _MAX_PENDING_LINES,
+    OutputReader,
+    cleanup_bg_files,
+    drain_with_timeout,
+    is_interactive_command,
+    kill_process_group,
+    read_bg_output,
+    run_to_exit,
 )
+from pydantic_ai_harness.shell._toolset import ShellToolset
 
 
 def _env_toolset(
@@ -94,6 +105,11 @@ def _run_context() -> RunContext[None]:
         prompt=None,
         messages=[],
         run_step=0,
+        # The tools emit capability events, which core only accepts from a
+        # context that has a buffer to hold them and a capability to attribute
+        # them to; neither exists outside an agent run.
+        _event_stream_buffer=[],
+        _capability=Shell[None](id='shell'),
     )
 
 
@@ -112,63 +128,63 @@ def _parse_command_id(result: str) -> str:
 
 class TestIsInteractiveCommand:
     def test_vi(self) -> None:
-        assert _is_interactive_command('vi file.txt') is True
+        assert is_interactive_command('vi file.txt') is True
 
     def test_vim(self) -> None:
-        assert _is_interactive_command('vim file.txt') is True
+        assert is_interactive_command('vim file.txt') is True
 
     def test_nano(self) -> None:
-        assert _is_interactive_command('nano file.txt') is True
+        assert is_interactive_command('nano file.txt') is True
 
     def test_less(self) -> None:
-        assert _is_interactive_command('less file.txt') is True
+        assert is_interactive_command('less file.txt') is True
 
     def test_top(self) -> None:
-        assert _is_interactive_command('top') is True
+        assert is_interactive_command('top') is True
 
     def test_sudo(self) -> None:
-        assert _is_interactive_command('sudo rm -rf /') is True
+        assert is_interactive_command('sudo rm -rf /') is True
 
     def test_ssh(self) -> None:
-        assert _is_interactive_command('ssh host') is True
+        assert is_interactive_command('ssh host') is True
 
     def test_regular_command(self) -> None:
-        assert _is_interactive_command('ls -la') is False
+        assert is_interactive_command('ls -la') is False
 
     def test_echo(self) -> None:
-        assert _is_interactive_command('echo hello') is False
+        assert is_interactive_command('echo hello') is False
 
     def test_grep(self) -> None:
-        assert _is_interactive_command('grep pattern file') is False
+        assert is_interactive_command('grep pattern file') is False
 
     def test_emacs(self) -> None:
-        assert _is_interactive_command('emacs file.txt') is True
+        assert is_interactive_command('emacs file.txt') is True
 
     def test_man(self) -> None:
-        assert _is_interactive_command('man ls') is True
+        assert is_interactive_command('man ls') is True
 
     def test_htop(self) -> None:
-        assert _is_interactive_command('htop') is True
+        assert is_interactive_command('htop') is True
 
     def test_telnet(self) -> None:
-        assert _is_interactive_command('telnet localhost 80') is True
+        assert is_interactive_command('telnet localhost 80') is True
 
     def test_ftp(self) -> None:
-        assert _is_interactive_command('ftp host') is True
+        assert is_interactive_command('ftp host') is True
 
     def test_passwd(self) -> None:
-        assert _is_interactive_command('passwd') is True
+        assert is_interactive_command('passwd') is True
 
     def test_more(self) -> None:
-        assert _is_interactive_command('more file.txt') is True
+        assert is_interactive_command('more file.txt') is True
 
     def test_not_prefix_match(self) -> None:
-        assert _is_interactive_command('view file.txt') is False
-        assert _is_interactive_command('vishnu') is False
+        assert is_interactive_command('view file.txt') is False
+        assert is_interactive_command('vishnu') is False
 
     def test_leading_spaces(self) -> None:
-        assert _is_interactive_command('  vi file.txt') is True
-        assert _is_interactive_command('  sudo rm') is True
+        assert is_interactive_command('  vi file.txt') is True
+        assert is_interactive_command('  sudo rm') is True
 
 
 @pytest.fixture
@@ -300,8 +316,9 @@ class TestCommandValidation:
     async def test_unparseable_command_allowed(self, toolset: ShellToolset[None]) -> None:
         toolset._check_command("echo 'unterminated")
 
-    async def test_empty_command_allowed(self, toolset: ShellToolset[None]) -> None:
-        toolset._check_command('')
+    async def test_empty_command_rejected(self, toolset: ShellToolset[None]) -> None:
+        with pytest.raises(ModelRetry, match='empty'):
+            toolset._check_command('   ')
 
     async def test_denied_operator_substring_match(self, shell_dir: Path) -> None:
         ts = ShellToolset(
@@ -329,19 +346,6 @@ class TestCommandValidation:
             allow_interactive=False,
         )
         ts._check_command("echo 'unterminated")
-
-    async def test_empty_tokens(self, shell_dir: Path) -> None:
-        ts = ShellToolset(
-            cwd=shell_dir,
-            allowed_commands=['echo'],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=10.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        ts._check_command('')
 
     def test_first_denied_operator_match(self, toolset: ShellToolset[None]) -> None:
         ts = ShellToolset(
@@ -477,7 +481,7 @@ class TestPersistCwdHardening:
 
 
 class TestSpawnFailures:
-    """Failures raised by the spawn itself, which reached past `_recoverable`
+    """Failures raised by the spawn itself, which reached past `recoverable`
     when it only caught `PermissionError` and aborted the whole run."""
 
     def _toolset_in(self, cwd: Path) -> ShellToolset[None]:
@@ -1161,6 +1165,55 @@ class TestBackgroundCommands:
                 await ts.start_command('echo hi')
         assert not ts._background
 
+    async def test_start_command_unlinks_the_stdout_file_when_the_stderr_file_fails(self, shell_dir: Path) -> None:
+        """A failure creating the second temp file must not leak the first."""
+        ts = _shell_toolset(shell_dir)
+        stdout_file = tempfile.NamedTemporaryFile(mode='w+b', prefix='harness_test_out_', delete=False)
+        with patch('tempfile.NamedTemporaryFile', side_effect=[stdout_file, OSError('no space left on device')]):
+            with pytest.raises(OSError, match='no space left on device'):
+                await ts.start_command('echo hi')
+
+        assert not os.path.exists(stdout_file.name)
+        assert not ts._background
+
+    async def test_check_while_a_finishing_stop_is_in_progress_emits_one_end(self, shell_dir: Path) -> None:
+        """A check landing while the kill runs must not report the exit as its own end.
+
+        The stop claims the process before its first await for this to hold: a
+        check running after the command's exit code becomes observable but
+        before the stop claims it records a second end event. Hammering
+        `check_command` from a sibling task keeps checks landing in that
+        window, so moving the claim after `await kill_process_group(...)` fails
+        here while the parallel agent-level test stays green.
+        """
+        ts = _shell_toolset(shell_dir)
+        ctx = _run_context()
+        tools = await ts.get_tools(ctx)
+        started = await ts.call_tool(
+            'start_command', {'command': 'trap "" TERM; sleep 30 & sleep 0.05; exit 5'}, ctx, tools['start_command']
+        )
+        command_id = _parse_command_id(str(started))
+        stop_done = anyio.Event()
+        checks = 0
+
+        async def hammer_checks() -> None:
+            nonlocal checks
+            while not stop_done.is_set() and checks < 10_000:
+                await checkpoint()
+                await ts.call_tool('check_command', {'command_id': command_id}, ctx, tools['check_command'])
+                checks += 1
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(hammer_checks)
+            await ts.call_tool('stop_command', {'command_id': command_id}, ctx, tools['stop_command'])
+            stop_done.set()
+
+        # A check that never overlapped the stop would leave the ordering untested.
+        assert checks > 1
+        assert ctx._event_stream_buffer is not None
+        ends = [event for event in ctx._event_stream_buffer if isinstance(event, ShellCommandEndEvent)]
+        assert len(ends) == 1
+
     async def test_aexit_terminates_background_processes(self, shell_dir: Path) -> None:
         ts = ShellToolset(
             cwd=shell_dir,
@@ -1372,37 +1425,24 @@ class TestCodeModeInterop:
         assert 'async def stop_command' in run_code_description
 
 
+def _record_signal(signals: list[int]) -> Callable[[int, int], None]:
+    def killpg(_pgid: int, sig: int) -> None:
+        signals.append(sig)
+
+    return killpg
+
+
 class TestKillProcessGroupEdgeCases:
     async def test_sigterm_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGTERM raises ProcessLookupError, method returns without SIGKILL."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         proc = MagicMock()
         proc.pid = 99999
         with patch('os.killpg', side_effect=ProcessLookupError):
-            await ts._kill_process_group(proc)
+            await kill_process_group(proc)
         # No exception raised, method returned early
 
     async def test_sigkill_escalation(self, tmp_path: Path) -> None:
         """When process doesn't exit within grace period, SIGKILL is sent."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         proc = MagicMock()
         proc.pid = 99999
 
@@ -1419,27 +1459,14 @@ class TestKillProcessGroupEdgeCases:
 
         with (
             patch('os.killpg', side_effect=fake_killpg),
-            patch('os.getpgid', return_value=12345),
-            patch('pydantic_ai_harness.shell._toolset._KILL_GRACE_PERIOD', 0.01),
+            patch('pydantic_ai_harness.shell._process._KILL_GRACE_PERIOD', 0.01),
         ):
-            await ts._kill_process_group(proc)
+            await kill_process_group(proc)
 
-        assert len(kill_calls) == 2
-        assert kill_calls[0][1] == signal.SIGTERM
-        assert kill_calls[1][1] == signal.SIGKILL
+        assert kill_calls == [(99999, signal.SIGTERM), (99999, signal.SIGKILL)]
 
     async def test_sigkill_raises_process_lookup_error(self, tmp_path: Path) -> None:
         """When SIGKILL raises ProcessLookupError (process exited between SIGTERM and SIGKILL)."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         proc = MagicMock()
         proc.pid = 99999
 
@@ -1458,120 +1485,102 @@ class TestKillProcessGroupEdgeCases:
 
         with (
             patch('os.killpg', side_effect=fake_killpg),
-            patch('os.getpgid', return_value=12345),
-            patch('pydantic_ai_harness.shell._toolset._KILL_GRACE_PERIOD', 0.01),
+            patch('pydantic_ai_harness.shell._process._KILL_GRACE_PERIOD', 0.01),
         ):
-            await ts._kill_process_group(proc)
+            await kill_process_group(proc)
 
         assert call_count == 2
 
+    async def test_group_is_swept_after_the_leader_exits(self) -> None:
+        """A child forked while the SIGTERM was in flight misses it, so the group is swept regardless."""
+        proc = MagicMock()
+        proc.pid = 99999
+
+        async def exits_at_once() -> int:
+            return 0
+
+        proc.wait = exits_at_once
+        signals: list[int] = []
+
+        with patch('os.killpg', side_effect=_record_signal(signals)):
+            await kill_process_group(proc)
+
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+    @pytest.mark.anyio(backends=['asyncio'])
+    async def test_group_is_swept_when_the_grace_wait_is_cancelled(self) -> None:
+        """A native `Task.cancel()` mid-wait, which no anyio shield stops, still ends in the sweep."""
+        if sniffio.current_async_library() != 'asyncio':  # pragma: no cover
+            pytest.skip('Task.cancel() is an asyncio primitive')
+        proc = MagicMock()
+        proc.pid = 99999
+        parked = anyio.Event()
+
+        async def wait_forever() -> int:
+            parked.set()
+            await anyio.sleep(999)
+            return 0  # pragma: no cover
+
+        proc.wait = wait_forever
+        signals: list[int] = []
+
+        with patch('os.killpg', side_effect=_record_signal(signals)):
+            task = asyncio.ensure_future(kill_process_group(proc))
+            await parked.wait()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+
+
+class _FailingStream(anyio.abc.ByteReceiveStream):
+    """Yields one chunk, then fails the way a pipe closed under the reader does."""
+
+    def __init__(self, error: type[Exception]) -> None:
+        self._error = error
+        self._yielded = False
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if not self._yielded:
+            self._yielded = True
+            return b'partial'
+        raise self._error
+
+    async def aclose(self) -> None:  # pragma: no cover
+        pass
+
 
 class TestDrainWithTimeoutEdgeCases:
-    async def test_stdout_closed_resource_error(self, tmp_path: Path) -> None:
-        """ClosedResourceError on stdout is caught silently after yielding data."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        proc = MagicMock()
+    @pytest.mark.parametrize('error', [anyio.ClosedResourceError, anyio.BrokenResourceError])
+    async def test_closed_pipe_ends_the_drain(self, error: type[Exception]) -> None:
+        """The data read before the pipe failed is kept and its tail still reaches the sink."""
+        lines: list[tuple[str, bool]] = []
 
-        # Yield one chunk then raise ClosedResourceError
-        class FailingStream:
-            def __init__(self) -> None:
-                self._yielded = False
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
 
-            def __aiter__(self) -> FailingStream:
-                return self
+        reader = OutputReader(_FailingStream(error), on_line=sink)
+        await drain_with_timeout(reader)
+        await reader.deliver()
 
-            async def __anext__(self) -> bytes:
-                if not self._yielded:
-                    self._yielded = True
-                    return b'partial'
-                raise anyio.ClosedResourceError
-
-        proc.stdout = FailingStream()
-        proc.stderr = None
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        await ts._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-        assert stdout_chunks == [b'partial']
-
-    async def test_stderr_broken_resource_error(self, tmp_path: Path) -> None:
-        """BrokenResourceError on stderr is caught silently after yielding data."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
-        proc = MagicMock()
-        proc.stdout = None
-
-        class FailingStream:
-            def __init__(self) -> None:
-                self._yielded = False
-
-            def __aiter__(self) -> FailingStream:
-                return self
-
-            async def __anext__(self) -> bytes:
-                if not self._yielded:
-                    self._yielded = True
-                    return b'partial'
-                raise anyio.BrokenResourceError
-
-        proc.stderr = FailingStream()
-
-        stdout_chunks: list[bytes] = []
-        stderr_chunks: list[bytes] = []
-        await ts._drain_with_timeout(stdout_chunks, stderr_chunks, proc)
-        assert stderr_chunks == [b'partial']
+        assert reader.chunks == [b'partial']
+        assert lines == [('partial', False)]
 
 
 class TestReadBgOutputEdgeCases:
     def test_stdout_oserror(self, tmp_path: Path) -> None:
         """OSError reading stdout file returns empty string."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         bg = MagicMock()
         bg.stdout_path = '/nonexistent/path/stdout'
         bg.stderr_path = '/nonexistent/path/stderr'
 
-        stdout, stderr = ts._read_bg_output(bg)
+        stdout, stderr = read_bg_output(bg)
         assert stdout == ''
         assert stderr == ''
 
     def test_stderr_oserror_only(self, tmp_path: Path) -> None:
         """OSError reading stderr file only, stdout succeeds."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         # Create a valid stdout file but invalid stderr path
         stdout_file = tmp_path / 'stdout.txt'
         stdout_file.write_text('hello')
@@ -1580,7 +1589,7 @@ class TestReadBgOutputEdgeCases:
         bg.stdout_path = str(stdout_file)
         bg.stderr_path = '/nonexistent/path/stderr'
 
-        stdout, stderr = ts._read_bg_output(bg)
+        stdout, stderr = read_bg_output(bg)
         assert stdout == 'hello'
         assert stderr == ''
 
@@ -1588,22 +1597,12 @@ class TestReadBgOutputEdgeCases:
 class TestCleanupBgFilesEdgeCases:
     def test_unlink_oserror(self, tmp_path: Path) -> None:
         """OSError on unlink is caught silently."""
-        ts = ShellToolset(
-            cwd=tmp_path,
-            allowed_commands=[],
-            denied_commands=[],
-            denied_operators=[],
-            default_timeout=5.0,
-            max_output_chars=50_000,
-            persist_cwd=False,
-            allow_interactive=False,
-        )
         bg = MagicMock()
         bg.stdout_path = '/nonexistent/path/stdout'
         bg.stderr_path = '/nonexistent/path/stderr'
 
         # Should not raise
-        ts._cleanup_bg_files(bg)
+        cleanup_bg_files(bg)
 
 
 class TestStopCommandAlreadyFinished:
@@ -1787,3 +1786,210 @@ class TestEnvControlPropagation:
             or name == 'PYDANTIC_AI_GATEWAY_API_KEY'
         }
         assert leaked == set()
+
+
+class _SlowStream(anyio.abc.ByteReceiveStream):
+    """Yields chunks quickly, to test that callback latency is not counted against timeout.
+
+    With `hang`, the stream blocks once its chunks are exhausted, simulating
+    a command that is still running.
+    """
+
+    def __init__(self, chunks: list[bytes], *, hang: bool = False) -> None:
+        self._chunks = list(chunks)
+        self._hang = hang
+        self._hung = False
+
+    async def receive(self, max_bytes: int = 65536) -> bytes:
+        if self._chunks:
+            return self._chunks.pop(0)
+        if self._hang and not self._hung:
+            self._hung = True
+            await anyio.sleep(3600)
+        raise anyio.EndOfStream
+
+    async def aclose(self) -> None:
+        pass
+
+
+class _FakeProcess:
+    """Minimal process stub for testing run_to_exit without spawning.
+
+    The default pid can never exist, so `kill_process_group` is a no-op
+    (ESRCH) instead of signalling a real process group.
+    """
+
+    def __init__(
+        self,
+        *,
+        pid: int = 1 << 30,
+        exit_code: int = 0,
+        stdout_chunks: list[bytes],
+        stderr_chunks: list[bytes],
+        hang: bool = False,
+    ) -> None:
+        self.pid = pid
+        self._exit_code = exit_code
+        self.stdout: anyio.abc.ByteReceiveStream = _SlowStream(stdout_chunks, hang=hang)
+        self.stderr: anyio.abc.ByteReceiveStream = _SlowStream(stderr_chunks)
+        self._closed = False
+
+    async def wait(self) -> int:
+        return self._exit_code
+
+    async def aclose(self) -> None:
+        """Close the pipe streams too, as a real `anyio.abc.Process.aclose` does."""
+        self._closed = True
+        await self.stdout.aclose()
+        await self.stderr.aclose()
+
+
+class TestRunToExitTimeoutAccounting:
+    """Callback latency must not consume the command execution timeout."""
+
+    async def test_slow_callback_does_not_cause_spurious_timeout(self) -> None:
+        """A slow on_line callback should not make an otherwise-fast command appear timed out."""
+        lines: list[tuple[str, bool]] = []
+        callback_delay = 0.5
+
+        async def slow_sink(line: str, truncated: bool) -> None:
+            await anyio.sleep(callback_delay)
+            lines.append((line, truncated))
+
+        proc = _FakeProcess(
+            exit_code=0,
+            stdout_chunks=[b'line1\n', b'line2\n'],
+            stderr_chunks=[],
+        )
+        stdout = OutputReader(proc.stdout, on_line=slow_sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        # Timeout is shorter than total callback time but longer than command execution
+        timeout = 0.2
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=timeout)  # type: ignore[arg-type]
+
+        # Command should complete successfully -- callback latency is outside the timeout scope
+        assert exit_code == 0
+        assert timed_out is False
+        # Lines should still be delivered
+        assert lines == [('line1', False), ('line2', False)]
+        assert proc._closed
+
+    async def test_command_completes_within_timeout(self) -> None:
+        """A fast command with lines completes normally and delivers all output."""
+        lines: list[tuple[str, bool]] = []
+
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+
+        proc = _FakeProcess(
+            exit_code=0,
+            stdout_chunks=[b'hello\n', b'world\n'],
+            stderr_chunks=[b'err\n'],
+        )
+        stdout = OutputReader(proc.stdout, on_line=sink)
+        stderr = OutputReader(proc.stderr, on_line=sink)
+
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=5.0)  # type: ignore[arg-type]
+
+        assert exit_code == 0
+        assert timed_out is False
+        assert stdout.text == 'hello\nworld\n'
+        assert stderr.text == 'err\n'
+        # Lines delivered in order (stdout then stderr from task group)
+        assert ('hello', False) in lines
+        assert ('world', False) in lines
+        assert ('err', False) in lines
+        assert proc._closed
+
+    async def test_unterminated_line_delivered_after_success(self) -> None:
+        """The final unterminated line is delivered outside the timeout scope."""
+        lines: list[tuple[str, bool]] = []
+
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+
+        proc = _FakeProcess(
+            exit_code=0,
+            stdout_chunks=[b'complete\n', b'partial'],
+            stderr_chunks=[],
+        )
+        stdout = OutputReader(proc.stdout, on_line=sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=5.0)  # type: ignore[arg-type]
+
+        assert exit_code == 0
+        assert timed_out is False
+        assert lines == [('complete', False), ('partial', False)]
+
+    async def test_high_volume_output_replays_only_the_last_lines(self) -> None:
+        """A high-volume command must not buffer unboundedly for the sink."""
+        lines: list[tuple[str, bool]] = []
+
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+
+        total = _MAX_PENDING_LINES + 50
+        proc = _FakeProcess(
+            exit_code=0,
+            stdout_chunks=[f'line{i}\n'.encode() for i in range(total)],
+            stderr_chunks=[],
+        )
+        stdout = OutputReader(proc.stdout, on_line=sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=5.0)  # type: ignore[arg-type]
+
+        assert (exit_code, timed_out) == (0, False)
+        # The oldest lines drop out of the replay; the last cap survives, in order.
+        assert len(lines) == _MAX_PENDING_LINES
+        assert lines[0] == (f'line{total - _MAX_PENDING_LINES}', False)
+        assert lines[-1] == (f'line{total - 1}', False)
+        # The reader still holds everything for the end event's text.
+        assert stdout.text == ''.join(f'line{i}\n' for i in range(total))
+
+    async def test_high_volume_output_is_capped_after_a_timeout_kill(self) -> None:
+        """The post-kill delivery must stay bounded, not become an unbounded burst."""
+        lines: list[tuple[str, bool]] = []
+
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+
+        total = _MAX_PENDING_LINES + 50
+        proc = _FakeProcess(
+            exit_code=137,
+            stdout_chunks=[f'line{i}\n'.encode() for i in range(total)],
+            stderr_chunks=[],
+            hang=True,
+        )
+        stdout = OutputReader(proc.stdout, on_line=sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=0.3)  # type: ignore[arg-type]
+
+        assert (exit_code, timed_out) == (137, True)
+        assert len(lines) == _MAX_PENDING_LINES
+        assert lines[0] == (f'line{total - _MAX_PENDING_LINES}', False)
+        assert lines[-1] == (f'line{total - 1}', False)
+
+    async def test_listener_timeout_is_not_read_as_the_command_deadline(self) -> None:
+        """A listener guarding its own work must not fake a timeout or replay lines."""
+        lines: list[tuple[str, bool]] = []
+
+        async def flaky_sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+            raise TimeoutError
+
+        proc = _FakeProcess(exit_code=0, stdout_chunks=[b'one\n', b'two\n'], stderr_chunks=[])
+        stdout = OutputReader(proc.stdout, on_line=flaky_sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        with pytest.raises(TimeoutError):
+            await run_to_exit(proc, stdout, stderr, timeout=5.0)  # type: ignore[arg-type]
+
+        # The exception reaches the caller instead of the timeout handler, so no
+        # line is delivered twice and no timeout is reported for a command that
+        # ran to completion.
+        assert lines == [('one', False)]
+        assert proc._closed

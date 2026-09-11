@@ -46,6 +46,13 @@ line on non-zero exit. When it exceeds `max_output_chars` the **tail** is kept
 which all land at the end -- survive truncation. Background command status and
 exit metadata follow the captured output so they remain in the retained tail.
 
+Commands run with stdin closed: a command that reads it (`cat`, `wc`) sees end
+of file and exits instead of waiting on the host's terminal. On POSIX systems
+each command starts its own process group, and cancelling the run kills the
+whole group: `SIGTERM`, then `SIGKILL` for anything still running once the
+shell has exited or a short grace period has passed, so a shell's children do
+not outlive the run.
+
 ## Command controls
 
 | Field | Effect |
@@ -67,10 +74,10 @@ denylist. Pass `denied_commands=[]` to disable command-name filtering.
 
 A denied or blocked command surfaces to the model as a `ModelRetry` (the model
 can retry with an allowed command) rather than aborting the run. So does every
-other failure the model can act on: a working directory an earlier command
-deleted or replaced with a file, and a command the operating system refuses to
-spawn because it holds a NUL byte or contains a character the operating system
-cannot encode. Failures
+other failure the model can act on: an empty or whitespace-only command, a
+working directory an earlier command deleted or replaced with a file, and a
+command the operating system refuses to spawn because it holds a NUL byte or
+contains a character the operating system cannot encode. Failures
 the model can do nothing about still abort the run: a host that cannot allocate
 a process, an argument or environment that exceeds the platform's combined
 size limit, and an invalid character in an application-supplied `env`.
@@ -137,8 +144,8 @@ but don't rely on it -- set `PATH` explicitly when you replace the environment.
 `start_command` writes stdout/stderr to temp files and returns a short ID. Use
 `check_command(command_id)` to poll and `stop_command(command_id)` to terminate
 and collect final output. Processes are launched in their own session (`start_new_session`)
-so the whole process group can be signalled -- `SIGTERM`, escalating to
-`SIGKILL` after a grace period.
+so the whole process group can be signalled -- `SIGTERM`, then `SIGKILL` for
+whatever is left once the leader exits or a grace period passes.
 
 On run end, the toolset's `__aexit__` terminates every still-running background
 process and deletes its temp files. The agent runtime enters toolsets via an
@@ -153,6 +160,83 @@ that after it runs, its final working directory is recorded to a private temp
 file, and that directory is carried into subsequent calls. The path is only
 updated when the command exits `0`, and the record is written out-of-band (not
 to stdout) so command output can never spoof the tracked directory.
+
+## Events
+
+`Shell` emits typed capability events in the `shell` namespace so a host can
+show a command's output, or veto it, without parsing tool arguments:
+
+| Event | Dispatch | When | Payload |
+|---|---|---|---|
+| `ShellCommandRequestEvent` | immediate | after a command passes the policy checks and before it is spawned | `command`, `cwd`, `timeout`, `background`; `cancel(reason)`, `rewrite(command, reason=...)` |
+| `ShellCommandStartEvent` | immediate | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
+| `ShellOutputLineEvent` | stream | the foreground command exited, replaying its buffered lines in order (at most the last 1000) | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
+| `ShellCommandEndEvent` | stream | the command exited, timed out, or was stopped | `command_id`, `command`, `background`, `exit_code`, `timed_out`, `duration_seconds`, `stdout`, `stderr`, `truncated` |
+
+`ShellCommandRequestEvent` is a decision. A listener that calls `cancel(reason)`
+stops the command before it runs; the model gets the reason as the tool result.
+A later bare `cancel()` preserves an earlier listener's reason.
+A listener that calls `rewrite(command, reason=...)` replaces the command; the
+rewrite goes through the same allow and deny checks as the original, and the
+model is told the command was rewritten and why, whether the rewrite ran or
+the policy refused it. The new command is normally not shown to the model, so
+a rewrite can add a credential that stays out of the transcript; put the
+command in `reason` if the model should see it. A policy refusal is the
+exception: the interactive check reports the complete command it refused, so a
+credential in a rewrite the policy refuses does reach the transcript. A command the policy refuses
+emits no request, so a
+listener cannot approve what the configuration denies. Listeners run in
+registration order: the last rewrite wins, and a cancel from any listener
+beats every rewrite and every later listener, because `cancelled` is
+read-only. A rewrite is final in the same way: the toolset runs the command
+`rewrite()` set, so a direct assignment to `command` changes nothing. The
+other three events are notifications.
+`ShellCommandStartEvent` is dispatched immediately: its listeners run as the
+tool spawns the process, so a listener that raises ends the run from inside
+the tool and the toolset kills the process group. No command is left running
+after a failed run, background command included (its record is removed with
+it).
+
+`command_id` ties a command's lines and its end to its start when several run
+at once. For a background command it is the same ID `check_command` and
+`stop_command` take, so the model and a subscriber name the process alike.
+Background commands write to files instead of pipes, so they emit no line
+events; their end event fires when `check_command` first sees the exit or when
+`stop_command` kills the process. Events come from the tools inside a run; the
+same methods called directly on the toolset outside a run emit nothing.
+
+Output in events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256),
+and an end event keeps the tail of `stdout` and of `stderr` separately, each
+up to `max_output_chars` (the model's combined result is cut to that limit
+once), with a `truncated` flag on both. `command` and `cwd` are carried as is.
+The number of line events is bounded too: a foreground command's lines are
+buffered as they are read and replayed in order when the command exits or is
+killed, keeping only the last 1000, so a high-volume command cannot exhaust
+a host that persists or forwards events. A run cancelled
+mid-command ends without an end event, and so does a background command
+still running when the run finishes: the toolset's cleanup kills it at
+teardown, where no run context exists to emit one.
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import AbstractCapability, on_event
+from pydantic_ai_harness import Shell
+from pydantic_ai_harness.shell import ShellCommandRequestEvent
+
+
+class HoldPushes(AbstractCapability):
+    @on_event(ShellCommandRequestEvent)
+    async def on_shell_request(self, ctx, event: ShellCommandRequestEvent) -> None:
+        if event.command.startswith('git push'):
+            event.cancel('pushes need a human')
+
+
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Shell(), HoldPushes()])
+```
+
+`Shell` emits no OpenTelemetry spans of its own: the core tool-call span
+already records the command and its result, and the events above carry the
+per-line detail a trace would not.
 
 ## Configuration
 
