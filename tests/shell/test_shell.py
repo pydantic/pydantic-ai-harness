@@ -19,6 +19,7 @@ import anyio
 import anyio.abc
 import pytest
 import sniffio
+from anyio.lowlevel import checkpoint
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
@@ -28,7 +29,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.code_mode import CodeMode
-from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell, ShellCommandEndEvent
 from pydantic_ai_harness.shell._process import (
     _MAX_PENDING_LINES,
     OutputReader,
@@ -1175,6 +1176,44 @@ class TestBackgroundCommands:
         assert not os.path.exists(stdout_file.name)
         assert not ts._background
 
+    async def test_check_while_a_finishing_stop_is_in_progress_emits_one_end(self, shell_dir: Path) -> None:
+        """A check landing while the kill runs must not report the exit as its own end.
+
+        The stop claims the process before its first await for this to hold: a
+        check running after the command's exit code becomes observable but
+        before the stop claims it records a second end event. Hammering
+        `check_command` from a sibling task keeps checks landing in that
+        window, so moving the claim after `await kill_process_group(...)` fails
+        here while the parallel agent-level test stays green.
+        """
+        ts = _shell_toolset(shell_dir)
+        ctx = _run_context()
+        tools = await ts.get_tools(ctx)
+        started = await ts.call_tool(
+            'start_command', {'command': 'trap "" TERM; sleep 30 & sleep 0.05; exit 5'}, ctx, tools['start_command']
+        )
+        command_id = _parse_command_id(str(started))
+        stop_done = anyio.Event()
+        checks = 0
+
+        async def hammer_checks() -> None:
+            nonlocal checks
+            while not stop_done.is_set() and checks < 10_000:
+                await checkpoint()
+                await ts.call_tool('check_command', {'command_id': command_id}, ctx, tools['check_command'])
+                checks += 1
+
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(hammer_checks)
+            await ts.call_tool('stop_command', {'command_id': command_id}, ctx, tools['stop_command'])
+            stop_done.set()
+
+        # A check that never overlapped the stop would leave the ordering untested.
+        assert checks > 1
+        assert ctx._event_stream_buffer is not None
+        ends = [event for event in ctx._event_stream_buffer if isinstance(event, ShellCommandEndEvent)]
+        assert len(ends) == 1
+
     async def test_aexit_terminates_background_processes(self, shell_dir: Path) -> None:
         ts = ShellToolset(
             cwd=shell_dir,
@@ -1940,8 +1979,7 @@ class TestRunToExitTimeoutAccounting:
 
         async def flaky_sink(line: str, truncated: bool) -> None:
             lines.append((line, truncated))
-            if len(lines) == 1:
-                raise TimeoutError
+            raise TimeoutError
 
         proc = _FakeProcess(exit_code=0, stdout_chunks=[b'one\n', b'two\n'], stderr_chunks=[])
         stdout = OutputReader(proc.stdout, on_line=flaky_sink)
