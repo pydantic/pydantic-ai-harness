@@ -1747,7 +1747,7 @@ class _SlowStream(anyio.abc.ByteReceiveStream):
             raise anyio.EndOfStream
         return self._chunks.pop(0)
 
-    async def aclose(self) -> None:
+    async def aclose(self) -> None:  # pragma: no cover
         pass
 
 

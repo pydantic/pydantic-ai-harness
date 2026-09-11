@@ -271,7 +271,7 @@ class OutputReader:
         if (last := self._lines.flush()) is not None:
             await self._on_line(*last)
 
-    async def flush(self) -> None:
+    async def flush(self) -> None:  # pragma: no cover
         """Hand the sink the unterminated last line, if any."""
         if self._on_line is not None and (last := self._lines.flush()) is not None:
             await self._on_line(*last)
