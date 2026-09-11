@@ -843,6 +843,12 @@ pins record/file cleanup plus stop-then-raise error propagation. Local gates:
 Ruff and strict Pyright clean. Pushed and requested a fresh review. CI and
 that review are pending; no additional plan item was selected.
 
+Follow-up on `255126ab`: CI completed with 30 successful checks, 3 skipped,
+and 2 neutral, including successful `coverage` and `check`. Pydanty review
+`df_run_86515719898e40a9970a` acknowledged dispatch in comment `5639483174`
+but posted no verdict during 15 quiet polls. The bot-watch window ended;
+review approval remains pending, not verified. All local changes are committed.
+
 ## Open questions for Mike
 
 1. Console script code name. Placeholder is `harness`.
