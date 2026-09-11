@@ -91,6 +91,14 @@ when the process intentionally uses a read-only variables token.
 
 Install the extra:
 
+uv:
+
+```bash
+uv add 'pydantic-ai-harness[logfire]'
+```
+
+pip:
+
 ```bash
 pip install 'pydantic-ai-harness[logfire]'
 ```
