@@ -310,6 +310,20 @@ async def test_overrides_on_an_agent_with_no_instructions_reach_nothing(capfire:
     assert instructions_seen(result.all_messages()) == []
 
 
+async def test_an_added_block_reaches_an_agent_with_no_instructions_of_its_own(capfire: CaptureLogfire) -> None:
+    # An agent that assembles nothing has no parts list for a managed block to be added to, so the
+    # request goes out with one the capability created. The joined prompt is what the model is sent,
+    # so the message history has to carry it too.
+    seen: list[InstructionPart] = []
+    published = {'instructions': 'MANAGED: be brief.'}
+    with variables_provider(capfire, published_value('agent__adds_to_nothing', published)):
+        result = await Agent(
+            capture_instructions(seen), capabilities=[AgentControl('adds_to_nothing', label='production')]
+        ).run('hello')
+    assert triples(seen) == [ADDED_BRIEF]
+    assert instructions_seen(result.all_messages()) == ['MANAGED: be brief.']
+
+
 async def test_added_blocks_render_placeholders_against_deps(publish: Publish) -> None:
     @dataclass
     class Deps:
