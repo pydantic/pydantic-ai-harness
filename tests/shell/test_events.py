@@ -6,10 +6,13 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Generator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from unittest.mock import patch
 
 import anyio
 import pytest
@@ -19,6 +22,7 @@ from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai.messages import CapabilityEvent, ModelMessage, ModelResponse, RetryPromptPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.run import AgentRun
+from pydantic_ai.toolsets import AbstractToolset
 
 from pydantic_ai_harness.shell import (
     MAX_EVENT_LINE_CHARS,
@@ -27,6 +31,7 @@ from pydantic_ai_harness.shell import (
     ShellCommandRequestEvent,
     ShellCommandStartEvent,
     ShellOutputLineEvent,
+    ShellToolset,
 )
 from pydantic_ai_harness.shell._process import kill_process_group
 
@@ -247,6 +252,18 @@ class TestRequestDecisions:
 
         assert results == ['[Command was not run: cancelled by a listener]']
 
+    async def test_a_bare_cancel_keeps_an_earlier_listeners_reason(self, tmp_path: Path) -> None:
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        agent = Agent(
+            _calls_model([_run_command('echo hi')]),
+            deps_type=type(None),
+            capabilities=[shell, Listener(decision='cancel'), Listener(decision='cancel_silently')],
+        )
+
+        result = await agent.run('go')
+
+        assert _tool_results(result.all_messages()) == ['[Command was not run: the user said no]']
+
     async def test_rewrite_runs_the_new_command_and_tells_the_model(self, tmp_path: Path) -> None:
         listener, results = await _run(
             tmp_path, [_run_command('echo original')], listener=Listener(rewrite_to='echo rewritten')
@@ -334,6 +351,45 @@ class CancelOnStart(AbstractCapability[None]):
         assert self.run is not None
         self.pid = event.pid
         self.run.cancel()
+
+
+@contextmanager
+def _capturing_for_run(holder: list[object]) -> Generator[None]:
+    """Patch `for_run` so `holder` receives the toolset each run builds.
+
+    That per-run copy owns the command records a run created, and the agent
+    keeps no handle on it.
+    """
+    real_for_run = ShellToolset[None].for_run
+
+    async def capture(toolset: ShellToolset[None], ctx: RunContext[None]) -> AbstractToolset[None]:
+        child = await real_for_run(toolset, ctx)
+        holder.append(child)
+        return child
+
+    with patch.object(ShellToolset, 'for_run', capture):
+        yield
+
+
+@dataclass
+class StopThenRaise(AbstractCapability[None]):
+    """Stops the command from its start listener, then raises.
+
+    The stop drops the record the abort handler also drops, which is what a
+    faulty host handler runs into.
+    """
+
+    toolsets: list[object] = field(default_factory=list[object])
+    pid: int | None = None
+
+    @on_event(ShellCommandStartEvent)
+    async def _on_start(self, ctx: RunContext[None], event: ShellCommandStartEvent) -> None:
+        self.pid = event.pid
+        assert self.toolsets
+        toolset = self.toolsets[0]
+        assert isinstance(toolset, ShellToolset)
+        await toolset.stop_command(event.command_id)
+        raise RuntimeError('listener blew up')
 
 
 @dataclass
@@ -446,13 +502,35 @@ class TestRunFailure:
             deps_type=type(None),
             capabilities=[shell, raiser],
         )
-        with pytest.raises(RuntimeError, match='listener blew up'):
+        toolsets: list[object] = []
+        with _capturing_for_run(toolsets), pytest.raises(RuntimeError, match='listener blew up'):
             await agent.run('go')
 
         assert raiser.pid is not None
         assert raiser.command_id is not None
         # The ID never reached the model, so no one is left to call
         # `stop_command`; the kill must come from the toolset itself.
+        assert await _process_group_is_gone(raiser.pid)
+        # The abort path also drops the record and unlinks both output files.
+        assert toolsets
+        run_toolset = toolsets[0]
+        assert isinstance(run_toolset, ShellToolset)
+        assert 'unknown command ID' in await run_toolset.check_command(raiser.command_id)
+        assert not list(Path(tempfile.gettempdir()).glob(f'harness_{raiser.command_id}_*'))
+
+    async def test_a_stop_from_the_start_listener_does_not_mask_the_listener_error(self, tmp_path: Path) -> None:
+        shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
+        raiser = StopThenRaise()
+        agent = Agent(
+            _calls_model([('start_command', json.dumps({'command': 'sleep 30'}))]),
+            deps_type=type(None),
+            capabilities=[shell, raiser],
+        )
+        with _capturing_for_run(raiser.toolsets), pytest.raises(RuntimeError, match='listener blew up'):
+            await agent.run('go')
+
+        assert raiser.pid is not None
+        # The stop already dropped the record the abort handler drops again.
         assert await _process_group_is_gone(raiser.pid)
 
 

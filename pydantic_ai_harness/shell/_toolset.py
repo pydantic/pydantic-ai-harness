@@ -520,7 +520,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 with anyio.CancelScope(shield=True):
                     await bg.proc.wait()
                 cleanup_bg_files(bg)
-                self._background.pop(command_id)
+                self._background.pop(command_id, None)
                 await bg.proc.aclose()
                 raise
 

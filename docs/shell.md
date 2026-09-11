@@ -235,6 +235,7 @@ show a command's output, or veto it, without parsing tool arguments:
 
 `ShellCommandRequestEvent` is a decision. A listener that calls `cancel(reason)`
 stops the command before it runs; the model gets the reason as the tool result.
+A later bare `cancel()` preserves an earlier listener's reason.
 A listener that calls `rewrite(command, reason=...)` replaces the command; the
 rewrite goes through the same allow and deny checks as the original, and the
 model is told the command was rewritten and why, whether the rewrite ran or

@@ -55,9 +55,13 @@ class ShellCommandRequestEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='co
         return self._cancelled
 
     def cancel(self, reason: str | None = None) -> None:
-        """Stop the command from running. A cancel is final; later listeners cannot lift it."""
+        """Stop the command from running. A cancel is final; later listeners cannot lift it.
+
+        A reason that reaches the model is not erased by a later bare `cancel()`.
+        """
         self._cancelled = True
-        self.cancel_reason = reason
+        if reason is not None or self.cancel_reason is None:
+            self.cancel_reason = reason
 
     def rewrite(self, command: str, *, reason: str) -> None:
         """Replace the command that will run; `reason` is all the model sees of it.
