@@ -766,6 +766,48 @@ Append-only. Date, item, decision, why.
   the max_output_chars truncation already makes safe); (2) if live line
   delivery with correct timeout accounting is ever wanted, it needs a
   dispatcher-based design (the bot's deferred design is what Mike chose).
+- 2026-09-11, "keep chunking until everything is green" round (Mike's ask, not a
+  plan item). Findings and fixes, all on `puppy/shell-events`:
+  (1) CI was RED on the previous head and nobody had noticed: the `coverage`
+  job failed with exactly one uncovered statement, `_SlowStream.aclose`'s
+  `pass` in `tests/shell/test_shell.py`, which macroscope's own PR #860
+  introduced together with the fake process scaffolding (it was green at
+  e85e6b9d). Fixed in 8c317ac6 by having `_FakeProcess.aclose()` close its
+  streams the way a real `anyio.abc.Process.aclose` does, which is faithful
+  and exercises the stub. Focused local coverage (`coverage run
+  --source=pydantic_ai_harness.shell,tests.shell` on tests/shell, then
+  `coverage report -m`) shows 100% on every shell module and the test file.
+  (2) The bot's fresh verdict on 63b4a8ab (run df_run_04476997c2f746b09cc5,
+  comment 5637209945) carried 1 blocking + 4 required. All five are done.
+  Blocking, fixed in 4d078297: `run_to_exit` ran the success-path
+  `deliver()` loop inside the same try whose `except TimeoutError` is the
+  command-deadline handler, so a listener raising `TimeoutError` from its own
+  guard killed a finished command, replayed its buffered lines, and returned
+  `timed_out=True`. Only the timed read is inside that try now. The
+  regression test (`test_listener_timeout_is_not_read_as_the_command_deadline`)
+  fails against the old nesting. Required 1: the PR body table claimed the
+  request event fires before the policy check (it fires after; `_run` calls
+  `_check_command` first) and gave the start event dispatch `stream` (it is
+  `immediate`) -- both rows corrected through the API. Required 2: the
+  stderr temp file creation in `_start` can now fail without leaking the
+  stdout file (close + unlink on `BaseException`), covered by a test that
+  patches the second `NamedTemporaryFile`. Required 3: the `_events.py`
+  module docstring was a THIRD copy of the "number of line events is not
+  bounded" claim, missed when the two markdown docs were updated earlier --
+  fixed. Required 4, in 48c9b671: the claim-before-await ordering in `_stop`
+  was pinned by no test (the parallel agent-level test stays green with
+  `bg.finished = True` moved after the kill). The new
+  `test_check_while_a_finishing_stop_is_in_progress_emits_one_end` drives
+  `ShellToolset` through the file's `_run_context()`/`call_tool` idiom,
+  hammers `check_command` from a sibling task (with an explicit
+  `checkpoint()` per iteration: without it the loop starves the stop, which
+  hung for 270s in the first prototype), and asserts one end event on the
+  context's event buffer. It fails on both backends when the claim moves and
+  passed 10 runs in a row in place. (3) 4716c1f5 corrects the
+  `ShellOutputLineEvent` "When" cell in both docs; the earlier edit for it
+  had been reported as applied but never landed, so the docs still said a
+  line event fires as the command writes one. Reply posted at 5638766090 and
+  `pydanty:review-lite` re-applied for 4716c1f5.
 - 2026-09-10, 1.3b: the #855 run dispatched at 20:50Z (df_run_30cc80e36c544267ad60)
   landed 21:25Z: reviewed, 0 blocking, 0 required, all 5 charters passed, on the real
   head 424c9634. #855 is clear of pydantic; only Macroscope on 424c9634 remains (it
