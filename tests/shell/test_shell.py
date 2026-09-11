@@ -29,6 +29,7 @@ from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.code_mode import CodeMode
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
 from pydantic_ai_harness.shell._process import (
+    _MAX_PENDING_LINES,
     OutputReader,
     cleanup_bg_files,
     drain_with_timeout,
@@ -1737,34 +1738,48 @@ class TestEnvControlPropagation:
 
 
 class _SlowStream(anyio.abc.ByteReceiveStream):
-    """Yields chunks quickly, to test that callback latency is not counted against timeout."""
+    """Yields chunks quickly, to test that callback latency is not counted against timeout.
 
-    def __init__(self, chunks: list[bytes]) -> None:
+    With `hang`, the stream blocks once its chunks are exhausted, simulating
+    a command that is still running.
+    """
+
+    def __init__(self, chunks: list[bytes], *, hang: bool = False) -> None:
         self._chunks = list(chunks)
+        self._hang = hang
+        self._hung = False
 
     async def receive(self, max_bytes: int = 65536) -> bytes:
-        if not self._chunks:
-            raise anyio.EndOfStream
-        return self._chunks.pop(0)
+        if self._chunks:
+            return self._chunks.pop(0)
+        if self._hang and not self._hung:
+            self._hung = True
+            await anyio.sleep(3600)
+        raise anyio.EndOfStream
 
     async def aclose(self) -> None:
         pass
 
 
 class _FakeProcess:
-    """Minimal process stub for testing run_to_exit without spawning."""
+    """Minimal process stub for testing run_to_exit without spawning.
+
+    The default pid can never exist, so `kill_process_group` is a no-op
+    (ESRCH) instead of signalling a real process group.
+    """
 
     def __init__(
         self,
         *,
-        pid: int = 12345,
+        pid: int = 1 << 30,
         exit_code: int = 0,
         stdout_chunks: list[bytes],
         stderr_chunks: list[bytes],
+        hang: bool = False,
     ) -> None:
         self.pid = pid
         self._exit_code = exit_code
-        self.stdout: anyio.abc.ByteReceiveStream = _SlowStream(stdout_chunks)
+        self.stdout: anyio.abc.ByteReceiveStream = _SlowStream(stdout_chunks, hang=hang)
         self.stderr: anyio.abc.ByteReceiveStream = _SlowStream(stderr_chunks)
         self._closed = False
 
@@ -1853,3 +1868,53 @@ class TestRunToExitTimeoutAccounting:
         assert exit_code == 0
         assert timed_out is False
         assert lines == [('complete', False), ('partial', False)]
+
+    async def test_high_volume_output_replays_only_the_last_lines(self) -> None:
+        """A high-volume command must not buffer unboundedly for the sink."""
+        lines: list[tuple[str, bool]] = []
+
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+
+        total = _MAX_PENDING_LINES + 50
+        proc = _FakeProcess(
+            exit_code=0,
+            stdout_chunks=[f'line{i}\n'.encode() for i in range(total)],
+            stderr_chunks=[],
+        )
+        stdout = OutputReader(proc.stdout, on_line=sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=5.0)  # type: ignore[arg-type]
+
+        assert (exit_code, timed_out) == (0, False)
+        # The oldest lines drop out of the replay; the last cap survives, in order.
+        assert len(lines) == _MAX_PENDING_LINES
+        assert lines[0] == (f'line{total - _MAX_PENDING_LINES}', False)
+        assert lines[-1] == (f'line{total - 1}', False)
+        # The reader still holds everything for the end event's text.
+        assert stdout.text == ''.join(f'line{i}\n' for i in range(total))
+
+    async def test_high_volume_output_is_capped_after_a_timeout_kill(self) -> None:
+        """The post-kill delivery must stay bounded, not become an unbounded burst."""
+        lines: list[tuple[str, bool]] = []
+
+        async def sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+
+        total = _MAX_PENDING_LINES + 50
+        proc = _FakeProcess(
+            exit_code=137,
+            stdout_chunks=[f'line{i}\n'.encode() for i in range(total)],
+            stderr_chunks=[],
+            hang=True,
+        )
+        stdout = OutputReader(proc.stdout, on_line=sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=0.3)  # type: ignore[arg-type]
+
+        assert (exit_code, timed_out) == (137, True)
+        assert len(lines) == _MAX_PENDING_LINES
+        assert lines[0] == (f'line{total - _MAX_PENDING_LINES}', False)
+        assert lines[-1] == (f'line{total - 1}', False)

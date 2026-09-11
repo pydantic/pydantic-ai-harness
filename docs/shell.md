@@ -224,7 +224,7 @@ at the configured `cwd`.
 ## Events
 
 `Shell` emits typed capability events in the `shell` namespace so a host can
-show a command as it runs, or veto it, without parsing tool arguments:
+show a command's output, or veto it, without parsing tool arguments:
 
 | Event | Dispatch | When | Payload |
 |---|---|---|---|
@@ -268,9 +268,10 @@ Output in events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256),
 and an end event keeps the tail of `stdout` and of `stderr` separately, each
 up to `max_output_chars` (the model's combined result is cut to that limit
 once), with a `truncated` flag on both. `command` and `cwd` are carried as is.
-The number of line events is not bounded: a command that prints in a loop
-emits one event per line until it finishes or times out, so a host that
-persists or forwards events applies its own budget. A run cancelled
+The number of line events is bounded too: a foreground command's lines are
+buffered as they are read and replayed in order when the command exits or is
+killed, keeping only the last 1000, so a high-volume command cannot exhaust
+a host that persists or forwards events. A run cancelled
 mid-command ends without an end event, and so does a background command
 still running when the run finishes: the toolset's cleanup kills it at
 teardown, where no run context exists to emit one.

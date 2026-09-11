@@ -15,6 +15,7 @@ import os
 import re
 import signal
 import time
+from collections import deque
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Concatenate, ParamSpec, TypeVar
@@ -27,6 +28,13 @@ from pydantic_ai_harness.shell._events import MAX_EVENT_LINE_CHARS
 
 _IO_DRAIN_TIMEOUT: float = 2.0
 _KILL_GRACE_PERIOD: float = 2.0
+
+# Completed lines an `OutputReader` retains for the per-line sink. The full
+# output still reaches the model through the (truncated) end event, so the
+# host-facing replay is capped: a high-volume command must not grow the
+# buffer without bound during the timed read, nor turn the post-kill
+# delivery into an unbounded burst of listener awaits.
+_MAX_PENDING_LINES = 1000
 
 _P = ParamSpec('_P')
 _SelfT = TypeVar('_SelfT')
@@ -236,7 +244,15 @@ class _LineBuffer:
 
 
 class OutputReader:
-    """Collect one pipe into bytes, handing each completed line to a sink.
+    """Collect one pipe into bytes, buffering completed lines for later delivery.
+
+    Lines are buffered while the timed read runs and delivered by `deliver()`
+    once the command exits or is killed, so listener latency cannot consume
+    the command's timeout. The buffer keeps only the last
+    `_MAX_PENDING_LINES` lines: a high-volume command must not grow it
+    without bound, nor turn the post-kill delivery into an unbounded burst
+    of listener awaits. The full output still reaches the model through the
+    end event.
 
     Reading resumes where a cancelled `read` stopped: after a timeout kills
     the command, `drain_with_timeout` picks up the same line buffer, so a
@@ -247,7 +263,7 @@ class OutputReader:
         self._stream = stream
         self._on_line = on_line
         self._lines = _LineBuffer()
-        self._pending: list[tuple[str, bool]] = []
+        self._pending: deque[tuple[str, bool]] = deque(maxlen=_MAX_PENDING_LINES)
         self.chunks: list[bytes] = []
 
     @property
@@ -269,11 +285,6 @@ class OutputReader:
             await self._on_line(line, truncated)
         self._pending.clear()
         if (last := self._lines.flush()) is not None:
-            await self._on_line(*last)
-
-    async def flush(self) -> None:
-        """Hand the sink the unterminated last line, if any."""
-        if self._on_line is not None and (last := self._lines.flush()) is not None:
             await self._on_line(*last)
 
     async def drain(self) -> None:
