@@ -737,6 +737,33 @@ class TestFileChangeRequests:
         target.chmod(0o644)
         assert target.read_text() == 'old\n'
 
+    @pytest.mark.skipif(os.name == 'nt', reason='FIFOs require POSIX.')
+    async def test_fifo_swapped_before_the_announcement_read_does_not_block(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The announcement reads the target non-blocking, so a FIFO swapped onto it cannot stall the run."""
+        target = tmp_path / 'target.txt'
+        target.write_text('old\n')
+        original_open = os.open
+        swapped = False
+
+        def swap_then_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
+            nonlocal swapped
+            if not swapped and os.path.realpath(path) == os.path.realpath(target):
+                swapped = True
+                target.unlink()
+                os.mkfifo(target)
+                assert flags & os.O_NONBLOCK
+            return original_open(path, flags, mode)
+
+        monkeypatch.setattr(os, 'open', swap_then_open)
+
+        events = await _run_and_collect(tmp_path, 'write_file', '{"path":"target.txt","content":"new\\n"}')
+
+        assert swapped
+        assert "Path 'target.txt' exists and is not a regular file" in _retry_reason(events)
+        assert not any(isinstance(event, FileWrittenEvent) for event in events)
+
     @pytest.mark.parametrize(
         ('tool_name', 'json_args'),
         [

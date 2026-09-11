@@ -202,6 +202,14 @@ _HASH_CHUNK_BYTES = 1 << 20
 _DIFF_SOURCE_BYTES = 4 * MAX_DIFF_SOURCE_CHARS
 """Bytes that can hold `MAX_DIFF_SOURCE_CHARS` of UTF-8; a longer file is past the bound whatever it holds."""
 
+_SPECIAL_FILE_FLAGS = os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW
+"""Open flags that keep a special file swapped onto a checked path from stalling or redirecting the open.
+
+POSIX non-blocking mode stops a FIFO from waiting for the other end, and
+O_NOFOLLOW stops a symlink swap from redirecting the descriptor. Windows has
+neither hazard; O_BINARY keeps its text I/O from translating the bytes.
+"""
+
 
 def _chunks(source: BinaryIO) -> Iterator[bytes]:
     """`source` in `_HASH_CHUNK_BYTES` pieces, so hashing a file never holds it whole."""
@@ -259,7 +267,9 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     if not resolved.is_file():
         return '', _disk_hash([b''])
     try:
-        with resolved.open('rb') as source:
+        # Opened like `_open_for_write`, so a special file swapped onto the
+        # path after the `is_file` check cannot stall this read.
+        with os.fdopen(os.open(resolved, os.O_RDONLY | _SPECIAL_FILE_FLAGS), 'rb') as source:
             head = source.read(_DIFF_SOURCE_BYTES + 1)
             current_hash = _disk_hash(itertools.chain([head], _chunks(source)))
     except OSError:
@@ -296,28 +306,25 @@ def _open_for_write(resolved: Path, path: str, *, read_back: bool, create: bool)
     Opening without O_TRUNC lets the caller classify the descriptor and check
     the expected hash before changing the file (`read_back` opens it
     read-write for that). An edit passes `create=False`: a file that vanished
-    while its change was announced is reported missing, not recreated. POSIX
-    non-blocking mode keeps a FIFO swapped into place from waiting for a
-    reader; O_NOFOLLOW keeps a final-component symlink swap from redirecting
-    the descriptor. Windows has no filesystem FIFO equivalent, and O_BINARY
-    with the caller's binary I/O means the written bytes are exactly the
-    encoded content: no newline translation, so the reported hash always
-    matches the bytes a later `read_file` hashes.
+    while its change was announced is reported missing, not recreated.
+    `_SPECIAL_FILE_FLAGS` keeps a swapped-in special file from stalling or
+    redirecting the open, and binary I/O on Windows means the written bytes
+    are exactly the encoded content, so the reported hash matches the bytes a
+    later `read_file` hashes.
     """
-    platform_flags = os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW
     access_flags = os.O_RDWR if read_back else os.O_WRONLY
     try:
         if not create:
-            return os.open(resolved, access_flags | platform_flags), False
+            return os.open(resolved, access_flags | _SPECIAL_FILE_FLAGS), False
         # The target can disappear after O_EXCL reports that it exists. Retry
         # the complete atomic classification so an ordinary write still
         # recreates it, while bounding churn from a concurrently replaced path.
         for _ in range(3):
             try:
-                descriptor = os.open(resolved, access_flags | platform_flags | os.O_CREAT | os.O_EXCL, 0o666)
+                descriptor = os.open(resolved, access_flags | _SPECIAL_FILE_FLAGS | os.O_CREAT | os.O_EXCL, 0o666)
             except FileExistsError:
                 try:
-                    return os.open(resolved, access_flags | platform_flags), False
+                    return os.open(resolved, access_flags | _SPECIAL_FILE_FLAGS), False
                 except FileNotFoundError:
                     continue
             return descriptor, True
