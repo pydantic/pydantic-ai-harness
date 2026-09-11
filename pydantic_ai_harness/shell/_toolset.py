@@ -465,7 +465,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         command_id = uuid.uuid4().hex[:12]
 
         stdout_file = tempfile.NamedTemporaryFile(mode='w+b', prefix=f'harness_{command_id}_out_', delete=False)
-        stderr_file = tempfile.NamedTemporaryFile(mode='w+b', prefix=f'harness_{command_id}_err_', delete=False)
+        try:
+            stderr_file = tempfile.NamedTemporaryFile(mode='w+b', prefix=f'harness_{command_id}_err_', delete=False)
+        except BaseException:
+            stdout_file.close()
+            os.unlink(stdout_file.name)
+            raise
 
         try:
             proc = await anyio.open_process(

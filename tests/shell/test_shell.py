@@ -9,6 +9,7 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, NoReturn
@@ -1163,6 +1164,17 @@ class TestBackgroundCommands:
                 await ts.start_command('echo hi')
         assert not ts._background
 
+    async def test_start_command_unlinks_the_stdout_file_when_the_stderr_file_fails(self, shell_dir: Path) -> None:
+        """A failure creating the second temp file must not leak the first."""
+        ts = _shell_toolset(shell_dir)
+        stdout_file = tempfile.NamedTemporaryFile(mode='w+b', prefix='harness_test_out_', delete=False)
+        with patch('tempfile.NamedTemporaryFile', side_effect=[stdout_file, OSError('no space left on device')]):
+            with pytest.raises(OSError, match='no space left on device'):
+                await ts.start_command('echo hi')
+
+        assert not os.path.exists(stdout_file.name)
+        assert not ts._background
+
     async def test_aexit_terminates_background_processes(self, shell_dir: Path) -> None:
         ts = ShellToolset(
             cwd=shell_dir,
@@ -1921,3 +1933,25 @@ class TestRunToExitTimeoutAccounting:
         assert len(lines) == _MAX_PENDING_LINES
         assert lines[0] == (f'line{total - _MAX_PENDING_LINES}', False)
         assert lines[-1] == (f'line{total - 1}', False)
+
+    async def test_listener_timeout_is_not_read_as_the_command_deadline(self) -> None:
+        """A listener guarding its own work must not fake a timeout or replay lines."""
+        lines: list[tuple[str, bool]] = []
+
+        async def flaky_sink(line: str, truncated: bool) -> None:
+            lines.append((line, truncated))
+            if len(lines) == 1:
+                raise TimeoutError
+
+        proc = _FakeProcess(exit_code=0, stdout_chunks=[b'one\n', b'two\n'], stderr_chunks=[])
+        stdout = OutputReader(proc.stdout, on_line=flaky_sink)
+        stderr = OutputReader(proc.stderr, on_line=None)
+
+        with pytest.raises(TimeoutError):
+            await run_to_exit(proc, stdout, stderr, timeout=5.0)  # type: ignore[arg-type]
+
+        # The exception reaches the caller instead of the timeout handler, so no
+        # line is delivered twice and no timeout is reported for a command that
+        # ran to completion.
+        assert lines == [('one', False)]
+        assert proc._closed

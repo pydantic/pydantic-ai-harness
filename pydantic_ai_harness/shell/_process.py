@@ -315,22 +315,27 @@ async def run_to_exit(proc: anyio.abc.Process, *readers: OutputReader, timeout: 
     listener cannot turn a completed command into a spurious timeout.
     """
     try:
-        with anyio.fail_after(timeout):
-            async with anyio.create_task_group() as tg:
-                for reader in readers:
-                    tg.start_soon(reader.read)
+        # Only the timed read maps to the timeout outcome. A listener that
+        # raises `TimeoutError` from its own guard must not be read as the
+        # command's deadline: that would kill a command that already finished
+        # and replay its buffered lines a second time.
+        try:
+            with anyio.fail_after(timeout):
+                async with anyio.create_task_group() as tg:
+                    for reader in readers:
+                        tg.start_soon(reader.read)
+                exit_code = await proc.wait()
+        except TimeoutError:
+            await kill_process_group(proc)
             exit_code = await proc.wait()
+            with anyio.CancelScope(shield=True):
+                await drain_with_timeout(*readers)
+                for reader in readers:
+                    await reader.deliver()
+            return exit_code, True
         for reader in readers:
             await reader.deliver()
         return exit_code, False
-    except TimeoutError:
-        await kill_process_group(proc)
-        exit_code = await proc.wait()
-        with anyio.CancelScope(shield=True):
-            await drain_with_timeout(*readers)
-            for reader in readers:
-                await reader.deliver()
-        return exit_code, True
     except BaseException:
         await kill_process_group(proc)
         raise
