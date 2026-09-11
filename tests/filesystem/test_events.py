@@ -154,6 +154,15 @@ class MeddlingListener(AbstractCapability[None]):
         self.act()
 
 
+@dataclass
+class RaisingListener(AbstractCapability[None]):
+    """Raises out of the announcement, as a listener with an error in it does."""
+
+    @on_event(FileChangeRequestEvent)
+    async def _on_request(self, ctx: RunContext[None], event: FileChangeRequestEvent) -> None:
+        raise RuntimeError('no writes today')
+
+
 def _file_at_leaf(root: Path) -> None:
     (root / 'made').write_text('x')
 
@@ -479,6 +488,28 @@ class TestFileChangeRequests:
 
         assert _tool_result(events) == "['fresh.txt' was not written: not today]"
 
+    @pytest.mark.parametrize(
+        ('tool_name', 'json_args'),
+        [
+            ('write_file', '{"path":"target.txt","content":"new\\\\n"}'),
+            ('write_file', '{"path":"fresh.txt","content":"new\\\\n"}'),
+            ('edit_file', '{"path":"target.txt","old_text":"old","new_text":"new"}'),
+            ('create_directory', '{"path":"made"}'),
+        ],
+    )
+    async def test_raising_listener_aborts_the_run_and_applies_nothing(
+        self, tmp_path: Path, tool_name: str, json_args: str
+    ) -> None:
+        """A listener that raises aborts the run, as the docs promise, and the change is not applied."""
+        (tmp_path / 'target.txt').write_text('old\n')
+
+        with pytest.raises(RuntimeError, match='no writes today'):
+            await _run_and_collect(tmp_path, tool_name, json_args, listeners=[RaisingListener()])
+
+        # Nothing was written, created or replaced: only the file the test made.
+        assert sorted(entry.name for entry in tmp_path.iterdir()) == ['target.txt']
+        assert (tmp_path / 'target.txt').read_text() == 'old\n'
+
     async def test_denied_write_emits_no_request(self, tmp_path: Path) -> None:
         listener = Listener()
 
@@ -545,6 +576,25 @@ class TestFileChangeRequests:
         assert event.kind == 'file_system.file_edited'
         # The event fires only after the edit has landed on disk.
         assert listener.on_disk == ['new\n']
+
+    async def test_large_edit_marks_the_edited_event_truncated(self, tmp_path: Path) -> None:
+        """An edit whose diff exceeds the bound reports the edited event as cut, not only the request that announced it."""
+        (tmp_path / 'big.txt').write_text('a\n')
+        listener = WrittenListener(root=tmp_path)
+
+        await _run_and_collect(
+            tmp_path,
+            'edit_file',
+            json.dumps({'path': 'big.txt', 'old_text': 'a', 'new_text': 'z\n' * 4000}),
+            listeners=[listener],
+        )
+
+        (event,) = listener.written
+        assert isinstance(event, FileEditedEvent)
+        assert event.truncated is True
+        assert len(event.diff) <= MAX_EVENT_DIFF_CHARS
+        # Cut on a line boundary, as the request's diff is: whole diff lines only.
+        assert event.diff.splitlines()[-1] == '+z'
 
     async def test_written_event_fires_after_the_content_lands(self, tmp_path: Path) -> None:
         listener = WrittenListener(root=tmp_path)
@@ -822,19 +872,24 @@ class TestFileChangeRequests:
         assert (tmp_path / 'target.txt').read_text() == 'new\n'
         assert any(isinstance(event, FileWrittenEvent) for event in events)
 
-    async def test_file_that_appeared_while_announced_is_refused(self, tmp_path: Path) -> None:
-        """A write announced as creating the file does not overwrite one that appeared in the meantime."""
+    @pytest.mark.parametrize('appeared', ['other\n', ''])
+    async def test_file_that_appeared_while_announced_is_refused(self, tmp_path: Path, appeared: str) -> None:
+        """A write announced as creating the file does not overwrite one that appeared in the meantime.
+
+        The empty file is the case worth pinning: it hashes to a reachable
+        value, so a guard of the empty file's own hash would let it through.
+        """
         target = tmp_path / 'fresh.txt'
 
         events = await _run_and_collect(
             tmp_path,
             'write_file',
             '{"path":"fresh.txt","content":"new\\n"}',
-            listeners=[MeddlingListener(act=lambda: target.write_text('other\n'))],
+            listeners=[MeddlingListener(act=lambda: target.write_text(appeared))],
         )
 
         assert 'Conflict' in _retry_reason(events)
-        assert target.read_text() == 'other\n'
+        assert target.read_text() == appeared
 
     @pytest.mark.parametrize(
         ('tool_name', 'json_args'),

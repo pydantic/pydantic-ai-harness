@@ -66,6 +66,14 @@ _OUTSIDE_WORKSPACE = '<outside-workspace>'
 _NOT_A_PATH = '<not-a-path>'
 """Shown when an error's `filename` is not a path value at all."""
 
+_ABSENT_HASH = '<absent>'
+"""The guard for a write announced against a path with nothing at it.
+
+No file hashes to a bracketed marker, so one that appears while the create is
+announced fails the descriptor check even when it is empty -- which the empty
+file's own hash, and so `_disk_hash([b''])`, would have matched.
+"""
+
 
 class _EventLocation(TypedDict):
     """The `path` and `root_dir` fields shared by every filesystem event."""
@@ -255,8 +263,9 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     A stale `expected_hash` for a file that exists is rejected here first, so
     a listener only sees a write that would go ahead; for a missing file the
     hash is ignored, as documented, and the write is announced as a create.
-    A new file diffs from empty and is guarded as empty, so one that appears
-    while the write is announced is a conflict. The
+    A new file diffs from empty and is guarded as absent, so one that appears
+    while the write is announced is a conflict whether or not it is empty: the
+    guard cannot be `_disk_hash([b''])`, which an empty file does hash to. The
     text is `None` when it cannot be shown: a file the process cannot read (a
     write-only mode, say) is announced as headers alone, marked as cut, and
     written unguarded, while an `expected_hash` it cannot check propagates the
@@ -265,7 +274,7 @@ def _announced_state(resolved: Path, path: str, *, expected_hash: str | None) ->
     rest is hashed in chunks.
     """
     if not resolved.is_file():
-        return '', _disk_hash([b''])
+        return '', _ABSENT_HASH
     try:
         # Opened like `_open_for_write`, so a special file swapped onto the
         # path after the `is_file` check cannot stall this read.
