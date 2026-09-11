@@ -729,6 +729,43 @@ Append-only. Date, item, decision, why.
   stale threads (3982252751 veto, 3982252753 try/finally); the bot does not re-check
   old threads on re-runs, so those await a maintainer's manual resolution (replies
   with the fix pointers were posted earlier today, 14:45-15:00Z).
+- 2026-09-11, #845 continued (at Mike's request, not a plan item): Mike chose to
+  let macroscope fix the timeout-accounting finding itself ("fix it for me",
+  15:34Z). The bot opened PR #860 and merged it into the branch at 15:42Z
+  (83dd128b): `OutputReader` now buffers lines during the timed read and
+  `run_to_exit()` delivers them via `deliver()` after exit/kill, so listener
+  latency no longer consumes the `fail_after` budget. Verified the fix locally
+  (289 passed) but noted the contract consequence: line events are no longer
+  live, the CLI's live line rendering becomes an end-of-run replay, and the
+  docs did not reflect the change. Then the bot's own full-diff re-review
+  flagged a NEW High finding (thread 3990872904, 15:46Z): `_pending` stored
+  EVERY line and `deliver()` awaited every listener only after the kill, so a
+  high-volume command (`yes`) exhausts memory and the post-kill delivery is
+  an unbounded burst. Mike asked me to fix it. Fix pushed as 63b4a8ab:
+  `_pending` is now a `deque(maxlen=_MAX_PENDING_LINES)` (1000, new module
+  constant with rationale comment), oldest lines drop out of the replay, the
+  full output still reaches the model through the (truncated) end event, the
+  now-dead `OutputReader.flush()` was removed, the class docstring was
+  rewritten, and BOTH hand-maintained docs were updated (intro line, the
+  `ShellOutputLineEvent` "When" table cell, and the "number of line events is
+  not bounded" paragraph, which now says the replay is capped at the last
+  1000). Two regression tests pin the cap on the success and timeout paths
+  (fake stream with a hang mode to simulate a still-running command). Also
+  fixed a latent hazard in the bot's `_FakeProcess` test stub: its default
+  pid 12345 could be a LIVE process, in which case `kill_process_group` in a
+  timeout-path test would SIGTERM a real process group; default is now
+  1 << 30 (cannot exist, killpg hits ESRCH/EINVAL and no-ops). Gates green:
+  293 passed, 6 skipped, ruff clean, pyright strict clean. Replied on thread
+  3990872904 (3991040856) pointing at the fix, removed the stale ignored
+  `pydantic-ai:review-lite` label, and re-applied `pydanty:review-lite`
+  (head moved, so pydantic's "Reviewed at head e85e6b9d" verdict is
+  orphaned and needs a fresh run on 63b4a8ab). Known follow-ups, NOT done
+  this round: (1) `reader.chunks` accumulates every raw chunk unbounded,
+  pre-existing since e85e6b9d, so a `yes`-like command still fills memory
+  before the kill (worth its own change: tail-cap the accumulation, which
+  the max_output_chars truncation already makes safe); (2) if live line
+  delivery with correct timeout accounting is ever wanted, it needs a
+  dispatcher-based design (the bot's deferred design is what Mike chose).
 - 2026-09-10, 1.3b: the #855 run dispatched at 20:50Z (df_run_30cc80e36c544267ad60)
   landed 21:25Z: reviewed, 0 blocking, 0 required, all 5 charters passed, on the real
   head 424c9634. #855 is clear of pydantic; only Macroscope on 424c9634 remains (it
