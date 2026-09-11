@@ -189,11 +189,10 @@ async def test_instruction_blocks_the_model_receives(
     # The whole contract in one table: an entry with no `id` adds a block, and an entry with one
     # replaces or drops the block the agent assembled under that key.
     #
-    # Added blocks land after the dynamic `@agent.instructions` text and before the dynamic toolset
-    # text because a capability's contribution is itself dynamic: Pydantic AI sorts static blocks
-    # ahead of dynamic ones so a provider can cache the stable prefix, and keeps source order within
-    # each group. Every added entry becomes one part, joined by a blank line, because they are
-    # contributed through `get_instructions` as a single string.
+    # Added blocks land at the end of the static run -- after the agent's own literal, before the
+    # first block the agent recomputes per request -- so published text is last in the prompt as
+    # written and still inside the prefix a provider can cache. One part per entry: each entry is one
+    # block, and joining them would make two published entries indistinguishable from one.
     assert triples(await run_blocks(capfire, name, value)) == expected
 
 
@@ -329,9 +328,9 @@ async def test_added_blocks_render_placeholders_against_deps(publish: Publish) -
     class Deps:
         city: str
 
-    # Rendering happens on the capability's joined contribution, so a `{{...}}` placeholder works the
-    # same in a list entry as it does in a bare string. An addressed block is deliberately left alone:
-    # its text replaces something the agent assembled, and that text was never templated either.
+    # Every added block is rendered, so a `{{...}}` placeholder works the same in a list entry as it
+    # does in a bare string. An addressed block is deliberately left alone: its text replaces
+    # something the agent assembled, and that text was never templated either.
     publish(
         'render',
         AgentConfig(
