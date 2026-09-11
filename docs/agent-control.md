@@ -194,16 +194,15 @@ recognize drops that setting; a malformed tool entry drops that tool; a block it
 that block. The rest of the config still applies, and each drop warns once per process naming what it
 skipped, rather than once per run.
 
-A published change can also be perfectly valid and still reach nothing *here*. `on_unmatched` decides
-what that costs:
+A published change can also be perfectly valid and still reach nothing *here*: an instruction block
+this deployment never assembles (or only computes per request), a tool no toolset advertises, a
+parameter a patched tool does not have, a rename another tool already answers to, a setting the
+contract has no field for, a `timeout` no request could be given. `on_unmatched` decides what that
+costs:
 
 ```python {test="skip"}
 AgentControl(label='production', on_unmatched='error')
 ```
-
-That covers an instruction block this deployment never assembles (or only computes per request), a
-tool no toolset advertises, a parameter a patched tool does not have, a rename another tool already
-answers to, a setting the contract has no field for, and a `timeout` no request could be given.
 
 - `'warn'` (the default) emits a `UserWarning` once per process, at the point the change would have
   applied, so a change Logfire shows and the agent isn't making is visible without stopping anything.
