@@ -89,20 +89,21 @@ Not: that spend stays under the ceiling. The request that crosses the line compl
 ```python
 from decimal import Decimal
 
+from pydantic_ai import Agent
 from pydantic_ai_harness import SpendLimits
-from pydantic_ai_harness.spend import Budget, SpendSnapshot
+from pydantic_ai_harness.spend import Budget, SpendRecordedEvent
 
+limits = SpendLimits(budgets=[Budget(usd=Decimal('100'))])
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[limits])
 
-def show(snapshot: SpendSnapshot) -> None:
-    print(f'{snapshot.model} cost ${snapshot.usd}')
-    for status in snapshot.budgets:
-        print(f'  {status.budget.name}: ${status.remaining_usd} left')
-
-
-SpendLimits(budgets=[Budget(usd=Decimal('100'))], on_spend=show)
+@agent.on_event(SpendRecordedEvent)
+async def show(ctx, event):
+    print(f'{event.model} cost ${event.usd}')
 ```
 
-`on_spend` fires after every response, sync or async, with a `SpendSnapshot` -- including one that `on_unpriced='raise'` is about to reject, since a report that skipped exactly the unpriced responses would be missing the ones worth knowing about. It carries the response's `usage` unchanged, so cache reads and writes are available without this capability modelling them. Under durable execution, orchestration can replay this callback even though the journaled accrual ran only once. Make the callback idempotent before it writes an audit record, emits a billing event, or performs another side effect.
+`SpendRecordedEvent` is emitted after every response, including one that `on_unpriced='raise'` is about to reject. Its flat payload carries the response usage and serializable budget readings. Under durable execution, orchestration can deliver it again even though the journaled accrual ran only once, so keep a listener that writes an audit record or emits a billing event idempotent.
+
+Migration: `on_spend` remains supported but is deprecated. Move its callback body to a `SpendRecordedEvent` subscription; the same idempotency requirement applies to it.
 
 `status()` reads the same numbers without a run, which is what a cost display in a UI wants:
 
@@ -121,7 +122,7 @@ Set `expose_tools=True` to give the agent a `get_spend` tool. It is off by defau
 
 ## Reacting to a threshold
 
-`on_spend` is awaited inside `wrap_model_request`, so an async callback does hold the run there. It is still the wrong place to ask for approval: it fires after every response that reaches the accrual, including the one carrying the final answer, and `SpendSnapshot` says nothing about whether another turn follows -- so a callback that waits there leaves a run that has already finished waiting for a decision nothing will act on. Use `on_spend` to report.
+Spend events are reporting signals, not approval points: they can follow the response carrying the final answer.
 
 The seam that runs before a request rather than after a response is `before_model_request`. A small capability of your own can read `status(ctx)` there and hold the run until someone decides:
 
@@ -229,7 +230,7 @@ A store that fails does not fail quietly. An error reading the counter refuses t
 
 Any object with `get_many` and `add_many` works, so a Postgres or DynamoDB counter is a small class rather than a fork. Four obligations come with writing one. Return a total for every key you were handed, keyed by `SpendEntry.key`, including one you skipped as a replay. A missing total raises `UserError`, which names either this store contract or a non-deterministic scope during durable replay as the cause. Read a key that was never written as zero rather than leaving it out. Skip an entry whose `token` has already been applied to that key, or recovery outside the durable journal can count one response twice. And apply the whole call or none of it -- the guarantee at the top of this section is only as good as the backend behind it, and a store that commits each entry as it goes puts back the split write this seam exists to remove. Neither method is ever handed an empty sequence, so there is no such case to answer for.
 
-`SpendStore`, the single-key `get` and `add` pair released in 0.17.0, is deprecated and removed in 0.28.0: a store of that shape still works, driven one window per call, and emits one `HarnessDeprecationWarning` when the `SpendLimits` holding it is constructed. The warning names both losses: windows are applied one at a time, and the token has nowhere to go. A durable journal still prevents duplicate execution while its record is available, but recovery that cannot consult that journal has no store-side deduplication. The single-key `get` and `add` on `InMemorySpendStore` and `RedisSpendStore` go at that release too. A direct call to either does not warn, so this is the notice; reach for `get_many` and `add_many` instead. A subclass that *overrode* one of them without also overriding the batch pair is warned when the store itself is constructed, because that case loses behavior rather than just naming a deprecated method: `SpendLimits` drives `get_many` and `add_many`, so an override on `get` or `add` is never called and whatever it added -- an audit, a mirrored write -- stops happening. Move it onto `get_many` or `add_many`, which is also what makes the warning stop.
+`SpendStore`, the single-key `get` and `add` pair released in 0.17.0, is deprecated: a store of that shape still works, driven one window per call, and emits one `HarnessDeprecationWarning` when the `SpendLimits` holding it is constructed. The warning names both losses: windows are applied one at a time, and the token has nowhere to go. A durable journal still prevents duplicate execution while its record is available, but recovery that cannot consult that journal has no store-side deduplication. The single-key `get` and `add` on `InMemorySpendStore` and `RedisSpendStore` are deprecated too. A direct call to either does not warn, so this is the notice; reach for `get_many` and `add_many` instead. A subclass that *overrode* one of them without also overriding the batch pair is warned when the store itself is constructed, because that case loses behavior rather than just naming a deprecated method: `SpendLimits` drives `get_many` and `add_many`, so an override on `get` or `add` is never called and whatever it added -- an audit, a mirrored write -- stops happening. Move it onto `get_many` or `add_many`, which is also what makes the warning stop.
 
 ## Pricing
 

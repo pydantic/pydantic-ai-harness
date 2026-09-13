@@ -144,6 +144,15 @@ jobs:
 
       - run: make typecheck
 
+      # `gh-aw/pydantic.md` is the engine definition GitHub Agentic Workflows
+      # compiles into a consumer's workflow, read from this repository's default
+      # branch. A merge therefore reaches every consumer on their next recompile
+      # and nothing downstream re-checks it, so this is the only gate: the
+      # frontmatter fields gh-aw reads are validated here, and `--published`
+      # refuses a pin PyPI does not serve, which is the version a generated
+      # workflow installs before its agent starts.
+      - run: uv run --script scripts/gh_aw_engine_version.py --published
+
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -514,6 +523,77 @@ jobs:
 
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
+
+  # `gh-aw/pydantic.md` pins the `pydantic-ai-harness` release a generated gh-aw
+  # workflow installs, and consumers compile the definition straight from the
+  # default branch. Shipping a bump is therefore an ordinary pull request against
+  # that file, and this job publishes nothing: it only notices that the release
+  # just cut is not the release the definition names, and asks for that pull
+  # request. Skipping it costs nothing beyond consumers staying on the pinned
+  # version.
+  #
+  # An issue rather than a pull request, because a pull request opened with
+  # GITHUB_TOKEN triggers no workflow runs: it would arrive with none of this
+  # repository's required checks and could never satisfy them.
+  gh-aw-engine-pin-reminder:
+    name: gh-aw engine / pin reminder
+    needs: [release]
+    # Same skipped-ancestor opt-out as `release` above.
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: false
+
+      # `uv run --script` resolves the guard script's dependencies from PyPI
+      # without a lockfile, so it runs in its own step with no token in the
+      # environment. The step below holds the token and runs only `gh`.
+      - id: engine
+        run: echo "version=$(uv run --script scripts/gh_aw_engine_version.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Ask for a pin bump when the release moved past the definition
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.engine.outputs.version }}
+        run: |
+          pinned="$PINNED"
+          released="${GITHUB_REF_NAME#v}"
+          if [ "$pinned" = "$released" ]; then
+            echo "The gh-aw engine definition already pins ${released}."
+            exit 0
+          fi
+
+          title="Bump the gh-aw engine pin to ${released}"
+          # `--search` matches words rather than the phrase, so it narrows the
+          # listing and the exact title is compared here.
+          if gh issue list --state open --search "${title} in:title" \
+            --json title --jq '.[].title' | grep -qxF "${title}"; then
+            echo "An open issue already asks for this: ${title}"
+            exit 0
+          fi
+
+          # A heredoc rather than an inline `--body`: the body is Markdown with
+          # blank lines and backticks, and only `$pinned` and `$released` are
+          # meant to expand.
+          cat > "${RUNNER_TEMP}/pin-reminder.md" <<EOF
+          \`gh-aw/pydantic.md\` on the default branch still pins \`engine.version: ${pinned}\`, and ${released} is now released.
+
+          gh-aw compiles that file from the default branch, so a pull request bumping \`engine.version\` to ${released} is what ships the new pin: consumers pick it up on their next recompile.
+
+          Lint refuses a pin PyPI does not serve, so that pull request goes green once ${released} is on PyPI.
+          EOF
+
+          gh issue create --title "${title}" --body-file "${RUNNER_TEMP}/pin-reminder.md"
 
   send-tweet:
     name: Send tweet

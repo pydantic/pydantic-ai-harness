@@ -7,6 +7,7 @@ Each capability lives in its own module; shared utilities (token estimation, the
 from pydantic_ai_harness._warn import warn_class_renamed
 from pydantic_ai_harness.compaction._clamp_oversized_messages import ClampOversizedMessages
 from pydantic_ai_harness.compaction._clear_tool_results import ClearToolResults
+from pydantic_ai_harness.compaction._context_usage_events import REPORT_CONTEXT_USAGE_EVENTS, ContextUsageEvent
 from pydantic_ai_harness.compaction._context_window import (
     DEFAULT_CONTEXT_WINDOW,
     resolve_context_window,
@@ -24,7 +25,7 @@ from pydantic_ai_harness.compaction._shared import (
     estimate_token_count,
 )
 from pydantic_ai_harness.compaction._sliding_window_compaction import SlidingWindowCompaction
-from pydantic_ai_harness.compaction._summarizing_compaction import SummarizingCompaction
+from pydantic_ai_harness.compaction._summarizing_compaction import SummarizingCompaction, drain_summary_events
 from pydantic_ai_harness.compaction._tiered_compaction import TieredCompaction
 from pydantic_ai_harness.compaction._warn_near_limits import WarningKind, WarnNearLimits
 
@@ -34,6 +35,8 @@ __all__ = [
     'ClearToolResults',
     'CompactionStrategy',
     'ContextUsage',
+    'ContextUsageEvent',
+    'REPORT_CONTEXT_USAGE_EVENTS',
     'ReportContextUsage',
     'DeduplicateFileReads',
     'FallbackCompaction',
@@ -45,6 +48,7 @@ __all__ = [
     'WarnNearLimits',
     'WarningKind',
     'compact_now',
+    'drain_summary_events',
     'estimate_context_tokens',
     'estimate_token_count',
     'is_pinned',

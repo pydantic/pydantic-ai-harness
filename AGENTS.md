@@ -85,6 +85,20 @@ acts on the run and one verb phrase states its entire contract. Never invent a
 nominalization for an action, and never name a capability after the problem it
 solves.
 
+## Telemetry
+
+OpenTelemetry is part of a feature's design, not a follow-up. Every new
+capability decides what it emits before it merges, from the point of view of
+someone operating a run in production and asking what happened, why the run
+changed course, and what it cost.
+
+Emitting nothing is a valid answer when core's own spans already cover the work.
+It is an answer to state in the docs, not a step to skip.
+
+The house pattern (spans on `ctx.tracer`, attribute naming, content behind
+`trace_include_content`) is in `agent_docs/capability-authoring.md`
+"Telemetry".
+
 ## Coding standards
 
 - Python 3.10+ (target version for pyright and ruff)
@@ -175,6 +189,11 @@ need.
   `from pydantic_ai_harness.filesystem._toolset import _content_hash`). When a
   branch is only reachable by calling a private helper directly, mark it
   `# pragma: no cover` rather than reaching into the helper from a test.
+- Test async behavior directly, following `agent_docs/concurrency.md`: assert
+  the cancellation, the ordering, or the cleanup itself rather than the output
+  it happens to produce; order steps with `Event`s instead of sleeps; and reach
+  the real trigger (a real outer `anyio` cancel scope, the Trio parametrization
+  where the suite has it) rather than a stand-in.
 
 ## Contributing rules for AICAs
 

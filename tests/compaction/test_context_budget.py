@@ -7,12 +7,14 @@ from collections.abc import Callable
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import pydantic_ai.messages as messages_module
 import pytest
 from opentelemetry.trace import NoOpTracer, Tracer, get_tracer
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
+    ModelMessagesTypeAdapter,
     ModelRequest,
     ModelResponse,
     SpeechPart,
@@ -34,6 +36,7 @@ from pydantic_ai_harness.compaction import (
     DEFAULT_CONTEXT_WINDOW,
     ClearToolResults,
     ContextUsage,
+    ContextUsageEvent,
     DeduplicateFileReads,
     ReportContextUsage,
     SlidingWindowCompaction,
@@ -93,6 +96,13 @@ def _ctx(model: Any = None) -> Any:
         model: Model = dataclasses.field(default_factory=TestModel)
         deps: None = None
         tracer: Tracer = dataclasses.field(default_factory=NoOpTracer)
+        emitted: list[Any] = dataclasses.field(default_factory=list[Any])
+
+        async def emit(self, event: Any) -> Any:
+            # Like the real `RunContext.emit` with no listeners: the event is recorded and
+            # returned unmutated, so an immediate-dispatch emitter can read its own decision.
+            self.emitted.append(event)
+            return event
 
     return _FakeCtx(model=model) if model is not None else _FakeCtx()
 
@@ -863,6 +873,21 @@ class TestContextUsage:
 
 
 class TestReportContextUsage:
+    async def test_emits_without_a_callback(self, monkeypatch: pytest.MonkeyPatch):
+        """The documented shape: no `on_usage`, so the event is the only reading."""
+        _fixed_window(monkeypatch, 1_000)
+        monitor: ReportContextUsage[None] = ReportContextUsage()
+        ctx = _ctx()
+
+        request_context = _request_context(_history(2))
+        assert await monitor.before_model_request(ctx, request_context) is request_context
+
+        assert [type(event) for event in ctx.emitted] == [ContextUsageEvent]
+        event = ctx.emitted[0]
+        assert event.window_tokens == 1_000
+        assert event.used_tokens > 0
+        assert event.resolved is True
+
     async def test_reports_before_each_request(self, monkeypatch: pytest.MonkeyPatch):
         _fixed_window(monkeypatch, 1_000)
         seen: list[ContextUsage] = []
@@ -1380,6 +1405,45 @@ class TestManualCompactionSemantics:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(not hasattr(messages_module, 'InstructionDeltaPart'), reason='requires core instruction updates')
+class TestInstructionDeltaCounting:
+    def test_superseded_updates_do_not_count(self) -> None:  # pragma: lax no cover
+        history = ModelMessagesTypeAdapter.validate_python(
+            [
+                {
+                    'kind': 'request',
+                    'parts': [{'part_kind': 'instruction-delta', 'id': 'agent:state', 'content': 'B' * 400}],
+                },
+                {'kind': 'response', 'parts': [{'part_kind': 'text', 'content': 'done'}]},
+                {
+                    'kind': 'request',
+                    'parts': [{'part_kind': 'user-prompt', 'content': 'Continue.'}],
+                    'instruction_baseline': {},
+                    'instructions': 'C',
+                },
+            ]
+        )
+        assert estimate_token_count(history, len) == estimate_token_count(TestModel().prepare_messages(history), len)
+
+    @pytest.mark.parametrize(
+        ('content', 'rendered'),
+        [
+            ('New state', "Instruction block 'agent:state' is replaced from this point onward by:\n\nNew state"),
+            (None, "Instruction block 'agent:state' is withdrawn. Its previous instructions no longer apply."),
+        ],
+    )
+    def test_rendered_updates_count(self, content: str | None, rendered: str) -> None:  # pragma: lax no cover
+        history = ModelMessagesTypeAdapter.validate_python(
+            [
+                {
+                    'kind': 'request',
+                    'parts': [{'part_kind': 'instruction-delta', 'id': 'agent:state', 'content': content}],
+                }
+            ]
+        )
+        assert estimate_token_count(history, len) == len(rendered)
+
+
 class TestSpeechPartCounting:
     """A `SpeechPart` transcript is text the provider bills, so the estimator counts it."""
 
@@ -1452,3 +1516,6 @@ class TestRealtimeModelSkipsTokenTriggers:
 
         with pytest.raises(UserError, match='needs a request-response model'):
             await capability._summarize(_history(2), ctx)  # pyright: ignore[reportPrivateUsage]
+
+
+pytestmark = pytest.mark.filterwarnings('ignore::pydantic_ai_harness.HarnessDeprecationWarning')

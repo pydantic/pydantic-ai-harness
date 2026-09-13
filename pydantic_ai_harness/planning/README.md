@@ -13,10 +13,14 @@ Long agentic runs drift: the model loses track of what it set out to do and what
 
 ## The solution
 
-`Planning` gives the model a small toolset that owns the plan. The current plan is surfaced back to the model as an *ephemeral* reminder appended to the tail of each request, with a cache breakpoint after its stable opening tag:
+`Planning` gives the model a small toolset that owns the plan. The current plan is surfaced back to the model as an *ephemeral* reminder appended to the tail of each request, with the single cache breakpoint anchored on the last durable user content:
 
 - The reminder is added after the durable history is persisted, so it reaches the model but is never written to `message_history`. No reminders accumulate across turns.
-- A `CachePoint` follows the stable `<plan-reminder>` opening tag, so the cached prefix (tools + system + real conversation + that tag) stays byte-identical turn over turn. Only the mutable reminder content falls outside the cache.
+- The `CachePoint` sits on the last durable user content, so the prefix it saves is a prefix of the next request and cache hits survive turn over turn. The reminder carries no breakpoint, so re-sending its mutable content never invalidates the cache.
+
+As with all capability cache breakpoints, provider mapping applies: OpenAI models only receive the `CachePoint` when the model profile enables explicit cache control, and with no durable user content to anchor on the reminder is sent without a breakpoint.
+
+Note that the anchor lands on the last `UserPromptPart` present in the request. A capability listed before `Planning` that appends user content each request (for example `SystemReminders`) displaces the anchor onto that part, so the prefix stays cache-stable only while that content is stable across turns.
 
 So the plan stays current in the model's view while the cached prefix is never invalidated; the only added cost is re-reading the reminder each turn.
 
@@ -114,23 +118,27 @@ The planner's read-only discipline is a property of how you configure that agent
 
 ## Events
 
-Give a store a `PlanEventEmitter` to react to changes -- surface progress in a UI, mirror steps to a tracker, notify a channel on completion:
+Subscribe to typed plan events to react to changes made through the `Planning` tools:
 
 ```python
-from pydantic_ai_harness.planning import InMemoryPlanStore, PlanEventEmitter
+from pydantic_ai import Agent
+from pydantic_ai_harness import Planning
+from pydantic_ai_harness.planning import PlanCompletedEvent
 
-emitter = PlanEventEmitter()
+agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[Planning()])
 
-@emitter.on_completed
-async def announce(event):
+@agent.on_event(PlanCompletedEvent)
+async def announce(ctx, event):
     print('done:', event.item.content)
-
-store = InMemoryPlanStore(event_emitter=emitter)
 ```
 
-Emitted types: `created`, `updated`, `status_changed`, `completed`, `deleted`.
+The family contains
+`PlanCreatedEvent`, `PlanUpdatedEvent`, `PlanStatusChangedEvent`, `PlanCompletedEvent`, and
+`PlanDeletedEvent`; each carries the affected `item` and, for updates, `previous_state`.
 
-Events come from the granular tools (`add_task`, `update_task_status`, `add_subtask`, ...). `write_plan` is a bulk whole-plan replacement and is **event-silent**, so a UI driven purely off events won't see plans the model builds or rewrites with `write_plan`. Read the plan after the run too, or steer the model toward the granular tools when you need live event coverage.
+Run events come from planning tool paths, including `write_plan`. Direct application mutations on a
+`PlanStore` have no run context and do not produce run events. `PlanEventEmitter`, `EventCallback`,
+and store `event_emitter` parameters remain supported but are deprecated.
 
 ## Why whole-plan replacement
 
@@ -152,7 +160,7 @@ from pydantic_ai_harness import Planning
 
 Planning(
     guidance=None,           # static system-prompt guidance; None = default, '' = omit
-    cache_ttl='5m',          # TTL for the cache breakpoint after the stable opening tag ('5m' | '1h')
+    cache_ttl='5m',          # TTL for the cache breakpoint anchored on the last durable user content ('5m' | '1h')
     store=None,              # None = fresh in-memory plan per run; or a PlanStore to persist
     enable_subtasks=False,   # add subtask/dependency tools and the 'blocked' status
     inject=True,             # surface the current plan as a cache-safe tail reminder

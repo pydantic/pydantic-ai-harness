@@ -13,7 +13,7 @@ works, a bounded truncation otherwise, never a silent drop.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import KW_ONLY, dataclass
 from typing import TYPE_CHECKING
 
 from pydantic_ai_harness.tool_output_limits._payload import TruncationStrategy
@@ -35,16 +35,30 @@ class Passthrough:
 
 @dataclass(frozen=True)
 class Truncate:
-    """Clamp the stringified return to `max_chars`. Lossy, zero-cost, no read-back.
+    """Clamp the stringified return to `max_chars`, including the truncation marker.
 
-    `max_chars` is always characters, independent of the capability's `over_tokens` size
-    unit (truncation is a character operation). Falls back to `then` for binary payloads,
-    which cannot be stringify-truncated.
+    Lossy, zero-cost, no read-back. `max_chars` is always characters, independent of the
+    capability's `over_tokens` size unit. If the budget cannot fit both retained content and
+    a complete marker, truncation keeps only the selected slice. A non-positive cap returns
+    an empty string. Falls back to `then` for binary payloads, which cannot be stringify-truncated.
     """
 
     strategy: TruncationStrategy = TruncationStrategy.head_tail
     max_chars: int = _DEFAULT_TRUNCATE_CHARS
     then: Action | None = None
+
+    _: KW_ONLY
+    keep_tail_lines: int = 0
+    """Prioritize the last N newline-delimited lines before truncating the remaining text.
+
+    Zero preserves the selected strategy's usual behavior. LF and CRLF endings are kept.
+    If these lines exceed `max_chars`, use tail truncation instead. If a complete marker
+    would displace these lines, keep a bare tail slice within the cap.
+    """
+
+    def __post_init__(self) -> None:
+        if self.keep_tail_lines < 0:
+            raise ValueError('keep_tail_lines must be non-negative.')
 
 
 @dataclass(frozen=True)

@@ -4,9 +4,8 @@ A `PlanStore` is an async CRUD interface over an ordered list of plan steps. The
 default `InMemoryPlanStore` keeps them in process memory (matching planning's
 original ephemeral behaviour); `SqlitePlanStore` persists them to a local SQLite
 file. `PostgresPlanStore` (in `_postgres.py`) covers a server database over a
-caller-owned pool. All three accept an optional `PlanEventEmitter` and emit the
-same events, so an application can react to changes regardless of where the plan
-lives.
+caller-owned pool. Their deprecated `event_emitter` parameters preserve callback delivery for
+applications migrating to typed events from `Planning` tool runs.
 """
 
 from __future__ import annotations
@@ -15,14 +14,30 @@ import json
 import re
 import sqlite3
 import threading
+import warnings
 from typing import Protocol, runtime_checkable
 
 import anyio.to_thread
 
+from pydantic_ai_harness._warn import HarnessDeprecationWarning
 from pydantic_ai_harness.planning._events import PlanEvent, PlanEventEmitter, PlanEventType
 from pydantic_ai_harness.planning._types import PlanItem, TaskStatus
 
 _VALID_TABLE_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,62}')
+
+
+def warn_event_emitter(event_emitter: PlanEventEmitter | None) -> None:
+    """Warn when a store is configured with the deprecated emitter delivery path."""
+    if event_emitter is not None:
+        warnings.warn(
+            '`event_emitter` is deprecated; subscribe with `@agent.on_event` to the events `Planning` emits '
+            'instead -- `PlanCreatedEvent`, `PlanUpdatedEvent`, `PlanStatusChangedEvent`, '
+            '`PlanCompletedEvent` and `PlanDeletedEvent`, from `pydantic_ai_harness.planning`. They are '
+            'emitted from the planning tools rather than from the store, so a mutation your own code '
+            'makes on this store directly has no run context and reaches no listener.',
+            HarnessDeprecationWarning,
+            stacklevel=3,
+        )
 
 
 @runtime_checkable
@@ -34,17 +49,24 @@ class PlanStore(Protocol):
     """
 
     async def get_items(self) -> list[PlanItem]:
-        """Return every step in insertion order."""
+        """Return every step in insertion order, as detached copies.
+
+        The returned items must not alias the store's internal state. The
+        `write_plan` tool diffs a before/after snapshot of the store by item id,
+        and a store handing out its own live objects would mutate the `before`
+        snapshot along with itself, erasing the differences it reports.
+        """
         ...  # pragma: no cover
 
     async def set_items(self, items: list[PlanItem]) -> None:
         """Replace the whole list with `items`.
 
-        This is a bulk replacement and does not emit `PlanEvent`s -- so the
-        `write_plan` tool, which calls it, is event-silent. Applications that
-        render off events should also read the plan after a run, or steer the
-        model toward the granular tools (`add_task`, `update_task_status`, ...),
-        which do emit.
+        The store itself emits no `PlanEvent`s, but the `write_plan` tool calls
+        this and then emits typed `Planning` events for the change, diffed by
+        item id: `PlanCreatedEvent` for new items, `PlanUpdatedEvent` (plus
+        `PlanStatusChangedEvent` and `PlanCompletedEvent` on status changes) for
+        changed ones, and `PlanDeletedEvent` for removed ones. Reordering steps
+        without changing a field emits nothing, since the diff is per item id.
         """
         ...  # pragma: no cover
 
@@ -150,6 +172,7 @@ class InMemoryPlanStore:
     """In-process plan storage. The default backend; state is lost on exit."""
 
     def __init__(self, *, event_emitter: PlanEventEmitter | None = None) -> None:
+        warn_event_emitter(event_emitter)
         self._items: list[PlanItem] = []
         self._emitter = event_emitter
 
@@ -233,6 +256,7 @@ class SqlitePlanStore:
         table: str = 'plan_items',
         event_emitter: PlanEventEmitter | None = None,
     ) -> None:
+        warn_event_emitter(event_emitter)
         validate_table_name(table)
         if database == ':memory:':
             raise ValueError(
@@ -374,7 +398,7 @@ class SqlitePlanStore:
                 connection.close()
 
     async def get_items(self) -> list[PlanItem]:
-        """Return every step for this session in insertion order."""
+        """Return every step for this session in insertion order, as detached objects."""
         return await anyio.to_thread.run_sync(self._get_items_sync)
 
     async def set_items(self, items: list[PlanItem]) -> None:

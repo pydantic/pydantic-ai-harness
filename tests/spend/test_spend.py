@@ -48,7 +48,10 @@ from pydantic_ai_harness.spend import (
     UnpricedModelWarning,
 )
 
-pytestmark = pytest.mark.anyio
+pytestmark = [
+    pytest.mark.anyio,
+    pytest.mark.filterwarnings('ignore::pydantic_ai_harness.HarnessDeprecationWarning'),
+]
 
 
 @pytest.fixture
@@ -91,6 +94,7 @@ def _run_ctx(
         trace_include_content=trace_include_content,
         tracer=tracer if tracer is not None else NoOpTracer(),
         root_capability=root_capability,
+        _event_stream_buffer=[],
     )
     ctx.run_step = run_step
     return ctx
@@ -135,8 +139,12 @@ async def _record(
     async def handler(request_context: ModelRequestContext) -> ModelResponse:
         return recorded
 
+    run_ctx = ctx if ctx is not None else _run_ctx()
+    run_ctx._event_stream_buffer = []
+    run_ctx._capability = guard
+    run_ctx.capabilities = {'spend_limits': guard}
     return await guard.wrap_model_request(
-        ctx if ctx is not None else _run_ctx(),
+        run_ctx,
         request_context=_request_context(),
         handler=handler,
     )
@@ -2112,7 +2120,8 @@ class TestDeprecatedStore:
         message = str(warned[0].message)
         assert 'one window at a time' in message
         assert 'durable journal' in message
-        assert 'removed in 0.28.0' in message
+        assert 'removed in' not in message
+        assert 'get_many' in message
 
     def test_a_batch_store_is_not_warned_about(self):
         with warnings.catch_warnings():
