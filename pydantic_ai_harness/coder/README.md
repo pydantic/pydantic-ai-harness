@@ -9,8 +9,16 @@ It is a regular combined capability: Coder-specific tools and argument repair co
 
 Install the Coder extra to include ripgrep (`rg`) for file listing and search:
 
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[coder]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-harness[coder]"
 ```
 
 The extra installs `ripgrep==14.1.0` except on Android, where `rg` must be supplied separately on `PATH`.
