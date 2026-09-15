@@ -18,8 +18,10 @@ from uuid import UUID
 import pytest
 from pydantic_ai import Agent, CallToolsNode, ModelRequestNode, ModelRetry, RunContext
 from pydantic_ai._agent_graph import GraphAgentState  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai.agent.spec import AgentSpec
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -1649,7 +1651,10 @@ class TestFromSpecBackendValidation:
     def test_unknown_backend_raises(self) -> None:
         """A typo like `backend='disk'` raises instead of silently using memory."""
         with pytest.raises(ValueError, match='unknown backend'):
-            StepPersistence.from_spec(backend='disk')
+            Agent.from_spec(
+                {'model': 'test', 'capabilities': [{'StepPersistence': {'backend': 'disk'}}]},
+                custom_capability_types=[StepPersistence],
+            )
 
     def test_memory_backend_still_works(self) -> None:
         cap: StepPersistence[Any] = StepPersistence.from_spec(backend='memory')
@@ -1658,6 +1663,93 @@ class TestFromSpecBackendValidation:
     def test_sqlite_backend(self, tmp_path: Path) -> None:
         cap: StepPersistence[Any] = StepPersistence.from_spec(backend='sqlite', database=str(tmp_path / 'runs.db'))
         assert isinstance(cap.store, SqliteStepStore)
+
+    def test_sqlite_backend_default_database(self) -> None:
+        cap: StepPersistence[Any] = StepPersistence.from_spec(backend='sqlite')
+        assert isinstance(cap.store, SqliteStepStore)
+
+    def test_directory_requires_file_backend(self, tmp_path: Path) -> None:
+        """A `directory` the chosen backend would ignore raises instead of silently not persisting."""
+        with pytest.raises(ValueError, match='directory is only valid'):
+            StepPersistence.from_spec(directory=str(tmp_path))
+
+    def test_database_requires_sqlite_backend(self, tmp_path: Path) -> None:
+        with pytest.raises(ValueError, match='database is only valid'):
+            StepPersistence.from_spec(backend='file', database=str(tmp_path / 'runs.db'))
+
+    def test_store_is_runtime_only(self) -> None:
+        with pytest.raises(UserError, match='runtime-only'):
+            StepPersistence.from_spec(store=InMemoryStepStore())
+
+    def test_unknown_field_raises(self) -> None:
+        with pytest.raises(UserError, match=r"no spec field\(s\) \['bogus'\]"):
+            StepPersistence.from_spec(bogus=True)
+
+
+class TestFromSpecSchema:
+    """Regression tests for #537: `from_spec` publishes its fields to the `AgentSpec` schema."""
+
+    SPEC_FIELDS = {
+        'backend',
+        'directory',
+        'database',
+        'max_snapshots_per_run',
+        'agent_name',
+        'run_id',
+        'parent_run_id',
+        'metadata',
+        'id',
+        'description',
+        'defer_loading',
+    }
+
+    def test_agent_spec_schema_publishes_fields_and_excludes_runtime_store(self) -> None:
+        """The variadic signature published a bare `{'const': 'StepPersistence'}` with no `$defs` entry."""
+        schema = AgentSpec.model_json_schema_with_capabilities([StepPersistence])
+        params = schema['$defs']['spec_params_StepPersistence']
+        assert set(params['properties']) == self.SPEC_FIELDS
+        assert params['additionalProperties'] is False
+        assert params['properties']['backend']['enum'] == ['memory', 'file', 'sqlite']
+        assert '"store"' not in json.dumps(schema)
+
+    def test_base_and_run_fields_are_forwarded(self) -> None:
+        cap: StepPersistence[Any] = StepPersistence.from_spec(
+            agent_name='librarian',
+            run_id='librarian-1',
+            parent_run_id='orchestrator-1',
+            metadata={'team': 'docs'},
+            id='steps',
+            description='append-only step log',
+            defer_loading=True,
+        )
+        assert cap.agent_name == 'librarian'
+        assert cap.run_id == 'librarian-1'
+        assert cap.parent_run_id == 'orchestrator-1'
+        assert cap.metadata == {'team': 'docs'}
+        assert cap.id == 'steps'
+        assert cap.description == 'append-only step log'
+        assert cap.defer_loading is True
+
+    def test_agent_spec_loads_configured_step_persistence(self, tmp_path: Path) -> None:
+        agent = Agent.from_spec(
+            {
+                'model': 'test',
+                'capabilities': [
+                    {
+                        'StepPersistence': {
+                            'backend': 'file',
+                            'directory': str(tmp_path),
+                            'max_snapshots_per_run': 3,
+                            'agent_name': 'librarian',
+                            'id': 'steps',
+                            'defer_loading': True,
+                        }
+                    }
+                ],
+            },
+            custom_capability_types=[StepPersistence],
+        )
+        assert isinstance(agent, Agent)
 
 
 # ---------------------------------------------------------------------------

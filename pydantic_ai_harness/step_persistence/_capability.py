@@ -5,12 +5,14 @@ from __future__ import annotations
 import base64
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic_ai import CallToolsNode, ModelRequestNode
 from pydantic_ai.capabilities import AbstractCapability, durable_operation
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
@@ -139,33 +141,90 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     _snapshot_sequence: int = field(default=0, init=False, repr=False)
 
     @classmethod
-    def from_spec(cls, *args: Any, **kwargs: Any) -> StepPersistence[Any]:
+    def from_spec(
+        cls,
+        *,
+        backend: Literal['memory', 'file', 'sqlite'] = 'memory',
+        directory: str | Path | None = None,
+        database: str | Path | None = None,
+        max_snapshots_per_run: int | None = None,
+        agent_name: str | None = None,
+        run_id: str | None = None,
+        parent_run_id: str | None = None,
+        metadata: dict[str, str] | None = None,
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
+        **unsupported: Any,
+    ) -> StepPersistence[Any]:
         """Construct from a serialised spec.
 
+        Every parameter is named because this signature is what core reads to
+        generate the spec's JSON schema: `build_schema_types` drops
+        `*args`/`**kwargs`, so a catch-all signature publishes the bare string
+        `'StepPersistence'` and an editor marks every configured block as
+        invalid even though it loads (#537). The `AbstractCapability` fields
+        (`id`, `description`, `defer_loading`) are redeclared for the same
+        reason -- they only reach the schema through this signature.
+
         Supports `backend='memory'` (default), `backend='file'` (with
-        `directory`), or `backend='sqlite'` (with `database`). Raises
-        `ValueError` for any other `backend` value -- silently falling
-        back to in-memory storage would turn a typo into accidental
-        non-durability.
+        `directory`, default `.step-persistence`), or `backend='sqlite'` (with
+        `database`, default `.step-persistence.db`). Raises `ValueError` for
+        any other `backend` value -- falling back to in-memory storage would
+        turn a typo into accidental non-durability -- and for a `directory` or
+        `database` that its backend would ignore, so a spec cannot claim
+        durability it does not deliver.
 
         `max_snapshots_per_run` (default `None`, unbounded) is forwarded to
         the constructed store to bound per-run snapshot growth.
+
+        `store` is runtime-only: a live `StepStore` has no spec
+        representation, so it is rejected with a pointer to Python
+        construction rather than dropped. `**unsupported` keeps that
+        rejection specific for any other unknown field; core drops it from
+        the schema, so it costs nothing there.
         """
-        backend = kwargs.pop('backend', 'memory')
-        max_snapshots_per_run = kwargs.pop('max_snapshots_per_run', None)
+        if 'store' in unsupported:
+            raise UserError(
+                'StepPersistence `store` is runtime-only and cannot be expressed in a spec. '
+                'Construct the capability in Python to pass a store, or pick a built-in '
+                "backend with `backend='memory'|'file'|'sqlite'`."
+            )
+        if unsupported:
+            raise UserError(f'StepPersistence has no spec field(s) {sorted(unsupported)}.')
+        if backend != 'file' and directory is not None:
+            raise ValueError('directory is only valid with backend="file"')
+        if backend != 'sqlite' and database is not None:
+            raise ValueError('database is only valid with backend="sqlite"')
+
         if backend == 'memory':
-            return cls(store=InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        if backend == 'file':
+            store: StepStore = InMemoryStepStore(max_snapshots_per_run=max_snapshots_per_run)
+        elif backend == 'file':
             from pydantic_ai_harness.step_persistence._store import FileStepStore
 
-            directory = kwargs.pop('directory', '.step-persistence')
-            return cls(store=FileStepStore(directory, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        if backend == 'sqlite':
+            store = FileStepStore(
+                directory if directory is not None else '.step-persistence',
+                max_snapshots_per_run=max_snapshots_per_run,
+            )
+        elif backend == 'sqlite':
             from pydantic_ai_harness.step_persistence._store import SqliteStepStore
 
-            database = kwargs.pop('database', '.step-persistence.db')
-            return cls(store=SqliteStepStore(database=database, max_snapshots_per_run=max_snapshots_per_run), **kwargs)
-        raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+            store = SqliteStepStore(
+                database=database if database is not None else '.step-persistence.db',
+                max_snapshots_per_run=max_snapshots_per_run,
+            )
+        else:
+            raise ValueError(f'unknown backend {backend!r}; expected `memory`, `file`, or `sqlite`')
+        return cls(
+            store=store,
+            agent_name=agent_name,
+            run_id=run_id,
+            parent_run_id=parent_run_id,
+            metadata=dict(metadata) if metadata is not None else {},
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
+        )
 
     def compaction_transcript_handle(self) -> str | None:
         """Retrieval handle to this run's transcript, for compaction receipts.
