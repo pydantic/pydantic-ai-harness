@@ -11,12 +11,13 @@ from pathlib import Path
 from typing import Literal
 
 import anyio
-from pydantic_ai import ModelRetry
+from pydantic_ai import ModelRetry, RunContext
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.coder._shell import shell
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
+from pydantic_ai_harness.filesystem._changes import Change
 from pydantic_ai_harness.filesystem._toolset import (
     _content_hash,  # pyright: ignore[reportPrivateUsage]
     _write_content,  # pyright: ignore[reportPrivateUsage]
@@ -48,18 +49,21 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
         self.add_function(self.grep)
         self.add_function(self.shell)
 
-    async def read_file(self, path: str, *, offset: int = 0, limit: int | None = None) -> str:
+    async def read_file(
+        self, ctx: RunContext[AgentDepsT], path: str, *, offset: int = 0, limit: int | None = None
+    ) -> str:
         """Read a file with zero-based offset and one-based line numbers, without hashes."""
-        result = await self.filesystem.read_file(path, offset=offset, limit=limit)
+        result = await self.filesystem._read_file(ctx, path, offset=offset, limit=limit)  # pyright: ignore[reportPrivateUsage]
         return re.sub(r' \| hash:[0-9a-f]+(?=\])', '', result, count=1)
 
-    async def write_file(self, path: str, content: str) -> str:
+    async def write_file(self, ctx: RunContext[AgentDepsT], path: str, content: str) -> str:
         """Write a complete file. Create missing parent directories with shell mkdir first."""
-        result = await self.filesystem.write_file(path, content)
+        result = await self.filesystem._write_file(ctx, path, content)  # pyright: ignore[reportPrivateUsage]
         return re.sub(r' \[hash:[0-9a-f]+\]', '', result)
 
     async def edit_file(
         self,
+        ctx: RunContext[AgentDepsT],
         path: str,
         *,
         old_text: str | None = None,
@@ -91,10 +95,22 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
             if not replacement.old_text or content.count(replacement.old_text) != 1:
                 raise ModelRetry('Each non-empty old_text must occur exactly once; no changes were written.')
             content = content.replace(replacement.old_text, replacement.new_text, 1)
+        change = Change.propose(
+            **self.filesystem._event_location(resolved),  # pyright: ignore[reportPrivateUsage]
+            operation='edit',
+            old=original,
+            new=content,
+        )
+        refusal = await self.filesystem._request(  # pyright: ignore[reportPrivateUsage]
+            ctx, change, path=path, resolved=resolved
+        )
+        if refusal is not None:
+            return refusal
         try:
             _write_content(resolved, path, content, expected_hash=_content_hash(original), create=False)
         except OSError as exc:
             raise ModelRetry(f'Cannot edit {path!r}: {exc}') from exc
+        await ctx.emit(change.edited(content_hash=_content_hash(content)))
         return f'Edited {path}.'
 
     def _directory(self, path: str) -> Path:

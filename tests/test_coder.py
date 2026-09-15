@@ -54,4 +54,5 @@ def test_coder_members_and_parameters(tmp_path: Path) -> None:
     instructions = str(guidance.get_instructions())
     for text in ('Custom instructions', 'DRY', 'YAGNI', 'SOLID', '600', 'sleep 60', '270'):
         assert text in instructions
+    assert coder.capabilities[-1].id is None
     assert isinstance(coder.for_agent(Agent(TestModel())), Coder)

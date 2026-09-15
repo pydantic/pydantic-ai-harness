@@ -32,7 +32,7 @@ class _RepairToolArguments(AbstractCapability[AgentDepsT]):
             return args
         try:
             json.loads(args)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             with ctx.tracer.start_as_current_span('coder.repair_tool_arguments'):
                 try:
                     return json_repair.repair_json(args, skip_json_loads=True, ensure_ascii=False)
@@ -72,6 +72,6 @@ class Coder(CombinedCapability[AgentDepsT]):
                 RepoContext[AgentDepsT](workspace_dir=Path(workspace), expose_inventory_tool=False),
                 ClearToolResults[AgentDepsT](max_fraction=0.7),
                 WarnNearLimits[AgentDepsT](max_context_fraction=0.9),
-                _BoundToolOutputs[AgentDepsT](bands=[Band(over=64000, action=Truncate(max_chars=64000))]),
+                _BoundToolOutputs[AgentDepsT](id=None, bands=[Band(over=64000, action=Truncate(max_chars=64000))]),
             ]
         )
