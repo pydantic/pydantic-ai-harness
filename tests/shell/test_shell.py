@@ -933,7 +933,7 @@ class TestBackgroundCommands:
             assert len(ends) == 1
             assert ends[0].exit_code == 7
         finally:
-            if group_id is not None:
+            if group_id is not None:  # pragma: no branch
                 try:
                     os.killpg(group_id, signal.SIGKILL)
                 except ProcessLookupError:
@@ -949,7 +949,7 @@ class TestBackgroundCommands:
                 state = result.stdout.decode().strip()
                 if not state or state.startswith('Z'):
                     return
-                await checkpoint()
+                await checkpoint()  # pragma: no cover
 
     async def test_start_command_returns_id(self, shell_dir: Path) -> None:
         ts = _shell_toolset(shell_dir)
