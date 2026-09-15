@@ -8,8 +8,10 @@ background command the same id is the handle `check_command` and
 Output in events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS`, and an
 end event keeps the tail of each stream up to `max_output_chars`, with a
 `truncated` flag. The number of line events is bounded too: a foreground
-command replays its buffered lines in order when it exits, keeping only the
-last 1000. `command` and `cwd` are carried as is.
+command replays stdout before stderr when it exits, preserving order within
+each stream, not cross-stream write order. Each stream keeps its last 1000
+newline-terminated lines plus an unterminated final line if present.
+`command` and `cwd` are carried as is.
 """
 
 from dataclasses import dataclass, field
@@ -95,8 +97,9 @@ class ShellCommandStartEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='comm
 class ShellOutputLineEvent(CapabilityEvent, namespace=SHELL_EVENTS, name='output_line'):
     """A foreground command wrote one line to stdout or stderr.
 
-    Background commands write to files the model reads through
-    `check_command`, so they emit no line events.
+    Foreground output is replayed after exit or timeout, stdout before stderr.
+    Order is preserved within each stream, not across streams. Background
+    commands write to files read through `check_command` and emit no line events.
     """
 
     command_id: str

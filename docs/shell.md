@@ -230,7 +230,7 @@ show a command's output, or veto it, without parsing tool arguments:
 |---|---|---|---|
 | `ShellCommandRequestEvent` | immediate | after a command passes the policy checks and before it is spawned | `command`, `cwd`, `timeout`, `background`; `cancel(reason)`, `rewrite(command, reason=...)` |
 | `ShellCommandStartEvent` | immediate | the process was spawned | `command_id`, `command`, `cwd`, `timeout`, `background`, `pid` |
-| `ShellOutputLineEvent` | stream | the foreground command exited, replaying its buffered lines in order (at most the last 1000) | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
+| `ShellOutputLineEvent` | stream | the foreground command exited or timed out, replaying buffered stdout lines then stderr lines (limits below) | `command_id`, `stream` (`stdout` or `stderr`), `line`, `truncated` |
 | `ShellCommandEndEvent` | stream | the command exited, timed out, or was stopped | `command_id`, `command`, `background`, `exit_code`, `timed_out`, `duration_seconds`, `stdout`, `stderr`, `truncated` |
 
 `ShellCommandRequestEvent` is a decision. A listener that calls `cancel(reason)`
@@ -270,9 +270,12 @@ and an end event keeps the tail of `stdout` and of `stderr` separately, each
 up to `max_output_chars` (the model's combined result is cut to that limit
 once), with a `truncated` flag on both. `command` and `cwd` are carried as is.
 The number of line events is bounded too: a foreground command's lines are
-buffered as they are read and replayed in order when the command exits or is
-killed, keeping only the last 1000, so a high-volume command cannot exhaust
-a host that persists or forwards events. A run cancelled
+buffered as they are read and replayed when the command exits or is killed.
+Each stream retains its last 1000 newline-terminated lines, plus an
+unterminated final line if present. Replay preserves order within each stream,
+but delivers stdout before stderr; it does not reconstruct cross-stream write
+order. Hosts should display the streams separately rather than treat these
+events as a chronologically merged transcript. A run cancelled
 mid-command ends without an end event, and so does a background command
 still running when the run finishes: the toolset's cleanup kills it at
 teardown, where no run context exists to emit one.
