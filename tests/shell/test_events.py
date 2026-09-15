@@ -215,10 +215,24 @@ class TestForegroundEvents:
         assert len(end.stdout) <= 40
         assert end.stdout.endswith('199\n200\n')
 
-    async def test_carriage_returns_are_stripped_from_lines(self, tmp_path: Path) -> None:
-        listener, _ = await _run(tmp_path, [_run_command("printf 'a\\r\\nb'")])
+    @pytest.mark.parametrize(
+        ('output', 'expected'),
+        [
+            ('a\r\nb', ['a', 'b']),
+            ('value\r\r\n', ['value\r']),
+            ('value\r', ['value\r']),
+            ('value\r\r', ['value\r\r']),
+        ],
+    )
+    async def test_only_crlf_carriage_return_is_stripped(
+        self, tmp_path: Path, output: str, expected: list[str]
+    ) -> None:
+        listener, _ = await _run(tmp_path, [_run_command(f"printf '{output}'")])
 
-        assert [event.line for event in listener.events if isinstance(event, ShellOutputLineEvent)] == ['a', 'b']
+        assert [event.line for event in listener.events if isinstance(event, ShellOutputLineEvent)] == expected
+        end = listener.events[-1]
+        assert isinstance(end, ShellCommandEndEvent)
+        assert end.stdout == output
 
     async def test_line_split_across_reads_is_reassembled(self, tmp_path: Path) -> None:
         # Two writes with a pause between them arrive as two pipe reads, and

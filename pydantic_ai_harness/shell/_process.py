@@ -220,14 +220,14 @@ class _LineBuffer:
                 self._extend(chunk)
                 return lines
             self._extend(chunk[:newline])
-            lines.append(self._take())
+            lines.append(self._take(newline=True))
             chunk = chunk[newline + 1 :]
 
     def flush(self) -> tuple[str, bool] | None:
         """Return the unterminated final line, if any."""
         if not self._head and not self._overflowed:
             return None
-        return self._take()
+        return self._take(newline=False)
 
     def _extend(self, piece: bytes) -> None:
         room = _LINE_HEAD_BYTES - len(self._head)
@@ -235,8 +235,10 @@ class _LineBuffer:
             self._overflowed = True
         self._head += piece[:room]
 
-    def _take(self) -> tuple[str, bool]:
-        text = self._head.decode('utf-8', errors='replace').rstrip('\r')
+    def _take(self, *, newline: bool) -> tuple[str, bool]:
+        text = self._head.decode('utf-8', errors='replace')
+        if newline and not self._overflowed:
+            text = text.removesuffix('\r')
         truncated = self._overflowed or len(text) > MAX_EVENT_LINE_CHARS
         self._head = b''
         self._overflowed = False

@@ -215,7 +215,9 @@ Each stream retains its last 1000 newline-terminated lines, plus an
 unterminated final line if present. Replay preserves order within each stream,
 but delivers stdout before stderr; it does not reconstruct cross-stream write
 order. Hosts should display the streams separately rather than treat these
-events as a chronologically merged transcript. A run cancelled
+events as a chronologically merged transcript. Line events omit the newline
+and its optional CRLF carriage return, preserving other carriage returns.
+A run cancelled
 mid-command ends without an end event, and so does a background command
 still running when the run finishes: the toolset's cleanup kills it at
 teardown, where no run context exists to emit one.
