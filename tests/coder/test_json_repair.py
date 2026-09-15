@@ -28,7 +28,7 @@ def model_for(respond: Callable[[list[ModelMessage], AgentInfo], ModelResponse])
 class TestCoder:
     async def test_dictionary_arguments(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=['write_file'], seed=0)
-        agent = Agent(model, capabilities=[Coder(tmp_path, subagents=[])])
+        agent = Agent(model, capabilities=[Coder(tmp_path)])
         result = await agent.run('Write a file')
         assert not any(isinstance(part, RetryPromptPart) for message in result.all_messages() for part in message.parts)
 
@@ -62,7 +62,7 @@ class TestCoder:
                 return ModelResponse(parts=[ToolCallPart('write_file', arguments)])
             return ModelResponse(parts=[TextPart('done')])
 
-        agent = Agent(model_for(respond), capabilities=[Coder(tmp_path, subagents=[])])
+        agent = Agent(model_for(respond), capabilities=[Coder(tmp_path)])
         result = await agent.run('Write hello.txt')
         assert result.output == 'done'
         assert (tmp_path / 'hello.txt').read_text() == 'hello'
@@ -81,7 +81,7 @@ class TestCoder:
             assert any(isinstance(part, RetryPromptPart) for message in messages for part in message.parts)
             return ModelResponse(parts=[TextPart('invalid arguments')])
 
-        agent = Agent(model_for(respond), capabilities=[Coder(tmp_path, subagents=[])])
+        agent = Agent(model_for(respond), capabilities=[Coder(tmp_path)])
         await agent.run('Write hello.txt')
         assert not (tmp_path / 'hello.txt').exists()
 
@@ -105,6 +105,6 @@ class TestCoder:
                 )
             return ModelResponse(parts=[TextPart('done')])
 
-        agent = Agent(model_for(respond), capabilities=[Coder(tmp_path, subagents=[])])
+        agent = Agent(model_for(respond), capabilities=[Coder(tmp_path)])
         await agent.run('Edit hello.py')
         assert path.read_text() == 'print("日本語")\npath = "C:\\tmp"\n'

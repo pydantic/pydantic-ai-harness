@@ -64,66 +64,22 @@ agent = Agent(
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is not a framework inside the framework; it's a [`CombinedCapability`](/ai/capabilities/custom/) bundling the same blocks you can use directly. This is the exact agent the [Coder page](coder.md)'s exported `coder_agent` gives you, written out block by block:
+`Coder` is a regular combined capability with six coding tools, autonomous engineering guidance, repository context, and context limits. Its private tools and JSON repair ship together; standalone capabilities remain independently available.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
 ```python
-from pathlib import Path
-
 from pydantic_ai import Agent
-from pydantic_ai_harness import (
-    ClearToolResults,
-    FileSystem,
-    LLM_API_KEY_ENV_PATTERNS,
-    Planning,
-    RepoContext,
-    Shell,
-    SubAgent,
-    SubAgents,
-    ToolOutputLimits,
-    WarnNearLimits,
-)
-
-allowed_commands = [
-    'git', 'rg', 'grep', 'find', 'ls', 'cat', 'sed', 'head', 'tail',
-    'python', 'uv', 'pytest', 'ruff', 'make',
-]
-
-explorer = SubAgent(
-    Agent(
-        name='explorer',
-        description='Explore the codebase and answer questions without modifying anything',
-        instructions='Answer with concrete paths and evidence.',
-        capabilities=[
-            FileSystem('.', read_only=True),
-            RepoContext(workspace_dir=Path('.')),
-        ],
-    )
-)
+from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
     'anthropic:claude-fable-5',
     name='coder',
-    instructions='You are a coding agent built on Pydantic AI.',
-    capabilities=[
-        FileSystem('.'),  # read/write/edit/search, path-traversal safe
-        Shell(  # allowlisted commands, LLM API keys stripped from their environment
-            cwd='.',
-            allowed_commands=allowed_commands,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
-        ),
-        RepoContext(workspace_dir=Path('.')),  # loads AGENTS.md/CLAUDE.md + repo structure
-        Planning(),  # structured task plans the model maintains
-        SubAgents(agents=[explorer], agent_folders=None),  # delegate exploration off the main context
-        ClearToolResults(max_fraction=0.7),  # clears old tool results near the limit
-        WarnNearLimits(max_context_fraction=0.9),  # warns the model before it hits limits
-        ToolOutputLimits(),  # bounds oversized tool results
-    ],
+    capabilities=[Coder('.')],
 )
 ```
 
-Start from the harness and remove what you don't want, or start from the blocks and build up; both are first-class. Constructor arguments (working directory, command allowlist, window sizes) thread through to the underlying capabilities.
+See the Coder documentation for tool signatures, persistent shell lifecycle, and migration from the previous planning/delegation composition.
 
 ## Capabilities
 

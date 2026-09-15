@@ -14,8 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS
-
 _ROOT = Path(__file__).parent.parent
 _PACKAGE = _ROOT / 'pydantic_ai_harness'
 
@@ -369,18 +367,8 @@ def test_blown_out_example_is_identical_across_surfaces(surface: str) -> None:
 
 
 def test_blown_out_example_matches_coder_defaults() -> None:
-
     block = _blown_out_block(_ROOT / _BLOWN_OUT_SURFACES[0])
-    listed = re.findall(r"'([a-z]+)'", block.split('allowed_commands = [', 1)[1].split(']', 1)[0])
-    assert tuple(listed) == tuple(DEFAULT_ALLOWED_COMMANDS), (
-        'the written-out allowlist no longer matches pydantic_ai_harness.coder.DEFAULT_ALLOWED_COMMANDS'
-    )
-    agent_source = (_PACKAGE / 'coder' / '_agent.py').read_text(encoding='utf-8')
-    identity_match = re.search(r"instructions='([^']+)'", agent_source)
-    assert identity_match, 'coder/_agent.py no longer defines an identity instruction'
-    identity = f"instructions='{identity_match.group(1)}'"
-    assert identity in block, "the blown-out example must carry coder_agent's identity instruction verbatim"
+    assert "capabilities=[Coder('.')]" in block
+    assert "name='coder'" in block
     example = (_ROOT / 'examples/coding_agent.py').read_text(encoding='utf-8')
-    assert identity in example and 'denied_env_patterns=LLM_API_KEY_ENV_PATTERNS' in example, (
-        'examples/coding_agent.py drifted from the coder_agent composition'
-    )
+    assert "name='coder'" in example and 'capabilities=[Coder(workspace or Path.cwd())]' in example
