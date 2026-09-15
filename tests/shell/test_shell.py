@@ -29,7 +29,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.code_mode import CodeMode
-from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell, ShellCommandEndEvent
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell, ShellCommandEndEvent, ShellToolset
 from pydantic_ai_harness.shell._process import (
     _MAX_PENDING_LINES,
     OutputReader,
@@ -40,7 +40,8 @@ from pydantic_ai_harness.shell._process import (
     read_bg_output,
     run_to_exit,
 )
-from pydantic_ai_harness.shell._toolset import ShellToolset
+
+_PROCESS_READY_TIMEOUT = 10.0
 
 
 def _env_toolset(
@@ -884,6 +885,72 @@ class TestProcessGroupKill:
 
 
 class TestBackgroundCommands:
+    @pytest.mark.parametrize('stop_explicitly', [True, False], ids=['stop', 'context-exit'])
+    async def test_finished_leader_does_not_leave_background_descendant(
+        self, shell_dir: Path, stop_explicitly: bool
+    ) -> None:
+        """A reported exit belongs to the leader, not necessarily its process group."""
+        ts = _shell_toolset(shell_dir)
+        ctx = _run_context()
+        tools = await ts.get_tools(ctx)
+        script = (
+            'import os, signal; '
+            'child = os.fork(); '
+            'os._exit(7) if child else None; '
+            'signal.signal(signal.SIGTERM, signal.SIG_IGN); '
+            'print(os.getpid(), os.getpgrp(), flush=True); '
+            'signal.pause()'
+        )
+        child_pid: int | None = None
+        group_id: int | None = None
+        try:
+            async with ts:
+                result = await ts.start_command(f'exec {shlex.quote(sys.executable)} -c {shlex.quote(script)}')
+                command_id = _parse_command_id(result)
+                with anyio.fail_after(_PROCESS_READY_TIMEOUT):
+                    while True:
+                        status = await ts.call_tool(
+                            'check_command', {'command_id': command_id}, ctx, tools['check_command']
+                        )
+                        if '[stdout]' in status and '[status: finished]' in status:
+                            break
+                        await checkpoint()
+                child_pid, group_id = map(int, status.splitlines()[1].split())
+                os.kill(child_pid, 0)
+                assert status.endswith('[exit code: 7]')
+                if stop_explicitly:
+                    stopped = await ts.call_tool('stop_command', {'command_id': command_id}, ctx, tools['stop_command'])
+                    assert stopped.endswith('[exit code: 7]')
+
+                # Assert before context exit in the explicit-stop case, so
+                # teardown cannot mask a broken stop implementation.
+                if stop_explicitly:
+                    await self._assert_descendant_stopped(child_pid)
+            await self._assert_descendant_stopped(child_pid)
+            assert 'unknown command ID' in await ts.check_command(command_id)
+            assert ctx._event_stream_buffer is not None
+            ends = [event for event in ctx._event_stream_buffer if isinstance(event, ShellCommandEndEvent)]
+            assert len(ends) == 1
+            assert ends[0].exit_code == 7
+        finally:
+            if group_id is not None:
+                try:
+                    os.killpg(group_id, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @staticmethod
+    async def _assert_descendant_stopped(pid: int) -> None:
+        # Linux container init may retain an orphan zombie. A zombie is dead,
+        # even though signal 0 and killpg still find its unreaped PID.
+        with anyio.fail_after(_PROCESS_READY_TIMEOUT):
+            while True:
+                result = await anyio.run_process(['ps', '-o', 'stat=', '-p', str(pid)], check=False)
+                state = result.stdout.decode().strip()
+                if not state or state.startswith('Z'):
+                    return
+                await checkpoint()
+
     async def test_start_command_returns_id(self, shell_dir: Path) -> None:
         ts = _shell_toolset(shell_dir)
         result = await _call_shell_tool(ts, 'start_command', command='sleep 100')

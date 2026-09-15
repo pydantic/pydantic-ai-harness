@@ -195,14 +195,18 @@ other three events are notifications.
 tool spawns the process, so a listener that raises ends the run from inside
 the tool and the toolset kills the process group. No command is left running
 after a failed run, background command included (its record is removed with
-it).
+it). Foreground start listeners run inside the command deadline: a blocked
+listener is cancelled when the timeout expires and the process group is killed.
 
 `command_id` ties a command's lines and its end to its start when several run
 at once. For a background command it is the same ID `check_command` and
 `stop_command` take, so the model and a subscriber name the process alike.
 Background commands write to files instead of pipes, so they emit no line
 events; their end event fires when `check_command` first sees the exit or when
-`stop_command` kills the process. Events come from the tools inside a run; the
+`stop_command` kills the process. A finished background leader may still have
+live descendants; stopping its handle or exiting the toolset cleans up the
+process group even after its end event has been reported.
+Events come from the tools inside a run; the
 same methods called directly on the toolset outside a run emit nothing.
 
 Output in events is bounded: a line is cut at `MAX_EVENT_LINE_CHARS` (256),

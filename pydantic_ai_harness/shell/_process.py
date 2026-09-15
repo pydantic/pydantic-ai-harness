@@ -305,29 +305,33 @@ async def drain_with_timeout(*readers: OutputReader) -> None:
                 tg.start_soon(reader.drain)
 
 
-async def run_to_exit(proc: anyio.abc.Process, *readers: OutputReader, timeout: float) -> tuple[int, bool]:
+async def run_to_exit(
+    proc: anyio.abc.Process,
+    *readers: OutputReader,
+    timeout: float,
+    on_start: Callable[[], Awaitable[None]] | None = None,
+) -> tuple[int, bool]:
     """Read the pipes to end of file and reap the process; return its exit code and whether the deadline hit.
 
     The whole group is killed on timeout and on cancellation alike:
     `proc.aclose()` kills only the shell, and its children would outlive
     the run.
 
-    Callback latency from `on_line` sinks does not consume the timeout: lines
+    The deadline includes `on_start`, so a blocked start listener cannot keep
+    the spawned process alive indefinitely. Callback latency from `on_line`
+    sinks does not consume the timeout: lines
     are buffered during the timed IO phase and delivered afterward, so a slow
     listener cannot turn a completed command into a spurious timeout.
     """
     try:
-        # Only the timed read maps to the timeout outcome. A listener that
-        # raises `TimeoutError` from its own guard must not be read as the
-        # command's deadline: that would kill a command that already finished
-        # and replay its buffered lines a second time.
-        try:
-            with anyio.fail_after(timeout):
-                async with anyio.create_task_group() as tg:
-                    for reader in readers:
-                        tg.start_soon(reader.read)
-                exit_code = await proc.wait()
-        except TimeoutError:
+        with anyio.move_on_after(timeout) as deadline:
+            if on_start is not None:
+                await on_start()
+            async with anyio.create_task_group() as tg:
+                for reader in readers:
+                    tg.start_soon(reader.read)
+            await proc.wait()
+        if deadline.cancel_called:
             await kill_process_group(proc)
             exit_code = await proc.wait()
             with anyio.CancelScope(shield=True):
@@ -337,9 +341,11 @@ async def run_to_exit(proc: anyio.abc.Process, *readers: OutputReader, timeout: 
             return exit_code, True
         for reader in readers:
             await reader.deliver()
-        return exit_code, False
+        return await proc.wait(), False
     except BaseException:
         await kill_process_group(proc)
         raise
     finally:
-        await proc.aclose()
+        with anyio.CancelScope(shield=True):
+            await proc.wait()
+            await proc.aclose()

@@ -178,10 +178,10 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     async def __aexit__(self, *args: Any) -> None:
         """Terminate all remaining background processes and clean up temp files."""
         for bg in self._background.values():
-            if not bg.finished:
-                await kill_process_group(bg.proc)
-                with anyio.CancelScope(shield=True):
-                    await bg.proc.wait()
+            # A finished leader can still have live descendants in its group.
+            await kill_process_group(bg.proc)
+            with anyio.CancelScope(shield=True):
+                await bg.proc.wait()
                 await bg.proc.aclose()
             cleanup_bg_files(bg)
         self._background.clear()
@@ -379,8 +379,9 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 start_new_session=True,
                 env=self._resolve_env(),
             )
-            if ctx is not None:
-                try:
+
+            async def on_start() -> None:
+                if ctx is not None:
                     await ctx.emit(
                         ShellCommandStartEvent(
                             command_id=command_id,
@@ -391,21 +392,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                             pid=proc.pid,
                         )
                     )
-                except BaseException:
-                    # A raising or cancelled listener ends the run; killing
-                    # the group first is what keeps the process from
-                    # outliving it. The shielded reap and close keep this path
-                    # at parity with the background one.
-                    await kill_process_group(proc)
-                    with anyio.CancelScope(shield=True):
-                        await proc.wait()
-                        await proc.aclose()
-                    raise
+
             assert proc.stdout is not None
             assert proc.stderr is not None
             stdout = OutputReader(proc.stdout, on_line=self._line_sink(ctx, command_id, 'stdout'))
             stderr = OutputReader(proc.stderr, on_line=self._line_sink(ctx, command_id, 'stderr'))
-            exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=timeout)
+            exit_code, timed_out = await run_to_exit(proc, stdout, stderr, timeout=timeout, on_start=on_start)
 
             if ctx is not None:
                 await ctx.emit(
@@ -588,15 +580,17 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
         async with bg.stop_lock:
             stopped: int | None = None
-            if not bg.finished:
-                # Claimed before the first await: a check running while the
-                # kill is in progress must not report the exit and emit a
-                # second end.
-                bg.finished = True
-                await kill_process_group(bg.proc)
-                with anyio.CancelScope(shield=True):
-                    stopped = await bg.proc.wait()
-                bg.exit_code = stopped
+            was_finished = bg.finished
+            # Claimed before the first await: a check running while the
+            # kill is in progress must not report the exit and emit a
+            # second end. Even an already-finished leader may have descendants.
+            bg.finished = True
+            await kill_process_group(bg.proc)
+            with anyio.CancelScope(shield=True):
+                exit_code = await bg.proc.wait()
+                if not was_finished:
+                    stopped = exit_code
+                    bg.exit_code = stopped
 
             stdout, stderr = read_bg_output(bg)
 
