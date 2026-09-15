@@ -208,3 +208,36 @@ class ManagedPrompt(AbstractCapability[AgentDepsT]):
                 return await handler()
             finally:
                 self._resolved.reset(token)
+
+    @classmethod
+    def from_spec(
+        cls,
+        name: str,
+        default: str,
+        *,
+        label: str | None = None,
+        targeting_key: str | None = None,
+        attributes: Mapping[str, Any] | None = None,
+        render_template: bool = False,
+        id: str | None = None,
+        description: str | None = None,
+        defer_loading: bool = False,
+    ) -> ManagedPrompt[AgentDepsT]:
+        """Construct the capability from serializable spec options.
+
+        In a spec, `name` is always a prompt name (a `Variable` is not spec-serializable),
+        so `default` is required. `targeting_key` and `attributes` accept only static
+        values, and `logfire_instance` is not spec-serializable; spec-loaded instances
+        always resolve on the global default Logfire instance.
+        """
+        return cls(
+            name,
+            default=default,
+            label=label,
+            targeting_key=targeting_key,
+            attributes=attributes,
+            render_template=render_template,
+            id=id,
+            description=description,
+            defer_loading=defer_loading,
+        )
