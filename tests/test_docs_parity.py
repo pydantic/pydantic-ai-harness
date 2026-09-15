@@ -372,3 +372,13 @@ def test_blown_out_example_matches_coder_defaults() -> None:
     assert "name='coder'" in block
     example = (_ROOT / 'examples/coding_agent.py').read_text(encoding='utf-8')
     assert "name='coder'" in example and 'capabilities=[Coder(workspace or Path.cwd())]' in example
+
+
+@pytest.mark.parametrize('surface', ['README.md', 'docs/index.md'])
+def test_coder_entry_page_describes_current_tools(surface: str) -> None:
+    text = (_ROOT / surface).read_text(encoding='utf-8')
+    introduction = text.split('## Capabilities', 1)[0]
+    assert 'Shell commands are unrestricted' in introduction
+    assert 'allowlisted shell' not in introduction
+    assert 'explorer sub-agent' not in introduction
+    assert 'no default instructions' not in introduction

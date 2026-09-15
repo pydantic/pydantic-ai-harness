@@ -41,7 +41,7 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-That's a complete [coding agent](pydantic_ai_harness/coder/): [workspace-rooted file access](pydantic_ai_harness/filesystem/), [allowlisted shell](pydantic_ai_harness/shell/), [repo orientation](pydantic_ai_harness/repo_context/), [planning](pydantic_ai_harness/planning/), a read-only [explorer sub-agent](pydantic_ai_harness/subagents/), and [context management](pydantic_ai_harness/compaction/) that survives long sessions, and it runs anywhere a Pydantic AI agent runs. [`agent.to_cli_sync()`](https://ai.pydantic.dev/cli/) opens it as a chat in your terminal, [`agent.to_web()`](https://ai.pydantic.dev/web/) in the browser, and [`Coder`](pydantic_ai_harness/coder/)'s exported `coder_agent` runs without writing a file at all, combined with [`clai`](https://ai.pydantic.dev/cli/) (the Pydantic AI CLI) and [`uvx`](https://docs.astral.sh/uv/guides/tools/):
+Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
 ```bash
 uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
@@ -108,7 +108,7 @@ Complete agent stacks as regular combined capabilities: one import gives you a w
 
 | Harness | Package | What it provides |
 |---|---|---|
-| [Coder](pydantic_ai_harness/coder/) | Harness | A complete coding-agent stack: files, shell, repo context, planning, a read-only explorer sub-agent, and context controls |
+| [Coder](pydantic_ai_harness/coder/) | Harness | Six coding tools, persistent shell commands, autonomous guidance, and context controls |
 | [Researcher](pydantic_ai_harness/researcher/) | Harness | A complete web-research stack: search, page fetching, a delegated sub-researcher, and bounded tool output |
 
 ### Execution environments
