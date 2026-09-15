@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -39,8 +39,15 @@ from tests._recording_durability import (  # pyright: ignore[reportMissingTypeSt
     RecordingDurability,
     RestrictedRunContext,
 )
+from tests.conftest import agent_run_names  # pyright: ignore[reportMissingTypeStubs]
 
-pytestmark = pytest.mark.anyio
+if TYPE_CHECKING:
+    from logfire.testing import CaptureLogfire
+
+pytestmark = [
+    pytest.mark.anyio,
+    pytest.mark.filterwarnings('ignore::pydantic_ai_harness.HarnessDeprecationWarning'),
+]
 
 
 @pytest.fixture
@@ -61,6 +68,11 @@ def _ctx(
     ctx.messages = messages if messages is not None else []
     ctx.usage = usage if usage is not None else RunUsage()
     ctx.usage_limits = usage_limits if usage_limits is not None else UsageLimits()
+
+    async def emit(event: Any) -> Any:
+        return event
+
+    ctx.emit = emit
     return ctx
 
 
@@ -592,6 +604,17 @@ def _capture_model(store: dict[str, str], output: str = 'generated') -> Function
 
 
 class TestLLMReminder:
+    @pytest.mark.usefixtures('instrument_all_agents')
+    async def test_generation_run_is_named_after_the_capability(self, capfire: CaptureLogfire) -> None:
+        reminder = LLMReminder(model=FunctionModel(lambda _messages, _info: ModelResponse(parts=[TextPart('refocus')])))
+        agent = Agent(
+            TestModel(call_tools=[]), name='outer', capabilities=[SystemReminders(dynamic_reminders=[reminder])]
+        )
+
+        await agent.run('stay focused')
+
+        assert 'system_reminders' in agent_run_names(capfire)
+
     async def test_generation_dispatches_as_durable_operation(self) -> None:
         durability = RecordingDurability()
         capability = SystemReminders(

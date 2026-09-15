@@ -359,8 +359,7 @@ configured retention can delete older snapshots.
   and `counters` (atomic `$inc` for monotonic `seq`). Run registration uses an
   atomic insert by `runs._id = run_id`; duplicate ids raise `ValueError`.
   Needs the `mongodb` extra
-  (`pip install pydantic-ai-harness[mongodb]`, which installs
-  `pymongo>=4.17.0`); pass a shared `AsyncMongoClient` as `client=`, or a
+  (which installs `pymongo>=4.17.0`); pass a shared `AsyncMongoClient` as `client=`, or a
   connection string as `db_url=` (the store then owns the client -- call
   `await store.aclose()` to release it).
   Externalizes individual parts at or above `media_threshold_bytes` by
@@ -402,6 +401,20 @@ so their keys become BSON field names: keys containing `.` or starting with
 `$` need [MongoDB 5.0 or later](https://www.mongodb.com/docs/manual/core/dot-dollar-considerations/),
 and a key containing a NULL byte is rejected by the BSON encoder before it
 reaches the server. CI exercises both Mongo backends against `mongo:8`.
+
+Install MongoDB support:
+
+uv:
+
+```bash
+uv add "pydantic-ai-harness[mongodb]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-harness[mongodb]"
+```
 
 ## Bounding snapshot growth
 
@@ -468,6 +481,23 @@ upgrade-only: a release that predates text externalization treats every marker
 as binary, so it cannot validate a snapshot containing an externalized text
 marker. Keep a current reader for persisted snapshots that contain those
 markers.
+
+Reserved-key escaping is a second marker-format generation with the same rule
+for these stores: a payload using the marker format's namespaced keys is moved
+into a versioned reserved mapping (the `__harness_external_escaped_keys__`
+stash, stamped with the format version under `__harness_external_marker_format__`),
+and the current reader moves those values back to their own keys. Compatibility
+the other way is upgrade-only. A reader that predates the escaping format
+re-inlines the externalized field correctly, but it leaves both reserved keys
+sitting in the restored payload rather than removing them. A marker carrying
+both, stamped with a version this reader does not know, is rejected rather than
+restored with the reserved values stripped: `restore_media` raises `ValueError`,
+and `latest_snapshot` surfaces it to the caller for the file, sqlite, and mongo
+stores. `list_snapshots` is different: each store treats the failed snapshot as
+unparsable, skips it, and logs the error, so an unknown version shows up as a
+missing snapshot rather than an exception. That rejection is the version gate
+and is intended, but store users have to anticipate it. Keep a current reader
+for persisted snapshots that contain escaped markers.
 
 | StepStore           | Default `media_store`                  | Where blobs live                      |
 | ------------------- | --------------------------------------- | ------------------------------------- |

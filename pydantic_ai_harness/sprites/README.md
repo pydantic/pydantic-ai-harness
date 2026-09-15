@@ -10,11 +10,12 @@ or reuse a caller-owned session across runs.
 
 ## Quick start
 
-Install the optional dependency and provide a Fly.io Sprites API token:
+Install the Sprites and Anthropic extras and provide both API tokens:
 
 ```bash
-uv add "pydantic-ai-harness[sprites]"
+uv add "pydantic-ai-harness[sprites,anthropic]"
 export SPRITE_TOKEN=...
+export ANTHROPIC_API_KEY=...
 ```
 
 ```python
