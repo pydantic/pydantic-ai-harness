@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
@@ -410,6 +411,7 @@ class StopThenRaise(AbstractCapability[None]):
 class RaiseOnStart(AbstractCapability[None]):
     """Raises in the start listener, the way a faulty host handler could."""
 
+    error: Exception
     pid: int | None = None
     command_id: str | None = None
 
@@ -417,7 +419,7 @@ class RaiseOnStart(AbstractCapability[None]):
     async def _on_start(self, ctx: RunContext[None], event: ShellCommandStartEvent) -> None:
         self.pid = event.pid
         self.command_id = event.command_id
-        raise RuntimeError('listener blew up')
+        raise self.error
 
 
 @dataclass
@@ -494,32 +496,52 @@ class TestRunFailure:
         # outlive a kill aimed at the shell alone.
         assert await _process_group_is_gone(canceller.pid)
 
-    async def test_a_raising_start_listener_kills_the_process_group(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('error_type', [RuntimeError, PermissionError, FileNotFoundError, NotADirectoryError])
+    async def test_a_raising_start_listener_kills_the_process_group(
+        self, tmp_path: Path, error_type: type[Exception]
+    ) -> None:
         shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
-        raiser = RaiseOnStart()
+        code: dict[type[Exception], int] = {
+            PermissionError: errno.EACCES,
+            FileNotFoundError: errno.ENOENT,
+            NotADirectoryError: errno.ENOTDIR,
+        }
+        error = error_type(code.get(error_type, 0), 'listener blew up')
+        raiser = RaiseOnStart(error)
         agent = Agent(
             _calls_model([_run_command('sleep 30; echo never')]), deps_type=type(None), capabilities=[shell, raiser]
         )
-        with pytest.raises(RuntimeError, match='listener blew up'):
+        with pytest.raises(error_type) as exc_info:
             await agent.run('go')
 
+        assert exc_info.value is error
         assert raiser.pid is not None
         # The listener's exception skips the foreground wait, the only other
         # cleanup path, so the kill must come from the toolset itself.
         assert await _process_group_is_gone(raiser.pid)
 
-    async def test_a_raising_start_listener_stops_the_background_command(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('error_type', [RuntimeError, PermissionError, FileNotFoundError, NotADirectoryError])
+    async def test_a_raising_start_listener_stops_the_background_command(
+        self, tmp_path: Path, error_type: type[Exception]
+    ) -> None:
         shell = Shell[None](cwd=tmp_path, denied_commands=[], id='shell')
-        raiser = RaiseOnStart()
+        code: dict[type[Exception], int] = {
+            PermissionError: errno.EACCES,
+            FileNotFoundError: errno.ENOENT,
+            NotADirectoryError: errno.ENOTDIR,
+        }
+        error = error_type(code.get(error_type, 0), 'listener blew up')
+        raiser = RaiseOnStart(error)
         agent = Agent(
             _calls_model([('start_command', json.dumps({'command': 'sleep 30'}))]),
             deps_type=type(None),
             capabilities=[shell, raiser],
         )
         toolsets: list[object] = []
-        with _capturing_for_run(toolsets), pytest.raises(RuntimeError, match='listener blew up'):
+        with _capturing_for_run(toolsets), pytest.raises(error_type) as exc_info:
             await agent.run('go')
 
+        assert exc_info.value is error
         assert raiser.pid is not None
         assert raiser.command_id is not None
         # The ID never reached the model, so no one is left to call

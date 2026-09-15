@@ -353,11 +353,11 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         """
         return await self._run(ctx, command, timeout_seconds=timeout_seconds)
 
-    @recoverable
     async def _run(
         self, ctx: RunContext[AgentDepsT] | None, command: str, *, timeout_seconds: float | None = None
     ) -> str:
-        self._check_command(command)
+        with recoverable():
+            self._check_command(command)
         timeout = timeout_seconds if timeout_seconds is not None else self._default_timeout
 
         note: str | None = None
@@ -370,15 +370,16 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         started_at = time.monotonic()
         actual_command, cwd_file = self._build_cwd_capture(command)
         try:
-            proc = await anyio.open_process(
-                actual_command,
-                cwd=self._cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-                env=self._resolve_env(),
-            )
+            with recoverable():
+                proc = await anyio.open_process(
+                    actual_command,
+                    cwd=self._cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    start_new_session=True,
+                    env=self._resolve_env(),
+                )
 
             async def on_start() -> None:
                 if ctx is not None:
@@ -445,9 +446,9 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         """
         return await self._start(ctx, command)
 
-    @recoverable
     async def _start(self, ctx: RunContext[AgentDepsT] | None, command: str) -> str:
-        self._check_command(command)
+        with recoverable():
+            self._check_command(command)
         note: str | None = None
         if ctx is not None:
             command, note = await self._request(ctx, command, timeout=None, background=True)
@@ -465,15 +466,16 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             raise
 
         try:
-            proc = await anyio.open_process(
-                command,
-                cwd=self._cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=stdout_file,
-                stderr=stderr_file,
-                start_new_session=True,
-                env=self._resolve_env(),
-            )
+            with recoverable():
+                proc = await anyio.open_process(
+                    command,
+                    cwd=self._cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                    env=self._resolve_env(),
+                )
         except BaseException:
             stdout_file.close()
             stderr_file.close()

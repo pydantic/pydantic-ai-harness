@@ -197,6 +197,8 @@ the tool and the toolset kills the process group. No command is left running
 after a failed run, background command included (its record is removed with
 it). Foreground start listeners run inside the command deadline: a blocked
 listener is cancelled when the timeout expires and the process group is killed.
+Host listener `PermissionError` and `OSError` exceptions propagate unchanged;
+only model-policy checks and process spawning convert recoverable OS errors to model retries.
 
 `command_id` ties a command's lines and its end to its start when several run
 at once. For a background command it is the same ID `check_command` and

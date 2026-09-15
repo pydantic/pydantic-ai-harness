@@ -10,15 +10,13 @@ from __future__ import annotations
 
 import contextlib
 import errno
-import functools
 import os
 import re
 import signal
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Generator
 from pathlib import Path
-from typing import Concatenate, ParamSpec, TypeVar
 
 import anyio
 import anyio.abc
@@ -35,9 +33,6 @@ _KILL_GRACE_PERIOD: float = 2.0
 # buffer without bound during the timed read, nor turn the post-kill
 # delivery into an unbounded burst of listener awaits.
 _MAX_PENDING_LINES = 1000
-
-_P = ParamSpec('_P')
-_SelfT = TypeVar('_SelfT')
 
 # Spawning a command fails with a bare `OSError` for causes that have no
 # dedicated subclass, and with `FileNotFoundError`/`NotADirectoryError` for
@@ -57,32 +52,19 @@ _RECOVERABLE_ERRNOS: dict[int | None, str] = {
 }
 
 
-def recoverable(
-    fn: Callable[Concatenate[_SelfT, _P], Awaitable[str]],
-) -> Callable[Concatenate[_SelfT, _P], Awaitable[str]]:
-    """Convert model-correctable errors into `ModelRetry`.
-
-    pyai only feeds `ModelRetry` back to the model as a retry prompt; any other
-    exception propagates and aborts the whole run. A denied command, a command
-    the OS refuses to spawn, and a working directory the model's own earlier
-    command destroyed are all things the model can recover from, so surface them
-    as a retry instead of crashing the agent.
-    """
-
-    @functools.wraps(fn)
-    async def wrapper(self: _SelfT, *args: _P.args, **kwargs: _P.kwargs) -> str:
-        try:
-            return await fn(self, *args, **kwargs)
-        except PermissionError as e:
-            raise ModelRetry(str(e)) from e
-        except OSError as e:
-            reason = _RECOVERABLE_ERRNOS.get(e.errno)
-            if reason is None:
-                raise
-            # `str(e)` embeds the absolute host path; the reason alone doesn't.
-            raise ModelRetry(reason) from e
-
-    return wrapper
+@contextlib.contextmanager
+def recoverable() -> Generator[None]:
+    """Convert model-correctable policy/spawn errors, excluding host callbacks and cleanup."""
+    try:
+        yield
+    except PermissionError as e:
+        raise ModelRetry(str(e)) from e
+    except OSError as e:
+        reason = _RECOVERABLE_ERRNOS.get(e.errno)
+        if reason is None:
+            raise
+        # `str(e)` embeds the absolute host path; the reason alone doesn't.
+        raise ModelRetry(reason) from e
 
 
 def is_interactive_command(command: str) -> bool:
