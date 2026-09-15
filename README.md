@@ -159,6 +159,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 | [Modal Sandbox](pydantic_ai_harness/modal_sandbox/) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
 | [Modal Workspace](pydantic_ai_harness/modal_workspace/) | Harness | Modal-backed workspace operations for agent runs |
 | [E2B Workspace](pydantic_ai_harness/e2b_workspace/) | Harness | E2B-backed workspace operations for agent runs |
+| [Sprite Workspace](pydantic_ai_harness/sprites/) | Harness | Fly.io Sprites-backed workspace operations for agent runs |
 
 ### Tools & native abilities
 

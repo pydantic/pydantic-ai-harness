@@ -1165,6 +1165,15 @@ wheels = [
 ]
 
 [[package]]
+name = "client-signals"
+version = "0.4.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/05/dd/5002f106210ebb4772171e80f206c395e1ac38532c7d601a883903b9b7e6/client_signals-0.4.4.tar.gz", hash = "sha256:1fc1846b9992706349a10c10886f0f326bc56eeedd9af612c41cf9ff1a89562d", size = 3851, upload-time = "2026-08-05T14:46:53.105Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/76/e8f0947c8a26ec9fd0ccc960ed3875aec55035afb19bd6c08e9eac574861/client_signals-0.4.4-py3-none-any.whl", hash = "sha256:672551d797c004cfc9d5ae87ed0dca4ba5a64fc35d1edcf1218cc11f12fdfb25", size = 4347, upload-time = "2026-08-05T14:46:52.186Z" },
+]
+
+[[package]]
 name = "cloudpickle"
 version = "3.1.2"
 source = { registry = "https://pypi.org/simple" }
@@ -4380,6 +4389,9 @@ researcher = [
 skills = [
     { name = "pyyaml" },
 ]
+sprites = [
+    { name = "sprites-py" },
+]
 stackone = [
     { name = "fastmcp" },
     { name = "pydantic-ai-slim", extra = ["mcp"] },
@@ -4443,11 +4455,12 @@ requires-dist = [
     { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.23" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.17.0" },
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
+    { name = "sprites-py", marker = "extra == 'sprites'", specifier = ">=0.7.0,<0.8" },
     { name = "stackone-defender", marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender'", specifier = ">=0.7.3,<0.8" },
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
     { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.2,<4" },
 ]
-provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "daytona", "dbos", "dynamic-workflow", "e2b", "exa", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "stackone", "temporal", "youdotcom"]
+provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "daytona", "dbos", "dynamic-workflow", "e2b", "exa", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "sprites", "stackone", "temporal", "youdotcom"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -8956,6 +8969,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d9/38/e12680bbe6b4f8f3d17adcaf38d26850aa756c85cf4a80e79fc12a018fe8/soupsieve-2.9.1.tar.gz", hash = "sha256:c33e6605bbc71dd628b00c632d58ae607c22bade247e52553928f83bbb75b4ba", size = 122261, upload-time = "2026-07-21T16:57:17.452Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0f/2c/437fe806897c2d6cfdc3ee43a18da8bf8e568530a4ae9bac781541ca9896/soupsieve-2.9.1-py3-none-any.whl", hash = "sha256:4f4477399246b7a0c720a88ca2454b11cd6bb9ae4c9d170140786e916776c14c", size = 37404, upload-time = "2026-07-21T16:57:16.421Z" },
+]
+
+[[package]]
+name = "sprites-py"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "client-signals" },
+    { name = "httpx" },
+    { name = "websockets", version = "15.0.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "websockets", version = "16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ff/a7/e79d3aa40919023b0be9d4ab9f4925bf3814a9d03583bae05a319f6f8e05/sprites_py-0.7.0.tar.gz", hash = "sha256:79a2c9b276b8427e7c3ed93ba0a04cceb2c1d705cf611d2290a84cedbf9effc1", size = 67899, upload-time = "2026-09-14T12:43:24.572Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/eb/e2/5bea56a45f8d48a05703f81b6ea1da9d0e528a0bc6ea0daaccac38e2f522/sprites_py-0.7.0-py3-none-any.whl", hash = "sha256:e118c5c5453a348b60f6020319723354f8d077d1313b65a44a36cbd3a7cfa6be", size = 61762, upload-time = "2026-09-14T12:43:23.133Z" },
 ]
 
 [[package]]
