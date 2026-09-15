@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from .subagents import SubAgent, SubAgents
     from .system_reminders import SystemReminders
     from .tool_output_limits import ToolOutputLimits
+    from .trajectory_judge import TrajectoryJudge
     from .warn_on_cache_busts import WarnOnCacheBusts
     from .youdotcom import YouResearch, YouSearch
 
@@ -111,6 +112,7 @@ __all__ = [
     'TieredCompaction',
     'ToolGuardrail',
     'ToolOutputLimits',
+    'TrajectoryJudge',
     'WarnNearLimits',
     'WarnOnCacheBusts',
     'YouResearch',
@@ -156,6 +158,7 @@ _CAPABILITY_EXPORTS = {
     'TieredCompaction': 'compaction',
     'ToolGuardrail': 'guardrails',
     'ToolOutputLimits': 'tool_output_limits',
+    'TrajectoryJudge': 'trajectory_judge',
     'WarnNearLimits': 'compaction',
     'WarnOnCacheBusts': 'warn_on_cache_busts',
     'YouResearch': 'youdotcom',

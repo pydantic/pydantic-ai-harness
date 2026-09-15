@@ -18,7 +18,7 @@ Everything here is one primitive: a [capability](/ai/capabilities/overview/), a 
 Install with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
-uv add "pydantic-ai-harness[anthropic]"
+pip/uv-add "pydantic-ai-harness[anthropic]"
 ```
 
 ```python
@@ -41,7 +41,7 @@ uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m 
 Every model works: swap the string for [any provider's](/ai/models/overview/). Need more? Add capabilities to the list; here's the same coder on `gpt-5.6-sol`, with web search and cross-session memory:
 
 ```bash
-uv add "pydantic-ai-slim[openai]"
+pip/uv-add "pydantic-ai-slim[openai]"
 ```
 
 ```python
@@ -226,6 +226,7 @@ Bounding what the agent may do, and keeping it on-instructions.
 | [Tool approval](/ai/tools-toolsets/deferred-tools/#human-in-the-loop-tool-approval) | Core | Flag tool calls that need human approval before they run |
 | [Handle Deferred Tool Calls](/ai/capabilities/handle-deferred-tool-calls/) | Core | Resolve approval-deferred tool calls programmatically |
 | [System Reminders](system-reminders.md) | Harness | Cache-safe re-injection of guidance mid-run to counter instruction fade |
+| [Trajectory Judge](trajectory-judge.md) | Harness | A second model reviews the live run every N requests over a sliding token window and steers it mid-run |
 
 ### Self-extension
 
@@ -259,7 +260,7 @@ Community packages extend the same capability system further; see [third-party c
 ## Installation
 
 ```bash
-uv add pydantic-ai-harness
+pip/uv-add pydantic-ai-harness
 ```
 
 This installs [`pydantic-ai-slim`](/ai/install/) with it, so it works on its own; you don't need to install Pydantic AI separately. Model providers and the CLI come via extras that pass through to Pydantic AI: `pydantic-ai-harness[anthropic]`, `[cli]`. Some capabilities need their own extra for optional dependencies; each capability's page gives its exact install line. Requires Python 3.10+.

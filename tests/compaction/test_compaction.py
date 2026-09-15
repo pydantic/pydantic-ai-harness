@@ -93,6 +93,7 @@ from pydantic_ai_harness.compaction._summarizing_compaction import (
     _format_messages,
 )
 from pydantic_ai_harness.step_persistence import InMemoryStepStore, StepPersistence
+from tests.conftest import agent_run_names  # pyright: ignore[reportMissingTypeStubs]
 
 try:
     from logfire.testing import CaptureLogfire
@@ -738,6 +739,14 @@ class TestCompaction:
         with pytest.raises(ValueError, match='keep_tokens must be non-negative'):
             SummarizingCompaction(model='test', max_messages=10, keep_tokens=-1)
 
+    def test_validation_bad_tool_return_max_chars(self):
+        with pytest.raises(ValueError, match='tool_return_max_chars must be positive'):
+            SummarizingCompaction(model='test', max_messages=10, tool_return_max_chars=0)
+
+    def test_tool_return_max_chars_none_is_accepted(self):
+        comp = SummarizingCompaction(model='test', max_messages=10, tool_return_max_chars=None)
+        assert comp.tool_return_max_chars is None
+
     @pytest.mark.anyio
     async def test_no_compaction_below_threshold(self):
         comp = SummarizingCompaction(model='test', max_messages=100)
@@ -936,7 +945,18 @@ class TestFormatMessages:
     def test_long_tool_return_truncated(self):
         msgs: list[ModelMessage] = [_tool_return('fn', 'tc1', 'x' * 600)]
         text = _format_messages(msgs)
-        assert '...' in text
+        # Default cap of 500, marker counted within the cap, like kept user turns.
+        assert text == 'Tool [fn]: ' + 'x' * 495 + '[...]'
+
+    def test_tool_return_custom_max_chars(self):
+        msgs: list[ModelMessage] = [_tool_return('fn', 'tc1', 'x' * 600)]
+        text = _format_messages(msgs, tool_return_max_chars=10)
+        assert text == 'Tool [fn]: ' + 'x' * 5 + '[...]'
+
+    def test_tool_return_none_renders_full(self):
+        msgs: list[ModelMessage] = [_tool_return('fn', 'tc1', 'x' * 600)]
+        text = _format_messages(msgs, tool_return_max_chars=None)
+        assert text == 'Tool [fn]: ' + 'x' * 600
 
 
 # ---------------------------------------------------------------------------
@@ -2702,6 +2722,18 @@ class TestCompactionSpan:
         assert spans[0]['attributes']['compaction.strategy'] == 'SummarizingCompaction'
 
     @pytest.mark.anyio
+    @pytest.mark.usefixtures('instrument_all_agents')
+    async def test_summarizer_run_is_named_after_the_capability(self, capfire: CaptureLogfire) -> None:
+        agent = Agent(
+            TestModel(),
+            name='outer',
+            capabilities=[SummarizingCompaction(model=_recording_summarizer([]), max_messages=2, keep_messages=1)],
+        )
+        await agent.run('go', message_history=[_user('a'), _assistant('b'), _user('c'), _assistant('d')])
+
+        assert 'summarizing_compaction' in agent_run_names(capfire)
+
+    @pytest.mark.anyio
     async def test_clamp_emits_span_only_when_a_part_is_clamped(self, capfire: CaptureLogfire) -> None:
         comp = ClampOversizedMessages(max_part_chars=4, keep_head_chars=1, keep_tail_chars=1)
 
@@ -3906,6 +3938,59 @@ class TestStructuralFeaturesThroughAgent:
         )
 
     @pytest.mark.anyio
+    async def test_tool_return_max_chars_threads_through_summarize(self):
+        """The field reaches `_format_messages` via `_summarize` in a real run."""
+        prompts: list[str] = []
+        agent = Agent(
+            _recording_model([]),
+            capabilities=[
+                SummarizingCompaction(
+                    model=_recording_summarizer(prompts),
+                    max_messages=3,
+                    keep_messages=1,
+                    tool_return_max_chars=10,
+                )
+            ],
+        )
+        await agent.run(
+            'go',
+            message_history=[
+                _tool_call('read', 'c1'),
+                _tool_return('read', 'c1', 'z' * 600),
+                _assistant('b'),
+                _user('recent'),
+            ],
+        )
+        assert len(prompts) == 1
+        assert f'Tool [read]: {"z" * 5}[...]' in prompts[0]
+
+    @pytest.mark.anyio
+    async def test_tool_return_max_chars_none_renders_whole_return(self):
+        prompts: list[str] = []
+        agent = Agent(
+            _recording_model([]),
+            capabilities=[
+                SummarizingCompaction(
+                    model=_recording_summarizer(prompts),
+                    max_messages=3,
+                    keep_messages=1,
+                    tool_return_max_chars=None,
+                )
+            ],
+        )
+        await agent.run(
+            'go',
+            message_history=[
+                _tool_call('read', 'c1'),
+                _tool_return('read', 'c1', 'z' * 600),
+                _assistant('b'),
+                _user('recent'),
+            ],
+        )
+        assert len(prompts) == 1
+        assert f'Tool [read]: {"z" * 600}' in prompts[0]
+
+    @pytest.mark.anyio
     async def test_summary_events_reach_a_caller_supplied_handler(self):
         seen: list[list[ModelMessage]] = []
         prompts: list[str] = []
@@ -3948,7 +4033,11 @@ class TestStructuralFeaturesThroughAgent:
         )
 
     @pytest.mark.anyio
-    async def test_keep_user_messages_reaches_the_model_truncated(self):
+    @pytest.mark.parametrize(
+        'max_chars,expected',
+        [(3, '[..'), (5, '[...]'), (10, 'v' * 5 + '[...]'), (200, 'v' * 195 + '[...]'), (1000, 'v' * 1000)],
+    )
+    async def test_keep_user_messages_reaches_the_model_truncated(self, max_chars: int, expected: str):
         seen: list[list[ModelMessage]] = []
         prompts: list[str] = []
         agent = Agent(
@@ -3959,15 +4048,15 @@ class TestStructuralFeaturesThroughAgent:
                     max_messages=3,
                     keep_messages=2,
                     keep_user_messages=True,
-                    keep_user_messages_max_chars=10,
+                    keep_user_messages_max_chars=max_chars,
                 )
             ],
         )
-        await agent.run('go', message_history=[_user('u' * 40), _assistant('b'), _user('v' * 40), _assistant('d')])
+        await agent.run('go', message_history=[_user('u' * 40), _assistant('b'), _user('v' * 1000), _assistant('d')])
 
         assert len(prompts) == 1
         texts = _user_texts(seen[0])
-        assert any(text.startswith('vvvvv') and text.endswith('[...]') for text in texts)
+        assert expected in texts
 
     @pytest.mark.anyio
     async def test_retained_user_turns_arrive_as_a_single_request(self):

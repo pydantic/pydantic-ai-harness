@@ -129,6 +129,24 @@ warnings where practical.
   editors, and stack traces (`modal_sandbox` is the reference; `filesystem` is
   0-based pending migration).
 
+### Internal Agents Carry The Capability's Name
+
+A capability that constructs its own `Agent` (a summarizer, an advisor, a
+reminder generator) passes `name=` explicitly, set to the capability's
+snake_case name: `Agent(model, name='summarizing_compaction', ...)`. That name
+is the `agent_name` on the run span, which is what Logfire groups runs and
+costs by.
+
+Without it, core infers the name from the caller's frame locals. Inside a
+capability method that lands on `agent`, `self`, or whatever a durability
+wrapper happened to bind, so the run is unattributable in tracing. Matching
+the capability name lets a reader trace spend straight back to the
+capability without knowing its internals.
+
+Test it through `instrument_all_agents` + `agent_run_names(capfire)` from
+`tests/conftest.py`; per-agent `instrument=` on the outer agent does not reach
+the inner one.
+
 ### Policy Lives In The Pluggable Component
 
 When a capability takes a dependency behind a `Protocol` -- `PlanStore`,
@@ -242,6 +260,46 @@ Record the choice in `tests/test_capability_combine.py`;
 reason from what the capability actually does, not from what would be
 convenient: a reason like "one per rooted directory" is wrong if the toolset's
 fixed tool names make two unreachable.
+
+## Telemetry
+
+Decide what a capability emits to OpenTelemetry while designing it, not after
+review. The question is not whether the code has spans; it is what someone
+operating this capability needs to see that core's spans do not already show.
+
+A capability's own decision points are what core cannot report: a guard refusing
+a value, a budget stopping a run, a history being rewritten, memory being
+injected. Those earn a span. Work core already spans (a model request, a tool
+call, an agent run) does not.
+
+Emitting nothing is a legitimate decision. `step_persistence` documents that it
+adds no spans because core's `Instrumentation` already covers the run, and
+`spend` documents that accrual emits nothing because a span per model request
+would grow the trace without recording a decision. Write the reason down. An
+undocumented silence is indistinguishable from an oversight.
+
+The house pattern:
+
+- Start spans on `ctx.tracer` (`RunContext`). It is a no-op tracer unless core's
+  instrumentation is active, so an uninstrumented run pays nothing.
+- A helper that runs outside a `RunContext` takes `tracer: Tracer | None = None`
+  and falls back to `NoOpTracer()`, so the standalone path emits the same span
+  shape as the in-run path (`compaction`'s `compact_messages`).
+- Use `start_as_current_span` for work that has a duration and can fail, and a
+  zero-duration `start_span(...).end()` to mark a decision that took no time.
+- Compute attributes under `if span.is_recording()`.
+- Keep span names static and low-cardinality. The variable part is an attribute:
+  one `compact_messages` span with `compaction.strategy`, not one span name per
+  strategy.
+- Prefix attributes with the capability name (`guardrail.action`,
+  `memory.backend`, `spend.budget`). Reuse a GenAI semantic-convention
+  attribute where one fits (`gen_ai.conversation.compacted`) instead of coining
+  a new name.
+- Put anything that could quote user content, a prompt, tool arguments, or a
+  tenant or user id behind `ctx.trace_include_content`. A trace has a wider
+  audience than the application that produced it.
+- Document the spans and their attributes in both the capability README and the
+  docs page, and cover them in tests like any other public behavior.
 
 ## CI And Dependency Footprint
 

@@ -126,17 +126,22 @@ A strategy knows when to act but says nothing about how close the run is to the 
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness import ReportContextUsage, SummarizingCompaction
+from pydantic_ai_harness.compaction import ContextUsageEvent
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
         SummarizingCompaction(max_fraction=0.9, keep_messages=20),
-        ReportContextUsage(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
+        ReportContextUsage(),
     ],
 )
+
+@agent.on_event(ContextUsageEvent)
+async def show(ctx, event):
+    print(f'{event.fraction:.0%}')
 ```
 
-Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the fallback rather than the model's real one, so a gauge can show that the percentage is a guess. `on_usage` may be a coroutine function, so a gauge that pushes over a socket does not need a sync bridge. Order matters: register the monitor *after* a compaction capability to observe the corrected current history after same-cycle compaction, or before it to see what triggered the compaction.
+Each reading carries `used_tokens`, `window_tokens`, `fraction`, and `resolved` -- `False` when the window is the fallback rather than the model's real one, so a gauge can show that the percentage is a guess. Migration: `on_usage` remains supported but is deprecated. Move its callback body to a `ContextUsageEvent` subscription. Order matters: register the monitor *after* a compaction capability to observe the corrected current history after same-cycle compaction, or before it to see what triggered the compaction.
 
 `used_tokens` follows the accounting above: provider usage anchors include instructions, tool
 definitions, and `FilePart` payloads from the anchored request. The suffix after the anchor, or a
@@ -345,6 +350,8 @@ agent = Agent(
 
 Both prompt surfaces of the summary request are fields: `summary_prompt` is the user-turn template (it must contain a `{messages}` placeholder), and `instructions` sets the internal agent's static instructions, which Pydantic AI sends in the request's system prompt. Override `instructions` when the summarizer endpoint requires a fixed leading instruction.
 
+The messages served into that template are rendered to text, and each tool return is capped per return at `tool_return_max_chars` (default 500) characters using the same explicit truncation marker as kept user turns. Raise it, or set it to `None` to render each return whole, when the summarizer's context window is large enough to absorb the payloads. `max_tokens` and `keep_tokens` control when compaction runs and which history messages are retained; they do not cap the summary-request payload.
+
 The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch the summary as it is written, or pass `drain_summary_events` to take the streaming request path without handling the events -- which is what a summarizer endpoint that rejects non-streaming requests needs:
 
 ```python
@@ -413,6 +420,8 @@ The span name is the static `compact_messages`; the strategy is an attribute, no
 
 `gen_ai.conversation.compacted` is the GenAI semantic convention's flag; the rest is harness-specific. Token counts use the strategy's `tokenizer` when set, otherwise the ~4-chars-per-token heuristic. Raw message content is not recorded.
 
+`SummarizingCompaction` runs its summarizer as a nested `Agent` named `summarizing_compaction`, so under `Agent.instrument_all()` (or `logfire.instrument_pydantic_ai()`) its runs carry `agent_name = summarizing_compaction`. Filter on that to track summarization usage and cost separately from the parent agent.
+
 ## Compaction receipts
 
 Compaction is a memory wipe the model cannot veto and often cannot detect, which invites *resumption drift* -- the model confabulates continuity with history it no longer has. A receipt makes the wipe legible: after a boundary-crossing strategy rewrites history it appends a short, deterministic note recording how much was compacted, warning that what survives is secondhand, and -- when a handle provider is attached -- an identifier for persisted run history.
@@ -480,7 +489,7 @@ As with receipts, the update instruction and the bridge-prefix wording are conte
 
 ## Out of scope
 
-These strategies compress or drop context *inside* the window. Moving large tool outputs *out* of the window -- overflowing them to a file the agent (or a subagent) can query on demand -- is a separate capability ([tool output limits](tool-output-limits.md)), not lossy truncation. Prefer it over capping individual tool outputs.
+These strategies compress or drop context *inside* the window. Moving large tool outputs *out* of the window -- overflowing them to a file the agent (or a subagent) can query on demand -- is a separate capability ([tool output limits](tool-output-limits.md)), not lossy truncation. Within `SummarizingCompaction`, `tool_return_max_chars` makes the summarizer's per-return cap tunable (or `None` to render returns whole), but the summary request still reads a lossy rendering; prefer tool output limits when a payload must be queryable in full.
 
 ## API reference
 

@@ -21,6 +21,10 @@ Use this before opening a PR or reviewing a capability change.
 - No casts are used to paper over type design.
 - The implementation uses Pydantic AI hooks/toolsets instead of duplicating core
   runtime behavior.
+- The change states what it emits to OpenTelemetry. A decision point an operator
+  needs (a refusal, a budget stop, a rewritten history) carries a span on
+  `ctx.tracer`; emitting nothing is documented with its reason. See
+  `capability-authoring.md` "Telemetry".
 - Capability ordering is justified when present.
 - Dependency changes are required, linked to an issue, and made through `uv`;
   every PR touching `pyproject.toml` or `uv.lock` carries
@@ -97,6 +101,9 @@ README, or source code.
 ## Tests
 
 - Tests cover the public `Agent(..., capabilities=[...])` path where possible.
+- Every `Agent` the capability constructs internally passes `name=` (the
+  capability's snake_case name) and a test asserts it on the run span. See
+  `capability-authoring.md` "Internal Agents Carry The Capability's Name".
 - Lower-level tests cover lifecycle, schemas, retries, and metadata when needed.
 - Error paths and important option combinations are covered.
 - For a stateful capability, or one that overrides `for_run`, require a public
