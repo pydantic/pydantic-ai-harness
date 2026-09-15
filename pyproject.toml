@@ -170,6 +170,11 @@ bump = true
 # on browser-use's exact pins.
 override-dependencies = ['anthropic>=1.3.0', 'openai>=2.45.0']
 
+[tool.uv.sources]
+# Temporary: BackgroundTools needs the thread-safe `RunContext.enqueue()` from
+# pydantic/pydantic-ai#7758. Replace with the released version before merging.
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "85f14a8fc11b99ec688ff4fcde9cd3a785dce8c8" }
+
 
 [tool.hatch.build.targets.wheel]
 packages = ['pydantic_ai_harness']
