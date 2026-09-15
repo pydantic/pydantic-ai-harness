@@ -98,6 +98,12 @@ applies the same rule to absolute symlink targets.
   resolution and I/O, the path read can differ from the path checked.
 - **Binary detection.** `read_file` returns a placeholder instead of dumping
   binary bytes into the model context.
+- **Content search.** `search_files` hands the walk to ripgrep when the `rg`
+  binary is available and scans in-process when it is not. Both engines return
+  the same lines: every path ripgrep reports is re-checked against the
+  resolution and pattern rules above before a match is returned. Files larger
+  than 5 MB are skipped by both engines, and `read_file` still reads a larger
+  file the model names explicitly.
 - **Optimistic concurrency.** `write_file`/`edit_file` accept an
   `expected_hash` so an agent operating on a stale read is told to re-read
   rather than silently overwriting newer content. Content hashes identify

@@ -13,10 +13,12 @@ from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Concatenate, ParamSpec, TypedDict
 
+import anyio.to_thread
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness.filesystem import _ripgrep
 from pydantic_ai_harness.filesystem._events import DirectoryListedEvent, FileReadEvent, FileWrittenEvent
 
 _P = ParamSpec('_P')
@@ -53,6 +55,9 @@ _OUTSIDE_WORKSPACE = '<outside-workspace>'
 """Shown instead of an absolute path that is not inside the workspace root."""
 
 _NOT_A_PATH = '<not-a-path>'
+
+_BINARY_SAMPLE_BYTES = 8192
+"""Bytes read to decide whether a file is binary. The same window ripgrep sniffs."""
 """Shown when an error's `filename` is not a path value at all."""
 
 
@@ -148,9 +153,30 @@ def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
     return result
 
 
-def _is_binary(data: bytes, sample_size: int = 8192) -> bool:
+def _is_binary(data: bytes, sample_size: int = _BINARY_SAMPLE_BYTES) -> bool:
     """Detect binary content by checking for null bytes in the sample."""
     return b'\x00' in data[:sample_size]
+
+
+def _symlinked_files(root: Path) -> list[Path]:
+    """The tree's symlinked files, hidden entries aside.
+
+    The in-process walk resolves each entry and searches a symlink whose target stays inside the root, and ripgrep
+    reports such an entry only under `-L`, so the caller matches these files itself rather than losing them. `os.walk`
+    does not follow directory symlinks, which matches the in-process walk where it counts: a symlinked directory is
+    never descended into, so a link to a parent directory cannot walk the whole machine.
+    """
+    found: list[Path] = []
+    for directory, subdirectories, filenames in os.walk(root, followlinks=False):
+        subdirectories[:] = [name for name in subdirectories if not name.startswith('.')]
+        for filename in filenames:
+            if filename.startswith('.'):
+                continue
+            candidate = Path(directory) / filename
+            if candidate.is_symlink():
+                found.append(candidate)
+
+    return found
 
 
 def _matching_lines(text: str, compiled: re.Pattern[str], rel_str: str, limit: int) -> tuple[list[str], bool]:
@@ -679,14 +705,50 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         except re.error as e:
             raise ValueError(f'Invalid regex pattern: {e}') from e
 
+        # This is the one tool that opens every candidate file to decide whether it matches, so it is the one worth
+        # handing to ripgrep. A search rooted at a single file stays in-process, where a walk buys nothing.
+        executable = _ripgrep.find_ripgrep() if resolved.is_dir() else None
+        if executable is not None:
+            try:
+                hits = await _ripgrep.search(
+                    executable,
+                    root=resolved,
+                    pattern=pattern,
+                    include_glob=include_glob,
+                    max_matches=self._max_search_results,
+                )
+            except _ripgrep.RipgrepError:
+                # Either ripgrep could not compile the pattern -- its dialect has no
+                # backreferences or lookaround, which `re` accepts -- or it could not
+                # start. The pattern already compiled above, so the in-process scan
+                # can still answer; reporting an empty result here would be a lie.
+                hits = None
+            if hits is not None:
+                # Ripgrep leaves out symlinked files: it reports one only under `-L`, and `-L` follows directory
+                # symlinks too, so a single link to a parent directory would walk the whole machine. Match those few
+                # files here and merge them, rather than giving up the walk for the entire search.
+                symlinked = await anyio.to_thread.run_sync(
+                    self._match_symlinked_files, resolved, compiled, include_glob
+                )
+                return self._render_hits([*hits, *symlinked], resolved, include_glob=include_glob)
+
+        return await anyio.to_thread.run_sync(self._search_in_process, resolved, compiled, include_glob)
+
+    def _render_hits(self, hits: Sequence[_ripgrep.Match], search_root: Path, *, include_glob: str | None) -> str:
+        """Order hits from both sources as one result, and apply this toolset's policy to each.
+
+        Ripgrep did the walking; it does not get to decide what the agent may read. Each hit is re-resolved through the
+        same containment and permission checks as the in-process walk, and re-tested against `include_glob` because
+        ripgrep's glob dialect is not `fnmatch` (in ripgrep, a glob without a separator matches a basename at any
+        depth). A hit in a binary file is dropped for the same reason `read_file` returns a placeholder instead of
+        bytes. Sorting by path then line is what makes the merged result read like the in-process scan's.
+        """
         results: list[str] = []
-
-        if resolved.is_file():
-            files = [resolved]
-        else:
-            files = sorted(resolved.rglob('*'))
-
-        for file_path in files:
+        # One verdict per file, because ripgrep reports a file once per matching line and these
+        # checks cost a realpath and a read between them.
+        readable: dict[Path, bool] = {}
+        for hit in sorted(hits, key=lambda hit: (hit.path, hit.line_number)):
+            file_path = search_root / hit.path
             try:
                 rel_path = file_path.relative_to(self._real_root)
             except ValueError:  # pragma: no cover
@@ -696,18 +758,39 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             rel_str = str(rel_path)
             if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
                 continue
-            target = self._resolve_walk_entry(file_path)
-            if target is None:
+            if file_path not in readable:
+                target = self._resolve_walk_entry(file_path)
+                readable[file_path] = target is not None and target.is_file() and not self._is_binary_file(target)
+            if not readable[file_path]:
                 continue
-            if not target.is_file():
-                continue
+            if len(results) >= self._max_search_results:
+                # The budget is enforced here rather than at ripgrep's `--max-count`,
+                # which is per file. A hit arriving past the budget is what proves
+                # output was cut, so exactly-at-budget stays unmarked.
+                results.append(f'[... truncated at {self._max_search_results} matches]')
+                break
+            results.append(f'{rel_str}:{hit.line_number}:{hit.line}')
+
+        return '\n'.join(results) if results else 'No matches found.'
+
+    def _search_in_process(self, resolved: Path, compiled: re.Pattern[str], include_glob: str | None) -> str:
+        """Scan candidates in Python, for when ripgrep is unavailable.
+
+        Blocking filesystem work with no await points, so it runs in a worker thread: on the event loop it would stall
+        every other task in the run for the length of the search.
+        """
+        results: list[str] = []
+
+        files = [resolved] if resolved.is_file() else sorted(resolved.rglob('*'))
+        for file_path in files:
             try:
-                raw = target.read_bytes()
-            except OSError:  # pragma: no cover
+                rel_path = file_path.relative_to(self._real_root)
+            except ValueError:  # pragma: no cover
                 continue
-            if _is_binary(raw):
+            rel_str = str(rel_path)
+            text = self._read_candidate(file_path, rel_str, include_glob)
+            if text is None:
                 continue
-            text = raw.decode('utf-8', errors='replace')
             matches, truncated = _matching_lines(text, compiled, rel_str, self._max_search_results - len(results))
             results.extend(matches)
             if truncated:
@@ -715,6 +798,63 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 break
 
         return '\n'.join(results) if results else 'No matches found.'
+
+    def _match_symlinked_files(
+        self, resolved: Path, compiled: re.Pattern[str], include_glob: str | None
+    ) -> list[_ripgrep.Match]:
+        """Match the tree's symlinked files, with paths relative to the search root.
+
+        Shaped like ripgrep's hits so the caller can merge both sources into one ordered result. Hidden entries are
+        already excluded by `_symlinked_files`, for the same reason no walker searches them.
+        """
+        hits: list[_ripgrep.Match] = []
+        for candidate in _symlinked_files(resolved):
+            try:
+                rel_str = str(candidate.relative_to(resolved))
+            except ValueError:  # pragma: no cover
+                continue
+            text = self._read_candidate(candidate, rel_str, include_glob)
+            if text is None:
+                continue
+            hits.extend(
+                _ripgrep.Match(path=rel_str, line_number=number, line=line)
+                for number, line in enumerate(text.splitlines(), start=1)
+                if compiled.search(line)
+            )
+
+        return hits
+
+    def _read_candidate(self, file_path: Path, rel_str: str, include_glob: str | None) -> str | None:
+        """Return a file's text when the walker policy permits reading it, or `None` to skip it.
+
+        The policy lives in one place so the two engines cannot drift apart: hidden paths, `include_glob`, containment
+        and permission checks, the size cap, and binary detection. The size cap is checked before the read, because
+        reading a whole file to scan its lines is the cost the ripgrep path exists to avoid.
+        """
+        if any(part.startswith('.') for part in Path(rel_str).parts):
+            return None
+        if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
+            return None
+        target = self._resolve_walk_entry(file_path)
+        if target is None or not target.is_file():
+            return None
+        try:
+            if target.stat().st_size > _ripgrep.MAX_FILE_BYTES:
+                return None
+            raw = target.read_bytes()
+        except OSError:  # pragma: no cover
+            return None
+        if _is_binary(raw):
+            return None
+        return raw.decode('utf-8', errors='replace')
+
+    def _is_binary_file(self, path: Path) -> bool:
+        """Whether `path` opens with binary content, treating an unreadable file as binary."""
+        try:
+            with path.open('rb') as handle:
+                return _is_binary(handle.read(_BINARY_SAMPLE_BYTES))
+        except OSError:
+            return True
 
     @_recoverable
     async def find_files(self, pattern: str, *, path: str = '.') -> str:
@@ -737,6 +877,14 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if not resolved.is_dir():
             raise NotADirectoryError(f'Not a directory: {path}')
 
+        return await anyio.to_thread.run_sync(self._find_in_process, resolved, pattern, path)
+
+    def _find_in_process(self, resolved: Path, pattern: str, path: str) -> str:
+        """Walk for `pattern` in a worker thread, for the same reason as `_search_in_process`.
+
+        Python's `glob` owns the matching. Ripgrep's dialect would change what `find_files('*.py')` means, from
+        top-level entries to basenames at any depth, which is a different tool than the documented one.
+        """
         try:
             found = sorted(resolved.glob(pattern))
         except NotImplementedError as e:
