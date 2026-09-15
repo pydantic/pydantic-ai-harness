@@ -153,3 +153,12 @@ class TestCoder:
         monkeypatch.setenv('PYTHONHOME', str(tmp_path / 'missing-python'))
         output = await call(tmp_path, 'shell', {'command': 'echo hi'})
         assert 'Shell supervisor exited' in output
+
+    async def test_shell_invalid_inputs(self, tmp_path: Path) -> None:
+        assert 'NUL' in await call(tmp_path, 'shell', {'command': 'echo \0'})
+        assert 'Cannot start command' in await call(tmp_path / 'absent', 'shell', {'command': 'echo hi'})
+
+    @pytest.mark.skipif(os.name == 'nt', reason='POSIX symlink')
+    async def test_search_symlink_loop(self, tmp_path: Path) -> None:
+        (tmp_path / 'loop').symlink_to('loop')
+        assert 'Cannot resolve' in await call(tmp_path, 'list_files', {'path': 'loop'})

@@ -28,6 +28,8 @@ async def shell(
     timeout: float = 270,
 ) -> str:
     """Run a shell command, returning durable PID, output and exit-status paths."""
+    if '\0' in command:
+        raise ModelRetry('command must not contain NUL characters.')
     if not 0 < timeout <= 270:
         raise ModelRetry('timeout must be greater than zero and at most 270 seconds.')
     environment = {
@@ -37,15 +39,19 @@ async def shell(
     }
     directory = Path(tempfile.mkdtemp(prefix='coder-shell-'))
     supervisor = Path(__file__).with_name('_supervisor.py')
-    process = subprocess.Popen(
-        [sys.executable, str(supervisor), str(directory), command],
-        cwd=workspace,
-        env=environment,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-    )
+    try:
+        process = subprocess.Popen(
+            [sys.executable, str(supervisor), str(directory), command],
+            cwd=workspace,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except (OSError, ValueError) as exc:
+        directory.rmdir()
+        raise ModelRetry(f'Cannot start command: {exc}') from exc
     # Reap the supervisor without tying command lifetime to an async run or loop.
     threading.Thread(target=process.wait, daemon=True).start()
     status_path = directory / 'status.json'

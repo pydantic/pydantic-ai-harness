@@ -114,7 +114,10 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
         return f'Edited {path}.'
 
     def _directory(self, path: str) -> Path:
-        directory = (self.workspace / path).resolve()
+        try:
+            directory = (self.workspace / path).resolve(strict=True)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ModelRetry(f'Cannot resolve directory: {exc}') from exc
         if not directory.is_relative_to(self.workspace) or not directory.is_dir():
             raise ModelRetry('path must be an existing directory inside the workspace.')
         return directory
