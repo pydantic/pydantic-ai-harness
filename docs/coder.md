@@ -12,7 +12,15 @@ It is a regular combined capability: Coder-specific tools and argument repair co
 
 ## Usage
 
-Install ripgrep (`rg`) on the host for file listing and search. Commands run on the host without an allowlist;
+Install the Coder extra to include ripgrep (`rg`) for file listing and search:
+
+```bash
+uv add "pydantic-ai-harness[coder]"
+```
+
+The extra installs `ripgrep==14.1.0` except on Android, where `rg` must be supplied separately on `PATH`.
+Add a provider extra such as `[coder,anthropic]` when needed.
+Commands run on the host without an allowlist;
 use an OS-level sandbox or container for untrusted work. Path restrictions on file tools are not a shell sandbox.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
@@ -37,7 +45,7 @@ The exported `pydantic_ai_harness.coder:coder_agent` is the same composition, mo
 Use it with the Pydantic AI CLI:
 
 ```bash
-uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
 ```
 
 ## Six tools
