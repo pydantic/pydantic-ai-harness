@@ -19,7 +19,8 @@ def model_for(respond: Callable[[list[ModelMessage], AgentInfo], ModelResponse])
             if isinstance(part, ToolCallPart):
                 arguments = part.args if isinstance(part.args, str) else part.args_as_json_str()
                 yield {0: DeltaToolCall(name=part.tool_name, json_args=arguments)}
-            elif isinstance(part, TextPart):
+            else:
+                assert isinstance(part, TextPart)
                 yield part.content
 
     return FunctionModel(respond, stream_function=stream)

@@ -34,7 +34,8 @@ async def call(
         for part in respond(messages, info).parts:
             if isinstance(part, ToolCallPart):
                 yield {0: DeltaToolCall(name=part.tool_name, json_args=part.args_as_json_str())}
-            elif isinstance(part, TextPart):
+            else:
+                assert isinstance(part, TextPart)
                 yield part.content
 
     result = await Agent(
@@ -143,3 +144,12 @@ class TestCoder:
         os.mkfifo(tmp_path / 'pipe')
         output = await call(tmp_path, 'edit_file', {'path': 'pipe', 'old_text': 'one', 'new_text': 'two'})
         assert 'regular file' in output
+
+    async def test_missing_ripgrep(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('PATH', str(tmp_path))
+        assert 'Install ripgrep' in await call(tmp_path, 'list_files', {})
+
+    async def test_supervisor_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('PYTHONHOME', str(tmp_path / 'missing-python'))
+        output = await call(tmp_path, 'shell', {'command': 'echo hi'})
+        assert 'Shell supervisor exited' in output
