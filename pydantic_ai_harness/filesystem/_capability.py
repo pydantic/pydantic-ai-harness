@@ -31,6 +31,9 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     is rejected. Symlinks are resolved before authorization.
     """
 
+    id: str | None = field(default='file_system', kw_only=True)
+    """Stable capability and toolset ID."""
+
     root_dir: str | Path = '.'
     """Root directory for all file operations. Defaults to the current directory."""
 
@@ -78,6 +81,7 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> FileSystemToolset[AgentDepsT] | FilteredToolset[AgentDepsT]:
         """Build and return the filesystem toolset."""
         toolset = FileSystemToolset[AgentDepsT](
+            id=self.id,
             root_dir=Path(self.root_dir),
             allowed_patterns=self.allowed_patterns,
             denied_patterns=self.denied_patterns,

@@ -208,6 +208,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
+        id: str | None = None,
         root_dir: Path,
         allowed_patterns: Sequence[str],
         denied_patterns: Sequence[str],
