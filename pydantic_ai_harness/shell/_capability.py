@@ -53,7 +53,7 @@ class Shell(AbstractCapability[AgentDepsT]):
     """
 
     cwd: str | Path = '.'
-    """Working directory for command execution: a workspace path, absolute or relative to the workspace working directory."""
+    """Working directory for command execution: a workspace path, absolute or relative to its working directory."""
 
     allowed_commands: Sequence[str] = field(default_factory=list[str])
     """If non-empty, only these command names may be executed (allowlist)."""
@@ -83,9 +83,10 @@ class Shell(AbstractCapability[AgentDepsT]):
     env: Mapping[str, str] | None = None
     """Explicit environment for commands.
 
-    Passes these variables explicitly to the workspace. With `LocalWorkspace`, they
-    are added to its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` environment. This
-    is not a security boundary: use OS-level isolation for untrusted commands.
+    The mapping is passed to the workspace backend. `None` leaves environment
+    selection to that backend. With `LocalWorkspace`, explicit variables are
+    added to its fixed `PATH`, `HOME`, `LANG`, and `TMPDIR` environment. This is
+    not a security boundary; use OS-level isolation for untrusted commands.
     """
 
     denied_env_patterns: Sequence[str] = field(default_factory=list[str])
@@ -119,4 +120,5 @@ class Shell(AbstractCapability[AgentDepsT]):
             allow_interactive=self.allow_interactive,
             env=self.env,
             denied_env_patterns=self.denied_env_patterns,
+            id=self.id or 'shell',
         )

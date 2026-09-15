@@ -137,8 +137,9 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         allow_interactive: bool,
         env: Mapping[str, str] | None = None,
         denied_env_patterns: Sequence[str] = (),
+        id: str | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         # The configured starting directory: a workspace path, absolute or relative to the
         # workspace working directory.
         self._initial_cwd = cwd
@@ -196,6 +197,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             allow_interactive=self._allow_interactive,
             env=self._env,
             denied_env_patterns=self._denied_env_patterns,
+            id=self.id,
         )
 
     async def call_tool(

@@ -83,7 +83,6 @@ from pydantic_ai import Agent
 from pydantic_ai_harness import (
     ClearToolResults,
     FileSystem,
-    LLM_API_KEY_ENV_PATTERNS,
     Planning,
     RepoContext,
     Shell,
@@ -115,11 +114,10 @@ agent = Agent(
     name='coder',
     instructions='You are a coding agent built on Pydantic AI.',
     capabilities=[
-        FileSystem('.'),  # read/write/edit/search, path-traversal safe
-        Shell(  # allowlisted commands, LLM API keys stripped from their environment
+        FileSystem('.'),  # read/write/edit/search, with textual path checks
+        Shell(  # allowlisted commands
             cwd='.',
             allowed_commands=allowed_commands,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
         ),
         RepoContext(workspace_dir=Path('.')),  # loads AGENTS.md/CLAUDE.md + repo structure
         Planning(),  # structured task plans the model maintains
@@ -152,8 +150,8 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 
 | Capability | Package | What it does |
 |---|---|---|
-| [FileSystem](filesystem.md) | Harness | Read, write, edit, search files under a root; path-traversal and symlink safe, secrets read-only |
-| [Shell](shell.md) | Harness | Command execution with allowlists, denylists, timeouts, and credential-stripping |
+| [FileSystem](filesystem.md) | Harness | Read, write, edit, search files under a root; textual path checks and configurable read-only patterns |
+| [Shell](shell.md) | Harness | Command execution with allowlists, denylists, timeouts, and optional filtering of explicit environments |
 | [Modal Sandbox](modal-sandbox.md) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
 
 ### Tools & native abilities

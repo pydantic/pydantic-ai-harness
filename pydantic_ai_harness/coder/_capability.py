@@ -59,7 +59,7 @@ class Coder(CombinedCapability[AgentDepsT]):
 
     The command allowlist is a guardrail against accidents, not a security boundary. Validation checks only the first
     token, and allowed commands such as `python`, `git`, `uv`, and `make` can spawn arbitrary processes. Run untrusted
-    work in an OS-level workspace such as `ModalSandbox` or a container.
+    work in an OS-level sandbox such as `ModalSandbox` or a container.
     """
 
     def __init__(
