@@ -37,9 +37,11 @@ async def call(
             elif isinstance(part, TextPart):
                 yield part.content
 
-    result = await Agent(FunctionModel(respond, stream_function=stream), capabilities=[Coder(tmp_path), *capabilities]).run(
-        'Use the tool'
-    )
+    result = await Agent(
+        FunctionModel(respond, stream_function=stream),
+        deps_type=type(None),
+        capabilities=[Coder(tmp_path), *capabilities],
+    ).run('Use the tool')
     return '\n'.join(
         str(part.content)
         for message in result.all_messages()
