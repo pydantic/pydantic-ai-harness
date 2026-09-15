@@ -216,6 +216,15 @@ jobs:
       # The lock validation must be off here: this job deviates from the lock
       # on purpose, and under UV_LOCKED=1 the lowest-direct resolution fails
       # because uv refuses to write the lowest-resolved lockfile it produces.
+      #
+      # It therefore also re-resolves any dependency that `[tool.uv.sources]`
+      # points at a git *branch* to that branch's current tip, rather than to
+      # the commit uv.lock pins: a branch requirement has no version range for
+      # "lowest" to mean anything about. While `logfire` is sourced from
+      # `agent-control-core` that makes this the one job that notices when the
+      # Agent Control contract moves under the harness -- useful, and the first
+      # thing to check when this job is red and nothing here changed. It stops
+      # being a factor when that source line goes away on release.
       - run: uv sync --resolution lowest-direct --group dev --all-extras
         env:
           UV_LOCKED: '0'
