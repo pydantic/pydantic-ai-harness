@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
-from pydantic_ai import Agent
-from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
-from pydantic_ai.tools import AgentDepsT
+import json_repair
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability, RawToolArgs
+from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.tools import AgentDepsT, ToolDefinition
 
 from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.filesystem import FileSystem
@@ -49,6 +52,29 @@ def _explorer(workspace: str | Path) -> SubAgent[AgentDepsT]:
     return SubAgent(agent)
 
 
+class _RepairToolArguments(AbstractCapability[AgentDepsT]):
+    async def before_tool_validate(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: RawToolArgs,
+    ) -> RawToolArgs:
+        """Repair malformed JSON arguments before normal tool schema validation."""
+        if not isinstance(args, str):
+            return args
+        try:
+            json.loads(args)
+        except json.JSONDecodeError:
+            with ctx.tracer.start_as_current_span('coder.repair_tool_arguments'):
+                try:
+                    return json_repair.repair_json(args, skip_json_loads=True, ensure_ascii=False)
+                except (ValueError, RecursionError):
+                    return args
+        return args
+
+
 class Coder(CombinedCapability[AgentDepsT]):
     """A complete coding-agent harness built as a regular combined capability.
 
@@ -71,7 +97,7 @@ class Coder(CombinedCapability[AgentDepsT]):
         instructions: str | None = None,
     ) -> None:
         delegates = [_explorer(workspace)] if subagents is None else subagents
-        capabilities: list[AbstractCapability[AgentDepsT]] = []
+        capabilities: list[AbstractCapability[AgentDepsT]] = [_RepairToolArguments[AgentDepsT]()]
         if instructions is not None:
             capabilities.append(Capability[AgentDepsT](instructions=instructions))
         capabilities.extend(

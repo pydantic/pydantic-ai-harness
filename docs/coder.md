@@ -35,7 +35,7 @@ uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m 
 
 ## What's inside
 
-It is literally these capabilities combined, in this order:
+Alongside internal tool argument repair, it combines these capabilities in this order:
 
 - [`FileSystem`](filesystem.md): read, write, edit, and search tools rooted at the workspace, path-traversal and symlink safe
 - [`Shell`](shell.md): allowlisted commands rooted at the workspace (a guardrail, not a security boundary), with common LLM provider API-key variables filtered from inherited command environments
@@ -85,9 +85,26 @@ Add [`Skills('skills')`](skills.md) to the list once you have a `skills/` direct
 
 To remove or replace one of the built-in components instead, start from the blown-out form below and adjust the list.
 
+## Tool argument repair
+
+`Coder` uses `json-repair` to repair malformed JSON tool arguments before Pydantic AI validates
+against the tool schema. Valid JSON and already-parsed arguments pass through unchanged.
+Repair applies to tools on the parent agent, including tools added alongside `Coder`, not to
+separate sub-agent runs. Missing fields and invalid argument types still follow normal tool
+validation and retry behavior. If the repair parser raises a value or recursion error, the
+original arguments go through normal validation.
+
+Repair is heuristic: malformed input can be ambiguous, and syntax repair cannot guarantee
+that inferred string contents match the model's intent. It does not supply a schema to the
+repair library or bypass file edit matching and other tool checks.
+
+Each repair attempt emits a `coder.repair_tool_arguments` span through `ctx.tracer` when
+instrumentation is enabled. The span does not record tool arguments or file contents.
+
 ## Blown-out equivalent
 
-This is the exact agent the exported `coder_agent` gives you (plus an explicit model), written out block by block:
+The following expands the tool and context capabilities of `coder_agent` (plus an explicit model).
+It omits the internal JSON-repair capability; use `Coder` to include argument repair.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
