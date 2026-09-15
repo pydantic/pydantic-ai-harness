@@ -8,7 +8,7 @@ import anyio
 import pytest
 from anyio.abc import SocketAttribute, SocketStream
 
-from tests.coder.test_tools import call
+from .test_tools import call
 
 pytestmark = [pytest.mark.anyio, pytest.mark.skipif(os.name == 'nt', reason='POSIX process groups')]
 

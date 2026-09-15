@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
 from typing import Literal
@@ -93,7 +94,9 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
         if not 1 <= limit <= 1000:
             raise ModelRetry('limit must be between 1 and 1000.')
         try:
-            async with await anyio.open_process(['rg', *arguments], cwd=self._directory(path)) as process:
+            async with await anyio.open_process(
+                ['rg', *arguments], cwd=self._directory(path), stderr=subprocess.DEVNULL
+            ) as process:
                 assert process.stdout is not None
                 output = bytearray()
                 truncated = False

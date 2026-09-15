@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.coder.test_tools import call
+from .test_tools import call
 
 pytestmark = pytest.mark.anyio
 
