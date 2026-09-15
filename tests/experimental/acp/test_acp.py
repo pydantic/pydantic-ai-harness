@@ -2211,7 +2211,7 @@ class TestPathAbsolutization:
         assert resolved.content == presentation.content
 
     def test_relative_traversal_escaping_the_workspace_drops_the_location(self) -> None:
-        # A `..` path that normalizes outside cwd is not shown as a location: the tool sandbox
+        # A `..` path that normalizes outside cwd is not shown as a location: the tool workspace
         # rejects it, and an editor should never get a click-to-file link outside the workspace.
         presentation = default_coding_presenter(_tool_call('read_file', {'path': '../../etc/passwd'}))
         assert presentation is not None
@@ -2259,7 +2259,11 @@ class TestWorkspaceRooting:
         agent = Agent(_calls_tool_each_turn(write))  # the agent itself has no filesystem tools
 
         def session_config(session: AcpSession) -> AcpSessionConfig[None]:
-            return AcpSessionConfig(deps=None, capabilities=[FileSystem[None](root_dir=session.cwd)])
+            return AcpSessionConfig(
+                deps=None,
+                capabilities=[FileSystem[None](root_dir=session.cwd)],
+                workspace=LocalWorkspace(root=session.cwd),
+            )
 
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, session_config=session_config)
         client = FakeClient()
@@ -2292,7 +2296,11 @@ class TestWorkspaceRooting:
             seen.append(event)
 
         def session_config(session: AcpSession) -> AcpSessionConfig[None]:
-            return AcpSessionConfig(deps=None, capabilities=[FileSystem[None](root_dir=session.cwd), hooks])
+            return AcpSessionConfig(
+                deps=None,
+                capabilities=[FileSystem[None](root_dir=session.cwd), hooks],
+                workspace=LocalWorkspace(root=session.cwd),
+            )
 
         adapter: PydanticAIACPAgent[None, str] = PydanticAIACPAgent(agent, session_config=session_config)
         client = FakeClient()
