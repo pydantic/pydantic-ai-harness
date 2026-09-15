@@ -44,9 +44,7 @@ class RaisingListener(AbstractCapability[None]):
 def calls_model(tool_names: Sequence[str]) -> FunctionModel:
     async def respond(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | DeltaToolCalls]:
         results = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
-        if len(results) == len(tool_names):
-            yield 'done'
-            return
+        assert len(results) < len(tool_names), 'The listener failure must abort before another model request'
         name = tool_names[len(results)]
         if name in ('run_command', 'start_command'):
             args = {'command': 'echo hello'}
