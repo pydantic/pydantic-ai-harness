@@ -162,14 +162,16 @@ def _normalize_base_url(base_url: str | None) -> str:
     raise UserError(f'{_BASE_URL_ENV} must be an https:// URL with a host and no query or fragment, got {base!r}')
 
 
-def validated_budget(name: str, value: int) -> int:
-    """Reject a non-positive output budget.
+def validated_budget(name: str, value: object) -> int:
+    """Reject a budget that is not a positive integer.
 
-    Negative budgets are worse than useless here: they slice from the end, so
-    they would silently return the wrong text rather than fail.
+    The annotation is advisory: a config-driven caller can pass a float or a
+    string, which would only fail later as a slice bound. Negative budgets are
+    worse than useless here: they slice from the end, so they would silently
+    return the wrong text rather than fail.
     """
-    if value < 1:
-        raise ValueError(f'{name} must be at least 1, got {value}')
+    if not isinstance(value, int) or value < 1:
+        raise ValueError(f'{name} must be a positive integer, got {value!r}')
     return value
 
 

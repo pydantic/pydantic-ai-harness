@@ -268,9 +268,13 @@ def test_guidance_overrides_and_disables_instructions():
 @pytest.mark.parametrize(
     ('kwargs', 'message'),
     [
-        ({'num_results': 0}, 'num_results must be at least 1'),
-        ({'max_snippet_chars': 0}, 'max_snippet_chars must be at least 1'),
-        ({'max_page_chars': 0}, 'max_page_chars must be at least 1'),
+        ({'num_results': 0}, 'num_results must be a positive integer'),
+        ({'max_snippet_chars': 0}, 'max_snippet_chars must be a positive integer'),
+        ({'max_page_chars': 0}, 'max_page_chars must be a positive integer'),
+        # The annotation is advisory; a config-driven caller can pass a float
+        # or a string, which would otherwise only fail later as a slice bound.
+        ({'num_results': 1.5}, 'num_results must be a positive integer, got 1.5'),
+        ({'max_page_chars': '10'}, "max_page_chars must be a positive integer, got '10'"),
     ],
 )
 def test_budgets_are_validated(kwargs: dict[str, Any], message: str):
@@ -281,9 +285,9 @@ def test_budgets_are_validated(kwargs: dict[str, Any], message: str):
 @pytest.mark.parametrize(
     ('kwargs', 'message'),
     [
-        ({'num_results': -1}, 'num_results must be at least 1'),
-        ({'max_snippet_chars': 0}, 'max_snippet_chars must be at least 1'),
-        ({'max_page_chars': -10}, 'max_page_chars must be at least 1'),
+        ({'num_results': -1}, 'num_results must be a positive integer'),
+        ({'max_snippet_chars': 0}, 'max_snippet_chars must be a positive integer'),
+        ({'max_page_chars': -10}, 'max_page_chars must be a positive integer'),
     ],
 )
 def test_the_toolset_validates_budgets_when_built_directly(kwargs: dict[str, Any], message: str):
