@@ -196,3 +196,8 @@ class TestCoder:
         (tmp_path / 'file').write_text('one\ntwo\nthree\n')
         output = await call(tmp_path, 'read_file', {'path': 'file', 'offset': 1})
         assert '2: two' in output and '3: three' in output
+
+    @pytest.mark.skipif(os.name == 'nt', reason='POSIX FIFO')
+    async def test_read_fifo(self, tmp_path: Path) -> None:
+        os.mkfifo(tmp_path / 'pipe')
+        assert 'regular file' in await call(tmp_path, 'read_file', {'path': 'pipe'})
