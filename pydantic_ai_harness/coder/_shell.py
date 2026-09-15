@@ -65,14 +65,14 @@ async def shell(
     except BaseException:
         # A cancelled call cannot return handles. Terminate its process group
         # instead of leaving an unreachable command behind.
-        if process.poll() is None:
-            if os.name == 'nt':  # pragma: no cover
+        if os.name == 'nt':  # pragma: no cover
+            if process.poll() is None:
                 subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], check=True, capture_output=True)
-            else:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:  # pragma: no cover
-                    pass
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         with anyio.CancelScope(shield=True):
             await run_sync(process.wait)
         raise

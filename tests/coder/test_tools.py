@@ -162,3 +162,37 @@ class TestCoder:
     async def test_search_symlink_loop(self, tmp_path: Path) -> None:
         (tmp_path / 'loop').symlink_to('loop')
         assert 'Cannot resolve' in await call(tmp_path, 'list_files', {'path': 'loop'})
+
+    @pytest.mark.parametrize('content,expected', [(b'a\0b', 'Binary file'), (b'a' * 70000, 'Line exceeds')])
+    async def test_read_special_content(self, tmp_path: Path, content: bytes, expected: str) -> None:
+        (tmp_path / 'file').write_bytes(content)
+        assert expected in await call(tmp_path, 'read_file', {'path': 'file'})
+
+    @pytest.mark.parametrize('arguments', [{'offset': -1}, {'limit': 0}, {'path': 'missing'}])
+    async def test_invalid_read(self, tmp_path: Path, arguments: dict[str, object]) -> None:
+        assert await call(tmp_path, 'read_file', {'path': 'file', **arguments})
+
+    async def test_read_bounds(self, tmp_path: Path) -> None:
+        (tmp_path / 'file').write_text('a' * 40000 + '\n' + 'b' * 40000 + '\n')
+        assert len(await call(tmp_path, 'read_file', {'path': 'file'})) < 64000
+        (tmp_path / 'file').write_text('')
+        assert 'Read window' in await call(tmp_path, 'read_file', {'path': 'file'})
+
+    async def test_binary_edit(self, tmp_path: Path) -> None:
+        path = tmp_path / 'file'
+        path.write_bytes(b'a\0b')
+        assert 'NUL' in await call(tmp_path, 'edit_file', {'path': 'file', 'old_text': 'a', 'new_text': 'c'})
+        assert path.read_bytes() == b'a\0b'
+
+    async def test_search_character_bound(self, tmp_path: Path) -> None:
+        (tmp_path / 'file').write_text('a' * 70000)
+        output = await call(tmp_path, 'grep', {'pattern': 'a'})
+        assert len(output) <= 64000 and 'truncated' in output
+
+    async def test_read_directory(self, tmp_path: Path) -> None:
+        assert await call(tmp_path, 'read_file', {'path': '.'})
+
+    async def test_read_multiline(self, tmp_path: Path) -> None:
+        (tmp_path / 'file').write_text('one\ntwo\nthree\n')
+        output = await call(tmp_path, 'read_file', {'path': 'file', 'offset': 1})
+        assert '2: two' in output and '3: three' in output

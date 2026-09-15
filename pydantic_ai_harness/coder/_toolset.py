@@ -53,8 +53,38 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
         self, ctx: RunContext[AgentDepsT], path: str, *, offset: int = 0, limit: int | None = None
     ) -> str:
         """Read a file with zero-based offset and one-based line numbers, without hashes."""
-        result = await self.filesystem._read_file(ctx, path, offset=offset, limit=limit)  # pyright: ignore[reportPrivateUsage]
-        return re.sub(r' \| hash:[0-9a-f]+(?=\])', '', result, count=1)
+        if offset < 0 or (limit is not None and limit <= 0):
+            raise ModelRetry('offset must be non-negative and limit positive.')
+        limit = min(limit or 2000, 2000)
+        try:
+            resolved = self.filesystem._safe_resolve(path)  # pyright: ignore[reportPrivateUsage]
+            flags = os.O_RDONLY | (os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW)
+            descriptor = os.open(resolved, flags)
+            with os.fdopen(descriptor, 'rb') as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise ModelRetry('Reads require a regular file.')
+                output: list[str] = []
+                number = 0
+                budget = 60000
+                while budget > 0:
+                    line = source.readline(65536)
+                    if not line:
+                        break
+                    if b'\0' in line:
+                        return '[Binary file; use a binary-aware tool.]'
+                    number += 1
+                    if len(line) == 65536 and not line.endswith(b'\n'):
+                        return '[Line exceeds 65,536 bytes; use shell for a bounded byte-range inspection.]'
+                    if number <= offset:
+                        continue
+                    rendered = f'{number}: {line.decode("utf-8", errors="replace")}'
+                    output.append(rendered[:budget])
+                    budget -= len(rendered)
+                    if len(output) >= limit:
+                        break
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ModelRetry(f'Cannot read {path!r}: {exc}') from exc
+        return f'[{path}]\n' + ''.join(output) + '\n[Read window; use offset/limit to continue.]'
 
     async def write_file(self, ctx: RunContext[AgentDepsT], path: str, content: str) -> str:
         """Write a complete file. Create missing parent directories with shell mkdir first."""
@@ -88,6 +118,8 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
                 if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
                     raise ModelRetry('Edits require a regular file.')
                 original = source.read().decode('utf-8')
+                if '\0' in original:
+                    raise ModelRetry('Edits require a text file without NUL bytes.')
         except (OSError, UnicodeError) as exc:
             raise ModelRetry(f'Cannot read {path!r}: {exc}') from exc
         content = original
@@ -144,8 +176,9 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
         except FileNotFoundError as exc:
             raise ModelRetry('Install ripgrep (rg) to use list_files and grep.') from exc
         lines = output.decode('utf-8', errors='replace').splitlines()
-        result = '\n'.join(lines[:limit])[:64000]
-        return result + ('\n[truncated; narrow the search]' if truncated else '')
+        marker = '\n[truncated; narrow the search]' if truncated else ''
+        result = '\n'.join(lines[:limit])[: 64000 - len(marker)]
+        return result + marker
 
     async def list_files(self, path: str = '.', *, glob: str | None = None, limit: int = 200) -> str:
         """List files with rg --files, respecting ignore rules and optional glob filtering."""

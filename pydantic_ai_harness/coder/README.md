@@ -39,7 +39,7 @@ uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m 
 
 | Tool | Behavior |
 | --- | --- |
-| `read_file(path, offset=0, limit=None)` | Zero-based line offset, one-based displayed line numbers, up to 2,000 lines. No hash header. |
+| `read_file(path, offset=0, limit=None)` | Zero-based line offset, one-based displayed line numbers, up to 2,000 lines. No hash header. Reads stream up to 60,000 content characters; lines above 65,536 bytes require shell inspection. |
 | `write_file(path, content)` | Replace a file or create it in an existing directory. No expected hash. |
 | `edit_file(path, old_text=..., new_text=...)` | Replace exactly one occurrence of a non-empty string. |
 | `list_files(path='.', glob=None, limit=200)` | `rg --files`, respecting ignore rules. Returns at most 1,000 lines. |
@@ -115,6 +115,6 @@ If the repair parser raises a value or recursion error, original arguments go th
 Repair is heuristic: malformed input can be ambiguous, and inferred strings may differ from the model's
 intent. It does not supply a schema to the repair library or bypass exact edit matching.
 Each attempt emits a `coder.repair_tool_arguments` span through `ctx.tracer`, without arguments or file
-contents. Other Coder operations rely on core tool spans; no additional Coder spans are emitted.
+contents. Other Coder operations rely on core tool spans. Writes and edits emit filesystem change-request and completion events. Bounded reads do not compute whole-file hashes or emit hash-bearing read events.
 
 See the [source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/coder/).
