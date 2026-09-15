@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -127,3 +128,9 @@ class TestCoder:
     async def test_edit_path_errors_retry(self, tmp_path: Path, path: str) -> None:
         output = await call(tmp_path, 'edit_file', {'path': path, 'old_text': 'one', 'new_text': 'two'})
         assert 'Cannot read' in output
+
+    @pytest.mark.skipif(os.name == 'nt', reason='POSIX FIFO')
+    async def test_edit_fifo_retries(self, tmp_path: Path) -> None:
+        os.mkfifo(tmp_path / 'pipe')
+        output = await call(tmp_path, 'edit_file', {'path': 'pipe', 'old_text': 'one', 'new_text': 'two'})
+        assert 'regular file' in output

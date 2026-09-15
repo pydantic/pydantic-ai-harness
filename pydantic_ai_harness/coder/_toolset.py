@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import subprocess
 from dataclasses import KW_ONLY, dataclass
 from pathlib import Path
@@ -15,7 +17,10 @@ from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.coder._shell import shell
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
-from pydantic_ai_harness.filesystem._toolset import _read_canonical_text  # pyright: ignore[reportPrivateUsage]
+from pydantic_ai_harness.filesystem._toolset import (
+    _content_hash,  # pyright: ignore[reportPrivateUsage]
+    _write_content,  # pyright: ignore[reportPrivateUsage]
+)
 
 
 @dataclass
@@ -73,7 +78,12 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
             raise ModelRetry('Use either old_text/new_text or a non-empty replacements list, not both.')
         try:
             resolved = self.filesystem._safe_resolve(path, write=True)  # pyright: ignore[reportPrivateUsage]
-            original = _read_canonical_text(resolved)
+            flags = os.O_RDONLY | (os.O_BINARY if os.name == 'nt' else os.O_NONBLOCK | os.O_NOFOLLOW)
+            descriptor = os.open(resolved, flags)
+            with os.fdopen(descriptor, 'rb') as source:
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
+                    raise ModelRetry('Edits require a regular file.')
+                original = source.read().decode('utf-8')
         except (OSError, UnicodeError) as exc:
             raise ModelRetry(f'Cannot read {path!r}: {exc}') from exc
         content = original
@@ -81,8 +91,11 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
             if not replacement.old_text or content.count(replacement.old_text) != 1:
                 raise ModelRetry('Each non-empty old_text must occur exactly once; no changes were written.')
             content = content.replace(replacement.old_text, replacement.new_text, 1)
-        result = await self.filesystem.edit_file(path, original, content)
-        return re.sub(r' \[hash:[0-9a-f]+\]', '', result)
+        try:
+            _write_content(resolved, path, content, expected_hash=_content_hash(original), create=False)
+        except OSError as exc:
+            raise ModelRetry(f'Cannot edit {path!r}: {exc}') from exc
+        return f'Edited {path}.'
 
     def _directory(self, path: str) -> Path:
         directory = (self.workspace / path).resolve()
