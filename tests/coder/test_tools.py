@@ -1,9 +1,10 @@
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse, RetryPromptPart, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -13,7 +14,13 @@ from pydantic_ai_harness.coder import Coder
 pytestmark = pytest.mark.anyio
 
 
-async def call(tmp_path: Path, name: str, arguments: dict[str, object]) -> str:
+async def call(
+    tmp_path: Path,
+    name: str,
+    arguments: dict[str, object],
+    *,
+    capabilities: Sequence[AbstractCapability[None]] = (),
+) -> str:
     calls = 0
 
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -30,7 +37,7 @@ async def call(tmp_path: Path, name: str, arguments: dict[str, object]) -> str:
             elif isinstance(part, TextPart):
                 yield part.content
 
-    result = await Agent(FunctionModel(respond, stream_function=stream), capabilities=[Coder(tmp_path)]).run(
+    result = await Agent(FunctionModel(respond, stream_function=stream), capabilities=[Coder(tmp_path), *capabilities]).run(
         'Use the tool'
     )
     return '\n'.join(

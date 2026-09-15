@@ -108,7 +108,7 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
             return refusal
         try:
             _write_content(resolved, path, content, expected_hash=_content_hash(original), create=False)
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             raise ModelRetry(f'Cannot edit {path!r}: {exc}') from exc
         await ctx.emit(change.edited(content_hash=_content_hash(content)))
         return f'Edited {path}.'
