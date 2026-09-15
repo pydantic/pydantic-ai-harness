@@ -178,6 +178,7 @@ jobs:
 
       - run: uv sync --locked --group dev ${{ matrix.install.extras }}
       - run: mkdir -p coverage-data
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: uv run coverage run -m pytest
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -219,6 +220,7 @@ jobs:
       - run: uv sync --resolution lowest-direct --group dev --all-extras
         env:
           UV_LOCKED: '0'
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: uv run --no-sync pytest
 
   # Verify the harness works against the latest published pydantic-ai packages,
@@ -253,6 +255,7 @@ jobs:
             --upgrade-package pydantic-ai-slim \
             --upgrade-package pydantic-graph
       - run: uv sync --locked --group dev --all-extras
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: uv run --no-sync pytest
 
   # Guard the pymongo-free import path. The `test` matrix's slim job installs the

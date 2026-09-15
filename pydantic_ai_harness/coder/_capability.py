@@ -42,6 +42,8 @@ class _RepairToolArguments(AbstractCapability[AgentDepsT]):
 
 
 class _BoundToolOutputs(ToolOutputLimits[AgentDepsT]):
+    id: str | None = None
+
     def get_toolset(self) -> None:
         """Coder uses bounded truncation, so no spill-retrieval tool is needed."""
         return None
