@@ -122,3 +122,8 @@ class TestCoder:
     @pytest.mark.parametrize('timeout', [0, 271])
     async def test_shell_timeout_validation(self, tmp_path: Path, timeout: int) -> None:
         assert 'timeout must' in await call(tmp_path, 'shell', {'command': 'echo hi', 'timeout': timeout})
+
+    @pytest.mark.parametrize('path', ['../outside', '.env', 'missing.txt'])
+    async def test_edit_path_errors_retry(self, tmp_path: Path, path: str) -> None:
+        output = await call(tmp_path, 'edit_file', {'path': path, 'old_text': 'one', 'new_text': 'two'})
+        assert 'Cannot read' in output

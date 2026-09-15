@@ -61,7 +61,7 @@ async def shell(
         # instead of leaving an unreachable command behind.
         if process.poll() is None:
             if os.name == 'nt':  # pragma: no cover
-                process.kill()
+                subprocess.run(['taskkill', '/PID', str(process.pid), '/T', '/F'], check=True, capture_output=True)
             else:
                 try:
                     os.killpg(process.pid, signal.SIGKILL)

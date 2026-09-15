@@ -71,8 +71,8 @@ class CoderToolset(FunctionToolset[AgentDepsT]):
             replacements = [Replacement(old_text=old_text, new_text=new_text)]
         elif old_text is not None or new_text is not None or not replacements:
             raise ModelRetry('Use either old_text/new_text or a non-empty replacements list, not both.')
-        resolved = self.filesystem._safe_resolve(path, write=True)  # pyright: ignore[reportPrivateUsage]
         try:
+            resolved = self.filesystem._safe_resolve(path, write=True)  # pyright: ignore[reportPrivateUsage]
             original = _read_canonical_text(resolved)
         except (OSError, UnicodeError) as exc:
             raise ModelRetry(f'Cannot read {path!r}: {exc}') from exc
