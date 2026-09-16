@@ -285,7 +285,9 @@ not cumulative conversation billing or a context-window percentage; `?` means
 unavailable. During a request it may reflect the previous response.
 
 While running, the footer reserves the terminal's bottom row using ANSI scrolling
-regions. Prompt-toolkit owns the footer while accepting input. The run footer is
+regions. Its text shimmers with a moving highlight, and the default spinner uses
+Code Puppy's six-digit binary frames. Both animate at ten frames per second, with
+16-colour fallback when truecolour is unavailable. Prompt-toolkit owns the footer while accepting input. The run footer is
 disabled for redirected output and restores normal scrolling on cancellation or
 failure. The cursor is hidden during runs and restored on completion, failure,
 or cancellation. No model requests or telemetry are added for status reporting.
