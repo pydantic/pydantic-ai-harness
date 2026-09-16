@@ -1,6 +1,7 @@
 """OAuth orchestration with fake browser, exchange, and credential storage."""
 
 import io
+from pathlib import Path
 
 import keyring
 import pytest
@@ -22,8 +23,8 @@ def anyio_backend() -> str:
     return 'asyncio'
 
 
-async def test_credentials_round_trip() -> None:
-    source = CodexCredentials()
+async def test_credentials_round_trip(tmp_path: Path) -> None:
+    source = CodexCredentials(fallback=tmp_path / 'credentials.json')
     with pytest.raises(UserError, match='/login'):
         await source.load()
     credentials = OpenAICodexCredentials(
@@ -33,7 +34,7 @@ async def test_credentials_round_trip() -> None:
     assert await source.load() == credentials
 
 
-async def test_login_uses_core_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_login_uses_core_flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     credentials = OpenAICodexCredentials(
         access_token='fake-access', refresh_token='fake-refresh', account_id='fake-account'
     )
@@ -45,7 +46,7 @@ async def test_login_uses_core_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(OpenAICodexOAuthFlow, 'exchange_code_from_callback', exchange)
     monkeypatch.setattr('webbrowser.open', fake_browser)
     output = io.StringIO()
-    auth = CodexAuth(Console(file=output))
+    auth = CodexAuth(Console(file=output), credentials_file=tmp_path / 'credentials.json')
     commands = Commands()
     commands.register(Command(name='login', description='Login', handler=auth.login))
     assert 'connected' in await commands.execute_async('/login openai-codex')
@@ -55,21 +56,21 @@ async def test_login_uses_core_flow(monkeypatch: pytest.MonkeyPatch) -> None:
     assert 'code_challenge=' in output.getvalue().replace('\n', '')
 
 
-async def test_failed_login_does_not_save(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_failed_login_does_not_save(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     async def exchange(self: OpenAICodexOAuthFlow) -> OpenAICodexCredentials:
         raise UserError('Authorization denied')
 
     monkeypatch.setattr(OpenAICodexOAuthFlow, 'exchange_code_from_callback', exchange)
     monkeypatch.setattr('webbrowser.open', fake_browser)
-    auth = CodexAuth(Console(file=io.StringIO()))
+    auth = CodexAuth(Console(file=io.StringIO()), credentials_file=tmp_path / 'credentials.json')
     with pytest.raises(UserError, match='denied'):
         await auth.login([])
     assert keyring.get_password('pydantic-clai2', 'openai-codex') is None
 
 
-async def test_auth_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_auth_failures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     keyring.set_password('pydantic-clai2', 'openai-codex', 'not json')
-    source = CodexCredentials()
+    source = CodexCredentials(fallback=tmp_path / 'credentials.json')
     with pytest.raises(UserError, match='invalid'):
         await source.load()
 
@@ -79,7 +80,7 @@ async def test_auth_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keyring, 'set_password', discard)
     with pytest.raises(UserError, match='did not retain'):
         await source.save(OpenAICodexCredentials(access_token='test', refresh_token='test', account_id='test'))
-    auth = CodexAuth(Console(file=io.StringIO()))
+    auth = CodexAuth(Console(file=io.StringIO()), credentials_file=tmp_path / 'credentials.json')
     with pytest.raises(ValueError, match='Usage'):
         await auth.login(['invalid'])
 

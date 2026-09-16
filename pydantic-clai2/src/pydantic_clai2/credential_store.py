@@ -1,10 +1,12 @@
-"""Size-bounded keyring storage for OAuth token bundles."""
+"""Size-bounded keyring storage for OAuth token bundles, with a private file when no keyring exists."""
 
+import os
 import re
+from pathlib import Path
 from uuid import uuid4
 
 import keyring
-from keyring.errors import PasswordDeleteError
+from keyring.errors import InitError, NoKeyringError, PasswordDeleteError
 from pydantic_ai.exceptions import UserError
 
 _SERVICE = 'pydantic-clai2'
@@ -14,6 +16,8 @@ _PREFIX = 'clai-chunks-v1:'
 # 600-character chunk fits even if every character uses a surrogate pair.
 _CHUNK_SIZE = 600
 _MAX_BYTES = 2560
+# A locked or failing keyring is not "no keyring": only these mean nothing is configured.
+_NO_KEYRING = (NoKeyringError, InitError)
 
 
 def _chunk_services(*, value: str) -> list[str]:
@@ -41,7 +45,38 @@ def _delete(*, services: list[str]) -> None:
             pass  # A failed write may not have created the entry.
 
 
-def load_codex_credentials() -> str | None:
+def _write_private(*, path: Path, value: str) -> None:
+    """Replace the file atomically so a refresh cannot leave half a token bundle behind."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    staging = path.with_name(f'{path.name}.tmp')
+    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
+        file.write(value)
+    os.replace(staging, path)
+
+
+def load_codex_credentials(*, fallback: Path) -> str | None:
+    """Read from keyring, or from the fallback file when keyring is empty or absent."""
+    try:
+        value = _load_keyring()
+    except _NO_KEYRING:
+        value = None
+    if value is not None:
+        return value
+    return fallback.read_text(encoding='utf-8') if fallback.is_file() else None
+
+
+def save_codex_credentials(*, value: str, fallback: Path) -> None:
+    """Write to keyring and drop any plaintext copy; write the file only when no keyring exists."""
+    try:
+        _save_keyring(value=value)
+    except _NO_KEYRING:
+        _write_private(path=fallback, value=value)
+        return
+    fallback.unlink(missing_ok=True)
+
+
+def _load_keyring() -> str | None:
     """Read either a legacy single entry or a complete chunked token bundle."""
     value = keyring.get_password(_SERVICE, _ACCOUNT)
     if value is None:
@@ -58,7 +93,7 @@ def load_codex_credentials() -> str | None:
     return ''.join(chunks)
 
 
-def save_codex_credentials(*, value: str) -> None:
+def _save_keyring(*, value: str) -> None:
     """Publish verified chunks before replacing the current login's entry."""
     previous = keyring.get_password(_SERVICE, _ACCOUNT)
     # A new login must also be able to replace a corrupt manifest.

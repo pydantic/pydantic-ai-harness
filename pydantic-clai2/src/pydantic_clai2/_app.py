@@ -73,7 +73,7 @@ async def chat(
     store = store or SettingsStore()
     session = Session(agent, deps=deps, plugins=plugins, usage_limits=usage_limits)
     session.model = settings.model
-    auth = CodexAuth(console)
+    auth = CodexAuth(console, credentials_file=store.path.with_name('credentials.json'))
     session.resolve_model = lambda name: auth.model(name) if name.startswith('openai-codex:') else name
     if session.model is None and agent.model is None:
         console.print('Choose a model with /set model <Tab>.', style=theme.INFO)

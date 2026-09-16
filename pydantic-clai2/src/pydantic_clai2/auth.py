@@ -2,6 +2,7 @@
 
 import asyncio
 import webbrowser
+from pathlib import Path
 
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai.exceptions import UserError
@@ -23,9 +24,13 @@ _CREDENTIALS = TypeAdapter(OpenAICodexCredentials)
 class CodexCredentials(OpenAICodexCredentialSource):
     """Keep tokens out of SQLite and persist core-managed refreshes in keyring."""
 
+    def __init__(self, *, fallback: Path) -> None:
+        """Name the private file used only when no keyring backend is configured."""
+        self.fallback = fallback
+
     async def load(self) -> OpenAICodexCredentials:
         """Load credentials without falling back to another application's tokens."""
-        value = await asyncio.to_thread(load_codex_credentials)
+        value = await asyncio.to_thread(load_codex_credentials, fallback=self.fallback)
         if value is None:
             raise UserError('Codex is not connected. Run /login openai-codex.')
         try:
@@ -36,16 +41,16 @@ class CodexCredentials(OpenAICodexCredentialSource):
     async def save(self, credentials: OpenAICodexCredentials) -> None:
         """Persist login or refresh results using the configured OS credential backend."""
         value = _CREDENTIALS.dump_json(credentials).decode()
-        await asyncio.to_thread(save_codex_credentials, value=value)
+        await asyncio.to_thread(save_codex_credentials, value=value, fallback=self.fallback)
 
 
 class CodexAuth:
     """Conversation-owned login command and cached native Codex provider."""
 
-    def __init__(self, console: Console) -> None:
+    def __init__(self, console: Console, *, credentials_file: Path) -> None:
         """Defer all credential access until login or a Codex request."""
         self.console = console
-        self.source = CodexCredentials()
+        self.source = CodexCredentials(fallback=credentials_file)
         self.provider: OpenAICodexProvider | None = None
 
     async def login(self, args: list[str]) -> str:
@@ -70,6 +75,9 @@ class CodexAuth:
         finally:
             browser.cancel()
             await asyncio.gather(browser, return_exceptions=True)
+        # A keyring save removes the file, so its presence means the fallback was used.
+        if self.source.fallback.exists():
+            return f'Codex connected. No OS keyring is available, so credentials are saved in plaintext at {self.source.fallback}.'
         return 'Codex connected. Credentials saved in the OS credential store.'
 
     def model(self, name: str) -> OpenAICodexModel:

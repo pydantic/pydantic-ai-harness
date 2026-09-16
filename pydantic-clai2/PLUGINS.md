@@ -30,9 +30,10 @@ Keep the bundled guide aligned with this contract when changing plugin APIs.
 
 CLAI's `/login openai-codex` stores tokens in the configured keyring backend,
 not plugin settings. Large token bundles use multiple entries to fit Windows
-Credential Manager's size limit. This does not change plugin APIs or add a
-plaintext fallback. See [Codex authentication](README.md#codex-authentication)
-for storage and security details.
+Credential Manager's size limit. When no keyring backend exists, tokens go to a
+`0600` file next to the settings database instead. None of this changes plugin
+APIs. See [Codex authentication](README.md#codex-authentication) for storage and
+security details.
 
 ## Where plugins live
 

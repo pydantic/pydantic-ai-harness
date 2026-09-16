@@ -74,6 +74,13 @@ Installing or selecting a plaintext backend can store tokens in plaintext. Core 
 token refresh through CLAI's `OpenAICodexCredentialSource`. Tests mock keyring,
 the browser, and OAuth exchange and do not access real credentials.
 
+When no keyring backend exists at all (keyring raises `NoKeyringError` or
+`InitError`, typical on a headless Linux box or over SSH), tokens go to
+`credentials.json` next to `config.db`, written with mode `0600`. `/login` says so
+in its confirmation. A locked keyring is not treated as missing; unlock it instead.
+Once a keyring becomes available, the next login or token refresh moves the tokens
+there and deletes the file.
+
 The default Coder shell runs under your OS identity, without a sandbox. Commands
 can read files and access credential backends available to that identity, including
 CLAI's tokens. Keyring is storage, not isolation from model-controlled commands.
