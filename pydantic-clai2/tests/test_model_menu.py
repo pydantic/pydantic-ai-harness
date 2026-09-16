@@ -106,7 +106,8 @@ def test_model_menu_rows_details_and_flow(tmp_path: Path) -> None:
     assert menu.current == 'openai-codex:gpt-6-astra'
     items = menu.items()
     current = next(item for item in items if item.value == menu.current)
-    assert current.label.endswith('(current)')
+    assert current.label == f'{menu.current} (current)'
+    assert all(item.label == item.value for item in items if item.value != menu.current)
     assert menu.index_of(menu.current) == items.index(current)
     assert menu.index_of('nope') == 0
     details = menu.details(current)

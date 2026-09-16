@@ -115,7 +115,7 @@ class ModelMenu:
         """One row per model, marking the current one."""
         return [
             MenuItem(
-                f'{model.name:<44} {_tokens(model.context_window)}{" (current)" if model.name == self.current else ""}',
+                f'{model.name}{" (current)" if model.name == self.current else ""}',
                 value=model.name,
             )
             for model in self.models

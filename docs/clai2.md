@@ -106,7 +106,8 @@ edit saves and applies immediately, the same as `/set KEY VALUE`.
 
 `/model` opens a picker over every model CLAI knows: genai-prices' catalog
 filtered to providers Pydantic AI can run, plus core's own model list, plus
-whatever you have set now. The right side shows the provider, context window,
+whatever you have set now. The left side shows model names and marks the current
+model; token counts stay in the details. The right side shows the provider, context window,
 prices, and any settings you have saved for that model. Type to filter. Enter
 makes it the model for the next prompt. `S` opens that model's settings:
 `max_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `timeout`, the two
