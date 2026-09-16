@@ -117,6 +117,7 @@ def test_provider_catalog_and_back_navigation(tmp_path: Path) -> None:
     )
     assert run_model_flow(menu, script.runners) == ['Saved model. Applied.']
     assert context.settings.model == 'openai-codex:gpt-5.6-luna'
+    assert run_model_flow(menu, Script(lists=[pick('openai-codex'), pick(0)], choices=[], texts=[]).runners) == []
 
 
 def test_settings_shortcut_does_not_consume_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
