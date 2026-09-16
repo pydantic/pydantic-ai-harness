@@ -104,7 +104,13 @@ edit saves and applies immediately, the same as `/set KEY VALUE`.
 
 ## Models and their settings
 
-`/model` opens a picker over every model CLAI knows: genai-prices' catalog
+`/model` opens a searchable provider list, then a model picker for that provider.
+Esc from the model list returns to providers. Providers are unique prefixes from
+the merged catalog, including `openai-codex`. Its suggestions include
+`gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, and `gpt-6-astra`; availability
+depends on your account. Unknown prices and context limits are not inferred.
+
+The model catalog combines genai-prices' catalog
 filtered to providers Pydantic AI can run, plus core's own model list, plus
 whatever you have set now. The left side shows model names and marks the current
 model; token counts stay in the details. The right side shows the provider, context window,

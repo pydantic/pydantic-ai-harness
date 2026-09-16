@@ -100,6 +100,25 @@ def test_model_settings_source(tmp_path: Path) -> None:
     assert 'current  high' in menu.details(MenuItem('thinking', value='thinking'))
 
 
+def test_provider_catalog_and_back_navigation(tmp_path: Path) -> None:
+    context, _ = make_context(tmp_path)
+    menu = ModelMenu(context)
+    assert menu.providers() == sorted({model.name.partition(':')[0] for model in menu.models})
+    codex = menu.for_provider('openai-codex')
+    assert all(model.provider == 'openai-codex' for model in codex.models)
+    assert {f'openai-codex:gpt-5.6-{suffix}' for suffix in ('luna', 'terra', 'sol')} <= {
+        model.name for model in codex.models
+    }
+    assert menu.build_providers().highlighted == MenuItem('openai-codex', value='openai-codex')
+    script = Script(
+        lists=[pick('anthropic'), MenuResult(cancelled=True), pick('openai-codex'), pick('openai-codex:gpt-5.6-luna')],
+        choices=[],
+        texts=[],
+    )
+    assert run_model_flow(menu, script.runners) == ['Saved model. Applied.']
+    assert context.settings.model == 'openai-codex:gpt-5.6-luna'
+
+
 def test_settings_shortcut_does_not_consume_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     context, _ = make_context(tmp_path)
     menu = ModelMenu(context)
@@ -132,7 +151,7 @@ def test_model_menu_rows_details_and_flow(tmp_path: Path) -> None:
     assert menu.build() is not None
     marker = menu.settings_marker(object(), priced)
     script = Script(
-        lists=[marker, pick('max_tokens'), MenuResult(cancelled=True), pick(priced.value)],
+        lists=[pick('anthropic'), marker, pick('max_tokens'), MenuResult(cancelled=True), pick(priced.value)],
         choices=[],
         texts=[typed('42')],
     )
