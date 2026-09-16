@@ -100,6 +100,20 @@ def test_model_settings_source(tmp_path: Path) -> None:
     assert 'current  high' in menu.details(MenuItem('thinking', value='thinking'))
 
 
+def test_settings_shortcut_does_not_consume_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    context, _ = make_context(tmp_path)
+    menu = ModelMenu(context)
+    keys = iter(['s', 'ctrl-s'])
+    monkeypatch.setattr('pydantic_clai2.model_menu.menu_key', lambda: next(keys))
+    widget = menu.build()
+    result = widget.run()
+    assert widget.highlighted is not None
+    assert 's' in str(widget.highlighted.value).lower()
+    assert result == menu.settings_marker(widget, widget.highlighted)
+    with pytest.raises(StopIteration):
+        next(keys)
+
+
 def test_model_menu_rows_details_and_flow(tmp_path: Path) -> None:
     context, applied = make_context(tmp_path)
     menu = ModelMenu(context)

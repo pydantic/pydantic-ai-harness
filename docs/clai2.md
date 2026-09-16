@@ -109,7 +109,7 @@ filtered to providers Pydantic AI can run, plus core's own model list, plus
 whatever you have set now. The left side shows model names and marks the current
 model; token counts stay in the details. The right side shows the provider, context window,
 prices, and any settings you have saved for that model. Type to filter. Enter
-makes it the model for the next prompt. `S` opens that model's settings:
+makes it the model for the next prompt. `Ctrl+S` opens that model's settings:
 `max_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `timeout`, the two
 penalties, `parallel_tool_calls`, `thinking`, and `service_tier`. They are
 saved per model and passed to every run with that model. Unsupported settings

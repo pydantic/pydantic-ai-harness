@@ -16,13 +16,13 @@ from .model_catalog import CatalogModel, catalog
 from .model_settings import ModelSettingsForm
 from .settings_store import SettingsStore
 
-_HINT = 'type to filter - Enter use this model - S settings - Esc close'
+_HINT = 'type to filter - Enter use this model - Ctrl+S settings - Esc close'
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 
 
 @dataclass(frozen=True)
 class _EditSettings:
-    """What the `s` key hands back to the loop instead of a model name."""
+    """What the `Ctrl+S` key hands back to the loop instead of a model name."""
 
     model: str
 
@@ -99,7 +99,7 @@ def _choices(annotation: object) -> tuple[str, ...]:
 
 
 class ModelMenu:
-    """The model list with a details pane; Enter picks, `s` opens that model's settings."""
+    """The model list with a details pane; Enter picks, `Ctrl+S` opens that model's settings."""
 
     def __init__(self, context: CommandContext) -> None:
         """The current model is always listed, even when no source knows it."""
@@ -146,14 +146,14 @@ class ModelMenu:
             .searchable()
             .initial_index(min(initial, max(len(self.models) - 1, 0)))
             .preview(self.details)
-            .on_key('s', self.settings_marker)
+            .on_key('ctrl-s', self.settings_marker)
             .footer_hint(_HINT)
             .key_source(menu_key)
             .build()
         )
 
     def settings_marker(self, menu: object, item: MenuItem) -> MenuResult:
-        """S: hand the model back to the loop tagged for its settings editor."""
+        """Ctrl+S: hand the model back to the loop tagged for its settings editor."""
         return MenuResult(item=MenuItem(item.label, value=_EditSettings(str(item.value))))
 
     def choose(self, name: str) -> str:
@@ -178,7 +178,7 @@ def _tokens(count: int | None) -> str:
 
 
 def run_model_flow(menu: ModelMenu, runners: Runners = TERMINAL) -> list[str]:
-    """Show the list; Enter picks and closes, `s` edits settings and returns to the list."""
+    """Show the list; Enter picks and closes, `Ctrl+S` edits settings and returns to the list."""
     messages: list[str] = []
     cursor = menu.index_of(menu.current)
     while True:
