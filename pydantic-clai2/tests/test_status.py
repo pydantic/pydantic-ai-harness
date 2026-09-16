@@ -43,7 +43,7 @@ def test_tool_status_transitions() -> None:
 
 
 @pytest.mark.parametrize('truecolor', [False, True])
-async def test_binary_spinner_and_shimmer(monkeypatch: pytest.MonkeyPatch, truecolor: bool) -> None:
+async def test_shimmer_without_spinner(monkeypatch: pytest.MonkeyPatch, truecolor: bool) -> None:
     monkeypatch.setenv('COLORTERM', 'truecolor' if truecolor else '')
     output = io.StringIO()
     frames: list[str] = []
@@ -60,11 +60,10 @@ async def test_binary_spinner_and_shimmer(monkeypatch: pytest.MonkeyPatch, truec
         while len(frames) < 11:
             await original_sleep(0)
     plain = [re.sub(r'\x1b\[[0-9;]*m|\x1b8', '', frame) for frame in frames]
-    assert plain[0].startswith('010010 test??')
-    assert plain[1].startswith('001100 test??')
-    assert plain[0] == plain[10]
+    assert plain[0].startswith('test?? | context:')
+    assert all(frame == plain[0] for frame in plain)
     assert all(len(frame) == 39 for frame in plain)
-    assert frames[0][6:] != frames[10][6:]
+    assert frames[0] != frames[10]
     assert ('38;2;' in frames[0]) == truecolor
     assert ('\x1b[38;2;155;119;255m' if truecolor else '\x1b[35m') in frames[0]
     assert ('\x1b[38;2;0;255;235m' if truecolor else '\x1b[96m') not in output.getvalue()

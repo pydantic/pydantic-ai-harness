@@ -2,8 +2,6 @@
 
 The startup pyramid and splash behavior are adapted from
 https://github.com/code-puppy/code_puppy/blob/main/code_puppy/splash.py.
-The binary spinner frames are from
-https://github.com/mpfaffenberger/code_puppy_core_plugins/blob/main/code_puppy_core_plugins/puppy_spinner/builtin_frames.py.
 The command registry and completion design also reference Code Puppy.
 
 MIT License

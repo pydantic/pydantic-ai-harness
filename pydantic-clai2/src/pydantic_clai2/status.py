@@ -19,9 +19,6 @@ from rich.console import Console
 
 from . import theme
 
-# Code Puppy's puppy_spinner/builtin_frames.py, binary preset.
-_BINARY_FRAMES = ('010010', '001100', '100101', '111010', '111101', '010111', '101011', '111000', '110011', '110101')
-
 
 @dataclass(kw_only=True)
 class Status:
@@ -98,10 +95,7 @@ class StatusLine:
         if height < 3:
             return
         # Leave one column unused so the footer cannot trigger autowrap.
-        text = ''.join(
-            char if char.isascii() and char.isprintable() else '?'
-            for char in self.status.text(_BINARY_FRAMES[frame % len(_BINARY_FRAMES)])
-        )
+        text = ''.join(char if char.isascii() and char.isprintable() else '?' for char in self.status.text())
         prefix = ''
         if height != self._height:
             prefix = f'\x1b[1;{height - 1}r'
