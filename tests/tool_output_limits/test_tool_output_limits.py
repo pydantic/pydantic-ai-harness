@@ -905,7 +905,7 @@ class TestSummarize:
         # No handler means the nested run takes the non-streaming request path, which this
         # summarizer rejects; the failure degrades to the `then` fallback (#687).
         cap: ToolOutputLimits[object] = ToolOutputLimits(
-            bands=[Band(over=5, action=Summarize(model=_stream_only_summarizer(), then=Truncate(max_chars=10)))]
+            bands=[Band(over=5, action=Summarize(model=_stream_only_summarizer(), then=Truncate(max_chars=95)))]
         )
         out = await _run(cap, 'x' * 100)
         assert isinstance(out, str) and 'truncated' in out
