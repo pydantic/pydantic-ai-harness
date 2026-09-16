@@ -32,8 +32,11 @@ The `playwright` extra pulls in Playwright, and Chromium is a separate binary
 download:
 
 ```bash
-uv add "pydantic-ai-harness[playwright]"
-playwright install chromium
+pip/uv-add "pydantic-ai-harness[playwright]"
+```
+
+```bash
+py-cli playwright install chromium
 ```
 
 If the Chromium binary is missing at runtime, the browser tool returns the
@@ -489,6 +492,17 @@ For untrusted-input scenarios, run the browser in a container or VM with an
 egress firewall, or front it with a proxy, and pair it with the harness's
 tool-approval hooks for consequential actions. Treat these as defense in depth,
 not a guarantee.
+
+## Further reading
+
+- [Browser automation with Pydantic-AI + Playwright](https://techcommunity.microsoft.com/blog/azuredevcommunityblog/browser-automation-with-pydantic-ai--playwright/4547971) (Microsoft) -- this
+  capability driving a manual QA pass over a live site, wired to Microsoft
+  Foundry models, with the run's OpenTelemetry traces.
+- [Browser Use](browser-use.md) -- the other browser capability. Each runs its
+  own browser, so give an agent one or the other.
+- [Playwright for Python](https://playwright.dev/python/) -- the automation
+  library underneath, and the reference for selector syntax.
+- [Capabilities](/ai/capabilities/overview/)
 
 ## API reference
 

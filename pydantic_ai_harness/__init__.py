@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from .browser_use import BrowserUse
     from .capability_creation import CapabilityCreation
     from .code_mode import CodeMode
-    from .coder import DEFAULT_ALLOWED_COMMANDS, Coder
+    from .coder import Coder
     from .compaction import (
         ClampOversizedMessages,
         ClearToolResults,
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from .subagents import SubAgent, SubAgents
     from .system_reminders import SystemReminders
     from .tool_output_limits import ToolOutputLimits
+    from .trajectory_judge import TrajectoryJudge
     from .warn_on_cache_busts import WarnOnCacheBusts
     from .youdotcom import YouResearch, YouSearch
 
@@ -66,7 +67,6 @@ __all__ = [
     'CodeMode',
     'Coder',
     'ConversationSearch',
-    'DEFAULT_ALLOWED_COMMANDS',
     'DEFAULT_RESEARCHER_INSTRUCTIONS',
     'DeduplicateFileReads',
     'DynamicWorkflow',
@@ -109,6 +109,7 @@ __all__ = [
     'TieredCompaction',
     'ToolGuardrail',
     'ToolOutputLimits',
+    'TrajectoryJudge',
     'WarnNearLimits',
     'WarnOnCacheBusts',
     'YouResearch',
@@ -153,6 +154,7 @@ _CAPABILITY_EXPORTS = {
     'TieredCompaction': 'compaction',
     'ToolGuardrail': 'guardrails',
     'ToolOutputLimits': 'tool_output_limits',
+    'TrajectoryJudge': 'trajectory_judge',
     'WarnNearLimits': 'compaction',
     'WarnOnCacheBusts': 'warn_on_cache_busts',
     'YouResearch': 'youdotcom',
@@ -160,7 +162,6 @@ _CAPABILITY_EXPORTS = {
 }
 
 _CONSTANT_EXPORTS = {
-    'DEFAULT_ALLOWED_COMMANDS': 'coder',
     'DEFAULT_RESEARCHER_INSTRUCTIONS': 'researcher',
     'LLM_API_KEY_ENV_PATTERNS': 'shell',
     'READ_ONLY_TOOL_NAMES': 'filesystem',

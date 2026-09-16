@@ -13,11 +13,16 @@ import functools
 import warnings as _warnings
 from collections.abc import AsyncIterator
 from dataclasses import replace as dc_replace
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 from unittest.mock import MagicMock
+from uuid import UUID
 
+import anyio
 import pytest
+from pydantic import BaseModel
 from pydantic_ai import (
     AbstractToolset,
     Agent,
@@ -165,6 +170,48 @@ class Person(TypedDict):
 def lookup_person(person: Person, count: int = 1) -> str:
     """Look up details for a person."""
     return f'{count}x {person["name"]} @ {person["home"]["street"]}'
+
+
+class Receipt(BaseModel):
+    """Fields whose Python type is not a JSON scalar."""
+
+    amount: Decimal
+    ident: UUID
+    when: datetime
+
+
+def get_receipt() -> Receipt:
+    """Fetch a receipt."""
+    return Receipt(
+        amount=Decimal('1.50'),
+        ident=UUID('00000000-0000-0000-0000-000000000001'),
+        when=datetime(2026, 1, 1),
+    )
+
+
+def get_prices() -> dict[Decimal, str]:
+    """Fetch prices by amount."""
+    return {Decimal('1.50'): 'USD'}
+
+
+def get_labels() -> dict[int, str]:
+    """Fetch labels by id."""
+    return {1: 'one'}
+
+
+def get_blobs() -> set[bytes]:
+    """Fetch binary blobs."""
+    return {b'\xff\xfe'}
+
+
+def get_sentinel() -> Any:
+    """Fetch a sentinel."""
+    return ...
+
+
+def get_colliding_labels() -> Any:
+    """Fetch labels whose keys collide once stringified."""
+    return {1: 'from-int', '1': 'from-str'}
 
 
 # Hand-built `ToolDefinition` objects + a tiny stub toolset are used by
@@ -371,6 +418,94 @@ class TestCodeMode:
             tools['run_code'],
         )
         assert result.return_value == {'output': 'Hello, Alice!\n'}
+
+    async def test_tool_result_crosses_in_the_shape_the_stub_declares(self) -> None:
+        """`Decimal`, `UUID` and `datetime` reach the sandbox as their JSON form.
+
+        `_build_type_check_stubs` derives the stub from the tool's JSON schema, so
+        those fields are declared `str`. Dumping in Python mode disagreed with that:
+        Monty rejects `Decimal` and `UUID` outright, and a `datetime` arrived where
+        the stub promised a `str`, so the type check passed and the snippet failed
+        at runtime.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_receipt))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "r = await get_receipt()\n[r['amount'], r['ident'], r['when']]"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == [
+            '1.50',
+            '00000000-0000-0000-0000-000000000001',
+            '2026-01-01T00:00:00',
+        ]
+
+        # The un-dumped result is still what the message history records.
+        assert result.metadata['tool_returns']['pyd_ai_code_mode__1'].content == get_receipt()
+
+    async def test_mapping_keys_cross_as_the_strings_the_stub_declares(self) -> None:
+        """A `Decimal` key reaches the sandbox as `'1.50'`, not as a `Decimal`.
+
+        JSON object keys are always strings, so the stub declares `dict[str, str]`
+        whatever the Python key type is. Leaving the key alone hit the same two
+        failures as the values: Monty rejects a `Decimal` key outright.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_prices))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "p = await get_prices()\np['1.50']"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == 'USD'
+
+    async def test_int_mapping_keys_cross_as_the_strings_the_stub_declares(self) -> None:
+        """An `int` key reaches the sandbox as `'1'`, so indexing with the declared `str` works.
+
+        This is the silent half: the stub declares `dict[str, str]`, so a snippet
+        indexing with a `str` type-checked and then raised `KeyError` against the
+        `int` key that actually arrived.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_labels))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "labels = await get_labels()\n[labels['1'], list(labels.keys())]"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == ['one', ['1']]
+
+    async def test_binary_survives_inside_a_set(self) -> None:
+        """A `set` recurses like the other array containers, so its binary leaves stay `bytes`.
+
+        Sending the set to `to_jsonable_python` whole would utf-8 decode the payload,
+        which arbitrary bytes fail.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_blobs))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'blobs = await get_blobs()\nblobs'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == [b'\xff\xfe']
+
+    async def test_ellipsis_crosses_as_itself(self) -> None:
+        """Monty holds `Ellipsis`, and JSON has no form for it, so it is left alone."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_sentinel))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'x = await get_sentinel()\nx is ...'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value is True
+
+    async def test_mapping_keys_that_collide_once_stringified_are_rejected(self) -> None:
+        """`1` and `'1'` both render as `'1'`, which would drop one value silently."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_colliding_labels))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'await get_colliding_labels()'
+        with pytest.raises(ModelRetry, match='renders as the JSON key'):
+            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
 
     async def test_run_code_can_chain_multiple_tool_calls_in_one_snippet(self) -> None:
         """A realistic LLM snippet that calls two tools in one `run_code` invocation."""
@@ -2516,6 +2651,102 @@ class TestCodeMode:
         assert unwound.is_set()
         with pytest.raises(ModelRetry, match='Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, tools['run_code'])
+
+    async def test_cancelled_scope_teardown_awaits_dispatched_work(self) -> None:
+        """The executor's cleanup `gather` is shielded from an already-cancelled anyio
+        scope, so still-pending dispatched work unwinds gracefully before `run_code`
+        returns (#559).
+
+        The sandbox defers `blocker()` and `cleanup_tool()`, then calls the sequential
+        `barrier()`. The barrier awaits `blocker` first, leaving `cleanup_tool`'s task
+        in `_pending`; cancelling the scope kills `blocker` at the barrier await, so
+        the executor's cleanup owns a still-running dispatched task while the enclosing
+        scope stays cancelled. Without the shield, that scope re-cancels the host every
+        event-loop cycle: either the cleanup `gather` is abandoned outright (the pending
+        task outlives `run_code`) or each re-cancel is forwarded through the `gather` to
+        the pending task, breaking every await of its cancellation handler. With the
+        shield the task sees exactly one cancellation, its handler's awaits survive, and
+        the runner stays blocked in the cleanup until the handler is released. Sequencing
+        is event-driven; the yield loop only gives an unshielded cleanup cycles to
+        misbehave.
+        """
+        blocker_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        cancel_seen = asyncio.Event()
+        release = asyncio.Event()
+        unwound = asyncio.Event()
+        extra_cancels = 0
+
+        async def blocker() -> str:
+            blocker_started.set()
+            await asyncio.Event().wait()
+            return 'unreachable'  # pragma: no cover
+
+        async def cleanup_tool() -> str:
+            nonlocal extra_cancels
+            cleanup_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_seen.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:  # pragma: no cover - regression path without the teardown shield
+                        extra_cancels += 1
+                unwound.set()
+                raise
+            return 'unreachable'  # pragma: no cover
+
+        def barrier() -> str:
+            return 'unreachable'  # pragma: no cover - cancelled at the barrier, never dispatched
+
+        class _SeqToolset(AbstractToolset[object]):
+            """Marks `barrier` as sequential; the other tools stay parallel."""
+
+            def __init__(self) -> None:
+                self._inner = _build_function_toolset(blocker, cleanup_tool, barrier)
+
+            @property
+            def id(self) -> str | None:
+                return None  # pragma: no cover
+
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
+                tools = await self._inner.get_tools(ctx)
+                return {
+                    n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) if n == 'barrier' else t
+                    for n, t in tools.items()
+                }
+
+            async def call_tool(
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
+            ) -> Any:
+                return await self._inner.call_tool(name, tool_args, ctx, tool)
+
+        wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        scope = anyio.CancelScope()
+
+        async def runner() -> None:
+            with scope:
+                code = 'a = blocker()\nb = cleanup_tool()\nbarrier()'
+                await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
+        task = asyncio.create_task(runner())
+        await blocker_started.wait()
+        await cleanup_started.wait()
+        scope.cancel()
+        await cancel_seen.wait()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done(), 'cleanup must wait for dispatched work to finish unwinding'
+        release.set()
+        await task
+        assert scope.cancelled_caught
+        assert unwound.is_set()
+        assert extra_cancels == 0, f'cancelled scope must not re-cancel dispatched work, got {extra_cancels} re-cancels'
 
     async def test_worker_crash_becomes_model_retry_and_resets_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A `MontyCrashedError` (worker death) becomes a retry with the session reset.
