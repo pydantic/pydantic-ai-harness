@@ -108,7 +108,7 @@ class StatusLine:
             self._height = height
         text = text[: max(0, width - 1)]
         highlight = frame % (len(text) + 12) - 6
-        shades = tuple(theme.sgr(color) for color in (theme.SUGAR, theme.LIGHT_PURPLE, theme.AQUA, theme.INFO))
+        shades = tuple(theme.sgr(color) for color in (theme.SUGAR, theme.LIGHT_PURPLE, theme.LITHIUM, theme.PURPLE))
         painted = ''.join(shades[min(abs(index - highlight) // 2, 3)] + char for index, char in enumerate(text))
         self.console.file.write(f'\x1b7{prefix}\x1b[{height};1H\x1b[2K{painted}\x1b[0m\x1b8')
         self.console.file.flush()

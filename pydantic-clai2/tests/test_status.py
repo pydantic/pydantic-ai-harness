@@ -66,6 +66,8 @@ async def test_binary_spinner_and_shimmer(monkeypatch: pytest.MonkeyPatch, truec
     assert all(len(frame) == 39 for frame in plain)
     assert frames[0][6:] != frames[10][6:]
     assert ('38;2;' in frames[0]) == truecolor
+    assert ('\x1b[38;2;155;119;255m' if truecolor else '\x1b[35m') in frames[0]
+    assert ('\x1b[38;2;0;255;235m' if truecolor else '\x1b[96m') not in output.getvalue()
     assert '\n' not in output.getvalue()
 
 
