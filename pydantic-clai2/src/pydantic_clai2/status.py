@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import math
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Self
 
 from pydantic_ai import AgentStreamEvent, FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
@@ -18,6 +19,7 @@ from pydantic_ai.messages import (
 from rich.console import Console
 
 from . import theme
+from .usage_report import format_cost
 
 
 @dataclass(kw_only=True)
@@ -27,6 +29,8 @@ class Status:
     model: str = 'agent default'
     context_tokens: int | None = None
     output_tokens: int | None = None
+    cost: Decimal | None = None
+    """Running session cost; `None` (hidden) until a priced response exists."""
     streamed_chars: int = 0
     activity: str = 'ready'
 
@@ -57,7 +61,8 @@ class Status:
         output = f'~{math.ceil(self.streamed_chars / 4):,} streamed tokens'
         if self.output_tokens is not None:
             output = f'{self.output_tokens:,} output tokens'
-        return f'{frame} {self.model} | context: {context} tokens | {output} | {self.activity}'.strip()
+        cost = '' if self.cost is None else f' | {format_cost(self.cost)}'
+        return f'{frame} {self.model} | context: {context} tokens | {output}{cost} | {self.activity}'.strip()
 
 
 class StatusLine:

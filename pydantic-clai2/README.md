@@ -150,12 +150,29 @@ Settings are validated before writes. `/set` updates the active settings snapsho
 legacy `/config` writes apply on restart; plugin changes apply on the next prompt.
 `--request-limit` controls the full prompt's model-request budget.
 
-Interactive commands: `/login`, `/set`, `/model`, `/help`, `/new`, `/exit`, `/config`, and `/plugins`.
+Interactive commands: `/login`, `/set`, `/model`, `/help`, `/new`, `/exit`, `/config`,
+`/plugins`, `/usage`, and `/cost`.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
 Unknown slash commands are not sent to the model. Up/down recall saved prompt
 history. Ctrl-D exits. Ctrl-C at input clears the line; during a run it cancels
 the turn and returns to input. No cancelled run is automatically retried.
+
+## Usage and cost
+
+`/usage` prints a table of the current conversation: one row per turn with the
+request count, input tokens, cache read and write tokens when a turn used them,
+output tokens, and cost, followed by a totals row. `/cost` prints the session
+total on one line. Both are derived from the retained messages, so `/new`
+resets them, and a cancelled turn's partial responses are counted.
+
+Prices come from core's genai-prices data for the response's model and provider.
+When there is no price data (a local model, `openrouter` and `vllm` models it
+does not list, or an unreleased model), the cost cell reads `unknown` rather
+than zero, the line under the table names the model, and totals exclude those
+responses. Cost is shown to four decimal places; a nonzero amount below that
+reads `<$0.0001`. There is no spending cap here; use the agent's `UsageLimits`
+for that.
 
 ## Ask CLAI to customize itself
 
@@ -298,7 +315,9 @@ string tool-argument deltas. The estimate is characters divided by four, not a
 provider tokenizer count. On completion it is replaced by reported run output
 usage. Context is the most recent response's reported input plus output tokens,
 not cumulative conversation billing or a context-window percentage; `?` means
-unavailable. During a request it may reflect the previous response.
+unavailable. During a request it may reflect the previous response. The running
+session cost (`$0.0123`) follows the output count, updated after each turn and
+hidden until a response has price data.
 
 While running, the footer reserves the terminal's bottom row using ANSI scrolling
 regions. Its text shimmers with a moving highlight at ten frames per second, with no spinner and a
