@@ -46,13 +46,23 @@ def _delete(*, services: list[str]) -> None:
 
 
 def _write_private(*, path: Path, value: str) -> None:
-    """Replace the file atomically so a refresh cannot leave half a token bundle behind."""
+    """Replace the file atomically, without ever writing through something already there.
+
+    A unique staging name plus `O_EXCL` means a symlink planted where the staging file
+    would go is refused rather than followed, concurrent saves cannot collide, and the
+    `0600` mode applies to a file this call created rather than an attacker's choice.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    staging = path.with_name(f'{path.name}.tmp')
-    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
-        file.write(value)
-    os.replace(staging, path)
+    for stale in path.parent.glob(f'{path.name}.*.tmp'):
+        stale.unlink(missing_ok=True)  # A killed write must not leave tokens on disk.
+    staging = path.with_name(f'{path.name}.{uuid4().hex}.tmp')
+    descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as file:
+            file.write(value)
+        os.replace(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)  # No-op once the replace succeeded.
 
 
 def load_codex_credentials(*, fallback: Path) -> str | None:

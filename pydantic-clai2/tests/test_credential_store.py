@@ -1,9 +1,11 @@
 """Exercise keyring storage with Windows' UTF-16 credential size limit, and the no-keyring file fallback."""
 
 import io
+import os
 import stat
 import sys
 from pathlib import Path
+from uuid import UUID
 
 import keyring
 import pytest
@@ -178,9 +180,51 @@ def test_file_fallback_when_no_keyring(fallback: Path, no_keyring: None) -> None
     assert load_codex_credentials(fallback=fallback) == '{"access_token":"first"}'
     save_codex_credentials(fallback=fallback, value='{"access_token":"refreshed"}')
     assert load_codex_credentials(fallback=fallback) == '{"access_token":"refreshed"}'
-    assert not fallback.with_name('credentials.json.tmp').exists()
+    assert list(fallback.parent.iterdir()) == [fallback]
     if sys.platform != 'win32':
         assert stat.S_IMODE(fallback.stat().st_mode) == 0o600
+
+
+def test_planted_staging_symlink_is_not_followed(
+    fallback: Path, no_keyring: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A symlink at the exact staging path the write would use never receives tokens."""
+    target = fallback.parent / 'stolen.txt'
+    fallback.parent.mkdir()
+    target.write_text('untouched')
+    staging = fallback.with_name(f'credentials.json.{"0" * 32}.tmp')
+    staging.symlink_to(target)
+    monkeypatch.setattr('pydantic_clai2.credential_store.uuid4', lambda: UUID(int=0))
+    save_codex_credentials(fallback=fallback, value='{"access_token":"secret"}')
+    assert target.read_text() == 'untouched'
+    assert not staging.is_symlink()
+    assert fallback.read_text() == '{"access_token":"secret"}'
+
+
+def test_staging_race_is_refused(fallback: Path, no_keyring: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file appearing between the stale sweep and the open is refused, not written through."""
+    real_open = os.open
+
+    def planting_open(path: str, flags: int, mode: int = 0o777) -> int:
+        if flags & os.O_EXCL:
+            Path(path).write_text('{"access_token":"attacker"}')
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr('pydantic_clai2.credential_store.os.open', planting_open)
+    with pytest.raises(FileExistsError):
+        save_codex_credentials(fallback=fallback, value='{"access_token":"secret"}')
+    assert not fallback.exists()
+
+
+def test_stale_staging_files_are_cleared(fallback: Path, no_keyring: None) -> None:
+    fallback.parent.mkdir()
+    stale = fallback.with_name('credentials.json.deadbeef.tmp')
+    stale.write_text('{"access_token":"leaked-after-a-crash"}')
+    unrelated = fallback.parent / 'other.tmp'
+    unrelated.write_text('mine')
+    save_codex_credentials(fallback=fallback, value='{"access_token":"fresh"}')
+    assert not stale.exists()
+    assert unrelated.read_text() == 'mine'
 
 
 def test_locked_keyring_is_not_a_fallback(fallback: Path, monkeypatch: pytest.MonkeyPatch) -> None:
