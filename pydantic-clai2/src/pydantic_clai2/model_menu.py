@@ -205,9 +205,7 @@ def _tokens(count: int | None) -> str:
     return f'{count:,} tokens' if count is not None else ''
 
 
-def run_model_flow(
-    menu: ModelMenu, runners: Runners = TERMINAL, *, connect_provider: bool = False
-) -> list[str]:
+def run_model_flow(menu: ModelMenu, runners: Runners = TERMINAL, *, connect_provider: bool = False) -> list[str]:
     """Show the list; Enter picks and closes, `Ctrl+S` edits settings and returns to the list."""
     messages: list[str] = []
     while True:
