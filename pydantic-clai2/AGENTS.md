@@ -161,6 +161,8 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `model_catalog.py` | model sources (genai-prices today) merged by `catalog()` |
 | `model_settings.py` | `ModelSettingsForm`, the editable subset of `ModelSettings` |
 | `commands.py` | `Command`, the registry, completion |
+| `usage_report.py` | `/usage`, `/cost`, and the footer cost, derived from `Session.messages` |
+| `status.py` | the footer `Status` fields and the `StatusLine` row painter |
 | `config.py` | `Settings`, `PluginSettings` |
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |
 | `theme.py` | brand palette, colour roles, `sgr()` |
