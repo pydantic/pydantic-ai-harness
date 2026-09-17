@@ -23,7 +23,7 @@ _UNKNOWN = 'unknown'
 
 @dataclass(kw_only=True)
 class SessionUsage:
-    """One `RunUsage` per turn plus the session total; `unpriced` names the models without price data."""
+    """One `RunUsage` per turn plus the retained-history total; `unpriced` names the models without price data."""
 
     turns: list[RunUsage]
     total: RunUsage
@@ -63,14 +63,14 @@ def format_cost(cost: Decimal) -> str:
 
 
 def cost_line(usage: SessionUsage) -> str:
-    """The `/cost` line: session total cost and tokens, with the unpriced models named once."""
+    """The `/cost` line: retained-history total cost and tokens, with the unpriced models named once."""
     if not usage.turns:
         return 'No usage yet.'
     total = usage.total
     cost = _UNKNOWN if total.cost is None else format_cost(total.cost)
     requests = f'{total.requests:,} request' + ('' if total.requests == 1 else 's')
     line = (
-        f'Session cost {cost}: {total.input_tokens + total.output_tokens:,} tokens'
+        f'Retained history cost {cost}: {total.input_tokens + total.output_tokens:,} tokens'
         f' ({total.input_tokens:,} in, {total.output_tokens:,} out) over {requests}'
     )
     if usage.unpriced:

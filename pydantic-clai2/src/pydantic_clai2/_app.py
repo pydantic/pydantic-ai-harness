@@ -156,7 +156,7 @@ async def chat(
     commands.register(
         Command(
             name='cost',
-            description='Show session cost and tokens',
+            description='Show retained history cost and tokens',
             handler=lambda _: cost_line(session_usage(session.messages)),
         )
     )

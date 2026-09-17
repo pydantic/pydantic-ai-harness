@@ -32,7 +32,7 @@ class Status:
     """Paint the context figure `WARNING`; set by whoever knows the window, such as the `compaction` plugin."""
     output_tokens: int | None = None
     cost: Decimal | None = None
-    """Running session cost; `None` (hidden) until a priced response exists."""
+    """Retained-history cost; `None` (hidden) until a priced response exists."""
     streamed_chars: int = 0
     activity: str = 'ready'
 

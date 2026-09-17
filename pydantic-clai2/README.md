@@ -229,15 +229,17 @@ the turn and returns to input. No cancelled run is automatically retried.
 
 `/usage` prints a table of the current conversation: one row per turn with the
 request count, input tokens, cache read and write tokens when a turn used them,
-output tokens, and cost, followed by a totals row. `/cost` prints the session
-total on one line. Both are derived from the retained messages, so `/new`
-resets them, and a cancelled turn's partial responses are counted.
+output tokens, and cost, followed by a totals row. `/cost` prints the retained
+history's total on one line. Both are derived from the retained messages, so
+`/new` resets them, and a cancelled turn's partial responses are counted.
+Compaction drops older responses from these totals; summary requests are not
+included. These are not lifetime spending totals or a billing ledger.
 
 Prices come from core's genai-prices data for the response's model and provider.
 When there is no price data (a local model, `openrouter` and `vllm` models it
 does not list, or an unreleased model), the cost cell reads `unknown` rather
-than zero, the line under the table names the model, and totals exclude those
-responses. Cost is shown to four decimal places; a nonzero amount below that
+than zero, the line under the table names the model, and only the cost total
+excludes those responses. Their requests and tokens remain in the usage totals. Cost is shown to four decimal places; a nonzero amount below that
 reads `<$0.0001`. There is no spending cap here; use the agent's `UsageLimits`
 for that.
 
@@ -426,8 +428,10 @@ not cumulative conversation billing or a context-window percentage; `?` means
 unavailable. As each request goes out, the `compaction` plugin replaces it with
 that request's estimated size and paints it yellow while the history is
 [over its threshold](#compacting-the-conversation); the response's reported
-usage takes over when it lands. The running session cost (`$0.0123`) follows the
+usage takes over when it lands. The retained-history cost (`$0.0123`) follows the
 output count, updated after each turn and hidden until a response has price data.
+After `/compact`, the footer keeps the previous figure until the next turn;
+`/cost` and `/usage` read the retained history immediately.
 
 While running, the footer reserves the terminal's bottom row using ANSI scrolling
 regions. Its text shimmers with a moving highlight at ten frames per second, with no spinner and a

@@ -66,7 +66,7 @@ def test_turns_group_tool_round_trips_and_skip_unpriced_responses() -> None:
     assert usage.total.cost == Decimal('0.01231')
     assert usage.unpriced == ('unknown',)
     assert cost_line(usage) == (
-        'Session cost $0.0123: 3,161 tokens (3,010 in, 151 out) over 3 requests.'
+        'Retained history cost $0.0123: 3,161 tokens (3,010 in, 151 out) over 3 requests.'
         ' No price data for unknown; those responses are not counted in costs.'
     )
 
@@ -94,7 +94,7 @@ def test_usage_table_shows_cache_columns_and_sub_cent_costs() -> None:
     assert 'unknown' in table
     assert 'Total' in table
     assert '3,010' in table
-    assert line.startswith('Session cost $0.0123')
+    assert line.startswith('Retained history cost $0.0123')
     assert format_cost(Decimal('0.00001')) == '<$0.0001'
     assert format_cost(Decimal(0)) == '$0.0000'
 
@@ -118,7 +118,7 @@ async def test_unpriced_test_model_and_clear() -> None:
     line = usage_command(session.messages, console=Console(file=output, width=120))
     assert 'Cache' not in output.getvalue()
     assert output.getvalue().count('unknown') == 3
-    assert line.startswith('Session cost unknown:')
+    assert line.startswith('Retained history cost unknown:')
     assert 'over 2 requests' in line
     assert 'No price data for no-such-model' in line
     session.clear()
@@ -167,7 +167,7 @@ async def test_shell_commands_and_footer(tmp_path: Path, monkeypatch: pytest.Mon
     )
     text = output.getvalue()
     assert 'Total' in text
-    assert text.count('Session cost $0.0123: ') == 2
+    assert text.count('Retained history cost $0.0123: ') == 2
     assert 'No usage yet.' in text
     assert '$' not in footers[0]
     assert all('$0.0123' in footer for footer in footers[1:4])
