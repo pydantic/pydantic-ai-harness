@@ -124,6 +124,47 @@ async def test_pasted_redirect_wins_over_callback(monkeypatch: pytest.MonkeyPatc
     assert await auth.source.load() == CREDENTIALS
 
 
+async def port_in_use(self: OpenAICodexOAuthFlow) -> OpenAICodexCredentials:
+    raise OSError(48, 'Address already in use')
+
+
+@pytest.mark.parametrize('same_tick', [False, True])
+async def test_paste_survives_a_failed_callback(monkeypatch: pytest.MonkeyPatch, *, same_tick: bool) -> None:
+    """A busy port loses the race; a callback that fails in the same tick as a good paste loses too."""
+
+    async def exchange_code(self: OpenAICodexOAuthFlow, code: str) -> OpenAICodexCredentials:
+        return CREDENTIALS
+
+    async def exchanged_elsewhere(self: OpenAICodexOAuthFlow) -> OpenAICodexCredentials:
+        raise UserError('invalid_grant')
+
+    output = io.StringIO()
+
+    async def paste(message: str) -> str:
+        while not same_tick and 'Address already in use' not in output.getvalue():
+            await asyncio.sleep(0)  # the listener fails, and is reported, before anything is pasted
+        return 'the-code'
+
+    monkeypatch.setattr(
+        OpenAICodexOAuthFlow, 'exchange_code_from_callback', exchanged_elsewhere if same_tick else port_in_use
+    )
+    monkeypatch.setattr(OpenAICodexOAuthFlow, 'exchange_code', exchange_code)
+    monkeypatch.setattr('webbrowser.open', fake_browser)
+    auth = CodexAuth(Console(file=output), read_line=paste)
+    assert 'connected' in await auth.login([])
+    assert await auth.source.load() == CREDENTIALS
+    assert ('Address already in use' in output.getvalue()) is not same_tick
+
+
+async def test_lost_race_then_rejected_paste(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(OpenAICodexOAuthFlow, 'exchange_code_from_callback', port_in_use)
+    monkeypatch.setattr('webbrowser.open', fake_browser)
+    _, auth = scripted(['', EOFError()])
+    with pytest.raises(UserError, match='cancelled'):
+        await auth.login([])
+    assert keyring.get_password('pydantic-clai2', 'openai-codex') is None
+
+
 @pytest.mark.parametrize(
     ('pasted', 'message'),
     [
@@ -168,14 +209,11 @@ async def test_auth_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(keyring, 'set_password', discard)
     with pytest.raises(UserError, match='did not retain'):
         await source.save(OpenAICodexCredentials(access_token='test', refresh_token='test', account_id='test'))
-    auth = CodexAuth(Console(file=io.StringIO()), read_line=never_pasted)
+    auth = CodexAuth(Console(file=io.StringIO()), read_line=never_pasted, login_timeout=0)
     with pytest.raises(ValueError, match='Usage'):
         await auth.login(['invalid'])
 
-    async def timeout(self: OpenAICodexOAuthFlow) -> OpenAICodexCredentials:
-        raise TimeoutError
-
-    monkeypatch.setattr(OpenAICodexOAuthFlow, 'exchange_code_from_callback', timeout)
+    monkeypatch.setattr(OpenAICodexOAuthFlow, 'exchange_code_from_callback', never_called_back)
     monkeypatch.setattr('webbrowser.open', fake_browser)
     with pytest.raises(UserError, match='timed out'):
         await auth.login([])

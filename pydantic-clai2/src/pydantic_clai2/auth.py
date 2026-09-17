@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.openai_codex import OpenAICodexModel
@@ -27,8 +28,12 @@ ReadLine = Callable[[str], Awaitable[str]]
 
 
 async def read_line(message: str) -> str:
-    """Read one line with a throwaway prompt; logins run between turns, so nothing else owns the terminal."""
-    return await PromptSession[str]().prompt_async(message)
+    """Read one line with a throwaway prompt; logins run between turns, so nothing else owns the terminal.
+
+    Console output while the prompt is open (a failed callback listener) goes above it, not into it.
+    """
+    with patch_stdout():
+        return await PromptSession[str]().prompt_async(message)
 
 
 def code_from_paste(*, text: str, state: str) -> str:
@@ -65,10 +70,11 @@ class CodexCredentials(OpenAICodexCredentialSource):
 class CodexAuth:
     """Conversation-owned login command and cached native Codex provider."""
 
-    def __init__(self, console: Console, *, read_line: ReadLine = read_line) -> None:
+    def __init__(self, console: Console, *, read_line: ReadLine = read_line, login_timeout: float = 300) -> None:
         """Defer all credential access until login or a Codex request."""
         self.console = console
         self.read_line = read_line
+        self.login_timeout = login_timeout
         self.source = CodexCredentials()
         self.provider: OpenAICodexProvider | None = None
 
@@ -90,7 +96,7 @@ class CodexAuth:
 
         browser = asyncio.create_task(open_browser())
         try:
-            credentials = await asyncio.wait_for(self._receive(flow), timeout=300)
+            credentials = await asyncio.wait_for(self._receive(flow), timeout=self.login_timeout)
             await self.source.save(credentials)
             self.provider = None
         except TimeoutError:
@@ -101,12 +107,31 @@ class CodexAuth:
         return 'Codex connected. Credentials saved in the OS credential store.'
 
     async def _receive(self, flow: OpenAICodexOAuthFlow) -> OpenAICodexCredentials:
-        """Race the localhost callback against a pasted redirect; the first to finish wins."""
+        """Race the localhost callback against a pasted redirect; the first to succeed wins.
+
+        A listener that cannot bind its port (another login, or a second CLAI) loses the race
+        instead of ending it: the paste path exists for exactly that case. Anything else the
+        callback reports, such as a denial in the browser, is a real outcome and ends the login.
+        """
         callback = asyncio.create_task(flow.exchange_code_from_callback())
         paste = asyncio.create_task(self._exchange_paste(flow))
+        pending = {callback, paste}
         try:
-            done, _ = await asyncio.wait({callback, paste}, return_when=asyncio.FIRST_COMPLETED)
-            return (callback if callback in done else paste).result()
+            while True:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    if task.exception() is None:
+                        return task.result()
+                failed = paste if paste in done else callback
+                if failed is callback and isinstance(callback.exception(), OSError):
+                    self.console.print(
+                        f'The local callback is unavailable ({callback.exception()}). Paste the URL instead.',
+                        style=theme.WARNING,
+                        markup=False,
+                        highlight=False,
+                    )
+                    continue
+                return failed.result()
         finally:
             callback.cancel()
             paste.cancel()
