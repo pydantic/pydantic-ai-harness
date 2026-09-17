@@ -29,14 +29,29 @@ class ProjectSettings:
     """Keys the `Settings` model does not know; reported once at startup and ignored."""
 
 
+def _present(path: Path) -> bool:
+    """Like `exists()`, except a permission failure counts as present: it is a boundary, not an absence."""
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def find_project_file(workspace: Path) -> Path | None:
-    """The nearest project file at or above `workspace`. The search stops at the first `.git`."""
+    """The nearest project file at or above `workspace`. The search stops at the first `.git`.
+
+    An unreadable project file is still returned, so loading it fails loudly rather than silently
+    dropping the repository's settings; an unreadable `.git` still ends the walk.
+    """
     start = workspace.resolve()
     for directory in (start, *start.parents):
         candidate = directory / PROJECT_FILE
-        if candidate.is_file():
+        if _present(candidate):
             return candidate
-        if (directory / '.git').exists():
+        if _present(directory / '.git'):
             return None
     return None
 

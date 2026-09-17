@@ -2,6 +2,7 @@
 
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,31 @@ def test_walk_up_stops_at_the_git_root(tmp_path: Path) -> None:
     assert find_project_file(nested) == inside
     assert find_project_file(repo) == inside
     assert find_project_file(nested / 'missing') == inside, 'the walk starts from the resolved path even if absent'
+
+
+def test_permission_failures_are_boundaries_not_absences(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = tmp_path / 'repo'
+    nested = repo / 'src'
+    nested.mkdir(parents=True)
+    write(tmp_path, {'thinking': False})
+    real_stat = Path.stat
+
+    def locked(name: str, parent: Path) -> None:
+        def stat(self: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+            if self.name == name and self.parent == parent:
+                raise PermissionError(f'{self} is locked')
+            return real_stat(self, follow_symlinks=follow_symlinks)
+
+        monkeypatch.setattr(Path, 'stat', stat)
+
+    locked('.git', repo)
+    assert find_project_file(nested) is None, 'an unreadable .git still marks the repository boundary'
+    locked('settings.json', repo / '.clai')
+    with pytest.raises(ValueError, match=r'repo/\.clai/settings\.json: '):
+        load_project_settings(nested)
+    (repo / '.clai').touch()
+    monkeypatch.setattr(Path, 'stat', real_stat)
+    assert find_project_file(nested) == tmp_path / PROJECT_FILE, 'a file named .clai is not a settings folder'
 
 
 def test_load_layers_between_store_and_flags(tmp_path: Path) -> None:
