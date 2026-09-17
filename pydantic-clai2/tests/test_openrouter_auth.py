@@ -3,11 +3,13 @@
 import asyncio
 import base64
 import hashlib
+import threading
 import webbrowser
 from io import StringIO
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import anyio
 import httpx
 import pytest
 from menu_script import make_context
@@ -56,11 +58,13 @@ async def test_login(mode: str) -> None:
             raise webbrowser.Error('unavailable')
         return mode != 'manual'
 
+    lines = iter(['', 'http://127.0.0.1/callback?code=secret-code'])
+
     async def read_line(message: str) -> str:
         prompt_started.set()
         try:
             if mode in ('paste', 'manual', 'browser_error'):
-                return 'http://127.0.0.1/callback?code=secret-code'
+                return next(lines)
             if mode == 'eof':
                 raise EOFError
             await asyncio.Future[None]()
@@ -213,3 +217,87 @@ async def test_browser_failure_preserves_connection(
     assert raw is not None
     assert openrouter.Connection.model_validate_json(raw) == original
     assert context.settings.model != 'openrouter:my/model'
+
+
+async def test_cancel_before_browser_returns() -> None:
+    browser_ready = asyncio.Event()
+    release = threading.Event()
+    browser_done = asyncio.Event()
+    loop = asyncio.get_running_loop()
+
+    def browser(url: str) -> bool:
+        loop.call_soon_threadsafe(browser_ready.set)
+        release.wait()
+        loop.call_soon_threadsafe(browser_done.set)
+        return True
+
+    async def unexpected_prompt(message: str) -> str:
+        raise AssertionError('Cancelled before opening the prompt')
+
+    auth = OpenRouterAuth(console=Console(file=StringIO()), open_browser=browser, read_line=unexpected_prompt)
+    login = asyncio.create_task(auth.login())
+    try:
+        await browser_ready.wait()
+        login.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await login
+    finally:
+        release.set()
+        await browser_done.wait()
+
+
+async def test_callback_clients_during_exchange(monkeypatch: pytest.MonkeyPatch) -> None:
+    browser_ready = asyncio.Event()
+    exchange_started = asyncio.Event()
+    release_exchange = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    urls: list[str] = []
+
+    def browser(url: str) -> bool:
+        urls.append(url)
+        loop.call_soon_threadsafe(browser_ready.set)
+        return True
+
+    async def prompt(message: str) -> str:
+        await asyncio.Future[None]()
+        raise AssertionError('unreachable')
+
+    async def exchange(request: httpx.Request) -> httpx.Response:
+        exchange_started.set()
+        await release_exchange.wait()
+        return httpx.Response(200, json={'key': 'key'})
+
+    original = asyncio.StreamWriter.wait_closed
+
+    async def disconnected(writer: asyncio.StreamWriter) -> None:
+        await original(writer)
+        raise ConnectionError('client disconnected during close')
+
+    monkeypatch.setattr(asyncio.StreamWriter, 'wait_closed', disconnected)
+    auth = OpenRouterAuth(
+        console=Console(file=StringIO()),
+        open_browser=browser,
+        read_line=prompt,
+        transport=httpx.MockTransport(exchange),
+    )
+    login = asyncio.create_task(auth.login())
+    try:
+        await browser_ready.wait()
+        callback = parse_qs(urlparse(urls[0]).query)['callback_url'][0]
+        async with httpx.AsyncClient() as client:
+            port = urlparse(callback).port
+            assert port is not None
+            async with await anyio.connect_tcp('127.0.0.1', port) as stream:
+                await stream.send(b'GET /callback?code=' + b'x' * 70000 + b' HTTP/1.1\r\n\r\n')
+                with pytest.raises((anyio.EndOfStream, anyio.BrokenResourceError)):
+                    await stream.receive()
+            assert (await client.post(callback)).status_code == 404
+            assert (await client.get(callback + '?code=first')).status_code == 200
+            await exchange_started.wait()
+            assert (await client.get(callback + '?code=duplicate')).status_code == 200
+            assert (await client.get(callback + '?error=late-denial')).status_code == 400
+            release_exchange.set()
+        assert (await login).get_secret_value() == 'key'
+    finally:
+        login.cancel()
+        await asyncio.gather(login, return_exceptions=True)
