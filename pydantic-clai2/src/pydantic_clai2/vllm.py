@@ -8,7 +8,7 @@ from prompt_toolkit import PromptSession
 from pydantic import BaseModel, Field, HttpUrl, SecretStr, TypeAdapter, ValidationError
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.providers.vllm import VLLMProvider
 from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingTypeStubs]
 
 from .command_context import CommandContext
@@ -82,7 +82,7 @@ def model(name: str) -> OpenAIChatModel:
         connection = Connection.model_validate_json(raw)
     except ValidationError:
         raise UserError('Stored connection is invalid. Reconfigure through /model > vllm.') from None
-    provider = OpenAIProvider(
+    provider = VLLMProvider(
         base_url=api_url(connection.url), api_key=connection.token.get_secret_value() or 'not-required'
     )
     return OpenAIChatModel(name.removeprefix('vllm:'), provider=provider)
