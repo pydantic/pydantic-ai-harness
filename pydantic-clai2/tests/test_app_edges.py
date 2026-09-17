@@ -101,3 +101,22 @@ async def test_model_string_and_non_command_plugin(tmp_path: Path, monkeypatch: 
         console=Console(file=io.StringIO()),
         store=SettingsStore(tmp_path / 'config.db'),
     )
+
+
+async def test_connected_provider_resolution(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inputs(monkeypatch, ['hello', '/exit'])
+
+    def model(name: str) -> TestModel:
+        assert name == 'vllm:test'
+        return TestModel(custom_output_text='Connected response')
+
+    monkeypatch.setattr('pydantic_clai2.vllm.model', model)
+    output = io.StringIO()
+    await chat(
+        Agent(TestModel()),
+        deps=None,
+        settings=Settings(model='vllm:test'),
+        store=SettingsStore(tmp_path / 'config.db'),
+        console=Console(file=output),
+    )
+    assert 'Connected response' in output.getvalue()
