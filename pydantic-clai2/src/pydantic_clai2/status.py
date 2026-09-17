@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Self
 
 from pydantic_ai import AgentStreamEvent, FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
@@ -57,7 +58,17 @@ class Status:
         output = f'~{math.ceil(self.streamed_chars / 4):,} streamed tokens'
         if self.output_tokens is not None:
             output = f'{self.output_tokens:,} output tokens'
-        return f'{frame} {self.model} | context: {context} tokens | {output} | {self.activity}'.strip()
+        try:
+            cwd = Path.cwd()
+        except OSError:
+            directory = '?'
+        else:
+            directory = str(cwd)
+            try:
+                directory = str(Path('~') / cwd.relative_to(Path.home()))
+            except (ValueError, RuntimeError, OSError):
+                pass
+        return f'{frame} {directory} | {self.model} | context: {context} tokens | {output} | {self.activity}'.strip()
 
 
 class StatusLine:

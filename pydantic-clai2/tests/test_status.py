@@ -3,6 +3,7 @@
 import asyncio
 import io
 import re
+from pathlib import Path
 
 import pytest
 from pydantic_ai import FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
@@ -29,6 +30,42 @@ def test_estimate_includes_tool_argument_deltas() -> None:
     assert '20 output tokens' in status.text()
 
 
+def test_working_directory(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    home = tmp_path / 'home'
+    project = home / 'project'
+    outside = tmp_path / 'home-other'
+    project.mkdir(parents=True)
+    outside.mkdir()
+
+    def home_path(cls: type[Path]) -> Path:
+        return home
+
+    monkeypatch.setattr(Path, 'home', classmethod(home_path))
+    status = Status(model='test')
+    for directory, label in ((home, '~'), (project, '~/project'), (outside, str(outside))):
+        monkeypatch.chdir(directory)
+        assert status.text().startswith(f'{label} | test | context:')
+
+
+def test_unavailable_working_directory(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing_cwd(cls: type[Path]) -> Path:
+        raise FileNotFoundError('directory removed')
+
+    monkeypatch.setattr(Path, 'cwd', classmethod(missing_cwd))
+    assert Status(model='test').text().startswith('? | test | context:')
+
+
+@pytest.mark.parametrize('error', [RuntimeError, OSError])
+def test_unavailable_home(monkeypatch: pytest.MonkeyPatch, error: type[Exception]) -> None:
+    cwd = Path.cwd()
+
+    def missing_home(cls: type[Path]) -> Path:
+        raise error('home unavailable')
+
+    monkeypatch.setattr(Path, 'home', classmethod(missing_home))
+    assert Status(model='test').text().startswith(f'{cwd} | test | context:')
+
+
 def test_tool_status_transitions() -> None:
     status = Status()
     status.observe(PartStartEvent(index=0, part=NativeToolCallPart('web_search', {})))
@@ -45,6 +82,8 @@ def test_tool_status_transitions() -> None:
 @pytest.mark.parametrize('truecolor', [False, True])
 async def test_shimmer_without_spinner(monkeypatch: pytest.MonkeyPatch, truecolor: bool) -> None:
     monkeypatch.setenv('COLORTERM', 'truecolor' if truecolor else '')
+    Path.home().mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(Path.home())
     output = io.StringIO()
     frames: list[str] = []
     original_sleep = asyncio.sleep
@@ -60,7 +99,7 @@ async def test_shimmer_without_spinner(monkeypatch: pytest.MonkeyPatch, truecolo
         while len(frames) < 11:
             await original_sleep(0)
     plain = [re.sub(r'\x1b\[[0-9;]*m|\x1b8', '', frame) for frame in frames]
-    assert plain[0].startswith('test?? | context:')
+    assert plain[0].startswith('~ | test?? | context:')
     assert all(frame == plain[0] for frame in plain)
     assert all(len(frame) == 39 for frame in plain)
     assert frames[0] != frames[10]

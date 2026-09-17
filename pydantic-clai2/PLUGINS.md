@@ -21,6 +21,10 @@ launchers. It also names current limits: PluginHost does not register providers,
 replace the prompt editor, or alter the built-in model catalog. Those need a
 custom agent launcher or a source change, as explained in the guide.
 
+The built-in status line shows the current working directory (`~` for home),
+model, token counts, and activity. Changing its layout requires a source change;
+there is no status-line registration API for plugins.
+
 Custom agents can opt in with `customization_guide()` from
 `pydantic_clai2.customization`. The tool only returns documentation; it does not
 write files, activate plugins, or grant permission to execute generated code.
