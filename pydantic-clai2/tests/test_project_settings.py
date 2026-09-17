@@ -86,6 +86,17 @@ def test_bad_values_fail_startup(tmp_path: Path, content: dict[str, JsonValue]) 
         load_project_settings(tmp_path)
 
 
+def test_unreadable_file_fails_startup_with_its_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    write(tmp_path, {'thinking': False})
+
+    def unreadable(self: Path) -> bytes:
+        raise PermissionError(f'{self} is locked')
+
+    monkeypatch.setattr(Path, 'read_bytes', unreadable)
+    with pytest.raises(ValueError, match=r'settings\.json: .* is locked'):
+        load_project_settings(tmp_path)
+
+
 def test_not_an_object_fails_startup(tmp_path: Path) -> None:
     path = tmp_path / PROJECT_FILE
     path.parent.mkdir()

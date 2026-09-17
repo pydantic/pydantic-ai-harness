@@ -240,10 +240,10 @@ class PluginLoader(Generic[DepsT]):
         self._store.save_plugin(entry.declaration.model_copy(update={'enabled': False}))
 
     async def remove(self, name: str) -> str:
-        """Unload the plugin and forget its saved declaration."""
+        """Unload the plugin and forget its saved declaration; a shipped declaration comes back as declared."""
         entry = self._entry(name)
         await self.unload(name)
-        if entry.path is not None:
+        if entry.path is not None and not entry.shipped:
             self._store.save_plugin(entry.declaration.model_copy(update={'enabled': False}))
             return f'Disabled {name}. Delete {entry.path} to remove the plugin itself.'
         self._store.delete_plugin(name)

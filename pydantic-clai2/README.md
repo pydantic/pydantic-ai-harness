@@ -191,9 +191,10 @@ still win: `/plugins disable NAME` remembers it in your user settings, and
 Plugins are trusted code running as you; read a repository's `.clai/settings.json`
 before you launch CLAI in it.
 
-The project file is read-only from inside CLAI. `/set KEY VALUE` and
-`/config set` write your user settings and apply for the current session, and the
-project value returns at the next start. In the `/set` menu a value the project
+The project file is read-only from inside CLAI. `/set KEY VALUE` writes your user
+settings and applies for the current session; `/config set` writes your user
+settings and applies on restart. Either way the project value returns at the
+next start. In the `/set` menu a value the project
 sets carries a muted `project` mark after it, and the details panel names the
 origin. CLAI prints the file it found when it starts.
 

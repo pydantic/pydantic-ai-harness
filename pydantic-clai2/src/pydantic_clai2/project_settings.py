@@ -41,7 +41,10 @@ def find_project_file(workspace: Path) -> Path | None:
 
 
 def load_project_settings(workspace: Path) -> ProjectSettings:
-    """Read and validate the project file for `workspace`. A bad value fails startup, an unknown key does not."""
+    """Read and validate the project file for `workspace`.
+
+    An unreadable file or a bad value fails startup with the path in the message; an unknown key does not.
+    """
     path = find_project_file(workspace)
     if path is None:
         return ProjectSettings()
@@ -50,7 +53,7 @@ def load_project_settings(workspace: Path) -> ProjectSettings:
         plugins = _PLUGINS.validate_python(raw.pop('plugins', []))
         overrides = {_SET_KEYS[name]: value for name, value in raw.items() if name in _SET_KEYS}
         resolve_settings(overrides)
-    except ValidationError as exc:
+    except (OSError, ValidationError) as exc:
         raise ValueError(f'{path}: {exc}') from exc
     return ProjectSettings(
         path=path,

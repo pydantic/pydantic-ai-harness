@@ -363,6 +363,19 @@ async def test_project_declarations_sit_above_builtins_and_below_the_store(tmp_p
         await fresh.loader.command(replace)
 
 
+async def test_remove_restores_a_project_plugin_that_names_a_file(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    path = harness.write('filed')
+    project = (PluginSettings(id='filed', factory='filed', path=str(path)),)
+    harness = Harness(tmp_path, project=project)
+    await harness.loader.load_all()
+    assert harness.loader.entries()[0].project and harness.loader.entries()[0].path == path
+
+    message = await harness.loader.command(['remove', 'filed'])
+    assert message.startswith('filed is declared by the project; restored its defaults.')
+    assert harness.store.plugins() == [] and harness.loader.entries()[0].state == 'enabled, loaded'
+
+
 async def test_repo_context_builtin_loads_the_workspace_instructions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
