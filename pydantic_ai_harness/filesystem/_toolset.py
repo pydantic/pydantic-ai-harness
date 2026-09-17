@@ -176,8 +176,12 @@ def _recoverable(
     return wrapper
 
 
-def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
-    """Format pre-split lines with line numbers and continuation hint."""
+def _format_lines(lines: Sequence[str], offset: int, limit: int, max_chars: int | None = None) -> str:
+    """Format pre-split lines with line numbers and continuation hint.
+
+    With `max_chars`, the window ends on the last complete numbered line that
+    fits, so the continuation offset always names the first line not shown.
+    """
     total = len(lines)
 
     if total == 0:
@@ -186,15 +190,27 @@ def _format_lines(lines: Sequence[str], offset: int, limit: int) -> str:
     if offset >= total:
         raise ValueError(f'Offset {offset} exceeds file length ({total} lines).')
 
-    selected = lines[offset : offset + limit]
-    numbered = [f'{i:>6}\t{line}' for i, line in enumerate(selected, start=offset + 1)]
+    numbered: list[str] = []
+    budget = max_chars
+    for number, line in enumerate(lines[offset : offset + limit], start=offset + 1):
+        rendered = f'{number:>6}\t{line}'
+        if budget is not None and len(rendered) > budget:
+            if not numbered:
+                return (
+                    f'... (Line {number} is {len(line):,} characters and does not fit the {max_chars:,}-character '
+                    f'read window. Use offset={number} to skip it, or a shell byte range to inspect it.)\n'
+                )
+            break
+        numbered.append(rendered)
+        if budget is not None:
+            budget -= len(rendered)
     result = ''.join(numbered)
     if not result.endswith('\n'):
         result += '\n'
 
-    remaining = total - (offset + len(selected))
+    remaining = total - (offset + len(numbered))
     if remaining > 0:
-        next_offset = offset + len(selected)
+        next_offset = offset + len(numbered)
         result += f'... ({remaining} more lines. Use offset={next_offset} to continue reading.)\n'
 
     return result
@@ -458,6 +474,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         denied_patterns: Sequence[str],
         protected_patterns: Sequence[str],
         max_read_lines: int,
+        max_read_chars: int | None = None,
         max_list_results: int,
         max_search_results: int,
         max_find_results: int,
@@ -476,6 +493,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._denied_patterns = list(denied_patterns)
         self._protected_patterns = list(protected_patterns)
         self._max_read_lines = max_read_lines
+        self._max_read_chars = max_read_chars
         self._max_list_results = max_list_results
         self._max_search_results = max_search_results
         self._max_find_results = max_find_results
@@ -669,7 +687,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         lines = text.splitlines(keepends=True)
         # Format before emitting: an out-of-range offset is a failed read, and
         # a failed read must not look like a successful one to subscribers.
-        body = _format_lines(lines, offset, limit)
+        body = _format_lines(lines, offset, limit, self._max_read_chars)
         if ctx is not None:
             await ctx.emit(FileReadEvent(**self._event_location(resolved), content_hash=content_hash))
 
