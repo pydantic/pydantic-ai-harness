@@ -82,9 +82,10 @@ the browser, and OAuth exchange and do not access real credentials.
 
 When no keyring backend exists at all (keyring raises `NoKeyringError` or
 `InitError`, typical on a headless Linux box or over SSH), credentials go to a
-`0600` file next to `config.db` instead, named for the account: Codex uses
-`credentials-openai-codex.json`, and the vllm and openrouter connections use their
-own files. `/login` says so in its confirmation. A locked keyring is not treated as
+`0600` file in `$XDG_CONFIG_HOME/pydantic-clai2/` (`~/.config/pydantic-clai2/` by
+default) instead, named for the account: Codex uses `credentials-openai-codex.json`,
+and the vllm and openrouter connections use their own files. Like keyring entries,
+these files are per user, so `--database PATH` does not move them. `/login` says so in its confirmation. A locked keyring is not treated as
 missing; unlock it instead. Once a keyring becomes available, the next login or
 token refresh moves the credentials there and deletes the file.
 
@@ -378,4 +379,4 @@ Open `/model`, choose `vllm`, then enter a trusted HTTP(S) server root or `/v1` 
 
 Open `/model`, choose `openrouter`, then paste an API key from https://openrouter.ai/keys in the masked prompt, then select a model from the live catalog. CLAI validates the key with `/api/v1/key` before fetching `/api/v1/models`. This flow uses API-key authentication, not browser OAuth.
 
-The connection is saved in the configured Python keyring backend after selection, or in a `0600` file next to `config.db` when no keyring backend exists, as described in [Codex authentication](#codex-authentication). Backend security depends on your keyring configuration. Tokens are not stored in SQLite or command history. The selected model persists across restarts. Select the provider again to browse its live models or reconfigure the saved connection. Discovery is explicit and has a 20-second network timeout; redirects are not followed. Agent inference uses Pydantic AI core.
+The connection is saved in the configured Python keyring backend after selection, or in a per-user `0600` file when no keyring backend exists, as described in [Codex authentication](#codex-authentication). Backend security depends on your keyring configuration. Tokens are not stored in SQLite or command history. The selected model persists across restarts. Select the provider again to browse its live models or reconfigure the saved connection. Discovery is explicit and has a 20-second network timeout; redirects are not followed. Agent inference uses Pydantic AI core.

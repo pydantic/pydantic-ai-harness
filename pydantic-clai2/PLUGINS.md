@@ -31,8 +31,8 @@ Keep the bundled guide aligned with this contract when changing plugin APIs.
 CLAI's `/login openai-codex` and the vllm and openrouter connections store tokens
 in the configured keyring backend, not plugin settings. Large token bundles use
 multiple entries to fit Windows Credential Manager's size limit. When no keyring
-backend exists, credentials go to a per-account `0600` file next to the settings
-database instead. None of this changes plugin APIs. See
+backend exists, credentials go to a per-account `0600` file under the user's CLAI config
+directory instead. None of this changes plugin APIs. See
 [Codex authentication](README.md#codex-authentication) for storage and security
 details.
 

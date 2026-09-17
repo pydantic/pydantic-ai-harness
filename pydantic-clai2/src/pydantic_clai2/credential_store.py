@@ -21,10 +21,11 @@ _NO_KEYRING = (NoKeyringError, InitError)
 
 
 def credentials_path(*, account: str = _ACCOUNT) -> Path:
-    """The private fallback file for one account, beside `config.db`.
+    """The private fallback file for one account, in the user's CLAI config directory.
 
-    Mirrors `SettingsStore`'s directory rule, which cannot be imported here without
-    constructing a database, and keeps accounts apart so one login cannot overwrite another.
+    Credentials are per user, like keyring entries, so `--database` does not move them.
+    Mirrors `SettingsStore`'s default directory rule, which cannot be imported here
+    without constructing a database.
     """
     root = Path(os.getenv('XDG_CONFIG_HOME', str(Path.home() / '.config'))) / 'pydantic-clai2'
     return root / f'credentials-{account}.json'
