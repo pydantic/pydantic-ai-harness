@@ -9,6 +9,7 @@ from pydantic import SecretStr
 from pydantic_ai.exceptions import UserError
 
 from pydantic_clai2 import vllm
+from pydantic_clai2.model_menu import open_model_menu
 
 
 @pytest.fixture
@@ -80,3 +81,57 @@ async def test_connect(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome:
         assert result == ('Saved model. Applied.' if outcome == 'ok' else 'Connection cancelled.')
         if outcome == 'ok':
             assert context.settings.model == 'vllm:my/model'
+
+
+@pytest.mark.parametrize('action', ['browse', 'configure', None])
+async def test_saved_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, action: str | None) -> None:
+    context, _ = make_context(tmp_path)
+    connection = vllm.Connection(url='http://localhost:8000', token=SecretStr('test'))
+    vllm.save_connection(connection)
+    monkeypatch.setattr(vllm, 'connection_action', lambda: action)
+
+    async def prompt() -> vllm.Connection:
+        assert action == 'configure'
+        return connection
+
+    async def discovery(saved: vllm.Connection) -> list[str]:
+        assert saved == connection
+        return ['my/model']
+
+    def choose(names: list[str]) -> str:
+        return names[0]
+
+    monkeypatch.setattr(vllm, 'prompt_connection', prompt)
+    monkeypatch.setattr(vllm, 'discover', discovery)
+    monkeypatch.setattr(vllm, 'choose', choose)
+    assert await vllm.connect(context, []) == ('Connection cancelled.' if action is None else 'Saved model. Applied.')
+
+
+async def test_provider_menu_connection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    context, _ = make_context(tmp_path)
+    keys = iter([*'vllm', 'enter', *'vllm', 'enter'])
+    monkeypatch.setattr('pydantic_clai2.model_menu.menu_key', lambda: next(keys))
+    results = iter(['Connection cancelled.', 'Saved model. Applied.'])
+
+    async def connect(context: object, args: list[str]) -> str:
+        return next(results)
+
+    monkeypatch.setattr(vllm, 'connect', connect)
+    assert await open_model_menu(context) == 'Saved model. Applied.'
+
+
+async def test_corrupt_connection_recovery(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    context, _ = make_context(tmp_path)
+
+    def invalid(*, account: str) -> str:
+        return 'invalid'
+
+    monkeypatch.setattr(vllm, 'load_codex_credentials', invalid)
+    with pytest.raises(UserError, match='Stored connection'):
+        vllm.model('vllm:test')
+
+    async def prompt() -> None:
+        return None
+
+    monkeypatch.setattr(vllm, 'prompt_connection', prompt)
+    assert await vllm.connect(context, []) == 'Connection cancelled.'

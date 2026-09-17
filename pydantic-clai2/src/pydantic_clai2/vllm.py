@@ -4,18 +4,16 @@ import asyncio
 import json
 
 import httpx
-import keyring
 from prompt_toolkit import PromptSession
-from pydantic import BaseModel, Field, HttpUrl, SecretStr, TypeAdapter
+from pydantic import BaseModel, Field, HttpUrl, SecretStr, TypeAdapter, ValidationError
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingTypeStubs]
 
 from .command_context import CommandContext
+from .credential_store import load_codex_credentials, save_codex_credentials
 from .menu_worker import menu_key, run_worker
-
-_SERVICE = 'pydantic-clai2.vllm'
 
 
 class Connection(BaseModel):
@@ -66,15 +64,18 @@ def save_connection(connection: Connection) -> None:
     """Keep credentials out of command history and SQLite."""
     value = connection.model_dump()
     value['token'] = connection.token.get_secret_value()
-    keyring.set_password(_SERVICE, 'connection', json.dumps(value))
+    save_codex_credentials(value=json.dumps(value), account='vllm')
 
 
 def model(name: str) -> OpenAIChatModel:
     """Resolve a saved vLLM selection through core, without global API-key fallbacks."""
-    raw = keyring.get_password(_SERVICE, 'connection')
+    raw = load_codex_credentials(account='vllm')
     if raw is None:
-        raise UserError('Connect first with /vllm.')
-    connection = Connection.model_validate_json(raw)
+        raise UserError('Connect first through /model > vllm.')
+    try:
+        connection = Connection.model_validate_json(raw)
+    except ValidationError:
+        raise UserError('Stored connection is invalid. Reconfigure through /model > vllm.') from None
     provider = OpenAIProvider(
         base_url=api_url(connection.url), api_key=connection.token.get_secret_value() or 'not-required'
     )
@@ -98,16 +99,47 @@ async def connect(context: CommandContext, args: list[str]) -> str:
     """Prompt privately, discover models, then persist only after selection."""
     if args:
         raise ValueError('Usage: /vllm (URL and optional token are prompted separately)')
-    prompt: PromptSession[str] = PromptSession()
+    raw = await asyncio.to_thread(load_codex_credentials, account='vllm')
     try:
-        url = api_url(await prompt.prompt_async('vLLM server URL: '))
-        token = await prompt.prompt_async('Token (optional, Enter for none): ', is_password=True)
-    except (EOFError, KeyboardInterrupt):
+        connection = Connection.model_validate_json(raw) if raw else None
+    except (ValidationError, ValueError):
+        connection = None
+    if connection is not None:
+        action = await run_worker(connection_action)
+        if action is None:
+            return 'Connection cancelled.'
+        if action == 'configure':
+            connection = None
+    if connection is None:
+        connection = await prompt_connection()
+    if connection is None:
         return 'Connection cancelled.'
-    connection = Connection(url=url, token=SecretStr(token))
     names = await discover(connection)
     selected = await run_worker(lambda: choose(names))
     if selected is None:
         return 'Connection cancelled.'
     await asyncio.to_thread(save_connection, connection)
     return context.set_setting(['model', f'vllm:{selected}'])
+
+
+async def prompt_connection() -> Connection | None:
+    """Collect connection details without recording them in history."""
+    prompt: PromptSession[str] = PromptSession()
+    try:
+        url = api_url(await prompt.prompt_async('vLLM server URL: '))
+        token = await prompt.prompt_async('Token (optional, Enter for none): ', is_password=True)
+    except (EOFError, KeyboardInterrupt):
+        return None
+    return Connection(url=url, token=SecretStr(token))
+
+
+def connection_action() -> str | None:  # pragma: no cover -- real terminal.
+    """Reuse saved authentication or replace it from the provider menu."""
+    result = (
+        MenuBuilder('vllm connection')
+        .items([MenuItem('Browse models', value='browse'), MenuItem('Reconfigure connection', value='configure')])
+        .key_source(menu_key)
+        .build()
+        .run()
+    )
+    return result.item.value if not result.cancelled and result.item and isinstance(result.item.value, str) else None

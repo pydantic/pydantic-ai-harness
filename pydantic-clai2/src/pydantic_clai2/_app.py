@@ -91,13 +91,6 @@ async def chat(
     commands = Commands()
     commands.register(
         Command(
-            name='vllm',
-            description='Connect to a vLLM server and select a model',
-            handler=lambda args: vllm.connect(context, args),
-        )
-    )
-    commands.register(
-        Command(
             name='login',
             description='Connect your ChatGPT/Codex subscription',
             handler=auth.login,
