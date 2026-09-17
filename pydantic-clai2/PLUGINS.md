@@ -348,3 +348,9 @@ activate(host)
 for handler in host.handlers:
     await handler(TurnEnd(text='hi', outcome='completed'))
 ```
+
+## vllm connection
+
+Run `/vllm`, enter a trusted HTTP(S) server root or `/v1` URL, and optionally a token. CLAI queries `/v1/models` and opens a searchable model picker. HTTP sends tokens unencrypted; use HTTPS outside trusted local networks.
+
+The connection is saved in the configured Python keyring backend after selection; backend security depends on your keyring configuration. Tokens are not stored in SQLite or command history. The selected model persists across restarts. Run the command again to replace the connection. Discovery is explicit and has a 20-second network timeout; redirects are not followed. Agent inference uses Pydantic AI core.

@@ -13,7 +13,7 @@ from pydantic_ai.messages import ModelResponse
 from pydantic_ai.usage import UsageLimits
 from rich.console import Console
 
-from . import theme
+from . import theme, vllm
 from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
@@ -74,7 +74,9 @@ async def chat(
     session = Session(agent, deps=deps, plugins=plugins, usage_limits=usage_limits)
     session.model = settings.model
     auth = CodexAuth(console)
-    session.resolve_model = lambda name: auth.model(name) if name.startswith('openai-codex:') else name
+    session.resolve_model = lambda name: (
+        vllm.model(name) if name.startswith('vllm:') else auth.model(name) if name.startswith('openai-codex:') else name
+    )
     if session.model is None and agent.model is None:
         console.print('Choose a model with /set model <Tab>.', style=theme.INFO)
 
@@ -87,6 +89,13 @@ async def chat(
     context = CommandContext(settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting)
 
     commands = Commands()
+    commands.register(
+        Command(
+            name='vllm',
+            description='Connect to a vLLM server and select a model',
+            handler=lambda args: vllm.connect(context, args),
+        )
+    )
     commands.register(
         Command(
             name='login',
