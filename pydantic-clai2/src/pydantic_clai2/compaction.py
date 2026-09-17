@@ -63,7 +63,7 @@ def activate(host: PluginHost[None]) -> None:
         if after is before:
             return f'Nothing to compact: the last {config.keep_messages} messages are always kept.'
         host.conversation.replace_messages(after)
-        host.status.context_alert = False
+        # The status figure and its colour describe the last reading; the next request refreshes both.
         saved = estimate_token_count(before) - estimate_token_count(after)
         return f'Compacted {len(before)} messages down to {len(after)}; about {max(saved, 0):,} tokens saved.'
 

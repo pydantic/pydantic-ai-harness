@@ -285,7 +285,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
 
 
 def _reset_status(command: str, status: Status) -> None:
-    if command == '/new':
+    if command.split(maxsplit=1)[0] == '/new':
         status.context_tokens = None
         status.context_alert = False
         status.output_tokens = None

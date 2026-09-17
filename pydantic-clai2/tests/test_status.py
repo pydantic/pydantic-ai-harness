@@ -9,6 +9,7 @@ from pydantic_ai import FunctionToolCallEvent, FunctionToolResultEvent, PartDelt
 from pydantic_ai.messages import NativeToolCallPart, TextPart, ToolCallPart, ToolCallPartDelta, ToolReturnPart
 from rich.console import Console
 
+from pydantic_clai2._app import _reset_status  # pyright: ignore[reportPrivateUsage]
 from pydantic_clai2.status import Status, StatusLine
 from pydantic_clai2.theme import WARNING, sgr
 
@@ -46,6 +47,15 @@ async def test_footer_paints_the_context_figure_on_alert(monkeypatch: pytest.Mon
         pass
     painted = output.getvalue()
     assert f'{sgr(WARNING)}9{sgr(WARNING)}0' in painted and f'{sgr(WARNING)}m' not in painted
+
+
+def test_new_resets_the_figures_whatever_follows_it() -> None:
+    status = Status(context_tokens=90, context_alert=True, output_tokens=5, streamed_chars=8)
+    _reset_status('/new please', status)
+    assert status == Status()
+    status.context_alert = True
+    _reset_status('/newer', status)
+    assert status.context_alert
 
 
 def test_tool_status_transitions() -> None:

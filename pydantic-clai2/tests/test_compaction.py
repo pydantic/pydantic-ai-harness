@@ -61,7 +61,7 @@ async def test_compact_sends_the_history_and_focus_to_the_summariser() -> None:
     assert isinstance(summary_part, SystemPromptPart) and isinstance(first_part, UserPromptPart)
     assert summary_part.content == 'Summary of previous conversation:\n\nthe gist'
     assert first_part.content == 'hello there'
-    assert not host.status.context_alert
+    assert host.status.context_alert, 'the colour follows the figure: both wait for the next reading'
 
 
 async def test_compact_says_when_there_is_nothing_to_do() -> None:

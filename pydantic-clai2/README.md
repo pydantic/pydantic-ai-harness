@@ -201,7 +201,8 @@ The context figure in the status line turns yellow when a request went out with
 the history still above `max_fraction`, which means compaction could not bring
 it under: the kept tail alone is that large, or the assumed window is too big.
 `/compact` with a smaller `keep_messages`, `/new`, or a correct `context_window`
-fixes that.
+fixes that. Like the figure itself, the colour describes the last request and
+refreshes with the next one.
 
 ## Ask CLAI to customize itself
 
