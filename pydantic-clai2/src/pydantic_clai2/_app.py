@@ -23,7 +23,6 @@ from ._session import Session
 from .auth import CodexAuth
 from .command_context import CommandContext, CommandProvider
 from .commands import Command, Commands, config_command, config_completions, set_completions
-from .compaction import Compactor, context_window
 from .config import PluginSettings, Settings
 from .customization import customization_guide
 from .input_history import input_history
@@ -43,6 +42,7 @@ _PLUGIN_ACTIONS = ('list', 'add', 'enable', 'disable', 'remove', 'reload')
 
 DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='coder', factory='pydantic_ai_harness.coder:Coder', settings={'unrestricted_filesystem': True}),
+    PluginSettings(id='compaction', factory='pydantic_clai2.compaction', settings={}),
 )
 """Plugins CLAI ships enabled. `/plugins disable coder` turns the coding tools off; `remove` restores this."""
 
@@ -131,15 +131,6 @@ async def chat(
         )
     )
     commands.register(Command(name='exit', description='Quit CLAI', handler=lambda _: 'Goodbye.'))
-    status = Status()
-    compactor = Compactor(session=session, status=status, console=console, fallback_model=lambda: agent.model)
-    commands.register(
-        Command(
-            name='compact',
-            description='Replace the history with a summary; add words to say what it must keep',
-            handler=compactor.command,
-        )
-    )
     commands.register(
         Command(
             name='config',
@@ -148,12 +139,15 @@ async def chat(
             complete=config_completions,
         )
     )
+    status = Status()
     loader: PluginLoader[DepsT] = PluginLoader(
         store=store,
         console=console,
         commands=commands,
         session_start=lambda: SessionStart(agent=agent, settings=context.settings),
         builtin=builtin_plugins,
+        conversation=session,
+        status=status,
     )
     commands.register(
         Command(
@@ -183,7 +177,6 @@ async def chat(
         console=console,
         context=context,
         status=status,
-        compactor=compactor,
         prompt=prompt,
         interrupts=Interrupts(),
     )
@@ -208,21 +201,13 @@ class _Shell(Generic[DepsT, OutputT]):
     console: Console
     context: CommandContext
     status: Status
-    compactor: Compactor[DepsT, OutputT]
     prompt: PromptSession[str]
     interrupts: Interrupts
 
     async def run(self) -> SessionEndReason:
         while True:
             try:
-                model = self.session.model or _model_label(self.agent)
-                self.status.model = model
-                if self.session.model is not None or self.agent.model is not None:
-                    self.compactor.prepare(
-                        model,
-                        window=context_window(model, override=self.context.context_window(model)),
-                        compact_at=self.context.settings.compact_at,
-                    )
+                self.status.model = self.session.model or _model_label(self.agent)
                 text = (await self.prompt.prompt_async('> ')).strip()
             except KeyboardInterrupt:
                 if self.interrupts.press():
@@ -269,7 +254,6 @@ class _Shell(Generic[DepsT, OutputT]):
 
         async def run_prompt() -> None:
             nonlocal ended
-            await self.compactor.auto()
             ended = await _run_prompt(
                 self.session,
                 start.text,
@@ -303,6 +287,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
 def _reset_status(command: str, status: Status) -> None:
     if command == '/new':
         status.context_tokens = None
+        status.context_alert = False
         status.output_tokens = None
         status.streamed_chars = 0
 

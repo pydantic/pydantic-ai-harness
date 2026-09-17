@@ -66,7 +66,12 @@ which can retain globals removed from source; initialize plugin state explicitly
 
 Plugins are trusted code running as you. Only install what you trust.
 
-## The built-in plugin
+## The built-in plugins
+
+| Id | Backed by | What it adds |
+|---|---|---|
+| `coder` | `pydantic_ai_harness.coder:Coder` | the coding tools |
+| `compaction` | `pydantic_clai2.compaction` | `SummarizingCompaction` at 80% of the context window, `/compact`, and the status row's context warning |
 
 The coding tools are a plugin too. `/plugins list` shows `coder`, backed by
 `pydantic_ai_harness.coder:Coder`, marked `(built-in)` and enabled unless you
@@ -78,6 +83,15 @@ own declaration under the same name and it takes the built-in's place:
 
 ```text
 /plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": false}'
+```
+
+`compaction` works the same way. `/plugins disable compaction` turns automatic
+compaction and `/compact` off together; a declaration under the same name
+changes its settings (`max_fraction`, `keep_messages`, `context_window`; see the
+README):
+
+```text
+/plugins add compaction pydantic_clai2.compaction '{"max_fraction": 0.7, "context_window": 200000}'
 ```
 
 ## Managing plugins
@@ -315,6 +329,15 @@ settings = host.settings(NotifySettings)
 
 Bad or missing values fail at startup with a message naming your plugin.
 
+### Reach the conversation and the status row: `host.conversation`, `host.status`
+
+`host.conversation` is the retained history: `messages` is a snapshot,
+`replace_messages(...)` swaps it between turns, and `resolved_model()` is the
+model the next prompt will use. `host.status` is the footer's state; set
+`context_alert` to paint the context figure in the warning colour. The built-in
+`compaction` plugin uses both. A host built outside the shell gets an in-memory
+`Transcript` and a detached `Status`, so tests need no special case.
+
 ## Rules that keep plugins predictable
 
 - Handlers are `async`. There is no sync variant of anything.
@@ -350,6 +373,9 @@ activate(host)
 for handler in host.handlers:
     await handler(TurnEnd(text='hi', outcome='completed'))
 ```
+
+A plugin that reads the history gets a `Transcript` by default; pass
+`conversation=Transcript(messages=[...], model=TestModel())` to seed it.
 
 ## vllm connection
 

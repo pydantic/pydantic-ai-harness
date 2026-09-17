@@ -60,14 +60,8 @@ def test_settings_form_validates_and_converts() -> None:
         'service_tier': 'flex',
     }
     assert model_settings_from_json(everything).to_model_settings() == everything
-    # CLAI's own field never reaches the provider.
-    form = model_settings_from_json({**everything, 'context_window': 32_000})
-    assert form.context_window == 32_000
-    assert form.to_model_settings() == everything
     with pytest.raises(ValidationError):
         ModelSettingsForm(max_tokens=0)
-    with pytest.raises(ValidationError):
-        ModelSettingsForm(context_window=0)
     with pytest.raises(ValidationError):
         model_settings_from_json({'nope': 1})
 

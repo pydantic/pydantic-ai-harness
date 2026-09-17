@@ -21,16 +21,16 @@ def test_rows_details_and_validation(tmp_path: Path) -> None:
     context, _ = make_context(tmp_path)
     menu = FieldMenu(SettingsSource(context))
     keys = [row.key for row in menu.rows]
-    assert keys[:4] == ['model', 'run.request_limit', 'run.compact_at', 'display.thinking']
+    assert keys[:3] == ['model', 'run.request_limit', 'display.thinking']
     items = menu.items()
     assert items[0].label.startswith('model') and 'openai-codex:gpt-6-astra' in items[0].label
     thinking = next(row for row in menu.rows if row.key == 'display.thinking')
     model = menu.rows[0]
     assert thinking.choices == ('true', 'false')
     assert len(model.choices) > 8
-    assert 'choices  true, false' in menu.details(items[3])
+    assert 'choices  true, false' in menu.details(items[2])
     assert 'options; Enter opens a searchable list' in menu.details(items[0])
-    assert 'current  true (default)' in menu.details(items[3])
+    assert 'current  true (default)' in menu.details(items[2])
     assert 'choices' not in menu.details(items[1])
     assert menu.details(MenuItem('stray', value='nope')) == ''
     context.settings = context.settings.model_copy(update={'model': None})

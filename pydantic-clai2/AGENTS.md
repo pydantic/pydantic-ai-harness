@@ -75,7 +75,7 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
   (`agent.run(capabilities=...)`), so "active for the next prompt" is the
   natural unit; nothing rebuilds the agent.
 - **Built-ins are declarations, not code paths.** `DEFAULT_PLUGINS` in
-  `_app.py` lists what CLAI ships enabled (`coder`). The loader treats them
+  `_app.py` lists what CLAI ships enabled (`coder`, `compaction`). The loader treats them
   like drop-ins with the lowest precedence: a store declaration with the same
   id replaces one, `disable` persists an override, `remove` resets it. Do not
   special-case `Coder` anywhere else; the agent from `create_agent()` has no
@@ -160,7 +160,7 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `model_menu.py` | `/model`: the picker, `ModelSettingsSource`, `run_model_flow` |
 | `model_catalog.py` | model sources (genai-prices today) merged by `catalog()` |
 | `model_settings.py` | `ModelSettingsForm`, the editable subset of `ModelSettings` |
-| `compaction.py` | `/compact` and `compact_at`, wired to harness's `SummarizingCompaction` via `compact_now` |
+| `compaction.py` | the built-in `compaction` plugin: harness's `SummarizingCompaction`, `/compact`, the context alert |
 | `commands.py` | `Command`, the registry, completion |
 | `config.py` | `Settings`, `PluginSettings` |
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |

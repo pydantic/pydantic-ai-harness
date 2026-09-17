@@ -10,6 +10,7 @@ from pydantic_ai.messages import NativeToolCallPart, TextPart, ToolCallPart, Too
 from rich.console import Console
 
 from pydantic_clai2.status import Status, StatusLine
+from pydantic_clai2.theme import WARNING, sgr
 
 
 @pytest.fixture
@@ -27,6 +28,24 @@ def test_estimate_includes_tool_argument_deltas() -> None:
     status.output_tokens = 20
     assert 'context: 1,000 tokens' in status.text()
     assert '20 output tokens' in status.text()
+
+
+def test_toolbar_paints_the_context_figure_on_alert() -> None:
+    status = Status(model='m', context_tokens=90, context_alert=True)
+    assert status.toolbar() == [('', 'm | context: '), (WARNING, '90'), ('', ' tokens | ~0 streamed tokens | ready')]
+    status.context_alert = False
+    assert status.toolbar()[1] == ('', '90')
+    assert ''.join(text for _, text in status.toolbar()) == status.text()
+
+
+async def test_footer_paints_the_context_figure_on_alert(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('COLORTERM', 'truecolor')
+    output = io.StringIO()
+    status = Status(model='m', context_tokens=90, context_alert=True)
+    async with StatusLine(Console(file=output, force_terminal=True, width=80, height=24), status):
+        pass
+    painted = output.getvalue()
+    assert f'{sgr(WARNING)}9{sgr(WARNING)}0' in painted and f'{sgr(WARNING)}m' not in painted
 
 
 def test_tool_status_transitions() -> None:

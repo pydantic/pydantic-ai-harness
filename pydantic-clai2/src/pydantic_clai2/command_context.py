@@ -55,10 +55,6 @@ class CommandContext:
         """Saved overrides for `model`, ready for `agent.run`; `None` when there are none."""
         return model_settings_from_json(self.store.model_settings(model)).to_model_settings()
 
-    def context_window(self, model: str) -> int | None:
-        """The user's saved window for `model`, in tokens; `None` leaves it to the catalog."""
-        return model_settings_from_json(self.store.model_settings(model)).context_window
-
     def reset_setting(self, key: str) -> str:
         """Forget the saved override and apply the default now."""
         self.store.reset(key)

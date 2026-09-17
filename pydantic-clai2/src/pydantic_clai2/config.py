@@ -15,13 +15,6 @@ class Settings(BaseModel):
     request_limit: int = Field(
         default=10000, gt=0, description='Most model requests one prompt may make before the turn stops.'
     )
-    compact_at: float = Field(
-        default=0.8,
-        ge=0,
-        le=1,
-        allow_inf_nan=False,
-        description='Summarise the history before the next turn once it fills this fraction of the context window. 0 disables.',
-    )
     thinking: bool = Field(default=True, description="Show the model's thinking as it streams.")
     splash: bool = Field(default=True, description='Animate the startup splash. Takes effect next start.')
     shell_lines: int = Field(
@@ -40,7 +33,6 @@ class Settings(BaseModel):
 SETTING_FIELDS = {
     'model': 'model',
     'run.request_limit': 'request_limit',
-    'run.compact_at': 'compact_at',
     'display.thinking': 'thinking',
     'display.splash': 'splash',
     'display.shell_lines': 'shell_lines',

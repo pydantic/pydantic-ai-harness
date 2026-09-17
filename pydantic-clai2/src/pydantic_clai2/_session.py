@@ -61,9 +61,9 @@ class Session(Generic[DepsT, OutputT]):
         self._messages = list(messages)
 
     async def resolved_model(self) -> Model | str | None:
-        """The model the next run uses, after `resolve_model`; `None` defers to the agent's own."""
+        """The model the next run uses: the session's choice after `resolve_model`, else the agent's own."""
         if self.model is None:
-            return None
+            return self.agent.model
         model = self.resolve_model(self.model)
         return await model if isinstance(model, Awaitable) else model
 

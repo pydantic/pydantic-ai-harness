@@ -7,11 +7,7 @@ from pydantic_ai.settings import ModelSettings
 
 
 class ModelSettingsForm(BaseModel):
-    """Overrides for one model. Unset fields leave the provider default in place.
-
-    `context_window` is CLAI's own, not a core `ModelSettings` key: it feeds automatic
-    compaction and never reaches the provider.
-    """
+    """Overrides for one model. Unset fields leave the provider default in place."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
     max_tokens: int | None = Field(default=None, gt=0, description='Cap on tokens the model may generate per request.')
@@ -36,11 +32,6 @@ class ModelSettingsForm(BaseModel):
     )
     service_tier: Literal['auto', 'default', 'flex', 'priority'] | None = Field(
         default=None, description='Provider service tier (OpenAI).'
-    )
-    context_window: int | None = Field(
-        default=None,
-        gt=0,
-        description='Context window in tokens, for automatic compaction. Overrides the catalog; set it when the catalog is wrong or silent.',
     )
 
     def to_model_settings(self) -> ModelSettings | None:

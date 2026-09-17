@@ -26,18 +26,11 @@ class Status:
 
     model: str = 'agent default'
     context_tokens: int | None = None
-    context_window: int | None = None
-    compact_at: float = 0
+    context_alert: bool = False
+    """Paint the context figure `WARNING`; set by whoever knows the window, such as the `compaction` plugin."""
     output_tokens: int | None = None
     streamed_chars: int = 0
     activity: str = 'ready'
-
-    @property
-    def over_limit(self) -> bool:
-        """Whether the last response filled more than `compact_at` of a known window."""
-        if self.compact_at <= 0 or self.context_window is None or self.context_tokens is None:
-            return False
-        return self.context_tokens > self.compact_at * self.context_window
 
     def observe(self, event: AgentStreamEvent) -> None:
         """Include text, thinking, and streamed tool arguments in the estimate."""
@@ -73,9 +66,9 @@ class Status:
         return ''.join(self.segments(frame))
 
     def toolbar(self) -> list[tuple[str, str]]:
-        """prompt-toolkit fragments for the input prompt; the figure turns `WARNING` past `compact_at`."""
+        """prompt-toolkit fragments for the input prompt; the figure is `WARNING` while `context_alert` is set."""
         head, figure, tail = self.segments()
-        return [('', head), (theme.WARNING if self.over_limit else '', figure), ('', tail)]
+        return [('', head), (theme.WARNING if self.context_alert else '', figure), ('', tail)]
 
 
 class StatusLine:
@@ -115,7 +108,7 @@ class StatusLine:
         # Leave one column unused so the footer cannot trigger autowrap.
         head, figure, tail = (_printable(segment) for segment in self.status.segments())
         text = head + figure + tail
-        warned = range(len(head), len(head) + len(figure)) if self.status.over_limit else range(0)
+        alerted = range(len(head), len(head) + len(figure)) if self.status.context_alert else range(0)
         prefix = '\x1b7'
         if height != self._height:
             # After a prompt the cursor is usually on the last row. Index down and back up first,
@@ -128,7 +121,7 @@ class StatusLine:
         shades = tuple(theme.sgr(color) for color in (theme.SUGAR, theme.LIGHT_PURPLE, theme.LITHIUM, theme.PURPLE))
         warning = theme.sgr(theme.WARNING)
         painted = ''.join(
-            (warning if index in warned else shades[min(abs(index - highlight) // 2, 3)]) + char
+            (warning if index in alerted else shades[min(abs(index - highlight) // 2, 3)]) + char
             for index, char in enumerate(text)
         )
         self.console.file.write(f'{prefix}\x1b[{height};1H\x1b[2K{painted}\x1b[0m\x1b8')
