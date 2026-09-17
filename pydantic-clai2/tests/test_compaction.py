@@ -90,6 +90,7 @@ async def test_gauge_paints_the_status_row_when_still_over_the_threshold() -> No
     session.plugins = host.capabilities
     await session.prompt('hello there, this is longer than ten tokens')
     assert host.status.context_alert
+    assert host.status.context_tokens is not None and host.status.context_tokens > 8, 'the figure is the gauge reading'
     roomy = make_host(session, context_window=100_000)
     session.plugins = roomy.capabilities
     await session.prompt('again')

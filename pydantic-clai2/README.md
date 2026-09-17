@@ -201,8 +201,8 @@ The context figure in the status line turns yellow when a request went out with
 the history still above `max_fraction`, which means compaction could not bring
 it under: the kept tail alone is that large, or the assumed window is too big.
 `/compact` with a smaller `keep_messages`, `/new`, or a correct `context_window`
-fixes that. Like the figure itself, the colour describes the last request and
-refreshes with the next one.
+fixes that. The figure and its colour describe the last request and refresh
+with the next one, so `/compact` alone does not change them.
 
 ## Ask CLAI to customize itself
 
@@ -345,9 +345,10 @@ string tool-argument deltas. The estimate is characters divided by four, not a
 provider tokenizer count. On completion it is replaced by reported run output
 usage. Context is the most recent response's reported input plus output tokens,
 not cumulative conversation billing or a context-window percentage; `?` means
-unavailable. During a request it may reflect the previous response. The
-`compaction` plugin paints the figure yellow while the history is
-[over its threshold](#compacting-the-conversation).
+unavailable. As each request goes out, the `compaction` plugin replaces it with
+that request's estimated size and paints it yellow while the history is
+[over its threshold](#compacting-the-conversation); the response's reported
+usage takes over when it lands.
 
 While running, the footer reserves the terminal's bottom row using ANSI scrolling
 regions. Its text shimmers with a moving highlight at ten frames per second, with no spinner and a
