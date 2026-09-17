@@ -26,9 +26,18 @@ class Status:
 
     model: str = 'agent default'
     context_tokens: int | None = None
+    context_window: int | None = None
+    compact_at: float = 0
     output_tokens: int | None = None
     streamed_chars: int = 0
     activity: str = 'ready'
+
+    @property
+    def over_limit(self) -> bool:
+        """Whether the last response filled more than `compact_at` of a known window."""
+        if self.compact_at <= 0 or self.context_window is None or self.context_tokens is None:
+            return False
+        return self.context_tokens > self.compact_at * self.context_window
 
     def observe(self, event: AgentStreamEvent) -> None:
         """Include text, thinking, and streamed tool arguments in the estimate."""
@@ -51,13 +60,22 @@ class Status:
         elif isinstance(event, FunctionToolResultEvent):
             self.activity = 'working'
 
-    def text(self, frame: str = '') -> str:
-        """Use no percentage when the model's context capacity is unknown."""
+    def segments(self, frame: str = '') -> tuple[str, str, str]:
+        """The row as (head, context figure, tail), so the figure can be painted on its own."""
         context = '?' if self.context_tokens is None else f'{self.context_tokens:,}'
         output = f'~{math.ceil(self.streamed_chars / 4):,} streamed tokens'
         if self.output_tokens is not None:
             output = f'{self.output_tokens:,} output tokens'
-        return f'{frame} {self.model} | context: {context} tokens | {output} | {self.activity}'.strip()
+        return f'{frame} {self.model} | context: '.lstrip(), context, f' tokens | {output} | {self.activity}'
+
+    def text(self, frame: str = '') -> str:
+        """Use no percentage when the model's context capacity is unknown."""
+        return ''.join(self.segments(frame))
+
+    def toolbar(self) -> list[tuple[str, str]]:
+        """prompt-toolkit fragments for the input prompt; the figure turns `WARNING` past `compact_at`."""
+        head, figure, tail = self.segments()
+        return [('', head), (theme.WARNING if self.over_limit else '', figure), ('', tail)]
 
 
 class StatusLine:
@@ -95,7 +113,9 @@ class StatusLine:
         if height < 3:
             return
         # Leave one column unused so the footer cannot trigger autowrap.
-        text = ''.join(char if char.isascii() and char.isprintable() else '?' for char in self.status.text())
+        head, figure, tail = (_printable(segment) for segment in self.status.segments())
+        text = head + figure + tail
+        warned = range(len(head), len(head) + len(figure)) if self.status.over_limit else range(0)
         prefix = '\x1b7'
         if height != self._height:
             # After a prompt the cursor is usually on the last row. Index down and back up first,
@@ -106,7 +126,11 @@ class StatusLine:
         text = text[: max(0, width - 1)]
         highlight = frame % (len(text) + 12) - 6
         shades = tuple(theme.sgr(color) for color in (theme.SUGAR, theme.LIGHT_PURPLE, theme.LITHIUM, theme.PURPLE))
-        painted = ''.join(shades[min(abs(index - highlight) // 2, 3)] + char for index, char in enumerate(text))
+        warning = theme.sgr(theme.WARNING)
+        painted = ''.join(
+            (warning if index in warned else shades[min(abs(index - highlight) // 2, 3)]) + char
+            for index, char in enumerate(text)
+        )
         self.console.file.write(f'{prefix}\x1b[{height};1H\x1b[2K{painted}\x1b[0m\x1b8')
         self.console.file.flush()
 
@@ -116,3 +140,7 @@ class StatusLine:
             self._draw(frame)
             frame += 1
             await asyncio.sleep(0.1)
+
+
+def _printable(text: str) -> str:
+    return ''.join(char if char.isascii() and char.isprintable() else '?' for char in text)

@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Generic, TypeVar
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import FormattedText
 from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
@@ -22,6 +23,7 @@ from ._session import Session
 from .auth import CodexAuth
 from .command_context import CommandContext, CommandProvider
 from .commands import Command, Commands, config_command, config_completions, set_completions
+from .compaction import Compactor, context_window
 from .config import PluginSettings, Settings
 from .customization import customization_guide
 from .input_history import input_history
@@ -129,6 +131,15 @@ async def chat(
         )
     )
     commands.register(Command(name='exit', description='Quit CLAI', handler=lambda _: 'Goodbye.'))
+    status = Status()
+    compactor = Compactor(session=session, status=status, console=console, fallback_model=lambda: agent.model)
+    commands.register(
+        Command(
+            name='compact',
+            description='Replace the history with a summary; add words to say what it must keep',
+            handler=compactor.command,
+        )
+    )
     commands.register(
         Command(
             name='config',
@@ -155,14 +166,13 @@ async def chat(
     for plugin in plugins:
         if isinstance(plugin, CommandProvider):
             commands.register_many(plugin.get_commands(context))
-    status = Status()
     prompt = PromptSession[str](
         history=input_history(store.path.with_name('input-history')),
         completer=PromptCompleter(commands),
         complete_while_typing=True,
         style=COMPLETION_STYLE,
         reserve_space_for_menu=6,
-        bottom_toolbar=lambda: status.text(),
+        bottom_toolbar=lambda: FormattedText(status.toolbar()),
     )
     shell = _Shell(
         agent=agent,
@@ -173,6 +183,7 @@ async def chat(
         console=console,
         context=context,
         status=status,
+        compactor=compactor,
         prompt=prompt,
         interrupts=Interrupts(),
     )
@@ -197,13 +208,21 @@ class _Shell(Generic[DepsT, OutputT]):
     console: Console
     context: CommandContext
     status: Status
+    compactor: Compactor[DepsT, OutputT]
     prompt: PromptSession[str]
     interrupts: Interrupts
 
     async def run(self) -> SessionEndReason:
         while True:
             try:
-                self.status.model = self.session.model or _model_label(self.agent)
+                model = self.session.model or _model_label(self.agent)
+                self.status.model = model
+                if self.session.model is not None or self.agent.model is not None:
+                    self.compactor.prepare(
+                        model,
+                        window=context_window(model, override=self.context.context_window(model)),
+                        compact_at=self.context.settings.compact_at,
+                    )
                 text = (await self.prompt.prompt_async('> ')).strip()
             except KeyboardInterrupt:
                 if self.interrupts.press():
@@ -250,6 +269,7 @@ class _Shell(Generic[DepsT, OutputT]):
 
         async def run_prompt() -> None:
             nonlocal ended
+            await self.compactor.auto()
             ended = await _run_prompt(
                 self.session,
                 start.text,

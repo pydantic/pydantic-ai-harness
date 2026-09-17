@@ -113,6 +113,7 @@ Pass secret references or use plugin-owned credential storage instead of embeddi
 /set model <Tab>
 /set display.thinking false
 /set run.request_limit 10000
+/set run.compact_at 0.8
 ```
 
 `/set` on its own opens a full-screen menu, the same kind Code Puppy uses: the
@@ -140,7 +141,10 @@ makes it the model for the next prompt. `Ctrl+S` opens that model's settings:
 `max_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `timeout`, the two
 penalties, `parallel_tool_calls`, `thinking`, and `service_tier`. They are
 saved per model and passed to every run with that model. Unsupported settings
-may be ignored or rejected by the provider; select only settings your provider supports. `/model NAME` sets the model without the menu.
+may be ignored or rejected by the provider; select only settings your provider supports.
+The same menu holds `context_window`, which is CLAI's own: it is never sent to the
+provider and only feeds [automatic compaction](#compacting-the-conversation).
+`/model NAME` sets the model without the menu.
 
 Tab completes setting names, boolean values, and model names from Pydantic AI's
 built-in catalog without network access. Provider prefixes include `openai-codex:`,
@@ -159,12 +163,46 @@ Settings are validated before writes. `/set` updates the active settings snapsho
 legacy `/config` writes apply on restart; plugin changes apply on the next prompt.
 `--request-limit` controls the full prompt's model-request budget.
 
-Interactive commands: `/login`, `/set`, `/model`, `/help`, `/new`, `/exit`, `/config`, and `/plugins`.
+Interactive commands: `/login`, `/set`, `/model`, `/help`, `/new`, `/compact`, `/exit`,
+`/config`, and `/plugins`.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
 Unknown slash commands are not sent to the model. Up/down recall saved prompt
 history. Ctrl-D exits. Ctrl-C at input clears the line; during a run it cancels
 the turn and returns to input. No cancelled run is automatically retried.
+
+## Compacting the conversation
+
+A long conversation eventually fills the model's context window. `/compact`
+replaces the retained history with a summary written by the current model, so
+the next prompt starts from that summary instead of every earlier turn. The
+summary is one system message the model sees; you see a one-line notice with
+the number of messages folded in and an estimate of the tokens saved. Add words
+to say what the summary must keep: `/compact the auth refactor, not the CSS`.
+An empty conversation says so and nothing is sent.
+
+The summary itself comes from `pydantic_ai_harness`'s `SummarizingCompaction`,
+driven through its `compact_now` helper. CLAI only decides when to call it.
+The summary request counts as one model request, billed to the model in use.
+
+Compaction also runs on its own. `run.compact_at` (default `0.8`) is a fraction
+of the context window: once the last response reports more total tokens than
+that fraction, CLAI compacts before the next turn and tells you first. It never
+compacts in the middle of a turn. `/set run.compact_at 0` turns automatic
+compaction off; `/compact` still works.
+
+The window comes from the model's own settings first, then the catalog:
+
+1. `context_window` in `/model` settings (`Ctrl+S` on the model), when you set it.
+2. genai-prices, the same catalog the `/model` menu shows context sizes from.
+
+A model in neither place, such as `test`, a local endpoint, or a model the
+catalog lists without a window, turns automatic compaction off for that model.
+CLAI says so once, the first time you use it. Set `context_window` to turn it
+back on, or to correct a catalog entry you know is wrong.
+
+While the last response is above `run.compact_at`, the context figure in the
+status line turns yellow.
 
 ## Ask CLAI to customize itself
 
@@ -307,7 +345,9 @@ string tool-argument deltas. The estimate is characters divided by four, not a
 provider tokenizer count. On completion it is replaced by reported run output
 usage. Context is the most recent response's reported input plus output tokens,
 not cumulative conversation billing or a context-window percentage; `?` means
-unavailable. During a request it may reflect the previous response.
+unavailable. During a request it may reflect the previous response. The figure
+turns yellow once it passes `run.compact_at` of a known context window, which
+means the next prompt starts by [compacting](#compacting-the-conversation).
 
 While running, the footer reserves the terminal's bottom row using ANSI scrolling
 regions. Its text shimmers with a moving highlight at ten frames per second, with no spinner and a
