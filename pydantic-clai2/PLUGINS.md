@@ -102,7 +102,9 @@ workspace and its default filenames. Its settings:
 | `nested_inject` | `"pointer"` | what nested traversal adds: `"pointer"` (one line naming the file) or `"contents"` |
 
 A repository can declare plugins too, in `.clai/settings.json`; they show as
-`(project)` and rank just above the built-ins. See
+`(project)` and rank just above the built-ins. They start off, because a
+repository must not run code as you just because you opened it: CLAI names the
+ones waiting at startup, and `/plugins enable NAME` approves one. See
 [Project settings](README.md#project-settings).
 
 ## Managing plugins

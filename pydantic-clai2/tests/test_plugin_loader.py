@@ -326,35 +326,34 @@ async def test_add_replaces_a_builtin_and_remove_restores_it(tmp_path: Path) -> 
 
 
 PROJECT = (
-    PluginSettings(id='hello', factory='pydantic_ai.capabilities:Capability', settings={'instructions': 'Project.'}),
-    PluginSettings(id='quiet', factory='pydantic_ai.capabilities:Capability', enabled=False),
+    PluginSettings(
+        id='hello', factory='pydantic_ai.capabilities:Capability', enabled=False, settings={'instructions': 'Project.'}
+    ),
 )
+"""As `load_project_settings` hands them over: declared by the repository, off until the user approves."""
 
 
 async def test_project_declarations_sit_above_builtins_and_below_the_store(tmp_path: Path) -> None:
     harness = Harness(tmp_path, builtin=BUILTIN, project=PROJECT)
     await harness.loader.load_all()
-    hello, quiet = harness.loader.entries()
+    hello = harness.loader.entries()[0]
     assert hello.project and not hello.builtin and hello.declaration.settings == {'instructions': 'Project.'}
     assert hello.source == 'pydantic_ai.capabilities:Capability (project)'
-    assert hello.state == 'enabled, loaded'
-    assert quiet.project and quiet.state == 'disabled'
-    assert harness.store.plugins() == []
+    assert hello.state == 'disabled', 'repository code does not run until the user approves it'
+    assert harness.loader.capabilities() == [] and harness.store.plugins() == []
 
-    assert await harness.loader.command(['disable', 'hello']) == 'Disabled hello.'
+    assert await harness.loader.command(['enable', 'hello']) == 'Enabled hello.'
+    assert len(harness.loader.capabilities()) == 1
     fresh = Harness(tmp_path, builtin=BUILTIN, project=PROJECT)
     await fresh.loader.load_all()
-    assert fresh.loader.entries()[0].project and fresh.loader.entries()[0].state == 'disabled'
+    entry = fresh.loader.entries()[0]
+    assert entry.project and entry.state == 'enabled, loaded', 'approval is remembered in the user store'
 
     message = await fresh.loader.command(['remove', 'hello'])
     assert (
         message == 'hello is declared by the project; restored its defaults. Use /plugins disable hello to turn it off.'
     )
-    assert fresh.loader.entries()[0].state == 'enabled, loaded'
-    assert await fresh.loader.command(['enable', 'quiet']) == 'Enabled quiet.'
-    message = await fresh.loader.command(['remove', 'quiet'])
-    assert message.startswith('quiet is declared by the project')
-    assert fresh.loader.entries()[1].state == 'disabled', 'a project declaration that is off stays off'
+    assert fresh.loader.entries()[0].state == 'disabled' and fresh.store.plugins() == []
 
     replace = ['add', 'hello', 'pydantic_ai.capabilities:Capability', '{"instructions": "Mine."}']
     assert await fresh.loader.command(replace) == 'Replaced project hello.'
@@ -364,16 +363,20 @@ async def test_project_declarations_sit_above_builtins_and_below_the_store(tmp_p
 
 
 async def test_remove_restores_a_project_plugin_that_names_a_file(tmp_path: Path) -> None:
-    harness = Harness(tmp_path)
-    path = harness.write('filed')
-    project = (PluginSettings(id='filed', factory='filed', path=str(path)),)
+    path = tmp_path / 'repo' / 'filed.py'
+    path.parent.mkdir()
+    path.write_text(
+        'from pydantic_clai2.plugins import PluginHost\ndef activate(host: PluginHost) -> None:\n    pass\n'
+    )
+    project = (PluginSettings(id='filed', factory='filed', path=str(path), enabled=False),)
     harness = Harness(tmp_path, project=project)
     await harness.loader.load_all()
     assert harness.loader.entries()[0].project and harness.loader.entries()[0].path == path
+    assert await harness.loader.command(['enable', 'filed']) == 'Enabled filed.'
 
     message = await harness.loader.command(['remove', 'filed'])
     assert message.startswith('filed is declared by the project; restored its defaults.')
-    assert harness.store.plugins() == [] and harness.loader.entries()[0].state == 'enabled, loaded'
+    assert harness.store.plugins() == [] and harness.loader.entries()[0].state == 'disabled'
 
 
 async def test_repo_context_builtin_loads_the_workspace_instructions(

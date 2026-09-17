@@ -196,6 +196,7 @@ async def chat(
     try:
         async with agent:
             await loader.load_all()
+            _report_project_plugins(loader, console)
             reason = await shell.run()
     finally:
         await loader.close(reason)
@@ -287,6 +288,15 @@ def _report_project(project: ProjectSettings, console: Console) -> None:
     console.print(f'Project settings: {project.path}', style=theme.MUTED)
     if project.unknown:
         console.print(f'Ignoring unknown settings: {", ".join(project.unknown)}', style=theme.WARNING)
+
+
+def _report_project_plugins(loader: PluginLoader[DepsT], console: Console) -> None:
+    waiting = [entry.name for entry in loader.entries() if entry.project and entry.host is None]
+    if waiting:
+        console.print(
+            f'Project plugins not loaded; approve one with /plugins enable NAME: {", ".join(waiting)}',
+            style=theme.INFO,
+        )
 
 
 def _report_interrupt(completed: bool, console: Console) -> None:

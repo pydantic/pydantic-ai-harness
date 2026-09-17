@@ -82,10 +82,12 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
   `create_agent()` has no coding tools of its own. `coder` is declared with
   `repo_context: false` because `repo_context` binds harness `RepoContext`
   itself; keep it that way or `AGENTS.md` reaches the model twice.
-- **Project declarations rank just above built-ins.** `.clai/settings.json`
-  (`project_settings.py`) may declare plugins; the loader takes them as
-  `project=`. Precedence is store, drop-in folder, project, built-in. CLAI
-  never writes the project file.
+- **Project declarations rank just above built-ins and start off.**
+  `.clai/settings.json` (`project_settings.py`) may declare plugins; the loader
+  takes them as `project=`, every one `enabled=False`, because a repository
+  must not run code as the user on launch. `/plugins enable` is the approval
+  and persists the approved declaration in the store. Precedence is store,
+  drop-in folder, project, built-in. CLAI never writes the project file.
 - **A load failure leaves the session as it was.** Import or `activate` errors
   are reported and the plugin stays unloaded; partial registrations from a
   failed `activate` are discarded with the host.

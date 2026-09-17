@@ -95,8 +95,9 @@ launch directory, and Coder's bundled RepoContext would load it again. To run
 without coding tools, /plugins disable coder; to stop reading the instruction
 file, /plugins disable repo_context. /plugins remove coder resets the
 built-in to its defaults rather than removing it. A repository's
-.clai/settings.json can declare plugins too; they show as (project) and rank
-just above the built-ins. Outside a session,
+.clai/settings.json can declare plugins too; they show as (project), rank
+just above the built-ins, and start off until the user runs /plugins enable
+NAME, so repository code never runs without that approval. Outside a session,
 clai2 plugins add NAME module[:attr] [JSON] saves for the next startup.
 /plugins opens the management menu. Removing a drop-in disables it persistently;
 delete its source file yourself to remove it from disk.

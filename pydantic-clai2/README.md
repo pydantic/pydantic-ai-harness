@@ -182,14 +182,16 @@ ignored, so a newer file still works with an older CLAI. Precedence, lowest
 first: defaults, your user settings, the project file, `CLAI_MODEL`, CLI flags.
 
 `plugins` takes the same declarations as `/plugins add`: an `id`, a `factory`
-(`module` or `module:attr`), optional `settings`, and `enabled` (default true).
-They load like the built-ins and rank just above them, so a project can turn a
-built-in off (`{"id": "coder", "factory": "pydantic_ai_harness.coder:Coder",
-"enabled": false}`) or run it with other options. Your own `/plugins` choices
-still win: `/plugins disable NAME` remembers it in your user settings, and
-`/plugins remove NAME` forgets that choice and restores the project's declaration.
-Plugins are trusted code running as you; read a repository's `.clai/settings.json`
-before you launch CLAI in it.
+(`module` or `module:attr`), an optional `path`, and optional `settings`. A
+repository cannot switch a plugin on for you: plugins are trusted code running
+as your user, so every project-declared plugin starts off, CLAI lists the ones
+waiting at startup, and `/plugins enable NAME` is your approval. Approval is
+remembered in your user settings together with the declaration you approved,
+so a later change to the repository's declaration does not run until you
+`/plugins remove NAME` (which forgets your approval and restores the project's
+current declaration, off) and enable it again. Project declarations rank just
+above the built-ins: a project may redeclare `coder` or `repo_context` with
+other options, and that replacement is also off until you enable it.
 
 The project file is read-only from inside CLAI. `/set KEY VALUE` writes your user
 settings and applies for the current session; `/config set` writes your user

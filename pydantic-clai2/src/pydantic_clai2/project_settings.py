@@ -24,6 +24,7 @@ class ProjectSettings:
     overrides: dict[str, JsonValue] = field(default_factory=dict[str, JsonValue])
     """Validated setting values by `/set` key, ready to layer over the user store."""
     plugins: tuple[PluginSettings, ...] = ()
+    """Declarations from the file, every one disabled: the user approves each with `/plugins enable`."""
     unknown: tuple[str, ...] = ()
     """Keys the `Settings` model does not know; reported once at startup and ignored."""
 
@@ -58,6 +59,6 @@ def load_project_settings(workspace: Path) -> ProjectSettings:
     return ProjectSettings(
         path=path,
         overrides=overrides,
-        plugins=tuple(plugins),
+        plugins=tuple(plugin.model_copy(update={'enabled': False}) for plugin in plugins),
         unknown=tuple(sorted(raw.keys() - _SET_KEYS.keys())),
     )

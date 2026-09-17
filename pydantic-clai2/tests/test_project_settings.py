@@ -64,8 +64,8 @@ def test_load_without_a_file_is_empty(tmp_path: Path) -> None:
     assert load_project_settings(tmp_path) == ProjectSettings()
 
 
-def test_plugins_are_validated_declarations(tmp_path: Path) -> None:
-    write(tmp_path, {'plugins': [{'id': 'exa', 'factory': 'pydantic_ai_harness.exa:ExaSearch', 'enabled': False}]})
+def test_plugins_are_validated_declarations_that_start_off(tmp_path: Path) -> None:
+    write(tmp_path, {'plugins': [{'id': 'exa', 'factory': 'pydantic_ai_harness.exa:ExaSearch', 'enabled': True}]})
     project = load_project_settings(tmp_path)
     assert project.plugins == (PluginSettings(id='exa', factory='pydantic_ai_harness.exa:ExaSearch', enabled=False),)
     assert project.overrides == {}
@@ -106,11 +106,12 @@ def test_not_an_object_fails_startup(tmp_path: Path) -> None:
 
 
 async def test_startup_reports_unknown_keys_once(tmp_path: Path) -> None:
-    path = write(tmp_path, {'thinking': False, 'colour': 'mauve'})
+    plugin: dict[str, JsonValue] = {'id': 'hello', 'factory': 'pydantic_ai.capabilities:Capability'}
+    path = write(tmp_path, {'thinking': False, 'colour': 'mauve', 'plugins': [plugin]})
     project = load_project_settings(tmp_path)
     output = io.StringIO()
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
-        pipe.send_text('/set display.thinking true\n/set display.thinking\n/exit\n')
+        pipe.send_text('/set display.thinking true\n/set display.thinking\n/plugins list\n/exit\n')
         await chat(
             Agent(TestModel(), deps_type=type(None)),
             deps=None,
@@ -122,6 +123,8 @@ async def test_startup_reports_unknown_keys_once(tmp_path: Path) -> None:
     text = output.getvalue()
     assert f'Project settings: {path}' in text
     assert text.count('Ignoring unknown settings: colour') == 1
+    assert 'Project plugins not loaded; approve one with /plugins enable NAME: hello' in text
+    assert 'hello: pydantic_ai.capabilities:Capability (project) (disabled)' in text
     assert 'Saved display.thinking. Applied. The project file sets it again at next start.' in text
     assert '\nTrue\n' in text, '/set still applies to this session'
 
