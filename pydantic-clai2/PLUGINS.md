@@ -28,12 +28,13 @@ Keep the bundled guide aligned with this contract when changing plugin APIs.
 
 ## Credentials
 
-CLAI's `/login openai-codex` stores tokens in the configured keyring backend,
-not plugin settings. Large token bundles use multiple entries to fit Windows
-Credential Manager's size limit. When no keyring backend exists, tokens go to a
-`0600` file next to the settings database instead. None of this changes plugin
-APIs. See [Codex authentication](README.md#codex-authentication) for storage and
-security details.
+CLAI's `/login openai-codex` and the vllm and openrouter connections store tokens
+in the configured keyring backend, not plugin settings. Large token bundles use
+multiple entries to fit Windows Credential Manager's size limit. When no keyring
+backend exists, credentials go to a per-account `0600` file next to the settings
+database instead. None of this changes plugin APIs. See
+[Codex authentication](README.md#codex-authentication) for storage and security
+details.
 
 ## Where plugins live
 
@@ -349,3 +350,13 @@ activate(host)
 for handler in host.handlers:
     await handler(TurnEnd(text='hi', outcome='completed'))
 ```
+
+## vllm connection
+
+Open `/model`, choose `vllm`, then enter a trusted HTTP(S) server root or `/v1` URL, and optionally a token. CLAI queries `/v1/models` and opens a searchable model picker. HTTP sends tokens unencrypted; use HTTPS outside trusted local networks.
+
+## openrouter connection
+
+Open `/model`, choose `openrouter`, then paste an API key from https://openrouter.ai/keys in the masked prompt, then select a model from the live catalog. CLAI validates the key with `/api/v1/key` before fetching `/api/v1/models`. This flow uses API-key authentication, not browser OAuth.
+
+The connection is saved in the configured Python keyring backend after selection; backend security depends on your keyring configuration. Tokens are not stored in SQLite or command history. The selected model persists across restarts. Select the provider again to browse its live models or reconfigure the saved connection. Discovery is explicit and has a 20-second network timeout; redirects are not followed. Agent inference uses Pydantic AI core.

@@ -15,7 +15,7 @@ from pydantic_ai.providers.openai_codex import OpenAICodexCredentials
 from rich.console import Console
 
 from pydantic_clai2.auth import CodexAuth, CodexCredentials
-from pydantic_clai2.credential_store import load_codex_credentials, save_codex_credentials
+from pydantic_clai2.credential_store import credentials_path, load_codex_credentials, save_codex_credentials
 
 
 @pytest.fixture
@@ -33,7 +33,7 @@ def fallback(tmp_path: Path) -> Path:
 
 
 async def test_large_codex_credentials(vault: dict[str, str], fallback: Path) -> None:
-    source = CodexCredentials(fallback=fallback)
+    source = CodexCredentials()
     credentials = OpenAICodexCredentials(
         access_token='fake-access' * 500, refresh_token='fake-refresh' * 300, account_id='fake-account'
     )
@@ -248,9 +248,8 @@ def test_keyring_save_removes_plaintext_copy(vault: dict[str, str], fallback: Pa
     assert load_codex_credentials(fallback=fallback) == '{"access_token":"in-keyring"}'
 
 
-async def test_login_reports_plaintext_location(
-    fallback: Path, no_keyring: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_login_reports_plaintext_location(no_keyring: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fallback path is derived from the account, so login can name the file it wrote."""
     credentials = OpenAICodexCredentials(access_token='a', refresh_token='r', account_id='x')
 
     async def exchange(self: object) -> OpenAICodexCredentials:
@@ -258,8 +257,22 @@ async def test_login_reports_plaintext_location(
 
     monkeypatch.setattr('pydantic_ai.providers.openai_codex.OpenAICodexOAuthFlow.exchange_code_from_callback', exchange)
     monkeypatch.setattr('webbrowser.open', fake_browser)
-    auth = CodexAuth(Console(file=io.StringIO()), credentials_file=fallback)
+    auth = CodexAuth(Console(file=io.StringIO()))
     message = await auth.login([])
+    path = credentials_path()
     assert 'plaintext' in message
-    assert str(fallback) in message
+    assert str(path) in message
     assert await auth.source.load() == credentials
+
+
+def test_fallback_paths_are_per_account(tmp_path: Path, no_keyring: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """One account's fallback file cannot overwrite another's, and XDG decides the directory."""
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+    codex = credentials_path()
+    vllm = credentials_path(account='vllm')
+    assert codex.parent == vllm.parent == tmp_path / 'pydantic-clai2'
+    assert codex.name != vllm.name
+    save_codex_credentials(value='codex-tokens', account='openai-codex')
+    save_codex_credentials(value='vllm-token', account='vllm')
+    assert load_codex_credentials(fallback=codex) == 'codex-tokens'
+    assert load_codex_credentials(account='vllm', fallback=vllm) == 'vllm-token'

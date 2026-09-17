@@ -62,8 +62,14 @@ Windows, `NO_COLOR`, or `CLAI_NO_SPLASH=1`.
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:
 authorization code with PKCE, state validation, and a callback at
-`http://localhost:1455/auth/callback`. It times out after five minutes. The browser
-must be able to reach that callback on the machine running CLAI.
+`http://localhost:1455/auth/callback`. It times out after five minutes.
+
+If the browser cannot reach that callback on the machine running CLAI (for
+example over SSH), the redirect fails in the browser. Copy the URL from the
+address bar and paste it at the prompt CLAI shows under the login link; the bare
+`code` value works too. CLAI checks the URL's `state` against the current login
+before exchanging the code. Whichever arrives first, the callback or the paste,
+completes the login.
 
 Tokens live in the configured Python `keyring` backend under service `pydantic-clai2`,
 not in SQLite or `~/.codex/auth.json`. Large token bundles are split across keyring
@@ -75,11 +81,12 @@ token refresh through CLAI's `OpenAICodexCredentialSource`. Tests mock keyring,
 the browser, and OAuth exchange and do not access real credentials.
 
 When no keyring backend exists at all (keyring raises `NoKeyringError` or
-`InitError`, typical on a headless Linux box or over SSH), tokens go to
-`credentials.json` next to `config.db`, written with mode `0600`. `/login` says so
-in its confirmation. A locked keyring is not treated as missing; unlock it instead.
-Once a keyring becomes available, the next login or token refresh moves the tokens
-there and deletes the file.
+`InitError`, typical on a headless Linux box or over SSH), credentials go to a
+`0600` file next to `config.db` instead, named for the account: Codex uses
+`credentials-openai-codex.json`, and the vllm and openrouter connections use their
+own files. `/login` says so in its confirmation. A locked keyring is not treated as
+missing; unlock it instead. Once a keyring becomes available, the next login or
+token refresh moves the credentials there and deletes the file.
 
 The default Coder shell runs under your OS identity, without a sandbox. Commands
 can read files and access credential backends available to that identity, including
@@ -362,3 +369,13 @@ requests, tools, and capability hooks when configured on the supplied agent.
 - [Code Puppy command registry](https://github.com/code-puppy/code_puppy/blob/main/code_puppy/command_line/command_registry.py)
 
 See `THIRD_PARTY_NOTICES.md` for attribution.
+
+## vllm connection
+
+Open `/model`, choose `vllm`, then enter a trusted HTTP(S) server root or `/v1` URL, and optionally a token. CLAI queries `/v1/models` and opens a searchable model picker. HTTP sends tokens unencrypted; use HTTPS outside trusted local networks.
+
+## openrouter connection
+
+Open `/model`, choose `openrouter`, then paste an API key from https://openrouter.ai/keys in the masked prompt, then select a model from the live catalog. CLAI validates the key with `/api/v1/key` before fetching `/api/v1/models`. This flow uses API-key authentication, not browser OAuth.
+
+The connection is saved in the configured Python keyring backend after selection; backend security depends on your keyring configuration. Tokens are not stored in SQLite or command history. The selected model persists across restarts. Select the provider again to browse its live models or reconfigure the saved connection. Discovery is explicit and has a 20-second network timeout; redirects are not followed. Agent inference uses Pydantic AI core.
