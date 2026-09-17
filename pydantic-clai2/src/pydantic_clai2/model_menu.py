@@ -213,7 +213,7 @@ def run_model_flow(menu: ModelMenu, runners: Runners = TERMINAL, *, connect_prov
         if selection.cancelled or selection.item is None or not isinstance(selection.item.value, str):
             return messages
         if selection.item.value == 'vllm' and connect_provider:
-            raise _ConnectProvider
+            raise _ConnectProvider(messages)
         provider_menu = menu.for_provider(selection.item.value)
         if _run_provider(provider_menu, runners, messages):
             return messages
@@ -241,16 +241,22 @@ async def open_model_menu(context: CommandContext, *, run: Callable[[ModelMenu],
     def flow(menu: ModelMenu) -> list[str]:
         return run_model_flow(menu, connect_provider=True)
 
+    accumulated: list[str] = []
     while True:
         try:
             messages = await run_worker(lambda: (run or flow)(ModelMenu(context)))
-        except _ConnectProvider:
+        except _ConnectProvider as request:
+            accumulated.extend(request.messages)
             result = await vllm.connect(context, [])
             if result == 'Connection cancelled.':
                 continue
-            return result
-        return '\n'.join(messages) or 'No changes.'
+            return '\n'.join([*accumulated, result])
+        return '\n'.join([*accumulated, *messages]) or 'No changes.'
 
 
 class _ConnectProvider(Exception):
     """Release the menu worker before prompting or awaiting provider discovery."""
+
+    def __init__(self, messages: list[str]) -> None:
+        self.messages = messages
+        super().__init__()

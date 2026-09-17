@@ -1,5 +1,6 @@
 """Conversation state and run-scoped capability plugins."""
 
+import asyncio
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from typing import Generic, TypeVar
 
@@ -67,7 +68,9 @@ class Session(Generic[DepsT, OutputT]):
                     result = await self.agent.run(
                         text,
                         deps=self.deps,
-                        model=self.resolve_model(self.model) if self.model is not None else None,
+                        model=await asyncio.to_thread(self.resolve_model, self.model)
+                        if self.model is not None
+                        else None,
                         model_settings=self.model_settings,
                         message_history=self._messages,
                         capabilities=self.plugins,
