@@ -44,6 +44,7 @@ async def test_login(mode: str) -> None:
     console = Console(file=output)
     browser_ready = asyncio.Event()
     prompt_closed = asyncio.Event()
+    prompt_started = asyncio.Event()
     urls: list[str] = []
     requests: list[httpx.Request] = []
     loop = asyncio.get_running_loop()
@@ -56,6 +57,7 @@ async def test_login(mode: str) -> None:
         return mode != 'manual'
 
     async def read_line(message: str) -> str:
+        prompt_started.set()
         try:
             if mode in ('paste', 'manual', 'browser_error'):
                 return 'http://127.0.0.1/callback?code=secret-code'
@@ -100,6 +102,7 @@ async def test_login(mode: str) -> None:
             )
             assert response.status_code == (400 if mode == 'denied' else 200)
     if mode == 'cancel':
+        await prompt_started.wait()
         login.cancel()
         with pytest.raises(asyncio.CancelledError):
             await login
