@@ -2436,27 +2436,16 @@ wheels = [
 
 [[package]]
 name = "logfire"
-version = "4.33.0"
-source = { registry = "https://pypi.org/simple" }
+version = "6.0.0b1"
+source = { git = "https://github.com/pydantic/logfire.git?subdirectory=logfire&rev=ca08c9e15746e53a364fdf72d9156ce87492ad3a#ca08c9e15746e53a364fdf72d9156ce87492ad3a" }
 dependencies = [
-    { name = "executing" },
-    { name = "opentelemetry-exporter-otlp-proto-http" },
-    { name = "opentelemetry-instrumentation" },
-    { name = "opentelemetry-sdk" },
-    { name = "protobuf" },
-    { name = "rich", version = "14.3.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "tomli", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/10/66/716dfae86d49f5861998151d9d10a023c225c9cf553d37bf4a7eb8444475/logfire-4.33.0.tar.gz", hash = "sha256:1f0ac129b4f76fd4a61763bff5e9fcd75aff99348b89071faa2f54e1213f856a", size = 1132586, upload-time = "2026-05-13T15:14:15.588Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/30/526aa2f7f08073d56e9d9d4d8dffb991225dbd02ec537a06b1c1f8f1c4e9/logfire-4.33.0-py3-none-any.whl", hash = "sha256:eb876a497f2f8cc450005541192ca2e87e0f8781dc20f88b952ab0b141a1ae76", size = 339969, upload-time = "2026-05-13T15:14:12.516Z" },
+    { name = "logfire-cli" },
+    { name = "logfire-sdk" },
 ]
 
 [package.optional-dependencies]
 httpx = [
-    { name = "opentelemetry-instrumentation-httpx" },
+    { name = "logfire-sdk", extra = ["httpx"] },
 ]
 
 [[package]]
@@ -2466,6 +2455,41 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/47/1a/c44eb3a02407aa739669822d19734e76e8751284b86cd99c73baca36998a/logfire_api-4.33.0.tar.gz", hash = "sha256:0a604f710e803db08a2ddc41e6152bf8d8a56b549f8856cbf82baa36bc7de2c9", size = 81483, upload-time = "2026-05-13T15:14:17.348Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d4/58/dc21672e0d5294668f4d35aaba4d839d031f096b4cf6802399c4b411b5fc/logfire_api-4.33.0-py3-none-any.whl", hash = "sha256:b992727bab71412b5a00f54453eec18e559232c83d7120cf5c6a9edd33fb0c4e", size = 128896, upload-time = "2026-05-13T15:14:14.322Z" },
+]
+
+[[package]]
+name = "logfire-cli"
+version = "0.1.3"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1c/c8/e753232161cf35a2f6d6d9446c3f1f73743f9a5c89a798a0786fe7c85e5d/logfire_cli-0.1.3-py3-none-macosx_10_12_x86_64.whl", hash = "sha256:cab37c9e97bd4a6a27be2b7a742c4e2e7c06d43bb37adc5118252fa99321b0a1", size = 2632248, upload-time = "2026-09-15T21:15:07.353Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/23/bc78c91ae30c14278e8ae806c8bd83b5ce2588cddb63df68b3edd03bf4d9/logfire_cli-0.1.3-py3-none-macosx_11_0_arm64.whl", hash = "sha256:010c1d40ebb1ae31345405fdfae51942e06a6c93da76ba8695ccb0cc856815cb", size = 2441730, upload-time = "2026-09-15T21:15:08.605Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/e3/f20483f738e77b723548e7c150e689e38767094cecf16afcdc7623453aea/logfire_cli-0.1.3-py3-none-manylinux_2_17_aarch64.whl", hash = "sha256:a0a17006b083cede069311501d1ed9d1954ba2ea883976231fdcf4e7ee92bffe", size = 3154983, upload-time = "2026-09-15T21:15:09.894Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/06/12b10b3d7ae621279a13865f03b9b76fc3e81d08948a951c73f86b9e9469/logfire_cli-0.1.3-py3-none-manylinux_2_17_x86_64.whl", hash = "sha256:379790251b5b4226418115c6c233ec4c71ace9a5cb458457c13007a4b46b7ed6", size = 3283155, upload-time = "2026-09-15T21:15:11.421Z" },
+    { url = "https://files.pythonhosted.org/packages/af/00/bfd647ce921912174fd493aa54b1080dea30cd37c9643d6c524b647b3956/logfire_cli-0.1.3-py3-none-win_amd64.whl", hash = "sha256:f2831baff386f2484f06d7476bb74768e87df065da34785ad9d3cbfb442c82bd", size = 2584190, upload-time = "2026-09-15T21:15:12.685Z" },
+]
+
+[[package]]
+name = "logfire-sdk"
+version = "6.0.0b1"
+source = { git = "https://github.com/pydantic/logfire.git?subdirectory=logfire-sdk&rev=ca08c9e15746e53a364fdf72d9156ce87492ad3a#ca08c9e15746e53a364fdf72d9156ce87492ad3a" }
+dependencies = [
+    { name = "executing" },
+    { name = "opentelemetry-exporter-otlp-proto-http" },
+    { name = "opentelemetry-instrumentation" },
+    { name = "opentelemetry-sdk" },
+    { name = "protobuf" },
+    { name = "requests", version = "2.33.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "requests", version = "2.34.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "rich", version = "14.3.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "rich", version = "15.0.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
+]
+
+[package.optional-dependencies]
+httpx = [
+    { name = "opentelemetry-instrumentation-httpx" },
 ]
 
 [[package]]
@@ -4044,7 +4068,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "idna", marker = "extra == 'playwright'", specifier = ">=3.4" },
     { name = "json-repair", specifier = ">=0.58.0" },
-    { name = "logfire", marker = "extra == 'logfire'", specifier = ">=4.31.0" },
+    { name = "logfire", marker = "extra == 'logfire'", git = "https://github.com/pydantic/logfire.git?subdirectory=logfire&rev=ca08c9e15746e53a364fdf72d9156ce87492ad3a" },
     { name = "modal", marker = "extra == 'modal'", specifier = ">=1.5.0" },
     { name = "playwright", marker = "extra == 'playwright'", specifier = ">=1.61.0" },
     { name = "pydantic-ai-slim", specifier = ">=2.40.0" },
@@ -4076,7 +4100,7 @@ dev = [
     { name = "coverage", specifier = ">=7.10.7" },
     { name = "dirty-equals", specifier = ">=0.9.0" },
     { name = "inline-snapshot", specifier = ">=0.32.5" },
-    { name = "logfire", extras = ["httpx"], specifier = ">=4.31.0" },
+    { name = "logfire", extras = ["httpx"], git = "https://github.com/pydantic/logfire.git?subdirectory=logfire&rev=ca08c9e15746e53a364fdf72d9156ce87492ad3a" },
     { name = "mongomock-motor", specifier = ">=0.0.36" },
     { name = "pydantic-ai-harness", extras = ["code-mode", "coder"] },
     { name = "pydantic-ai-slim", extras = ["anthropic"] },
