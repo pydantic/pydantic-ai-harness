@@ -37,7 +37,10 @@ class ModelList(BaseModel):
 
 def api_url(value: str) -> str:
     """Accept a server root or API root, but not credentials or query parameters."""
-    url = TypeAdapter(HttpUrl).validate_python(value.strip())
+    try:
+        url = TypeAdapter(HttpUrl).validate_python(value.strip())
+    except ValidationError:
+        raise UserError('Enter a valid HTTP(S) server URL.') from None
     if url.username or url.password or url.query or url.fragment:
         raise ValueError('Use an HTTP(S) server URL without credentials, query, or fragment.')
     root = str(url).rstrip('/')

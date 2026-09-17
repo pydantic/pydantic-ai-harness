@@ -39,6 +39,8 @@ async def test_discovery_failure(status: int) -> None:
 
 
 def test_url_and_credentials() -> None:
+    with pytest.raises(UserError, match='valid HTTP'):
+        vllm.api_url('not-a-url')
     for url in ('http://user:pass@host', 'https://host?token=x', 'https://host#fragment'):
         with pytest.raises(ValueError):
             vllm.api_url(url)
