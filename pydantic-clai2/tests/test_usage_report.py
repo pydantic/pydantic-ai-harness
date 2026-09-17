@@ -52,6 +52,7 @@ def priced_history() -> list[ModelMessage]:
         ),
         ModelRequest(parts=[UserPromptPart('second')]),
         ModelResponse(parts=[TextPart('cheap')], usage=RequestUsage(input_tokens=10, output_tokens=1)),
+        ModelRequest(parts=[UserPromptPart('cancelled before any response')]),
     ]
 
 
@@ -68,6 +69,12 @@ def test_turns_group_tool_round_trips_and_skip_unpriced_responses() -> None:
         'Session cost $0.0123: 3,161 tokens (3,010 in, 151 out) over 3 requests.'
         ' No price data for unknown; those responses are not counted in costs.'
     )
+
+
+def test_prompt_cancelled_before_a_response_is_not_a_turn() -> None:
+    usage = session_usage([ModelRequest(parts=[UserPromptPart('cancelled')])])
+    assert usage.turns == []
+    assert cost_line(usage) == 'No usage yet.'
 
 
 def test_response_before_any_prompt_starts_a_turn() -> None:

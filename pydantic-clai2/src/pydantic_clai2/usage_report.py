@@ -31,7 +31,10 @@ class SessionUsage:
 
 
 def session_usage(messages: Sequence[ModelMessage]) -> SessionUsage:
-    """Group responses into turns; a turn starts at a request that carries no tool return or retry."""
+    """Group responses into turns; a turn starts at a request that carries no tool return or retry.
+
+    A prompt cancelled before any response leaves only its request behind; such turns are dropped.
+    """
     turns: list[RunUsage] = []
     unpriced: dict[str, None] = {}
     for message in messages:
@@ -45,6 +48,7 @@ def session_usage(messages: Sequence[ModelMessage]) -> SessionUsage:
         turns[-1].requests += 1
         if message.usage.cost is None:
             unpriced.setdefault(message.model_name or _UNKNOWN, None)
+    turns = [turn for turn in turns if turn.requests]
     total = RunUsage()
     for turn in turns:
         total.incr(turn)
