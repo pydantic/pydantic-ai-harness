@@ -28,11 +28,13 @@ Keep the bundled guide aligned with this contract when changing plugin APIs.
 
 ## Credentials
 
-CLAI's `/login openai-codex` stores tokens in the configured keyring backend,
-not plugin settings. Large token bundles use multiple entries to fit Windows
-Credential Manager's size limit. This does not change plugin APIs or add a
-plaintext fallback. See [Codex authentication](README.md#codex-authentication)
-for storage and security details.
+CLAI's `/login openai-codex` and the vllm and openrouter connections store tokens
+in the configured keyring backend, not plugin settings. Large token bundles use
+multiple entries to fit Windows Credential Manager's size limit. When no keyring
+backend exists, credentials go to a per-account `0600` file under the user's CLAI config
+directory instead. None of this changes plugin APIs. See
+[Codex authentication](README.md#codex-authentication) for storage and security
+details.
 
 ## Where plugins live
 
@@ -64,18 +66,62 @@ which can retain globals removed from source; initialize plugin state explicitly
 
 Plugins are trusted code running as you. Only install what you trust.
 
-## The built-in plugin
+## The built-in plugins
 
-The coding tools are a plugin too. `/plugins list` shows `coder`, backed by
-`pydantic_ai_harness.coder:Coder`, marked `(built-in)` and enabled unless you
-say otherwise. `/plugins disable coder` gives you a chat-only CLAI (a
-writing or research setup with `ExaSearch` instead, say); `/plugins enable
-coder` brings the tools back; `/plugins remove coder` cannot forget a built-in,
-so it resets it to its defaults. To run `Coder` with different options, add your
-own declaration under the same name and it takes the built-in's place:
+The coding tools are a plugin too, and so are reading the repository's
+instruction file and keeping the conversation inside the context window.
+`/plugins list` shows all three, marked `(built-in)` and enabled unless you say
+otherwise:
+
+| Id | Backed by | Settings | Does |
+|---|---|---|---|
+| `coder` | `pydantic_ai_harness.coder:Coder` | `{"unrestricted_filesystem": true, "repo_context": false}` | the file and shell tools |
+| `repo_context` | `pydantic_clai2.repo_context` | `{}` | reads `CLAUDE.md` or `AGENTS.md` from the launch directory into the instructions |
+| `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
+
+`/plugins disable coder` gives you a chat-only CLAI (a writing or research setup
+with `ExaSearch` instead, say); `/plugins enable coder` brings the tools back;
+`/plugins remove coder` cannot forget a built-in, so it resets it to its
+defaults. `/plugins disable repo_context` stops the instruction file from being
+read. To run a built-in with different options, add your own declaration under
+the same name and it takes the built-in's place:
 
 ```text
-/plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": false}'
+/plugins add coder pydantic_ai_harness.coder:Coder '{"unrestricted_filesystem": false, "repo_context": false}'
+/plugins add repo_context pydantic_clai2.repo_context '{"walk_up": true}'
+```
+
+Keep `"repo_context": false` on a replacement `coder`: `Coder` bundles its own
+`RepoContext`, and with the `repo_context` plugin also on, the instruction file
+would reach the model twice.
+
+`repo_context` wraps harness `RepoContext` with the launch directory as the
+workspace and its default filenames. Its settings:
+
+| Key | Default | Does |
+|---|---|---|
+| `walk_up` | `false` | also load instruction files from every directory between the workspace and your home directory |
+| `inventory_tool` | `false` | give the agent `inventory_agent_context`, which maps the repo's `.claude`, `.agents`, `.codex`, and `.grok` assets |
+| `nested_traversal` | `false` | when the agent reads or lists a directory, tell it about that directory's instruction file |
+| `nested_inject` | `"pointer"` | what nested traversal adds: `"pointer"` (one line naming the file) or `"contents"` |
+
+A repository can declare plugins too, in `.clai/settings.json`; they show as
+`(project)` and rank just above the built-ins. They start off, because a
+repository must not run code as you just because you opened it: CLAI names the
+ones waiting at startup, and `/plugins enable NAME` approves one. See
+[Project settings](README.md#project-settings).
+
+`compaction` directly registers harness `FallbackCompaction` with
+`max_fraction=threshold`; harness owns the automatic trigger. `/compact` runs the
+same chain unconditionally. Only `ModelAPIError`, `FallbackExceptionGroup`, and
+`UsageLimitExceeded` cause summarisation to fall back to truncation; other exceptions
+propagate. `/plugins disable compaction` turns automatic compaction,
+`/compact`, and its context warning off; a declaration under the same name
+changes its settings (`strategy`, `threshold`, `protected_tokens`,
+`context_window`, `summarization_model`; see the README):
+
+```text
+/plugins add compaction pydantic_clai2.compaction '{"threshold": 0.7, "context_window": 200000}'
 ```
 
 ## Managing plugins
@@ -108,7 +154,7 @@ CLAI does the same thing:
 |---|---|
 | `/plugins list` | show every plugin and whether it is on |
 | `/plugins add NAME module[:attr] [JSON]` | save it and load it now |
-| `/plugins remove NAME` | forget an installed declaration; persistently disable a drop-in (delete its file yourself to remove it); reset a built-in to its defaults |
+| `/plugins remove NAME` | forget an installed declaration; persistently disable a drop-in (delete its file yourself to remove it); reset a built-in or project-declared plugin to its declaration |
 | `/plugins enable NAME` / `disable NAME` | load or unload, remembered across restarts |
 | `/plugins reload NAME` | re-import the file and load it again (for editing a plugin while CLAI runs) |
 
@@ -313,6 +359,15 @@ settings = host.settings(NotifySettings)
 
 Bad or missing values fail at startup with a message naming your plugin.
 
+### Reach the conversation and the status row: `host.conversation`, `host.status`
+
+`host.conversation` is the retained history: `messages` is a snapshot,
+`replace_messages(...)` swaps it between turns, and `resolved_model()` is the
+model the next prompt will use. `host.status` is the footer's state; set
+`context_alert` to paint the context figure in the warning colour. The built-in
+`compaction` plugin uses both. A host built outside the shell gets an in-memory
+`Transcript` and a detached `Status`, so tests need no special case.
+
 ## Rules that keep plugins predictable
 
 - Handlers are `async`. There is no sync variant of anything.
@@ -349,12 +404,17 @@ for handler in host.handlers:
     await handler(TurnEnd(text='hi', outcome='completed'))
 ```
 
+A plugin that reads the history gets a `Transcript` by default; pass
+`conversation=Transcript(messages=[...], model=TestModel())` to seed it.
+
 ## vllm connection
 
 Open `/model`, choose `vllm`, then enter a trusted HTTP(S) server root or `/v1` URL, and optionally a token. CLAI queries `/v1/models` and opens a searchable model picker. HTTP sends tokens unencrypted; use HTTPS outside trusted local networks.
 
 ## openrouter connection
 
-Open `/model`, choose `openrouter`, then paste an API key from https://openrouter.ai/keys in the masked prompt, then select a model from the live catalog. CLAI validates the key with `/api/v1/key` before fetching `/api/v1/models`. This flow uses API-key authentication, not browser OAuth.
+Open `/model`, choose `openrouter`, then choose **Sign in with browser** or **Enter API key**. Browser sign-in opens OpenRouter's [PKCE authorization flow](https://openrouter.ai/docs/use-cases/oauth-pkce) and receives an authorization code on a temporary loopback listener. CLAI exchanges the code for a user-controlled API key over HTTPS. If the browser cannot reach CLAI (for example over SSH), paste the final callback URL or authorization code into the terminal. If no browser opens, open the printed authorization URL manually. Login times out after five minutes; Ctrl-C cancels it. You can revoke the generated key on OpenRouter.
+
+Manual entry still accepts a key from https://openrouter.ai/keys in a masked prompt. After either method, select a model from the live catalog. CLAI validates the key with `/api/v1/key` before fetching `/api/v1/models`. Cancelling before model selection leaves the saved connection unchanged.
 
 The connection is saved in the configured Python keyring backend after selection; backend security depends on your keyring configuration. Tokens are not stored in SQLite or command history. The selected model persists across restarts. Select the provider again to browse its live models or reconfigure the saved connection. Discovery is explicit and has a 20-second network timeout; redirects are not followed. Agent inference uses Pydantic AI core.

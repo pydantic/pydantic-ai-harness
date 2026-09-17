@@ -2,7 +2,11 @@
 
 A separately installable terminal client for Pydantic AI. The coding tools,
 `Coder(unrestricted_filesystem=True)`, are the built-in `coder` plugin: on by
-default, `/plugins disable coder` for a chat-only shell.
+default, `/plugins disable coder` for a chat-only shell. The built-in
+`repo_context` plugin reads `AGENTS.md` or `CLAUDE.md` from the launch directory
+into the agent's instructions; `/plugins disable repo_context` turns that off.
+Context management is the built-in `compaction` plugin,
+[described below](#compacting-the-conversation).
 Python 3.11+ is required by Termflow. Tracking issue: https://github.com/pydantic/pydantic-ai-harness/issues/875.
 
 CLAI file tools can access paths outside the workspace, including `/tmp`, and do
@@ -80,6 +84,15 @@ Installing or selecting a plaintext backend can store tokens in plaintext. Core 
 token refresh through CLAI's `OpenAICodexCredentialSource`. Tests mock keyring,
 the browser, and OAuth exchange and do not access real credentials.
 
+When no keyring backend exists at all (keyring raises `NoKeyringError` or
+`InitError`, typical on a headless Linux box or over SSH), credentials go to a
+`0600` file in `$XDG_CONFIG_HOME/pydantic-clai2/` (`~/.config/pydantic-clai2/` by
+default) instead, named for the account: Codex uses `credentials-openai-codex.json`,
+and the vllm and openrouter connections use their own files. Like keyring entries,
+these files are per user, so `--database PATH` does not move them. `/login` says so in its confirmation. A locked keyring is not treated as
+missing; unlock it instead. Once a keyring becomes available, the next login or
+token refresh moves the credentials there and deletes the file.
+
 The default Coder shell runs under your OS identity, without a sandbox. Commands
 can read files and access credential backends available to that identity, including
 CLAI's tokens. Keyring is storage, not isolation from model-controlled commands.
@@ -94,7 +107,8 @@ an awaitable string.
 
 Preferences live in `$XDG_CONFIG_HOME/pydantic-clai2/config.db`, falling back to
 `~/.config/pydantic-clai2/config.db`. Use `--database PATH` to select another database.
-There is no automatic repository config loading. Conversation messages and CLAI's
+A repository can add its own layer with a `.clai/settings.json` file; see
+[Project settings](#project-settings). Conversation messages and CLAI's
 Codex tokens are not written to the settings database. Plugin settings are arbitrary
 JSON stored in plaintext in this database, including secrets if you put them there.
 Pass secret references or use plugin-owned credential storage instead of embedding keys.
@@ -145,13 +159,66 @@ adapter; replacing that editor with a Termflow-based editor is separate work.
 `/set SETTING` shows its current value. `/set` changes apply to subsequent prompts
 and preserve conversation history; splash changes apply at next startup.
 
-Precedence is defaults, SQLite overrides, `CLAI_MODEL`, then explicit CLI flags.
-Settings are validated before writes. `/set` updates the active settings snapshot;
-legacy `/config` writes apply on restart; plugin changes apply on the next prompt.
-`--request-limit` controls the full prompt's model-request budget.
+Precedence is defaults, SQLite overrides, the project file, `CLAI_MODEL`, then
+explicit CLI flags. Settings are validated before writes. `/set` updates the
+active settings snapshot; legacy `/config` writes apply on restart; plugin
+changes apply on the next prompt. `--request-limit` controls the full prompt's
+model-request budget.
+
+## Project settings
+
+A repository can pin settings for everyone who runs CLAI inside it. Put a
+`.clai/settings.json` next to the code; CLAI looks for one in the launch
+directory and each parent, stopping at the first directory that contains
+`.git`, and uses the nearest file it finds. Nothing is loaded from above the
+repository.
+
+```json
+{
+  "model": "anthropic:claude-sonnet-4-6",
+  "thinking": false,
+  "request_limit": 50,
+  "plugins": [
+    {"id": "exa", "factory": "pydantic_ai_harness.exa:ExaSearch", "settings": {"num_results": 8}},
+    {"id": "repo_context", "factory": "pydantic_clai2.repo_context", "settings": {"inventory_tool": true}}
+  ]
+}
+```
+
+The keys are the field names from `/config show` (`model`, `request_limit`,
+`thinking`, `splash`, `shell_lines`, `grep_lines`, `smooth_seconds`) and are
+validated the same way as `/set`. A bad value stops startup with the file name
+and the problem; a key CLAI does not know is reported once at startup and
+ignored, so a newer file still works with an older CLAI. Precedence, lowest
+first: defaults, your user settings, the project file, `CLAI_MODEL`, CLI flags.
+
+`plugins` takes the same declarations as `/plugins add`: an `id`, a `factory`
+(`module` or `module:attr`), an optional `path`, and optional `settings`. A
+repository cannot switch a plugin on for you: plugins are trusted code running
+as your user, so every project-declared plugin starts off, CLAI lists the ones
+waiting at startup, and `/plugins enable NAME` is your approval. Approval is
+remembered in your user settings together with the declaration you approved,
+so a later change to the repository's declaration does not run until you
+`/plugins remove NAME` (which forgets your approval and restores the project's
+current declaration, off) and enable it again. Project declarations rank just
+above the built-ins: a project may redeclare `coder` or `repo_context` with
+other options, and that replacement is also off until you enable it.
+
+The project file is read-only from inside CLAI. `/set KEY VALUE` writes your user
+settings and applies for the current session; `/config set` writes your user
+settings and applies on restart. Either way the project value returns at the
+next start. In the `/set` menu a value the project
+sets carries a muted `project` mark after it, and the details panel names the
+origin. CLAI prints the file it found when it starts.
+
+`AGENTS.md` or `CLAUDE.md` in the launch directory is read automatically by the
+built-in `repo_context` plugin (harness `RepoContext`), which is separate from
+the project file. `/plugins disable repo_context` turns it off, for this and
+every later session; `/plugins enable repo_context` brings it back. See
+[PLUGINS.md](PLUGINS.md#the-built-in-plugins) for its settings.
 
 Interactive commands: `/login`, `/set`, `/model`, `/help`, `/new`, `/exit`, `/config`,
-`/plugins`, `/usage`, and `/cost`.
+`/plugins`, `/usage`, `/cost`, and `/compact` from the built-in `compaction` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
 Unknown slash commands are not sent to the model. Up/down recall saved prompt
@@ -173,6 +240,47 @@ than zero, the line under the table names the model, and totals exclude those
 responses. Cost is shown to four decimal places; a nonzero amount below that
 reads `<$0.0001`. There is no spending cap here; use the agent's `UsageLimits`
 for that.
+
+## Compacting the conversation
+
+The built-in `compaction` plugin uses harness's `FallbackCompaction` with
+`SummarizingCompaction` first and `SlidingWindowCompaction` as the fallback.
+It protects the most recent 50,000 tokens. `ModelAPIError`,
+`FallbackExceptionGroup`, and `UsageLimitExceeded` during summarisation fall
+back to truncation; other exceptions propagate. The summary request is billed
+to the current model unless `summarization_model` selects another.
+
+The chain runs automatically before requests above `threshold` (85% of the context
+window by default). `/compact` runs the same chain between turns regardless of that
+threshold. Add words to say what the summary must keep: `/compact the auth refactor, not the CSS`. You get one line
+with the message counts before and after and an estimate of the tokens saved.
+An empty conversation, or one that fits inside the protected tail, says so and
+sends nothing.
+
+The window comes from genai-prices, the same catalog the `/model` menu shows
+context sizes from. A model it does not list (`test`, a local endpoint) is
+assumed to have 200,000 tokens, the harness default. To change any of this,
+redeclare the plugin with your own settings; `/plugins disable compaction`
+turns it off, `/compact` included:
+
+```text
+/plugins add compaction pydantic_clai2.compaction '{"threshold": 0.7, "protected_tokens": 20000, "context_window": 200000}'
+```
+
+| Key | Default | Does |
+|---|---|---|
+| `strategy` | `"summarization"` | `"truncation"` skips the summary and only drops older messages |
+| `threshold` | `0.85` | fraction of the window above which the fallback chain runs |
+| `protected_tokens` | `50000` | tokens of the most recent messages never compacted |
+| `context_window` | unset | overrides the catalog when it is wrong or silent for your model |
+| `summarization_model` | unset | a cheaper model to write the summary; unset uses the one in use |
+
+The context figure turns yellow when a request still exceeds `threshold` after
+compaction, for example because the protected tail is too large. For windows smaller
+than 50,000 tokens, redeclare the plugin with a smaller `protected_tokens` value;
+`/compact` does not override that protection. Run `/compact` to retry the chain,
+or `/new` to clear the history. The figure and colour
+refresh with the next request; `/compact` alone does not change them.
 
 ## Ask CLAI to customize itself
 
@@ -315,9 +423,11 @@ string tool-argument deltas. The estimate is characters divided by four, not a
 provider tokenizer count. On completion it is replaced by reported run output
 usage. Context is the most recent response's reported input plus output tokens,
 not cumulative conversation billing or a context-window percentage; `?` means
-unavailable. During a request it may reflect the previous response. The running
-session cost (`$0.0123`) follows the output count, updated after each turn and
-hidden until a response has price data.
+unavailable. As each request goes out, the `compaction` plugin replaces it with
+that request's estimated size and paints it yellow while the history is
+[over its threshold](#compacting-the-conversation); the response's reported
+usage takes over when it lands. The running session cost (`$0.0123`) follows the
+output count, updated after each turn and hidden until a response has price data.
 
 While running, the footer reserves the terminal's bottom row using ANSI scrolling
 regions. Its text shimmers with a moving highlight at ten frames per second, with no spinner and a
@@ -383,10 +493,12 @@ See `THIRD_PARTY_NOTICES.md` for attribution.
 
 ## vllm connection
 
-Open `/model`, choose `vllm`, then enter a trusted HTTP(S) server root or `/v1` URL, and optionally a token. CLAI queries `/v1/models` and opens a searchable model picker. HTTP sends tokens unencrypted; use HTTPS outside trusted local networks.
+Open `/model`, choose `vllm`, then enter a trusted HTTP(S) server root or `/v1` URL, and optionally a token. CLAI queries `/v1/models` and opens a searchable model picker. HTTP sends tokens unencrypted; use HTTPS outside trusted local networks. The connection is saved like Codex's, see [Codex authentication](#codex-authentication).
 
 ## openrouter connection
 
-Open `/model`, choose `openrouter`, then paste an API key from https://openrouter.ai/keys in the masked prompt, then select a model from the live catalog. CLAI validates the key with `/api/v1/key` before fetching `/api/v1/models`. This flow uses API-key authentication, not browser OAuth.
+Open `/model`, choose `openrouter`, then choose **Sign in with browser** or **Enter API key**. Browser sign-in opens OpenRouter's [PKCE authorization flow](https://openrouter.ai/docs/use-cases/oauth-pkce) and receives an authorization code on a temporary loopback listener. CLAI exchanges the code for a user-controlled API key over HTTPS. If the browser cannot reach CLAI (for example over SSH), paste the final callback URL or authorization code into the terminal. If no browser opens, open the printed authorization URL manually. Login times out after five minutes; Ctrl-C cancels it. You can revoke the generated key on OpenRouter.
 
-The connection is saved in the configured Python keyring backend after selection; backend security depends on your keyring configuration. Tokens are not stored in SQLite or command history. The selected model persists across restarts. Select the provider again to browse its live models or reconfigure the saved connection. Discovery is explicit and has a 20-second network timeout; redirects are not followed. Agent inference uses Pydantic AI core.
+Manual entry still accepts a key from https://openrouter.ai/keys in a masked prompt. After either method, select a model from the live catalog. CLAI validates the key with `/api/v1/key` before fetching `/api/v1/models`. Cancelling before model selection leaves the saved connection unchanged.
+
+The connection is saved in the configured Python keyring backend after selection, or in a per-user `0600` file when no keyring backend exists, as described in [Codex authentication](#codex-authentication). Backend security depends on your keyring configuration. Tokens are not stored in SQLite or command history. The selected model persists across restarts. Select the provider again to browse its live models or reconfigure the saved connection. Discovery is explicit and has a 20-second network timeout; redirects are not followed. Agent inference uses Pydantic AI core.

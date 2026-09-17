@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Generic, TypeVar
 
 from prompt_toolkit import PromptSession
+from prompt_toolkit.formatted_text import FormattedText
 from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
@@ -30,6 +31,7 @@ from .model_menu import open_model_menu
 from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
 from .plugins import Renderer, SessionEndReason, SessionStart, TurnEnd, TurnStart
+from .project_settings import ProjectSettings
 from .set_menu import open_settings_menu
 from .settings_store import SettingsStore
 from .status import Status, StatusLine
@@ -41,9 +43,18 @@ _PLUGIN_ACTIONS = ('list', 'add', 'enable', 'disable', 'remove', 'reload')
 
 
 DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
-    PluginSettings(id='coder', factory='pydantic_ai_harness.coder:Coder', settings={'unrestricted_filesystem': True}),
+    PluginSettings(
+        id='coder',
+        factory='pydantic_ai_harness.coder:Coder',
+        settings={'unrestricted_filesystem': True, 'repo_context': False},
+    ),
+    PluginSettings(id='repo_context', factory='pydantic_clai2.repo_context'),
+    PluginSettings(id='compaction', factory='pydantic_clai2.compaction', settings={}),
 )
-"""Plugins CLAI ships enabled. `/plugins disable coder` turns the coding tools off; `remove` restores this."""
+"""Plugins CLAI ships enabled. `/plugins disable NAME` turns one off; `remove` restores this.
+
+`coder` leaves out its own `RepoContext` because `repo_context` binds one, so instruction files load once.
+"""
 
 
 def create_agent(model: str | None = None) -> Agent[None, str]:
@@ -61,11 +72,13 @@ async def chat(
     settings: Settings | None = None,
     store: SettingsStore | None = None,
     builtin_plugins: Sequence[PluginSettings] = (),
+    project: ProjectSettings | None = None,
 ) -> None:
     """Start an asyncio terminal conversation with a caller-supplied agent.
 
     Ctrl-C cancels the current turn or clears input; Ctrl-D and `/exit` quit.
     Failed and cancelled turns are not added to the retained history.
+    `project` is the parsed `.clai/settings.json`; layer its overrides into `settings` yourself.
     """
     console = console or Console()
     console.print()
@@ -73,6 +86,8 @@ async def chat(
     console.print('/new clears history; /exit quits. Ctrl-C interrupts a turn.', style=theme.MUTED)
     settings = settings or Settings(model=None)
     store = store or SettingsStore()
+    project = project or ProjectSettings()
+    _report_project(project, console)
     session = Session(agent, deps=deps, plugins=plugins, usage_limits=usage_limits)
     session.model = settings.model
     auth = CodexAuth(console)
@@ -94,7 +109,9 @@ async def chat(
         elif key == 'run.request_limit':
             session.usage_limits = replace(session.usage_limits or UsageLimits(), request_limit=updated.request_limit)
 
-    context = CommandContext(settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting)
+    context = CommandContext(
+        settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting, project=project
+    )
 
     commands = Commands()
     commands.register(
@@ -152,12 +169,16 @@ async def chat(
             complete=config_completions,
         )
     )
+    status = Status()
     loader: PluginLoader[DepsT] = PluginLoader(
         store=store,
         console=console,
         commands=commands,
         session_start=lambda: SessionStart(agent=agent, settings=context.settings),
         builtin=builtin_plugins,
+        project=project.plugins,
+        conversation=session,
+        status=status,
     )
     commands.register(
         Command(
@@ -170,14 +191,13 @@ async def chat(
     for plugin in plugins:
         if isinstance(plugin, CommandProvider):
             commands.register_many(plugin.get_commands(context))
-    status = Status()
     prompt = PromptSession[str](
         history=input_history(store.path.with_name('input-history')),
         completer=PromptCompleter(commands),
         complete_while_typing=True,
         style=COMPLETION_STYLE,
         reserve_space_for_menu=6,
-        bottom_toolbar=lambda: status.text(),
+        bottom_toolbar=lambda: FormattedText(status.toolbar()),
     )
     shell = _Shell(
         agent=agent,
@@ -195,6 +215,7 @@ async def chat(
     try:
         async with agent:
             await loader.load_all()
+            _report_project_plugins(loader, console)
             reason = await shell.run()
     finally:
         await loader.close(reason)
@@ -280,6 +301,23 @@ class _Shell(Generic[DepsT, OutputT]):
         return self.interrupts.exit_requested
 
 
+def _report_project(project: ProjectSettings, console: Console) -> None:
+    if project.path is None:
+        return
+    console.print(f'Project settings: {project.path}', style=theme.MUTED)
+    if project.unknown:
+        console.print(f'Ignoring unknown settings: {", ".join(project.unknown)}', style=theme.WARNING)
+
+
+def _report_project_plugins(loader: PluginLoader[DepsT], console: Console) -> None:
+    waiting = [entry.name for entry in loader.entries() if entry.project and entry.host is None]
+    if waiting:
+        console.print(
+            f'Project plugins not loaded; approve one with /plugins enable NAME: {", ".join(waiting)}',
+            style=theme.INFO,
+        )
+
+
 def _report_interrupt(completed: bool, console: Console) -> None:
     if not completed:
         console.print('Turn cancelled. Press Ctrl-C again within 2 seconds to exit.', style=theme.MUTED)
@@ -296,8 +334,9 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
 
 
 def _reset_status(command: str, status: Status) -> None:
-    if command == '/new':
+    if command.split(maxsplit=1)[0] == '/new':
         status.context_tokens = None
+        status.context_alert = False
         status.output_tokens = None
         status.cost = None
         status.streamed_chars = 0
