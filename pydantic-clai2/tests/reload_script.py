@@ -10,6 +10,7 @@ import prompt_toolkit
 import pytest
 from prompt_toolkit.completion import CompleteEvent, Completer
 from prompt_toolkit.document import Document
+from prompt_toolkit.input import DummyInput
 from pydantic_ai import Agent, ModelRequestContext, RunContext, models
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.messages import ModelRequest, UserPromptPart
@@ -31,7 +32,8 @@ async def main(root: Path, mode: str) -> None:
     package = root / 'pydantic_clai2'
     app = package / '_app.py'
     original = app.read_text()
-    updated = original.replace("prompt_async('> ',", "prompt_async('updated> ',")
+    updated = original.replace("'> ',", "'updated> ',")
+    assert updated != original
     updated = updated.replace('New session started.', 'Updated session started.')
     commands = package / 'commands.py'
     commands.write_text(commands.read_text().replace('Use /help.', 'Use updated /help.'))
@@ -87,6 +89,7 @@ async def main(root: Path, mode: str) -> None:
 
     class Prompt(Generic[PromptT]):
         def __init__(self, **kwargs: object) -> None:
+            self.input = DummyInput()
             completer = kwargs['completer']
             assert isinstance(completer, Completer)
             self.completer = completer

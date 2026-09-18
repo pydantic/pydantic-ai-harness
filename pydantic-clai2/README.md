@@ -43,7 +43,7 @@ and completed tool side effects cannot be undone.
 
 ```text
 ┌──────────────────────────────────────────────┐
-│> Working... Ctrl-C to interrupt               │
+│> Focus on the input handling                 │
 └──────────────────────────────────────────────┘
 model | context: ... | running: shell
 ```
@@ -51,10 +51,24 @@ model | context: ... | running: shell
 The prompt sits above the footer with one editable line when empty. It grows
 for wrapped or pasted text and completion suggestions, not to fill the terminal.
 History search stays compact too. The bordered prompt area stays visible below
-streamed output while CLAI works. It shows a busy hint during a turn. Wait for the
-turn to finish, or press Ctrl-C to cancel it, before entering your next prompt.
-There is no message queue or mid-turn editing. Full-screen question menus
-temporarily replace the prompt area; it returns when the menu closes.
+streamed output while CLAI works, and remains editable:
+
+- Enter sends a steering message to the active run at its next model request.
+  In-flight model requests and tool calls finish normally. Core gives the model
+  another request if it was about to finish without seeing your message.
+- Alt+Enter queues a separate follow-up turn. Queued turns run in submission order.
+  Esc followed by Enter works too if your terminal reserves Alt+Enter.
+- Slash commands wait until the current turn ends, regardless of the submit key.
+- Unsubmitted drafts survive turn completion and full-screen question menus.
+- Ctrl-C cancels the run and clears queued submissions, but preserves your draft.
+  Ctrl-D only exits while idle.
+
+The footer confirms steering or the queued count. If steering arrives after the
+run stops accepting messages, it becomes a queued follow-up instead.
+Steering stays within the active turn. Plugin authors who validate all model
+input should use `before_model_request`, not only the once-per-turn `turn_start`.
+Full-screen question menus temporarily own the terminal; your draft returns
+when the menu closes.
 Small terminals omit the border to leave room for output.
 
 ## Input history
@@ -592,16 +606,12 @@ output count, updated after each turn and hidden until a response has price data
 After `/compact`, the footer keeps the previous figure until the next turn;
 `/cost` and `/usage` read the retained history immediately.
 
-While running, the prompt frame and status row reserve the terminal's bottom
-four rows using ANSI scrolling regions, so output scrolls above them. Terminals
-shorter than six rows or narrower than four columns keep only the status row;
-below three rows, neither is drawn. The status text shimmers with a moving
-highlight at ten frames per second, with no spinner and a 16-colour fallback.
-Prompt-toolkit owns the framed editor and footer while accepting input. The run
-footer is disabled for redirected output and restores normal scrolling on
-cancellation or failure. The cursor is hidden during runs and restored on
-completion, failure, or cancellation. No model requests or telemetry are added
-for status reporting.
+Prompt-toolkit owns the editor and footer both while idle and during a run.
+Complete output lines are written above the prompt so streamed Markdown does not
+replace your draft. The footer refreshes ten times per second. Small terminals
+omit the frame, and redirected output has no live editor. Full-screen menus
+release and restore the editor's input ownership. No model requests or telemetry
+are added for status reporting.
 
 ## Plugins
 

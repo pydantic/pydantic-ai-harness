@@ -36,6 +36,7 @@ class Status:
     """Retained-history cost; `None` (hidden) until a priced response exists."""
     streamed_chars: int = 0
     activity: str = 'ready'
+    input_hint: str = ''
 
     def observe(self, event: AgentStreamEvent) -> None:
         """Include text, thinking, and streamed tool arguments in the estimate."""
@@ -74,7 +75,8 @@ class Status:
     def toolbar(self) -> list[tuple[str, str]]:
         """prompt-toolkit fragments for the input prompt; the figure is `WARNING` while `context_alert` is set."""
         head, figure, tail = self.segments()
-        return [('', head), (theme.WARNING if self.context_alert else '', figure), ('', tail)]
+        hint = f' | {self.input_hint}' if self.input_hint else ''
+        return [('', head), (theme.WARNING if self.context_alert else '', figure), ('', tail + hint)]
 
 
 def _interrupted() -> bool:

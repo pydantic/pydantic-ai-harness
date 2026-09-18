@@ -8,6 +8,7 @@ from typing import Generic, TypeVar
 
 import pytest
 from menu_script import Script, pick, typed
+from prompt_toolkit.input import DummyInput
 from prompt_toolkit.styles import BaseStyle
 from pydantic_ai import Agent, ModelRequestContext, RunContext
 from pydantic_ai.capabilities import AbstractCapability
@@ -33,6 +34,7 @@ def anyio_backend() -> str:
 def inputs(monkeypatch: pytest.MonkeyPatch, values: list[str | BaseException]) -> None:
     class Prompt(Generic[PromptT]):
         def __init__(self, **kwargs: object) -> None:
+            self.input = DummyInput()
             style = kwargs['style']
             assert isinstance(style, BaseStyle)
             for selector in ('class:bottom-toolbar', 'class:bottom-toolbar.text'):

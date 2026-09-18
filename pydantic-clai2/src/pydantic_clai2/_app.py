@@ -1,14 +1,15 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Generic, TypeVar
 
 from anyio import create_task_group
 from prompt_toolkit import PromptSession
-from prompt_toolkit.filters import Always, Condition, is_done
+from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Always, Condition, Filter, is_done
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.layout import BufferControl, HSplit
 from prompt_toolkit.layout.containers import VerticalAlign
@@ -36,6 +37,7 @@ from .customization import customization_guide
 from .input_history import input_history
 from .interrupts import Interrupts
 from .key_menu import keys_command
+from .live_prompt import LivePrompt
 from .model_menu import open_add_model_menu
 from .model_picker import model_command, model_completions
 from .plugin_loader import PluginError, PluginLoader
@@ -353,6 +355,7 @@ class _Shell(Generic[DepsT, OutputT]):
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
     reload_requested: bool = False
+    live: LivePrompt | None = None
 
     def request_reload(self, args: list[str]) -> str:
         if args:
@@ -364,6 +367,7 @@ class _Shell(Generic[DepsT, OutputT]):
         show_frame = ~is_done & Condition(lambda: self.console.width >= 4 and self.console.height >= 6)
 
         def prepare_prompt() -> None:
+            self.prompt.app.erase_when_done = False
             layout = self.prompt.layout
             for window in layout.find_all_windows():
                 if isinstance(window.content, BufferControl):
@@ -374,10 +378,20 @@ class _Shell(Generic[DepsT, OutputT]):
             assert isinstance(layout.container, HSplit)
             layout.container.align = VerticalAlign.BOTTOM
 
+        if self.console.is_terminal and not self.console.is_dumb_terminal:
+            self.live = LivePrompt(
+                prompt=self.prompt,
+                console=self.console,
+                status=self.status,
+                steer=self.session.steer,
+                prepare=prepare_prompt,
+                show_frame=show_frame,
+            )
+
         while True:
             try:
                 self.status.model = self.session.model or _model_label(self.agent)
-                text = (await self.prompt.prompt_async('> ', show_frame=show_frame, pre_run=prepare_prompt)).strip()
+                text = await self._read_prompt(show_frame=show_frame, prepare=prepare_prompt)
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
@@ -400,6 +414,26 @@ class _Shell(Generic[DepsT, OutputT]):
                 continue
             if await self._turn(text):
                 return 'exit'
+
+    async def _read_prompt(self, *, show_frame: Filter, prepare: Callable[[], None]) -> str:
+        if self.live is not None and self.live.queue:
+            text = self.live.queue.popleft()
+            self.console.print(f'> {text}', markup=False)
+            return text
+        try:
+            return (
+                await self.prompt.prompt_async(
+                    '> ',
+                    show_frame=show_frame,
+                    pre_run=prepare,
+                    default=self.live.draft if self.live else Document(),
+                    key_bindings=None,
+                    refresh_interval=0,
+                )
+            ).strip()
+        finally:
+            if self.live is not None:
+                self.live.draft = Document()
 
     async def _turn(self, text: str) -> bool:
         start = TurnStart(text=text)
@@ -431,9 +465,23 @@ class _Shell(Generic[DepsT, OutputT]):
                 status=self.status,
                 renderers=self.loader.renderers(),
                 screen=self.screen,
+                live=self.live,
             )
 
-        completed = await self.interrupts.run(run_prompt())
+        async def operation() -> bool:
+            await run_prompt()
+            return True
+
+        async def execute() -> None:
+            if self.live is not None:
+                await self.live.run(operation)
+            else:
+                await run_prompt()
+
+        completed = await self.interrupts.run(execute())
+        if not completed and self.live is not None and self.live.queue:
+            self.live.queue.clear()
+            self.console.print('Queued submissions cleared after cancellation.', style=theme.MUTED)
         self.sessions.namer.submit(self.session.summary.id)
         _report_interrupt(completed, self.console)
         await self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled'))
@@ -497,6 +545,7 @@ async def _run_prompt(
     status: Status,
     renderers: Sequence[Renderer[AgentStreamEvent]],
     screen: Screen,
+    live: LivePrompt | None = None,
 ) -> TurnEnd:
     renderer = StreamRenderer(
         console,
@@ -526,14 +575,18 @@ async def _run_prompt(
     @asynccontextmanager
     async def take_screen() -> AsyncGenerator[None]:
         await renderer.finish()
-        async with status_line.paused():
+        async with live.paused() if live is not None else status_line.paused():
             yield
 
     try:
         with screen.bound(take_screen):
-            async with status_line:
+            if live is not None:
                 result = await session.prompt(text)
                 await renderer.finish()
+            else:
+                async with status_line:
+                    result = await session.prompt(text)
+                    await renderer.finish()
         status.output_tokens = result.usage.output_tokens
         for message in reversed(result.all_messages()):  # pragma: no branch -- successful runs contain a response.
             if isinstance(message, ModelResponse):

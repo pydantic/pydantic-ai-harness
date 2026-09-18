@@ -188,7 +188,9 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `compaction.py` | the built-in `compaction` plugin: harness `FallbackCompaction([SummarizingCompaction, SlidingWindowCompaction])`, `/compact`, the context alert |
 | `commands.py` | `Command`, the registry, completion |
 | `usage_report.py` | `/usage`, `/cost`, and the footer cost, derived from `Session.messages` |
-| `status.py` | the footer `Status` fields and the `StatusLine` row painter |
+| `status.py` | the footer `Status` fields and non-editor `StatusLine` row painter |
+| `live_prompt.py` | mid-turn editing, Enter steering, Alt+Enter queued submissions, draft-preserving screen handoff |
+| `prompt_output.py` | complete output lines written above the live editor |
 | `config.py` | `Settings`, `PluginSettings` |
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |

@@ -43,6 +43,8 @@ def test_toolbar_paints_the_context_figure_on_alert() -> None:
     assert status.toolbar()[1] == (WARNING, '90')
     assert '$0.0123' in status.toolbar()[2][1]
     assert ''.join(text for _, text in status.toolbar()) == status.text()
+    status.input_hint = '2 queued'
+    assert status.toolbar()[2][1].endswith(' | 2 queued')
 
 
 async def test_footer_paints_the_context_figure_on_alert(monkeypatch: pytest.MonkeyPatch) -> None:

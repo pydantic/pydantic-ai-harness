@@ -212,6 +212,8 @@ async def test_prompt_frame_stays_visible_during_tools(tmp_path: Path, height: i
     completions = anyio.Event()
     searched = anyio.Event()
     pasted = anyio.Event()
+    drafted = anyio.Event()
+    restored = anyio.Event()
     frame: list[str] = []
     working = anyio.Event()
     finish = anyio.Event()
@@ -241,6 +243,10 @@ async def test_prompt_frame_stays_visible_during_tools(tmp_path: Path, height: i
                     searched.set()
                 if any('second line' in line for line in frame):
                     pasted.set()
+                if any('draft during tool' in line for line in frame):
+                    drafted.set()
+                    if any('ready' in line for line in frame):
+                        restored.set()
 
     output = Output()
     terminal = Vt100_Output(output, lambda: Size(rows=height, columns=80), term='xterm-256color')
@@ -286,14 +292,19 @@ async def test_prompt_frame_stays_visible_during_tools(tmp_path: Path, height: i
             assert bottom - top == 3
             pipe.send_text('\n')
             await working.wait()
-            assert '│> Working... Ctrl-C to interrupt' in output.getvalue()
-            assert f'\x1b[1;{height - 4}r' in output.getvalue()
+            pipe.send_text('draft during tool')
+            await drafted.wait()
+            top = next(row for row, line in enumerate(frame) if '┌' in line)
+            bottom = next(row for row, line in enumerate(frame) if '└' in line)
+            assert bottom - top == 2
+            assert any('│> draft during tool' in line for line in frame)
             finish.set()
-            pipe.send_text('/exit\n')
+            await restored.wait()
+            pipe.send_text('\x15/exit\n')
             await done.wait()
     assert 'Goodbye.' in output.getvalue()
     assert 'Turn not saved' not in output.getvalue()
-    assert '\x1b[r' in output.getvalue()
+    assert 'Working... Ctrl-C to interrupt' not in output.getvalue()
 
 
 async def test_prompt_loop_commands(tmp_path: Path) -> None:

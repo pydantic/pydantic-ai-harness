@@ -12,6 +12,7 @@ from anyio import get_cancelled_exc_class, move_on_after
 from pydantic_ai import AgentRunResult, AgentStreamEvent, RunContext, capture_run_messages
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
@@ -62,6 +63,9 @@ class Session(Generic[DepsT, OutputT]):
         self.on_stream_event = on_stream_event
         self._messages: list[ModelMessage] = list(message_history)
         self._running = False
+        self._run_context: RunContext[DepsT] | None = None
+        self._accepting_steering = False
+        self._pending_steering: list[str] = []
         self.on_context_usage: Callable[[int], None] | None = None
 
     @property
@@ -135,11 +139,31 @@ class Session(Generic[DepsT, OutputT]):
         model = self.resolve_model(self.model)
         return await model if isinstance(model, Awaitable) else model
 
+    def steer(self, text: str) -> bool:
+        """Inject a user message at core's next opportunity, or return false if the run cannot accept it.
+
+        Text received while the model is resolving waits for the first stream
+        context. The caller retains text sent while idle or after the queue
+        closes. Tool calls already in flight are not cancelled.
+        """
+        if not self._accepting_steering:
+            return False
+        if self._run_context is None:
+            self._pending_steering.append(text)
+            return True
+        try:
+            self._run_context.enqueue(text, priority='asap')
+        except UserError:
+            self._accepting_steering = False
+            return False
+        return True
+
     async def prompt(self, text: str) -> AgentRunResult[OutputT]:
         """Execute the complete native agent loop, including tool calls."""
         if self._running:
             raise RuntimeError('A conversation can only run one prompt at a time')
         self._running = True
+        self._accepting_steering = True
         try:
             previous = self._messages
             run_id = str(uuid4())
@@ -168,6 +192,7 @@ class Session(Generic[DepsT, OutputT]):
                         usage_limits=self.usage_limits,
                         event_stream_handler=self._stream,
                     )
+                    self._accepting_steering = False
                     self._messages = result.all_messages()
                     await self._save_turn(outcome='completed')
                     return result
@@ -188,9 +213,17 @@ class Session(Generic[DepsT, OutputT]):
                         await self._save_turn(outcome='failed')
                     raise
         finally:
+            self._run_context = None
+            self._accepting_steering = False
+            self._pending_steering.clear()
             self._running = False
 
     async def _stream(self, ctx: RunContext[DepsT], events: AsyncIterable[AgentStreamEvent]) -> None:
+        self._run_context = ctx
+        for text in self._pending_steering:
+            ctx.enqueue(text, priority='asap')
+        self._pending_steering.clear()
+
         async def observed() -> AsyncIterable[AgentStreamEvent]:
             async for event in events:
                 if self.on_context_usage is not None:

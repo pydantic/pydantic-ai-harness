@@ -328,13 +328,18 @@ Four names belong to CLAI itself. They fire outside the agent run, in the shell:
 |---|---|---|---|
 | `session_start` | CLAI has started, before the first prompt | `agent`, `settings` | no |
 | `session_end` | CLAI is quitting | `reason`: `exit`, `eof`, or `error` | no |
-| `turn_start` | you pressed Enter on a prompt | `text` | yes: edit `event.text`, or `event.cancel()` |
+| `turn_start` | an idle or queued prompt starts a new turn | `text` | yes: edit `event.text`, or `event.cancel()` |
 | `turn_end` | the turn finished, failed, or was interrupted | `text`, `outcome`, `result`, `error` | no |
 
 Ctrl-C during an agent run keeps the prompt and captured partial messages in
 conversation history for the next turn. Cancellation still reaches the running
 tools for cleanup; it does not undo completed side effects or retry the run.
 A prompt cancelled by `turn_start` never starts an agent run and is not retained.
+Steering adds input to an existing turn; it does not fire another `turn_start`
+or `turn_end`. Do not use `turn_start` alone to validate all text sent to a model.
+For validation that must include steering, register core's `before_model_request`
+hook and inspect `request_context.messages`. It runs after queued steering is
+included and can rewrite the request or raise to stop it before the model is called.
 
 Every other name is a Pydantic AI lifecycle hook, spelled exactly as on core's
 `Hooks().on`, with the same handler signature. The ones people reach for:
@@ -441,13 +446,16 @@ never lands in the middle of a paragraph.
 ### Take the whole screen mid-run: `async with host.full_screen()`
 
 A full-screen widget opened from inside a tool call (the built-in `ask_user` menu
-is one) has to wait for streamed text to finish and the busy prompt frame and
-status row to get out of the way. Otherwise it draws over unfinished output and
-the footer keeps repainting into it. `host.full_screen()` clears the whole prompt
-area and restores it when the block exits. The idle editor stays compact above
-the footer, growing for input or completions rather than filling the terminal.
-The busy frame is not an editor; users enter their next prompt after the turn
-finishes or they cancel it:
+is one) has to wait for streamed text to finish and the live editor and status
+row to get out of the way. Otherwise it draws over unfinished output and the
+footer keeps repainting into it. `host.full_screen()` releases the editor's input
+and output ownership, then restores it with the draft intact when the block exits.
+The editor stays compact above the footer, growing for input or completions.
+Enter steers through core's `RunContext.enqueue`; Alt+Enter queues a new turn.
+Steering stays inside the current turn's hooks. Queued prompts run the normal
+`turn_start` and `turn_end` hooks. Slash commands wait until the turn ends, so
+plugin loading and configuration still happen between turns.
+Use the screen context so your widget can read its own keys:
 
 ```python
 from pydantic_clai2.plugins import PluginHost
