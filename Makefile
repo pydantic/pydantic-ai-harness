@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := all
 
-.PHONY: .uv .prek install format lint typecheck test testcov integration-localstack integration-mongodb integration-redis all
+.PHONY: .uv .prek install format lint typecheck test testcov integration-localstack integration-mongodb integration-redis integration-logfire-platform all
 
 .uv:
 	@uv --version || echo 'Please install uv: https://docs.astral.sh/uv/getting-started/installation/'
@@ -42,5 +42,13 @@ integration-mongodb:
 # tests skip. Set REDIS_TEST_URL to point at a server elsewhere.
 integration-redis:
 	uv run pytest integration_tests/redis/test_live_redis.py
+
+# Needs a whole Logfire platform rather than one container, so no CI job runs it and it
+# skips unless you point it somewhere on purpose. It creates, publishes over and deletes
+# one per-run `agent__harness_agent_control_live_<hex>` variable on the project it is
+# pointed at, and makes real model requests. Read
+# integration_tests/logfire_platform/README.md first.
+integration-logfire-platform:
+	uv run pytest integration_tests/logfire_platform
 
 all: format lint typecheck testcov
