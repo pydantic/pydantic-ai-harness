@@ -84,6 +84,8 @@ primitive for it (see [Three-level identity](#three-level-identity)).
 - **Neither set** uses `ctx.run_id` unchanged. A missing context run id raises
   `RuntimeError` because inventing one would disconnect replayed writes.
 
+Storing an agent's notes as well as its messages? [Memory](../memory/README.md#one-database-for-both) shows both capabilities pointed at one database; they write disjoint tables and stay separate capabilities.
+
 ## Durable execution
 
 `StepPersistence` has the stable capability id `step_persistence`, so it can
@@ -350,10 +352,15 @@ configured retention can delete older snapshots.
   `AUTOINCREMENT seq` to mirror `FileStepStore._next_snapshot_seq`.
   Databases created before the snapshot `state` column existed gain it
   automatically on open (existing rows read as `complete`).
-  Pass `connection=` instead of `database=` to share a `sqlite3.Connection`
-  with the rest of your application; the connection must be opened with
-  `check_same_thread=False` because hook calls are dispatched onto a
-  worker thread.
+  Pass `connection=` instead of `database=` to share a connection with the
+  rest of your application. A stdlib `sqlite3` connection must be opened with
+  `check_same_thread=False`, because hook calls are dispatched onto a worker
+  thread. Any DB-API 2.0 connection speaking SQLite works, so
+  [Turso](https://turso.tech) needs no backend of its own -- `turso.connect('runs.db')`
+  locally (no account), or `turso.sync.connect('runs.db', remote_url=...)` for
+  an embedded replica, which makes moving to the hosted database a connection
+  change rather than a migration. Install `pyturso` in your application; the
+  harness does not depend on it.
 - `MongoStepStore(client= or db_url=, database=...)` -- MongoDB collections
   `runs`, `events`, `snapshots`, `snapshot_idempotency_keys`, `tool_effects`,
   and `counters` (atomic `$inc` for monotonic `seq`). Run registration uses an

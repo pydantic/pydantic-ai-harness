@@ -20,6 +20,8 @@ from typing import Protocol, TypeGuard, runtime_checkable
 
 import anyio.to_thread
 
+from pydantic_ai_harness._sqlite import SqliteConnection
+
 _URI_SCHEME = 'media+sha256://'
 _HEX_RE = re.compile(r'^[0-9a-f]{64}$')
 
@@ -300,11 +302,13 @@ class SqliteMediaStore:
     """SQLite store. One row per blob in a `media` table keyed by sha256 hex.
 
     Pass either a path to a SQLite file (created on demand) or an existing
-    `sqlite3.Connection`. When a connection is passed the caller owns its
-    lifecycle; when a path is passed each call opens a short-lived connection
-    inside the worker thread (safe across event-loop threads).
+    connection. When a connection is passed the caller owns its lifecycle;
+    when a path is passed each call opens a short-lived connection inside the
+    worker thread (safe across event-loop threads). A caller-owned connection
+    only has to be a DB-API 2.0 connection speaking SQLite, so a Turso one
+    works as well as stdlib `sqlite3`.
 
-    A caller-owned connection **must** be created with
+    A caller-owned stdlib `sqlite3` connection **must** be created with
     `check_same_thread=False`. Store methods dispatch SQL onto worker threads
     via `anyio.to_thread`, so the stdlib default (`check_same_thread=True`)
     raises `sqlite3.ProgrammingError` on first use. The path form sets this
@@ -338,7 +342,7 @@ class SqliteMediaStore:
         self,
         *,
         database: str | Path | None = None,
-        connection: sqlite3.Connection | None = None,
+        connection: SqliteConnection | None = None,
         table: str = 'media',
         public_url: PublicUrlResolver | None = None,
     ) -> None:
@@ -352,7 +356,7 @@ class SqliteMediaStore:
         self._schema_ready = False
         self._public_url_resolver = public_url
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+    def _ensure_schema(self, conn: SqliteConnection) -> None:
         if self._schema_ready:
             return
         conn.execute(
@@ -366,7 +370,7 @@ class SqliteMediaStore:
         conn.commit()
         self._schema_ready = True
 
-    def _open(self) -> sqlite3.Connection:
+    def _open(self) -> SqliteConnection:
         if self._connection is not None:
             return self._connection
         assert self._database is not None
@@ -375,7 +379,7 @@ class SqliteMediaStore:
         conn.execute('PRAGMA journal_mode=WAL').close()
         return conn
 
-    def _maybe_close(self, conn: sqlite3.Connection) -> None:
+    def _maybe_close(self, conn: SqliteConnection) -> None:
         if self._connection is None:
             conn.close()
 

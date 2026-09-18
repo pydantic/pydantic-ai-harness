@@ -138,6 +138,7 @@ dev = [
     "pytest-examples>=0.0.18",
     "pytest-recording>=0.13.4",
     "mongomock-motor>=0.0.36",
+    "pyturso>=0.7.2",
     "redis>=6.0.0",
 ]
 lint = [
@@ -247,6 +248,9 @@ filterwarnings = [
     "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning",
     # Experimental capabilities warn on import by design; assert it explicitly where it matters.
     'ignore::pydantic_ai_harness.experimental.HarnessExperimentalWarning',
+    # pyturso 0.7.2 has a `return` inside a `finally`, which Python 3.14 flags when it compiles the
+    # module. Raised as an error it fails collection of anything importing `turso` — not our code.
+    "ignore:'return' in a 'finally' block:SyntaxWarning",
 ]
 anyio_mode = 'auto'
 

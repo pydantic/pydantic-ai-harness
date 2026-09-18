@@ -76,6 +76,7 @@ Every `MemoryStore.read` call includes a finite `max_chars`, and every `list_pat
 | `FileStore(directory)` | Local filesystem; atomic Markdown replacement plus a hidden SQLite journal provide recovery, cross-process compare-and-swap, and durable idempotency receipts. |
 | `SqliteMemoryStore(database=...)` | Durable single-host storage; compare-and-swap and idempotency are enforced in database transactions. |
 | `PostgresMemoryStore(pool)` | Durable shared storage; compare-and-swap and idempotency are enforced in database transactions. The caller owns the pool lifecycle. |
+| `SqliteMemoryStore(connection=...)` | Any DB-API 2.0 connection speaking SQLite, including [Turso](https://turso.tech). Same guarantees as the path form; the caller owns the connection lifecycle. |
 
 ```python
 from pydantic_ai_harness import Memory
@@ -85,7 +86,40 @@ local_memory = Memory(FileStore('.agent-memory'))
 sqlite_memory = Memory(SqliteMemoryStore(database='.agent-memory.db'))
 ```
 
-`SqliteMemoryStore` can instead use a caller-owned `sqlite3.Connection`. Because operations run off the event loop, create that connection with `check_same_thread=False` and manage its lifecycle in the application. The connection must be dedicated to the store and idle at the start of every operation; a call fails rather than commit or roll back an active caller transaction.
+`SqliteMemoryStore` can instead use a caller-owned connection. It must be dedicated to the store and idle at the start of every operation; a call fails rather than commit or roll back an active caller transaction. Because operations run off the event loop, a stdlib `sqlite3` connection must be created with `check_same_thread=False`.
+
+The store only needs a DB-API 2.0 connection speaking SQLite, so [Turso](https://turso.tech) works here without a backend of its own. Install the driver in your application, as with the PostgreSQL one below:
+
+uv:
+
+```bash
+uv add pyturso
+```
+
+pip:
+
+```bash
+pip install pyturso
+```
+
+```python
+import turso
+
+from pydantic_ai_harness import Memory
+from pydantic_ai_harness.memory import SqliteMemoryStore
+
+local = Memory(SqliteMemoryStore(connection=turso.connect('agent-memory.db')))
+
+replica = Memory(
+    SqliteMemoryStore(
+        connection=turso.sync.connect(
+            'agent-memory.db', remote_url='libsql://<database>.turso.io', auth_token='...'
+        )
+    )
+)
+```
+
+The local form needs no account, and the embedded replica is the same store pointed at a different connection, so moving from one to the other is a connection change rather than a migration.
 
 `FileStore` keeps the journal at `.memory-store.sqlite3` inside its root. Keep it with the Markdown files when copying or backing up the store. Editing a Markdown file outside the capability changes its content version and can produce a conflict with a prepared operation; the journal recovers operations interrupted between transaction preparation and filesystem replacement.
 
@@ -117,6 +151,31 @@ async def build_memory() -> tuple[Memory[None], asyncpg.Pool]:
 ```
 
 Call `build_memory` during application startup and close the returned pool during shutdown. The store does not manage it.
+
+## One database for both
+
+`Memory` and `StepPersistence` stay separate capabilities: one is a versioned notebook meant to outlive any conversation, the other an append-only log of what each run did, and their store protocols have nothing in common. What they can share is the database, so an application needs one connection and one thing to back up:
+
+```python
+import turso
+
+from pydantic_ai import Agent
+from pydantic_ai_harness import Memory, StepPersistence
+from pydantic_ai_harness.memory import SqliteMemoryStore
+from pydantic_ai_harness.step_persistence import SqliteStepStore
+
+connection = turso.connect('agent.db')
+
+agent = Agent(
+    'openai:gpt-5.2',
+    capabilities=[
+        Memory(SqliteMemoryStore(connection=connection)),
+        StepPersistence(SqliteStepStore(connection=connection)),
+    ],
+)
+```
+
+The two write disjoint tables, so they coexist in one file. Swap both connections for a pool and the same pairing runs on PostgreSQL; see [Step Persistence](../step_persistence/README.md) for what the message side records.
 
 ## Namespaces
 

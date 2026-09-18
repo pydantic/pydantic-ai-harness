@@ -17,6 +17,7 @@ import anyio.to_thread
 from pydantic import TypeAdapter, ValidationError
 from pydantic_ai.messages import ModelMessage, ModelMessagesTypeAdapter
 
+from pydantic_ai_harness._sqlite import SqliteConnection
 from pydantic_ai_harness.media import (
     DiskMediaStore,
     MediaStore,
@@ -939,9 +940,14 @@ class SqliteStepStore:
     """SQLite-backed store. Single file holds runs, events, snapshots, tool effects + media.
 
     Pass either `database=` (path; connections opened short-lived per call) or
-    `connection=` (caller-owned `sqlite3.Connection`). When `database=` is
-    used, the default `media_store` is a `SqliteMediaStore` against the same
-    file (sibling `media` table), so a single-file deployment is the default.
+    `connection=` (caller-owned). When `database=` is used, the default
+    `media_store` is a `SqliteMediaStore` against the same file (sibling
+    `media` table), so a single-file deployment is the default.
+
+    A caller-owned `connection=` only has to be a DB-API 2.0 connection
+    speaking SQLite, so `turso.connect(...)` -- or `turso.sync.connect(...,
+    remote_url=...)` for an embedded replica -- works as well as stdlib
+    `sqlite3`.
 
     `BinaryContent` payloads and text parts at or above
     `media_threshold_bytes` (default 64 KiB) are externalized through that
@@ -950,11 +956,13 @@ class SqliteStepStore:
     externalization existed still restore: `restore_media` recognizes the
     older marker shape.
 
-    A caller-owned `connection=` **must** be created with
+    A caller-owned stdlib `sqlite3` connection **must** be created with
     `check_same_thread=False`. Store methods dispatch SQL onto worker threads
     via `anyio.to_thread`, so the stdlib default (`check_same_thread=True`)
     raises `sqlite3.ProgrammingError` on first use. The `database=` path sets
-    this internally; `connection=` cannot, so it is the caller's responsibility.
+    this internally; `connection=` cannot, so it is the caller's
+    responsibility. Turso needs no equivalent: it is usable across threads as
+    opened, and rejects the keyword.
 
     Concurrency: WAL mode is enabled on connections opened from a `database=`
     path (a caller-owned `connection=` keeps whatever journal mode the caller
@@ -975,7 +983,8 @@ class SqliteStepStore:
       for content-addressed dedup.
 
     The `runs.run_id` PK enforces the "explicit `run_id` is single-shot"
-    contract -- `register_run` raises `sqlite3.IntegrityError` on reuse,
+    contract -- `register_run` raises the driver's DB-API `IntegrityError` on
+    reuse,
     which `StepPersistence.before_run` converts to a friendlier
     `ValueError` via its own pre-check.
 
@@ -988,7 +997,7 @@ class SqliteStepStore:
         self,
         *,
         database: str | Path | None = None,
-        connection: sqlite3.Connection | None = None,
+        connection: SqliteConnection | None = None,
         media_store: MediaStore | None | _AutoMedia = 'auto',
         media_threshold_bytes: int = _DEFAULT_MEDIA_THRESHOLD_BYTES,
         max_snapshots_per_run: int | None = None,
@@ -1012,7 +1021,7 @@ class SqliteStepStore:
         self._media_store: MediaStore | None = resolved
         self._media_threshold_bytes = media_threshold_bytes
 
-    def _open(self) -> sqlite3.Connection:
+    def _open(self) -> SqliteConnection:
         if self._connection is not None:
             return self._connection
         assert self._database is not None
@@ -1021,11 +1030,11 @@ class SqliteStepStore:
         conn.execute('PRAGMA journal_mode=WAL')
         return conn
 
-    def _maybe_close(self, conn: sqlite3.Connection) -> None:
+    def _maybe_close(self, conn: SqliteConnection) -> None:
         if self._connection is None:
             conn.close()
 
-    def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+    def _ensure_schema(self, conn: SqliteConnection) -> None:
         if self._schema_ready:
             return
         conn.executescript(_SQLITE_SCHEMA)
@@ -1043,18 +1052,18 @@ class SqliteStepStore:
         # state` and `_schema_ready` never letting the migration retry.
         try:
             conn.execute("ALTER TABLE snapshots ADD COLUMN state TEXT NOT NULL DEFAULT 'complete'")
-        except sqlite3.OperationalError:
+        except conn.DatabaseError:
             if 'state' not in self._snapshot_columns(conn):
                 raise
         for table in ('events', 'snapshots'):
             try:
                 conn.execute(f'ALTER TABLE {table} ADD COLUMN idempotency_key TEXT')
-            except sqlite3.OperationalError:
+            except conn.DatabaseError:
                 if 'idempotency_key' not in self._table_columns(conn, table):
                     raise  # pragma: no cover
         try:
             conn.execute('ALTER TABLE runs ADD COLUMN registration_id TEXT')
-        except sqlite3.OperationalError:
+        except conn.DatabaseError:
             if 'registration_id' not in self._table_columns(conn, 'runs'):
                 raise  # pragma: no cover
         conn.execute(
@@ -1085,11 +1094,11 @@ class SqliteStepStore:
         self._schema_ready = True
 
     @staticmethod
-    def _snapshot_columns(conn: sqlite3.Connection) -> set[str]:
+    def _snapshot_columns(conn: SqliteConnection) -> set[str]:
         return {row[1] for row in conn.execute('PRAGMA table_info(snapshots)')}
 
     @staticmethod
-    def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    def _table_columns(conn: SqliteConnection, table: str) -> set[str]:
         return {row[1] for row in conn.execute(f'PRAGMA table_info({table})')}
 
     async def register_run(self, record: RunRecord) -> None:
@@ -1252,7 +1261,7 @@ class SqliteStepStore:
         finally:
             self._maybe_close(conn)
 
-    def _sync_prune_snapshots(self, conn: sqlite3.Connection, run_id: str) -> None:
+    def _sync_prune_snapshots(self, conn: SqliteConnection, run_id: str) -> None:
         """Delete this run's snapshot rows outside the retain set when bounded.
 
         No-op when `max_snapshots_per_run` is `None`. Externalized media in the
