@@ -70,6 +70,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
+        id: str | None = None,
         cwd: Path,
         allowed_commands: Sequence[str],
         denied_commands: Sequence[str],
@@ -82,7 +83,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         denied_env_patterns: Sequence[str] = (),
         tools: Sequence[str] = RUN_SCOPED_TOOL_NAMES,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         self._cwd = cwd.resolve()
         # The configured starting directory, never mutated by persist_cwd, so
         # `for_run` can hand each run a fresh instance rooted back here.
@@ -134,6 +135,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         each other's background processes.
         """
         return ShellToolset(
+            id=self.id,
             cwd=self._initial_cwd,
             allowed_commands=self._allowed_commands,
             denied_commands=self._denied_commands,

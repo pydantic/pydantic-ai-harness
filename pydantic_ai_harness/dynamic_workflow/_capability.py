@@ -48,6 +48,9 @@ class DynamicWorkflow(AbstractCapability[AgentDepsT]):
     until the model loads the capability.
     """
 
+    id: str | None = 'dynamic_workflow'
+    """Stable capability and toolset ID."""
+
     agents: Sequence[AbstractAgent[AgentDepsT, object] | WorkflowAgent[AgentDepsT]]
     """Sub-agents the orchestration script can call as async functions.
 

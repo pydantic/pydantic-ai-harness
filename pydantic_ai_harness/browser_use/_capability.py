@@ -89,6 +89,9 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
     judgement about unknown pages, not for scripted flows.
     """
 
+    id: str | None = field(default='browser_use', kw_only=True)
+    """Stable capability and toolset ID."""
+
     llm: ChatModelInput | None = None
     """The chat model driving the sub-agent.
 
@@ -294,6 +297,7 @@ class BrowserUse(AbstractCapability[AgentDepsT]):
             if sensitive_data is not None and browser_profile is not None:
                 browser_profile = browser_profile.model_copy(deep=True)
             self._toolset = BrowserUseToolset[AgentDepsT](
+                id=self.id,
                 browser_agent=self.browser_agent if self.browser_agent is not None else default_browser_agent,
                 llm=resolve_chat_model(self.llm),
                 browser_profile=browser_profile,
