@@ -160,8 +160,10 @@ Enabled plugins unload and activate again so their handlers use the refreshed
 shell types. Disabled and unapproved project plugins stay off.
 
 If an import or shell rebuild fails, CLAI reports the error and restores the
-previous module bindings. Correct the source and retry `/reload`. Plugin-local
-state resets during reload; import-time side effects cannot be undone.
+previous module bindings. Correct the source and retry `/reload`. Plugin hosts
+and their registrations are recreated. Installed module globals not overwritten
+by the new source can survive; initialize mutable state in `activate`.
+Import-time side effects cannot be undone.
 
 Reload ordering follows the modules' existing imports. Restart after changing
 import dependencies, startup code, or the custom agent's construction. `/reload`

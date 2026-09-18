@@ -134,9 +134,11 @@ Use `/reload` after editing `pydantic_clai2` itself, not just a plugin. It uses
 restarting Python. Conversation history, the agent and its dependencies, selected
 model, and active settings are kept. Enabled plugins unload and activate again
 against the refreshed shell types; disabled and unapproved project plugins stay
-off. Plugin-local state resets. Failed imports or shell rebuilds restore previous
-module bindings and report the error; correct the source and retry. Import-time
-side effects cannot be undone.
+off. Plugin hosts and their registrations are recreated, but installed module
+globals not overwritten by the new source can survive. Initialize mutable state
+in `activate`. Failed imports or shell rebuilds restore previous module bindings
+and report the error; correct the source and retry. Import-time side effects
+cannot be undone.
 
 Reload ordering follows existing imports. Restart for changes to import
 dependencies, startup code, or agent construction. Third-party dependencies are

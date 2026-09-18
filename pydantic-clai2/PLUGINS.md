@@ -208,8 +208,10 @@ CLAI does the same thing:
 `/reload` takes no arguments. It uses `importlib.reload`, preserves the conversation,
 agent, selected model, and active settings, and reactivates enabled plugins against
 the refreshed shell types. Each loaded plugin receives `session_end` before reload
-and `session_start` when loaded again. Plugin-local state resets; disabled and
-unapproved project plugins stay off. Failed imports or shell rebuilds restore the
+and `session_start` when loaded again. Plugin hosts and their registrations are
+recreated, but installed module globals not overwritten by the new source can
+survive. Initialize mutable state in `activate`. Disabled and unapproved project
+plugins stay off. Failed imports or shell rebuilds restore the
 previous module bindings and report the error, but cannot undo import-time side
 effects. Restart for changes to startup code, import dependencies, or agent
 construction. Third-party dependencies are not recursively reloaded.
