@@ -47,6 +47,7 @@ if TYPE_CHECKING:
     from .pydantic_ai_docs import PydanticAIDocs
     from .repo_context import RepoContext
     from .researcher import DEFAULT_RESEARCHER_INSTRUCTIONS, Researcher
+    from .retry_policy import RetryPolicy
     from .shell import LLM_API_KEY_ENV_PATTERNS, Shell
     from .skills import Skills
     from .spend import SpendLimits
@@ -95,6 +96,7 @@ __all__ = [
     'PromptInjectionDefender',
     'PydanticAIDocs',
     'READ_ONLY_TOOL_NAMES',
+    'RetryPolicy',
     'ReportContextUsage',
     'RepoContext',
     'Researcher',
@@ -145,6 +147,7 @@ _CAPABILITY_EXPORTS = {
     'ReportContextUsage': 'compaction',
     'RepoContext': 'repo_context',
     'Researcher': 'researcher',
+    'RetryPolicy': 'retry_policy',
     'Shell': 'shell',
     'Skills': 'skills',
     'SlidingWindowCompaction': 'compaction',

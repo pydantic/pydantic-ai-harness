@@ -136,6 +136,7 @@ _CAPABILITY_PAGE_META = {
     'repo-context.md': ('repo_context', 'Repo Context'),
     'repair-tool-arguments.md': ('repair_tool_arguments', 'Repair Tool Arguments'),
     'researcher.md': ('researcher', 'Researcher'),
+    'retry_policy.md': ('retry_policy', 'Retry Policy'),
     'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),
     'exa-search.md': ('exa', 'Exa Search'),
     'playwright.md': ('playwright', 'Playwright Browser'),
