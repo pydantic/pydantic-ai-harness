@@ -1,7 +1,7 @@
 # Coder
 
 `Coder` gives a Pydantic AI agent tools and guidance for investigating, editing, and testing a local codebase.
-It is a regular combined capability made from [`FileSystem`](https://pydantic.dev/docs/ai/harness/filesystem/), [`Shell`](https://pydantic.dev/docs/ai/harness/shell/), [`RepoContext`](https://pydantic.dev/docs/ai/harness/repo-context/), and the [context management](https://pydantic.dev/docs/ai/harness/compaction/) capabilities, so you can use it whole or take it apart.
+It is a regular combined capability made from [`FileSystem`](https://pydantic.dev/docs/ai/harness/filesystem/), [`Shell`](https://pydantic.dev/docs/ai/harness/shell/), [`RepoContext`](https://pydantic.dev/docs/ai/harness/repo-context/), [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/), and the [context management](https://pydantic.dev/docs/ai/harness/compaction/) capabilities, so you can use it whole or take it apart.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://pydantic.dev/docs/ai/harness/#version-policy).
 
@@ -62,19 +62,21 @@ uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_
 4. [`RepoContext`](https://pydantic.dev/docs/ai/harness/repo-context/)`(workspace_dir=workspace, expose_inventory_tool=False)` for repository instructions and structure.
    Pass `repo_context=False` to leave it out when the agent already binds its own `RepoContext`, so the
    instruction files are not loaded twice.
+5. [`SubAgents`](../subagents/)`(agents=[...], agent_folders=None)` with one delegate, for handing off self-contained
+   sub-tasks. Pass `sub_agents=False` to leave it out (see below).
 
 Then the plumbing, which the agent never calls directly:
 
-5. [`ClearToolResults`](https://pydantic.dev/docs/ai/harness/compaction/)`(max_fraction=0.7)` and [`WarnNearLimits`](https://pydantic.dev/docs/ai/harness/compaction/)`(max_context_fraction=0.9)`.
-6. A private [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/) specialization that truncates any tool result over 64,000 characters
+6. [`ClearToolResults`](https://pydantic.dev/docs/ai/harness/compaction/)`(max_fraction=0.7)` and [`WarnNearLimits`](https://pydantic.dev/docs/ai/harness/compaction/)`(max_context_fraction=0.9)`.
+7. A private [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/) specialization that truncates any tool result over 64,000 characters
    without adding a spill-retrieval tool.
-7. [`RepairToolArguments`](../repair_tool_arguments/) repairs malformed JSON tool arguments before normal validation (see below).
+8. [`RepairToolArguments`](../repair_tool_arguments/) repairs malformed JSON tool arguments before normal validation (see below).
 
-Every tool comes from `FileSystem` or `Shell`; those pages document each one in full. Build the same
+Every tool comes from `FileSystem`, `Shell`, or `SubAgents`; those pages document each one in full. Build the same
 agent from the pieces to change any setting, for example to keep content hashes, add `list_directory`,
 or allowlist commands.
 
-## Six tools
+## Tools
 
 | Tool | Behavior |
 | --- | --- |
@@ -84,12 +86,32 @@ or allowlist commands.
 | `list_files(path='.', glob=None)` | `rg --files`, sorted by path, respecting ignore files and skipping hidden files. |
 | `grep(pattern, ...)` | Ripgrep search with `path`, `glob`, `file_type`, `ignore_case`, `literal`, and `context` (0 to 20). |
 | `shell(command, mode='foreground', timeout=270)` | Unrestricted commands rooted at the workspace that outlive the run. |
+| `delegate_task(agent_name, task)` | Hand a self-contained sub-task to a `coder` delegate: the same `Coder`, with delegation off. Present unless `sub_agents=False`. |
 
 Results are bounded by `FileSystem`'s caps (2,000 lines or 60,000 characters per `read_file`, 1,000 lines or files per search or listing) and Coder's 64,000-character
 tool-output limit; a truncation marker means more output was omitted, so narrow the search rather than
 assuming it was complete. A `read_file` window stays under the output limit, so paging by `offset` never skips lines. Use `shell` for `mkdir`, `find`, process inspection, and `kill`. File writes
 keep the standalone filesystem's protected-path rules (`.git`, `.env`, keys, and secrets); shell can bypass
-these rules. Coder does not include planning, delegation, or the run-scoped `run_command` family.
+these rules. Coder does not include planning or the run-scoped `run_command` family.
+
+## Sub-agents
+
+`Coder` bundles [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/) with a single delegate named `coder`, so the agent can hand a
+self-contained sub-task to a fresh run rather than spending its own context on it. The delegate is the
+same `Coder` you configured -- same workspace, same `instructions=`, same filesystem scope -- built with
+`sub_agents=False`, which is what terminates the recursion. It carries no model of its own, so each
+delegation runs on the parent run's model.
+
+Capabilities the host binds alongside `Coder` -- an approval gate, a tool guardrail, an audit hook --
+apply to the parent run, and a delegation is a separate run. Those hooks see the `delegate_task` call
+and not the tool calls the delegate makes inside it, so a command a parent-level guard would block can
+still run in a delegation. This follows from sub-agent isolation rather than from `Coder` (see
+`shared_capabilities` on [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/)), but `sub_agents=True` makes it the default. Pass `sub_agents=False`
+where parent-level tool policy has to cover every command.
+
+Delegates are not loaded from disk (`agent_folders=None`): the roster is this one delegate. Pass
+`sub_agents=False` to drop `delegate_task` and the capability with it, or compose
+[`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/) yourself for a different roster, per-delegate budgets, or a model menu.
 
 ## Filesystem scope
 

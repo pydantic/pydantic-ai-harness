@@ -6,6 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 
 from pydantic_ai_harness.coder import Coder
@@ -45,10 +47,38 @@ class TestCoder:
         await Agent(model, capabilities=[Coder(tmp_path)]).run('Inspect tools')
         assert model.last_model_request_parameters is not None
         tools = {tool.name: tool for tool in model.last_model_request_parameters.function_tools}
-        assert list(tools) == ['read_file', 'write_file', 'edit_file', 'list_files', 'grep', 'shell']
+        assert list(tools) == ['read_file', 'write_file', 'edit_file', 'list_files', 'grep', 'shell', 'delegate_task']
         assert 'expected_hash' not in str(tools)
         assert 'replacements' in tools['edit_file'].parameters_json_schema['properties']
         assert tools['shell'].parameters_json_schema['properties']['mode']['enum'] == ['foreground', 'background']
+
+    async def test_sub_agents_can_be_left_out(self, tmp_path: Path) -> None:
+        model = TestModel(call_tools=[])
+        await Agent(model, capabilities=[Coder(tmp_path, sub_agents=False)]).run('Inspect tools')
+        assert model.last_model_request_parameters is not None
+        tools = [tool.name for tool in model.last_model_request_parameters.function_tools]
+        assert tools == ['read_file', 'write_file', 'edit_file', 'list_files', 'grep', 'shell']
+
+    async def test_the_delegate_does_not_delegate_further(self, tmp_path: Path) -> None:
+        """The delegate is another `Coder` with delegation off, so a delegation cannot recurse.
+
+        The delegate carries no model, so it runs on the parent's; every request lands in the same
+        function, and the second one is the sub-agent's.
+        """
+        seen: list[list[str]] = []
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen.append([tool.name for tool in info.function_tools])
+            if len(seen) == 1:
+                return ModelResponse(parts=[ToolCallPart('delegate_task', {'agent_name': 'coder', 'task': 'Tidy up'})])
+            return ModelResponse(parts=[TextPart('done')])
+
+        await Agent(FunctionModel(respond), capabilities=[Coder(tmp_path, repo_context=False)]).run('Delegate it')
+
+        parent_tools, delegate_tools = seen[0], seen[1]
+        assert 'delegate_task' in parent_tools
+        assert 'delegate_task' not in delegate_tools
+        assert 'edit_file' in delegate_tools
 
     @pytest.mark.parametrize('extra_instructions', [None, '', 'Keep new files under 400 lines.'])
     async def test_instructions(self, tmp_path: Path, extra_instructions: str | None) -> None:

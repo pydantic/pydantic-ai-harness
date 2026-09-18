@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
 from pydantic_ai.tools import AgentDepsT
 
@@ -14,10 +15,18 @@ from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.repair_tool_arguments import RepairToolArguments
 from pydantic_ai_harness.repo_context import RepoContext
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, MAX_FOREGROUND_WAIT, Shell
+from pydantic_ai_harness.subagents import SubAgent, SubAgents
 from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Truncate
 
 FILE_TOOL_NAMES: tuple[str, ...] = ('read_file', 'write_file', 'edit_file', 'list_files', 'grep')
 """The `FileSystem` tools `Coder` registers; `shell` covers directory creation, file metadata, and the rest."""
+
+SUB_AGENT_NAME = 'coder'
+"""Name the parent delegates to; the delegate is another `Coder` with `sub_agents=False`."""
+
+SUB_AGENT_DESCRIPTION = (
+    'Carry out a self-contained coding task in this workspace and report back what changed and what was verified'
+)
 
 
 class _BoundToolOutputs(ToolOutputLimits[AgentDepsT]):
@@ -45,12 +54,13 @@ def _file_system(workspace: Path, *, unrestricted: bool) -> FileSystem[AgentDeps
 
 
 class Coder(CombinedCapability[AgentDepsT]):
-    """Autonomous local coding with six tools and context management.
+    """Autonomous local coding with six tools, delegation, and context management.
 
     Commands are unrestricted and can outlive runs. Use an OS sandbox for
     untrusted work. Additional instructions supplement the default guidance.
     `repo_context=False` leaves out the bundled `RepoContext`, for hosts that
     bind their own and would otherwise load the instruction files twice.
+    `sub_agents=False` leaves out delegation.
     """
 
     def __init__(
@@ -60,6 +70,7 @@ class Coder(CombinedCapability[AgentDepsT]):
         instructions: str | None = None,
         unrestricted_filesystem: bool = False,
         repo_context: bool = True,
+        sub_agents: bool = True,
     ) -> None:
         root = Path(workspace).resolve()
         capabilities: list[AbstractCapability[AgentDepsT]] = [
@@ -76,6 +87,15 @@ class Coder(CombinedCapability[AgentDepsT]):
         ]
         if repo_context:
             capabilities.append(RepoContext[AgentDepsT](workspace_dir=root, expose_inventory_tool=False))
+        if sub_agents:
+            capabilities.append(
+                self._sub_agents(
+                    root,
+                    instructions=instructions,
+                    unrestricted_filesystem=unrestricted_filesystem,
+                    repo_context=repo_context,
+                )
+            )
         capabilities += [
             ClearToolResults[AgentDepsT](max_fraction=0.7),
             WarnNearLimits[AgentDepsT](max_context_fraction=0.9),
@@ -85,3 +105,26 @@ class Coder(CombinedCapability[AgentDepsT]):
             RepairToolArguments[AgentDepsT](),
         ]
         super().__init__(capabilities)
+
+    @staticmethod
+    def _sub_agents(
+        workspace: Path, *, instructions: str | None, unrestricted_filesystem: bool, repo_context: bool
+    ) -> SubAgents[AgentDepsT]:
+        """One delegate: the same `Coder`, with delegation off so the recursion terminates.
+
+        The delegate carries no model of its own, so each delegation runs on the parent run's model.
+        """
+        delegate = Agent[AgentDepsT, str](  # pyright: ignore[reportCallIssue, reportArgumentType]
+            name=SUB_AGENT_NAME,
+            description=SUB_AGENT_DESCRIPTION,
+            capabilities=[
+                Coder[AgentDepsT](
+                    workspace,
+                    instructions=instructions,
+                    unrestricted_filesystem=unrestricted_filesystem,
+                    repo_context=repo_context,
+                    sub_agents=False,
+                )
+            ],
+        )
+        return SubAgents[AgentDepsT](agents=[SubAgent[AgentDepsT](delegate)], agent_folders=None)
