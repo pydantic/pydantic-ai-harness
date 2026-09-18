@@ -38,7 +38,7 @@ def inputs(monkeypatch: pytest.MonkeyPatch, values: list[str | BaseException]) -
             for selector in ('class:bottom-toolbar', 'class:bottom-toolbar.text'):
                 assert style.get_attrs_for_style_str(selector).color == '9B77FF'
 
-        async def prompt_async(self, label: str) -> str:
+        async def prompt_async(self, label: str, **kwargs: object) -> str:
             value = values.pop(0)
             if isinstance(value, BaseException):
                 raise value
@@ -83,6 +83,8 @@ async def test_chat_boundaries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, 
         )
     if mode == 'error':
         assert 'broken provider' in output.getvalue()
+        assert 'Retained history may include partial progress' in output.getvalue()
+        assert 'Turn not saved' not in output.getvalue()
     elif mode == 'cancel':
         assert 'Turn cancelled' in output.getvalue()
     elif mode == 'interrupt':

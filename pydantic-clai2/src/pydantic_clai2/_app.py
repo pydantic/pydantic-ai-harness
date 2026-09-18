@@ -6,7 +6,9 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from typing import Generic, TypeVar
 
+from anyio import create_task_group
 from prompt_toolkit import PromptSession
+from prompt_toolkit.filters import Condition, is_done
 from prompt_toolkit.formatted_text import FormattedText
 from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
@@ -14,6 +16,7 @@ from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
+from pydantic_ai_harness.step_persistence.conversations import ConversationSummary, SqliteConversationStore
 from rich.console import Console
 
 from . import openrouter, theme, vllm
@@ -37,10 +40,11 @@ from .plugins import Renderer, SessionEndReason, SessionStart, TurnEnd, TurnStar
 from .project_settings import ProjectSettings
 from .reloading import reload_clai
 from .screen import Screen
+from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
 from .status import Status, StatusLine
-from .usage_report import cost_line, session_usage, usage_command
+from .usage_report import cost_line, session_usage
 
 DepsT = TypeVar('DepsT')
 OutputT = TypeVar('OutputT')
@@ -56,6 +60,7 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='ask_user', factory='pydantic_clai2.ask_user_menu:activate'),
     PluginSettings(id='repo_context', factory='pydantic_clai2.repo_context'),
     PluginSettings(id='compaction', factory='pydantic_clai2.compaction', settings={}),
+    PluginSettings(id='persistence', factory='pydantic_clai2.sessions'),
 )
 """Plugins CLAI ships enabled. `/plugins disable NAME` turns one off; `remove` restores this.
 
@@ -79,17 +84,20 @@ async def chat(
     store: SettingsStore | None = None,
     builtin_plugins: Sequence[PluginSettings] = (),
     project: ProjectSettings | None = None,
+    resume: str | None = None,
 ) -> None:
     """Start an asyncio terminal conversation with a caller-supplied agent.
 
     Ctrl-C cancels the current turn or clears input; Ctrl-D and `/exit` quit.
-    Failed and cancelled turns are not added to the retained history.
+    Failed and cancelled turns retain their captured history. Resume never replays tools.
     `project` is the parsed `.clai/settings.json`; layer its overrides into `settings` yourself.
     """
     console = console or Console()
     console.print()
     print_banner(console)
-    console.print('/new clears history; /exit quits. Ctrl-C interrupts a turn.', style=theme.MUTED)
+    console.print(
+        '/new starts a session; /resume restores one; /exit quits. Ctrl-C interrupts a turn.', style=theme.MUTED
+    )
     project = project or ProjectSettings()
     _report_project(project, console)
     use_defaults = builtin_plugins is DEFAULT_PLUGINS
@@ -109,9 +117,21 @@ async def chat(
         while True:
             reason: SessionEndReason = 'error'
             try:
-                await shell.loader.load_all(fresh=fresh)
-                _report_project_plugins(shell.loader, console)
-                reason = await shell.run()
+                async with create_task_group() as workers:
+                    workers.start_soon(shell.sessions.namer.run)
+                    try:
+                        await shell.loader.load_all(fresh=fresh)
+                        _report_project_plugins(shell.loader, console)
+                        if resume is not None:
+                            console.print(await shell.sessions.command([resume] if resume else []), markup=False)
+                            resume = None
+                        reason = await shell.run()
+                    finally:
+                        workers.cancel_scope.cancel()
+            except BaseExceptionGroup as exc:
+                if len(exc.exceptions) == 1:
+                    raise exc.exceptions[0] from None
+                raise
             finally:
                 await shell.loader.close(reason)
             if not shell.reload_requested:
@@ -130,6 +150,7 @@ async def chat(
                         builtin_plugins=DEFAULT_PLUGINS if use_defaults else builtin_plugins,
                         project=project,
                         message_history=shell.session.messages,
+                        summary=shell.session.summary,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 -- development edits must not discard the conversation.
@@ -152,10 +173,21 @@ def _create_shell(
     builtin_plugins: Sequence[PluginSettings],
     project: ProjectSettings,
     message_history: Sequence[ModelMessage] = (),
+    summary: ConversationSummary | None = None,
 ) -> '_Shell[DepsT, OutputT]':
     settings = Settings.model_validate(settings.model_dump()) if settings is not None else Settings(model=None)
     store = store or SettingsStore()
-    session = Session(agent, deps=deps, plugins=plugins, usage_limits=usage_limits, message_history=message_history)
+    conversations = SqliteConversationStore(database=store.path.with_name('sessions.db'))
+    session = Session(
+        agent,
+        deps=deps,
+        plugins=plugins,
+        usage_limits=usage_limits,
+        message_history=message_history,
+        conversations=conversations,
+    )
+    if summary is not None:
+        session.summary = summary
     session.model = settings.model
     auth = CodexAuth(console)
 
@@ -180,7 +212,9 @@ def _create_shell(
         settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting, project=project
     )
 
+    sessions = Sessions(session=session, store=conversations, context=context)
     commands = Commands()
+    commands.register(Command(name='resume', description='Browse or restore a saved session', handler=sessions.command))
     commands.register(Command(name='keys', description='Manage saved API keys', handler=keys_command))
     commands.register(
         Command(
@@ -218,15 +252,15 @@ def _create_shell(
     commands.register(
         Command(
             name='new',
-            description='Clear conversation history',
-            handler=lambda _: session.clear() or 'Conversation cleared.',
+            description='Start a new session; preserve the previous session',
+            handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
         )
     )
     commands.register(
         Command(
             name='usage',
             description='Show tokens and cost per turn',
-            handler=lambda _: usage_command(session.messages, console=console),
+            handler=lambda _: sessions.usage(console=console),
         )
     )
     commands.register(
@@ -289,6 +323,7 @@ def _create_shell(
         prompt=prompt,
         interrupts=Interrupts(),
         screen=screen,
+        sessions=sessions,
     )
     commands.register(
         Command(name='reload', description='Reload CLAI2 code without restarting', handler=shell.request_reload)
@@ -311,6 +346,7 @@ class _Shell(Generic[DepsT, OutputT]):
     prompt: PromptSession[str]
     interrupts: Interrupts
     screen: Screen
+    sessions: Sessions[DepsT, OutputT]
     reload_requested: bool = False
 
     def request_reload(self, args: list[str]) -> str:
@@ -320,10 +356,11 @@ class _Shell(Generic[DepsT, OutputT]):
         return 'Reloading CLAI2...'
 
     async def run(self) -> SessionEndReason:
+        show_frame = ~is_done & Condition(lambda: self.console.width >= 4 and self.console.height >= 6)
         while True:
             try:
                 self.status.model = self.session.model or _model_label(self.agent)
-                text = (await self.prompt.prompt_async('> ')).strip()
+                text = (await self.prompt.prompt_async('> ', show_frame=show_frame)).strip()
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
@@ -380,6 +417,7 @@ class _Shell(Generic[DepsT, OutputT]):
             )
 
         completed = await self.interrupts.run(run_prompt())
+        self.sessions.namer.submit(self.session.summary.id)
         _report_interrupt(completed, self.console)
         await self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled'))
         return self.interrupts.exit_requested
@@ -418,7 +456,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
 
 
 def _reset_status(command: str, status: Status) -> None:
-    if command.split(maxsplit=1)[0] == '/new':
+    if command.split(maxsplit=1)[0] in ('/new', '/resume'):
         status.context_tokens = None
         status.context_alert = False
         status.output_tokens = None
@@ -448,6 +486,7 @@ async def _run_prompt(
         stop_loading=lambda: None,
         show_thinking=settings.thinking,
         smooth_seconds=settings.smooth_seconds,
+        show_tool_output=settings.tool_output,
         shell_lines=settings.shell_lines,
         grep_lines=settings.grep_lines,
         renderers=renderers,
@@ -493,7 +532,10 @@ async def _run_prompt(
     except Exception as exc:  # noqa: BLE001 -- interactive boundary reports plugin/provider failures.
         await renderer.finish()
         console.print(f'{type(exc).__name__}: {exc}', style=theme.ERROR, markup=False)
-        console.print('Turn not saved. External tool side effects may already have occurred.', style=theme.MUTED)
+        console.print(
+            'Turn failed. Retained history may include partial progress. External tool side effects may already have occurred.',
+            style=theme.MUTED,
+        )
         console.print()
         return TurnEnd(text=text, outcome='failed', error=exc)
     finally:

@@ -14,6 +14,7 @@ from pydantic_ai import Agent, ModelRequestContext, RunContext, models
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai_harness.step_persistence.conversations import SqliteConversationStore
 from rich.console import Console
 
 import pydantic_clai2
@@ -30,8 +31,8 @@ async def main(root: Path, mode: str) -> None:
     package = root / 'pydantic_clai2'
     app = package / '_app.py'
     original = app.read_text()
-    updated = original.replace("prompt_async('> ')", "prompt_async('updated> ')")
-    updated = updated.replace('Conversation cleared.', 'Updated conversation cleared.')
+    updated = original.replace("prompt_async('> ',", "prompt_async('updated> ',")
+    updated = updated.replace('New session started.', 'Updated session started.')
     commands = package / 'commands.py'
     commands.write_text(commands.read_text().replace('Use /help.', 'Use updated /help.'))
     session = package / '_session.py'
@@ -90,7 +91,7 @@ async def main(root: Path, mode: str) -> None:
             assert isinstance(completer, Completer)
             self.completer = completer
 
-        async def prompt_async(self, label: str) -> str:
+        async def prompt_async(self, label: str, **kwargs: object) -> str:
             nonlocal reloads
             assert [item.text for item in self.completer.get_completions(Document('/rel'), CompleteEvent())] == [
                 'reload'
@@ -149,10 +150,21 @@ async def main(root: Path, mode: str) -> None:
             builtin_plugins=(declaration,) if mode == 'custom' else DEFAULT_PLUGINS,
             project=ProjectSettings(plugins=(PluginSettings(id='unapproved', factory='unapproved', enabled=False),)),
         )
+    conversations = SqliteConversationStore(database=root / 'sessions.db')
+    summaries = await conversations.listing()
+    assert len(summaries) == 1, summaries
+    saved = await conversations.get(conversation_id=summaries[0].id)
+    assert [
+        str(part.content)
+        for message in saved.messages
+        if isinstance(message, ModelRequest)
+        for part in message.parts
+        if isinstance(part, UserPromptPart)
+    ] == seen[2]
     text = output.getvalue()
     assert '/reload: Reload CLAI2 code without restarting' in text, text
     assert 'Usage: /reload' in text, text
-    assert 'Updated conversation cleared.' in text, text
+    assert 'Updated session started.' in text, text
     assert text.count('plugin end') == 3, text
     assert text.count('plugin start test False') == 2, text
     assert all(f'plugin turn {prompt}' in text for prompt in ('first', 'second', 'third')), text
