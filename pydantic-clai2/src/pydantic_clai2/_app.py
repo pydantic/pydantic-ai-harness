@@ -11,7 +11,7 @@ from prompt_toolkit.formatted_text import FormattedText
 from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
-from pydantic_ai.messages import ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelResponse
 from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 from rich.console import Console
@@ -35,6 +35,7 @@ from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
 from .plugins import Renderer, SessionEndReason, SessionStart, TurnEnd, TurnStart
 from .project_settings import ProjectSettings
+from .reloading import reload_clai
 from .screen import Screen
 from .set_menu import set_command
 from .settings_store import SettingsStore
@@ -89,11 +90,72 @@ async def chat(
     console.print()
     print_banner(console)
     console.print('/new clears history; /exit quits. Ctrl-C interrupts a turn.', style=theme.MUTED)
-    settings = settings or Settings(model=None)
-    store = store or SettingsStore()
     project = project or ProjectSettings()
     _report_project(project, console)
-    session = Session(agent, deps=deps, plugins=plugins, usage_limits=usage_limits)
+    use_defaults = builtin_plugins is DEFAULT_PLUGINS
+    shell = _create_shell(
+        agent,
+        deps=deps,
+        plugins=plugins,
+        usage_limits=usage_limits,
+        console=console,
+        settings=settings,
+        store=store,
+        builtin_plugins=builtin_plugins,
+        project=project,
+    )
+    fresh = False
+    async with agent:
+        while True:
+            reason: SessionEndReason = 'error'
+            try:
+                await shell.loader.load_all(fresh=fresh)
+                _report_project_plugins(shell.loader, console)
+                reason = await shell.run()
+            finally:
+                await shell.loader.close(reason)
+            if not shell.reload_requested:
+                return
+            shell.reload_requested = False
+            try:
+                shell = reload_clai(
+                    lambda shell=shell: _create_shell(
+                        agent,
+                        deps=deps,
+                        plugins=plugins,
+                        usage_limits=shell.session.usage_limits,
+                        console=console,
+                        settings=shell.context.settings,
+                        store=SettingsStore(shell.context.store.path),
+                        builtin_plugins=DEFAULT_PLUGINS if use_defaults else builtin_plugins,
+                        project=project,
+                        message_history=shell.session.messages,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 -- development edits must not discard the conversation.
+                console.print(f'Reload failed: {type(exc).__name__}: {exc}', style=theme.ERROR, markup=False)
+                fresh = False
+            else:
+                console.print('CLAI2 reloaded. Conversation preserved.', style=theme.INFO)
+                fresh = True
+
+
+def _create_shell(
+    agent: AbstractAgent[DepsT, OutputT],
+    *,
+    deps: DepsT,
+    plugins: Sequence[AgentCapability[DepsT]],
+    usage_limits: UsageLimits | None,
+    console: Console,
+    settings: Settings | None,
+    store: SettingsStore | None,
+    builtin_plugins: Sequence[PluginSettings],
+    project: ProjectSettings,
+    message_history: Sequence[ModelMessage] = (),
+) -> '_Shell[DepsT, OutputT]':
+    settings = Settings.model_validate(settings.model_dump()) if settings is not None else Settings(model=None)
+    store = store or SettingsStore()
+    session = Session(agent, deps=deps, plugins=plugins, usage_limits=usage_limits, message_history=message_history)
     session.model = settings.model
     auth = CodexAuth(console)
 
@@ -190,9 +252,9 @@ async def chat(
         console=console,
         commands=commands,
         session_start=lambda: SessionStart(agent=agent, settings=context.settings),
-        builtin=builtin_plugins,
+        builtin=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in builtin_plugins),
         full_screen=screen.full,
-        project=project.plugins,
+        project=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in project.plugins),
         conversation=session,
         status=status,
     )
@@ -228,14 +290,10 @@ async def chat(
         interrupts=Interrupts(),
         screen=screen,
     )
-    reason: SessionEndReason = 'error'
-    try:
-        async with agent:
-            await loader.load_all()
-            _report_project_plugins(loader, console)
-            reason = await shell.run()
-    finally:
-        await loader.close(reason)
+    commands.register(
+        Command(name='reload', description='Reload CLAI2 code without restarting', handler=shell.request_reload)
+    )
+    return shell
 
 
 @dataclass(kw_only=True)
@@ -253,6 +311,13 @@ class _Shell(Generic[DepsT, OutputT]):
     prompt: PromptSession[str]
     interrupts: Interrupts
     screen: Screen
+    reload_requested: bool = False
+
+    def request_reload(self, args: list[str]) -> str:
+        if args:
+            raise ValueError('Usage: /reload')
+        self.reload_requested = True
+        return 'Reloading CLAI2...'
 
     async def run(self) -> SessionEndReason:
         while True:
@@ -273,7 +338,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 await self.interrupts.run(
                     _execute_command(self.commands, text, console=self.console, status=self.status)
                 )
-                if text == '/exit' or self.interrupts.exit_requested:
+                if text == '/exit' or self.interrupts.exit_requested or self.reload_requested:
                     return 'exit'
                 continue
             if self.session.model is None and self.agent.model is None:
