@@ -120,6 +120,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 | [FileSystem](pydantic_ai_harness/filesystem/) | Harness | Read, write, edit, list, and search files under a root, with opt-in ripgrep tools; path-traversal and symlink safe, secrets read-only |
 | [Shell](pydantic_ai_harness/shell/) | Harness | Command execution with allowlists, denylists, timeouts, credential-stripping, and opt-in commands that outlive the run |
 | [Modal Sandbox](pydantic_ai_harness/modal_sandbox/) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
+| [Fly.io Sprites Sandbox](pydantic_ai_harness/sprites/) | Harness | Commands and files in a persistent [Fly.io Sprite](https://docs.sprites.dev/) cloud computer |
 
 ### Tools & native abilities
 

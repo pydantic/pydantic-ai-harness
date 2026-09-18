@@ -1,6 +1,6 @@
-"""Presentation helpers for Modal sandbox file and command output.
+"""Presentation helpers for sandbox file and command output.
 
-Pure formatting stays separate from the Modal I/O layer so output behavior can be
+Pure formatting stays separate from provider I/O so output behavior can be
 tested without provisioning a sandbox.
 
 `read_file`-style tools want `render_file_window` (line-addressable, head-first, with a
