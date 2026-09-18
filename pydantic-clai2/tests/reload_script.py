@@ -98,7 +98,7 @@ async def main(root: Path, mode: str) -> None:
             ]
             labels.append(label)
             text = next(prompts)
-            if text == '/reload':
+            if text == '/reload' and mode != 'unchanged':
                 reloads += 1
                 sys.path.insert(0, str(root))
                 pydantic_clai2.__path__.insert(0, str(package))
@@ -164,7 +164,7 @@ async def main(root: Path, mode: str) -> None:
     text = output.getvalue()
     assert '/reload: Reload CLAI2 code without restarting' in text, text
     assert 'Usage: /reload' in text, text
-    assert 'Updated session started.' in text, text
+    assert ('New session started.' if mode == 'unchanged' else 'Updated session started.') in text, text
     assert text.count('plugin end') == 3, text
     assert text.count('plugin start test False') == 2, text
     assert all(f'plugin turn {prompt}' in text for prompt in ('first', 'second', 'third')), text
@@ -175,12 +175,12 @@ async def main(root: Path, mode: str) -> None:
         assert 'example: reload_plugin (built-in) (enabled, loaded)' in text, text
     assert seen[0] == ['first'], seen
     assert seen[1] == ['first', 'second updated' if mode in ('success', 'custom') else 'second'], seen
-    assert seen[2] == [*seen[1], 'third updated'], seen
-    assert 'updated> ' in labels
+    assert seen[2] == [*seen[1], 'third' if mode == 'unchanged' else 'third updated'], seen
+    assert labels[-1] == ('> ' if mode == 'unchanged' else 'updated> ')
     assert store.load().model == 'test' and not store.load().thinking
-    if mode in ('success', 'custom'):
+    if mode in ('unchanged', 'success', 'custom'):
         assert text.count('CLAI2 reloaded. Conversation preserved.') == 2, text
-        assert 'Use updated /help.' in text, text
+        assert ('Use /help.' if mode == 'unchanged' else 'Use updated /help.') in text, text
     else:
         assert text.count('Reload failed:') == 1, text
         assert text.count('CLAI2 reloaded. Conversation preserved.') == 1, text

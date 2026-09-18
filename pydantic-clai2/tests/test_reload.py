@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 
-@pytest.mark.parametrize('mode', ['success', 'custom', 'syntax', 'import', 'build'])
+@pytest.mark.parametrize('mode', ['unchanged', 'success', 'custom', 'syntax', 'import', 'build'])
 def test_reload_running_shell(tmp_path: Path, mode: str) -> None:
     package = Path(__file__).parents[1] / 'src' / 'pydantic_clai2'
     shutil.copytree(package, tmp_path / 'pydantic_clai2', ignore=shutil.ignore_patterns('__pycache__'))
