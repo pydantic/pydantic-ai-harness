@@ -1287,9 +1287,12 @@ class TestConfigurationAndSpecs:
             'agent_name',
             'backend',
             'database',
+            'defer_loading',
+            'description',
             'directory',
             'guidance',
             'heading',
+            'id',
             'inject_memory',
             'injection_errors',
             'max_lines',
@@ -1322,7 +1325,17 @@ class TestConfigurationAndSpecs:
         assert 'storage-id' not in instructions
 
     def test_from_spec_backends_and_cross_backend_validation(self, tmp_path: Path) -> None:
-        assert isinstance(Memory.from_spec().store, InMemoryStore)
+        capability = Memory.from_spec(
+            id='memory',
+            description='Use for durable notes.',
+            defer_loading=True,
+        )
+        assert isinstance(capability.store, InMemoryStore)
+        assert (capability.id, capability.description, capability.defer_loading) == (
+            'memory',
+            'Use for durable notes.',
+            True,
+        )
         assert isinstance(Memory.from_spec(backend='file', directory=str(tmp_path)).store, FileStore)
         assert isinstance(
             Memory.from_spec(backend='sqlite', database=str(tmp_path / 'memory.db')).store, SqliteMemoryStore

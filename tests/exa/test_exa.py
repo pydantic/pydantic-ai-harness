@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -500,7 +499,8 @@ class TestExaSearch:
 class TestAgentSpec:
     def test_spec_schema_includes_exa_search(self) -> None:
         schema = AgentSpec.model_json_schema_with_capabilities([ExaSearch])
-        assert 'ExaSearch' in json.dumps(schema)
+        params = schema['$defs']['spec_params_ExaSearch']
+        assert {'id', 'description', 'defer_loading'} <= params['properties'].keys()
 
     def test_from_spec_builds_capability(self) -> None:
         capability = ExaSearch[None].from_spec(
@@ -508,11 +508,17 @@ class TestAgentSpec:
             text_summary=True,
             include_deep_search=True,
             include_domains=['a.dev'],
+            id='web-research',
+            description='Use for cited web research.',
+            defer_loading=True,
         )
         assert capability.num_results == 3
         assert capability.text_summary is True
         assert capability.include_deep_search is True
         assert capability.include_domains == ['a.dev']
+        assert capability.id == 'web-research'
+        assert capability.description == 'Use for cited web research.'
+        assert capability.defer_loading is True
         assert capability.client is None
 
     def test_agent_loads_from_spec_file(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
