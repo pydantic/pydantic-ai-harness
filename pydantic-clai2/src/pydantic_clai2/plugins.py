@@ -224,11 +224,13 @@ class PluginHost(Generic[DepsT]):
         notify: Callable[[str], Awaitable[None]] | None = None,
         conversation: Conversation | None = None,
         status: Status | None = None,
+        host_hooks: frozenset[HostHookName] | None = None,
     ) -> None:
         """`settings` is the raw JSON from `plugins add`; validate it with `settings(Model)`.
 
         The shell passes its own `conversation` and `status`; a host built elsewhere gets a
         `Transcript` and a detached status row, so a plugin needs no special case for either.
+        `host_hooks` restricts registration when an interface cannot dispatch every shell hook.
         """
         self.name = name
         self.console = console
@@ -246,6 +248,7 @@ class PluginHost(Generic[DepsT]):
         self._settings = settings
         self._hooks: Hooks[DepsT] = Hooks()
         self._hooks_used = False
+        self._host_hooks = host_hooks
         self._capabilities: list[AgentCapability[DepsT]] = []
         self._handlers: list[Callable[[HostEvent], Awaitable[None]]] = []
         self._renderers: list[Renderer[AgentStreamEvent]] = []
@@ -431,6 +434,8 @@ class PluginHost(Generic[DepsT]):
             return self._hooks.on.event(name)
         host_event = HOST_HOOKS.get(name)
         if host_event is not None:
+            if self._host_hooks is not None and name not in self._host_hooks:
+                raise ValueError(f'{name!r} is not supported by this interface; use core run hooks instead.')
             return self._host_decorator(host_event)
         if name not in CORE_HOOK_NAMES:
             raise ValueError(f'Unknown hook {name!r}. See PLUGINS.md for the list.')

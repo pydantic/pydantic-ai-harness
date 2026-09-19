@@ -138,7 +138,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           enable-cache: false
-      - run: uv sync --locked --all-packages --group dev --group clai-test
+      - run: uv sync --locked --all-packages --extra web --group dev --group clai-test
       - run: uv run --no-sync coverage run -m pytest -p no:cacheprovider tests
         env:
           COVERAGE_FILE: .coverage.${{ matrix.python }}

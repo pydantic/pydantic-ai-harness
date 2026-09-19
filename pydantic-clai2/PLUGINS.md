@@ -405,6 +405,53 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
 
+## Browser mode compatibility
+
+```python
+from pydantic_ai import ModelRequestContext, RunContext
+from pydantic_clai2.plugins import PluginHost
+
+
+def activate(host: PluginHost[None]) -> None:
+    @host.on('before_model_request')
+    async def observe(ctx: RunContext[None], request: ModelRequestContext) -> ModelRequestContext:
+        host.console.print(f'Model request {ctx.run_step}')
+        return request
+```
+
+This plugin works in both interfaces. Install the `pydantic-clai2[web]` extra
+and start `clai2 --web` to serve core's `Agent.to_web()` UI on
+<http://127.0.0.1:7932>. See [browser setup and limits](README.md#browser-chat).
+
+| Plugin surface | Browser behavior |
+| --- | --- |
+| `host.add(...)`, core hooks, typed core events | Contribute to core agent runs, including per-run capability factories. |
+| `session_start`, `session_end` | Run once per ASGI lifespan, not once per browser chat. Plugins close after requests drain, before the agent closes and signal handling exits. |
+| `turn_start`, `turn_end` | Registration raises and prevents startup. Use core run hooks for cross-interface guards. |
+| `host.full_screen()` | Raises when called; terminal widgets have no browser equivalent. |
+| Slash commands and `host.render(...)` | May register, but the browser does not dispatch or display them. Core renders its own stream. |
+| `host.console`, `host.notify(...)` | Write to the server's terminal, not the browser. No interactive terminal owns that output. |
+| `host.conversation`, `host.status` | Detached defaults, not the browser's history or status. Use core run context for run data. |
+
+The terminal `ask_user`, `persistence`, `notifications`, and `updates` modules
+are omitted even if enabled in the store. Preferences are not rewritten; the
+next terminal launch still uses them. Omission matches the shipped module,
+not just the plugin ID: replacing one with a custom plugin does not bypass
+compatibility checks. There is no browser answerer for `ask_user` or CLAI SQLite
+saving and resume.
+
+Agent runs share one execution slot per server so browser tabs do not execute
+coding tools concurrently. A real HTTP/stdio regression covers browser
+disconnection during an MCP call: core's streaming runner closes the process.
+The separate [outer-cancellation limitation](#mcp-explicitly-approved-mcp-servers)
+affects direct `Agent.run()` embeddings.
+
+Other enabled plugin import or activation failures abort startup. Project
+plugins still require approval, and store overrides retain their precedence.
+Use the terminal to change plugin settings, then restart the server. Core owns
+the run loop, tool retries, model settings, and streaming; browser mode does not
+simulate shell turn hooks or add telemetry beyond core and plugin spans.
+
 ## Managing plugins
 
 `/plugins` on its own opens a full-screen menu, the same kind Code Puppy uses

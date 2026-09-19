@@ -29,6 +29,12 @@ dependencies = [
 [project.scripts]
 clai2 = 'pydantic_clai2.__main__:main'
 
+[project.optional-dependencies]
+web = [
+    "pydantic-ai-slim[web]>=2.44.0",
+    "uvicorn>=0.31.1",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ['src/pydantic_clai2']
 

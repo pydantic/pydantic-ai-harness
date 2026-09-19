@@ -23,6 +23,7 @@ from .plugins import (
     DepsT,
     FullScreen,
     HostEvent,
+    HostHookName,
     PluginHost,
     Renderer,
     SessionEnd,
@@ -103,11 +104,12 @@ class PluginLoader(Generic[DepsT]):
         status: Status | None = None,
         full_screen: FullScreen = bare_screen,
         notify: Callable[[str], Awaitable[None]] | None = None,
+        host_hooks: frozenset[HostHookName] | None = None,
     ) -> None:
         """`builtin` ships with CLAI, `project` comes from `.clai/settings.json`; the store overrides both.
 
         `full_screen` is handed to every host; the shell binds it to the live renderer per prompt.
-        `conversation` and `status` are handed to every host; see `PluginHost` for the defaults.
+        `conversation`, `status`, and `host_hooks` are handed to every host; see `PluginHost` for the defaults.
         """
         self._store = store
         self._console = console
@@ -115,6 +117,7 @@ class PluginLoader(Generic[DepsT]):
         self._session_start = session_start
         self._full_screen = full_screen
         self._notify = notify
+        self._host_hooks = host_hooks
         self._conversation = conversation
         self._status = status
         self._builtin = {declaration.id: declaration for declaration in builtin}
@@ -210,6 +213,7 @@ class PluginLoader(Generic[DepsT]):
             notify=self._notify,
             conversation=self._conversation,
             status=self._status,
+            host_hooks=self._host_hooks,
         )
         try:
             module = self._import(entry, fresh=fresh)

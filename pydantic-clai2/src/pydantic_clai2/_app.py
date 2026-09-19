@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Generic, TypeVar
 
 from anyio import create_task_group
@@ -17,12 +18,11 @@ from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse
-from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness.step_persistence.conversations import ConversationSummary, SqliteConversationStore
 from rich.console import Console
 
-from . import openrouter, theme, vllm
+from . import theme
 from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
@@ -39,6 +39,7 @@ from .key_menu import keys_command
 from .live_prompt import LivePrompt
 from .model_menu import open_add_model_menu
 from .model_picker import model_command, model_completions
+from .model_resolution import resolve_model
 from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
 from .plugins import Renderer, SessionEndReason, SessionStart, TurnEnd, TurnStart, bare_screen
@@ -215,14 +216,7 @@ def _create_shell(
     session.tool_retries = settings.tool_retries
     auth = CodexAuth(console)
 
-    async def resolve_model(name: str) -> Model | str:
-        if name.startswith('openrouter:'):
-            return await asyncio.to_thread(openrouter.model, name)
-        if name.startswith('vllm:'):
-            return await asyncio.to_thread(vllm.model, name)
-        return auth.model(name) if name.startswith('openai-codex:') else name
-
-    session.resolve_model = resolve_model
+    session.resolve_model = partial(resolve_model, auth=auth)
     if session.model is None and agent.model is None:
         console.print('Add a model with /add_model.', style=theme.THEMES[settings.theme].info)
 

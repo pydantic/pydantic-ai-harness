@@ -95,6 +95,56 @@ not use custom indexes or proxy environment settings. It makes no model calls
 and adds no capability telemetry spans because this is terminal maintenance,
 not an agent operation.
 
+## Browser chat
+
+```bash
+pip/uv-add 'pydantic-clai2[web]'
+```
+
+```bash
+py-cli clai2 --web
+```
+
+From this source checkout, use `uv run --project pydantic-clai2 --extra web clai2 --web`.
+Open <http://127.0.0.1:7932>. Use `--port 8765` for another local port;
+Ctrl-C stops the server after active requests finish. Agent runs share one
+execution slot per server, so browser tabs do not run coding tools concurrently.
+The ASGI lifespan closes plugins and model resources before signal handling exits.
+
+This serves Pydantic AI's existing [`Agent.to_web()` UI](/ai/web/), not a second
+agent runtime. It streams responses and tool calls using your enabled coding
+capabilities. Core fetches and caches the UI HTML; its browser assets load from
+a CDN, so this is not an offline UI.
+
+`--model` overrides `CLAI_MODEL`, project settings, then saved settings, as in the
+terminal. Saved model settings and tool retries apply. OpenRouter, vllm, and Codex
+use the same credential and endpoint resolution as the terminal. Complete any
+interactive login in the terminal before starting the server.
+
+Browser mode omits the terminal `ask_user`, `persistence`, `notifications`, and
+`updates` plugins without changing their saved preferences. It does not provide
+CLAI slash commands, terminal renderers, settings menus, the status line, or
+SQLite conversation saving and `--resume`. Browser chat history is not a CLAI
+saved session. Core hooks and capability tools work; a plugin registering
+`turn_start` or `turn_end` prevents startup rather than losing its guards.
+See [browser plugin compatibility](https://github.com/pydantic/pydantic-ai-harness/blob/main/pydantic-clai2/PLUGINS.md#browser-mode-compatibility).
+Browser disconnection during an MCP tool call is covered by a real HTTP and
+stdio cleanup test. It uses core's streaming runner, unlike the direct
+`Agent.run()` embedding path affected by the [outer-cancellation limitation](#mcp-servers).
+
+Core's web adapter uses its default limit of 50 model requests per run. Explicit
+`--request-limit`, saved `run.request_limit`, and project `request_limit` overrides
+are rejected, even when set to 50. Reset the saved override with
+`clai2 config reset run.request_limit` and remove any project override, or use the
+terminal. `--web` cannot be combined with `--resume`, `config`, or `plugins`.
+
+!!! warning "Local access is not a sandbox"
+    The server binds only to `127.0.0.1`; there is no remote host option or
+    authentication. Core retains its Host validation, JSON-only chat endpoint,
+    and cross-origin restrictions. Do not expose it through a proxy or tunnel
+    to untrusted clients. Coding tools still run with your user permissions.
+    Browser mode adds no telemetry beyond core and plugin spans.
+
 ## Codex authentication
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:

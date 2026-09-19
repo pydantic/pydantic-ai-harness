@@ -3679,6 +3679,10 @@ spec = [
 temporal = [
     { name = "temporalio" },
 ]
+web = [
+    { name = "starlette" },
+    { name = "uvicorn" },
+]
 web-fetch = [
     { name = "markdownify" },
 ]
@@ -3700,6 +3704,12 @@ dependencies = [
     { name = "termflow-md" },
 ]
 
+[package.optional-dependencies]
+web = [
+    { name = "pydantic-ai-slim", extra = ["web"] },
+    { name = "uvicorn" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "genai-prices", specifier = ">=0.1.7" },
@@ -3709,10 +3719,13 @@ requires-dist = [
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pydantic-ai-harness", extras = ["coder"], editable = "." },
     { name = "pydantic-ai-slim", extras = ["anthropic", "mcp", "openai"], specifier = ">=2.43.0" },
+    { name = "pydantic-ai-slim", extras = ["web"], marker = "extra == 'web'", specifier = ">=2.44.0" },
     { name = "pyfiglet", specifier = ">=1.0.4" },
     { name = "rich", specifier = ">=14" },
     { name = "termflow-md", specifier = ">=0.9.2,<0.10" },
+    { name = "uvicorn", marker = "extra == 'web'", specifier = ">=0.31.1" },
 ]
+provides-extras = ["web"]
 
 [[package]]
 name = "pydantic-core"
