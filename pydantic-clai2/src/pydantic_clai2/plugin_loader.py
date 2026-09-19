@@ -233,7 +233,10 @@ class PluginLoader(Generic[DepsT]):
         try:
             with CancelScope(shield=True):
                 await _dispatch(host, SessionEnd(reason='error'))
-        except Exception as exc:  # noqa: BLE001 -- cleanup errors must not replace the load failure.
+        except (Exception, asyncio.CancelledError) as exc:
+            task = asyncio.current_task()
+            if isinstance(exc, asyncio.CancelledError) and task is not None and task.cancelling():
+                raise
             self._console.print(str(PluginError(entry.name, exc)), style=theme.ERROR, markup=False)
         finally:
             self._drop(entry)

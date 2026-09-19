@@ -317,7 +317,8 @@ Third-party dependencies are not recursively reloaded.
 If loading fails or is cancelled, registered `session_end` handlers receive
 `reason='error'` under cancellation shielding before the partial host is dropped.
 Register cleanup once a resource is owned; cleanup may run before `session_start`
-finishes. Cleanup errors are reported without replacing the original load error.
+finishes. Cleanup errors are reported without replacing the original load error;
+cancellation requested by the caller still propagates.
 
 What "load" and "unload" mean for your plugin:
 

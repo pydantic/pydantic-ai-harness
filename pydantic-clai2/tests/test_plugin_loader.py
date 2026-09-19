@@ -1,8 +1,12 @@
 """Loading, unloading, reloading, and dispatching between turns."""
 
+import asyncio
 import io
+import sys
 from pathlib import Path
+from types import ModuleType
 
+import anyio
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
@@ -12,7 +16,7 @@ from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.commands import Command, Commands
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
-from pydantic_clai2.plugins import SessionStart, TurnEnd, TurnStart
+from pydantic_clai2.plugins import PluginHost, SessionEnd, SessionStart, TurnEnd, TurnStart
 from pydantic_clai2.settings_store import SettingsStore
 
 
@@ -433,9 +437,11 @@ async def test_repo_context_builtin_loads_the_workspace_instructions(
         await harness.loader.command(['add', 'repo_context', 'pydantic_clai2.repo_context', '{"filenames": []}'])
 
 
-async def test_failed_start_reports_cleanup_error_without_masking_start_failure(tmp_path: Path) -> None:
+@pytest.mark.parametrize('error', ['RuntimeError', 'CancelledError'])
+async def test_failed_start_reports_cleanup_error_without_masking_start_failure(tmp_path: Path, error: str) -> None:
     harness = Harness(tmp_path)
     (harness.store.plugins_dir / 'broken_start.py').write_text(
+        'from asyncio import CancelledError\n'
         'from pydantic_clai2.commands import Command\n'
         'def activate(host):\n'
         '    host.commands.register(Command(name="temporary", description="temporary", handler=lambda _: "ok"))\n'
@@ -445,7 +451,7 @@ async def test_failed_start_reports_cleanup_error_without_masking_start_failure(
         '    @host.on("session_end")\n'
         '    async def end(event):\n'
         '        host.console.print("cleanup reason " + event.reason)\n'
-        '        raise RuntimeError("cleanup failed")\n'
+        f'        raise {error}("cleanup failed")\n'
     )
     with pytest.raises(PluginError, match='start failed'):
         await harness.loader.load('broken_start')
@@ -453,3 +459,51 @@ async def test_failed_start_reports_cleanup_error_without_masking_start_failure(
     assert 'cleanup failed' in harness.text
     assert 'temporary' not in {command.name for command in harness.commands}
     assert harness.loader.entries()[0].host is None
+    assert harness.loader.entries()[0].error == 'RuntimeError: start failed'
+
+
+async def test_external_cancellation_during_failed_start_cleanup_propagates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered = anyio.Event()
+    cancelled = anyio.Event()
+    cleaned = anyio.Event()
+    task: asyncio.Task[None] | None = None
+    module = ModuleType('cancel_during_cleanup')
+
+    def activate(host: PluginHost[None]) -> None:
+        @host.on('session_start')
+        async def start(event: SessionStart) -> None:
+            raise RuntimeError('startup failed')
+
+        @host.on('session_end')
+        async def end(event: SessionEnd) -> None:
+            try:
+                entered.set()
+                await anyio.sleep_forever()
+            finally:
+                cleaned.set()
+
+    module.__dict__['activate'] = activate
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    harness = Harness(tmp_path, builtin=(PluginSettings(id='cancel', factory=module.__name__),))
+
+    async def load() -> None:
+        nonlocal task
+        task = asyncio.current_task()
+        try:
+            await harness.loader.load('cancel')
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(load)
+            await entered.wait()
+            assert task is not None
+            task.cancel()
+            await cancelled.wait()
+    assert cleaned.is_set()
+    assert harness.loader.entries()[0].host is None
+    assert not harness.loader.capabilities()
