@@ -384,3 +384,67 @@ def test_encoder_buffer_rejects_writes_before_allocating(monkeypatch: pytest.Mon
         with pytest.raises(ValueError, match='attachment limit'):
             output.write(memoryview(array('I', [1, 2])))
         assert output.getvalue() == b'abcd'
+
+
+@pytest.mark.parametrize(
+    'text',
+    [
+        r'\\attacker.example\share\image.png',
+        '//attacker.example/share/image.png',
+        r'\\?\C:\image.png',
+        r'\\.\device\image.png',
+    ],
+)
+def test_network_paths_are_rejected_without_io(text: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_stat(path: Path, *, follow_symlinks: bool = True) -> None:
+        raise AssertionError('Network paths must be rejected before filesystem access')
+
+    monkeypatch.setattr(Path, 'stat', no_stat)
+    assert pasted_paths(text) == []
+    with pytest.raises(ValueError, match='UNC and device'):
+        read_image(Path(text))
+    monkeypatch.setattr(image_input.ImageGrab, 'grabclipboard', lambda: [text])
+    with pytest.raises(ValueError, match='UNC and device'):
+        clipboard_images()
+
+
+def test_expanded_home_cannot_bypass_network_path_guard(monkeypatch: pytest.MonkeyPatch) -> None:
+    def network_home(path: Path) -> Path:
+        return Path('//server/share/image.png')
+
+    monkeypatch.setattr(Path, 'expanduser', network_home)
+    assert pasted_paths('~/image.png') == []
+
+
+def test_unknown_home_is_plain_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_home(path: Path) -> Path:
+        raise RuntimeError('Could not determine home directory')
+
+    monkeypatch.setattr(Path, 'expanduser', no_home)
+    assert pasted_paths('~unknown/image.png') == []
+
+
+def test_renamed_unsupported_format_is_rejected(image_path: Path) -> None:
+    Image.new('RGB', (1, 1)).save(image_path, format='PPM')
+    with pytest.raises(OSError):
+        read_image(image_path)
+
+
+@pytest.mark.parametrize('terminal', [False, True])
+async def test_image_can_be_retried_after_selecting_a_model(
+    image_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal: bool
+) -> None:
+    monkeypatch.setattr(image_input, 'uuid4', lambda: UUID('12345678-0000-0000-0000-000000000000'))
+    agent = Agent()
+    output = io.StringIO()
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()), anyio.fail_after(15):
+        pipe.send_text(f'\x1b[200~{image_path}\x1b[201~caption\n/set model test\n[image:12345678]caption\n/exit\n')
+        await chat(
+            agent,
+            deps=None,
+            console=Console(file=output, force_terminal=terminal),
+            store=SettingsStore(tmp_path / 'settings.db'),
+        )
+    assert 'Choose a model first' in output.getvalue()
+    assert 'expired' not in output.getvalue()
+    assert 'success' in output.getvalue()

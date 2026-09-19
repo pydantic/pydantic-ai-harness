@@ -39,11 +39,22 @@ def encode_image(image: Image.Image) -> BinaryContent:
         return BinaryContent(data=output.getvalue(), media_type='image/png')
 
 
+def local_image_path(text: str) -> Path:
+    """Reject network and device namespaces before probing the filesystem."""
+    if text.replace('\\', '/').startswith('//'):
+        raise ValueError('UNC and device paths are not supported for image attachments.')
+    path = Path(text).expanduser()
+    if str(path).replace('\\', '/').startswith('//'):
+        raise ValueError('UNC and device paths are not supported for image attachments.')
+    return path
+
+
 def read_image(path: Path) -> BinaryContent:
     """Read a local file, checking its contents rather than trusting its suffix."""
+    path = local_image_path(str(path))
     if path.stat().st_size > MAX_IMAGE_BYTES:
         raise ValueError('Image file exceeds the 10 MiB attachment limit.')
-    with Image.open(path) as image:
+    with Image.open(path, formats=['PNG', 'JPEG', 'GIF', 'WEBP', 'BMP', 'TIFF']) as image:
         return encode_image(image)
 
 
@@ -67,15 +78,15 @@ def pasted_paths(text: str) -> list[Path]:
         return []
     try:
         # Try the entire path first, so Windows backslashes and unquoted spaces survive.
-        path = Path(text.strip('"\'')).expanduser()
+        path = local_image_path(text.strip('"\''))
         if path.is_file():
             paths = [path]
         else:
             tokens = shlex.split(text, posix='\\' not in text or '\\ ' in text)
-            paths = [Path(token.strip('"\'')).expanduser() for token in tokens]
+            paths = [local_image_path(token.strip('"\'')) for token in tokens]
         suffixes = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tif', '.tiff'}
         return paths if paths and all(p.suffix.lower() in suffixes and p.is_file() for p in paths) else []
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
         return []
 
 
@@ -97,6 +108,7 @@ class ImageInput:
         """Start with no clipboard access and no attachments."""
         self.pending: dict[str, BinaryContent] = {}
         self.notice = ''
+        self.retry_text = ''
 
     def attach(self, images: Sequence[BinaryContent]) -> str:
         """Stage all images atomically; the editor inserts these removable markers."""
@@ -118,11 +130,12 @@ class ImageInput:
         markers = MARKER.findall(text)
         if any(marker not in self.pending for marker in markers):
             raise ValueError('This image attachment has expired. Paste the image again.')
+        self.retry_text = ''
         return MARKER.sub('', text).strip(), [self.pending[marker] for marker in markers]
 
     def retain(self, texts: Sequence[str]) -> None:
         """Release bytes not referenced by the draft or queued prompts."""
-        markers = {marker for text in texts for marker in MARKER.findall(text)}
+        markers = {marker for text in (*texts, self.retry_text) for marker in MARKER.findall(text)}
         self.pending = {marker: image for marker, image in self.pending.items() if marker in markers}
 
     def bindings(self, *, queued: Callable[[], Sequence[str]] = tuple) -> KeyBindings:

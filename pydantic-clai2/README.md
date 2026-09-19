@@ -98,7 +98,7 @@ is the terminal's text paste, not CLAI's clipboard-image shortcut.
 You can also paste or drag local image file paths into the prompt. This requires
 the terminal's bracketed-paste support. A paste containing only existing image
 paths becomes attachments; ordinary pasted text stays text. Quoted paths and
-paths containing spaces are supported. PNG, JPEG, GIF, WebP, BMP, and TIFF files
+paths containing spaces are supported. UNC and device paths are not read. PNG, JPEG, GIF, WebP, BMP, and TIFF files
 are read locally and converted to PNG (the first frame of animated images).
 
 Each image appears as `[image:...]`. Add your question and press Enter, or submit
@@ -117,7 +117,8 @@ provider-specific size and format restrictions can still apply. Each source file
 and encoded attachment is limited to 10 MiB and 25 megapixels, with 32 MiB of
 pending image bytes. Accepted images are saved with the conversation and restored
 by `/resume`. Input recall stores markers, not image bytes: paste the image again
-if you recall an expired marker. Unsubmitted images are discarded on exit or reload.
+if you recall an expired marker. If submission is rejected because no model is
+selected, the most recently rejected prompt keeps its attachments for retry. Unsubmitted images are discarded on exit or reload.
 
 Pillow is a terminal-only dependency; see the CLAI dependency boundary in
 [#875](https://github.com/pydantic/pydantic-ai-harness/issues/875).

@@ -433,6 +433,7 @@ class _Shell(Generic[DepsT, OutputT]):
                     return 'exit'
                 continue
             if self.session.model is None and self.agent.model is None:
+                self.images.retry_text = text
                 self.console.print('Choose a model first: /set model <Tab>', style=theme.WARNING)
                 continue
             try:
