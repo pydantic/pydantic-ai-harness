@@ -71,7 +71,7 @@ The prompt sits above the footer with one editable line when empty. It grows
 for wrapped or pasted text and completion suggestions, not to fill the terminal.
 History search stays compact too. The bordered prompt area stays visible below
 streamed output while CLAI works, and remains editable. A `Working` label and
-animated spinner appear in the box's top border while a turn or its lifecycle
+animated spinner, in the same pink accent as tool names, appear in the box's top border while a turn or its lifecycle
 hooks are active, without adding a row to the input area. The animation uses the editor's existing refresh
 cycle and disappears when work finishes, fails, or is cancelled. It is not part
 of your draft or submitted message. The editor reserves rows below a terminal

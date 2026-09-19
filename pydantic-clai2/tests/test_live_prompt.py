@@ -145,7 +145,7 @@ async def test_interrupt_targets_work_and_preserves_draft(key: str) -> None:
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(run)
             await started.wait()
-            assert any('Working ⠋' in row for row in live.frame())
+            assert any('Working ⠋' in Text.from_ansi(row).plain for row in live.frame())
             pipe.send_text(key)
             await done.wait()
         assert not any('Working' in row for row in live.frame())
@@ -262,3 +262,27 @@ async def test_shift_enter_inserts_newline_and_plain_enter_submits(sequence: str
         assert await live.read() == 'first\nsecond'
         assert live.queued_messages == ()
         assert live.buffer.text == ''
+
+
+@pytest.mark.parametrize('colorterm', ['', 'truecolor'])
+@pytest.mark.parametrize('width', [10, 80])
+async def test_spinner_uses_tool_accent_without_coloring_border(
+    monkeypatch: pytest.MonkeyPatch, colorterm: str, width: int
+) -> None:
+    monkeypatch.setenv('COLORTERM', colorterm)
+    async with editor() as (live, _, _):
+        live.console.size = (width, 24)
+
+        async def operation() -> None:
+            top = live.frame()[0]
+            plain = Text.from_ansi(top).plain
+            assert len(plain) == width
+            if '⠋' in plain:
+                assert f'{theme.sgr(theme.ACCENT)}⠋\x1b[0m{theme.sgr(theme.MUTED)}' in top
+            else:
+                assert theme.sgr(theme.ACCENT) not in top
+            border_style = Text.from_ansi(top).get_style_at_offset(live.console, len(plain) - 1)
+            assert not border_style.bold
+
+        assert await live.interrupts.run(operation())
+        assert theme.sgr(theme.ACCENT) not in live.frame()[0]

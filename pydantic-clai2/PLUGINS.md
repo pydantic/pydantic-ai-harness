@@ -487,7 +487,9 @@ but turns and slash commands execute sequentially. Shift-Enter inserts a newline
 Enter submits. Alt-Enter remains a fallback for terminals that cannot distinguish
 Shift-Enter. Modified-key reporting is enabled only while the editor owns input.
 While work or turn lifecycle
-hooks are active, a `Working` label and spinner appear in the editor's top border,
+hooks are active, a `Working` label and spinner appear in the editor's top border.
+The spinner uses the same pink `ACCENT` as tool names, while the label and border
+stay muted. The indicator appears
 without adding an input row or changing the draft. The indicator uses the editor's refresh cycle, adds no
 background task, and is hidden while a full-screen interface owns the terminal.
 The editor reserves bottom rows with terminal scrolling margins. Both partial

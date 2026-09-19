@@ -204,8 +204,8 @@ class LivePrompt:
         title = ''
         if self.interrupts.active:
             spinner = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[int(self.clock() * 10) % 10]
-            title = f' Working {spinner} '
-        title = truncate(title, width - 2)
+            title = truncate(f' Working {spinner} ', width - 2)
+            title = title.replace(spinner, f'{theme.sgr(theme.ACCENT)}{spinner}{reset}{muted}')
         rows.append(muted + '┌' + title + '─' * max(0, width - 2 - visible_length(title)) + '┐' + reset)
         available = max(1, min(height // 3, height - len(rows) - 4))
         draft = self.buffer.rows(width=width - 4, limit=available)
