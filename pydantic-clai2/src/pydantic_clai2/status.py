@@ -74,15 +74,19 @@ class Status:
         return head, context, f' tokens | {output}{cost} | {self.activity}', self._plugin_text()
 
     def _plugin_text(self) -> str:
-        """Plugin fragments, separated and prefixed; a fragment that raises is shown as its error name."""
+        """Plugin fragments, separated and prefixed; a fragment that raises or returns a non-string is reported."""
         shown: list[str] = []
         for segment in self.status_segments:
             try:
                 text = segment()
+                if not isinstance(text, str):
+                    # A non-string cannot be joined; report its type instead of raising out of the painter.
+                    text = f'!{type(text).__name__}' if text else ''
+                if text:
+                    # Sanitized here rather than only in the row painter: the toolbar draws fragments too.
+                    shown.append(_printable(text))
             except Exception as exc:  # noqa: BLE001 -- a plugin fragment must not take down the footer.
-                text = f'!{type(exc).__name__}'
-            if text:
-                shown.append(text)
+                shown.append(f'!{type(exc).__name__}')
         return '' if not shown else ' | ' + ' | '.join(shown)
 
     def text(self, frame: str = '') -> str:

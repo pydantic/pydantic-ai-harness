@@ -4,6 +4,7 @@ import asyncio
 import io
 import re
 from decimal import Decimal
+from typing import cast
 
 import pytest
 from pydantic_ai import FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
@@ -213,6 +214,18 @@ def test_a_failing_segment_reports_itself_instead_of_breaking_the_row() -> None:
 
     status = Status(model='m', status_segments=(broken, lambda: 'last'))
     assert status.text().endswith('ready | !RuntimeError | last')
+
+
+def test_a_segment_returning_a_non_string_is_reported_not_joined() -> None:
+    status = Status(model='m', status_segments=(lambda: cast(str, 42), lambda: cast(str, None), lambda: 'ok'))
+    assert status.text().endswith('ready | !int | ok')
+
+
+def test_a_fragment_cannot_break_the_prompt_row() -> None:
+    status = Status(model='m', status_segments=(lambda: 'a\nb\x1b[31mc',))
+    assert '\n' not in status.text()
+    assert '\x1b' not in status.text()
+    assert ''.join(text for _, text in status.toolbar()) == status.text()
 
 
 async def test_plugin_segments_are_painted_muted(monkeypatch: pytest.MonkeyPatch) -> None:
