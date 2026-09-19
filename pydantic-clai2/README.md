@@ -268,7 +268,10 @@ subscription availability. Custom model identifiers are accepted too.
 
 The command registry uses Termflow's `Completer`, `Document`, and `Completion`
 types. Completion rows stay visible while replacement suggestions are computed;
-stale suggestions cannot be selected. Reopening or growing the popup reuses free
+stale suggestions cannot be selected. Provider errors appear in the footer
+without ending the session. A blocked completion lookup does not hold menus or
+shutdown open; its late result is discarded. Lookups use one daemon worker with
+one latest queued request, so a stuck provider cannot create a thread per key. Reopening or growing the popup reuses free
 space above the editor instead of adding blank transcript lines.
 The interactive editor draws its own pinned prompt and completion rows,
 using Termflow's layout helpers. It does not run a prompt-toolkit Application or

@@ -35,3 +35,16 @@ def test_non_main_thread_registration_falls_back_to_polling(monkeypatch: pytest.
     monkeypatch.setattr(signal, 'signal', fail)
     with resize_notifications(lambda: None):
         pass
+
+
+def test_default_signal_disposition_is_restored_without_calling_it() -> None:
+    previous = signal.getsignal(signal.SIGWINCH)
+    received: list[bool] = []
+    signal.signal(signal.SIGWINCH, signal.SIG_DFL)
+    try:
+        with resize_notifications(lambda: received.append(True)):
+            signal.raise_signal(signal.SIGWINCH)
+        assert received == [True]
+        assert signal.getsignal(signal.SIGWINCH) == signal.SIG_DFL
+    finally:
+        signal.signal(signal.SIGWINCH, previous)

@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from itertools import islice
 
 import anyio
-from anyio.to_thread import run_sync
 from PIL import Image
 from prompt_toolkit.application.current import get_app_session
 from prompt_toolkit.history import History
@@ -22,6 +21,7 @@ from .commands import Commands, is_command_input
 from .image_input import ImageInput, clipboard_images, pasted_paths, read_images
 from .interrupts import Interrupts
 from .prompt_buffer import PromptBuffer
+from .prompt_completion import CompletionWorker
 from .prompt_keys import PromptKeys
 from .prompt_resize import resize_notifications
 from .prompt_surface import PromptSurface
@@ -68,6 +68,9 @@ class LivePrompt:
         self._completion_revision = 0
         self._complete = anyio.Event()
         self._completion_owner = anyio.Lock()
+        self._completion_scope: anyio.CancelScope | None = None
+        self._completion_worker = CompletionWorker()
+        self._completion_error = ''
         self._opened = False
 
     @property
@@ -181,11 +184,13 @@ class LivePrompt:
         self._selection = -1
         self._completion_pending = False
         self._completion_revision += 1
+        self._completion_error = ''
 
     def refresh_completions(self) -> None:
         """Compute file/command suggestions off the input loop, ignoring stale results."""
         self._selection = -1
         self._completion_revision += 1
+        self._completion_error = ''
         self._completion_pending = bool(self.buffer.text) and self.buffer.search is None
         # Retain the displayed rows until their replacements arrive. Removing
         # them here makes the terminal band shrink and grow on every key.
@@ -194,7 +199,7 @@ class LivePrompt:
         self._complete.set()
 
     async def completion_loop(self) -> None:
-        """Serialize completion lookups and join their worker on cancellation."""
+        """Keep optional completion providers from blocking or terminating the shell."""
         while True:
             await self._complete.wait()
             self._complete = anyio.Event()
@@ -202,17 +207,31 @@ class LivePrompt:
             revision = self._completion_revision
             if not self._completion_pending:
                 continue
+            error = ''
+            items: list[Completion] = []
             async with self._completion_owner:
-                items = await run_sync(
-                    lambda: list(
-                        islice(
-                            self.commands.get_completions(Document(text, cursor), CompleteEvent(text_inserted=True)),
-                            100,
+                with anyio.CancelScope() as scope:
+                    self._completion_scope = scope
+                    try:
+                        items = await self._completion_worker.run(
+                            lambda: list(
+                                islice(
+                                    self.commands.get_completions(
+                                        Document(text, cursor), CompleteEvent(text_inserted=True)
+                                    ),
+                                    100,
+                                )
+                            ),
                         )
-                    )
-                )
+                    except Exception as exc:  # noqa: BLE001 -- optional suggestions must not end a session.
+                        error = f'Completion unavailable: {exc}'
+                    finally:
+                        self._completion_scope = None
+                if scope.cancel_called:
+                    continue
             if revision == self._completion_revision and (text, cursor) == (self.buffer.text, self.buffer.cursor):
                 self._completion_pending = False
+                self._completion_error = error
                 self._completions = items
                 self.paint()
 
@@ -254,9 +273,10 @@ class LivePrompt:
         if self.buffer.search is not None:
             footer = f'reverse-i-search: {self.buffer.search}'
         else:
+            notice = self.images.notice or self._completion_error
             footer = (
-                ' '.join(terminal_text(self.images.notice).split())
-                if self.images.notice
+                ' '.join(terminal_text(notice).split())
+                if notice
                 else ''.join(
                     (theme.sgr(style) if style else muted) + ' '.join(terminal_text(text).splitlines())
                     for style, text in self.toolbar()
@@ -280,6 +300,9 @@ class LivePrompt:
             return
         self._suspended = True
         self.keys.stop()
+        self.dismiss_completions()
+        if self._completion_scope is not None:
+            self._completion_scope.cancel()
         try:
             async with self._completion_owner:
                 await self.output.drain()
@@ -287,6 +310,7 @@ class LivePrompt:
                 yield
         finally:
             self._suspended = False
+            self.refresh_completions()
             self.paint()
             self.keys.start()
 
@@ -323,5 +347,6 @@ class LivePrompt:
         finally:
             self._opened = False
             self.keys.stop()
+            self._completion_worker.close()
             self.console.file = original
             self.output.release()

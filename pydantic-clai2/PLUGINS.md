@@ -540,7 +540,11 @@ Enter submits. Alt-Enter remains a fallback for terminals that cannot distinguis
 Shift-Enter. Modified-key reporting is enabled only while the editor owns input.
 Completion rows remain visible while a replacement lookup runs, but stale results
 cannot be selected. Popup height changes reuse available space without adding
-blank transcript lines on each key.
+blank transcript lines on each key. Completion providers should be read-only.
+Their errors are shown in the footer rather than ending the session; on menu
+handoff or shutdown, a blocked synchronous lookup may finish in the background
+and its result is ignored. A single daemon worker and a latest-only queue bound
+this work; a stuck provider delays further lookups, not input or process exit.
 While work or turn lifecycle
 hooks are active, a `Working` label and spinner appear in the editor's top border.
 The spinner uses the same pink `ACCENT` as tool names, while the label and border

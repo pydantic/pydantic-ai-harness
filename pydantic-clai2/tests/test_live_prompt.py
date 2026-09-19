@@ -2,12 +2,16 @@
 
 import asyncio
 import io
+import signal
+import sys
 from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Event as ThreadEvent
 
 import anyio
 import pytest
+from anyio.to_thread import run_sync as in_worker
 from PIL import Image
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.history import InMemoryHistory
@@ -25,6 +29,7 @@ from pydantic_clai2.commands import Command, Commands
 from pydantic_clai2.image_input import ImageInput
 from pydantic_clai2.interrupts import Interrupts
 from pydantic_clai2.live_prompt import LivePrompt
+from pydantic_clai2.prompt_completion import CompletionWorker
 
 
 @pytest.fixture
@@ -87,11 +92,14 @@ async def test_completed_and_partial_output_never_repaint_editor() -> None:
 @pytest.mark.parametrize('thinking', [False, True])
 async def test_real_termflow_writes_do_not_clear_input(thinking: bool) -> None:
     async with editor() as (live, _, output):
+        live.buffer.replace('retained draft')
+        live.paint()
         start = len(output.getvalue())
         renderer = StreamRenderer(live.console, stop_loading=lambda: None)
         part = ThinkingPart(content='A thinking burst') if thinking else TextPart(content='A response burst\n')
         await renderer.on_stream_event(PartStartEvent(index=0, part=part))
         await renderer.finish()
+        assert live.buffer.text == 'retained draft'
         text = output.getvalue()[start:]
         assert 'A thinking burst' in Text.from_ansi(text).plain if thinking else 'A response burst' in text
         for forbidden in ('\x1b[J', '\x1b[2K', '\x1b[?25h', '┌', '└'):
@@ -297,7 +305,7 @@ async def test_completion_refresh_keeps_popup_without_selecting_stale_results(
     held = False
     started, release, finished = anyio.Event(), anyio.Event(), anyio.Event()
 
-    async def compute(operation: Callable[[], list[Completion]]) -> list[Completion]:
+    async def compute(self: CompletionWorker, operation: Callable[[], list[Completion]]) -> list[Completion]:
         if held:
             started.set()
             await release.wait()
@@ -305,7 +313,7 @@ async def test_completion_refresh_keeps_popup_without_selecting_stale_results(
         finished.set()
         return result
 
-    monkeypatch.setattr('pydantic_clai2.live_prompt.run_sync', compute)
+    monkeypatch.setattr(CompletionWorker, 'run', compute)
     terminal = SurfaceTerminal(width=80, height=24)
     async with editor(output=terminal) as (live, pipe, _):
         live.commands.register(Command(name='hello', description='Hello', handler=lambda args: 'hello'))
@@ -387,3 +395,84 @@ async def test_recalled_history_gets_completions_and_completed_draft_survives_na
         assert live.buffer.text == '/he'
         live.feed('down')
         assert live.buffer.text == '/help'
+
+
+@pytest.mark.parametrize('menu', [False, True])
+async def test_blocked_completion_does_not_hold_terminal_ownership(menu: bool) -> None:
+    started = anyio.Event()
+    release, finished = ThreadEvent(), ThreadEvent()
+    output = io.StringIO()
+    loop = asyncio.get_running_loop()
+
+    def blocked(args: list[str]) -> list[str]:
+        loop.call_soon_threadsafe(started.set)
+        try:
+            assert release.wait(timeout=5)
+            return ['late result']
+        finally:
+            finished.set()
+
+    try:
+        async with editor(output=output) as (live, pipe, _):
+            live.commands.register(
+                Command(name='blocked', description='Blocked', handler=lambda args: '', complete=blocked)
+            )
+            pipe.send_text('/blocked ')
+            await started.wait()
+            if menu:
+                async with live.suspended():
+                    assert not finished.is_set()
+                    assert live.buffer.text == '/blocked '
+                    live.commands.unregister(['blocked'])
+        assert not finished.is_set()
+        assert output.getvalue().endswith('\x1b[?25h\x1b[?2026l')
+        before = output.getvalue()
+    finally:
+        release.set()
+        assert await in_worker(finished.wait, 5)
+    assert output.getvalue() == before
+
+
+async def test_completion_exception_is_reported_without_ending_editor() -> None:
+    failed, recovered = anyio.Event(), anyio.Event()
+
+    class Output(io.StringIO):
+        def write(self, text: str) -> int:
+            if 'Completion unavailable' in text:
+                failed.set()
+            if '/help' in text:
+                recovered.set()
+            return super().write(text)
+
+    def broken(args: list[str]) -> list[str]:
+        raise RuntimeError('broken provider')
+
+    async with editor(output=Output()) as (live, pipe, _):
+        live.commands.register(Command(name='broken', description='Broken', handler=lambda args: '', complete=broken))
+        pipe.send_text('/broken ')
+        await failed.wait()
+        assert live.buffer.text == '/broken '
+        assert any('broken provider' in row for row in live.frame())
+        pipe.send_text('\x15/he')
+        await recovered.wait()
+        live.feed('tab')
+        assert live.buffer.text == '/help'
+        assert not any('Completion unavailable' in row for row in live.frame())
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='SIGWINCH is POSIX-only')
+async def test_live_resize_signal_schedules_viewport_clear_without_losing_draft() -> None:
+    cleared = anyio.Event()
+
+    class Output(io.StringIO):
+        def write(self, text: str) -> int:
+            if '\x1b[2J' in text:
+                cleared.set()
+            return super().write(text)
+
+    async with editor(output=Output()) as (live, _, _):
+        live.buffer.replace('retained during resize signal')
+        live.paint()
+        signal.raise_signal(signal.SIGWINCH)
+        await cleared.wait()
+        assert live.buffer.text == 'retained during resize signal'

@@ -200,6 +200,7 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `prompt_transcript.py` | bounded styled transcript tail for viewport replay |
 | `prompt_resize.py` | scoped resize notifications, without terminal IO in signal handlers |
 | `prompt_buffer.py` | pure draft editing, history navigation, search and cell-width wrapping |
+| `prompt_completion.py` | bounded daemon completion worker; no terminal ownership |
 | `prompt_keys.py` | keyboard decoder attachment only; no prompt-toolkit Application or renderer |
 | `config.py` | `Settings`, `PluginSettings` |
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |

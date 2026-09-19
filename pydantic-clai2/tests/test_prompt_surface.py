@@ -156,6 +156,7 @@ def test_tiny_terminal_then_grow_keeps_transcript_and_draft() -> None:
     screen.resize(width=10, height=2)
     screen.settle(rows=('DRAFT',))
     assert 'retained' in screen.terminal.lines()
+    assert 'DRAFT' not in screen.terminal.lines()
     screen.resize(width=80, height=24)
     screen.settle()
     assert screen.terminal.lines()[-4:] == list(ROWS)
