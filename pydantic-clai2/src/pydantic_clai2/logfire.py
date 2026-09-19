@@ -1,5 +1,7 @@
 """Default-enabled Logfire instrumentation, owned by the plugin rather than the process."""
 
+import os
+from pathlib import Path
 from typing import Literal
 
 import logfire
@@ -26,6 +28,10 @@ class LogfireSettings(BaseModel):
 def activate(host: PluginHost[None]) -> None:
     """Add core instrumentation without changing the supplied agent or global OTel providers."""
     config = host.settings(LogfireSettings)
+    config_home = Path(os.getenv('XDG_CONFIG_HOME', '')).expanduser()
+    if not config_home.is_absolute():
+        config_home = Path.home() / '.config'
+    private_dir = config_home / 'pydantic-clai2' / 'logfire'
     propagator = get_global_textmap()
     try:
         instance = logfire.configure(
@@ -33,6 +39,8 @@ def activate(host: PluginHost[None]) -> None:
             send_to_logfire=config.send_to_logfire,
             service_name=config.service_name,
             console=False,
+            config_dir=private_dir,
+            data_dir=private_dir,
         )
     finally:
         # Even local SDK configuration replaces the process-wide propagator.

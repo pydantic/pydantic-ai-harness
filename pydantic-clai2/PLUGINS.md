@@ -64,10 +64,14 @@ and binary image attachments by default, including retained history used by
 later turns. This may export source code, file contents, and screenshots; verify
 the configured telemetry destination first.
 
-Credentials are read by the SDK from `LOGFIRE_TOKEN` or its credential file
-(`.logfire` by default; `LOGFIRE_CREDENTIALS_DIR` changes that location). Without
-credentials the default `if-token-present` mode does not export to Logfire or
-start interactive setup. Console logging is disabled. Other SDK configuration,
+Credentials are read from `LOGFIRE_TOKEN` or the SDK's `logfire_credentials.json`
+in `$XDG_CONFIG_HOME/pydantic-clai2/logfire/`, defaulting to
+`~/.config/pydantic-clai2/logfire/`. SDK configuration is read only from that user
+directory too. Repository-local configuration/credentials and the SDK's
+`LOGFIRE_CONFIG_DIR`/`LOGFIRE_CREDENTIALS_DIR` overrides are ignored. Relative
+`XDG_CONFIG_HOME` values fall back to `~/.config`. A checkout cannot select the
+telemetry destination through its own files. Without credentials the default
+`if-token-present` mode does not export to Logfire or start interactive setup. Console logging is disabled. Other SDK configuration,
 such as explicit OTLP exporters, still applies.
 
 Manage it with `/plugins disable logfire`, `/plugins enable logfire`, or
@@ -309,6 +313,11 @@ may require a restart if their alternatives form a cycle. Invalid source
 or a detected import cycle fails before module reloads begin. Restart for changes
 to startup code, dynamically loaded dependencies, or agent construction.
 Third-party dependencies are not recursively reloaded.
+
+If loading fails or is cancelled, registered `session_end` handlers receive
+`reason='error'` under cancellation shielding before the partial host is dropped.
+Register cleanup once a resource is owned; cleanup may run before `session_start`
+finishes. Cleanup errors are reported without replacing the original load error.
 
 What "load" and "unload" mean for your plugin:
 

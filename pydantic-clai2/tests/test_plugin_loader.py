@@ -431,3 +431,25 @@ async def test_repo_context_builtin_loads_the_workspace_instructions(
     assert (await harness.loader.command(['remove', 'repo_context'])).startswith('repo_context is built in')
     with pytest.raises(PluginError, match='extra_forbidden'):
         await harness.loader.command(['add', 'repo_context', 'pydantic_clai2.repo_context', '{"filenames": []}'])
+
+
+async def test_failed_start_reports_cleanup_error_without_masking_start_failure(tmp_path: Path) -> None:
+    harness = Harness(tmp_path)
+    (harness.store.plugins_dir / 'broken_start.py').write_text(
+        'from pydantic_clai2.commands import Command\n'
+        'def activate(host):\n'
+        '    host.commands.register(Command(name="temporary", description="temporary", handler=lambda _: "ok"))\n'
+        '    @host.on("session_start")\n'
+        '    async def start(event):\n'
+        '        raise RuntimeError("start failed")\n'
+        '    @host.on("session_end")\n'
+        '    async def end(event):\n'
+        '        host.console.print("cleanup reason " + event.reason)\n'
+        '        raise RuntimeError("cleanup failed")\n'
+    )
+    with pytest.raises(PluginError, match='start failed'):
+        await harness.loader.load('broken_start')
+    assert 'cleanup reason error' in harness.text
+    assert 'cleanup failed' in harness.text
+    assert 'temporary' not in {command.name for command in harness.commands}
+    assert harness.loader.entries()[0].host is None

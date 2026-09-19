@@ -11,6 +11,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Generic
 
+from anyio import CancelScope
 from pydantic_ai import AgentStreamEvent
 from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
@@ -220,13 +221,22 @@ class PluginLoader(Generic[DepsT]):
             self._loaded[name] = host
             await _dispatch(host, self._session_start())
         except asyncio.CancelledError:
-            self._drop(entry)
+            await self._failed_load(entry, host)
             raise
         except Exception as exc:
-            self._drop(entry)
+            await self._failed_load(entry, host)
             entry.error = f'{type(exc).__name__}: {exc}'
             raise PluginError(name, exc) from exc
         entry.error = None
+
+    async def _failed_load(self, entry: PluginEntry[DepsT], host: PluginHost[DepsT]) -> None:
+        try:
+            with CancelScope(shield=True):
+                await _dispatch(host, SessionEnd(reason='error'))
+        except Exception as exc:  # noqa: BLE001 -- cleanup errors must not replace the load failure.
+            self._console.print(str(PluginError(entry.name, exc)), style=theme.ERROR, markup=False)
+        finally:
+            self._drop(entry)
 
     async def unload(self, name: str, *, reason: SessionEndReason = 'exit') -> None:
         """Fire `session_end`, then drop everything the plugin registered."""

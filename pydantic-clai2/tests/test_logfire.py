@@ -24,7 +24,7 @@ from rich.console import Console
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.logfire import activate
-from pydantic_clai2.plugin_loader import PluginLoader
+from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugins import PluginHost, SessionEnd, SessionStart
 from pydantic_clai2.settings_store import SettingsStore
 
@@ -51,9 +51,18 @@ class Recorder:
         send_to_logfire: Literal[False, 'if-token-present'],
         service_name: str,
         console: Literal[False],
+        config_dir: Path,
+        data_dir: Path,
     ) -> logfire.Logfire:
         self.options.append(
-            {'local': local, 'send_to_logfire': send_to_logfire, 'service_name': service_name, 'console': console}
+            {
+                'local': local,
+                'send_to_logfire': send_to_logfire,
+                'service_name': service_name,
+                'console': console,
+                'config_dir': config_dir,
+                'data_dir': data_dir,
+            }
         )
         exporter = Exporter()
         instance = self.configure_sdk(
@@ -61,6 +70,8 @@ class Recorder:
             send_to_logfire=False,
             service_name=service_name,
             console=console,
+            config_dir=config_dir,
+            data_dir=data_dir,
             metrics=False,
             additional_span_processors=[SimpleSpanProcessor(exporter)],
             advanced=logfire.AdvancedOptions(emit_configuration_span=False),
@@ -97,7 +108,7 @@ def operation(span: ReadableSpan) -> object:
     return (span.attributes or {}).get('gen_ai.operation.name')
 
 
-async def test_default_content_images_tools_and_usage_are_traced(recorder: Recorder) -> None:
+async def test_default_content_images_tools_and_usage_are_traced(recorder: Recorder, tmp_path: Path) -> None:
     tracer, meter = trace.get_tracer_provider(), metrics.get_meter_provider()
     propagator = propagate.get_global_textmap()
     host = make_host()
@@ -129,7 +140,14 @@ async def test_default_content_images_tools_and_usage_are_traced(recorder: Recor
     assert base64.b64encode(image.data).decode() in serialized
     assert 'gen_ai.usage.input_tokens' in serialized
     assert recorder.options == [
-        {'local': True, 'send_to_logfire': 'if-token-present', 'service_name': 'pydantic-clai2', 'console': False}
+        {
+            'local': True,
+            'send_to_logfire': 'if-token-present',
+            'service_name': 'pydantic-clai2',
+            'console': False,
+            'config_dir': tmp_path / 'config/pydantic-clai2/logfire',
+            'data_dir': tmp_path / 'config/pydantic-clai2/logfire',
+        }
     ]
     assert all(exporter.closed for exporter in recorder.exporters)
     assert trace.get_tracer_provider() is tracer
@@ -324,3 +342,76 @@ async def test_flush_timeout_still_stops_providers(recorder: Recorder, monkeypat
     output = host.console.file
     assert isinstance(output, io.StringIO)
     assert 'Logfire shutdown timed out' in output.getvalue()
+
+
+@pytest.mark.parametrize('xdg', ['', 'relative-config'])
+async def test_relative_config_home_does_not_read_the_checkout(
+    recorder: Recorder, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, xdg: str
+) -> None:
+    monkeypatch.setenv('XDG_CONFIG_HOME', xdg)
+    host = make_host()
+    activate(host)
+    await close_host(host)
+    assert recorder.options[0]['config_dir'] == tmp_path / 'home/.config/pydantic-clai2/logfire'
+    assert recorder.options[0]['data_dir'] == recorder.options[0]['config_dir']
+
+
+async def test_repository_cannot_select_telemetry_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorder: Recorder
+) -> None:
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    (repo / 'pyproject.toml').write_text('[tool.logfire]\ntoken = "repository-token"\n')
+    credentials = repo / '.logfire'
+    credentials.mkdir()
+    (credentials / 'logfire_credentials.json').write_text(
+        json.dumps({'token': 'repository-token', 'project_name': 'untrusted', 'logfire_api_url': 'http://127.0.0.1:1'})
+    )
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv('LOGFIRE_CONFIG_DIR', str(repo))
+    monkeypatch.setenv('LOGFIRE_CREDENTIALS_DIR', str(credentials))
+    host = make_host()
+    activate(host)
+    await close_host(host)
+    assert recorder.options[0]['config_dir'] == tmp_path / 'config/pydantic-clai2/logfire'
+    assert recorder.options[0]['data_dir'] == recorder.options[0]['config_dir']
+    assert recorder.instances[0].config.token is None
+
+
+@pytest.mark.parametrize('cancel', [False, True])
+async def test_interrupted_startup_shuts_down_plugin_providers(
+    tmp_path: Path, recorder: Recorder, monkeypatch: pytest.MonkeyPatch, cancel: bool
+) -> None:
+    started = anyio.Event()
+
+    def start(host: PluginHost[None]) -> None:
+        activate(host)
+
+        @host.on('session_start')
+        async def wait(event: SessionStart) -> None:
+            started.set()
+            if cancel:
+                await anyio.sleep_forever()
+            raise RuntimeError('startup failed')
+
+    monkeypatch.setattr('pydantic_clai2.logfire.activate', start)
+    store = SettingsStore(tmp_path / 'config.db')
+    loader: PluginLoader[None] = PluginLoader(
+        store=store,
+        console=Console(file=io.StringIO()),
+        commands=Commands(),
+        session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=store.load()),
+        builtin=(next(plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'logfire'),),
+    )
+    if cancel:
+        with anyio.fail_after(10):
+            async with anyio.create_task_group() as tasks:
+                tasks.start_soon(loader.load, 'logfire')
+                await started.wait()
+                tasks.cancel_scope.cancel()
+    else:
+        with pytest.raises(PluginError, match='startup failed'):
+            await loader.load('logfire')
+    assert recorder.exporters[0].closed
+    assert not loader.capabilities()
+    assert loader.entries()[0].host is None

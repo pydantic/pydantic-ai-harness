@@ -773,10 +773,15 @@ capability to CLAI turns for agent, model-request, and tool
 spans, including timing, token usage, and failures. It adds no separate CLAI spans
 and does not instrument HTTP clients or unrelated agents globally.
 
-Set `LOGFIRE_TOKEN` to a write token for your Logfire project, or use the Logfire
-SDK's credential file (`.logfire` by default, configurable with
-`LOGFIRE_CREDENTIALS_DIR`). Export uses `send_to_logfire='if-token-present'`: no
-credentials means no Logfire export and no interactive project setup. Logfire's
+Set `LOGFIRE_TOKEN` to a write token for your Logfire project. Alternatively,
+place the SDK's `logfire_credentials.json` in your user config directory at
+`$XDG_CONFIG_HOME/pydantic-clai2/logfire/` (default
+`~/.config/pydantic-clai2/logfire/`). SDK configuration is also read only from
+that directory. The plugin ignores repository-local Logfire configuration and
+credentials, plus `LOGFIRE_CONFIG_DIR` and `LOGFIRE_CREDENTIALS_DIR`, so a checkout
+cannot choose the telemetry destination. Relative `XDG_CONFIG_HOME` values fall
+back to `~/.config`. Export uses `send_to_logfire='if-token-present'`: no credentials
+means no Logfire export and no interactive project setup. Logfire's
 terminal console output is disabled so it does not interfere with the editor.
 Standard SDK configuration, including explicitly configured OTLP exporters, still
 applies; disable the plugin to stop its instrumentation altogether.

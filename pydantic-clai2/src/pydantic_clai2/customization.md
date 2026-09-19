@@ -126,8 +126,11 @@ default, so review the telemetry destination before setting LOGFIRE_TOKEN. Use
 
 Other options are service_name (default pydantic-clai2) and send_to_logfire
 (default "if-token-present", or false). This explicit option overrides
-LOGFIRE_SEND_TO_LOGFIRE. Tokens belong in the SDK environment or credential file,
-not plugin JSON. Disabling or reloading shuts down only the plugin's own
+LOGFIRE_SEND_TO_LOGFIRE. Use LOGFIRE_TOKEN or the SDK credential file in
+$XDG_CONFIG_HOME/pydantic-clai2/logfire (default ~/.config/pydantic-clai2/logfire).
+Both SDK configuration and credentials are read from that user directory, not
+from the checkout. LOGFIRE_CONFIG_DIR and LOGFIRE_CREDENTIALS_DIR are ignored;
+relative XDG_CONFIG_HOME falls back to ~/.config. Keep tokens out of plugin JSON. Disabling or reloading shuts down only the plugin's own
 providers, without mutating the agent or global tracer/meter providers. The
 existing global propagator is preserved, but SDK-installed executor propagation
 helpers are not removed on unload. While enabled, its per-run instrumentation takes precedence over the supplied
@@ -142,7 +145,9 @@ SQLite. Use environment variables or plugin-owned credential storage instead.
 Each plugin gets its own PluginHost. Keep mutable state inside activate, not in
 module globals. Loading calls activate then session_start; unloading calls
 session_end and discards that host's registrations. Changes happen between turns.
-Import/activation failures discard partial registrations. Drop-in entry modules
+Failed or cancelled loading calls registered session_end handlers with reason=error
+under cancellation shielding, then discards partial registrations. Cleanup can run
+before session_start finishes; register it once the plugin owns a resource. Drop-in entry modules
 reload from fresh source; installed modules use importlib.reload, which can retain
 globals absent from the new source. Initialize state explicitly on activation.
 Do not mutate another plugin's host or the agent to register a plugin's tools.
