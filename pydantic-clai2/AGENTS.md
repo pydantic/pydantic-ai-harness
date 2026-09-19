@@ -92,8 +92,9 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
 - **A load failure leaves the session as it was.** Import or `activate` errors
   are reported and the plugin stays unloaded; partial registrations from a
   failed `activate` are discarded with the host. Registered `session_end` handlers
-  run with `reason='error'` under a shield before a failed/cancelled load drops the
-  host, so cleanup must tolerate incomplete `session_start`.
+  run with `reason='error'` under a shield with a five-second cooperative timeout
+  per handler before a failed/cancelled load drops the host. Cleanup must tolerate
+  incomplete `session_start`; a handler failure must not skip later cleanup.
 
 Compaction registers harness `FallbackCompaction` directly with `max_fraction`
 and `context_window` for both strategies. Harness owns the trigger; do not add

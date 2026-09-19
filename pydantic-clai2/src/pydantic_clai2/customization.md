@@ -146,8 +146,11 @@ Each plugin gets its own PluginHost. Keep mutable state inside activate, not in
 module globals. Loading calls activate then session_start; unloading calls
 session_end and discards that host's registrations. Changes happen between turns.
 Failed or cancelled loading calls registered session_end handlers with reason=error
-under cancellation shielding, then discards partial registrations. Cleanup can run
-before session_start finishes; register it once the plugin owns a resource. Drop-in entry modules
+under cancellation shielding, with a five-second cooperative timeout per handler,
+then discards partial registrations. Handler errors/timeouts are reported and later
+handlers still run. Blocking code and nested shields can exceed the deadline.
+Cleanup can run before session_start finishes; register it once the plugin owns a
+resource. Drop-in entry modules
 reload from fresh source; installed modules use importlib.reload, which can retain
 globals absent from the new source. Initialize state explicitly on activation.
 Do not mutate another plugin's host or the agent to register a plugin's tools.
