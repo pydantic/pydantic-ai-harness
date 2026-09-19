@@ -2,7 +2,7 @@
 
 import asyncio
 import io
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -337,3 +337,53 @@ async def test_completion_refresh_keeps_popup_without_selecting_stale_results(
             live.feed('tab')
             live.feed('enter')
             assert live.buffer.text == '/help'
+
+
+async def test_completion_iteration_is_bounded_before_materializing() -> None:
+    ready = anyio.Event()
+    produced: list[int] = []
+
+    class Output(io.StringIO):
+        def write(self, text: str) -> int:
+            if 'candidate0' in text:
+                ready.set()
+            return super().write(text)
+
+    def candidates(args: list[str]) -> Iterator[str]:
+        for index in range(100):
+            produced.append(index)
+            yield f'candidate{index}'
+        raise AssertionError('completion consumed beyond its bound')
+
+    async with editor(output=Output()) as (live, pipe, _):
+        live.commands.register(
+            Command(name='many', description='Many candidates', handler=lambda args: '', complete=candidates)
+        )
+        pipe.send_text('/many ')
+        await ready.wait()
+        assert produced == list(range(100))
+        async with live.suspended():
+            assert live.buffer.text == '/many '
+
+
+async def test_recalled_history_gets_completions_and_completed_draft_survives_navigation() -> None:
+    ready = anyio.Event()
+
+    class Output(io.StringIO):
+        def write(self, text: str) -> int:
+            if '/help' in text:
+                ready.set()
+            return super().write(text)
+
+    async with editor(output=Output()) as (live, pipe, _):
+        live.buffer.history = ['/he']
+        live.buffer.replace('original draft')
+        pipe.send_text('\x1b[A')
+        await ready.wait()
+        live.feed('tab')
+        assert live.buffer.text == '/help'
+        live.feed('escape')
+        live.feed('up')
+        assert live.buffer.text == '/he'
+        live.feed('down')
+        assert live.buffer.text == '/help'

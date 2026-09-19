@@ -5,6 +5,7 @@ import time
 from collections import deque
 from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
+from itertools import islice
 
 import anyio
 from anyio.to_thread import run_sync
@@ -134,7 +135,7 @@ class LivePrompt:
             self.dismiss_completions()
         else:
             self.buffer.edit(key)
-        if key not in ('tab', 'backtab', 'up', 'down', 'escape'):
+        if key not in ('tab', 'backtab', 'escape') and (key not in ('up', 'down') or not self._completions):
             self.refresh_completions()
         self.paint()
 
@@ -171,6 +172,7 @@ class LivePrompt:
         start = max(0, self.buffer.cursor + item.start_position)
         self.buffer.text = self.buffer.text[:start] + item.text + self.buffer.text[self.buffer.cursor :]
         self.buffer.cursor = start + len(item.text)
+        self.buffer.history_index = None
         self.dismiss_completions()
 
     def dismiss_completions(self) -> None:
@@ -203,8 +205,11 @@ class LivePrompt:
             async with self._completion_owner:
                 items = await run_sync(
                     lambda: list(
-                        self.commands.get_completions(Document(text, cursor), CompleteEvent(text_inserted=True))
-                    )[:100]
+                        islice(
+                            self.commands.get_completions(Document(text, cursor), CompleteEvent(text_inserted=True)),
+                            100,
+                        )
+                    )
                 )
             if revision == self._completion_revision and (text, cursor) == (self.buffer.text, self.buffer.cursor):
                 self._completion_pending = False

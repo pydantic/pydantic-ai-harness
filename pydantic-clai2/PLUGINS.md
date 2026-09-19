@@ -555,7 +555,8 @@ is a nonblinking highlighted cell, separate from the transcript cursor.
 Resize blanks the visible viewport and buffers transcript writes until the size
 has been stable for 250 ms. It then replays a bounded recent transcript tail and
 restores the draft; it does not erase terminal scrollback or conversation history.
-The buffer retains ANSI styling, not arbitrary terminal-control operations.
+The buffer includes startup and plugin lifecycle output. It retains ANSI styling,
+not arbitrary terminal-control operations.
 Use `host.full_screen()` for widgets instead of printing cursor-control sequences
 into the transcript. Large output bursts during resize spill to a private temporary
 file and are flushed in order after the viewport is rebuilt.

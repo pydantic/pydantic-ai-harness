@@ -273,3 +273,15 @@ def test_popup_reopening_reuses_gap_without_scrolling_blank_lines() -> None:
     assert screen.terminal.lines()[: -len(popup)] == transcript_rows
     screen.surface.write(' continuation')
     assert 'partial continuation' in screen.terminal.lines()
+
+
+@pytest.mark.parametrize('resize', [False, True])
+def test_release_finishes_partial_output_before_shell_can_overwrite_it(resize: bool) -> None:
+    screen = Screen()
+    screen.surface.write('partial streamed response')
+    if resize:
+        screen.resize(width=100, height=40)
+    screen.surface.release()
+    screen.terminal.write('shell prompt')
+    assert 'partial streamed response' in screen.terminal.lines()
+    assert 'shell prompt' in screen.terminal.lines()

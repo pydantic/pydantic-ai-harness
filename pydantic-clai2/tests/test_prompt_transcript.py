@@ -1,10 +1,15 @@
 """Bounded transcript replay preserves text, wrapping, and styling, not controls."""
 
+import io
+
 import pytest
+from rich.color import ColorSystem
+from rich.console import Console
+from rich.style import Style
 from rich.text import Text
 from termflow.ansi.utils import visible_length  # pyright: ignore[reportMissingTypeStubs]
 
-from pydantic_clai2.prompt_transcript import TranscriptBuffer
+from pydantic_clai2.prompt_transcript import TranscriptBuffer, render_ansi
 
 
 def plain(buffer: TranscriptBuffer, *, width: int = 80, height: int = 24) -> list[str]:
@@ -85,3 +90,55 @@ def test_wide_character_in_one_column_cannot_scroll_the_replayed_screen() -> Non
     buffer.write('界x')
     assert all(visible_length(row) <= 1 for row in buffer.frame(width=1, height=10).rows)
     assert plain(buffer) == ['界x']
+
+
+def test_partial_truncation_never_splits_ansi_tokens() -> None:
+    buffer = TranscriptBuffer(max_chars=8)
+    buffer.write('prefix\x1b[31mTAIL')
+    assert plain(buffer) == ['TAIL']
+    assert '\x1b[31m' in buffer.frame(width=40, height=10).rows[0]
+    buffer.write('\nnext')
+    assert plain(buffer) == ['TAIL', 'next']
+    assert '\x1b[31m' in buffer.frame(width=40, height=10).rows[-1]
+
+
+def test_partial_escape_is_retained_until_completed_without_leaking_bytes() -> None:
+    buffer = TranscriptBuffer(max_chars=4)
+    buffer.write('prefix\x1b[38;2;229;')
+    assert '[38;' not in ''.join(plain(buffer))
+    buffer.write('32;233mTAIL')
+    assert plain(buffer) == ['TAIL']
+    assert '229;32;233' in buffer.frame(width=40, height=10).rows[0]
+
+
+def test_malformed_unbounded_control_cannot_grow_the_partial_cache() -> None:
+    buffer = TranscriptBuffer(max_chars=4)
+    buffer.write('prefix\x1b[' + '1;' * 3000)
+    buffer.write('still an unclosed control')
+    assert plain(buffer) == ['efix']
+    buffer.write('\nnext')
+    assert plain(buffer) == ['efix', 'next']
+
+
+def test_replay_ignores_richs_previously_cached_16_color_encoding() -> None:
+
+    style = Style(color='#e520e9', bold=True)
+    assert '\x1b[1;95m' in style.render('cached', color_system=ColorSystem.STANDARD)
+    assert '38;2;229;32;233' in render_ansi(text='replay', style=style)
+
+
+def test_capture_forwards_and_restores_console_on_error() -> None:
+
+    output = io.StringIO()
+    console = Console(file=output)
+    buffer = TranscriptBuffer()
+    with pytest.raises(ValueError):
+        with buffer.capture(console):
+            assert not console.file.isatty()
+            console.print('startup notice')
+            console.file.flush()
+            raise ValueError('startup failed')
+    assert console.file is output
+    assert output.getvalue() == 'startup notice\n'
+    assert plain(buffer) == ['startup notice', '']
+    assert not output.closed

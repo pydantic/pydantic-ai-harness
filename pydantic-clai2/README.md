@@ -721,7 +721,8 @@ blank and incoming output is buffered. After 250 ms without another size change,
 CLAI redraws recent transcript at the new width and restores the current draft.
 It does not clear terminal scrollback or conversation history. The repaint cache
 retains up to 2,000 lines and one million characters per editor, plus a bounded
-partial line; it is carried across shell reloads. Output arriving during resize
+partial line; it includes startup and plugin lifecycle notices and is carried
+across shell reloads. Output arriving during resize
 is kept separately and flushed in order, spilling to a private temporary file
 for large bursts. Full-screen menus release scrolling margins and detach the keyboard reader before taking over.
 Redirected output has no live editor or footer.

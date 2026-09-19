@@ -99,25 +99,29 @@ async def chat(
     `project` is the parsed `.clai/settings.json`; layer its overrides into `settings` yourself.
     """
     console = console or Console()
-    console.print()
-    print_banner(console)
-    console.print(
-        '/new starts a session; /resume restores one; /exit quits. Esc or Ctrl-C interrupts a turn.', style=theme.MUTED
-    )
-    project = project or ProjectSettings()
-    _report_project(project, console)
-    use_defaults = builtin_plugins is DEFAULT_PLUGINS
-    shell = _create_shell(
-        agent,
-        deps=deps,
-        plugins=plugins,
-        usage_limits=usage_limits,
-        console=console,
-        settings=settings,
-        store=store,
-        builtin_plugins=builtin_plugins,
-        project=project,
-    )
+    transcript = TranscriptBuffer()
+    with transcript.capture(console):
+        console.print()
+        print_banner(console)
+        console.print(
+            '/new starts a session; /resume restores one; /exit quits. Esc or Ctrl-C interrupts a turn.',
+            style=theme.MUTED,
+        )
+        project = project or ProjectSettings()
+        _report_project(project, console)
+        use_defaults = builtin_plugins is DEFAULT_PLUGINS
+        shell = _create_shell(
+            agent,
+            deps=deps,
+            plugins=plugins,
+            usage_limits=usage_limits,
+            console=console,
+            settings=settings,
+            store=store,
+            builtin_plugins=builtin_plugins,
+            project=project,
+            transcript=transcript,
+        )
     fresh = False
     async with agent:
         while True:
@@ -126,11 +130,12 @@ async def chat(
                 async with create_task_group() as workers:
                     workers.start_soon(shell.sessions.namer.run)
                     try:
-                        await shell.loader.load_all(fresh=fresh)
-                        _report_project_plugins(shell.loader, console)
-                        if resume is not None:
-                            console.print(await shell.sessions.command([resume] if resume else []), markup=False)
-                            resume = None
+                        with transcript.capture(console):
+                            await shell.loader.load_all(fresh=fresh)
+                            _report_project_plugins(shell.loader, console)
+                            if resume is not None:
+                                console.print(await shell.sessions.command([resume] if resume else []), markup=False)
+                                resume = None
                         reason = await shell.run()
                     finally:
                         workers.cancel_scope.cancel()
@@ -139,7 +144,8 @@ async def chat(
                     raise exc.exceptions[0] from None
                 raise
             finally:
-                await shell.loader.close(reason)
+                with transcript.capture(console):
+                    await shell.loader.close(reason)
             if not shell.reload_requested:
                 return
             shell.reload_requested = False
@@ -161,10 +167,12 @@ async def chat(
                     )
                 )
             except Exception as exc:  # noqa: BLE001 -- development edits must not discard the conversation.
-                console.print(f'Reload failed: {type(exc).__name__}: {exc}', style=theme.ERROR, markup=False)
+                with transcript.capture(console):
+                    console.print(f'Reload failed: {type(exc).__name__}: {exc}', style=theme.ERROR, markup=False)
                 fresh = False
             else:
-                console.print('CLAI2 reloaded. Conversation preserved.', style=theme.INFO)
+                with transcript.capture(console):
+                    console.print('CLAI2 reloaded. Conversation preserved.', style=theme.INFO)
                 fresh = True
 
 

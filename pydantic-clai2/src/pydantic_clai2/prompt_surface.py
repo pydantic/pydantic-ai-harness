@@ -184,6 +184,9 @@ class PromptSurface(io.StringIO):
                 if self._resize_at is not None or (width, height) != self._geometry:
                     rows = self._rows[-(height - 2) :] if height > 2 else ()
                     self._rebuild(rows=rows, width=width, height=height)
+                if self._partial:
+                    self._emit('\n')
+                    self._partial = False
                 bottom = self._geometry[1] - len(self._rows)
                 parts = ['\x1b[r']
                 for row in range(bottom + 1, self._geometry[1] + 1):
