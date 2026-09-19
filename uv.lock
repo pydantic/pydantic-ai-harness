@@ -3657,6 +3657,7 @@ source = { editable = "pydantic-clai2" }
 dependencies = [
     { name = "genai-prices" },
     { name = "keyring" },
+    { name = "logfire" },
     { name = "pillow" },
     { name = "prompt-toolkit" },
     { name = "pydantic-ai-harness", extra = ["coder"] },
@@ -3670,6 +3671,7 @@ dependencies = [
 requires-dist = [
     { name = "genai-prices", specifier = ">=0.1.7" },
     { name = "keyring", specifier = ">=25.6" },
+    { name = "logfire", specifier = ">=4.31.0" },
     { name = "pillow", specifier = ">=12.3.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pydantic-ai-harness", extras = ["coder"], editable = "." },
