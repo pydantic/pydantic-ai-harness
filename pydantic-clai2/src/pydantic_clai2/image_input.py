@@ -7,7 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from uuid import uuid4
 
-from PIL import Image, ImageGrab
+from PIL import Image, ImageGrab, ImageOps
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from pydantic_ai.messages import BinaryContent
 
@@ -22,9 +22,10 @@ def encode_image(image: Image.Image) -> BinaryContent:
     if image.width * image.height > MAX_PIXELS:
         raise ValueError('Image exceeds the 25 megapixel limit.')
     output = BytesIO()
-    image.convert('RGBA' if 'A' in image.getbands() or 'transparency' in image.info else 'RGB').save(
-        output, format='PNG'
-    )
+    mode = 'RGBA' if 'A' in image.getbands() or 'transparency' in image.info else 'RGB'
+    with ImageOps.exif_transpose(image) as oriented, oriented.convert(mode) as normalized:
+        normalized.info.clear()
+        normalized.save(output, format='PNG')
     data = output.getvalue()
     if len(data) > MAX_IMAGE_BYTES:
         raise ValueError('Image exceeds the 10 MiB attachment limit.')

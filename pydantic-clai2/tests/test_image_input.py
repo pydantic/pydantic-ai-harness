@@ -344,3 +344,19 @@ def test_marker_collision_does_not_replace_an_image(monkeypatch: pytest.MonkeyPa
     second = images.attach([blue])
     assert first != second
     assert images.resolve(first + second) == ('', [red, blue])
+
+
+@pytest.mark.parametrize('orientation', [1, 3, 6, 8])
+def test_exif_orientation_is_applied_and_metadata_removed(orientation: int) -> None:
+    image = Image.new('RGB', (3, 2), color='red')
+    image.putpixel((0, 0), (0, 0, 255))
+    exif = image.getexif()
+    exif[274] = orientation
+    exif[315] = 'private camera owner'
+    image.info['exif'] = exif.tobytes()
+    encoded = encode_image(image)
+    with Image.open(io.BytesIO(encoded.data)) as restored:
+        assert restored.size == ((3, 2) if orientation in (1, 3) else (2, 3))
+        blue_pixel = {1: (0, 0), 3: (2, 1), 6: (1, 0), 8: (0, 2)}[orientation]
+        assert restored.getpixel(blue_pixel) == (0, 0, 255)
+        assert not restored.getexif()
