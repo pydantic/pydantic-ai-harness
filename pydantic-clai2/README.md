@@ -594,13 +594,17 @@ colour the nearest of the 16 standard colours is used. Every colour lives in
 or Termflow defaults elsewhere. Code block syntax highlighting retains Termflow's
 Monokai default.
 
-Streaming matches Code Puppy's separate output and thinking paths:
+Streaming uses the defaults from [Code Puppy's smoothing adapters](https://github.com/mpfaffenberger/code_puppy/blob/a862bf478b63822c9d97093f81e4f827e1c53d6e/code_puppy/agents/smooth_stream.py):
 
 - Markdown uses Termflow `SmoothWriter`: 12 ms ticks, 0.5-second catch-up,
   minimum one visible character per tick. Markdown is parsed line-by-line.
 - Thinking deltas feed `StreamSmoother` immediately: 20 ms ticks, 0.4-second
   catch-up, minimum two characters per tick. They display as dim literal text,
   without waiting for newlines or interpreting Markdown.
+- Each partial write requests an editor redraw instead of waiting for the
+  100 ms spinner/footer refresh. Partial-text redraw requests use a 12 ms
+  minimum interval so bursts can coalesce without reducing streaming to ten
+  updates per second.
 - Smoothing applies only to interactive terminal output. Redirected output is
   written directly. Parts drain before the next heading, tool status, or prompt.
 

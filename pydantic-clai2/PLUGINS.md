@@ -489,7 +489,12 @@ without adding an input row or changing the draft. The indicator uses the editor
 background task, and is hidden while a full-screen interface owns the terminal.
 Queued output is batched with the editor redraw in a synchronized terminal update
 on supporting terminals. Partial streaming previews and regular editor refreshes
-are synchronized too; nested redraws remain inside the enclosing output update. Plugins do not need their own redraw logic. Pending message previews appear
+are synchronized too; nested redraws remain inside the enclosing output update.
+Partial writes request a redraw at the streaming cadence, with a 12 ms minimum
+interval, rather than waiting for the 100 ms spinner/footer refresh. The Termflow
+smoothing defaults match Code Puppy: responses use 12 ms ticks, a 0.5-second
+catch-up window, and at least one character per tick; thinking uses 20 ms ticks,
+a 0.4-second window, and at least two characters per tick. Plugins do not need their own redraw logic. Pending message previews appear
 above the editor in execution order (`Follow-up:` for messages, `Command:` for
 slash commands), and disappear when consumed. The preview is read-only; clipping
 and flattening multiline text for display do not change the submitted text.

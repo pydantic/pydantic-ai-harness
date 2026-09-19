@@ -31,10 +31,11 @@ _WORKING_FRAMES = ('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇'
 class PromptOutput(io.StringIO):
     """Buffer complete lines so a redraw cannot overwrite a partially streamed line."""
 
-    def __init__(self, original: IO[str]) -> None:
+    def __init__(self, original: IO[str], *, invalidate: Callable[[], None]) -> None:
         """Retain the console destination rather than replacing the process streams."""
         super().__init__()
         self.original = original
+        self.invalidate = invalidate
         self.pending = ''
         self.lines: asyncio.Queue[str] = asyncio.Queue()
         self.direct = False
@@ -52,6 +53,9 @@ class PromptOutput(io.StringIO):
         before, separator, self.pending = self.pending.rpartition('\n')
         if separator:
             self.lines.put_nowait(before + separator)
+        elif text:
+            # Preserve Termflow's tick cadence instead of waiting for the footer refresh.
+            self.invalidate()
         return len(text)
 
     def flush(self) -> None:
@@ -102,7 +106,7 @@ class LivePrompt:
         self._clock = clock
         self._submissions: deque[str | KeyboardInterrupt | EOFError] = deque()
         self._submitted = asyncio.Event()
-        self.output = PromptOutput(console.file)
+        self.output = PromptOutput(console.file, invalidate=prompt.app.invalidate)
 
     def working_title(self) -> FormattedText:
         """Animate the top border without adding a row to the editable area."""
@@ -257,6 +261,9 @@ class LivePrompt:
             self.output.updates.end()
 
         original = self.console.file
+        redraw_interval = self.prompt.app.min_redraw_interval
+        # Match the fastest Termflow writer tick; coalesce faster producer bursts.
+        self.prompt.app.min_redraw_interval = 0.012
         self.prompt.app.before_render += begin_render
         self.prompt.app.after_render += end_render
         try:
@@ -278,5 +285,6 @@ class LivePrompt:
                         container.children.remove(queue_preview)
                         workers.cancel_scope.cancel()
         finally:
+            self.prompt.app.min_redraw_interval = redraw_interval
             self.prompt.app.before_render -= begin_render
             self.prompt.app.after_render -= end_render

@@ -17,9 +17,11 @@ from prompt_toolkit.filters import Always
 from prompt_toolkit.input import PipeInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.vt100 import Vt100_Output
+from pydantic_ai import PartStartEvent, TextPart, ThinkingPart
 from pydantic_ai.messages import BinaryContent
 from rich.console import Console
 
+from pydantic_clai2 import StreamRenderer
 from pydantic_clai2.image_input import ImageInput
 from pydantic_clai2.interrupts import Interrupts
 from pydantic_clai2.live_prompt import LivePrompt, PromptOutput
@@ -34,15 +36,23 @@ def anyio_backend() -> str:
 
 @asynccontextmanager
 async def editor(
-    *, clock: Callable[[], float] = time.monotonic, images: ImageInput | None = None
+    *, clock: Callable[[], float] = time.monotonic, images: ImageInput | None = None, periodic_refresh: bool = True
 ) -> AsyncGenerator[tuple[LivePrompt, PipeInput, io.StringIO]]:
     output = io.StringIO()
     console = Console(file=output, force_terminal=True)
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()), anyio.fail_after(TIMEOUT):
         prompt = PromptSession[str](key_bindings=images.bindings() if images is not None else None)
-        live = LivePrompt(prompt, console, prepare=lambda: None, interrupts=Interrupts(), clock=clock)
+
+        def prepare() -> None:
+            if not periodic_refresh:
+                prompt.app.refresh_interval = 0
+
+        live = LivePrompt(prompt, console, prepare=prepare, interrupts=Interrupts(), clock=clock)
+        redraw_interval = prompt.app.min_redraw_interval
         async with live.opened():
+            assert prompt.app.min_redraw_interval == 0.012
             yield live, pipe, output
+        assert prompt.app.min_redraw_interval == redraw_interval
         assert console.file is output
         assert not prompt.app.is_running
 
@@ -402,7 +412,7 @@ async def test_output_failure_ends_synchronized_update_and_releases_batch() -> N
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=terminal):
         with set_app(PromptSession[str]().app):
             start = len(output.getvalue())
-            worker = PromptOutput(BrokenOutput())
+            worker = PromptOutput(BrokenOutput(), invalidate=lambda: None)
             worker.write('first\n')
             worker.write('second\n')
             with pytest.raises(OSError, match='write failed'):
@@ -467,3 +477,50 @@ async def test_partial_stream_and_spinner_refreshes_are_synchronized() -> None:
             prompt.app.before_render.fire()
             prompt.app.after_render.fire()
         assert output.getvalue()[start:] == ''
+
+
+@pytest.mark.parametrize('thinking', [False, True])
+async def test_termflow_partial_output_refreshes_without_periodic_polling(thinking: bool) -> None:
+    """Run the real drainer through the editor, not just into a StringIO sink."""
+    async with editor(periodic_refresh=False) as (live, _, _):
+        # Only streamed writes trigger preview renders; there is no polling timer.
+        live.prompt.default_buffer.text = 'retained draft'
+        ready = anyio.Event()
+        previewed = anyio.Event()
+        previews: set[str] = set()
+
+        def rendered(app: Application[str]) -> None:
+            screen = app.renderer.last_rendered_screen
+            if screen is None:
+                return
+            rows = [''.join(cell.char for cell in row.values()) for row in screen.data_buffer.values()]
+            if any('> retained draft' in row for row in rows):
+                ready.set()
+                if 'zz' in live.output.pending and any('zz' in row for row in rows):
+                    previews.add(live.output.pending)
+                    if len(previews) >= 3:
+                        previewed.set()
+
+        live.prompt.app.after_render += rendered
+        live.prompt.app.invalidate()
+        await ready.wait()
+        renderer = StreamRenderer(live.console, stop_loading=lambda: None)
+        content = 'z' * 200
+        part = ThinkingPart(content=content) if thinking else TextPart(content=content + '\n')
+        await renderer.on_stream_event(PartStartEvent(index=0, part=part))
+        try:
+            await previewed.wait()
+            assert live.output.pending
+            assert live.prompt.default_buffer.text == 'retained draft'
+        finally:
+            await renderer.abort()
+            live.prompt.app.after_render -= rendered
+
+
+def test_empty_output_does_not_request_a_redraw() -> None:
+    redraws: list[bool] = []
+    output = PromptOutput(io.StringIO(), invalidate=lambda: redraws.append(True))
+    assert output.write('') == 0
+    assert redraws == []
+    output.write('partial')
+    assert redraws == [True]
