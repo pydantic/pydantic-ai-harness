@@ -488,7 +488,8 @@ hooks are active, a `Working` label and spinner appear in the editor's top borde
 without adding an input row or changing the draft. The indicator uses the editor's refresh cycle, adds no
 background task, and is hidden while a full-screen interface owns the terminal.
 Queued output is batched with the editor redraw in a synchronized terminal update
-on supporting terminals. Plugins do not need their own redraw logic. Pending message previews appear
+on supporting terminals. Partial streaming previews and regular editor refreshes
+are synchronized too; nested redraws remain inside the enclosing output update. Plugins do not need their own redraw logic. Pending message previews appear
 above the editor in execution order (`Follow-up:` for messages, `Command:` for
 slash commands), and disappear when consumed. The preview is read-only; clipping
 and flattening multiline text for display do not change the submitted text.

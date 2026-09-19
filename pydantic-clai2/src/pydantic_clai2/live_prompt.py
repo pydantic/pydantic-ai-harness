@@ -10,20 +10,20 @@ from typing import IO
 
 import anyio
 from prompt_toolkit import PromptSession
-from prompt_toolkit.application import in_terminal
-from prompt_toolkit.application.current import get_app, set_app
+from prompt_toolkit.application import Application, in_terminal
+from prompt_toolkit.application.current import set_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition, is_done
 from prompt_toolkit.formatted_text import ANSI, FormattedText, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent, merge_key_bindings
 from prompt_toolkit.layout import ConditionalContainer, FormattedTextControl, HSplit, VSplit, Window
-from prompt_toolkit.output.vt100 import Vt100_Output
 from rich.console import Console
 from rich.text import Text
 
 from . import theme
 from .commands import is_command_input
 from .interrupts import Interrupts
+from .terminal_updates import TerminalUpdates
 
 _WORKING_FRAMES = ('⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏')
 
@@ -38,6 +38,7 @@ class PromptOutput(io.StringIO):
         self.pending = ''
         self.lines: asyncio.Queue[str] = asyncio.Queue()
         self.direct = False
+        self.updates = TerminalUpdates()
 
     def isatty(self) -> bool:
         """Preserve terminal detection for Rich and Termflow."""
@@ -71,21 +72,12 @@ class PromptOutput(io.StringIO):
             batch = [await self.lines.get()]
             while not self.lines.empty():
                 batch.append(self.lines.get_nowait())
-            terminal = get_app().output
-            # in_terminal flushes an erased editor before restoring it. Keep that
-            # intermediate frame hidden on terminals supporting synchronized output.
-            synchronized = isinstance(terminal, Vt100_Output)
             try:
-                if synchronized:
-                    terminal.write_raw('\x1b[?2026h')
-                    terminal.flush()
-                async with in_terminal():
-                    self.original.write(''.join(batch))
-                    self.original.flush()
+                with self.updates.batch():
+                    async with in_terminal():
+                        self.original.write(''.join(batch))
+                        self.original.flush()
             finally:
-                if synchronized:
-                    terminal.write_raw('\x1b[?2026l')
-                    terminal.flush()
                 for _ in batch:
                     self.lines.task_done()
 
@@ -258,21 +250,33 @@ class LivePrompt:
             except EOFError:
                 self._submit(EOFError())
 
+        def begin_render(app: Application[str]) -> None:
+            self.output.updates.begin()
+
+        def end_render(app: Application[str]) -> None:
+            self.output.updates.end()
+
         original = self.console.file
-        with set_app(self.prompt.app):
-            async with anyio.create_task_group() as workers:
-                workers.start_soon(edit)
-                await started.wait()
-                self.console.file = self.output
-                workers.start_soon(self.output.run)
-                try:
-                    yield
-                    await self.output.drain()
-                finally:
-                    self.console.file = original
-                    self.prompt.bottom_toolbar = toolbar
-                    self.prompt.default_buffer.accept_handler = accept_handler
-                    frame.children[0] = original_border
-                    container.children.remove(preview)
-                    container.children.remove(queue_preview)
-                    workers.cancel_scope.cancel()
+        self.prompt.app.before_render += begin_render
+        self.prompt.app.after_render += end_render
+        try:
+            with set_app(self.prompt.app):
+                async with anyio.create_task_group() as workers:
+                    workers.start_soon(edit)
+                    await started.wait()
+                    self.console.file = self.output
+                    workers.start_soon(self.output.run)
+                    try:
+                        yield
+                        await self.output.drain()
+                    finally:
+                        self.console.file = original
+                        self.prompt.bottom_toolbar = toolbar
+                        self.prompt.default_buffer.accept_handler = accept_handler
+                        frame.children[0] = original_border
+                        container.children.remove(preview)
+                        container.children.remove(queue_preview)
+                        workers.cancel_scope.cancel()
+        finally:
+            self.prompt.app.before_render -= begin_render
+            self.prompt.app.after_render -= end_render

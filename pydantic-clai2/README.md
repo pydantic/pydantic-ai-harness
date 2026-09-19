@@ -75,8 +75,9 @@ animated spinner appear in the box's top border while a turn or its lifecycle
 hooks are active, without adding a row to the input area. The animation uses the editor's existing refresh
 cycle and disappears when work finishes, fails, or is cancelled. It is not part
 of your draft or submitted message. Output bursts are batched; terminals supporting
-synchronized output display new output and the restored input box together,
-without showing the cleared box between updates. Full-screen menus temporarily hide it along
+synchronized output display new output and the restored input box together.
+Partial streaming text and spinner refreshes use the same synchronization,
+so intermediate redraws are not presented as separate frames. Full-screen menus temporarily hide it along
 with the editor. Enter submits a message to an in-memory queue. Pending text appears above the editor as `Follow-up:`
 previews, with queued slash commands labeled `Command:`. Previews are shown in
 execution order and disappear as each submission starts. Long or multiline messages

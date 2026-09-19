@@ -410,3 +410,60 @@ async def test_output_failure_ends_synchronized_update_and_releases_batch() -> N
             with anyio.fail_after(TIMEOUT):
                 await worker.drain()
     assert output.getvalue()[start:] == '\x1b[?2026h\x1b[?2026l'
+
+
+async def test_partial_stream_and_spinner_refreshes_are_synchronized() -> None:
+    output = io.StringIO()
+    terminal = Vt100_Output(output, lambda: Size(rows=24, columns=80), enable_cpr=False)
+    console = Console(file=output, force_terminal=True)
+    now = 0.0
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=terminal), anyio.fail_after(TIMEOUT):
+        prompt = PromptSession[str]()
+        live = LivePrompt(prompt, console, prepare=lambda: None, interrupts=Interrupts(), clock=lambda: now)
+        async with live.opened():
+            rendered = anyio.Event()
+
+            def on_render(app: Application[str]) -> None:
+                rendered.set()
+
+            prompt.app.after_render += on_render
+            prompt.default_buffer.text = 'retained draft'
+
+            async def operation() -> None:
+                nonlocal rendered, now
+                for partial in ('Thinking ', 'through this problem ', '\nStreaming answer ', 'with more detail'):
+                    rendered = anyio.Event()
+                    start = len(output.getvalue())
+                    console.file.write(partial)
+                    await live.output.lines.join()
+                    prompt.app.invalidate()
+                    await rendered.wait()
+                    painted = output.getvalue()[start:]
+                    assert painted.startswith('\x1b[?2026h')
+                    assert painted.endswith('\x1b[?2026l')
+                    # A nested redraw must not release its enclosing output batch.
+                    depth = 0
+                    for fragment in painted.split('\x1b[?2026')[1:]:
+                        depth += 1 if fragment.startswith('h') else -1
+                        assert depth in (0, 1)
+                    assert depth == 0
+                    assert live.prompt.default_buffer.text == 'retained draft'
+                rendered = anyio.Event()
+                start = len(output.getvalue())
+                now = 0.1
+                prompt.app.invalidate()
+                await rendered.wait()
+                painted = output.getvalue()[start:]
+                assert painted.startswith('\x1b[?2026h')
+                assert '⠙' in painted
+                assert 'retained draft' not in painted
+                assert '\x1b[J' not in painted
+                assert painted.endswith('\x1b[?2026l')
+
+            assert await live.interrupts.run(operation())
+            prompt.app.after_render -= on_render
+        start = len(output.getvalue())
+        with set_app(prompt.app):
+            prompt.app.before_render.fire()
+            prompt.app.after_render.fire()
+        assert output.getvalue()[start:] == ''
