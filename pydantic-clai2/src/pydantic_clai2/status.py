@@ -6,7 +6,7 @@ import math
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Self
+from typing import Self, cast
 
 from pydantic_ai import AgentStreamEvent, FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
 from pydantic_ai.messages import (
@@ -78,7 +78,8 @@ class Status:
         shown: list[str] = []
         for segment in self.status_segments:
             try:
-                text = segment()
+                # Plugins may be untyped, so validate the runtime result despite the callable's contract.
+                text = cast(object, segment())
                 if not isinstance(text, str):
                     # A non-string cannot be joined; report its type instead of raising out of the painter.
                     text = f'!{type(text).__name__}' if text else ''
