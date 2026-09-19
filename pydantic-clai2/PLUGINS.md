@@ -570,6 +570,8 @@ a 0.4-second window, and at least two characters per tick. Plugins do not need t
 above the editor in execution order (`Follow-up:` for messages, `Command:` for
 slash commands), and disappear when consumed. The preview is read-only; clipping
 and flattening multiline text for display do not change the submitted text.
+Control bytes are escaped in completion labels, queued previews, and prompt echoes
+rather than being executed as terminal commands.
 Esc in the live editor cancels active work, including turn lifecycle hooks,
 without clearing the draft or requesting exit. While a plugin owns the screen,
 its menu retains control of Esc.

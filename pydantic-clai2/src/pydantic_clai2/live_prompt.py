@@ -246,7 +246,7 @@ class LivePrompt:
         queue_limit = max(1, height // 6)
         for text in self.queued_messages[:queue_limit]:
             label = 'Command' if is_command_input(text) else 'Follow-up'
-            rows.append(muted + truncate(f'{label}: {" ".join(text.split())}', width) + reset)
+            rows.append(muted + truncate(f'{label}: {" ".join(terminal_text(text).split())}', width) + reset)
         if len(self.queued_messages) > queue_limit:
             rows.append(muted + f'+{len(self.queued_messages) - queue_limit} more queued' + reset)
         title = ''

@@ -83,7 +83,8 @@ previews, with queued slash commands labeled `Command:`. Previews are shown in
 execution order and disappear as each submission starts. Long or multiline messages
 have a single-line preview; large queues show a `+N more queued` summary to leave
 room for the editor. The original message text is unchanged. The footer also shows
-the number waiting. This is a read-only preview, not a queue editor.
+the number waiting. This is a read-only preview, not a queue editor. Control bytes in completion-derived
+text are escaped in previews and prompt echoes; the submitted text is unchanged.
 
 Messages and slash commands run in submission order, after the current turn and its cleanup
 finish. They do not interrupt or steer the active turn. An unsubmitted draft stays

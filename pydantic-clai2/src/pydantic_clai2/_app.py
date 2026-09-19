@@ -48,6 +48,7 @@ from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
 from .status import Status, StatusLine
+from .tool_output import terminal_text
 from .usage_report import cost_line, session_usage
 
 DepsT = TypeVar('DepsT')
@@ -431,7 +432,7 @@ class _Shell(Generic[DepsT, OutputT]):
             if not text:
                 continue
             if self.editor is not None:
-                self.console.print(f'> {text}', markup=False, highlight=False)
+                self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
             self.console.print()
             if is_command_input(text):
                 async with (self.editor.suspended if self.editor is not None else bare_screen)():
