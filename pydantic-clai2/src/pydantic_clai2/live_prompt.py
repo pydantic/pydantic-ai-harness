@@ -11,12 +11,13 @@ from typing import IO
 import anyio
 from prompt_toolkit import PromptSession
 from prompt_toolkit.application import in_terminal
-from prompt_toolkit.application.current import set_app
+from prompt_toolkit.application.current import get_app, set_app
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition, is_done
 from prompt_toolkit.formatted_text import ANSI, FormattedText, to_formatted_text
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent, merge_key_bindings
 from prompt_toolkit.layout import ConditionalContainer, FormattedTextControl, HSplit, VSplit, Window
+from prompt_toolkit.output.vt100 import Vt100_Output
 from rich.console import Console
 from rich.text import Text
 
@@ -65,15 +66,28 @@ class PromptOutput(io.StringIO):
         await self.lines.join()
 
     async def run(self) -> None:
-        """Serialize writes with prompt-toolkit terminal ownership."""
+        """Paint queued output and the restored editor as one terminal update."""
         while True:
-            text = await self.lines.get()
+            batch = [await self.lines.get()]
+            while not self.lines.empty():
+                batch.append(self.lines.get_nowait())
+            terminal = get_app().output
+            # in_terminal flushes an erased editor before restoring it. Keep that
+            # intermediate frame hidden on terminals supporting synchronized output.
+            synchronized = isinstance(terminal, Vt100_Output)
             try:
+                if synchronized:
+                    terminal.write_raw('\x1b[?2026h')
+                    terminal.flush()
                 async with in_terminal():
-                    self.original.write(text)
+                    self.original.write(''.join(batch))
                     self.original.flush()
             finally:
-                self.lines.task_done()
+                if synchronized:
+                    terminal.write_raw('\x1b[?2026l')
+                    terminal.flush()
+                for _ in batch:
+                    self.lines.task_done()
 
 
 class LivePrompt:

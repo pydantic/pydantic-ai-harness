@@ -486,7 +486,9 @@ The editor remains active during agent turns: users can draft and queue messages
 but turns and slash commands execute sequentially. While work or turn lifecycle
 hooks are active, a `Working` label and spinner appear in the editor's top border,
 without adding an input row or changing the draft. The indicator uses the editor's refresh cycle, adds no
-background task, and is hidden while a full-screen interface owns the terminal. Pending message previews appear
+background task, and is hidden while a full-screen interface owns the terminal.
+Queued output is batched with the editor redraw in a synchronized terminal update
+on supporting terminals. Plugins do not need their own redraw logic. Pending message previews appear
 above the editor in execution order (`Follow-up:` for messages, `Command:` for
 slash commands), and disappear when consumed. The preview is read-only; clipping
 and flattening multiline text for display do not change the submitted text.
