@@ -70,7 +70,11 @@ def test_file_paste(image_path: Path, quoting: str) -> None:
     assert pasted_paths(text) == [image_path] * (2 if quoting in ('multiple', 'lines') else 1)
 
 
-@pytest.mark.parametrize('text', ['', 'ordinary text', "'unclosed", '/missing.png', 'a' * 40000, '\x00', 'a' * 300])
+@pytest.mark.parametrize(
+    'text',
+    ['', 'ordinary text', "'unclosed", '/missing.png', 'a' * 40000, '\x00', 'a' * 300],
+    ids=['empty', 'text', 'unclosed-quote', 'missing', 'oversized', 'nul', 'long-filename'],
+)
 def test_text_paste_is_not_an_attachment(text: str) -> None:
     assert pasted_paths(text) == []
 
