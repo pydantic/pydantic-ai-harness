@@ -173,7 +173,8 @@ Settings are validated before writes. `/set` updates the active settings snapsho
 legacy `/config` writes apply on restart; plugin changes apply on the next prompt.
 `--request-limit` controls the full prompt's model-request budget.
 
-Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/help`, `/new`, `/exit`, `/config`, `/plugins`, and `/reload`.
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/help`, `/new`, `/exit`, `/config`, `/plugins`, `/reload`,
+and `/mcp` from the built-in `mcp` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
 Unknown slash commands are not sent to the model. Up/down recall prompt history
@@ -402,6 +403,112 @@ next prompt; no restart. `/plugins` alone opens a full-screen menu to enable, di
 reload, and remove. Plugins are trusted code running as you.
 
 [PLUGINS.md](PLUGINS.md) has the full list of hooks, events, and rules.
+
+## MCP servers
+
+Save this as `mcp_server.py`. `uv` runs this example with MCP SDK 1.x in a
+script environment, independent of CLAI's client dependencies:
+
+```python
+# /// script
+# dependencies = ['mcp>=1.26,<2']
+# ///
+from mcp.server.fastmcp import FastMCP
+
+server = FastMCP('calculator')
+
+
+@server.tool()
+def add(a: int, b: int) -> int:
+    return a + b
+
+
+if __name__ == '__main__':
+    server.run(transport='stdio')
+```
+
+Save `.mcp.json` in the directory where you launch CLAI:
+
+```json
+{
+  "mcpServers": {
+    "calculator": {
+      "command": "uv",
+      "args": ["run", "--script", "mcp_server.py"]
+    }
+  }
+}
+```
+
+```text
+/mcp status
+/mcp load
+/mcp load --approve
+```
+
+The `mcp` plugin is built in and enabled by default. CLAI includes the MCP
+runtime dependency; you do not need a drop-in plugin or an extra install.
+Startup and `/mcp status` do not read `.mcp.json` or contact its servers.
+`/mcp load` names the path and explains the approval. After reviewing the file,
+`/mcp load --approve` loads it for subsequent turns. Tools have server-name
+prefixes, such as `calculator_add`. The launch directory is captured when the
+plugin activates; CLAI does not search parent directories for `.mcp.json`.
+
+Approval is in memory, not saved globally. Reloading or disabling the plugin,
+`/reload`, or restarting CLAI drops it. Another repository needs its own approval.
+Loading again replaces the toolsets; malformed or unreadable config leaves the
+previously loaded toolsets unchanged. Config-loading errors hide field values.
+Check JSON, `mcpServers`, file permissions, and missing environment variables locally.
+`/mcp` is an alias for `/mcp status`; its loaded count is not a connection health check.
+
+Core's `load_mcp_toolsets` supports stdio `command`, `args`, `env`, and `cwd`,
+or HTTP `url` and `headers`. If an entry has both `command` and `url`, `command`
+wins. `${VAR}` and `${VAR:-default}` expand environment references. Relative paths
+use CLAI's process directory, not the config file's parent. Prefer absolute `cwd`
+and script paths for persistent configurations.
+A URL ending in `/sse` selects SSE; other URLs select Streamable HTTP. Unknown
+keys are ignored: `disabled` does not skip a server, and `type` does not select
+its transport. Core owns connections during agent turns. Stdio keep-alive is
+disabled; normal completion, model failure, and CLAI's Esc/Ctrl-C `Task.cancel()`
+path close the subprocesses.
+
+Stdio server stderr goes to owner-only files in a private temporary directory,
+not over the editor. `/mcp load --approve` and `/mcp status` show its path.
+Files are named `server-N.log` by configuration order and append across turns.
+Each load gets a new directory. Logs can contain sensitive server output; they
+remain after exit for diagnosis, so remove them when no longer needed.
+
+!!! warning "Outer cancellation limitation"
+    In Pydantic AI 2.44.0 and 2.46.0, cancelling an outer AnyIO scope during an MCP
+    tool call can leave the stdio subprocess alive after the run unwinds. Reloading
+    or disabling this plugin does not recover from that leak. Embedded
+    callers must not assume this cancellation path is safe. The core-only
+    regression is retained as a strict expected failure, tracked in
+    [pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548).
+
+### Trusted startup configuration
+
+```text
+/plugins add mcp pydantic_clai2.mcp '{"config_path": "/absolute/path/to/.mcp.json"}'
+/plugins disable mcp
+/plugins remove mcp
+```
+
+Only an explicit absolute `config_path` enables automatic loading on plugin
+activation. This global setting loads that same file from every repository,
+not each repository's `.mcp.json`. Relative paths are rejected. `disable` removes
+MCP commands and tools; `remove` restores the default unconfigured plugin.
+
+!!! warning "Trust includes later edits"
+    MCP config can execute programs as your OS user and expand your environment,
+    including credentials. Trusting `config_path` also trusts later edits and
+    symlink-target changes whenever the plugin activates. This is not a sandbox.
+    Keep secrets out of command history and plugin settings; use environment
+    references in the MCP config instead.
+
+The plugin emits no additional telemetry; core instrumentation covers its tool
+calls. See the [MCP client reference](/ai/mcp/client/)
+for the config format and transport behavior.
 
 ## Telemetry and references
 

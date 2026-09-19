@@ -138,8 +138,8 @@ Plugins are trusted code running as you. Only install what you trust.
 
 The coding tools are a plugin too, and so are asking you multiple-choice
 questions mid-run, reading the repository's instruction file, and keeping the
-conversation inside the context window. Native desktop notifications are a plugin
-too. These six plugins are marked
+conversation inside the context window. Native desktop notifications and MCP
+configuration are plugins too. These seven plugins are marked
 `(built-in)` and enabled unless you say otherwise:
 
 | Id | Backed by | Settings | Does |
@@ -150,6 +150,7 @@ too. These six plugins are marked
 | `persistence` | `pydantic_clai2.sessions` | `{}` | Harness step checkpoints for interrupted session recovery |
 | `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
 | `notifications` | `pydantic_clai2.notifications` | `{}` | native desktop alerts for completed or failed turns and questions awaiting an answer |
+| `mcp` | `pydantic_clai2.mcp` | `{}` | `/mcp status` and explicit approval to load MCP servers; no servers connected by default |
 
 ### Optional harness capabilities
 
@@ -258,6 +259,73 @@ utility can delay the next prompt or question menu by up to two seconds. Timeout
 cancellation kills and reaps the child. There are no background workers to survive
 unloading and no additional telemetry; core already traces the event hooks when
 instrumentation is enabled.
+
+### `mcp`: explicitly approved MCP servers
+
+```text
+/mcp status
+/mcp load
+/mcp load --approve
+/plugins disable mcp
+```
+
+The built-in `mcp` plugin is enabled by default and needs no extra installation.
+It does not read project config or connect at startup. `/mcp` and `/mcp status`
+show the path and loaded server count without connecting; this is not a health
+check. `/mcp load` names the file and warns about execution and environment access.
+After reviewing it, `/mcp load --approve` loads the `.mcp.json` in the directory
+where the plugin activated. It does not search parent directories or save approval.
+Reloading, disabling, or restarting drops this in-memory approval; it cannot
+approve another repository's `.mcp.json`. `/reload` also resets it.
+
+Core's `load_mcp_toolsets` parses `mcpServers` and prefixes tools with server
+names. It supports stdio `command`, `args`, `env`, and `cwd`, plus HTTP `url` and
+`headers`. If an entry has both `command` and `url`, `command` wins.
+Environment references support `${VAR}` and `${VAR:-default}`.
+Relative paths use the process directory, not the config file's parent.
+URLs ending in `/sse` select SSE; others select Streamable HTTP. Unknown keys
+are ignored: `disabled` does not skip servers, and `type` does not select transport.
+See the [runnable server example](README.md#mcp-servers) and
+[core MCP reference](https://pydantic.dev/docs/ai/mcp/client/).
+
+Each successful load replaces the toolsets in a reusable `Capability`.
+Config-loading errors hide field values and leave the previous toolsets unchanged.
+Check file access, JSON shape, and missing environment variables locally. Core owns connections
+per turn; the plugin disables stdio keep-alive. Normal completion, model failure,
+and CLAI's Esc/Ctrl-C `Task.cancel()` path close subprocesses. Unloading uses the
+ordinary `PluginLoader` lifecycle to discard the host, commands, and capabilities.
+No extra telemetry is emitted because core already instruments the tool calls.
+
+Stdio server stderr goes to owner-only files in a private temporary directory,
+not over the editor. `/mcp load --approve` and `/mcp status` show its path.
+Files are named `server-N.log` by configuration order and append across turns.
+Each load gets a new directory. Logs can contain sensitive server output; they
+remain after exit for diagnosis, so remove them when no longer needed.
+
+> **Outer cancellation limitation.** In Pydantic AI 2.44.0 and 2.46.0, cancelling
+> an outer AnyIO scope during an MCP tool call can leave the stdio subprocess alive
+> after the run unwinds. Reloading or disabling this plugin does not recover
+> from that leak. Embedded callers must not assume this cancellation path is safe.
+> The core-only regression is retained as a strict expected failure, tracked in
+> [pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548).
+
+```text
+/plugins add mcp pydantic_clai2.mcp '{"config_path": "/absolute/path/to/.mcp.json"}'
+/plugins remove mcp
+```
+
+`config_path` is the only setting, a string or `null` with a default of `null`.
+An explicit absolute path opts into loading that file on every plugin activation.
+Relative paths are rejected so a saved setting cannot trust a different file
+based on which repository you open. The absolute setting is global but keeps
+pointing to the same file. Prefer absolute `cwd` and script paths too.
+`/plugins remove mcp` restores the default unconfigured built-in.
+
+> **Trust includes later edits.** MCP config can execute commands as you and
+> expand environment variables, including credentials. Persistent `config_path`
+> trusts later edits and symlink-target changes on future activations. This is
+> not a sandbox. Use environment references for secrets instead of embedding
+> them in plugin settings or command history.
 
 ### `ask_user`: questions answered from the terminal
 

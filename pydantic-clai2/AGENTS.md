@@ -76,7 +76,7 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
   natural unit; nothing rebuilds the agent.
 - **Built-ins are declarations, not code paths.** `DEFAULT_PLUGINS` in
   `_app.py` lists what CLAI ships enabled (`coder`, `ask_user`, `repo_context`,
-  `compaction`, `persistence`, `notifications`). The loader treats them like
+  `compaction`, `persistence`, `notifications`, `mcp`). The loader treats them like
   drop-ins with the lowest precedence: a store declaration with the same id replaces one, `disable`
   persists an override, `remove` resets it. Do not special-case `Coder`
   anywhere else; the agent from `create_agent()` has no coding tools of its
@@ -202,6 +202,7 @@ pydantic.dev's `pydantic-visual-identity` skill's `brand-identity.md`.
 | `model_catalog.py` | model sources (genai-prices today) merged by `catalog()` |
 | `model_settings.py` | `ModelSettingsForm`, the editable subset of `ModelSettings` |
 | `compaction.py` | the built-in `compaction` plugin: harness `FallbackCompaction([SummarizingCompaction, SlidingWindowCompaction])`, `/compact`, the context alert |
+| `mcp.py` | the built-in MCP plugin: explicit config approval, `/mcp`, core-owned per-turn connections |
 | `commands.py` | `Command`, the registry, completion |
 | `usage_report.py` | `/usage`, `/cost`, and the footer cost, derived from `Session.messages` |
 | `status.py` | the footer `Status` fields and the standalone `StatusLine` row painter |
