@@ -1,0 +1,84 @@
+name: Run a Pydantic AI agent
+description: Run a Pydantic AI agent directly on a GitHub Actions runner.
+
+inputs:
+  prompt:
+    description: The prompt to send to the agent. Set exactly one of prompt and prompt-file.
+    required: false
+    default: ''
+  prompt-file:
+    description: A prompt file, resolved relative to working-directory. Set exactly one of prompt and prompt-file.
+    required: false
+    default: ''
+  agent:
+    description: A module:variable agent target or a .yml, .yaml, or .json agent spec file.
+    required: false
+    default: pydantic_ai_harness.coder:coder_agent
+  model:
+    description: A Pydantic AI model identifier, such as openai:gpt-5.6-sol.
+    required: true
+  python-version:
+    description: The Python version used to install dependencies and run the agent.
+    required: false
+    default: '3.12'
+  harness-version:
+    description: The exact pydantic-ai-harness version to install. An empty value installs the latest version.
+    required: false
+    default: ''
+  pip-install:
+    description: Extra space-separated packages to install for a custom agent.
+    required: false
+    default: ''
+  working-directory:
+    description: The directory from which packages are installed and the agent runs.
+    required: false
+    default: .
+
+outputs:
+  result:
+    description: The agent's output.
+    value: ${{ steps.run-agent.outputs.result }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install the agent
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        HARNESS_VERSION: ${{ inputs.harness-version }}
+        EXTRA_PACKAGES: ${{ inputs.pip-install }}
+      run: |
+        packages=("pydantic-ai-slim[openai,anthropic,spec]>=2.44.0")
+        if [[ -n "$HARNESS_VERSION" ]]; then
+          packages+=("pydantic-ai-harness==$HARNESS_VERSION")
+        else
+          packages+=("pydantic-ai-harness")
+        fi
+
+        if [[ -n "$EXTRA_PACKAGES" ]]; then
+          read -r -a extra_packages <<< "$EXTRA_PACKAGES"
+          packages+=("${extra_packages[@]}")
+        fi
+
+        # -P keeps the checkout off sys.path while pip imports its own modules.
+        python3 -P -m pip install --quiet --user --disable-pip-version-check "${packages[@]}"
+
+    - name: Run the agent
+      id: run-agent
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        PAI_AGENT: ${{ inputs.agent }}
+        PAI_MODEL: ${{ inputs.model }}
+        PAI_PROMPT: ${{ inputs.prompt }}
+        PAI_PROMPT_FILE: ${{ inputs.prompt-file }}
+        # Onboarding copy for someone at a terminal. It goes to stderr, so it never
+        # reached the result, but in a workflow log it is noise on every run.
+        PYDANTIC_AI_NO_BANNER: '1'
+      run: python3 -P "$GITHUB_ACTION_PATH/runner.py"
