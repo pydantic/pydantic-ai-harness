@@ -3,6 +3,7 @@
 import io
 from collections.abc import Sequence
 from pathlib import Path
+from uuid import UUID
 
 import anyio
 import pytest
@@ -331,3 +332,15 @@ def test_palette_transparency() -> None:
     with Image.open(io.BytesIO(encoded.data)) as restored:
         assert restored.mode == 'RGBA'
         assert restored.getpixel((0, 0)) == (0, 0, 0, 0)
+
+
+def test_marker_collision_does_not_replace_an_image(monkeypatch: pytest.MonkeyPatch) -> None:
+    ids = iter([UUID(int=1), UUID(int=2), UUID('12345678-0000-0000-0000-000000000000')])
+    monkeypatch.setattr(image_input, 'uuid4', lambda: next(ids))
+    images = ImageInput()
+    red = encode_image(Image.new('RGB', (1, 1), color='red'))
+    blue = encode_image(Image.new('RGB', (1, 1), color='blue'))
+    first = images.attach([red])
+    second = images.attach([blue])
+    assert first != second
+    assert images.resolve(first + second) == ('', [red, blue])

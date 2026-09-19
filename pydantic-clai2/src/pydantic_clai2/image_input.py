@@ -98,6 +98,8 @@ class ImageInput:
         markers: list[str] = []
         for image in images:
             marker = f'[image:{uuid4().hex[:8]}]'
+            while marker in self.pending:
+                marker = f'[image:{uuid4().hex[:8]}]'
             self.pending[marker] = image
             markers.append(marker)
         self.notice = 'Image attached. Enter sends it; delete its marker to remove it.'
