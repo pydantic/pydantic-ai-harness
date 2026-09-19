@@ -39,6 +39,19 @@ def read_image(path: Path) -> BinaryContent:
         return encode_image(image)
 
 
+def read_images(paths: Sequence[Path]) -> list[BinaryContent]:
+    """Bound a batch while reading, before all of its images can accumulate in memory."""
+    images: list[BinaryContent] = []
+    size = 0
+    for path in paths:
+        image = read_image(path)
+        size += len(image.data)
+        if size > MAX_PENDING_BYTES:
+            raise ValueError('Pasted images exceed the 32 MiB pending attachment limit.')
+        images.append(image)
+    return images
+
+
 def pasted_paths(text: str) -> list[Path]:
     """Recognize a paste consisting solely of image paths, including shell quoting."""
     text = text.strip()
@@ -65,7 +78,7 @@ def clipboard_images() -> list[BinaryContent]:
         with content:
             return [encode_image(content)]
     if isinstance(content, list) and content:
-        return [read_image(Path(path)) for path in content]
+        return read_images([Path(path) for path in content])
     raise ValueError('No image in the clipboard. Copy an image or paste an image file path.')
 
 
@@ -127,7 +140,7 @@ class ImageInput:
                     if not paths:
                         buffer.insert_text(text.replace('\r\n', '\n').replace('\r', '\n'))
                         return
-                    images = [read_image(path) for path in paths]
+                    images = read_images(paths)
                 buffer.insert_text(self.attach(images))
             except (OSError, ValueError, NotImplementedError, Image.DecompressionBombError) as exc:
                 self.notice = f'Image paste failed: {exc}. Linux requires wl-paste (Wayland) or xclip (X11).'

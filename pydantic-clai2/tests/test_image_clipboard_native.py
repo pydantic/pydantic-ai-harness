@@ -31,7 +31,8 @@ def test_native_clipboard(tmp_path: Path) -> None:
         ]
     else:
         command = ['xclip', '-selection', 'clipboard', '-t', 'image/png', '-i', str(path)]
-    subprocess.run(command, check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    # xclip forks a clipboard owner; do not wait for an inherited stderr pipe to close.
+    subprocess.run(command, check=True, timeout=15, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     images = clipboard_images()
     assert len(images) == 1
     # Some clipboard backends supply RGBA even when the source is RGB.

@@ -19,7 +19,7 @@ from pydantic_ai_harness.step_persistence.conversations import SqliteConversatio
 from rich.console import Console
 
 from pydantic_clai2 import Session, chat, image_input
-from pydantic_clai2.image_input import ImageInput, clipboard_images, encode_image, pasted_paths, read_image
+from pydantic_clai2.image_input import ImageInput, clipboard_images, encode_image, pasted_paths, read_image, read_images
 from pydantic_clai2.settings_store import SettingsStore
 
 
@@ -312,3 +312,18 @@ async def test_cancelled_image_turn_is_durable(image_path: Path, tmp_path: Path)
     part = record.messages[0].parts[0]
     assert isinstance(part, UserPromptPart) and not isinstance(part.content, str)
     assert isinstance(part.content[1], BinaryContent) and part.content[1].data == image.data
+
+
+def test_batch_limit_stops_before_reading_remaining_files(image_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(image_input, 'MAX_PENDING_BYTES', 1)
+    with pytest.raises(ValueError, match='Pasted images exceed'):
+        read_images([image_path, image_path.with_name('does-not-exist.png')])
+
+
+def test_palette_transparency() -> None:
+    image = Image.new('P', (1, 1))
+    image.info['transparency'] = 0
+    encoded = encode_image(image)
+    with Image.open(io.BytesIO(encoded.data)) as restored:
+        assert restored.mode == 'RGBA'
+        assert restored.getpixel((0, 0)) == (0, 0, 0, 0)
