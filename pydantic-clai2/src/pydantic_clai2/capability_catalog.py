@@ -44,6 +44,7 @@ _FACTORIES = (
     ('step_persistence', 'step_persistence:StepPersistence'),
     ('subagents', 'subagents:SubAgents'),
     ('system_reminders', 'system_reminders:SystemReminders'),
+    ('tool_call_judge', 'tool_call_judge:ToolCallJudge'),
     ('tool_output_limits', 'tool_output_limits:ToolOutputLimits'),
     ('trajectory_judge', 'trajectory_judge:TrajectoryJudge'),
     ('warn_on_cache_busts', 'warn_on_cache_busts:WarnOnCacheBusts'),
