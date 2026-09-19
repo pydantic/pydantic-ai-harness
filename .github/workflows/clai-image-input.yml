@@ -1,0 +1,40 @@
+name: CLAI image input
+
+on:
+  pull_request:
+    paths:
+      - 'pydantic-clai2/**'
+      - 'uv.lock'
+      - '.github/workflows/clai-image-input.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  clipboard:
+    name: Image paste on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      CLAI_TEST_CLIPBOARD: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: false
+      - run: uv sync --locked --all-packages --group dev
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xclip xvfb
+          xvfb-run -a uv run --no-sync pytest -p no:cacheprovider -c pydantic-clai2/pyproject.toml pydantic-clai2/tests/test_image_input.py pydantic-clai2/tests/test_image_clipboard_native.py
+      - if: runner.os != 'Linux'
+        run: uv run --no-sync pytest -p no:cacheprovider -c pydantic-clai2/pyproject.toml pydantic-clai2/tests/test_image_input.py pydantic-clai2/tests/test_image_clipboard_native.py

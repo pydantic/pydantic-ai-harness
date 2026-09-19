@@ -3643,6 +3643,7 @@ source = { editable = "pydantic-clai2" }
 dependencies = [
     { name = "genai-prices" },
     { name = "keyring" },
+    { name = "pillow" },
     { name = "prompt-toolkit" },
     { name = "pydantic-ai-harness", extra = ["coder"] },
     { name = "pydantic-ai-slim", extra = ["anthropic", "openai"] },
@@ -3655,6 +3656,7 @@ dependencies = [
 requires-dist = [
     { name = "genai-prices", specifier = ">=0.1.7" },
     { name = "keyring", specifier = ">=25.6" },
+    { name = "pillow", specifier = ">=11.0" },
     { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pydantic-ai-harness", extras = ["coder"], editable = "." },
     { name = "pydantic-ai-slim", extras = ["anthropic", "openai"], specifier = ">=2.43.0" },

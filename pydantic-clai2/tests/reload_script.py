@@ -37,7 +37,7 @@ async def main(root: Path, mode: str) -> None:
     commands.write_text(commands.read_text().replace('Use /help.', 'Use updated /help.'))
     session = package / '_session.py'
     session.write_text(
-        session.read_text().replace('                        text,', "                        text + ' updated',")
+        session.read_text().replace('                        content,', "                        content + ' updated',")
     )
     plugin = root / 'reload_plugin.py'
     plugin.write_text(

@@ -662,3 +662,19 @@ is labeled **SELECT PROJECT** or **SELECT SESSION**, with matching key hints.
 The resume transcript preview displays at most 24,000 characters of the newest-first
 text, with a truncation notice for longer histories. Search is Unicode
 case-insensitive and includes text instructions in multimodal prompts.
+
+## Image input
+
+Clipboard and image-path paste are part of the shell's prompt editor, not a plugin
+API. Ctrl-V or Alt-V attaches clipboard images; bracketed paste of existing image
+paths attaches local files. See [Pasting images](README.md#pasting-images) for
+platform requirements and limits.
+
+`turn_start.text` and `turn_end.text` contain the text caption with attachment
+markers removed, possibly an empty string for an image-only turn. A `turn_start`
+handler may rewrite the caption or cancel the entire turn. Rewriting the text
+does not remove the images. Core hooks receive the native multimodal request with
+`BinaryContent` image parts. Plugins that inspect or transform image content
+should use core hooks rather than parsing terminal markers. There are no new
+host lifecycle hooks. Images are persisted with the conversation, including the
+accepted request when a turn fails or is cancelled.
