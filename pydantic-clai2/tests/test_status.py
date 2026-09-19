@@ -226,3 +226,13 @@ async def test_plugin_segments_are_painted_muted(monkeypatch: pytest.MonkeyPatch
     assert f'{muted}c{muted}w{muted}d' in painted
     assert f'{muted}m{muted}p' in painted
     assert sgr(WARNING) not in painted
+
+
+async def test_a_fragment_wider_than_the_terminal_still_mutes_only_itself() -> None:
+    output = io.StringIO()
+    status = Status(model='m', status_segments=(lambda: 'x' * 200,))
+    async with StatusLine(Console(file=output, force_terminal=True, width=60, height=24), status):
+        pass
+    painted = output.getvalue()
+    assert f'{sgr(MUTED)}m' not in painted
+    assert f'{sgr(MUTED)}x' in painted

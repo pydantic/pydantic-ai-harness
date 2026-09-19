@@ -170,6 +170,8 @@ class StatusLine:
         # Leave one column unused so the footer cannot trigger autowrap.
         head, figure, tail, plugins = (_printable(segment) for segment in self.status.segments())
         text = head + figure + tail + plugins
+        # From the untruncated row, so a fragment wider than the terminal cannot mute the built-in part.
+        plugin_start = max(0, len(text) - len(plugins))
         alerted = range(len(head), len(head) + len(figure)) if self.status.context_alert else range(0)
         prefix = '\x1b7'
         if (height, rows) != (self._height, self._rows):
@@ -182,7 +184,6 @@ class StatusLine:
         shades = tuple(theme.sgr(color) for color in (theme.SUGAR, theme.LIGHT_PURPLE, theme.LITHIUM, theme.PURPLE))
         warning = theme.sgr(theme.WARNING)
         muted = theme.sgr(theme.MUTED)
-        plugin_start = len(text) - len(plugins)
 
         def paint(index: int) -> str:
             if index in alerted:
