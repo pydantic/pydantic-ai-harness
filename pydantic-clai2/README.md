@@ -127,6 +127,47 @@ pyramid, with CLAI lettering. The persistent `CLAI 2.0` banner uses `ansi_shadow
 The splash is disabled for redirected output, CLI arguments, small terminals,
 Windows, `NO_COLOR`, or `CLAI_NO_SPLASH=1`.
 
+## Update notices
+
+```text
+/plugins disable updates
+/plugins enable updates
+```
+
+The built-in `updates` plugin is on by default. It checks public PyPI once when
+loaded, without waiting before showing the prompt. A newer stable release with
+an unyanked file compatible with your Python produces a notice with the installed
+and available versions, plus update guidance. Notices wait until turns and menus
+finish. CLAI does not run an installer or change your installation.
+
+Disabling the plugin persists across launches and cancels its pending check or
+notice. Exit, `/reload`, and `/plugins reload updates` also drain the old worker;
+reloading or enabling starts a new check. The request has a five-second deadline
+and a 1 MiB response limit, without retries. Offline errors, 404s, malformed
+metadata, and missing local version metadata produce no notice. An unpublished
+package therefore produces no notice. Pre-release, development, local, empty,
+and fully yanked remote releases are ignored. Versions use PEP 440 ordering.
+
+The notice recognizes source/direct installs, `uv tool` receipts, `pipx`
+environments, and pip's installer metadata. It does not guess whether another
+uv environment is a project or a temporary `uvx` run. Use the method that created
+your installation, from its original environment or project:
+
+| Installation | Update yourself |
+|---|---|
+| `uv tool` | `uv tool upgrade pydantic-clai2` |
+| `uvx` | `uvx --upgrade --from pydantic-clai2 clai2` |
+| `pipx` | `pipx upgrade pydantic-clai2`; use your suffixed environment name if applicable |
+| pip | `python -m pip install --upgrade pydantic-clai2`; the notice names the running interpreter |
+| uv project | `uv lock --upgrade-package pydantic-clai2 && uv sync`, subject to your project constraints |
+| `uv pip` | `uv pip install --upgrade pydantic-clai2` in the original environment |
+| Editable, VCS, direct URL, or injected package | Follow your original source or injection workflow |
+
+The check sends no prompts, credentials, or installed version to PyPI. It does
+not use custom indexes or proxy environment settings. It makes no model calls
+and adds no capability telemetry spans because this is terminal maintenance,
+not an agent operation.
+
 ## Codex authentication
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:

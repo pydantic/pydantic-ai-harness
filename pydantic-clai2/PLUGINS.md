@@ -138,8 +138,8 @@ Plugins are trusted code running as you. Only install what you trust.
 
 The coding tools are a plugin too, and so are asking you multiple-choice
 questions mid-run, reading the repository's instruction file, and keeping the
-conversation inside the context window. Native desktop notifications and MCP
-configuration are plugins too. These seven plugins are marked
+conversation inside the context window. Native notifications, MCP configuration,
+and update notices are plugins too. These plugins are marked
 `(built-in)` and enabled unless you say otherwise:
 
 | Id | Backed by | Settings | Does |
@@ -151,6 +151,36 @@ configuration are plugins too. These seven plugins are marked
 | `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
 | `notifications` | `pydantic_clai2.notifications` | `{}` | native desktop alerts for completed or failed turns and questions awaiting an answer |
 | `mcp` | `pydantic_clai2.mcp` | `{}` | `/mcp status` and explicit approval to load MCP servers; no servers connected by default |
+| `updates` | `pydantic_clai2.updates` | `{}` | background PyPI update notices, with manual update guidance |
+
+### `updates`: update notices
+
+```text
+/plugins disable updates
+/plugins enable updates
+```
+
+`updates` checks public PyPI once per activation in a background task. A newer
+stable release with an unyanked file compatible with your Python produces a
+notice containing both versions and installation-specific guidance. It never
+runs an installer. Source/direct installs keep their original workflow; uv tool
+receipts, pipx environments, and pip metadata select their own guidance. Other
+uv environments get conditional uvx advice rather than a guessed project/tool
+command. See [update methods](README.md#update-notices) for the full table.
+
+The request has a five-second deadline and a 1 MiB limit, without retries.
+Offline errors, 404s (including an unpublished package), malformed responses,
+and missing local version metadata are silent. PEP 440 comparison ignores
+remote pre-release, development, local, empty, and fully yanked releases.
+It does not use custom indexes or proxy environment settings. No prompts,
+credentials, or installed version are sent. No model calls or capability
+telemetry spans are added: this is terminal maintenance, not an agent operation.
+
+Startup does not await the check. The worker awaits `host.notify` if a turn or
+menu owns output. Disabling persists and cancels both a pending check and a
+pending notice. `session_end` cancels and awaits the task, including on exit or
+reload; enabling or reloading starts a new check. There is no process-global
+worker, recurring poll, or persistent cache.
 
 ### Optional harness capabilities
 
@@ -649,6 +679,25 @@ When no editor or stream is active, taking the screen is a no-op. It only settle
 the screen; drawing, and restoring the terminal afterwards, is the widget's job. One
 widget owns the screen at a time: a second `full_screen()` (from a parallel tool
 call, say) waits for the first block to exit. Do not nest it inside itself.
+
+### Background terminal notices: `await host.notify(message)`
+
+```python
+import asyncio
+from rich.console import Console
+from pydantic_clai2.plugins import PluginHost
+
+host = PluginHost(name='example', console=Console(), settings={})
+asyncio.run(host.notify('A newer release is available.'))
+```
+
+In the shell, `notify` waits until turns and menus release output, then prints
+literal text above the editor without changing its draft. This is terminal text,
+not a native OS notification. A standalone host prints immediately. Use it from a
+plugin-owned background task, not from a turn hook or command that must finish
+before the notice can appear. Cancel and await
+that task at `session_end`; cancellation discards a waiting notice. For model
+events, continue to use `host.render` instead.
 
 ### Read your settings: `host.settings(Model)`
 

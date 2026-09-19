@@ -21,6 +21,9 @@ dependencies = [
     'prompt-toolkit>=3.0.52',
     'rich>=14',
     "keyring>=25.6",
+    # Bounded PyPI checks and PEP 440 comparisons for update notices (issue #966).
+    "httpx2>=2.12.0",
+    "packaging>=24.2",
 ]
 
 [project.scripts]
@@ -55,5 +58,6 @@ fail_under = 100
 show_missing = true
 
 [tool.pytest.ini_options]
+addopts = '-p no:recording --record-mode=none'
 anyio_mode = 'auto'
 testpaths = ['tests']

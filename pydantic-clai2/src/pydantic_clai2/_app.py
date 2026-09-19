@@ -69,6 +69,7 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='persistence', factory='pydantic_clai2.sessions'),
     PluginSettings(id='notifications', factory='pydantic_clai2.notifications'),
     PluginSettings(id='mcp', factory='pydantic_clai2.mcp'),
+    PluginSettings(id='updates', factory='pydantic_clai2.updates'),
     *HARNESS_PLUGINS,
 )
 """Built-in declarations, including opt-in harness capabilities. `remove` restores their defaults.
@@ -136,7 +137,10 @@ async def chat(
                             await shell.loader.load_all(fresh=fresh)
                             _report_project_plugins(shell.loader, console)
                             if resume is not None:
-                                console.print(await shell.sessions.command([resume] if resume else []), markup=False)
+                                with shell.screen.busy():
+                                    console.print(
+                                        await shell.sessions.command([resume] if resume else []), markup=False
+                                    )
                                 resume = None
                             reason = await shell.run()
                         finally:
@@ -318,6 +322,7 @@ def _create_shell(
         session_start=lambda: SessionStart(agent=agent, settings=context.settings),
         builtin=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in builtin_plugins),
         full_screen=screen.full,
+        notify=lambda message: screen.notify(message, console=console),
         project=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in project.plugins),
         conversation=session,
         status=status,
@@ -405,11 +410,13 @@ class _Shell(Generic[DepsT, OutputT]):
             self.screen.editor = self.editor.suspended
             try:
                 async with self.editor.opened():
-                    return await self._read_loop(show_frame, prepare_prompt)
+                    with self.screen.session():
+                        return await self._read_loop(show_frame, prepare_prompt)
             finally:
                 self.screen.editor = None
                 self.editor = None
-        return await self._read_loop(show_frame, prepare_prompt)
+        with self.screen.session():
+            return await self._read_loop(show_frame, prepare_prompt)
 
     async def _read_loop(self, show_frame: Filter, prepare_prompt: Callable[[], None]) -> SessionEndReason:
         while True:
@@ -434,22 +441,24 @@ class _Shell(Generic[DepsT, OutputT]):
                 self.console.print(f'> {text}', markup=False, highlight=False)
             self.console.print()
             if text.startswith('/'):
-                async with (self.editor.suspended if self.editor is not None else bare_screen)():
-                    await self.interrupts.run(
-                        _execute_command(self.commands, text, console=self.console, status=self.status)
-                    )
+                with self.screen.busy():
+                    async with (self.editor.suspended if self.editor is not None else bare_screen)():
+                        await self.interrupts.run(
+                            _execute_command(self.commands, text, console=self.console, status=self.status)
+                        )
                 if text == '/exit' or self.interrupts.exit_requested or self.reload_requested:
                     return 'exit'
                 continue
             if self.session.model is None and self.agent.model is None:
                 self.console.print('Choose a model first: /set model <Tab>', style=theme.current().warning)
                 continue
-            try:
-                if await self._turn(text):
-                    return 'exit'
-            finally:
-                if self.editor is not None:
-                    await self.editor.output.drain()
+            with self.screen.busy():
+                try:
+                    if await self._turn(text):
+                        return 'exit'
+                finally:
+                    if self.editor is not None:
+                        await self.editor.output.drain()
 
     async def _turn(self, text: str) -> bool:
         start = TurnStart(text=text)

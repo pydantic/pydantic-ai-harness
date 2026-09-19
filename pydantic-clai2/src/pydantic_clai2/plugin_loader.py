@@ -5,7 +5,7 @@ import hashlib
 import importlib
 import importlib.util
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -102,6 +102,7 @@ class PluginLoader(Generic[DepsT]):
         conversation: Conversation | None = None,
         status: Status | None = None,
         full_screen: FullScreen = bare_screen,
+        notify: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         """`builtin` ships with CLAI, `project` comes from `.clai/settings.json`; the store overrides both.
 
@@ -113,6 +114,7 @@ class PluginLoader(Generic[DepsT]):
         self._commands = commands
         self._session_start = session_start
         self._full_screen = full_screen
+        self._notify = notify
         self._conversation = conversation
         self._status = status
         self._builtin = {declaration.id: declaration for declaration in builtin}
@@ -205,6 +207,7 @@ class PluginLoader(Generic[DepsT]):
             console=self._console,
             settings=entry.declaration.settings,
             full_screen=self._full_screen,
+            notify=self._notify,
             conversation=self._conversation,
             status=self._status,
         )

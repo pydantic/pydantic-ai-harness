@@ -4,6 +4,9 @@ import asyncio
 from collections.abc import AsyncGenerator, Generator
 from contextlib import asynccontextmanager, contextmanager
 
+from rich.console import Console
+
+from . import theme
 from .plugins import FullScreen, bare_screen
 
 
@@ -23,6 +26,40 @@ class Screen:
         self._take: FullScreen = bare_screen
         self._owner = asyncio.Lock()
         self.editor: FullScreen | None = None
+        self._busy = 0
+        self._closed = False
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    @contextmanager
+    def session(self) -> Generator[None]:
+        """Keep notices suspended after input ends until plugin workers are unloaded."""
+        self._closed = False
+        if not self._busy:
+            self._idle.set()
+        try:
+            yield
+        finally:
+            self._closed = True
+            self._idle.clear()
+
+    @contextmanager
+    def busy(self) -> Generator[None]:
+        """Defer background notices until turns and menus have released output."""
+        self._busy += 1
+        self._idle.clear()
+        try:
+            yield
+        finally:
+            self._busy -= 1
+            if not self._busy and not self._closed:
+                self._idle.set()
+
+    async def notify(self, message: str, *, console: Console) -> None:
+        """Print only at an idle boundary, without taking input away from the editor."""
+        while self._busy or self._closed:
+            await self._idle.wait()
+        console.print(message, style=theme.current().info, markup=False, highlight=False)
 
     @contextmanager
     def bound(self, take: FullScreen) -> Generator[None]:
@@ -36,5 +73,6 @@ class Screen:
     @asynccontextmanager
     async def full(self) -> AsyncGenerator[None]:
         """Own the terminal until the block exits. Give this to `PluginHost` as its `full_screen`."""
-        async with self._owner, self._take(), (self.editor or bare_screen)():
-            yield
+        with self.busy():
+            async with self._owner, self._take(), (self.editor or bare_screen)():
+                yield

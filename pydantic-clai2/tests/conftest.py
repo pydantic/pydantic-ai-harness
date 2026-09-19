@@ -4,15 +4,27 @@ from pathlib import Path
 
 import keyring
 import pytest
+from packaging.version import Version
 from pydantic_ai import models
 
-from pydantic_clai2 import notifications
+from pydantic_clai2 import notifications, updates
 
 
 @pytest.fixture
 def anyio_backend() -> str:
     """CLAI's terminal and cancellation primitives require asyncio."""
     return 'asyncio'
+
+
+@pytest.fixture(autouse=True)
+def offline_updates(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only the recorded PyPI test may contact the update endpoint."""
+    if 'vcr' not in request.keywords:
+
+        async def unavailable() -> Version | None:
+            return None
+
+        monkeypatch.setattr(updates, 'latest_version', unavailable)
 
 
 @pytest.fixture(autouse=True)

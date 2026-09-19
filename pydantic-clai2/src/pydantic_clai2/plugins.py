@@ -50,6 +50,7 @@ from pydantic_ai_harness.step_persistence import StepStore
 from rich.console import Console, RenderableType
 from typing_extensions import TypeVar as DefaultTypeVar
 
+from . import theme
 from .commands import Commands
 from .config import Settings
 from .status import Status
@@ -220,6 +221,7 @@ class PluginHost(Generic[DepsT]):
         console: Console,
         settings: dict[str, JsonValue],
         full_screen: FullScreen = bare_screen,
+        notify: Callable[[str], Awaitable[None]] | None = None,
         conversation: Conversation | None = None,
         status: Status | None = None,
     ) -> None:
@@ -230,6 +232,7 @@ class PluginHost(Generic[DepsT]):
         """
         self.name = name
         self.console = console
+        self._notify = notify
         self.full_screen = full_screen
         """Own the whole terminal for a widget mid-run.
 
@@ -246,6 +249,13 @@ class PluginHost(Generic[DepsT]):
         self._capabilities: list[AgentCapability[DepsT]] = []
         self._handlers: list[Callable[[HostEvent], Awaitable[None]]] = []
         self._renderers: list[Renderer[AgentStreamEvent]] = []
+
+    async def notify(self, message: str) -> None:
+        """Show terminal text when idle, not an OS alert. Cancellation discards a waiting notice."""
+        if self._notify is not None:
+            await self._notify(message)
+        else:
+            self.console.print(message, style=theme.current().info, markup=False, highlight=False)
 
     @property
     def capabilities(self) -> list[AgentCapability[DepsT]]:

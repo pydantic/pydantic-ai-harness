@@ -119,6 +119,13 @@ not in a sandbox. Do not install code or change executable startup configuration
 without the user's intent. Keep secrets out of plugin JSON: it is plaintext in
 SQLite. Use environment variables or plugin-owned credential storage instead.
 
+For background terminal notices, use await host.notify(text) from a task your
+plugin owns. It waits until turns and menus finish, then prints above the editor
+without changing the draft. It is not a native OS notification. Do not await it
+inside a turn hook or command that must finish first; use host.render for model
+events. Cancel and await background tasks at session_end. The built-in updates
+plugin follows this pattern and can be disabled with /plugins disable updates.
+
 Each plugin gets its own PluginHost. Keep mutable state inside activate, not in
 module globals. Loading calls activate then session_start; unloading calls
 session_end and discards that host's registrations. Changes happen between turns.
