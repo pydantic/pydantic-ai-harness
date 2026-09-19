@@ -191,7 +191,10 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `commands.py` | `Command`, the registry, completion |
 | `usage_report.py` | `/usage`, `/cost`, and the footer cost, derived from `Session.messages` |
 | `status.py` | the footer `Status` fields, `StatusSegment`, and the `StatusLine` row painter |
-| `live_prompt.py` | the continuously editable prompt, submission queue, and output ownership |
+| `live_prompt.py` | pinned editor lifecycle, completion worker, submission queue and menu handoff |
+| `prompt_surface.py` | scroll-region ownership, serialized transcript writes and changed-row painting |
+| `prompt_buffer.py` | pure draft editing, history navigation, search and cell-width wrapping |
+| `prompt_keys.py` | keyboard decoder attachment only; no prompt-toolkit Application or renderer |
 | `config.py` | `Settings`, `PluginSettings` |
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |
@@ -239,3 +242,11 @@ frame pure, inject keys/size/IO, use Termflow terminal ownership and layout, and
 run through `menu_worker`. Metadata refreshes must preserve selection by ID.
 History-changing plugins use `await conversation.commit_messages`, not the legacy
 in-memory `replace_messages`, so exiting immediately after `/compact` is durable.
+
+The interactive editor owns its layout explicitly. Do not reintroduce a
+PromptSession renderer or mutate generated layout children. Transcript writes
+go directly to the scroll region, never through an erase/redraw of the editor.
+The hardware cursor stays hidden until release; the input cursor is a painted
+reverse-video cell. Keep terminal mutations in `PromptSurface`, and detach the
+key reader before a menu owns the screen. The remaining prompt-toolkit decoder
+preserves paste and modified keys not yet exposed by Termflow's `read_key`.

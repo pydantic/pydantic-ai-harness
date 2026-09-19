@@ -1,18 +1,15 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Generic, TypeVar
 
 from anyio import create_task_group
 from prompt_toolkit import PromptSession
-from prompt_toolkit.filters import Always, Condition, Filter, is_done
 from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.layout import BufferControl, HSplit
-from prompt_toolkit.layout.containers import VerticalAlign
-from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.history import History
 from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
@@ -314,14 +311,17 @@ def _create_shell(
         if isinstance(plugin, CommandProvider):
             commands.register_many(plugin.get_commands(context))
     images = ImageInput()
-    prompt = PromptSession[str](
-        history=input_history(store.path.with_name('input-history')),
-        completer=PromptCompleter(commands),
-        complete_while_typing=True,
-        style=COMPLETION_STYLE,
-        reserve_space_for_menu=6,
-        bottom_toolbar=lambda: FormattedText([(theme.MUTED, images.notice)] if images.notice else status.toolbar()),
-    )
+    history = input_history(store.path.with_name('input-history'))
+    prompt = None
+    if not console.is_terminal:
+        prompt = PromptSession[str](
+            history=history,
+            completer=PromptCompleter(commands),
+            complete_while_typing=True,
+            style=COMPLETION_STYLE,
+            reserve_space_for_menu=6,
+            bottom_toolbar=lambda: FormattedText([(theme.MUTED, images.notice)] if images.notice else status.toolbar()),
+        )
     shell = _Shell(
         agent=agent,
         session=session,
@@ -332,14 +332,14 @@ def _create_shell(
         context=context,
         status=status,
         prompt=prompt,
+        history=history,
         images=images,
         interrupts=Interrupts(),
         screen=screen,
         sessions=sessions,
     )
-    prompt.key_bindings = images.bindings(
-        queued=lambda: shell.editor.queued_messages if shell.editor is not None else ()
-    )
+    if prompt is not None:
+        prompt.key_bindings = images.bindings()
     commands.register(
         Command(name='reload', description='Reload CLAI2 code without restarting', handler=shell.request_reload)
     )
@@ -358,7 +358,8 @@ class _Shell(Generic[DepsT, OutputT]):
     console: Console
     context: CommandContext
     status: Status
-    prompt: PromptSession[str]
+    prompt: PromptSession[str] | None
+    history: History
     interrupts: Interrupts
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
@@ -373,36 +374,28 @@ class _Shell(Generic[DepsT, OutputT]):
         return 'Reloading CLAI2...'
 
     async def run(self) -> SessionEndReason:
-        show_frame = ~is_done & Condition(lambda: self.console.width >= 4 and self.console.height >= 6)
-
-        def prepare_prompt() -> None:
-            layout = self.prompt.layout
-            for window in layout.find_all_windows():
-                if isinstance(window.content, BufferControl):
-                    window.dont_extend_height = Always()
-            layout.current_window.height = lambda: Dimension(
-                min=self.prompt.reserve_space_for_menu if self.prompt.default_buffer.complete_state else 1
-            )
-            assert isinstance(layout.container, HSplit)
-            layout.container.align = VerticalAlign.BOTTOM
-
         if self.console.is_terminal:
-            self.editor = LivePrompt(self.prompt, self.console, prepare=prepare_prompt, interrupts=self.interrupts)
+            self.editor = LivePrompt(
+                console=self.console,
+                commands=self.commands,
+                history=self.history,
+                images=self.images,
+                interrupts=self.interrupts,
+                toolbar=self.status.toolbar,
+            )
             self.screen.editor = self.editor.suspended
             try:
                 async with self.editor.opened():
-                    return await self._read_loop(show_frame, prepare_prompt)
+                    return await self._read_loop()
             finally:
                 self.screen.editor = None
                 self.editor = None
-        return await self._read_loop(show_frame, prepare_prompt)
+        return await self._read_loop()
 
-    async def _read_loop(self, show_frame: Filter, prepare_prompt: Callable[[], None]) -> SessionEndReason:
+    async def _read_loop(self) -> SessionEndReason:
         while True:
             self.images.retain(
-                [self.editor.prompt.default_buffer.text, *self.editor.queued_messages]
-                if self.editor is not None
-                else []
+                [self.editor.buffer.text, *self.editor.queued_messages] if self.editor is not None else []
             )
             try:
                 self.status.model = self.session.model or _model_label(self.agent)
@@ -410,7 +403,8 @@ class _Shell(Generic[DepsT, OutputT]):
                 if self.editor is not None:
                     text = await self.editor.read()
                 else:
-                    text = (await self.prompt.prompt_async('> ', show_frame=show_frame, pre_run=prepare_prompt)).strip()
+                    assert self.prompt is not None
+                    text = (await self.prompt.prompt_async('> ')).strip()
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
@@ -458,6 +452,8 @@ class _Shell(Generic[DepsT, OutputT]):
 
         completed = await self.interrupts.run(run_turn())
         self.sessions.namer.submit(self.session.summary.id)
+        if self.editor is not None:
+            await self.editor.output.drain()
         _report_interrupt(completed, self.console)
         await self.interrupts.run(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
         return self.interrupts.exit_requested

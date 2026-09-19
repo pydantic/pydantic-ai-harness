@@ -1,32 +1,28 @@
-"""Input remains owned by the editor while turns and terminal widgets run."""
+"""Exercise native editor state and ownership without a prompt-toolkit renderer."""
 
 import asyncio
 import io
-import time
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import anyio
 import pytest
-from prompt_toolkit import PromptSession
-from prompt_toolkit.application import Application, create_app_session
-from prompt_toolkit.application.current import set_app
-from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.data_structures import Size
-from prompt_toolkit.filters import Always
+from PIL import Image
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import PipeInput, create_pipe_input
 from prompt_toolkit.output import DummyOutput
-from prompt_toolkit.output.vt100 import Vt100_Output
 from pydantic_ai import PartStartEvent, TextPart, ThinkingPart
 from pydantic_ai.messages import BinaryContent
 from rich.console import Console
+from rich.text import Text
 
-from pydantic_clai2 import StreamRenderer
+from pydantic_clai2 import StreamRenderer, theme
+from pydantic_clai2.commands import Command, Commands
 from pydantic_clai2.image_input import ImageInput
 from pydantic_clai2.interrupts import Interrupts
-from pydantic_clai2.live_prompt import LivePrompt, PromptOutput
-
-TIMEOUT = 10
+from pydantic_clai2.live_prompt import LivePrompt
 
 
 @pytest.fixture
@@ -35,29 +31,28 @@ def anyio_backend() -> str:
 
 
 @asynccontextmanager
-async def editor(
-    *, clock: Callable[[], float] = time.monotonic, images: ImageInput | None = None, periodic_refresh: bool = True
-) -> AsyncGenerator[tuple[LivePrompt, PipeInput, io.StringIO]]:
-    output = io.StringIO()
-    console = Console(file=output, force_terminal=True)
-    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()), anyio.fail_after(TIMEOUT):
-        prompt = PromptSession[str](key_bindings=images.bindings() if images is not None else None)
-
-        def prepare() -> None:
-            if not periodic_refresh:
-                prompt.app.refresh_interval = 0
-
-        live = LivePrompt(prompt, console, prepare=prepare, interrupts=Interrupts(), clock=clock)
-        redraw_interval = prompt.app.min_redraw_interval
+async def editor(*, output: io.StringIO | None = None) -> AsyncGenerator[tuple[LivePrompt, PipeInput, io.StringIO]]:
+    output = output if output is not None else io.StringIO()
+    console = Console(file=output, force_terminal=True, width=80, height=24)
+    commands = Commands()
+    commands.register(Command(name='help', description='Help', handler=lambda args: 'help'))
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()), anyio.fail_after(5):
+        live = LivePrompt(
+            console=console,
+            commands=commands,
+            history=InMemoryHistory(),
+            images=ImageInput(),
+            interrupts=Interrupts(),
+            toolbar=lambda: [('', 'ready')],
+            clock=lambda: 0,
+        )
         async with live.opened():
-            assert prompt.app.min_redraw_interval == 0.012
             yield live, pipe, output
-        assert prompt.app.min_redraw_interval == redraw_interval
         assert console.file is output
-        assert not prompt.app.is_running
+        assert output.getvalue().endswith('\x1b[?25h\x1b[?2026l')
 
 
-async def test_submissions_and_input_controls() -> None:
+async def test_input_queue_and_controls() -> None:
     async with editor() as (live, pipe, _):
         pipe.send_text('  \nfirst\nsecond\n')
         assert await live.read() == 'first'
@@ -65,8 +60,7 @@ async def test_submissions_and_input_controls() -> None:
         pipe.send_text('discard\x03')
         with pytest.raises(KeyboardInterrupt):
             await live.read()
-        assert live.prompt.default_buffer.text == ''
-        # Ctrl-D with text edits the buffer rather than exiting.
+        assert live.buffer.text == ''
         pipe.send_text('keep\x01\x04\n')
         assert await live.read() == 'eep'
         pipe.send_text('\x04')
@@ -74,47 +68,88 @@ async def test_submissions_and_input_controls() -> None:
             await live.read()
 
 
-async def test_streaming_preview_and_menu_preserve_draft() -> None:
-    async with editor() as (live, pipe, output):
-        drafted = anyio.Event()
+async def test_completed_and_partial_output_never_repaint_editor() -> None:
+    async with editor() as (live, _, output):
+        live.buffer.replace('retained draft')
+        live.paint()
+        start = len(output.getvalue())
+        for chunk in ('streaming ', 'partial', '\n', 'next line\n'):
+            live.console.file.write(chunk)
+            live.console.file.flush()
+        assert output.getvalue()[start:] == 'streaming partial\nnext line\n'
+        assert live.buffer.text == 'retained draft'
+        live.paint()
+        assert output.getvalue()[start:] == 'streaming partial\nnext line\n'
 
-        def changed(buffer: Buffer) -> None:
-            drafted.set()
 
-        live.prompt.default_buffer.on_text_changed += changed
-        pipe.send_text('unfinished draft')
-        await drafted.wait()
-        previewed = anyio.Event()
+@pytest.mark.parametrize('thinking', [False, True])
+async def test_real_termflow_writes_do_not_clear_input(thinking: bool) -> None:
+    async with editor() as (live, _, output):
+        start = len(output.getvalue())
+        renderer = StreamRenderer(live.console, stop_loading=lambda: None)
+        part = ThinkingPart(content='A thinking burst') if thinking else TextPart(content='A response burst\n')
+        await renderer.on_stream_event(PartStartEvent(index=0, part=part))
+        await renderer.finish()
+        text = output.getvalue()[start:]
+        assert 'A thinking burst' in Text.from_ansi(text).plain if thinking else 'A response burst' in text
+        for forbidden in ('\x1b[J', '\x1b[2K', '\x1b[?25h', '┌', '└'):
+            assert forbidden not in text
 
-        def rendered(app: Application[str]) -> None:
-            screen = app.renderer.last_rendered_screen
-            if screen is not None:
-                rows = [''.join(cell.char for cell in row.values()) for row in screen.data_buffer.values()]
-                if any('streaming partial' in row for row in rows):
-                    assert any('> unfinished draft' in row for row in rows)
-                    previewed.set()
 
-        live.prompt.app.after_render += rendered
-        assert not live.console.file.isatty()
-        live.console.file.write('streaming partial')
-        live.console.file.flush()
-        assert live.output.pending == 'streaming partial'
-        assert 'streaming partial' not in output.getvalue()
-        await previewed.wait()
-        live.console.file.write(' line\nnext partial')
-        await live.output.lines.join()
-        assert 'streaming partial line\n' in output.getvalue()
-        assert live.output.pending == 'next partial'
+async def test_menu_suspension_preserves_draft_and_output() -> None:
+    async with editor() as (live, _, output):
+        live.buffer.replace('draft')
+        live.paint()
+        live.output.write('partial')
         async with live.suspended():
-            assert 'next partial\n' in output.getvalue()
+            start = len(output.getvalue())
+            live.paint()
+            assert output.getvalue()[start:] == ''
             async with live.suspended():
-                live.console.print('menu output', markup=False)
+                live.console.print('menu output')
                 assert 'menu output' in output.getvalue()
-            assert live.prompt.default_buffer.text == 'unfinished draft'
-        pipe.send_text('\n')
-        assert await live.read() == 'unfinished draft'
-        live.console.file.write('final partial')
-    assert output.getvalue().endswith('final partial\n')
+            assert live.buffer.text == 'draft'
+        assert 'draft' in Text.from_ansi(output.getvalue()).plain
+
+
+@pytest.mark.parametrize('menu', [False, True])
+async def test_outer_cancellation_releases_terminal_and_tasks(menu: bool) -> None:
+    before = asyncio.all_tasks()
+    with anyio.CancelScope() as scope:
+        async with editor() as (live, _, _):
+            if menu:
+                async with live.suspended():
+                    scope.cancel()
+                    await anyio.sleep_forever()
+            else:
+                scope.cancel()
+                await anyio.sleep_forever()
+    assert scope.cancelled_caught
+    assert asyncio.all_tasks() <= before
+
+
+@pytest.mark.parametrize('key', ['\x03', '\x1b'])
+async def test_interrupt_targets_work_and_preserves_draft(key: str) -> None:
+    async with editor() as (live, pipe, _):
+        started, done = anyio.Event(), anyio.Event()
+
+        async def operation() -> None:
+            started.set()
+            await anyio.sleep_forever()
+
+        async def run() -> None:
+            assert not await live.interrupts.run(operation())
+            done.set()
+
+        live.buffer.replace('retained draft')
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(run)
+            await started.wait()
+            assert any('Working ⠋' in row for row in live.frame())
+            pipe.send_text(key)
+            await done.wait()
+        assert not any('Working' in row for row in live.frame())
+        assert live.buffer.text == 'retained draft'
 
 
 async def test_closed_input_reports_eof() -> None:
@@ -124,403 +159,97 @@ async def test_closed_input_reports_eof() -> None:
             await live.read()
 
 
-@pytest.mark.parametrize('key', ['\x03', '\x1b'])
-async def test_busy_interrupt_cancels_work_not_editor(key: str) -> None:
+async def test_paste_is_atomic_and_alt_word_editing_works() -> None:
     async with editor() as (live, pipe, _):
-        started = anyio.Event()
-        stopped = anyio.Event()
-        cleaned = anyio.Event()
-
-        async def operation() -> None:
-            try:
-                started.set()
-                await anyio.sleep_forever()
-            finally:
-                cleaned.set()
-
-        async def work() -> None:
-            assert not await live.interrupts.run(operation())
-            stopped.set()
-
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(work)
-            await started.wait()
-            edited = anyio.Event()
-
-            def changed(buffer: Buffer) -> None:
-                if buffer.text == 'Zretained':
-                    edited.set()
-
-            live.prompt.default_buffer.on_text_changed += changed
-            pipe.send_text('retained\x1b[D\x1bbZ')
-            await edited.wait()
-            assert not cleaned.is_set()
-            pipe.send_text(key)
-            await stopped.wait()
-            assert cleaned.is_set()
-            assert live.prompt.app.is_running
-            assert live.prompt.default_buffer.text == 'Zretained'
-            pipe.send_text('\n')
-            assert await live.read() == 'Zretained'
+        pipe.send_text('\x1b[200~one\ntwo\x1b[201~\x1bbX\n')
+        assert await live.read() == 'Xone\ntwo'
+        assert live.buffer.text == ''
 
 
-@pytest.mark.parametrize('menu', [False, True])
-@pytest.mark.parametrize('vt100', [False, True])
-async def test_outer_cancellation_restores_console_and_drains_workers(menu: bool, vt100: bool) -> None:
-    original = io.StringIO()
-    console = Console(file=original, force_terminal=True)
-    before = asyncio.all_tasks()
-    terminal = Vt100_Output(original, lambda: Size(rows=24, columns=80), enable_cpr=False) if vt100 else DummyOutput()
-    with create_pipe_input() as pipe, create_app_session(input=pipe, output=terminal), anyio.fail_after(TIMEOUT):
-        prompt = PromptSession[str]()
-        live = LivePrompt(prompt, console, prepare=lambda: None, interrupts=Interrupts())
-        with anyio.CancelScope() as scope:
-            async with live.opened():
-                console.print('pending output')
-                if menu:
-                    async with live.suspended():
-                        scope.cancel()
-                        await anyio.sleep_forever()
-                else:
-                    scope.cancel()
-                    await anyio.sleep_forever()
-        assert scope.cancelled_caught
-        assert console.file is original
-        assert not prompt.app.is_running
-    assert asyncio.all_tasks() <= before
-    assert original.getvalue().count('\x1b[?2026h') == original.getvalue().count('\x1b[?2026l')
-
-
-async def test_queue_preview_tracks_pending_messages_above_editor() -> None:
-    async with editor() as (live, pipe, _):
-        frames = [anyio.Event() for _ in range(3)]
-
-        def rendered(app: Application[str]) -> None:
-            screen = app.renderer.last_rendered_screen
-            if screen is None:
-                return
-            rows = [''.join(cell.char for cell in row.values()) for row in screen.data_buffer.values()]
-            text = '\n'.join(rows)
-            if '> draft' not in text:
-                return
-            if 'Follow-up: first' in text and 'Command: /usage' in text:
-                assert text.index('Follow-up: first') < text.index('Command: /usage') < text.index('> draft')
-                frames[0].set()
-            elif 'Follow-up:' not in text and 'Command: /usage' in text:
-                frames[1].set()
-            elif 'Follow-up:' not in text and 'Command:' not in text:
-                frames[2].set()
-
-        live.prompt.app.after_render += rendered
-        pipe.send_text('first\n/usage\ndraft')
-        await frames[0].wait()
-        assert live.queued_messages == ('first', '/usage')
-        assert await live.read() == 'first'
-        await frames[1].wait()
-        assert await live.read() == '/usage'
-        await frames[2].wait()
-        assert live.queued_messages == ()
-        assert live.prompt.default_buffer.text == 'draft'
-
-
-async def test_queue_preview_is_bounded_and_does_not_modify_messages() -> None:
-    async with editor() as (live, pipe, _):
-        live.console.size = (24, 9)
-        messages = ['one\ntwo\x1b[31m', '界' * 40, 'third', '/usage']
-        for message in messages:
-            live.prompt.default_buffer.text = message
-            live.prompt.default_buffer.validate_and_handle()
-        lines = live.queue_preview()[0][1].splitlines()
-        assert lines[0] == 'Follow-up: one two[31m'
-        assert lines[1].startswith('Follow-up: 界') and lines[1].endswith('…')
-        assert lines[2] == '+2 more queued'
-        assert '\x1b' not in '\n'.join(lines)
-        for message in messages:
-            assert await live.read() == message
-        assert live.queued_messages == ()
-        drafted = anyio.Event()
-
-        def changed(buffer: Buffer) -> None:
-            drafted.set()
-
-        live.prompt.default_buffer.on_text_changed += changed
-        pipe.send_text('\x04draft')
-        await drafted.wait()
-        assert live.queued_messages == ()
-        assert live.queue_preview()[0][1] == ''
-        with pytest.raises(EOFError):
-            await live.read()
-
-
-@pytest.mark.parametrize('outcome', ['completed', 'cancelled', 'failed'])
-async def test_working_animation_is_on_top_border_without_changing_draft(outcome: str) -> None:
-    now = 0.0
-    started = anyio.Event()
-    finish = anyio.Event()
-    finished = anyio.Event()
-    frames = [anyio.Event(), anyio.Event()]
-    idle = anyio.Event()
-
-    async with editor(clock=lambda: now) as (live, pipe, _):
-        live.prompt.layout.current_window.height = 1
-        live.prompt.layout.current_window.dont_extend_height = Always()
-        painted: list[str] = []
-
-        def rendered(app: Application[str]) -> None:
-            screen = app.renderer.last_rendered_screen
-            if screen is None:
-                return
-            rows = [''.join(cell.char for cell in row.values()) for row in screen.data_buffer.values()]
-            text = '\n'.join(rows)
-            if '> draft' not in text:
-                return
-            for index, spinner in enumerate(('⠋', '⠙')):
-                if f'Working {spinner}' in text:
-                    painted[:] = rows
-                    frames[index].set()
-            if finished.is_set() and 'Working' not in text:
-                idle.set()
-
-        live.prompt.app.after_render += rendered
-        assert live.working_title() == []
-
-        async def operation() -> None:
-            started.set()
-            await finish.wait()
-            if outcome == 'failed':
-                raise ValueError('test failure')
-
-        async def run() -> None:
-            if outcome == 'failed':
-                with pytest.raises(ValueError, match='test failure'):
-                    await live.interrupts.run(operation())
-            else:
-                assert await live.interrupts.run(operation()) == (outcome == 'completed')
-            finished.set()
-            live.prompt.app.invalidate()
-
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(run)
-            await started.wait()
-            pipe.send_text('draft')
-            await frames[0].wait()
-            top = next(index for index, row in enumerate(painted) if '┌' in row)
-            bottom = next(index for index, row in enumerate(painted) if '└' in row)
-            assert '┌─ Working ⠋' in painted[top]
-            assert bottom - top == 2
-            assert '> draft' in painted[top + 1]
-            now = 0.1
-            live.prompt.app.invalidate()
-            await frames[1].wait()
-            assert live.prompt.default_buffer.text == 'draft'
-            if outcome == 'cancelled':
-                pipe.send_text('\x1b')
-            else:
-                finish.set()
-            await idle.wait()
-        assert live.working_title() == []
-        assert live.prompt.default_buffer.text == 'draft'
-
-
-async def test_alt_v_during_work_attaches_without_cancelling(monkeypatch: pytest.MonkeyPatch) -> None:
-    images = ImageInput()
-    image = BinaryContent(data=b'png', media_type='image/png')
-    monkeypatch.setattr('pydantic_clai2.image_input.clipboard_images', lambda: [image])
-    async with editor(images=images) as (live, pipe, _):
-        started = anyio.Event()
-        stopped = anyio.Event()
-        attached = anyio.Event()
-
-        async def operation() -> None:
-            started.set()
-            await anyio.sleep_forever()
-
-        async def work() -> None:
-            assert not await live.interrupts.run(operation())
-            stopped.set()
-
-        def changed(buffer: Buffer) -> None:
-            if '[image:' in buffer.text:
-                attached.set()
-
-        live.prompt.default_buffer.on_text_changed += changed
-        async with anyio.create_task_group() as tasks:
-            tasks.start_soon(work)
-            await started.wait()
-            pipe.send_text('caption\x1bv')
-            await attached.wait()
-            assert not stopped.is_set()
-            assert live.interrupts.active
-            assert images.resolve(live.prompt.default_buffer.text) == ('caption', [image])
-            pipe.send_text('\x1b')
-            await stopped.wait()
-            assert images.resolve(live.prompt.default_buffer.text) == ('caption', [image])
-
-
-async def test_queue_labels_screenshot_paths_as_follow_ups() -> None:
+async def test_image_paste_and_failure_notice(monkeypatch: pytest.MonkeyPatch) -> None:
     async with editor() as (live, _, _):
-        for text in ('/tmp/shot.png', '/screenshot.PNG', '/help', '/unknown-command'):
-            live.prompt.default_buffer.text = text
-            live.prompt.default_buffer.validate_and_handle()
-        assert live.queue_preview()[0][1].splitlines() == [
-            'Follow-up: /tmp/shot.png',
-            'Follow-up: /screenshot.PNG',
-            'Command: /help',
-            'Command: /unknown-command',
-        ]
+        image = BinaryContent(data=b'png', media_type='image/png')
+        monkeypatch.setattr('pydantic_clai2.live_prompt.clipboard_images', lambda: [image])
+        live.feed('alt-v')
+        assert live.images.resolve(live.buffer.text) == ('', [image])
+
+        def fail() -> list[BinaryContent]:
+            raise ValueError('clipboard unavailable')
+
+        monkeypatch.setattr('pydantic_clai2.live_prompt.clipboard_images', fail)
+        live.feed('ctrl-v')
+        assert 'clipboard unavailable' in live.images.notice
+        live.feed('paste', 'plain\r\ntext')
+        assert live.buffer.text.endswith('plain\ntext')
 
 
-async def test_output_batch_redraws_working_editor_inside_synchronized_update() -> None:
-    output = io.StringIO()
-    terminal = Vt100_Output(output, lambda: Size(rows=24, columns=80), enable_cpr=False)
-    console = Console(file=output, force_terminal=True)
-    with create_pipe_input() as pipe, create_app_session(input=pipe, output=terminal), anyio.fail_after(TIMEOUT):
-        live = LivePrompt(PromptSession[str](), console, prepare=lambda: None, interrupts=Interrupts())
-        async with live.opened():
-            drafted = anyio.Event()
-
-            def changed(buffer: Buffer) -> None:
-                drafted.set()
-
-            live.prompt.default_buffer.on_text_changed += changed
-            pipe.send_text('retained draft')
-            await drafted.wait()
-
-            async def operation() -> None:
-                start = len(output.getvalue())
-                for line in ('first\n', 'second\n', 'third\n'):
-                    console.file.write(line)
-                await live.output.drain()
-                painted = output.getvalue()[start:]
-                assert painted.count('\x1b[?2026h') == painted.count('\x1b[?2026l') == 1
-                frame = painted.split('\x1b[?2026h')[1].split('\x1b[?2026l')[0]
-                assert 'first\nsecond\nthird\n' in frame
-                assert frame.index('\x1b[J') < frame.index('first\n') < frame.index('Working')
-                assert 'retained draft' in frame
-                assert live.prompt.default_buffer.text == 'retained draft'
-
-            assert await live.interrupts.run(operation())
+async def test_queue_labels_and_small_terminal() -> None:
+    async with editor() as (live, _, _):
+        for text in ('/tmp/shot.png', '/help'):
+            live.buffer.replace(text)
+            live.accept()
+        frame = '\n'.join(Text.from_ansi(row).plain for row in live.frame())
+        assert 'Follow-up: /tmp/shot.png' in frame
+        assert 'Command: /help' in frame
+        assert await live.read() == '/tmp/shot.png'
+        assert await live.read() == '/help'
+        live.console.size = (3, 3)
+        assert len(live.frame()) == 1
 
 
-async def test_output_failure_ends_synchronized_update_and_releases_batch() -> None:
-    class BrokenOutput(io.StringIO):
+async def test_completion_acceptance_and_cycling() -> None:
+    ready = anyio.Event()
+
+    class Output(io.StringIO):
         def write(self, text: str) -> int:
-            raise OSError('write failed')
-
-    output = io.StringIO()
-    terminal = Vt100_Output(output, lambda: Size(rows=24, columns=80), enable_cpr=False)
-    with create_pipe_input() as pipe, create_app_session(input=pipe, output=terminal):
-        with set_app(PromptSession[str]().app):
-            start = len(output.getvalue())
-            worker = PromptOutput(BrokenOutput(), invalidate=lambda: None)
-            worker.write('first\n')
-            worker.write('second\n')
-            with pytest.raises(OSError, match='write failed'):
-                await worker.run()
-            with anyio.fail_after(TIMEOUT):
-                await worker.drain()
-    assert output.getvalue()[start:] == '\x1b[?2026h\x1b[?2026l'
-
-
-async def test_partial_stream_and_spinner_refreshes_are_synchronized() -> None:
-    output = io.StringIO()
-    terminal = Vt100_Output(output, lambda: Size(rows=24, columns=80), enable_cpr=False)
-    console = Console(file=output, force_terminal=True)
-    now = 0.0
-    with create_pipe_input() as pipe, create_app_session(input=pipe, output=terminal), anyio.fail_after(TIMEOUT):
-        prompt = PromptSession[str]()
-        live = LivePrompt(prompt, console, prepare=lambda: None, interrupts=Interrupts(), clock=lambda: now)
-        async with live.opened():
-            rendered = anyio.Event()
-
-            def on_render(app: Application[str]) -> None:
-                rendered.set()
-
-            prompt.app.after_render += on_render
-            prompt.default_buffer.text = 'retained draft'
-
-            async def operation() -> None:
-                nonlocal rendered, now
-                for partial in ('Thinking ', 'through this problem ', '\nStreaming answer ', 'with more detail'):
-                    rendered = anyio.Event()
-                    start = len(output.getvalue())
-                    console.file.write(partial)
-                    await live.output.lines.join()
-                    prompt.app.invalidate()
-                    await rendered.wait()
-                    painted = output.getvalue()[start:]
-                    assert painted.startswith('\x1b[?2026h')
-                    assert painted.endswith('\x1b[?2026l')
-                    # A nested redraw must not release its enclosing output batch.
-                    depth = 0
-                    for fragment in painted.split('\x1b[?2026')[1:]:
-                        depth += 1 if fragment.startswith('h') else -1
-                        assert depth in (0, 1)
-                    assert depth == 0
-                    assert live.prompt.default_buffer.text == 'retained draft'
-                rendered = anyio.Event()
-                start = len(output.getvalue())
-                now = 0.1
-                prompt.app.invalidate()
-                await rendered.wait()
-                painted = output.getvalue()[start:]
-                assert painted.startswith('\x1b[?2026h')
-                assert '⠙' in painted
-                assert 'retained draft' not in painted
-                assert '\x1b[J' not in painted
-                assert painted.endswith('\x1b[?2026l')
-
-            assert await live.interrupts.run(operation())
-            prompt.app.after_render -= on_render
-        start = len(output.getvalue())
-        with set_app(prompt.app):
-            prompt.app.before_render.fire()
-            prompt.app.after_render.fire()
-        assert output.getvalue()[start:] == ''
-
-
-@pytest.mark.parametrize('thinking', [False, True])
-async def test_termflow_partial_output_refreshes_without_periodic_polling(thinking: bool) -> None:
-    """Run the real drainer through the editor, not just into a StringIO sink."""
-    async with editor(periodic_refresh=False) as (live, _, _):
-        # Only streamed writes trigger preview renders; there is no polling timer.
-        live.prompt.default_buffer.text = 'retained draft'
-        ready = anyio.Event()
-        previewed = anyio.Event()
-        previews: set[str] = set()
-
-        def rendered(app: Application[str]) -> None:
-            screen = app.renderer.last_rendered_screen
-            if screen is None:
-                return
-            rows = [''.join(cell.char for cell in row.values()) for row in screen.data_buffer.values()]
-            if any('> retained draft' in row for row in rows):
+            if 'Hello command' in text:
                 ready.set()
-                if 'zz' in live.output.pending and any('zz' in row for row in rows):
-                    previews.add(live.output.pending)
-                    if len(previews) >= 3:
-                        previewed.set()
+            return super().write(text)
 
-        live.prompt.app.after_render += rendered
-        live.prompt.app.invalidate()
+    async with editor(output=Output()) as (live, pipe, _):
+        live.commands.register(Command(name='hello', description='Hello command', handler=lambda args: 'hi'))
+        pipe.send_text('/he')
         await ready.wait()
-        renderer = StreamRenderer(live.console, stop_loading=lambda: None)
-        content = 'z' * 200
-        part = ThinkingPart(content=content) if thinking else TextPart(content=content + '\n')
-        await renderer.on_stream_event(PartStartEvent(index=0, part=part))
-        try:
-            await previewed.wait()
-            assert live.output.pending
-            assert live.prompt.default_buffer.text == 'retained draft'
-        finally:
-            await renderer.abort()
-            live.prompt.app.after_render -= rendered
+        pipe.send_text('\t\t\n\n')
+        assert await live.read() == '/hello'
+        ready = anyio.Event()
+        pipe.send_text('/hell')
+        await ready.wait()
+        pipe.send_text('\t\n')
+        assert await live.read() == '/hello'
+        live.feed('tab')
+        live.feed('backtab')
+        live.feed('escape')
 
 
-def test_empty_output_does_not_request_a_redraw() -> None:
-    redraws: list[bool] = []
-    output = PromptOutput(io.StringIO(), invalidate=lambda: redraws.append(True))
-    assert output.write('') == 0
-    assert redraws == []
-    output.write('partial')
-    assert redraws == [True]
+async def test_literal_paths_attach_images_and_queue_is_bounded(tmp_path: Path) -> None:
+    path = tmp_path / 'shot.png'
+    Image.new('RGB', (2, 2)).save(path)
+    async with editor() as (live, _, _):
+        live.feed('paste', str(path))
+        caption, images = live.images.resolve(live.buffer.text)
+        assert caption == '' and len(images) == 1
+        for i in range(10):
+            live.submit(f'message {i}')
+        rows = '\n'.join(Text.from_ansi(row).plain for row in live.frame())
+        assert '+6 more queued' in rows
+        assert 'queued: 10' in rows
+
+
+async def test_history_search_and_multiline_submission() -> None:
+    async with editor() as (live, pipe, _):
+        pipe.send_text('history entry\n')
+        assert await live.read() == 'history entry'
+        pipe.send_text('\x12history\n\n')
+        assert await live.read() == 'history entry'
+        pipe.send_text('first\x1b\rsecond\n')
+        assert await live.read() == 'first\nsecond'
+
+
+async def test_footer_warning_and_control_bytes_are_safe() -> None:
+    async with editor() as (live, _, _):
+        live.toolbar = lambda: [(theme.WARNING, 'warning\x1b[2J')]
+        footer = live.frame()[-1]
+        assert theme.sgr(theme.WARNING) in footer
+        assert '\x1b[2J' not in footer
+        assert r'\x1b[2J' in footer

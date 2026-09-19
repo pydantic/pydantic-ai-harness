@@ -487,12 +487,12 @@ but turns and slash commands execute sequentially. While work or turn lifecycle
 hooks are active, a `Working` label and spinner appear in the editor's top border,
 without adding an input row or changing the draft. The indicator uses the editor's refresh cycle, adds no
 background task, and is hidden while a full-screen interface owns the terminal.
-Queued output is batched with the editor redraw in a synchronized terminal update
-on supporting terminals. Partial streaming previews and regular editor refreshes
-are synchronized too; nested redraws remain inside the enclosing output update.
-Partial writes request a redraw at the streaming cadence, with a 12 ms minimum
-interval, rather than waiting for the 100 ms spinner/footer refresh. The Termflow
-smoothing defaults match Code Puppy: responses use 12 ms ticks, a 0.5-second
+The editor reserves bottom rows with terminal scrolling margins. Both partial
+and complete output go straight to the transcript region, without suspending or
+repainting the input box. The shell paints changed editor rows itself, using
+Termflow layout helpers; it does not run a prompt-toolkit renderer. Its cursor
+is a nonblinking highlighted cell, separate from the transcript cursor.
+The Termflow smoothing defaults match Code Puppy: responses use 12 ms ticks, a 0.5-second
 catch-up window, and at least one character per tick; thinking uses 20 ms ticks,
 a 0.4-second window, and at least two characters per tick. Plugins do not need their own redraw logic. Pending message previews appear
 above the editor in execution order (`Follow-up:` for messages, `Command:` for
