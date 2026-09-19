@@ -258,3 +258,18 @@ def test_replacement_editor_can_reuse_transcript_after_reload() -> None:
     screen.now += 0.3
     replacement.paint(ROWS)
     assert 'retained across reload' in screen.terminal.lines()
+
+
+def test_popup_reopening_reuses_gap_without_scrolling_blank_lines() -> None:
+    screen = Screen()
+    screen.surface.write('transcript tail\npartial')
+    popup = ('TOP', 'DRAFT', 'BOTTOM', 'one', 'two', 'three', 'FOOTER')
+    screen.surface.paint(popup)
+    history = screen.terminal.history.copy()
+    transcript_rows = screen.terminal.lines()[: -len(popup)]
+    for count in (1, 2, 3, 0, 3, 1, 0, 3):
+        screen.surface.paint((*ROWS[:-1], *('suggestion' for _ in range(count)), ROWS[-1]))
+        assert screen.terminal.history == history
+    assert screen.terminal.lines()[: -len(popup)] == transcript_rows
+    screen.surface.write(' continuation')
+    assert 'partial continuation' in screen.terminal.lines()

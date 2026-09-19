@@ -267,7 +267,10 @@ the provider prefix, then enter the model identifier; suggestions do not establi
 subscription availability. Custom model identifiers are accepted too.
 
 The command registry uses Termflow's `Completer`, `Document`, and `Completion`
-types. The interactive editor draws its own pinned prompt and completion rows,
+types. Completion rows stay visible while replacement suggestions are computed;
+stale suggestions cannot be selected. Reopening or growing the popup reuses free
+space above the editor instead of adding blank transcript lines.
+The interactive editor draws its own pinned prompt and completion rows,
 using Termflow's layout helpers. It does not run a prompt-toolkit Application or
 renderer. The keyboard decoder and history-file backend still come from
 prompt-toolkit, preserving bracketed paste and modified-key handling. Redirected

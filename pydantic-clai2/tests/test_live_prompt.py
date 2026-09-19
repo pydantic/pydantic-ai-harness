@@ -2,7 +2,7 @@
 
 import asyncio
 import io
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -17,6 +17,8 @@ from pydantic_ai import PartStartEvent, TextPart, ThinkingPart
 from pydantic_ai.messages import BinaryContent
 from rich.console import Console
 from rich.text import Text
+from surface_terminal import SurfaceTerminal
+from termflow.tui.completion import Completion  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import StreamRenderer, theme
 from pydantic_clai2.commands import Command, Commands
@@ -286,3 +288,52 @@ async def test_spinner_uses_tool_accent_without_coloring_border(
 
         assert await live.interrupts.run(operation())
         assert theme.sgr(theme.ACCENT) not in live.frame()[0]
+
+
+@pytest.mark.parametrize('dismiss', [False, True])
+async def test_completion_refresh_keeps_popup_without_selecting_stale_results(
+    monkeypatch: pytest.MonkeyPatch, dismiss: bool
+) -> None:
+    held = False
+    started, release, finished = anyio.Event(), anyio.Event(), anyio.Event()
+
+    async def compute(operation: Callable[[], list[Completion]]) -> list[Completion]:
+        if held:
+            started.set()
+            await release.wait()
+        result = operation()
+        finished.set()
+        return result
+
+    monkeypatch.setattr('pydantic_clai2.live_prompt.run_sync', compute)
+    terminal = SurfaceTerminal(width=80, height=24)
+    async with editor(output=terminal) as (live, pipe, _):
+        live.commands.register(Command(name='hello', description='Hello', handler=lambda args: 'hello'))
+        live.output.write('transcript tail\n')
+        pipe.send_text('/')
+        await finished.wait()
+        assert any('/help' in row for row in live.frame())
+        height = len(live.frame())
+        history = terminal.history.copy()
+        held = True
+        finished = anyio.Event()
+        pipe.send_text('h')
+        await started.wait()
+        assert len(live.frame()) == height
+        assert any('/help' in row for row in live.frame())
+        live.feed('tab')
+        live.feed('down')
+        assert live.buffer.text == '/h'
+        assert all('\x1b[7m' not in row for row in live.frame()[-3:-1])
+        if dismiss:
+            live.feed('escape')
+        release.set()
+        await finished.wait()
+        assert terminal.history == history
+        if dismiss:
+            assert not any('/help' in row for row in live.frame())
+        else:
+            assert len(live.frame()) == height
+            live.feed('tab')
+            live.feed('enter')
+            assert live.buffer.text == '/help'

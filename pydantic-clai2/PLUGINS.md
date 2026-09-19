@@ -486,6 +486,9 @@ The editor remains active during agent turns: users can draft and queue messages
 but turns and slash commands execute sequentially. Shift-Enter inserts a newline;
 Enter submits. Alt-Enter remains a fallback for terminals that cannot distinguish
 Shift-Enter. Modified-key reporting is enabled only while the editor owns input.
+Completion rows remain visible while a replacement lookup runs, but stale results
+cannot be selected. Popup height changes reuse available space without adding
+blank transcript lines on each key.
 While work or turn lifecycle
 hooks are active, a `Working` label and spinner appear in the editor's top border.
 The spinner uses the same pink `ACCENT` as tool names, while the label and border

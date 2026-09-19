@@ -63,6 +63,8 @@ class LivePrompt:
         self._suspended = False
         self._completions: list[Completion] = []
         self._selection = -1
+        self._completion_pending = False
+        self._completion_revision = 0
         self._complete = anyio.Event()
         self._completion_owner = anyio.Lock()
         self._opened = False
@@ -127,10 +129,9 @@ class LivePrompt:
         elif key in ('shift-enter', 'alt-enter', 'ctrl-j'):
             self.buffer.insert('\n')
         elif key in ('up', 'down') and self._completions:
-            self._selection = (self._selection + (-1 if key == 'up' else 1)) % len(self._completions)
+            self.complete(backwards=key == 'up', accept_single=False)
         elif key == 'escape':
-            self._completions = []
-            self._selection = -1
+            self.dismiss_completions()
         else:
             self.buffer.edit(key)
         if key not in ('tab', 'backtab', 'up', 'down', 'escape'):
@@ -150,9 +151,11 @@ class LivePrompt:
             self.buffer.replace('')
             self.submit(text)
 
-    def complete(self, *, backwards: bool) -> None:
+    def complete(self, *, backwards: bool, accept_single: bool = True) -> None:
         """Cycle suggestions, accepting a sole candidate immediately."""
-        if len(self._completions) == 1:
+        if self._completion_pending:
+            return
+        if len(self._completions) == 1 and accept_single:
             self._selection = 0
             self.accept_completion()
         elif self._completions:
@@ -168,13 +171,24 @@ class LivePrompt:
         start = max(0, self.buffer.cursor + item.start_position)
         self.buffer.text = self.buffer.text[:start] + item.text + self.buffer.text[self.buffer.cursor :]
         self.buffer.cursor = start + len(item.text)
+        self.dismiss_completions()
+
+    def dismiss_completions(self) -> None:
+        """Close the popup and invalidate any in-flight lookup."""
         self._completions = []
         self._selection = -1
+        self._completion_pending = False
+        self._completion_revision += 1
 
     def refresh_completions(self) -> None:
         """Compute file/command suggestions off the input loop, ignoring stale results."""
-        self._completions = []
         self._selection = -1
+        self._completion_revision += 1
+        self._completion_pending = bool(self.buffer.text) and self.buffer.search is None
+        # Retain the displayed rows until their replacements arrive. Removing
+        # them here makes the terminal band shrink and grow on every key.
+        if not self._completion_pending:
+            self._completions = []
         self._complete.set()
 
     async def completion_loop(self) -> None:
@@ -183,7 +197,8 @@ class LivePrompt:
             await self._complete.wait()
             self._complete = anyio.Event()
             text, cursor = self.buffer.text, self.buffer.cursor
-            if not text or self.buffer.search is not None:
+            revision = self._completion_revision
+            if not self._completion_pending:
                 continue
             async with self._completion_owner:
                 items = await run_sync(
@@ -191,7 +206,8 @@ class LivePrompt:
                         self.commands.get_completions(Document(text, cursor), CompleteEvent(text_inserted=True))
                     )[:100]
                 )
-            if (text, cursor) == (self.buffer.text, self.buffer.cursor):
+            if revision == self._completion_revision and (text, cursor) == (self.buffer.text, self.buffer.cursor):
+                self._completion_pending = False
                 self._completions = items
                 self.paint()
 

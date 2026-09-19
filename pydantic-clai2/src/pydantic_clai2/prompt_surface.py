@@ -117,7 +117,10 @@ class PromptSurface(io.StringIO):
             growth = max(0, old_bottom - bottom)
             parts.append('\x1b7')
             if growth:
-                parts.extend([f'\x1b[{old_bottom};1H', '\r\n' * growth, '\x1b8', f'\x1b[{growth}A', '\x1b7'])
+                # Make room from the writer's actual position, not the old
+                # region bottom. Reopening a popup can reuse the gap left when
+                # it closed without scrolling another batch of blank lines.
+                parts.extend(['\x1bD' * growth, f'\x1b[{growth}A', '\x1b7'])
             parts.extend([f'\x1b[1;{bottom}r', '\x1b8'])
             if bottom > old_bottom:
                 parts.append('\x1b7')
