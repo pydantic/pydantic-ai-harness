@@ -42,6 +42,7 @@ if TYPE_CHECKING:
     from .macroscope import Macroscope
     from .memory import Memory
     from .modal_sandbox import ModalSandbox
+    from .model_router import ModelChoice, ModelRouter
     from .planning import Planning
     from .prompt_injection_defender import PromptInjectionDefender
     from .pydantic_ai_docs import PydanticAIDocs
@@ -88,6 +89,8 @@ __all__ = [
     'ManagedPrompt',
     'Memory',
     'ModalSandbox',
+    'ModelChoice',
+    'ModelRouter',
     'OutputBlocked',
     'OutputGuardrail',
     'OutputGuardrailFunc',
@@ -139,6 +142,8 @@ _CAPABILITY_EXPORTS = {
     'ManagedPrompt': 'logfire',
     'Memory': 'memory',
     'ModalSandbox': 'modal_sandbox',
+    'ModelChoice': 'model_router',
+    'ModelRouter': 'model_router',
     'Planning': 'planning',
     'PromptInjectionDefender': 'prompt_injection_defender',
     'PydanticAIDocs': 'pydantic_ai_docs',
