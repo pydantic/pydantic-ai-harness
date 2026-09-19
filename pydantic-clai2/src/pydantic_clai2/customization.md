@@ -113,6 +113,27 @@ questions somewhere other than the terminal, declare ask_user again with a
 module whose activate(host) calls host.add(AskUser(answerer=...)) with your own
 async answerer; see PLUGINS.md.
 
+The built-in logfire plugin (pydantic_clai2.logfire) is enabled by default in the
+stock CLI. It contributes core's Instrumentation capability using an isolated
+Logfire instance. It exports to Logfire only when credentials are present, with
+no interactive setup or console logging. Text and binary images are included by
+default, so review the telemetry destination before setting LOGFIRE_TOKEN. Use
+/plugins disable logfire to remove it, or replace its settings with:
+
+```text
+/plugins add logfire pydantic_clai2.logfire '{"include_content": false, "include_binary_content": false}'
+```
+
+Other options are service_name (default pydantic-clai2) and send_to_logfire
+(default "if-token-present", or false). This explicit option overrides
+LOGFIRE_SEND_TO_LOGFIRE. Tokens belong in the SDK environment or credential file,
+not plugin JSON. Disabling or reloading shuts down only the plugin's own
+providers, without mutating the agent or global tracer/meter providers. The
+existing global propagator is preserved, but SDK-installed executor propagation
+helpers are not removed on unload. While enabled, its per-run instrumentation takes precedence over the supplied
+agent's instrumentation; disabling restores that agent's own behavior. Standard
+SDK configuration, including explicit OTLP exporters, still applies.
+
 Plugins are trusted Python executed as the user. Drop-ins execute at startup,
 not in a sandbox. Do not install code or change executable startup configuration
 without the user's intent. Keep secrets out of plugin JSON: it is plaintext in
