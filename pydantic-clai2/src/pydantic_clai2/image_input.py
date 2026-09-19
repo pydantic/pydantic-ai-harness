@@ -10,6 +10,7 @@ from uuid import uuid4
 from PIL import Image, ImageGrab, ImageOps
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from pydantic_ai.messages import BinaryContent
+from typing_extensions import Buffer
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 MAX_PENDING_BYTES = 32 * 1024 * 1024
@@ -17,19 +18,25 @@ MAX_PIXELS = 25_000_000
 MARKER = re.compile(r'\[image:[0-9a-f]{8}\]')
 
 
+class ImageBuffer(BytesIO):
+    """Reject oversized encoded output before it grows the attachment buffer."""
+
+    def write(self, data: Buffer, /) -> int:
+        """Enforce the byte limit for each encoder write, including partial output."""
+        if self.tell() + memoryview(data).nbytes > MAX_IMAGE_BYTES:
+            raise ValueError('Image exceeds the 10 MiB attachment limit.')
+        return super().write(data)
+
+
 def encode_image(image: Image.Image) -> BinaryContent:
     """Normalize to PNG, bounding decoded dimensions and encoded payload size."""
     if image.width * image.height > MAX_PIXELS:
         raise ValueError('Image exceeds the 25 megapixel limit.')
-    output = BytesIO()
     mode = 'RGBA' if 'A' in image.getbands() or 'transparency' in image.info else 'RGB'
-    with ImageOps.exif_transpose(image) as oriented, oriented.convert(mode) as normalized:
+    with ImageBuffer() as output, ImageOps.exif_transpose(image) as oriented, oriented.convert(mode) as normalized:
         normalized.info.clear()
         normalized.save(output, format='PNG')
-    data = output.getvalue()
-    if len(data) > MAX_IMAGE_BYTES:
-        raise ValueError('Image exceeds the 10 MiB attachment limit.')
-    return BinaryContent(data=data, media_type='image/png')
+        return BinaryContent(data=output.getvalue(), media_type='image/png')
 
 
 def read_image(path: Path) -> BinaryContent:

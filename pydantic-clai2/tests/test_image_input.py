@@ -1,6 +1,7 @@
 """Image bytes survive editing, queued turns, hooks, and persisted history."""
 
 import io
+from array import array
 from collections.abc import Sequence
 from pathlib import Path
 from uuid import UUID
@@ -20,7 +21,15 @@ from pydantic_ai_harness.step_persistence.conversations import SqliteConversatio
 from rich.console import Console
 
 from pydantic_clai2 import Session, chat, image_input
-from pydantic_clai2.image_input import ImageInput, clipboard_images, encode_image, pasted_paths, read_image, read_images
+from pydantic_clai2.image_input import (
+    ImageBuffer,
+    ImageInput,
+    clipboard_images,
+    encode_image,
+    pasted_paths,
+    read_image,
+    read_images,
+)
 from pydantic_clai2.settings_store import SettingsStore
 
 
@@ -360,3 +369,18 @@ def test_exif_orientation_is_applied_and_metadata_removed(orientation: int) -> N
         blue_pixel = {1: (0, 0), 3: (2, 1), 6: (1, 0), 8: (0, 2)}[orientation]
         assert restored.getpixel(blue_pixel) == (0, 0, 255)
         assert not restored.getexif()
+
+
+def test_encoder_buffer_rejects_writes_before_allocating(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(image_input, 'MAX_IMAGE_BYTES', 4)
+    with ImageBuffer() as output:
+        assert output.write(b'ab') == 2
+        assert output.write(bytearray(b'cd')) == 2
+        with pytest.raises(ValueError, match='attachment limit'):
+            output.write(b'e')
+        assert output.getvalue() == b'abcd'
+        output.seek(0)
+        # Count bytes, not elements, for non-byte buffers.
+        with pytest.raises(ValueError, match='attachment limit'):
+            output.write(memoryview(array('I', [1, 2])))
+        assert output.getvalue() == b'abcd'
