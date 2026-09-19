@@ -7,7 +7,6 @@ case that bottom-anchoring tmux can hide. This is not a general terminal emulato
 
 import io
 import re
-from collections.abc import Callable
 
 
 class SurfaceTerminal(io.StringIO):
@@ -22,7 +21,6 @@ class SurfaceTerminal(io.StringIO):
         self.top, self.bottom = 0, height - 1
         self.wrap = True
         self.history: list[str] = []
-        self.report: Callable[[int, int], None] = lambda row, column: None
 
     def resize(self, *, width: int, height: int, bottom_anchored: bool = False) -> None:
         """Resize without moving old UI rows to the new screen bottom."""
@@ -43,23 +41,6 @@ class SurfaceTerminal(io.StringIO):
         self.width, self.height = width, height
         self.top, self.bottom = 0, height - 1
         self.row, self.column = min(self.row, height - 1), min(self.column, width - 1)
-
-    def reflow(self, *, width: int, height: int) -> None:
-        """Model a terminal wrapping old hard rows at a narrower width."""
-        lines: list[list[str]] = []
-        cursor_row = 0
-        for index, row in enumerate(self.cells):
-            text = ''.join(row).rstrip()
-            if index == self.row:
-                cursor_row = len(lines) + self.column // width
-            wrapped = [list(text[start : start + width].ljust(width)) for start in range(0, len(text), width)]
-            lines.extend(wrapped or [[' '] * width])
-        shift = max(0, len(lines) - height)
-        self.history.extend(''.join(row).rstrip() for row in lines[:shift])
-        self.cells = lines[shift:] + [[' '] * width for _ in range(max(0, height - len(lines)))]
-        self.row, self.column = max(0, cursor_row - shift), self.column % width
-        self.width, self.height = width, height
-        self.top, self.bottom = 0, height - 1
 
     def isatty(self) -> bool:
         return True
@@ -100,9 +81,7 @@ class SurfaceTerminal(io.StringIO):
 
     def control(self, token: str) -> None:
         params, code = token[2:-1], token[-1]
-        if token == '\x1b[6n':
-            self.report(self.row + 1, min(self.width, self.column + 1))
-        elif code == 'H':
+        if code == 'H':
             row, col = (int(part) for part in params.split(';'))
             self.row = min(max(0, row - 1), self.height - 1)
             self.column = min(max(0, col - 1), self.width - 1)
@@ -111,6 +90,8 @@ class SurfaceTerminal(io.StringIO):
             self.row = self.column = 0
         elif code == 'A':
             self.row = max(0, self.row - int(params))
+        elif code == 'J' and params == '2':
+            self.cells = [[' '] * self.width for _ in range(self.height)]
         elif code == 'K':
             start = 0 if params == '2' else self.column
             self.cells[self.row][start:] = [' '] * (self.width - start)

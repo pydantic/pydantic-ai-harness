@@ -41,6 +41,7 @@ from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
 from .plugins import Renderer, SessionEndReason, SessionStart, TurnEnd, TurnStart, bare_screen
 from .project_settings import ProjectSettings
+from .prompt_transcript import TranscriptBuffer
 from .reloading import reload_clai
 from .screen import Screen
 from .sessions import Sessions
@@ -155,6 +156,7 @@ async def chat(
                         project=project,
                         message_history=shell.session.messages,
                         summary=shell.session.summary,
+                        transcript=shell.transcript,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 -- development edits must not discard the conversation.
@@ -178,6 +180,7 @@ def _create_shell(
     project: ProjectSettings,
     message_history: Sequence[ModelMessage] = (),
     summary: ConversationSummary | None = None,
+    transcript: TranscriptBuffer | None = None,
 ) -> '_Shell[DepsT, OutputT]':
     settings = Settings.model_validate(settings.model_dump()) if settings is not None else Settings(model=None)
     store = store or SettingsStore()
@@ -333,6 +336,7 @@ def _create_shell(
         status=status,
         prompt=prompt,
         history=history,
+        transcript=transcript if transcript is not None else TranscriptBuffer(),
         images=images,
         interrupts=Interrupts(),
         screen=screen,
@@ -363,6 +367,7 @@ class _Shell(Generic[DepsT, OutputT]):
     interrupts: Interrupts
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
+    transcript: TranscriptBuffer = field(default_factory=TranscriptBuffer)
     images: ImageInput = field(default_factory=ImageInput)
     reload_requested: bool = False
     editor: LivePrompt | None = None
@@ -382,6 +387,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 images=self.images,
                 interrupts=self.interrupts,
                 toolbar=self.status.toolbar,
+                transcript=self.transcript,
             )
             self.screen.editor = self.editor.suspended
             try:

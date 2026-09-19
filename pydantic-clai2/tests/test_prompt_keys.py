@@ -94,18 +94,15 @@ def test_csi_partial_unknown_and_oversized_sequences_do_not_become_draft_text() 
 
 async def test_cursor_reports_are_not_draft_keys() -> None:
     events: list[tuple[str, str]] = []
-    positions: list[tuple[int, int]] = []
     with create_pipe_input() as pipe:
         keys = PromptKeys(
             source=pipe,
             feed=lambda key, data: events.append((key, data)),
             eof=lambda: None,
-            cursor_position=lambda row, column: positions.append((row, column)),
         )
         try:
             pipe.send_text('\x1b[12;34R')
             keys.read()
-            assert positions == [(12, 34)]
             assert events == []
         finally:
             keys.stop()

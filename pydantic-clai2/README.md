@@ -713,10 +713,14 @@ a nonblinking reverse-video cell marks the editing position. Status and resize
 checks run ten times per second, writing only changed rows. Terminals shorter
 than six rows or narrower than six columns omit the border. Below three rows,
 the draft is retained but hidden until the terminal grows. The pinned surface
-requires VT scrolling-margin support. On resize, the editor uses a terminal
-cursor-position report to locate and erase its previous rows before repainting.
-Output briefly queues during that query; a 250 ms timeout resumes output without
-erasing guessed coordinates on terminals that do not reply. Full-screen menus release scrolling margins and detach the keyboard reader before taking over.
+requires VT scrolling-margin support. While resizing, the visible viewport goes
+blank and incoming output is buffered. After 250 ms without another size change,
+CLAI redraws recent transcript at the new width and restores the current draft.
+It does not clear terminal scrollback or conversation history. The repaint cache
+retains up to 2,000 lines and one million characters per editor, plus a bounded
+partial line; it is carried across shell reloads. Output arriving during resize
+is kept separately and flushed in order, spilling to a private temporary file
+for large bursts. Full-screen menus release scrolling margins and detach the keyboard reader before taking over.
 Redirected output has no live editor or footer.
 No model requests or telemetry are added for status reporting.
 

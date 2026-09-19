@@ -22,7 +22,9 @@ from .image_input import ImageInput, clipboard_images, pasted_paths, read_images
 from .interrupts import Interrupts
 from .prompt_buffer import PromptBuffer
 from .prompt_keys import PromptKeys
+from .prompt_resize import resize_notifications
 from .prompt_surface import PromptSurface
+from .prompt_transcript import TranscriptBuffer
 from .tool_output import terminal_text
 
 
@@ -39,6 +41,7 @@ class LivePrompt:
         interrupts: Interrupts,
         toolbar: Callable[[], list[tuple[str, str]]],
         clock: Callable[[], float] = time.monotonic,
+        transcript: TranscriptBuffer | None = None,
     ) -> None:
         """Bind editing state, terminal ownership and per-session services."""
         self.console = console
@@ -49,12 +52,11 @@ class LivePrompt:
         self.toolbar = toolbar
         self.clock = clock
         self.buffer = PromptBuffer(history=list(reversed(list(history.load_history_strings()))))
-        self.output = PromptSurface(output=console.file, size=lambda: (console.width, console.height))
+        self.output = PromptSurface(output=console.file, size=lambda: console.size, transcript=transcript)
         self.keys = PromptKeys(
             source=get_app_session().input,
             feed=self.feed,
             eof=lambda: self.submit(EOFError()),
-            cursor_position=lambda row, column: self.output.cursor_position(row=row, column=column),
         )
         self._submissions: deque[str | KeyboardInterrupt | EOFError] = deque()
         self._submitted = asyncio.Event()
@@ -195,7 +197,8 @@ class LivePrompt:
 
     def frame(self) -> tuple[str, ...]:
         """Build the reserved rows; transcript contents are deliberately absent."""
-        width, height = max(1, self.console.width), max(2, self.console.height)
+        width, height = self.console.size
+        width, height = max(1, width), max(2, height)
         muted, reset = theme.sgr(theme.MUTED), '\x1b[0m'
         if width < 6 or height < 6:
             return tuple(self.buffer.rows(width=width, limit=1))
@@ -275,20 +278,27 @@ class LivePrompt:
                 self.paint()
                 await anyio.sleep(0.1)
 
+        loop = asyncio.get_running_loop()
+
+        def resized() -> None:
+            self.output.resize_notice()
+            loop.call_soon_threadsafe(self.paint)
+
         original = self.console.file
         self._opened = True
         self.console.file = self.output
         try:
-            self.paint()
-            self.keys.start()
-            async with anyio.create_task_group() as tasks:
-                tasks.start_soon(refresh)
-                tasks.start_soon(self.completion_loop)
-                try:
-                    yield
-                    await self.output.drain()
-                finally:
-                    tasks.cancel_scope.cancel()
+            with resize_notifications(resized):
+                self.paint()
+                self.keys.start()
+                async with anyio.create_task_group() as tasks:
+                    tasks.start_soon(refresh)
+                    tasks.start_soon(self.completion_loop)
+                    try:
+                        yield
+                        await self.output.drain()
+                    finally:
+                        tasks.cancel_scope.cancel()
         finally:
             self._opened = False
             self.keys.stop()

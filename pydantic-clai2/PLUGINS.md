@@ -497,9 +497,13 @@ and complete output go straight to the transcript region, without suspending or
 repainting the input box. The shell paints changed editor rows itself, using
 Termflow layout helpers; it does not run a prompt-toolkit renderer. Its cursor
 is a nonblinking highlighted cell, separate from the transcript cursor.
-Resize briefly queues transcript writes while the terminal reports its cursor
-position, so old editor rows can be removed without erasing moved transcript
-lines. Cursor reports are handled by the shell, not delivered as draft text.
+Resize blanks the visible viewport and buffers transcript writes until the size
+has been stable for 250 ms. It then replays a bounded recent transcript tail and
+restores the draft; it does not erase terminal scrollback or conversation history.
+The buffer retains ANSI styling, not arbitrary terminal-control operations.
+Use `host.full_screen()` for widgets instead of printing cursor-control sequences
+into the transcript. Large output bursts during resize spill to a private temporary
+file and are flushed in order after the viewport is rebuilt.
 The Termflow smoothing defaults match Code Puppy: responses use 12 ms ticks, a 0.5-second
 catch-up window, and at least one character per tick; thinking uses 20 ms ticks,
 a 0.4-second window, and at least two characters per tick. Plugins do not need their own redraw logic. Pending message previews appear

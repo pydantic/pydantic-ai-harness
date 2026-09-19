@@ -23,13 +23,11 @@ class PromptKeys:
         source: Input,
         feed: Callable[[str, str], None],
         eof: Callable[[], None],
-        cursor_position: Callable[[int, int], None] = lambda row, column: None,
     ) -> None:
         """Keep decoder and callbacks local to this editor."""
         self.source = source
         self.feed = feed
         self.eof = eof
-        self.cursor_position = cursor_position
         self._stack: ExitStack | None = None
         self._timer: asyncio.TimerHandle | None = None
         self._escape = False
@@ -82,8 +80,7 @@ class PromptKeys:
     def dispatch(self, key: KeyPress) -> None:
         """Translate decoder tokens into editor actions and literal paste payloads."""
         if key.key == Keys.CPRResponse:
-            row, column = (int(value) for value in key.data[2:-1].split(';'))
-            self.cursor_position(row, column)
+            # Ignore a late response left over from a previous renderer/menu.
             return
         if key.data in ('\x1b[13;2u', '\x1b[27;2;13~') and key.key != Keys.BracketedPaste:
             self._escape = False
