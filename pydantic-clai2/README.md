@@ -20,7 +20,7 @@ Relative paths use the launch workspace. Use a custom agent with `Coder()` to
 retain workspace-scoped file tools.
 
 Tool calls show a single-line summary followed by a blank line by default.
-Tool names are pink; their arguments and bullet markers are muted grey. Shell output, exit details and
+In the default theme, tool names are pink; their arguments and bullet markers are muted grey. Shell output, exit details and
 log paths, grep results, and file diffs stay out of the terminal; the model still
 receives full tool results. Long summaries are clipped to the terminal width.
 Use `/set display.tool_output true` to show detailed output again, or
@@ -187,7 +187,7 @@ Pass secret references or use plugin-owned credential storage instead of embeddi
 
 `/set` on its own opens a full-screen menu, the same kind Code Puppy uses: the
 settings on the left, details for the highlighted one on the right (current
-value, default, what it does). Type to filter. Enter edits: booleans and the
+value, default, what it does). Type to filter. Enter edits: booleans, the theme, and the
 model get a picker (the model list is searchable, with "Type a value..." for
 anything not listed), everything else a typed input that validates as you go.
 An empty value resets. `R` resets the highlighted setting. Esc closes. Every
@@ -197,6 +197,40 @@ edit saves and applies immediately, the same as `/set KEY VALUE`.
 Use a non-negative integer; `0` disables retries. Changes apply to the next turn.
 Explicit per-tool or per-toolset retry limits take precedence. This setting does
 not change output-validation or HTTP transport retries.
+
+## Themes
+
+```text
+/theme
+/theme light
+/theme system
+/theme pydantic
+```
+
+`/theme` opens a searchable picker with colour samples. The current choice is
+marked. Enter saves and applies; Esc or Ctrl-C closes without changing it.
+`/theme NAME` selects directly, and Tab suggests the available names.
+
+| Name | Appearance |
+|---|---|
+| `pydantic` | The default Pydantic brand palette for dark terminals. |
+| `light` | Darker accents and pale diff surfaces for light terminals. |
+| `system` | Your terminal's foreground and background, without fixed UI colours. Diffs keep plain `+` and `-` markers. |
+
+The prompt, completions, status, menus, Markdown, thinking, and tool output use
+the new roles immediately. Text already printed in scrollback is not repainted.
+CLAI does not change your terminal's background or palette, and `system` does not
+try to detect light or dark mode. Select `light` after changing your terminal to a
+light background. Shell-provided ANSI colours and custom plugin styling remain
+their authors' choices. Fenced code uses Monokai for `pydantic`, Friendly for
+`light`, and terminal ANSI colours for `system`.
+
+The preference is saved as `display.theme` in the existing settings database.
+`/set display.theme light` uses the same validation and applies immediately;
+reset that setting in `/set` to restore `pydantic`. A project can set `"theme"`
+in `.clai/settings.json`; as with other settings, its value returns at next start.
+The early startup animation keeps its brand colours because it runs before
+settings load. Theme selection makes no model requests and emits no telemetry.
 
 ## Models and their settings
 
@@ -291,7 +325,7 @@ the project file. `/plugins disable repo_context` turns it off, for this and
 every later session; `/plugins enable repo_context` brings it back. See
 [PLUGINS.md](PLUGINS.md#the-built-in-plugins) for its settings.
 
-Interactive commands: `/login`, `/set`, `/model`, `/add_model`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/add_model`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
 `/plugins`, `/reload`, `/usage`, `/cost`, and `/compact` from the built-in `compaction` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
@@ -520,20 +554,18 @@ interrupted responses and tool results. Failed turns leave the previous history
 intact. External tool side effects may already have occurred. History is in memory
 only. Structured outputs are supported and displayed after completion.
 
-CLAI is painted in the Pydantic brand palette: Lithium magenta for headings,
-the banner, and the thing to look at; Calcium for list markers and errors; Aqua
-for links and added diff lines; Pydantic AI cyan for guidance; purple with a
-magenta-to-white shimmer for the active status line and plain purple while idle;
-brand grey for tool previews and hints. On terminals without 24-bit
-colour the nearest of the 16 standard colours is used. Every colour lives in
-`theme.py`. This is local to CLAI; it does not change your terminal's colours
-or Termflow defaults elsewhere. Code block syntax highlighting retains Termflow's
-Monokai default.
+CLAI defaults to the Pydantic brand palette. [Themes](#themes) describes the
+other appearances. Every role lives in `theme.py`; `theme.current()` resolves the
+active session's colours at render time. Fenced code uses Rich Syntax with the
+active `syntax` field: `monokai`, `friendly`, or `ansi_dark`.
+The raw-ANSI status and preview surfaces use a 16-colour fallback when the
+terminal does not advertise true colour.
 
 Streaming matches Code Puppy's separate output and thinking paths:
 
 - Markdown uses Termflow `SmoothWriter`: 12 ms ticks, 0.5-second catch-up,
-  minimum one visible character per tick. Markdown is parsed line-by-line.
+  minimum one visible character per tick. Prose is parsed line-by-line; code
+  fences are buffered until they close or the text part ends.
 - Thinking deltas feed `StreamSmoother` immediately: 20 ms ticks, 0.4-second
   catch-up, minimum two characters per tick. They display as dim literal text,
   without waiting for newlines or interpreting Markdown.
@@ -601,7 +633,7 @@ Native capability events drive specialized output: `FileEditedEvent` renders its
 bounded unified diff using Termflow `DiffRenderer`, the same renderer Code Puppy
 uses. Addition backgrounds are muted teal (`#203c3b`), deletion backgrounds are
 muted burgundy (`#432d3b`), and brighter markers distinguish the changes. Code
-syntax colors are unchanged. Successful file writes also show the proposed diff from their matching
+syntax colors follow the selected theme. Successful file writes also show the proposed diff from their matching
 `FileChangeRequestEvent`: new files show additions, overwrites show before/after
 changes. Without a matching request event, only the written path is shown. Failed
 or cancelled writes do not display a success diff. Large diffs retain the

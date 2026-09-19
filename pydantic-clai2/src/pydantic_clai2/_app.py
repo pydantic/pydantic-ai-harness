@@ -49,6 +49,7 @@ from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
 from .status import Status, StatusLine
+from .theme_picker import theme_command
 from .usage_report import cost_line, session_usage
 
 DepsT = TypeVar('DepsT')
@@ -100,13 +101,16 @@ async def chat(
     `project` is the parsed `.clai/settings.json`; layer its overrides into `settings` yourself.
     """
     console = console or Console()
-    console.print()
-    print_banner(console)
-    console.print(
-        '/new starts a session; /resume restores one; /exit quits. Esc or Ctrl-C interrupts a turn.', style=theme.MUTED
-    )
+    settings = settings or Settings(model=None)
     project = project or ProjectSettings()
-    _report_project(project, console)
+    with theme.use(lambda: settings.theme):
+        console.print()
+        print_banner(console)
+        console.print(
+            '/new starts a session; /resume restores one; /exit quits. Esc or Ctrl-C interrupts a turn.',
+            style=theme.current().muted,
+        )
+        _report_project(project, console)
     use_defaults = builtin_plugins is DEFAULT_PLUGINS
     shell = _create_shell(
         agent,
@@ -123,24 +127,25 @@ async def chat(
     async with agent:
         while True:
             reason: SessionEndReason = 'error'
-            try:
-                async with create_task_group() as workers:
-                    workers.start_soon(shell.sessions.namer.run)
-                    try:
-                        await shell.loader.load_all(fresh=fresh)
-                        _report_project_plugins(shell.loader, console)
-                        if resume is not None:
-                            console.print(await shell.sessions.command([resume] if resume else []), markup=False)
-                            resume = None
-                        reason = await shell.run()
-                    finally:
-                        workers.cancel_scope.cancel()
-            except BaseExceptionGroup as exc:
-                if len(exc.exceptions) == 1:
-                    raise exc.exceptions[0] from None
-                raise
-            finally:
-                await shell.loader.close(reason)
+            with theme.use(lambda: shell.context.settings.theme):
+                try:
+                    async with create_task_group() as workers:
+                        workers.start_soon(shell.sessions.namer.run)
+                        try:
+                            await shell.loader.load_all(fresh=fresh)
+                            _report_project_plugins(shell.loader, console)
+                            if resume is not None:
+                                console.print(await shell.sessions.command([resume] if resume else []), markup=False)
+                                resume = None
+                            reason = await shell.run()
+                        finally:
+                            workers.cancel_scope.cancel()
+                except BaseExceptionGroup as exc:
+                    if len(exc.exceptions) == 1:
+                        raise exc.exceptions[0] from None
+                    raise
+                finally:
+                    await shell.loader.close(reason)
             if not shell.reload_requested:
                 return
             shell.reload_requested = False
@@ -161,10 +166,16 @@ async def chat(
                     )
                 )
             except Exception as exc:  # noqa: BLE001 -- development edits must not discard the conversation.
-                console.print(f'Reload failed: {type(exc).__name__}: {exc}', style=theme.ERROR, markup=False)
+                console.print(
+                    f'Reload failed: {type(exc).__name__}: {exc}',
+                    style=theme.THEMES[shell.context.settings.theme].error,
+                    markup=False,
+                )
                 fresh = False
             else:
-                console.print('CLAI2 reloaded. Conversation preserved.', style=theme.INFO)
+                console.print(
+                    'CLAI2 reloaded. Conversation preserved.', style=theme.THEMES[shell.context.settings.theme].info
+                )
                 fresh = True
 
 
@@ -208,7 +219,7 @@ def _create_shell(
 
     session.resolve_model = resolve_model
     if session.model is None and agent.model is None:
-        console.print('Add a model with /add_model.', style=theme.INFO)
+        console.print('Add a model with /add_model.', style=theme.THEMES[settings.theme].info)
 
     def apply_setting(key: str, updated: Settings) -> None:
         if key == 'model':
@@ -240,6 +251,14 @@ def _create_shell(
             description='Change settings; no arguments opens the menu',
             handler=lambda args: set_command(context, args),
             complete=set_completions,
+        )
+    )
+    commands.register(
+        Command(
+            name='theme',
+            description='Select terminal colours; no arguments opens the picker',
+            handler=lambda args: theme_command(context, args),
+            complete=lambda args: theme.THEMES if len(args) <= 1 else (),
         )
     )
     commands.register(
@@ -402,7 +421,9 @@ class _Shell(Generic[DepsT, OutputT]):
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
-                self.console.print('Input cleared. Press Ctrl-C again within 2 seconds to exit.', style=theme.MUTED)
+                self.console.print(
+                    'Input cleared. Press Ctrl-C again within 2 seconds to exit.', style=theme.current().muted
+                )
                 continue
             except EOFError:
                 return 'eof'
@@ -420,7 +441,7 @@ class _Shell(Generic[DepsT, OutputT]):
                     return 'exit'
                 continue
             if self.session.model is None and self.agent.model is None:
-                self.console.print('Choose a model first: /set model <Tab>', style=theme.WARNING)
+                self.console.print('Choose a model first: /set model <Tab>', style=theme.current().warning)
                 continue
             try:
                 if await self._turn(text):
@@ -447,12 +468,12 @@ class _Shell(Generic[DepsT, OutputT]):
         try:
             await self.loader.fire(start)
         except PluginError as exc:
-            self.console.print(str(exc), style=theme.ERROR, markup=False)
+            self.console.print(str(exc), style=theme.current().error, markup=False)
             self.console.print()
             return TurnEnd(text=start.text, outcome='failed', error=exc)
         if start.cancelled:
             self.console.print(
-                f'Turn cancelled by a plugin: {start.cancel_reason or "no reason given"}', style=theme.WARNING
+                f'Turn cancelled by a plugin: {start.cancel_reason or "no reason given"}', style=theme.current().warning
             )
             self.console.print()
             return TurnEnd(text=start.text, outcome='cancelled')
@@ -472,9 +493,9 @@ class _Shell(Generic[DepsT, OutputT]):
 def _report_project(project: ProjectSettings, console: Console) -> None:
     if project.path is None:
         return
-    console.print(f'Project settings: {project.path}', style=theme.MUTED)
+    console.print(f'Project settings: {project.path}', style=theme.current().muted)
     if project.unknown:
-        console.print(f'Ignoring unknown settings: {", ".join(project.unknown)}', style=theme.WARNING)
+        console.print(f'Ignoring unknown settings: {", ".join(project.unknown)}', style=theme.current().warning)
 
 
 def _report_project_plugins(loader: PluginLoader[DepsT], console: Console) -> None:
@@ -482,13 +503,13 @@ def _report_project_plugins(loader: PluginLoader[DepsT], console: Console) -> No
     if waiting:
         console.print(
             f'Project plugins not loaded; approve one with /plugins enable NAME: {", ".join(waiting)}',
-            style=theme.INFO,
+            style=theme.current().info,
         )
 
 
 def _report_interrupt(completed: bool, console: Console) -> None:
     if not completed:
-        console.print('Turn cancelled. Use /exit to quit.', style=theme.MUTED, highlight=False)
+        console.print('Turn cancelled. Use /exit to quit.', style=theme.current().muted, highlight=False)
         console.print()
 
 
@@ -496,7 +517,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
     try:
         console.print(await commands.execute_async(text), markup=False)
     except Exception as exc:  # noqa: BLE001 -- command failures must not exit the interactive shell.
-        console.print(str(exc), style=theme.ERROR, markup=False)
+        console.print(str(exc), style=theme.current().error, markup=False)
     console.print()
     _reset_status(text, status)
 
@@ -577,10 +598,10 @@ async def _run_prompt(
         raise
     except Exception as exc:  # noqa: BLE001 -- interactive boundary reports plugin/provider failures.
         await renderer.finish()
-        console.print(f'{type(exc).__name__}: {exc}', style=theme.ERROR, markup=False)
+        console.print(f'{type(exc).__name__}: {exc}', style=theme.current().error, markup=False)
         console.print(
             'Turn failed. Retained history may include partial progress. External tool side effects may already have occurred.',
-            style=theme.MUTED,
+            style=theme.current().muted,
         )
         console.print()
         return TurnEnd(text=text, outcome='failed', error=exc)

@@ -36,17 +36,18 @@ from .tool_output import ToolOutput, print_tool_header, terminal_text
 
 
 def markdown_style() -> RenderStyle:
-    """Termflow palette from the brand guide: Lithium headings, Calcium markers, Aqua links."""
+    """Termflow colours from the active terminal theme."""
+    colors = theme.current()
     return RenderStyle(
-        bright=theme.LITHIUM,
-        head=theme.PURPLE,
-        symbol=theme.CALCIUM,
-        grey=theme.GREY,
-        dark=theme.DARK_PURPLE,
-        mid=theme.ELEMENT_PURPLE,
-        light=theme.GREY,
-        link=theme.AQUA,
-        error=theme.CALCIUM,
+        bright=colors.primary,
+        head=colors.thinking,
+        symbol=colors.error,
+        grey=colors.muted,
+        dark=colors.surface,
+        mid=colors.panel,
+        light=colors.muted,
+        link=colors.link,
+        error=colors.error,
     )
 
 
@@ -165,13 +166,13 @@ class StreamRenderer:
         )
 
     def _emit_thinking(self, content: str) -> None:
-        self.console.print(content, style=theme.MUTED, end='', markup=False, highlight=False)
+        self.console.print(content, style=theme.current().muted, end='', markup=False, highlight=False)
 
     def _feed(self, content: str) -> None:
         content = terminal_text(content)
         if content and not self._heading_printed:
             if self._thinking:
-                self.console.print('Thinking', style=theme.THINKING)
+                self.console.print('Thinking', style=theme.current().thinking)
             self._heading_printed = True
         if self._thinking:
             if self._thinking_writer is not None:
@@ -199,17 +200,17 @@ class StreamRenderer:
             elif isinstance(event, CodeBlockEndEvent):
                 # Lex the whole fence so multiline strings and comments keep their state.
                 with self.console.capture() as capture:
-                    self.console.rule(Text(self._code_language), align='left', style=theme.MUTED)
+                    self.console.rule(Text(self._code_language), align='left', style=theme.current().muted)
                     self.console.print(
                         Syntax(
                             '\n'.join(self._code_lines),
                             LANGUAGE_ALIASES.get(self._code_language.lower(), self._code_language.lower()),
-                            theme='monokai',
+                            theme=theme.current().syntax,
                             background_color='default',
                             word_wrap=True,
                         )
                     )
-                    self.console.rule(style=theme.MUTED)
+                    self.console.rule(style=theme.current().muted)
                 (self._writer or self.console.file).write(capture.get())
                 self._code_lines = []
             else:

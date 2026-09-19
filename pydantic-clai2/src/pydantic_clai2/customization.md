@@ -15,8 +15,10 @@ contract; this guide is shipped with the package for use without a checkout.
 - Configure a plugin: host.settings with a Pydantic settings model.
 - Use a custom model/provider: supply a Pydantic AI Agent to chat from a Python
   launcher. There is no host.register_provider or host.register_model API.
+- Select terminal colours: /theme opens the picker; /theme pydantic, light,
+  or system selects directly and persists display.theme. It applies immediately.
 - Replace the prompt editor, splash, status line, streaming Markdown, built-in
-  model catalog, or global colour scheme: currently a CLAI source change, not
+  model catalog, or add a custom palette: currently a CLAI source change, not
   a supported PluginHost extension. A command can own its own UI instead.
 
 Pydantic AI core owns the agent loop, model/provider protocols, hooks and tools.
@@ -227,8 +229,11 @@ Return a Rich renderable, or None to let the next renderer/default handle it.
 CLAI flushes streaming text before printing it. First matching non-None renderer
 wins. Do not print from an event observer when a renderer can do the job.
 Use host.console for plugin-owned console output outside streaming handlers.
-Use pydantic_clai2.theme roles ACCENT, INFO, WARNING, ERROR, MUTED, THINKING,
-not hard-coded colours. Raw ANSI uses theme.sgr. StreamRenderer owns text and
+Read pydantic_clai2.theme.current() when rendering; use its accent, info,
+warning, error, muted, and thinking roles, not hard-coded colours. Uppercase
+constants stay at their default brand values and do not follow /theme.
+The syntax field supplies the Rich Syntax theme name for renderer integrations.
+Raw ANSI uses theme.sgr. StreamRenderer owns text and
 thinking, not tool-specific rendering.
 
 ## Custom TUI menus

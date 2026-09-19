@@ -94,7 +94,7 @@ class FieldMenu:
             MenuItem(
                 f'{row.key:<24} {self._source.current(row)}',
                 value=row.key,
-                description=f'{theme.sgr(theme.MUTED)}{row.note}' if row.note else '',
+                description=f'{theme.sgr(theme.current().muted)}{row.note}' if row.note else '',
             )
             for row in self.rows
         ]

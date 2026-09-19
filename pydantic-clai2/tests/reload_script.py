@@ -10,6 +10,7 @@ import prompt_toolkit
 import pytest
 from prompt_toolkit.completion import CompleteEvent, Completer
 from prompt_toolkit.document import Document
+from prompt_toolkit.styles import BaseStyle
 from pydantic_ai import Agent, ModelRequestContext, RunContext, models
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.messages import ModelRequest, UserPromptPart
@@ -18,7 +19,7 @@ from pydantic_ai_harness.step_persistence.conversations import SqliteConversatio
 from rich.console import Console
 
 import pydantic_clai2
-from pydantic_clai2 import DEFAULT_PLUGINS, chat
+from pydantic_clai2 import DEFAULT_PLUGINS, chat, theme
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.project_settings import ProjectSettings
 from pydantic_clai2.settings_store import SettingsStore
@@ -68,6 +69,7 @@ async def main(root: Path, mode: str) -> None:
             '/help',
             '/set model test',
             '/set display.thinking false',
+            '/theme light',
             'first',
             '/reload extra',
             '/reload',
@@ -76,6 +78,7 @@ async def main(root: Path, mode: str) -> None:
             '/example',
             '/plugins list',
             'second',
+            '/theme system',
             '/reload',
             '/help',
             'third',
@@ -91,6 +94,9 @@ async def main(root: Path, mode: str) -> None:
             completer = kwargs['completer']
             assert isinstance(completer, Completer)
             self.completer = completer
+            style = kwargs['style']
+            assert isinstance(style, BaseStyle)
+            self.style = style
 
         async def prompt_async(self, label: str, **kwargs: object) -> str:
             nonlocal reloads
@@ -99,6 +105,12 @@ async def main(root: Path, mode: str) -> None:
             ]
             labels.append(label)
             text = next(prompts)
+            if text in ('first', 'second', 'third'):
+                expected = 'system' if text == 'third' else 'light'
+                assert theme.current() is theme.THEMES[expected]
+                assert self.style.get_attrs_for_style_str('class:bottom-toolbar').color == (
+                    theme.current().thinking.lstrip('#')
+                )
             if text == '/reload' and mode != 'unchanged':
                 reloads += 1
                 sys.path.insert(0, str(root))
@@ -179,6 +191,8 @@ async def main(root: Path, mode: str) -> None:
     assert seen[2] == [*seen[1], 'third' if mode == 'unchanged' else 'third updated'], seen
     assert labels[-1] == ('> ' if mode == 'unchanged' else 'updated> ')
     assert store.load().model == 'test' and not store.load().thinking
+    assert store.load().theme == 'system'
+    assert theme.current() is theme.THEMES['pydantic']
     if mode in ('unchanged', 'success', 'custom'):
         assert text.count('CLAI2 reloaded. Conversation preserved.') == 2, text
         assert ('Use /help.' if mode == 'unchanged' else 'Use updated /help.') in text, text

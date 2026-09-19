@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
+from .theme import ThemeName
+
 
 class Settings(BaseModel):
     """An immutable snapshot; storage contains only explicit overrides."""
@@ -22,6 +24,7 @@ class Settings(BaseModel):
     session_namer_model: str | None = Field(
         default=None, description='Naming model override; null uses the current model.'
     )
+    theme: ThemeName = Field(default='pydantic', description='Terminal appearance: pydantic (dark), light, or system.')
     thinking: bool = Field(default=True, description="Show the model's thinking as it streams.")
     splash: bool = Field(default=True, description='Animate the startup splash. Takes effect next start.')
     tool_output: bool = Field(
@@ -46,6 +49,7 @@ SETTING_FIELDS = {
     'model': 'model',
     'run.request_limit': 'request_limit',
     'display.thinking': 'thinking',
+    'display.theme': 'theme',
     'display.splash': 'splash',
     'display.tool_output': 'tool_output',
     'display.shell_lines': 'shell_lines',

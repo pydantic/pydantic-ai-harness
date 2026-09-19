@@ -74,7 +74,7 @@ class Status:
     def toolbar(self) -> list[tuple[str, str]]:
         """prompt-toolkit fragments for the input prompt; the figure is `WARNING` while `context_alert` is set."""
         head, figure, tail = self.segments()
-        return [('', head), (theme.WARNING if self.context_alert else '', figure), ('', tail)]
+        return [('', head), (theme.current().warning if self.context_alert else '', figure), ('', tail)]
 
 
 def _interrupted() -> bool:
@@ -160,8 +160,9 @@ class StatusLine:
             self._height, self._rows = height, rows
         text = text[: max(0, width - 1)]
         highlight = frame % (len(text) + 12) - 6
-        shades = tuple(theme.sgr(color) for color in (theme.SUGAR, theme.LIGHT_PURPLE, theme.LITHIUM, theme.PURPLE))
-        warning = theme.sgr(theme.WARNING)
+        colors = theme.current()
+        shades = tuple(theme.sgr(color) for color in (colors.text, colors.highlight, colors.primary, colors.thinking))
+        warning = theme.sgr(colors.warning)
         painted = ''.join(
             (warning if index in alerted else shades[min(abs(index - highlight) // 2, 3)]) + char
             for index, char in enumerate(text)
@@ -171,7 +172,7 @@ class StatusLine:
             hint = '> Working... Ctrl-C to interrupt'[:inner_width].ljust(inner_width)
             border = '─' * inner_width
             for row, line in enumerate((f'┌{border}┐', f'│{hint}│', f'└{border}┘'), start=height - 3):
-                prefix += f'\x1b[{row};1H\x1b[2K{theme.sgr(theme.MUTED)}{line}\x1b[0m'
+                prefix += f'\x1b[{row};1H\x1b[2K{theme.sgr(colors.muted)}{line}\x1b[0m'
         self.console.file.write(f'{prefix}\x1b[{height};1H\x1b[2K{painted}\x1b[0m\x1b8')
         self.console.file.flush()
 

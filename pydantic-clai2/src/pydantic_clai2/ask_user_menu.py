@@ -90,7 +90,7 @@ class QuestionMenu:
             for index, label in enumerate(labels):
                 if index == self.cursor:
                     fragments.append(('[SetCursorPosition]', ''))
-                style = theme.ACCENT if index == self.cursor else theme.MUTED
+                style = theme.current().accent if index == self.cursor else theme.current().muted
                 marker = '[x]' if index in self.selected else '[ ]'
                 prefix = f'{marker} ' if self.question.multi_select and index < len(self.question.options) else ''
                 number = f'{index + 1}. ' if index < len(self.question.options) else ''
@@ -100,7 +100,7 @@ class QuestionMenu:
 
         def description() -> FormattedText:
             text = '' if self.cursor == len(self.question.options) else self.question.options[self.cursor].description
-            return FormattedText([(theme.MUTED, text or '')])
+            return FormattedText([(theme.current().muted, text or '')])
 
         options = Window(
             FormattedTextControl(rows, focusable=True),
@@ -112,7 +112,7 @@ class QuestionMenu:
             layout=Layout(
                 HSplit(
                     [
-                        Window(FormattedTextControl(FormattedText([(theme.ACCENT, self.title)])), height=1),
+                        Window(FormattedTextControl(FormattedText([(theme.current().accent, self.title)])), height=1),
                         Window(
                             FormattedTextControl(self.question.question),
                             wrap_lines=True,
@@ -158,14 +158,14 @@ def render_answer(event: AskUserAnsweredEvent) -> RenderableType:
     """Leave a record of the selected answers in the transcript."""
     text = Text()
     if event.response.cancelled:
-        text.append('● You declined to answer', style=theme.MUTED)
+        text.append('● You declined to answer', style=theme.current().muted)
         return text
     for index, answer in enumerate(event.response.answers):
         if index:
             text.append('\n')
-        text.append('● ', style=theme.MUTED)
-        text.append(answer.header, style=theme.ACCENT)
-        text.append(f': {", ".join(answer.selected)}', style=theme.MUTED)
+        text.append('● ', style=theme.current().muted)
+        text.append(answer.header, style=theme.current().accent)
+        text.append(f': {", ".join(answer.selected)}', style=theme.current().muted)
     return text
 
 

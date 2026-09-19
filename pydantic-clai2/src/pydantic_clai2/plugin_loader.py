@@ -160,7 +160,7 @@ class PluginLoader(Generic[DepsT]):
         try:
             children = sorted(folder.iterdir())
         except OSError as exc:
-            self._console.print(f'Cannot discover plugins: {exc}', style=theme.ERROR, markup=False)
+            self._console.print(f'Cannot discover plugins: {exc}', style=theme.current().error, markup=False)
             return {}
         for child in children:
             name = child.stem if child.suffix == '.py' else child.name
@@ -193,7 +193,7 @@ class PluginLoader(Generic[DepsT]):
                 try:
                     await self.load(entry.name, fresh=fresh)
                 except PluginError as exc:
-                    self._console.print(str(exc), style=theme.ERROR, markup=False)
+                    self._console.print(str(exc), style=theme.current().error, markup=False)
 
     async def load(self, name: str, *, fresh: bool = False) -> None:
         """Import, activate, and fire `session_start`. A failure leaves nothing registered."""
@@ -232,7 +232,7 @@ class PluginLoader(Generic[DepsT]):
         try:
             await _dispatch(entry.host, SessionEnd(reason=reason))
         except Exception as exc:  # noqa: BLE001 -- unloading must finish even if the plugin misbehaves.
-            self._console.print(str(PluginError(name, exc)), style=theme.ERROR, markup=False)
+            self._console.print(str(PluginError(name, exc)), style=theme.current().error, markup=False)
         finally:
             self._drop(entry)
 
@@ -255,7 +255,7 @@ class PluginLoader(Generic[DepsT]):
             except Exception as exc:
                 if isinstance(event, TurnStart):
                     raise PluginError(name, exc) from exc
-                self._console.print(str(PluginError(name, exc)), style=theme.ERROR, markup=False)
+                self._console.print(str(PluginError(name, exc)), style=theme.current().error, markup=False)
 
     async def enable(self, name: str) -> None:
         """Remember the plugin as enabled and load it now."""

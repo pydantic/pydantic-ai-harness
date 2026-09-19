@@ -37,6 +37,56 @@ plain text. Long code lines wrap to the terminal width. Prose still streams line
 by line. A plugin renderer that handles a text event replaces this default
 rendering for that event.
 
+## Themes
+
+```text
+/theme
+/theme light
+/theme system
+/theme pydantic
+```
+
+`/theme` opens a searchable picker with colour samples and a current-choice mark.
+Enter saves and applies; Esc or Ctrl-C keeps the current choice. `/theme NAME`
+selects directly, with Tab completion. `pydantic` is the default dark-terminal
+brand palette; `light` uses darker accents and pale surfaces; `system` uses your
+terminal's foreground and background without fixed UI colours. System diffs keep
+plain `+` and `-` markers. CLAI does not change or detect the terminal background.
+
+The setting is `display.theme`, shared with `/set` and persisted in SQLite.
+The project field is `theme`; a project override returns at next start. Changes
+apply immediately to the prompt, completions, status, menus, Markdown, thinking,
+and built-in tool output, not text already printed in scrollback. The early
+startup animation retains brand colours. Shell ANSI colours and hard-coded
+plugin styles are not rewritten. Fenced code uses Monokai for `pydantic`,
+Friendly for `light`, and terminal ANSI colours for `system`. Theme selection
+makes no model requests and emits no telemetry.
+
+Read roles when you render, not when the plugin imports:
+
+```python
+from rich.text import Text
+from pydantic_ai_harness.filesystem import FileWrittenEvent
+
+from pydantic_clai2 import theme
+from pydantic_clai2.plugins import PluginHost
+
+
+def activate(host: PluginHost[None]) -> None:
+    @host.render(FileWrittenEvent)
+    def show_write(event: FileWrittenEvent) -> Text:
+        return Text(f'wrote {event.path}', style=theme.current().accent)
+```
+
+`theme.current()` exposes `accent`, `info`, `warning`, `error`, `muted`, and
+`thinking`, plus Markdown and diff colours. Roles are scoped to the shell and
+follow setting changes in its tasks and menu workers. Existing uppercase colour
+constants remain the default brand values; use `current()` to follow selection.
+Raw ANSI uses `theme.sgr(colour)`, including its 16-colour fallback. Custom Termflow
+menus use `markdown_style()` when built. `theme.current().syntax` supplies the Rich
+Syntax name `monokai`, `friendly`, or `ansi_dark` for renderer integrations.
+The built-in fenced-code renderer uses this field too.
+
 ## Tool retries
 
 CLAI defaults to three retries per tool call. `/set run.tool_retries N` changes
@@ -473,14 +523,14 @@ capability (or `None`), for tools that should only exist in some runs.
 ### Draw an event yourself: `@host.render(EventClass)`
 
 Built-in tool rendering shows one summary line per call by default, clipped to
-the terminal width and followed by a blank line. Tool names are pink; arguments
+the terminal width and followed by a blank line. In the default theme, tool names are pink; arguments
 and bullet markers are muted grey. Shell output and completion details, grep results, and file
 diffs are hidden from the terminal, not from the model. Set
 `/set display.tool_output true` to restore detailed output; `display.shell_lines`
 and `display.grep_lines` then control preview lengths (20 lines each by default).
 This setting does not suppress plugin renderers or interactive questions.
 
-CLAI shows unknown tool calls as `● tool_name`, with the name in pink. To show something
+CLAI shows unknown tool calls as `● tool_name`, with the name in the accent colour. To show something
 better, return a Rich renderable (a `str` is fine). Return `None` to say "not mine,
 use the default".
 

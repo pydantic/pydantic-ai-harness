@@ -109,7 +109,7 @@ summary failure; other exceptions propagate.
 3. Fire it from exactly one place in the shell.
 4. Document it in `PLUGINS.md` in the table it belongs to.
 
-## The `/plugins`, `/set`, `/model`, and `/add_model` menus
+## The `/plugins`, `/set`, `/theme`, `/model`, and `/add_model` menus
 
 Built on termflow's `MenuBuilder` (and `TextInputBuilder` for typed values),
 exactly like Code Puppy's `/agent`, `/mcp`, `/set`, and `/model` menus:
@@ -162,13 +162,22 @@ the host does this for renderers, so do not call `console.print` from inside an
 
 ## Colours
 
-Every colour comes from `theme.py`, which holds the Pydantic brand palette and
-the roles CLAI paints with (`ACCENT`, `INFO`, `WARNING`, `ERROR`, `MUTED`,
-`THINKING`). Use a role, not a hex, and never a bare Rich colour name like
-`'cyan'` or `'dim'`. Raw ANSI surfaces (status line, splash) go through
-`theme.sgr(...)`, which handles the 16-colour fallback. `theme.py` is stdlib
-only because the splash imports it before anything heavy. Source of truth is
-the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
+Every colour comes from `theme.py`. Read `theme.current()` at render time:
+its `accent`, `info`, `warning`, `error`, `muted`, and `thinking` roles follow
+`display.theme`. `/theme` and `/set` share validation and persistence. A scoped
+settings reader lets editor tasks and menu workers see changes without a mutable
+global palette. Prompt-toolkit uses `DynamicStyle` to refresh existing widgets.
+Use a role, not a hex or a bare Rich colour name like `'cyan'` or `'dim'`.
+`theme.current().syntax` supplies a Rich Syntax theme name for renderer integrations.
+Fenced-code highlighting uses `theme.current().syntax` with Rich Syntax.
+The `system` theme uses terminal defaults; Termflow treats these as no fixed
+colour. Its diffs are plain because Termflow's diff markers require hex colours.
+
+Raw ANSI surfaces go through `theme.sgr(...)`, which handles the 16-colour
+fallback. `theme.py` stays stdlib only for the early startup splash. The splash
+and the uppercase constants retain the default brand palette; interactive output
+must not import those constants as active roles. The brand source of truth is
+pydantic.dev's `pydantic-visual-identity` skill's `brand-identity.md`.
 
 ## File map
 
@@ -189,6 +198,7 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `set_menu.py` | `/set`: `SettingsSource` over `CommandContext` |
 | `model_menu.py` | `/add_model`: provider discovery, `ModelSettingsSource`, `run_model_flow` |
 | `model_picker.py` | `/model`: selection and completion of saved models |
+| `theme_picker.py` | `/theme`: selection and preview of built-in terminal themes |
 | `model_catalog.py` | model sources (genai-prices today) merged by `catalog()` |
 | `model_settings.py` | `ModelSettingsForm`, the editable subset of `ModelSettings` |
 | `compaction.py` | the built-in `compaction` plugin: harness `FallbackCompaction([SummarizingCompaction, SlidingWindowCompaction])`, `/compact`, the context alert |
@@ -201,7 +211,7 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |
 | `repo_context.py` | the built-in `repo_context` plugin over harness `RepoContext` |
 | `notifications.py` | the built-in desktop notifications for turn outcomes and `AskUserRequestedEvent` |
-| `theme.py` | brand palette, colour roles, `sgr()` |
+| `theme.py` | brand palette, scoped active roles, syntax theme names, `sgr()` |
 
 Keep files concise - we don't need any 10,000 line files. Single responsibility.
 

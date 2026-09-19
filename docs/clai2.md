@@ -97,11 +97,45 @@ Pass secret references or use plugin-owned credential storage instead of embeddi
 
 `/set` on its own opens a full-screen menu, the same kind Code Puppy uses: the
 settings on the left, details for the highlighted one on the right (current
-value, default, what it does). Type to filter. Enter edits: booleans and the
+value, default, what it does). Type to filter. Enter edits: booleans, themes, and the
 model get a picker (the model list is searchable, with "Type a value..." for
 anything not listed), everything else a typed input that validates as you go.
 An empty value resets. `R` resets the highlighted setting. Esc closes. Every
 edit saves and applies immediately, the same as `/set KEY VALUE`.
+
+## Themes
+
+```text
+/theme
+/theme light
+/theme system
+/theme pydantic
+```
+
+`/theme` opens a searchable picker with colour samples. The current choice is
+marked. Enter saves and applies; Esc or Ctrl-C closes without changing it.
+`/theme NAME` selects directly, and Tab suggests the available names.
+
+| Name | Appearance |
+|---|---|
+| `pydantic` | The default Pydantic brand palette for dark terminals. |
+| `light` | Darker accents and pale diff surfaces for light terminals. |
+| `system` | Your terminal's foreground and background, without fixed UI colours. Diffs keep plain `+` and `-` markers. |
+
+The prompt, completions, status, menus, Markdown, thinking, and tool output use
+the new roles immediately. Text already printed in scrollback is not repainted.
+CLAI does not change your terminal's background or palette, and `system` does not
+try to detect light or dark mode. Select `light` after changing your terminal to a
+light background. Shell-provided ANSI colours and custom plugin styling remain
+their authors' choices. Fenced code uses Monokai for `pydantic`, Friendly for
+`light`, and terminal ANSI colours for `system`.
+
+The preference is saved as `display.theme` in the existing settings database.
+`/set display.theme light` uses the same validation and applies immediately;
+reset that setting in `/set` to restore `pydantic`. A project can set `"theme"`
+in `.clai/settings.json`; as with other settings, its value returns at next start.
+The early startup animation keeps its brand colours because it runs before
+settings load. Theme selection makes no model requests and emits no telemetry.
 
 ## Models and their settings
 
@@ -139,7 +173,7 @@ Settings are validated before writes. `/set` updates the active settings snapsho
 legacy `/config` writes apply on restart; plugin changes apply on the next prompt.
 `--request-limit` controls the full prompt's model-request budget.
 
-Interactive commands: `/login`, `/set`, `/model`, `/help`, `/new`, `/exit`, `/config`, `/plugins`, and `/reload`.
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/help`, `/new`, `/exit`, `/config`, `/plugins`, and `/reload`.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
 Unknown slash commands are not sent to the model. Up/down recall prompt history
@@ -188,15 +222,12 @@ failed or cancelled turns leave the previous history intact, though external too
 side effects may already have occurred. History is in memory only. Structured
 outputs are supported and displayed after completion.
 
-CLAI is painted in the Pydantic brand palette: Lithium magenta for headings,
-the banner, and the thing to look at; Calcium for list markers and errors; Aqua
-for links and added diff lines; Pydantic AI cyan for guidance; purple with a
-magenta-to-white shimmer for the active status line and plain purple while idle;
-brand grey for tool previews and hints. On terminals without 24-bit
-colour the nearest of the 16 standard colours is used. Every colour lives in
-`theme.py`. This is local to CLAI; it does not change your terminal's colours
-or Termflow defaults elsewhere. Code blocks use Rich's syntax renderer with the
-Monokai palette and Termflow's language aliases.
+CLAI defaults to the Pydantic brand palette. [Themes](#themes) describes the
+other appearances. Every role lives in `theme.py`; `theme.current()` resolves the
+active session's colours at render time. Code blocks use Rich's syntax renderer
+with the active `syntax` theme (`monokai`, `friendly`, or `ansi_dark`) and
+Termflow's language aliases. The raw-ANSI status and preview surfaces use a
+16-colour fallback when the terminal does not advertise true colour.
 
 Streaming matches Code Puppy's separate output and thinking paths:
 
@@ -316,7 +347,7 @@ Native capability events drive specialized output: `FileEditedEvent` renders its
 bounded unified diff using Termflow `DiffRenderer`, the same renderer Code Puppy
 uses. Addition backgrounds are muted teal (`#203c3b`), deletion backgrounds are
 muted burgundy (`#432d3b`), and brighter markers distinguish the changes. Code
-syntax colors are unchanged. Successful file writes also show the proposed diff from their matching
+syntax colors follow the selected theme. Successful file writes also show the proposed diff from their matching
 `FileChangeRequestEvent`: new files show additions, overwrites show before/after
 changes. Without a matching request event, only the written path is shown. Failed
 or cancelled writes do not display a success diff. Large diffs retain the

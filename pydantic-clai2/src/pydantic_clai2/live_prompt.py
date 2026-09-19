@@ -102,7 +102,7 @@ class LivePrompt:
         if not self.interrupts.active:
             return FormattedText([])
         frame = _WORKING_FRAMES[int(self._clock() * 10) % len(_WORKING_FRAMES)]
-        return FormattedText([(theme.MUTED, ' Working '), (theme.ACCENT, frame), ('', ' ')])
+        return FormattedText([(theme.current().muted, ' Working '), (theme.current().accent, frame), ('', ' ')])
 
     async def read(self) -> str:
         """Consume submissions in order without overlapping agent runs."""
@@ -138,7 +138,7 @@ class LivePrompt:
             lines.append(text.plain)
         if len(messages) > limit:
             lines.append(f'+{len(messages) - limit} more queued')
-        return FormattedText([(theme.MUTED, '\n'.join(lines))])
+        return FormattedText([(theme.current().muted, '\n'.join(lines))])
 
     def accept(self, buffer: Buffer) -> bool:
         """Submit the current buffer without ending the editor application."""

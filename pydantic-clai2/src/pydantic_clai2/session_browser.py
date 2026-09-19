@@ -42,9 +42,9 @@ def date_label(moment: datetime, *, now: datetime | None = None) -> str:
     return day.isoformat()
 
 
-def colored(text: str, *, role: str = theme.INFO, bold: bool = False) -> str:
+def colored(text: str, *, role: str | None = None, bold: bool = False) -> str:
     """Use the shared brand palette, including the 16-color fallback."""
-    return f'{theme.sgr(role, bold=bold)}{plain(text)}\x1b[0m'
+    return f'{theme.sgr(role or theme.current().info, bold=bold)}{plain(text)}\x1b[0m'
 
 
 class SessionBrowser:
@@ -186,7 +186,7 @@ class SessionBrowser:
         for entry in entries[start : start + capacity]:
             day = date_label(entry.updated_at)
             if self.sort == 0 and day != last_day:
-                lines.append(colored(day, role=theme.MUTED))
+                lines.append(colored(day, role=theme.current().muted))
                 last_day = day
             marker = '> ' if entry == selected else '  '
             risk = ' !' if entry.outcome in ('running', 'failed', 'cancelled') else ''
@@ -196,7 +196,7 @@ class SessionBrowser:
                 counts = f'{entry.message_count} msgs'
             title = truncate(plain(title), max(1, width - len(counts) - 1))
             if entry == selected and self.mode == 'sessions':
-                title = f'{theme.sgr(theme.INFO, bold=True)}{title}\x1b[0m'
+                title = f'{theme.sgr(theme.current().info, bold=True)}{title}\x1b[0m'
             lines.append(title + ' ' * max(1, width - visible_length(title) - len(counts)) + counts)
             tags = list(entry.tags)
             while tags and len(' '.join(f'#{t}' for t in tags)) > width // 2:
@@ -209,7 +209,7 @@ class SessionBrowser:
             )
             if self.query:
                 detail += f'  [{entry.workspace}]'
-            lines.append(colored(detail, role=theme.MUTED))
+            lines.append(colored(detail, role=theme.current().muted))
         if not entries:
             lines.append('No saved sessions match. Esc goes back.')
         return lines
