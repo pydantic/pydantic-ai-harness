@@ -339,3 +339,16 @@ async def test_alt_v_during_work_attaches_without_cancelling(monkeypatch: pytest
             pipe.send_text('\x1b')
             await stopped.wait()
             assert images.resolve(live.prompt.default_buffer.text) == ('caption', [image])
+
+
+async def test_queue_labels_screenshot_paths_as_follow_ups() -> None:
+    async with editor() as (live, _, _):
+        for text in ('/tmp/shot.png', '/screenshot.PNG', '/help', '/unknown-command'):
+            live.prompt.default_buffer.text = text
+            live.prompt.default_buffer.validate_and_handle()
+        assert live.queue_preview()[0][1].splitlines() == [
+            'Follow-up: /tmp/shot.png',
+            'Follow-up: /screenshot.PNG',
+            'Command: /help',
+            'Command: /unknown-command',
+        ]

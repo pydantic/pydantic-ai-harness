@@ -28,6 +28,15 @@ Use `/set display.tool_output true` to show detailed output again, or
 `display.shell_lines` and `display.grep_lines` limit previews to 20 lines by
 default. Plugin-provided rendering, including interactive questions, is unchanged.
 
+## Code highlighting
+
+Fenced code uses the fence's language for syntax highlighting. CLAI renders a
+block when its closing fence arrives, or when the text part ends if the fence
+is unfinished. This keeps multiline strings and comments correctly colored.
+Prose outside fences still streams line by line. Unlabelled and Markdown fences
+stay literal, including indentation and blank lines; unknown languages use plain
+text. Long code lines wrap to the terminal width.
+
 ## Interrupting a turn
 
 Press Esc or Ctrl-C to cancel the active agent turn without discarding your draft.
@@ -319,8 +328,19 @@ Interactive commands: `/login`, `/set`, `/model`, `/add_model`, `/help`, `/new`,
 `/plugins`, `/reload`, `/usage`, `/cost`, and `/compact` from the built-in `compaction` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
-Unknown slash commands are not sent to the model. Up/down recall saved prompt
-history. Ctrl-D exits. Ctrl-C at input clears the line; during a run it cancels
+Unknown command-shaped input such as `/missing` still reports an error instead
+of reaching the model. Absolute paths such as `/Users/me/Desktop/Screenshot.png`
+are prompts, not commands: a slash, dot, or backslash in the first token after
+`/` marks path-like input. Quoted paths are also prompts. For an ambiguous
+single-component path with spaces, quote it, for example `"/Screen Shot.png"`.
+This routing handles path text that the editor has not converted to an attachment.
+After trimming surrounding whitespace, that text, including internal spaces and
+shell escapes, reaches the agent unchanged. Routing alone does not read the file;
+the agent's configured tools determine how it can access it. Separately, bracketed
+paste of existing image paths creates attachments as described in
+[Pasting images](#pasting-images).
+
+Up/down recall saved prompt history. Ctrl-D exits. Ctrl-C at input clears the line; during a run it cancels
 the turn and returns to input. No cancelled run is automatically retried.
 
 ## Reload CLAI during development
@@ -342,10 +362,22 @@ and their registrations are recreated. Installed module globals not overwritten
 by the new source can survive; initialize mutable state in `activate`.
 Import-time side effects cannot be undone.
 
-Reload ordering follows the modules' existing imports. Restart after changing
-import dependencies, startup code, or the custom agent's construction. `/reload`
-does not rerun the CLI or recursively reload third-party packages. Use
-`/plugins reload NAME` when you only want to reload one plugin.
+Reload ordering follows module-scope imports in the current Python source, so
+adding or changing imports between CLAI modules does not require a restart.
+Newly referenced local modules and package initializers are included when planning
+the dependency order, but Python imports them only if the updated code uses them.
+Function-local imports and `TYPE_CHECKING` guards do not create eager dependencies.
+Literal guards and direct comparisons of `sys.platform`, `os.name`, and
+`sys.version_info` select only the active branch, including imported aliases.
+Other conditions are analyzed conservatively and may require a restart if their
+alternative imports form a cycle. No guard expression is executed during planning.
+A detected import cycle or invalid source reports an error before reloading modules.
+
+Restart for changes to startup code, the custom agent's construction, or dependencies
+loaded dynamically rather than declared by module-scope imports. `/reload` does not
+rerun the CLI or recursively reload third-party packages. Import-time side effects
+still cannot be undone. Use `/plugins reload NAME` when you only want to reload one
+plugin.
 
 ## Saved sessions and `/resume`
 

@@ -28,6 +28,15 @@ Custom agents can opt in with `customization_guide()` from
 write files, activate plugins, or grant permission to execute generated code.
 Keep the bundled guide aligned with this contract when changing plugin APIs.
 
+## Default code rendering
+
+The default stream renderer buffers fenced code until the fence closes or the
+text part ends, then highlights the whole block. This preserves multiline lexer
+context. Unlabelled and Markdown fences stay literal; unknown languages use
+plain text. Long code lines wrap to the terminal width. Prose still streams line
+by line. A plugin renderer that handles a text event replaces this default
+rendering for that event.
+
 ## Tool retries
 
 CLAI defaults to three retries per tool call. `/set run.tool_retries N` changes
@@ -251,8 +260,16 @@ recreated, but installed module globals not overwritten by the new source can
 survive. Initialize mutable state in `activate`. Disabled and unapproved project
 plugins stay off. Failed imports or shell rebuilds restore the
 previous module bindings and report the error, but cannot undo import-time side
-effects. Restart for changes to startup code, import dependencies, or agent
-construction. Third-party dependencies are not recursively reloaded.
+effects. Reload ordering is planned from current module-scope source imports,
+including newly referenced local modules and package initializers. Lazy imports
+inside functions and `TYPE_CHECKING` guards do not create eager dependencies;
+new modules are imported only when reached by the updated code. Literal guards
+and direct platform/version comparisons select their active branch without
+executing guard expressions. Other conditions are analyzed conservatively and
+may require a restart if their alternatives form a cycle. Invalid source
+or a detected import cycle fails before module reloads begin. Restart for changes
+to startup code, dynamically loaded dependencies, or agent construction.
+Third-party dependencies are not recursively reloaded.
 
 What "load" and "unload" mean for your plugin:
 
@@ -399,6 +416,16 @@ host.commands.register(
 The handler gets the arguments as a list of strings and returns the text to show.
 It may be `async`. Add `complete=` to offer Tab suggestions. Names must be unique;
 clashing with a built-in is an error at startup, not a silent override.
+
+Path-like input is not dispatched to commands. A slash, dot, or backslash in the
+first token after the leading `/` makes it a prompt instead, so screenshot paths
+such as `/Users/me/Desktop/Screen Shot.png` appear as follow-ups in the queue.
+For path text not converted to an image attachment by the editor, surrounding
+whitespace is trimmed and the remaining text reaches the agent without further
+rewriting. Quoted paths are prompts too. Unknown command-shaped names such as
+`/missing` still report an error. Routing itself does not read files; the editor's
+separate image-paste handling can attach existing images before routing. See
+[Image input](#image-input) for the resulting hook payloads.
 
 ### Give the agent tools or instructions: `host.add(capability)`
 

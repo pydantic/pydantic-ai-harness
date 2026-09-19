@@ -143,9 +143,16 @@ in `activate`. Failed imports or shell rebuilds restore previous module bindings
 and report the error; correct the source and retry. Import-time side effects
 cannot be undone.
 
-Reload ordering follows existing imports. Restart for changes to import
-dependencies, startup code, or agent construction. Third-party dependencies are
-not recursively reloaded. Use `/plugins reload NAME` to reload only one plugin.
+Reload ordering follows module-scope imports in the current source, including
+newly added dependencies between CLAI modules and new local modules. Function-local
+imports and `TYPE_CHECKING` guards do not create eager dependencies. Literal
+guards and direct platform/version comparisons select their active branch without
+executing source expressions. Other conditions are analyzed conservatively and
+may require a restart if their alternatives form a cycle. New modules
+are imported only if reached by the updated code; invalid source or a detected
+import cycle fails before reloads begin. Restart for changes to startup code,
+agent construction, or dynamically loaded dependencies. Third-party dependencies
+are not recursively reloaded. Use `/plugins reload NAME` to reload only one plugin.
 
 ## Hooks, tools and settings
 
@@ -208,7 +215,14 @@ If an event supports cancel(), use its documented cancellation semantics.
 
 Command handlers receive list[str] arguments and return a string or an awaitable
 string. Register complete= on Command for Tab suggestions. Command names must be
-unique, including built-ins. Unknown slash commands do not reach the model.
+unique, including built-ins. Unknown command-shaped input such as `/missing`
+does not reach the model. Path-like input (a slash, dot, or backslash in the first
+token after `/`) is passed through as a prompt instead. Routing itself does not
+read files. Separately, the editor converts bracketed pastes of existing image
+paths into attachments. Ctrl-V or Alt-V attaches clipboard images. Attachment
+markers are removed before host turn hooks run; those hooks receive the text
+caption, while core hooks receive the multimodal request. Quoted paths are also
+prompts.
 Commands run between turns, which makes them suitable for configuration menus.
 
 Use a renderer for output during a stream:
