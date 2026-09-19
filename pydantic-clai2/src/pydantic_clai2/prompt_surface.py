@@ -66,7 +66,9 @@ class PromptSurface(io.StringIO):
             parts: list[str] = []
             if not self._active:
                 # Reserve space by scrolling existing contents, not clearing them.
-                parts.extend(['\x1b[?25l\x1b[?2004h', '\r\n' * len(rows), f'\x1b[1;{bottom}r', f'\x1b[{bottom};1H'])
+                parts.extend(
+                    ['\x1b[?25l\x1b[?2004h\x1b[>4;1m', '\r\n' * len(rows), f'\x1b[1;{bottom}r', f'\x1b[{bottom};1H']
+                )
                 self._active = True
             elif geometry_changed:
                 old_bottom = self._geometry[1] - len(self._rows)
@@ -104,7 +106,7 @@ class PromptSurface(io.StringIO):
             parts = ['\x1b[?2026h', '\x1b[r']
             for row in range(bottom + 1, self._geometry[1] + 1):
                 parts.append(f'\x1b[{row};1H\x1b[2K')
-            parts.extend([f'\x1b[{bottom};1H', '\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?2026l'])
+            parts.extend([f'\x1b[{bottom};1H', '\x1b[>4;0m\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?2026l'])
             self.output.write(''.join(parts))
             self.output.flush()
             self._rows = ()

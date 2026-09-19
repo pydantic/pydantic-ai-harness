@@ -483,7 +483,10 @@ is one) has to wait for streamed text to finish and the editor and status row to
 get out of the way. `host.full_screen()` flushes pending output, suspends the
 editor's input reader, and restores the editor and its draft when the block exits.
 The editor remains active during agent turns: users can draft and queue messages,
-but turns and slash commands execute sequentially. While work or turn lifecycle
+but turns and slash commands execute sequentially. Shift-Enter inserts a newline;
+Enter submits. Alt-Enter remains a fallback for terminals that cannot distinguish
+Shift-Enter. Modified-key reporting is enabled only while the editor owns input.
+While work or turn lifecycle
 hooks are active, a `Working` label and spinner appear in the editor's top border,
 without adding an input row or changing the draft. The indicator uses the editor's refresh cycle, adds no
 background task, and is hidden while a full-screen interface owns the terminal.

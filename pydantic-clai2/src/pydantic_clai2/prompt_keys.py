@@ -25,6 +25,7 @@ class PromptKeys:
         self._stack: ExitStack | None = None
         self._timer: asyncio.TimerHandle | None = None
         self._escape = False
+        self._csi = ''
 
     def start(self) -> None:
         """Attach one input reader, with raw mode owned by its lifetime."""
@@ -44,6 +45,7 @@ class PromptKeys:
             self._timer.cancel()
             self._timer = None
         self._escape = False
+        self._csi = ''
         if self._stack is not None:
             self._stack.close()
             self._stack = None
@@ -67,11 +69,29 @@ class PromptKeys:
         if self._escape:
             self._escape = False
             self.feed('escape', '')
+        self._csi = ''
 
     def dispatch(self, key: KeyPress) -> None:
         """Translate decoder tokens into editor actions and literal paste payloads."""
+        if key.data in ('\x1b[13;2u', '\x1b[27;2;13~') and key.key != Keys.BracketedPaste:
+            self._escape = False
+            self.feed('shift-enter', key.data)
+            return
+        if self._csi:
+            # The installed decoder splits unrecognized CSI-u into individual
+            # keys. Reassemble it here, without modifying its global key table.
+            self._csi += key.data
+            if len(self._csi) > 32 or len(key.data) != 1 or '@' <= key.data <= '~':
+                sequence, self._csi = self._csi, ''
+                if sequence == '\x1b[13;2u':
+                    self.feed('shift-enter', sequence)
+            return
         if key.key == Keys.Escape:
             self._escape = True
+            return
+        if self._escape and key.data == '[':
+            self._escape = False
+            self._csi = '\x1b['
             return
         name = key.key.value if isinstance(key.key, Keys) else key.key
         name = {

@@ -350,7 +350,10 @@ paste of existing image paths creates attachments as described in
 [Pasting images](#pasting-images).
 
 Up/down move through multiline drafts, then recall saved prompt history.
-Alt-Enter inserts a newline. Ctrl-R searches history; Enter accepts a search
+Shift-Enter inserts a newline; Enter submits. Alt-Enter also works as a fallback
+for terminals that do not report Shift-Enter separately. CLAI requests modified
+key reporting while the editor is active and releases it for menus and on exit.
+Ctrl-R searches history; Enter accepts a search
 result without submitting it. Ctrl-D exits when the draft is empty. Ctrl-C at
 input clears the line; during a run it cancels the turn and returns to input. No cancelled run is automatically retried.
 

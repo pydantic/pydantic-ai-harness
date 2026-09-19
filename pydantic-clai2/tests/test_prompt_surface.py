@@ -50,6 +50,7 @@ def test_growth_shrink_resize_and_menu_reentry_restore_margins() -> None:
     surface = PromptSurface(output=output, size=lambda: size)
     surface.paint(('prompt', 'footer'))
     assert '\x1b[1;22r' in output.getvalue()
+    assert '\x1b[>4;1m' in output.getvalue()
     surface.paint(('first', 'second', 'footer'))
     assert '\x1b[1;21r' in output.getvalue()
     surface.paint(('prompt', 'footer'))
@@ -59,7 +60,7 @@ def test_growth_shrink_resize_and_menu_reentry_restore_margins() -> None:
     surface.paint(('prompt', 'footer'))
     assert '\x1b[1;10r' in output.getvalue()
     surface.release()
-    assert output.getvalue().endswith('\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?2026l')
+    assert output.getvalue().endswith('\x1b[>4;0m\x1b[0m\x1b[?2004l\x1b[?25h\x1b[?2026l')
     surface.write('menu\n')
     surface.paint(('prompt', 'footer'))
     assert output.getvalue().count('\x1b[?25l') == 2

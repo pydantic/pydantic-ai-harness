@@ -57,3 +57,36 @@ async def test_attach_failure_unwinds_raw_mode(monkeypatch: pytest.MonkeyPatch) 
             keys.start()
         keys.stop()
     assert restored == [True]
+
+
+@pytest.mark.parametrize('sequence', ['\x1b[13;2u', '\x1b[27;2;13~'])
+async def test_shift_enter_through_actual_decoder_with_split_input(sequence: str) -> None:
+    events: list[tuple[str, str]] = []
+    with create_pipe_input() as pipe:
+        keys = PromptKeys(source=pipe, feed=lambda key, data: events.append((key, data)), eof=lambda: None)
+        try:
+            for char in sequence:
+                pipe.send_text(char)
+                keys.read()
+            assert events == [('shift-enter', sequence)]
+        finally:
+            keys.stop()
+
+
+def test_csi_partial_unknown_and_oversized_sequences_do_not_become_draft_text() -> None:
+    events: list[tuple[str, str]] = []
+    with create_pipe_input() as pipe:
+        keys = PromptKeys(source=pipe, feed=lambda key, data: events.append((key, data)), eof=lambda: None)
+        for sequence in ('\x1b[13;', '\x1b[999u', '\x1b[' + '9' * 31):
+            for char in sequence:
+                keys.dispatch(KeyPress(Keys.Escape if char == '\x1b' else char, char))
+            keys.flush()
+        assert events == []
+        keys.dispatch(KeyPress(Keys.ControlM, '\x1b[13;2u'))
+        assert events == [('shift-enter', '\x1b[13;2u')]
+        keys.dispatch(KeyPress(Keys.BracketedPaste, '\x1b[13;2u'))
+        assert events[-1] == ('paste', '\x1b[13;2u')
+        keys.dispatch(KeyPress(Keys.Escape, '\x1b'))
+        keys.dispatch(KeyPress('[', '['))
+        keys.dispatch(KeyPress(Keys.Left, '\x1b[D'))
+        assert len(events) == 2

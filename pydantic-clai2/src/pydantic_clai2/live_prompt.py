@@ -117,7 +117,7 @@ class LivePrompt:
             self.complete(backwards=key == 'backtab')
         elif key == 'enter':
             self.accept()
-        elif key in ('alt-enter', 'ctrl-j'):
+        elif key in ('shift-enter', 'alt-enter', 'ctrl-j'):
             self.buffer.insert('\n')
         elif key in ('up', 'down') and self._completions:
             self._selection = (self._selection + (-1 if key == 'up' else 1)) % len(self._completions)

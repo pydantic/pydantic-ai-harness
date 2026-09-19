@@ -253,3 +253,12 @@ async def test_footer_warning_and_control_bytes_are_safe() -> None:
         assert theme.sgr(theme.WARNING) in footer
         assert '\x1b[2J' not in footer
         assert r'\x1b[2J' in footer
+
+
+@pytest.mark.parametrize('sequence', ['\x1b[13;2u', '\x1b[27;2;13~', '\x1b\r'])
+async def test_shift_enter_inserts_newline_and_plain_enter_submits(sequence: str) -> None:
+    async with editor() as (live, pipe, _):
+        pipe.send_text(f'first{sequence}second\r')
+        assert await live.read() == 'first\nsecond'
+        assert live.queued_messages == ()
+        assert live.buffer.text == ''
