@@ -50,7 +50,12 @@ class LivePrompt:
         self.clock = clock
         self.buffer = PromptBuffer(history=list(reversed(list(history.load_history_strings()))))
         self.output = PromptSurface(output=console.file, size=lambda: (console.width, console.height))
-        self.keys = PromptKeys(source=get_app_session().input, feed=self.feed, eof=lambda: self.submit(EOFError()))
+        self.keys = PromptKeys(
+            source=get_app_session().input,
+            feed=self.feed,
+            eof=lambda: self.submit(EOFError()),
+            cursor_position=lambda row, column: self.output.cursor_position(row=row, column=column),
+        )
         self._submissions: deque[str | KeyboardInterrupt | EOFError] = deque()
         self._submitted = asyncio.Event()
         self._suspended = False

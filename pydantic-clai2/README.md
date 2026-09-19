@@ -713,7 +713,10 @@ a nonblinking reverse-video cell marks the editing position. Status and resize
 checks run ten times per second, writing only changed rows. Terminals shorter
 than six rows or narrower than six columns omit the border. Below three rows,
 the draft is retained but hidden until the terminal grows. The pinned surface
-requires VT scrolling-margin support. Full-screen menus release scrolling margins and detach the keyboard reader before taking over.
+requires VT scrolling-margin support. On resize, the editor uses a terminal
+cursor-position report to locate and erase its previous rows before repainting.
+Output briefly queues during that query; a 250 ms timeout resumes output without
+erasing guessed coordinates on terminals that do not reply. Full-screen menus release scrolling margins and detach the keyboard reader before taking over.
 Redirected output has no live editor or footer.
 No model requests or telemetry are added for status reporting.
 

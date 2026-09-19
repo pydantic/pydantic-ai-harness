@@ -193,6 +193,7 @@ the pydantic.dev `pydantic-visual-identity` skill's `brand-identity.md`.
 | `status.py` | the footer `Status` fields, `StatusSegment`, and the `StatusLine` row painter |
 | `live_prompt.py` | pinned editor lifecycle, completion worker, submission queue and menu handoff |
 | `prompt_surface.py` | scroll-region ownership, serialized transcript writes and changed-row painting |
+| `prompt_cursor.py` | transcript cursor tracking for locating the editor after terminal resize |
 | `prompt_buffer.py` | pure draft editing, history navigation, search and cell-width wrapping |
 | `prompt_keys.py` | keyboard decoder attachment only; no prompt-toolkit Application or renderer |
 | `config.py` | `Settings`, `PluginSettings` |
@@ -250,3 +251,8 @@ The hardware cursor stays hidden until release; the input cursor is a painted
 reverse-video cell. Keep terminal mutations in `PromptSurface`, and detach the
 key reader before a menu owns the screen. The remaining prompt-toolkit decoder
 preserves paste and modified keys not yet exposed by Termflow's `read_key`.
+
+On physical resize, use the terminal cursor report to locate the old editor
+relative to the transcript. Do not clear its old absolute coordinates: some
+terminals shift the viewport and put transcript there. Keep editor-height changes
+separate from terminal-size changes, and never guess which transcript rows to erase.
