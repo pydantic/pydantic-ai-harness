@@ -18,6 +18,10 @@ from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness.step_persistence.conversations import ConversationSummary, SqliteConversationStore
 from rich.console import Console
+from termflow.themes import (  # pyright: ignore[reportMissingTypeStubs]
+    PALETTES,
+    apply_palette,  # pyright: ignore[reportUnknownVariableType] -- upstream also accepts an untyped dict.
+)
 
 from . import openrouter, theme, vllm
 from ._branding import print_banner
@@ -48,6 +52,7 @@ from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
 from .status import Status, StatusLine
+from .theme_picker import theme_command
 from .tool_output import terminal_text
 from .usage_report import cost_line, session_usage
 
@@ -127,26 +132,29 @@ async def chat(
     async with agent:
         while True:
             reason: SessionEndReason = 'error'
-            try:
-                async with create_task_group() as workers:
-                    workers.start_soon(shell.sessions.namer.run)
-                    try:
-                        with transcript.capture(console):
-                            await shell.loader.load_all(fresh=fresh)
-                            _report_project_plugins(shell.loader, console)
-                            if resume is not None:
-                                console.print(await shell.sessions.command([resume] if resume else []), markup=False)
-                                resume = None
-                        reason = await shell.run()
-                    finally:
-                        workers.cancel_scope.cancel()
-            except BaseExceptionGroup as exc:
-                if len(exc.exceptions) == 1:
-                    raise exc.exceptions[0] from None
-                raise
-            finally:
-                with transcript.capture(console):
-                    await shell.loader.close(reason)
+            with theme.use(lambda: shell.context.settings.theme, output=console.file if console.is_terminal else None):
+                try:
+                    async with create_task_group() as workers:
+                        workers.start_soon(shell.sessions.namer.run)
+                        try:
+                            with transcript.capture(console):
+                                await shell.loader.load_all(fresh=fresh)
+                                _report_project_plugins(shell.loader, console)
+                                if resume is not None:
+                                    console.print(
+                                        await shell.sessions.command([resume] if resume else []), markup=False
+                                    )
+                                    resume = None
+                            reason = await shell.run()
+                        finally:
+                            workers.cancel_scope.cancel()
+                except BaseExceptionGroup as exc:
+                    if len(exc.exceptions) == 1:
+                        raise exc.exceptions[0] from None
+                    raise
+                finally:
+                    with transcript.capture(console):
+                        await shell.loader.close(reason)
             if not shell.reload_requested:
                 return
             shell.reload_requested = False
@@ -227,6 +235,8 @@ def _create_shell(
             session.tool_retries = updated.tool_retries
         elif key == 'run.request_limit':
             session.usage_limits = replace(session.usage_limits or UsageLimits(), request_limit=updated.request_limit)
+        elif key == 'display.theme' and console.is_terminal:
+            apply_palette(PALETTES[updated.theme], output=console.file, register_reset=False)
 
     context = CommandContext(
         settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting, project=project
@@ -250,6 +260,14 @@ def _create_shell(
             description='Change settings; no arguments opens the menu',
             handler=lambda args: set_command(context, args),
             complete=set_completions,
+        )
+    )
+    commands.register(
+        Command(
+            name='theme',
+            description='Select a Termflow palette; no arguments opens the picker',
+            handler=lambda args: theme_command(context, args),
+            complete=lambda args: PALETTES if len(args) <= 1 else (),
         )
     )
     commands.register(
@@ -333,7 +351,12 @@ def _create_shell(
             complete_while_typing=True,
             style=COMPLETION_STYLE,
             reserve_space_for_menu=6,
-            bottom_toolbar=lambda: FormattedText([(theme.MUTED, images.notice)] if images.notice else status.toolbar()),
+            bottom_toolbar=lambda: FormattedText(
+                [
+                    (style.replace(theme.MUTED, theme.current().ansi[8]), text)
+                    for style, text in ([(theme.MUTED, images.notice)] if images.notice else status.toolbar())
+                ]
+            ),
         )
     shell = _Shell(
         agent=agent,

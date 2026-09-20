@@ -4,27 +4,33 @@ from collections.abc import Iterable
 
 from prompt_toolkit.completion import CompleteEvent, Completer, Completion
 from prompt_toolkit.document import Document
-from prompt_toolkit.styles import Style
+from prompt_toolkit.styles import DynamicStyle, Style
 from termflow.tui.completion import CompleteEvent as TermflowEvent  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.completion import Document as TermflowDocument  # pyright: ignore[reportMissingTypeStubs]
 
+from . import theme
 from .commands import Commands
-from .theme import ELEMENT_PURPLE, GREY, LITHIUM, MUTED, PURPLE
 
-COMPLETION_STYLE = Style.from_dict(
-    {
-        'frame.border': MUTED,
-        'bottom-toolbar': f'noreverse bg:default {PURPLE}',
-        'bottom-toolbar.text': f'noreverse bg:default {PURPLE}',
-        'completion-menu': 'bg:default',
-        'completion-menu.completion': f'bg:default {GREY}',
-        'completion-menu.completion.current': f'bg:default {LITHIUM} bold',
-        'completion-menu.meta.completion': f'bg:default {GREY}',
-        'completion-menu.meta.completion.current': f'bg:default {LITHIUM}',
-        'scrollbar.background': 'bg:default',
-        'scrollbar.button': f'bg:default {ELEMENT_PURPLE}',
-    }
-)
+
+def completion_style() -> Style:
+    colors = theme.current().ansi
+    return Style.from_dict(
+        {
+            'frame.border': colors[8],
+            'bottom-toolbar': f'noreverse bg:default {colors[5]}',
+            'bottom-toolbar.text': f'noreverse bg:default {colors[5]}',
+            'completion-menu': 'bg:default',
+            'completion-menu.completion': f'bg:default {colors[8]}',
+            'completion-menu.completion.current': f'bg:default {colors[12]} bold',
+            'completion-menu.meta.completion': f'bg:default {colors[8]}',
+            'completion-menu.meta.completion.current': f'bg:default {colors[12]}',
+            'scrollbar.background': 'bg:default',
+            'scrollbar.button': f'bg:default {colors[8]}',
+        }
+    )
+
+
+COMPLETION_STYLE = DynamicStyle(completion_style)
 
 
 class PromptCompleter(Completer):

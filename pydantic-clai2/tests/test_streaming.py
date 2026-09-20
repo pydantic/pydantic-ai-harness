@@ -9,7 +9,9 @@ from pydantic_ai import FunctionToolCallEvent, FunctionToolResultEvent, PartDelt
 from pydantic_ai.messages import ThinkingPart, ThinkingPartDelta, ToolCallPart, ToolReturnPart
 from rich.console import Console
 from rich.text import Text
+from termflow.ansi.color import fg_color  # pyright: ignore[reportMissingTypeStubs]
 from termflow.stream import SmoothWriter  # pyright: ignore[reportMissingTypeStubs]
+from termflow.themes import PALETTES  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import StreamRenderer
 from pydantic_clai2.config import Settings
@@ -54,16 +56,16 @@ async def test_long_tool_name_does_not_wrap() -> None:
     assert output.getvalue().endswith('\n\n')
 
 
-async def test_markdown_uses_brand_palette() -> None:
+async def test_markdown_uses_termflow_palette() -> None:
     output = io.StringIO()
     renderer = StreamRenderer(Console(file=output, force_terminal=False), stop_loading=lambda: None)
     await renderer.on_stream_event(
         PartStartEvent(index=0, part=TextPart(content='# Heading\n\n- item with [link](https://pydantic.dev)\n'))
     )
     await renderer.finish()
-    assert '\x1b[38;2;229;32;233m' in output.getvalue()  # Lithium headings
-    assert '\x1b[38;2;255;101;80m' in output.getvalue()  # Calcium list markers
-    assert '\x1b[38;2;119;255;216m' in output.getvalue()  # Aqua links
+    style = PALETTES['catppuccin_mocha'].to_render_style()
+    for color in (style.bright, style.symbol, style.link):
+        assert fg_color(color) in output.getvalue()
     assert 'Heading' in output.getvalue()
     assert '\x1b]4;' not in output.getvalue()
 

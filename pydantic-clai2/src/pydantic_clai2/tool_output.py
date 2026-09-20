@@ -10,7 +10,7 @@ from pydantic_ai_harness.shell import CommandFinishedEvent, CommandOutputEvent, 
 from rich.ansi import AnsiDecoder
 from rich.console import Console
 from rich.text import Text
-from termflow.diff import DiffRenderer, DiffTheme  # pyright: ignore[reportMissingTypeStubs]
+from termflow.diff import DiffRenderer  # pyright: ignore[reportMissingTypeStubs]
 
 from . import theme
 
@@ -175,15 +175,7 @@ class ToolOutput:
         safe_diff = terminal_text(diff)
         if safe_diff:
             if self.console.is_terminal:
-                self.console.file.write(
-                    DiffRenderer(
-                        theme=DiffTheme(
-                            addition=theme.DIFF_ADDITION,
-                            deletion=theme.DIFF_DELETION,
-                            marker_brighten=2.0,
-                        )
-                    ).render(safe_diff)
-                )
+                self.console.file.write(DiffRenderer().render(safe_diff))
                 self.console.file.flush()
             else:
                 self.console.print(safe_diff, markup=False, highlight=False)

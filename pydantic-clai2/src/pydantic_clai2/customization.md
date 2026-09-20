@@ -16,8 +16,10 @@ contract; this guide is shipped with the package for use without a checkout.
 - Configure a plugin: host.settings with a Pydantic settings model.
 - Use a custom model/provider: supply a Pydantic AI Agent to chat from a Python
   launcher. There is no host.register_provider or host.register_model API.
+- Select colours: /theme opens the Termflow palette picker; /theme tokyo_night
+  selects directly and persists display.theme. /set exposes the same preference.
 - Replace the prompt editor, splash, streaming Markdown, built-in model catalog,
-  or global colour scheme: currently a CLAI source change, not a supported
+  or add custom palettes: currently a CLAI source change, not a supported
   PluginHost extension. A command can own its own UI instead. You can add a
   fragment to the status row with host.status_segment; you cannot redesign or
   replace the row itself.
@@ -272,7 +274,13 @@ CLAI flushes streaming text before printing it. First matching non-None renderer
 wins. Do not print from an event observer when a renderer can do the job.
 Use host.console for plugin-owned console output outside streaming handlers.
 Use pydantic_clai2.theme roles ACCENT, INFO, WARNING, ERROR, MUTED, THINKING,
-not hard-coded colours. Raw ANSI uses theme.sgr. StreamRenderer owns text and
+not hard-coded colours. These roles use the selected terminal palette's ANSI slots.
+Only termflow.themes.PALETTES are selectable; catppuccin_mocha is the default.
+theme.current().to_render_style() supplies Markdown and menu colours. Termflow
+applies foreground, background, and ANSI slots via OSC and CLAI resets them to
+terminal defaults on exit; redirected output receives no palette changes.
+The early splash, syntax highlighting, and diff colours do not follow selection.
+Raw ANSI uses theme.sgr. StreamRenderer owns text and
 thinking, not tool-specific rendering.
 
 Add a fragment to the status row with host.status_segment:
@@ -294,7 +302,7 @@ repaints about ten times a second, so it runs that often: no blocking IO, no
 awaits, no printing. Return an empty string to contribute nothing that frame.
 Fragments are truncated from the right on narrow terminals and cannot set their
 own colours. host.status_segment adds to the row; replacing the row, prompt
-editor, splash, or global colour scheme is still a CLAI source change.
+editor, splash, or adding custom palettes is still a CLAI source change.
 
 ## Custom TUI menus
 

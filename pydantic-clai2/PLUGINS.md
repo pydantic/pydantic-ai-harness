@@ -739,6 +739,33 @@ selects one without the menu. Its Tab suggestions contain only added models.
 The list persists across sessions. The currently configured model is retained
 when upgrading; `/set model NAME` also saves the model in this list.
 
+### Terminal themes
+
+```text
+/theme tokyo_night
+/set display.theme github_light
+```
+
+`/theme` without arguments opens the searchable picker. It offers only palettes
+from `termflow.themes.PALETTES`, with `catppuccin_mocha` as the default. The picker,
+`/set`, project settings, and persisted `display.theme` values share validation.
+Selection applies immediately and persists; cancelling the picker changes nothing.
+A project override takes precedence again on the next startup.
+
+Use the `ACCENT`, `INFO`, `WARNING`, `ERROR`, `MUTED`, and `THINKING` roles from
+`pydantic_clai2.theme` for Rich output, and `theme.sgr(role)` for raw ANSI surfaces.
+These roles use the terminal's ANSI slots. `theme.current()` returns the active
+Termflow `TerminalPalette`. Use `theme.current().to_render_style()` when building
+Termflow menus to read its Markdown colours at render time.
+
+Termflow changes the live terminal foreground, background, and ANSI palette via
+OSC sequences. CLAI resets them to the terminal's configured defaults on shell
+exit, including errors and cancellation, and does not emit palette changes to
+redirected output. Unsupported terminals may ignore the changes. Palette changes
+can recolour ANSI-styled scrollback. The early splash retains its brand colours;
+syntax and diff highlighting retain Termflow's defaults. Plugins cannot register
+custom palettes. Theme selection adds no model requests, hooks, or telemetry.
+
 ### Persisting conversation changes
 
 Use `await host.conversation.commit_messages(messages)` for between-turn history

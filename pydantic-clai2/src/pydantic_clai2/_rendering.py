@@ -36,18 +36,8 @@ from .tool_output import ToolOutput, print_tool_header, terminal_text
 
 
 def markdown_style() -> RenderStyle:
-    """Termflow palette from the brand guide: Lithium headings, Calcium markers, Aqua links."""
-    return RenderStyle(
-        bright=theme.LITHIUM,
-        head=theme.PURPLE,
-        symbol=theme.CALCIUM,
-        grey=theme.GREY,
-        dark=theme.DARK_PURPLE,
-        mid=theme.ELEMENT_PURPLE,
-        light=theme.GREY,
-        link=theme.AQUA,
-        error=theme.CALCIUM,
-    )
+    """Use Termflow's Markdown colours for the active built-in palette."""
+    return theme.current().to_render_style()
 
 
 class StreamRenderer:

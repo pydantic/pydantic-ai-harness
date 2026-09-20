@@ -15,7 +15,7 @@ from pydantic_ai.models.test import TestModel
 from rich.console import Console
 from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
 
-from pydantic_clai2 import api_keys, chat, key_menu
+from pydantic_clai2 import api_keys, chat, key_menu, theme
 from pydantic_clai2.command_context import CommandContext
 from pydantic_clai2.commands import Command
 from pydantic_clai2.config import Settings
@@ -36,7 +36,7 @@ def inputs(monkeypatch: pytest.MonkeyPatch, values: list[str | BaseException]) -
             style = kwargs['style']
             assert isinstance(style, BaseStyle)
             for selector in ('class:bottom-toolbar', 'class:bottom-toolbar.text'):
-                assert style.get_attrs_for_style_str(selector).color == '9B77FF'
+                assert style.get_attrs_for_style_str(selector).color == theme.current().ansi[5].lstrip('#')
 
         async def prompt_async(self, label: str, **kwargs: object) -> str:
             value = values.pop(0)

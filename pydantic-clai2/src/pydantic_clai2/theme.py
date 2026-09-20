@@ -1,9 +1,47 @@
-"""Pydantic brand palette and the roles CLAI paints with. Stdlib only, so the splash can import it.
+"""Terminal colour roles and Termflow palettes. Heavy imports stay out of the startup splash."""
 
-Source: pydantic.dev `.agents/skills/pydantic-visual-identity/references/brand-identity.md`.
-"""
+# ruff: noqa: PLC0415 -- the splash must not import Termflow at startup.
+
+from __future__ import annotations
 
 import os
+from collections.abc import Callable, Generator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import IO, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from termflow.themes import TerminalPalette  # pyright: ignore[reportMissingTypeStubs]
+
+_ACTIVE: ContextVar[Callable[[], str]] = ContextVar('clai_theme', default=lambda: 'catppuccin_mocha')
+
+
+def current() -> TerminalPalette:
+    """Read the session's palette, including settings changed in menu workers."""
+    from termflow.themes import PALETTES  # pyright: ignore[reportMissingTypeStubs]
+
+    return PALETTES[_ACTIVE.get()()]
+
+
+@contextmanager
+def use(get_name: Callable[[], str], *, output: IO[str] | None = None) -> Generator[None]:
+    """Scope a palette to a shell and reset terminal colours when it exits."""
+    from termflow.themes import (  # pyright: ignore[reportMissingTypeStubs]
+        apply_palette,  # pyright: ignore[reportUnknownVariableType] -- upstream also accepts an untyped dict.
+        reset_palette,
+    )
+
+    active = _ACTIVE
+    token = active.set(get_name)
+    try:
+        if output is not None:
+            apply_palette(current(), output=output, register_reset=False)
+        yield
+    finally:
+        if output is not None:
+            reset_palette(output=output)
+        active.reset(token)
+
 
 LITHIUM = '#E520E9'
 """Primary brand accent. Logo, interactive highlights."""
@@ -28,24 +66,21 @@ AI_CYAN = '#00FFEB'
 AI_YELLOW = '#D0FF71'
 """Pydantic AI sub-brand accent."""
 
-ACCENT = f'bold {LITHIUM}'
+ACCENT = 'bold bright_blue'
 """Names, arguments, the thing to look at."""
-INFO = AI_CYAN
+INFO = 'cyan'
 """Guidance the user asked for or needs next."""
-WARNING = AI_YELLOW
+WARNING = 'yellow'
 """Something stopped early but nothing broke."""
-ERROR = CALCIUM
+ERROR = 'red'
 """Something broke."""
-MUTED = GREY
+MUTED = 'bright_black'
 """Housekeeping: tool markers, previews, hints."""
-THINKING = PURPLE
+THINKING = 'magenta'
 """The model's reasoning heading."""
-BANNER = (LITHIUM, PURPLE, AI_CYAN)
+BANNER = ('bright_blue', 'magenta', 'cyan')
 """Top-to-bottom gradient for the CLAI banner."""
-DIFF_ADDITION = '#465258'
-"""Aqua over Dark Purple, one quarter strength."""
-DIFF_DELETION = '#682B36'
-"""Calcium over Dark Purple, one quarter strength."""
+_ANSI = {'bright_blue': 94, 'cyan': 36, 'yellow': 33, 'red': 31, 'bright_black': 90, 'magenta': 35}
 
 _BASIC = {
     LITHIUM: 95,
@@ -71,6 +106,8 @@ def sgr(color: str, *, bold: bool = False) -> str:
         color = color.removeprefix('bold ')
         bold = True
     prefix = '1;' if bold else ''
+    if color in _ANSI:
+        return f'\x1b[{prefix}{_ANSI[color]}m'
     if truecolor():
         red, green, blue = (int(color[index : index + 2], 16) for index in (1, 3, 5))
         return f'\x1b[{prefix}38;2;{red};{green};{blue}m'

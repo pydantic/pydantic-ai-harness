@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from pydantic import ValidationError
 from pydantic_ai.models import known_model_names
+from termflow.themes import PALETTES  # pyright: ignore[reportMissingTypeStubs]
 
 from .api_keys import set_api_key
 from .command_context import CommandContext
@@ -28,6 +29,8 @@ class SettingsSource:
             info = Settings.model_fields[field]
             if info.annotation is bool:
                 choices: tuple[str, ...] = ('true', 'false')
+            elif key == 'display.theme':
+                choices = tuple(PALETTES)
             elif key == 'model':
                 choices = tuple(known_model_names())
             else:

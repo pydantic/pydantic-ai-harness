@@ -1,6 +1,7 @@
 """Validated settings, independent of persistence and terminal code."""
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
+from termflow.themes import PALETTES  # pyright: ignore[reportMissingTypeStubs]
 
 
 class Settings(BaseModel):
@@ -22,6 +23,9 @@ class Settings(BaseModel):
     session_namer_model: str | None = Field(
         default=None, description='Naming model override; null uses the current model.'
     )
+    theme: str = Field(
+        default='catppuccin_mocha', description='Built-in Termflow terminal palette; /theme lists choices.'
+    )
     thinking: bool = Field(default=True, description="Show the model's thinking as it streams.")
     splash: bool = Field(default=True, description='Animate the startup splash. Takes effect next start.')
     tool_output: bool = Field(
@@ -41,11 +45,20 @@ class Settings(BaseModel):
         description='Catch-up window for smoothed response streaming, 0.1 to 5 seconds.',
     )
 
+    @field_validator('theme')
+    @classmethod
+    def validate_theme(cls, value: str) -> str:
+        """Keep picker, project files, and saved preferences on the same registry."""
+        if value not in PALETTES:
+            raise ValueError(f'Unknown theme: {value}. Choose from: {", ".join(PALETTES)}')
+        return value
+
 
 SETTING_FIELDS = {
     'model': 'model',
     'run.request_limit': 'request_limit',
     'display.thinking': 'thinking',
+    'display.theme': 'theme',
     'display.splash': 'splash',
     'display.tool_output': 'tool_output',
     'display.shell_lines': 'shell_lines',

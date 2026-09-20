@@ -11,6 +11,7 @@ from prompt_toolkit.output import DummyOutput
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from rich.console import Console
+from termflow.ansi.utils import ANSI_ESCAPE_RE  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import chat
 from pydantic_clai2.settings_store import SettingsStore
@@ -64,5 +65,6 @@ async def test_completion_control_bytes_are_not_executed_by_preview_or_echo(tmp_
             pipe.send_text('/exit\r')
             await done.wait()
     assert '\x1b]52;' not in output.getvalue()
-    assert '\x07' not in output.getvalue()
+    transcript = output.getvalue().removesuffix('\x1b]104\x07\x1b]111\x07\x1b]110\x07')
+    assert '\x07' not in ANSI_ESCAPE_RE.sub('', transcript)
     assert r'> /unsafe file\x1b]52;c;YQ==\x07' in output.getvalue()

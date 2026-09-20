@@ -344,7 +344,7 @@ the project file. `/plugins disable repo_context` turns it off, for this and
 every later session; `/plugins enable repo_context` brings it back. See
 [PLUGINS.md](PLUGINS.md#the-built-in-plugins) for its settings.
 
-Interactive commands: `/login`, `/set`, `/model`, `/add_model`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/add_model`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
 `/plugins`, `/reload`, `/usage`, `/cost`, and `/compact` from the built-in `compaction` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
@@ -603,15 +603,40 @@ interrupted responses and tool results. Failed turns leave the previous history
 intact. External tool side effects may already have occurred. History is in memory
 only. Structured outputs are supported and displayed after completion.
 
-CLAI is painted in the Pydantic brand palette: Lithium magenta for headings,
-the banner, and the thing to look at; Calcium for list markers and errors; Aqua
-for links and added diff lines; Pydantic AI cyan for guidance; purple with a
-magenta-to-white shimmer for the active status line and plain purple while idle;
-brand grey for tool previews and hints. On terminals without 24-bit
-colour the nearest of the 16 standard colours is used. Every colour lives in
-`theme.py`. This is local to CLAI; it does not change your terminal's colours
-or Termflow defaults elsewhere. Code block syntax highlighting retains Termflow's
-Monokai default.
+### Themes
+
+```text
+/theme
+/theme tokyo_night
+/set display.theme github_light
+/config reset display.theme
+```
+
+`/theme` opens a searchable picker with colour samples. Enter saves your choice;
+Esc or Ctrl-C closes it without changes. `/theme NAME` and `/set display.theme NAME`
+apply the same validated preference immediately and save it for future sessions.
+Tab completes the installed Termflow palette names. `/set` also includes a theme
+row; its reset action applies the default immediately. `/config reset display.theme`
+removes the saved override for the next startup.
+
+Choices come directly from Termflow's bundled registry, including `catppuccin_mocha`,
+`catppuccin_latte`, `tokyo_night`, and `github_light`. CLAI defines no extra palettes.
+The default is `catppuccin_mocha`, a bundled dark palette. Markdown and newly opened
+menus use Termflow's `to_render_style()`; shell roles use the terminal's ANSI slots.
+
+Termflow applies the palette to the terminal foreground, background, and 16 ANSI
+colours through OSC escape sequences. Supported terminals also recolour existing
+ANSI-styled scrollback. CLAI resets these colours to the terminal's configured
+defaults on exit, including failure and cancellation. Unsupported terminals may
+ignore palette changes. Redirected output receives no palette-changing sequences.
+This changes terminal colours, not your terminal configuration file.
+
+The early startup splash keeps its brand colours because settings are not loaded
+yet. Syntax highlighting retains Termflow's Monokai default, and diffs retain
+Termflow's default diff colours; those are separate from its terminal palettes.
+Theme selection adds no model requests or telemetry.
+
+### Streaming
 
 Streaming uses the defaults from [Code Puppy's smoothing adapters](https://github.com/mpfaffenberger/code_puppy/blob/a862bf478b63822c9d97093f81e4f827e1c53d6e/code_puppy/agents/smooth_stream.py):
 
@@ -685,9 +710,8 @@ repeated completion heading before the diff or output.
 
 Native capability events drive specialized output: `FileEditedEvent` renders its
 bounded unified diff using Termflow `DiffRenderer`, the same renderer Code Puppy
-uses. Addition backgrounds are muted teal (`#203c3b`), deletion backgrounds are
-muted burgundy (`#432d3b`), and brighter markers distinguish the changes. Code
-syntax colors are unchanged. Successful file writes also show the proposed diff from their matching
+uses, with Termflow's default addition and deletion backgrounds and brighter
+markers. Code syntax colours retain the Monokai default. Successful file writes also show the proposed diff from their matching
 `FileChangeRequestEvent`: new files show additions, overwrites show before/after
 changes. Without a matching request event, only the written path is shown. Failed
 or cancelled writes do not display a success diff. Large diffs retain the
