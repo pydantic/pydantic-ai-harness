@@ -271,7 +271,7 @@ def _create_shell(
     commands.register(
         Command(
             name='model_settings',
-            description='Edit settings for the current or a named added model',
+            description='Choose an added model to configure, or edit a named model',
             handler=lambda args: model_settings_command(context, args),
             complete=lambda args: model_completions(context, args),
         )

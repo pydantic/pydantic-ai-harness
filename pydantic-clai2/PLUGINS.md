@@ -740,21 +740,36 @@ when upgrading; `/set model NAME` also saves the model in this list.
 
 ### Model settings and custom parameters
 
-`/model_settings` edits the current model. `/model_settings PROVIDER:NAME`
-edits another added model without selecting it. Tab completes added models.
+`/model_settings` opens a searchable list of added models. Enter configures a
+model without changing the active model. Esc returns from settings to this list;
+Esc again closes it. `/model_settings PROVIDER:NAME` opens that model directly.
+Tab completes added models.
 `Ctrl+S` in `/add_model` opens the same editor. Edits save immediately and apply
-on the next prompt. `R` resets a field; Esc or Ctrl-C closes the menu.
+on the next prompt. `r` resets a field; Esc or Ctrl-C goes back. Fixed choices
+open a picker; numeric fields accept typed values, and empty input resets.
 
 The editor offers OpenAI reasoning effort, Responses reasoning context, mode,
 summary, and verbosity, and Claude classic/adaptive thinking and effort.
-Choices depend on the model and API: Chat Completions does not get Responses
+The editor hides generic request fields such as timeouts and penalties.
+Reasoning GPT models do not show sampling controls. Previously saved overrides
+remain visible so they can be reset. Choices depend on the model and API: Chat Completions does not get Responses
 controls, `all_turns` appears only on compatible models, and adaptive Claude
 models do not get a token budget. Classic thinking budgets must be at least
 1024 and below an explicit `max_tokens`. If classic thinking has no output cap,
 CLAI reserves the thinking budget plus 4096 output tokens. Other unset fields
 use the provider default.
 Explicit native thinking settings take precedence over generic `thinking`.
-No retry settings are included.
+GPT-6 and GPT-5.6 families, including provider-qualified and namespaced names,
+default to `thinking=true`, `service_tier=default`, reasoning effort `medium`,
+context `all_turns`, mode `standard`, summary `detailed`, and verbosity `low`.
+Explicit per-model values win; reset restores the family default without saving
+it as an override. Other models keep their existing defaults. Provider-specific
+fields are consumed only by APIs that support them; this does not add Responses
+controls to Chat Completions or other protocols.
+
+Code Puppy runtime parity is not complete. In particular, its progress-aware
+main/sub-agent streaming retries require core recovery support before CLAI can
+expose working retry controls. See [the parity audit](MODEL_SETTINGS_AUDIT.md).
 
 Pydantic AI owns adaptive-thinking translation and preserved-thinking replay,
 including Fable 5.1's recovery when a changed conversation prefix invalidates a

@@ -16,7 +16,7 @@ from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run
 from .menu_worker import menu_key, run_worker
 from .model_catalog import CatalogModel, catalog
 from .model_options import model_options, validate_model_options
-from .model_settings import ModelSettingsForm
+from .model_settings import ModelSettingsForm, model_defaults
 from .settings_store import SettingsStore
 
 _HINT = 'type to filter - Enter add and use model - Ctrl+S settings - Esc close'
@@ -41,7 +41,7 @@ class ModelSettingsSource:
     @property
     def title(self) -> str:
         """Menu title naming the model."""
-        return f'Settings for {self.model}'
+        return f'Settings - {self.model}'
 
     def rows(self) -> list[FieldRow]:
         """Every form field with its description and any fixed choices."""
@@ -54,16 +54,19 @@ class ModelSettingsSource:
             rows.append(
                 FieldRow(
                     key=key,
+                    label=_setting_label(key),
+                    allow_custom=False,
                     description=info.description or '',
-                    default='(not set)',
+                    default=shown(model_defaults(model=self.model).get(key)),
                     choices=options.get(key, ()) or _choices(info.annotation),
                 )
             )
         return rows
 
     def current(self, row: FieldRow) -> str:
-        """The saved value as the user would type it."""
-        return shown(self._store.model_settings(self.model).get(row.key))
+        """The effective value, without persisting inherited defaults."""
+        values = {**model_defaults(model=self.model), **self._store.model_settings(self.model)}
+        return shown(values.get(row.key))
 
     def problem(self, row: FieldRow, text: str) -> str | None:
         """Why `text` is not valid for the row, or `None` if it is."""
@@ -99,6 +102,18 @@ class ModelSettingsSource:
         form = ModelSettingsForm.model_validate({**self._store.model_settings(self.model), row.key: value})
         validate_model_options(model=self.model, form=form)
         return form
+
+
+def _setting_label(key: str) -> str:
+    labels = {
+        'max_tokens': 'Max Output Tokens',
+        'top_p': 'Top-P (Nucleus Sampling)',
+        'openai_text_verbosity': 'Verbosity',
+        'anthropic_thinking_mode': 'Extended Thinking',
+        'anthropic_thinking_budget': 'Thinking Budget',
+        'anthropic_effort': 'Effort',
+    }
+    return labels.get(key, key.removeprefix('openai_').replace('_', ' ').title())
 
 
 def _choices(annotation: object) -> tuple[str, ...]:
@@ -278,12 +293,13 @@ class _ConnectProvider(Exception):
 
 
 async def model_settings_command(context: CommandContext, args: list[str], *, runners: Runners = TERMINAL) -> str:
-    """Edit the current or a named saved model without switching models."""
+    """Pick a saved model to edit, or open a named one, without switching models."""
     if len(args) > 1:
         raise ValueError('Usage: /model_settings [NAME]')
-    name = args[0] if args else context.settings.model
-    if not name:
-        raise ValueError('No model selected. Use /add_model first.')
+    if not args:
+        messages = await run_worker(lambda: run_model_settings_picker(context=context, runners=runners))
+        return '\n'.join(messages) or 'No changes.'
+    name = args[0]
     if name not in context.store.models():
         raise ValueError(f'Model not added: {name}. Use /add_model {name} first.')
     messages = await run_worker(lambda: run_model_settings(store=context.store, model=name, runners=runners))
@@ -294,7 +310,50 @@ def run_model_settings(*, store: SettingsStore, model: str, runners: Runners) ->
     """Both entry points use the same field editor and custom-params submenu."""
     custom = CustomParamsMenu(store=store, model=model)
     return run_flow(
-        FieldMenu(ModelSettingsSource(store, model)),
+        FieldMenu(ModelSettingsSource(store, model), searchable=False),
         runners,
         submenus={'custom_params': lambda: custom.run(runners=runners)},
     )
+
+
+def build_model_settings_picker(*, context: CommandContext, current: str | None) -> Menu:
+    """Choose a model to configure without changing the active run model."""
+    names = context.store.models()
+
+    return (
+        MenuBuilder('Model Settings - Select a Model')
+        .style(markdown_style())
+        .items(
+            [MenuItem(name, value=name) for name in names]
+            or [MenuItem('No models added. Use /add_model first.', disabled=True)]
+        )
+        .searchable()
+        .list_width(40)
+        .initial_index(names.index(current) if current in names else 0)
+        .preview(lambda item: model_settings_summary(store=context.store, model=str(item.value)))
+        .footer_hint('type filter - Enter configure - Esc exit')
+        .key_source(menu_key)
+        .build()
+    )
+
+
+def model_settings_summary(*, store: SettingsStore, model: str) -> str:
+    """Preview effective settings without mutating the model or its saved overrides."""
+    values = {**model_defaults(model=model), **store.model_settings(model)}
+    lines = [model, '', 'Configured settings:' if values else 'No custom settings (model defaults).']
+    lines.extend(f'{_setting_label(key)}: {shown(value)}' for key, value in values.items())
+    return '\n'.join(lines)
+
+
+def run_model_settings_picker(*, context: CommandContext, runners: Runners) -> list[str]:
+    """Return from a model's editor to the picker, preserving its selection."""
+    current = context.settings.model
+    messages: list[str] = []
+    while True:
+        result = runners.run_list(build_model_settings_picker(context=context, current=current))
+        if result.cancelled or result.item is None or not isinstance(result.item.value, str):
+            return messages
+        current = result.item.value
+        if current not in context.store.models():
+            return messages
+        messages.extend(run_model_settings(store=context.store, model=current, runners=runners))

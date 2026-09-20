@@ -20,7 +20,7 @@ from pydantic_clai2.custom_params import CustomParamsMenu, DeleteParam, expand_p
 from pydantic_clai2.field_menu import FieldMenu
 from pydantic_clai2.model_menu import ModelSettingsSource, model_settings_command, run_model_settings
 from pydantic_clai2.model_options import model_options, validate_model_options
-from pydantic_clai2.model_settings import ModelSettingsForm, model_settings_from_json
+from pydantic_clai2.model_settings import ModelSettingsForm, model_defaults, model_settings_from_json
 
 
 @pytest.fixture
@@ -152,7 +152,10 @@ async def test_direct_command_persists_without_switching(tmp_path: Path) -> None
         context, ['openai:gpt-5.6'], runners=script.runners
     )
     assert context.settings.model == selected
-    assert context.model_settings('openai:gpt-5.6') == {'openai_reasoning_effort': 'max'}
+    assert context.model_settings('openai:gpt-5.6') == {
+        **model_defaults(model='openai:gpt-5.6'),
+        'openai_reasoning_effort': 'max',
+    }
     assert (
         await model_settings_command(
             context, [], runners=Script(lists=[MenuResult(cancelled=True)], choices=[], texts=[]).runners
@@ -163,8 +166,12 @@ async def test_direct_command_persists_without_switching(tmp_path: Path) -> None
         with pytest.raises(ValueError):
             await model_settings_command(context, args)
     context.settings = context.settings.model_copy(update={'model': None})
-    with pytest.raises(ValueError, match='No model selected'):
-        await model_settings_command(context, [])
+    assert (
+        await model_settings_command(
+            context, [], runners=Script(lists=[MenuResult(cancelled=True)], choices=[], texts=[]).runners
+        )
+        == 'No changes.'
+    )
 
 
 def test_editor_validation_and_reset(tmp_path: Path) -> None:
@@ -222,7 +229,7 @@ def test_custom_menu_add_edit_rename_delete_cancel(tmp_path: Path) -> None:
     assert run_model_settings(store=context.store, model=model, runners=script.runners) == [
         f'Reset custom_params for {model}.'
     ]
-    assert context.model_settings(model) == {'temperature': 1.0}
+    assert context.model_settings(model) == {**model_defaults(model=model), 'temperature': 1.0}
 
 
 def test_custom_editor_validates_before_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -280,7 +287,12 @@ async def test_saved_controls_and_custom_overrides_reach_openai_body(tmp_path: P
             context.store.save_model_settings(name, {**saved, 'custom_params': custom})
             result = await Agent(model).run('hello', model_settings=context.model_settings(name))
     assert result.output == 'done'
-    assert bodies[0]['reasoning'] == {'effort': 'high', 'context': 'all_turns', 'mode': 'standard'}
+    assert bodies[0]['reasoning'] == {
+        'effort': 'high',
+        'context': 'all_turns',
+        'mode': 'standard',
+        'summary': 'detailed',
+    }
     assert bodies[1]['reasoning'] == {'effort': 'max'}
     assert bodies[1]['custom'] == {'flag': True}
 

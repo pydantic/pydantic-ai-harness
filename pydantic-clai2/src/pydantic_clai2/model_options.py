@@ -5,32 +5,20 @@ import re
 from pydantic_ai.profiles.anthropic import anthropic_model_profile
 from pydantic_ai.profiles.openai import openai_model_profile
 
-from .model_settings import ModelSettingsForm
+from .model_settings import ModelSettingsForm, model_defaults
 
 
 def model_options(*, model: str) -> dict[str, tuple[str, ...]]:
     """Offer native controls only for the provider that will consume them."""
     provider, _, name = model.partition(':')
-    options: dict[str, tuple[str, ...]] = {
-        key: () for key in ModelSettingsForm.model_fields if not key.startswith(('openai_', 'anthropic_'))
-    }
+    name = name.rsplit('/', 1)[-1]
+    family_defaults = bool(model_defaults(model=model))
+    options: dict[str, tuple[str, ...]] = {key: () for key in ('max_tokens', 'temperature', 'seed', 'custom_params')}
     if provider in ('openai', 'openai-chat', 'openai-responses', 'openai-codex'):
-        profile = openai_model_profile(name)
-        if profile.get('openai_supports_reasoning', False):
-            efforts = _openai_efforts(name=name)
-            options['openai_reasoning_effort'] = tuple(efforts)
-            if provider != 'openai-chat':
-                options['openai_reasoning_summary'] = ()
-                options['openai_reasoning_context'] = (
-                    ('auto', 'current_turn', 'all_turns')
-                    if profile.get('openai_responses_supports_reasoning_context', False)
-                    else ('auto', 'current_turn')
-                )
-                if profile.get('openai_responses_supports_reasoning_mode', False):
-                    options['openai_reasoning_mode'] = ()
-        if provider != 'openai-chat':
-            options['openai_text_verbosity'] = ()
+        options = _openai_options(provider=provider, name=name, family_defaults=family_defaults)
     elif provider == 'anthropic':
+        options.pop('seed')
+        options['top_p'] = ()
         claude = anthropic_model_profile(name) or {}
         adaptive = claude.get('anthropic_supports_adaptive_thinking', False)
         options['anthropic_thinking_mode'] = ('adaptive', 'disabled') if adaptive else ('enabled', 'disabled')
@@ -40,7 +28,41 @@ def model_options(*, model: str) -> dict[str, tuple[str, ...]]:
             options['anthropic_effort'] = _anthropic_efforts(name=name)
         if claude.get('anthropic_disallows_sampling_settings', False):
             for key in ('temperature', 'top_p', 'top_k'):
-                options.pop(key)
+                options.pop(key, None)
+    elif provider in ('google', 'google-gla', 'google-vertex'):
+        options['top_p'] = ()
+        if name.startswith(('gemini-2.5', 'gemini-3')):
+            options['thinking'] = ()
+    elif family_defaults or openai_model_profile(name).get('openai_supports_reasoning', False):
+        options.pop('temperature')
+        options.pop('seed')
+        options['thinking'] = ()
+    return options
+
+
+def _openai_options(*, provider: str, name: str, family_defaults: bool) -> dict[str, tuple[str, ...]]:
+    options: dict[str, tuple[str, ...]] = {key: () for key in ('max_tokens', 'temperature', 'seed', 'custom_params')}
+    options['top_p'] = ()
+    options['service_tier'] = ()
+    if provider != 'openai-chat':
+        options.pop('seed')
+    profile = openai_model_profile(name)
+    if family_defaults or profile.get('openai_supports_reasoning', False):
+        for key in ('temperature', 'top_p', 'seed'):
+            options.pop(key, None)
+        options['thinking'] = ()
+        efforts = _openai_efforts(name=name)
+        options['openai_reasoning_effort'] = tuple(efforts)
+        if provider != 'openai-chat':
+            options['openai_reasoning_summary'] = ()
+            options['openai_reasoning_context'] = (
+                ('auto', 'current_turn', 'all_turns')
+                if family_defaults or profile.get('openai_responses_supports_reasoning_context', False)
+                else ('auto', 'current_turn')
+            )
+            if family_defaults or profile.get('openai_responses_supports_reasoning_mode', False):
+                options['openai_reasoning_mode'] = ()
+            options['openai_text_verbosity'] = ()
     return options
 
 

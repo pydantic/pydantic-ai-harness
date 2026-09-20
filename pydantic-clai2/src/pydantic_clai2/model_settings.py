@@ -1,5 +1,6 @@
 """The per-model settings a user can edit, validated before they reach `ModelSettings`."""
 
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -134,6 +135,23 @@ class ModelSettingsForm(BaseModel):
         return anthropic
 
 
-def model_settings_from_json(values: dict[str, JsonValue]) -> ModelSettingsForm:
-    """Validate what the store holds for one model."""
-    return ModelSettingsForm.model_validate(values)
+def model_defaults(*, model: str) -> dict[str, JsonValue]:
+    """CLAI defaults for GPT-6 and GPT-5.6 families, independent of provider."""
+    name = model.partition(':')[2] if ':' in model else model
+    name = name.rsplit('/', 1)[-1]
+    if not re.match(r'^gpt-(?:6(?:\.\d+)?|5\.6)(?:$|[-:])', name):
+        return {}
+    return {
+        'thinking': True,
+        'service_tier': 'default',
+        'openai_reasoning_effort': 'medium',
+        'openai_reasoning_context': 'all_turns',
+        'openai_reasoning_mode': 'standard',
+        'openai_reasoning_summary': 'detailed',
+        'openai_text_verbosity': 'low',
+    }
+
+
+def model_settings_from_json(values: dict[str, JsonValue], *, model: str = '') -> ModelSettingsForm:
+    """Resolve saved overrides against family defaults, then validate."""
+    return ModelSettingsForm.model_validate({**model_defaults(model=model), **values})
