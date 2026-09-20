@@ -37,6 +37,13 @@ Prose outside fences still streams line by line. Unlabelled and Markdown fences
 stay literal, including indentation and blank lines; unknown languages use plain
 text. Long code lines wrap to the terminal width.
 
+## Word deletion
+
+Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
+including trailing whitespace. Spaces, tabs, and newlines separate words. Text
+after the cursor is preserved. Your terminal must send Option as Alt/Meta for
+this shortcut; legacy and modified-key encodings are supported.
+
 ## Interrupting a turn
 
 Press Esc or Ctrl-C to cancel the active agent turn without discarding your draft.
@@ -170,6 +177,73 @@ pyramid, with CLAI lettering. The persistent `CLAI 2.0` banner uses `ansi_shadow
 The splash is disabled for redirected output, CLI arguments, small terminals,
 Windows, `NO_COLOR`, or `CLAI_NO_SPLASH=1`.
 
+## Headless mode
+
+```bash
+clai2 -p "Explain this repository" -m anthropic:claude-sonnet-4-6
+clai2 -p "Continue the task" --resume SESSION-ID
+```
+
+`-p` / `--prompt` requires prompt text as an argument, never reads stdin,
+and runs one turn through tools to completion. Only the final answer is printed
+to stdout, without Markdown rendering, wrapping, banners, thinking, or tool output.
+Errors go to stderr with a nonzero exit status; Ctrl-C exits with status 130.
+The turn is saved and can be resumed. With `-p`, `--resume` requires an explicit
+session ID; the browser cannot open. Prompt text is literal, not a slash command.
+
+`-m` is the short form of `--model`. It overrides the saved, project, and
+`CLAI_MODEL` model for this invocation without changing your saved preference.
+It also works in interactive mode.
+
+Headless mode skips the `ask_user` plugin, including saved replacements, without
+changing your preferences. Full-screen plugin requests fail rather than waiting
+for input. Other enabled plugins and coding tools still run with your permissions.
+Trusted third-party plugins must not read input or print directly to stdout;
+CLAI cannot enforce that contract on arbitrary Python code. Plugin load failures
+abort headless runs. Background session naming is not started.
+
+## Git worktrees
+
+```bash
+clai2 --worktree my-task
+clai2 -w
+```
+
+A Git worktree is another checkout of the same repository with its own branch
+and working files. Run these commands inside a repository with at least one
+commit. `--worktree NAME` creates a `clai/NAME` branch from the current `HEAD`
+and starts CLAI at `<repository-root>/.worktrees/NAME`.
+`-w` is the short form; omit the name to generate one. Names start with a letter
+or digit and contain only ASCII letters, digits, hyphens, and underscores.
+
+After checkout succeeds, CLAI adds `/.worktrees/` to Git's local `info/exclude`
+file to keep generated checkouts out of `git status`, without changing your
+tracked `.gitignore`.
+Uncommitted changes, ignored files, and untracked files are not copied. Project settings, repository instructions, and coding
+tools use the new worktree root. Your user settings and plugins stay available;
+a relative `--database` path still refers to the directory you launched from.
+
+CLAI prints the new path and branch. Existing branches and non-empty directories
+are rejected. If checkout fails, CLAI tries to remove only the branch it just
+created, without forcing deletion. If cleanup or the ignore edit fails, the error
+names the retained branch or checkout for recovery. The worktree and branch
+remain after exit, including startup
+errors after creation, so CLAI does not delete your work. Enter that directory
+and run `clai2 --resume` to continue a saved session. `--worktree` cannot be
+combined with `--resume`, `config`, or `plugins`.
+
+When you no longer need the checkout, use Git's own cleanup commands from your
+original repository root. Without `--force`, Git refuses to remove a dirty worktree:
+
+```bash
+git worktree remove .worktrees/my-task
+git branch -d clai/my-task
+```
+
+A worktree separates working files, not permissions. CLAI's default tools can
+still access files outside it. Creation runs before the agent starts and emits
+no agent telemetry spans.
+
 ## Codex authentication
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:
@@ -221,6 +295,11 @@ Codex tokens are not written to the settings database. Plugin settings are arbit
 JSON stored in plaintext in this database, including secrets if you put them there.
 Pass secret references or use plugin-owned credential storage instead of embedding keys.
 
+When you switch versions or branches, CLAI ignores saved setting names it does not
+recognize and leaves their stored values unchanged. Missing settings use the current
+defaults. New writes still reject unknown names and invalid values. Invalid saved
+values for known settings and unsupported database schema versions still cause an error.
+
 ```text
 /set
 /set model <Tab>
@@ -260,10 +339,101 @@ whatever you have set now. The left side shows model names and marks the current
 model; token counts stay in the details. The right side shows the provider, context window,
 prices, and any settings you have saved for that model. Type to filter. Enter
 saves it in your model list and makes it the model for the next prompt. `Ctrl+S` opens that model's settings:
-`max_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `timeout`, the two
-penalties, `parallel_tool_calls`, `thinking`, and `service_tier`. They are
+the model-aware request and thinking controls described below. They are
 saved per model and passed to every run with that model. Unsupported settings
 may be ignored or rejected by the provider; select only settings your provider supports. `/add_model NAME` sets the model without the menu.
+
+### Model settings and custom parameters
+
+`/model_settings` opens a searchable list of added models. Enter configures a
+model without changing the active model. Esc returns from settings to this list;
+Esc again closes it. `/model_settings PROVIDER:NAME` opens that model directly.
+Tab completes added models.
+`Ctrl+S` in `/add_model` opens the same editor. Edits save immediately and apply
+on the next prompt. `r` resets a field; Esc or Ctrl-C goes back. Fixed choices
+open a picker; numeric fields accept typed values, and empty input resets.
+
+Model preferences are shared across checkouts. Reading saved preferences ignores
+unknown fields, so newer settings do not break an older reader with this
+compatibility fix. Editing or resetting a known field preserves unknown fields
+in the store. New edits still reject unknown keys and invalid values.
+An invalid value in a known field stops that turn with a repair message, not the
+shell; use `/model_settings` to fix or reset it and try again. CLAI does not silently
+run with different settings or delete saved preferences.
+
+Older branches must receive this fix too. The minimum read-side backport is
+`ModelSettingsForm.model_validate(values, extra='ignore')` in
+`model_settings_from_json`; keep the form itself strict. Also backport preservation
+of unknown keys on save and the shell's model-settings validation error handler.
+
+The editor offers OpenAI reasoning effort, Responses reasoning context, mode,
+summary, and verbosity, and Claude classic/adaptive thinking and effort.
+The editor hides generic request fields such as timeouts and penalties.
+Reasoning GPT models do not show sampling controls. Previously saved overrides
+remain visible so they can be reset. Choices depend on the model and API: Chat Completions does not get Responses
+controls. OpenRouter and vLLM GPT routes expose Chat Completions reasoning effort
+and service tier, not Responses-only controls. `all_turns` appears only on compatible models, and adaptive Claude
+models do not get a token budget. Classic thinking budgets must be at least
+1024 and below an explicit `max_tokens`. If classic thinking has no output cap,
+CLAI reserves the thinking budget plus 4096 output tokens. Other unset fields
+use the provider default.
+Explicit native thinking settings take precedence over generic `thinking`.
+GPT-6 and GPT-5.6 families, including provider-qualified and namespaced names,
+default to `thinking=true`, `service_tier=default`, reasoning effort `medium`,
+context `all_turns`, mode `standard`, summary `detailed`, and verbosity `low`.
+Explicit per-model values win; reset restores the family default without saving
+it as an override. Other models keep their existing defaults. Provider-specific
+fields are consumed only by APIs that support them; this does not add Responses
+controls to Chat Completions or other protocols.
+
+Code Puppy runtime parity is not complete. In particular, its progress-aware
+main/sub-agent streaming retries require core recovery support before CLAI can
+expose working retry controls. See [the parity audit](MODEL_SETTINGS_AUDIT.md).
+
+Pydantic AI owns adaptive-thinking translation and preserved-thinking replay,
+including Fable 5.1's recovery when a changed conversation prefix invalidates a
+thinking block. CLAI does not strip thinking or implement a second recovery loop.
+See [core's thinking block binding documentation](https://pydantic.dev/docs/ai/models/anthropic/#thinking-block-binding).
+
+For native Anthropic models, **Preserved Thinking** controls
+`thinking.block_binding.prefix_mismatch_behavior`: `error` rejects a mismatched
+prefix; `drop_block` continues without the mismatched reasoning block. It appears
+on adaptive-capable Claude models. Fable 5.1 also exposes **Thinking Display**:
+`updates` or `summarized`. Setting either control without a thinking mode selects
+adaptive thinking; neither can be combined with disabled thinking. Resetting the
+mode clears its budget, display, and binding overrides. **Interleaved Thinking**
+adds the beta header on classic Claude 4 models. CLAI adds the display beta when
+requesting updates; core adds the block-binding beta. These native controls do
+not add Anthropic protocol support to third-party Chat Completions endpoints.
+
+GLM-4.5 and newer expose **Thinking (GLM)** and **Clear Thinking (GLM)**;
+GLM-5.2 and newer also expose **Reasoning Effort (GLM)**. Clear Thinking set to
+true clears earlier reasoning; false preserves it. These controls send GLM's
+native `thinking.type`, `thinking.clear_thinking`, and `reasoning_effort` body
+fields. Only explicit overrides are sent. Disabled thinking cannot be combined
+with an effort override. A proxy that needs `chat_template_kwargs` instead of
+this native shape still needs custom parameters. Custom parameters win over the
+generated body on conflict.
+
+Open `custom_params` for Code Puppy-style **Custom Params**. Enter adds or edits
+`key = value`; editing the key renames it. `d` deletes a pair and Esc goes back.
+Dotted keys nest in the request body's `extra_body`, for example:
+
+```text
+chat_template_kwargs.thinking = medium
+reasoning.effort = max
+```
+
+Values accept JSON booleans, numbers, null, arrays, and objects, or unquoted
+text. Quote numeric-looking strings to keep them strings. Parameters are saved
+per model and applied last, overriding built-in request fields on conflict.
+An extra-body object replaces the corresponding generated object, rather than
+deep-merging it. For example, overriding `reasoning.effort` replaces the generated
+`reasoning` object; include custom `reasoning.context` too if you need both.
+They deliberately bypass the model compatibility checks: the endpoint must
+support what you send. This is also the escape hatch for custom endpoints and
+provider options not listed in the form. Reset `custom_params` to remove all
+pairs. Do not put credentials here: values are stored as plaintext in SQLite.
 
 For `/set` and `/add_model`, Tab completes setting names, boolean values, and model names from Pydantic AI's
 built-in catalog without network access. Provider prefixes include `openai-codex:`,
@@ -344,7 +514,7 @@ the project file. `/plugins disable repo_context` turns it off, for this and
 every later session; `/plugins enable repo_context` brings it back. See
 [PLUGINS.md](PLUGINS.md#the-built-in-plugins) for its settings.
 
-Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/add_model`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/add_model`, `/model_settings`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
 `/plugins`, `/reload`, `/usage`, `/cost`, and `/compact` from the built-in `compaction` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.

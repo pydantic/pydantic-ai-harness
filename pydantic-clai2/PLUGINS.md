@@ -127,6 +127,20 @@ which can retain globals removed from source; initialize plugin state explicitly
 
 Plugins are trusted code running as you. Only install what you trust.
 
+## Worktree startup
+
+```bash
+clai2 --worktree my-task
+```
+
+`--worktree` (or `-w`) creates `<repository-root>/.worktrees/NAME` and changes to
+that directory before reading project settings or activating plugins. Relative paths in your plugin, the coding tools,
+and `repo_context` therefore refer to that checkout. User plugins and settings
+still load from the same database directory, even with a relative `--database`
+path. Only committed project files reach the new checkout. Worktrees and their
+`clai/NAME` branches stay on disk after the session ends; plugins do not own their
+cleanup. See [Git worktrees](README.md#git-worktrees) for naming and cleanup.
+
 ## The built-in plugins
 
 The coding tools are a plugin too, and so are asking you multiple-choice
@@ -538,6 +552,11 @@ The editor remains active during agent turns: users can draft and queue messages
 but turns and slash commands execute sequentially. Shift-Enter inserts a newline;
 Enter submits. Alt-Enter remains a fallback for terminals that cannot distinguish
 Shift-Enter. Modified-key reporting is enabled only while the editor owns input.
+Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
+including trailing whitespace. Spaces, tabs, and newlines separate words. Text
+after the cursor is preserved. Your terminal must send Option as Alt/Meta for
+this shortcut; legacy and modified-key encodings are supported.
+
 Completion rows remain visible while a replacement lookup runs, but stale results
 cannot be selected. Popup height changes reuse available space without adding
 blank transcript lines on each key. Completion providers should be read-only.
@@ -609,6 +628,9 @@ settings = host.settings(NotifySettings)
 ```
 
 Bad or missing values fail at startup with a message naming your plugin.
+CLAI ignores unknown names in its own saved settings and preserves their values for
+other versions or branches. This does not relax validation of plugin declarations
+or `host.settings(Model)`.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 
@@ -777,6 +799,97 @@ scrollback. The early splash retains brand colours, and syntax keeps Monokai.
 Diff colours stay unchanged in `default`; bundled palettes use Termflow's diff
 defaults. Plugins cannot register custom palettes. Theme selection adds no model
 requests, hooks, or telemetry.
+### Model settings and custom parameters
+
+`/model_settings` opens a searchable list of added models. Enter configures a
+model without changing the active model. Esc returns from settings to this list;
+Esc again closes it. `/model_settings PROVIDER:NAME` opens that model directly.
+Tab completes added models.
+`Ctrl+S` in `/add_model` opens the same editor. Edits save immediately and apply
+on the next prompt. `r` resets a field; Esc or Ctrl-C goes back. Fixed choices
+open a picker; numeric fields accept typed values, and empty input resets.
+
+Model preferences are shared across checkouts. Reading saved preferences ignores
+unknown fields, so newer settings do not break an older reader with this
+compatibility fix. Editing or resetting a known field preserves unknown fields
+in the store. New edits still reject unknown keys and invalid values.
+An invalid value in a known field stops that turn with a repair message, not the
+shell; use `/model_settings` to fix or reset it and try again. CLAI does not silently
+run with different settings or delete saved preferences.
+
+Older branches must receive this fix too. The minimum read-side backport is
+`ModelSettingsForm.model_validate(values, extra='ignore')` in
+`model_settings_from_json`; keep the form itself strict. Also backport preservation
+of unknown keys on save and the shell's model-settings validation error handler.
+
+The editor offers OpenAI reasoning effort, Responses reasoning context, mode,
+summary, and verbosity, and Claude classic/adaptive thinking and effort.
+The editor hides generic request fields such as timeouts and penalties.
+Reasoning GPT models do not show sampling controls. Previously saved overrides
+remain visible so they can be reset. Choices depend on the model and API: Chat Completions does not get Responses
+controls. OpenRouter and vLLM GPT routes expose Chat Completions reasoning effort
+and service tier, not Responses-only controls. `all_turns` appears only on compatible models, and adaptive Claude
+models do not get a token budget. Classic thinking budgets must be at least
+1024 and below an explicit `max_tokens`. If classic thinking has no output cap,
+CLAI reserves the thinking budget plus 4096 output tokens. Other unset fields
+use the provider default.
+Explicit native thinking settings take precedence over generic `thinking`.
+GPT-6 and GPT-5.6 families, including provider-qualified and namespaced names,
+default to `thinking=true`, `service_tier=default`, reasoning effort `medium`,
+context `all_turns`, mode `standard`, summary `detailed`, and verbosity `low`.
+Explicit per-model values win; reset restores the family default without saving
+it as an override. Other models keep their existing defaults. Provider-specific
+fields are consumed only by APIs that support them; this does not add Responses
+controls to Chat Completions or other protocols.
+
+Code Puppy runtime parity is not complete. In particular, its progress-aware
+main/sub-agent streaming retries require core recovery support before CLAI can
+expose working retry controls. See [the parity audit](MODEL_SETTINGS_AUDIT.md).
+
+Pydantic AI owns adaptive-thinking translation and preserved-thinking replay,
+including Fable 5.1's recovery when a changed conversation prefix invalidates a
+thinking block. CLAI does not strip thinking or implement a second recovery loop.
+See [core's thinking block binding documentation](https://pydantic.dev/docs/ai/models/anthropic/#thinking-block-binding).
+
+For native Anthropic models, **Preserved Thinking** controls
+`thinking.block_binding.prefix_mismatch_behavior`: `error` rejects a mismatched
+prefix; `drop_block` continues without the mismatched reasoning block. It appears
+on adaptive-capable Claude models. Fable 5.1 also exposes **Thinking Display**:
+`updates` or `summarized`. Setting either control without a thinking mode selects
+adaptive thinking; neither can be combined with disabled thinking. Resetting the
+mode clears its budget, display, and binding overrides. **Interleaved Thinking**
+adds the beta header on classic Claude 4 models. CLAI adds the display beta when
+requesting updates; core adds the block-binding beta. These native controls do
+not add Anthropic protocol support to third-party Chat Completions endpoints.
+
+GLM-4.5 and newer expose **Thinking (GLM)** and **Clear Thinking (GLM)**;
+GLM-5.2 and newer also expose **Reasoning Effort (GLM)**. Clear Thinking set to
+true clears earlier reasoning; false preserves it. These controls send GLM's
+native `thinking.type`, `thinking.clear_thinking`, and `reasoning_effort` body
+fields. Only explicit overrides are sent. Disabled thinking cannot be combined
+with an effort override. A proxy that needs `chat_template_kwargs` instead of
+this native shape still needs custom parameters. Custom parameters win over the
+generated body on conflict.
+
+Open `custom_params` for Code Puppy-style **Custom Params**. Enter adds or edits
+`key = value`; editing the key renames it. `d` deletes a pair and Esc goes back.
+Dotted keys nest in the request body's `extra_body`, for example:
+
+```text
+chat_template_kwargs.thinking = medium
+reasoning.effort = max
+```
+
+Values accept JSON booleans, numbers, null, arrays, and objects, or unquoted
+text. Quote numeric-looking strings to keep them strings. Parameters are saved
+per model and applied last, overriding built-in request fields on conflict.
+An extra-body object replaces the corresponding generated object, rather than
+deep-merging it. For example, overriding `reasoning.effort` replaces the generated
+`reasoning` object; include custom `reasoning.context` too if you need both.
+They deliberately bypass the model compatibility checks: the endpoint must
+support what you send. This is also the escape hatch for custom endpoints and
+provider options not listed in the form. Reset `custom_params` to remove all
+pairs. Do not put credentials here: values are stored as plaintext in SQLite.
 
 ### Persisting conversation changes
 
@@ -829,3 +942,14 @@ does not remove the images. Core hooks receive the native multimodal request wit
 should use core hooks rather than parsing terminal markers. There are no new
 host lifecycle hooks. Images are persisted with the conversation, including the
 accepted request when a turn fails or is cancelled.
+
+## Headless CLI runs
+
+`clai2 -p "PROMPT" [-m PROVIDER:NAME]` runs one saved turn without an editor.
+Session and turn hooks still run; stream renderers do not. Host console output
+is suppressed, and stdout contains only the final answer. Plugin load failures
+abort the run. The `ask_user` plugin is skipped even if saved settings enable or
+replace it; this does not change those settings. `host.full_screen()` raises in
+headless mode. Plugins must not bypass the host by reading terminal input or
+printing directly to stdout. `--resume SESSION-ID` restores history without a
+browser or tool replay.

@@ -10,6 +10,7 @@ from anyio import create_task_group
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import History
+from pydantic import ValidationError
 from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
@@ -35,7 +36,7 @@ from .input_history import input_history
 from .interrupts import Interrupts
 from .key_menu import keys_command
 from .live_prompt import LivePrompt
-from .model_menu import open_add_model_menu
+from .model_menu import model_settings_command, open_add_model_menu
 from .model_picker import model_command, model_completions
 from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
@@ -112,7 +113,7 @@ async def chat(
         project = project or ProjectSettings()
         _report_project(project, console)
         use_defaults = builtin_plugins is DEFAULT_PLUGINS
-        shell = _create_shell(
+        shell = create_shell(
             agent,
             deps=deps,
             plugins=plugins,
@@ -156,7 +157,7 @@ async def chat(
             shell.reload_requested = False
             try:
                 shell = reload_clai(
-                    lambda shell=shell: _create_shell(
+                    lambda shell=shell: create_shell(
                         agent,
                         deps=deps,
                         plugins=plugins,
@@ -183,7 +184,7 @@ async def chat(
                 fresh = True
 
 
-def _create_shell(
+def create_shell(
     agent: AbstractAgent[DepsT, OutputT],
     *,
     deps: DepsT,
@@ -197,7 +198,9 @@ def _create_shell(
     message_history: Sequence[ModelMessage] = (),
     summary: ConversationSummary | None = None,
     transcript: TranscriptBuffer | None = None,
+    headless: bool = False,
 ) -> '_Shell[DepsT, OutputT]':
+    """Build shared session services, without attaching terminal input in headless mode."""
     settings = Settings.model_validate(settings.model_dump()) if settings is not None else Settings(model=None)
     store = store or SettingsStore()
     conversations = SqliteConversationStore(database=store.path.with_name('sessions.db'))
@@ -288,6 +291,14 @@ def _create_shell(
             complete=lambda args: set_completions(['model', *args]) if len(args) <= 1 else (),
         )
     )
+    commands.register(
+        Command(
+            name='model_settings',
+            description='Choose an added model to configure, or edit a named model',
+            handler=lambda args: model_settings_command(context, args),
+            complete=lambda args: model_completions(context, args),
+        )
+    )
     commands.register(Command(name='help', description='Show commands', handler=commands.help))
     commands.register(
         Command(
@@ -346,7 +357,7 @@ def _create_shell(
     images = ImageInput()
     history = input_history(store.path.with_name('input-history'))
     prompt = None
-    if not console.is_terminal:
+    if not headless and not console.is_terminal:
         prompt = PromptSession[str](
             history=history,
             completer=PromptCompleter(commands),
@@ -491,7 +502,7 @@ class _Shell(Generic[DepsT, OutputT]):
 
         async def run_turn() -> None:
             nonlocal ended
-            ended = await self._run_turn(start, images=images)
+            ended = await self.run_turn(start, images=images)
 
         completed = await self.interrupts.run(run_turn())
         self.sessions.namer.submit(self.session.summary.id)
@@ -501,7 +512,10 @@ class _Shell(Generic[DepsT, OutputT]):
         await self.interrupts.run(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
         return self.interrupts.exit_requested
 
-    async def _run_turn(self, start: TurnStart, *, images: Sequence[BinaryContent] = ()) -> TurnEnd:
+    async def run_turn(
+        self, start: TurnStart, *, images: Sequence[BinaryContent] = (), headless: bool = False
+    ) -> TurnEnd:
+        """Apply turn hooks and settings, then run with optional terminal rendering."""
         try:
             await self.loader.fire(start)
         except PluginError as exc:
@@ -516,7 +530,26 @@ class _Shell(Generic[DepsT, OutputT]):
             self.console.print()
             return TurnEnd(text=start.text, outcome='cancelled')
         self.session.plugins = (*self.plugins, *self.loader.capabilities())
-        self.session.model_settings = self.context.model_settings(self.session.model or _model_label(self.agent))
+        model = self.session.model or _model_label(self.agent)
+        try:
+            self.session.model_settings = self.context.model_settings(model)
+        except ValidationError as exc:
+            self.console.print(
+                f'Invalid saved model settings for {model}. Fix or reset them with /model_settings {model}.',
+                style=theme.ERROR,
+                markup=False,
+            )
+            for error in exc.errors(include_input=False, include_url=False):
+                location = '.'.join(str(part) for part in error['loc'])
+                self.console.print(f'{location}: {error["msg"]}', style=theme.ERROR, markup=False)
+            self.console.print()
+            return TurnEnd(text=start.text, outcome='failed', error=exc)
+        if headless:
+            try:
+                result = await self.session.prompt(start.text)
+            except Exception as exc:  # noqa: BLE001 -- report a failed headless turn to the CLI.
+                return TurnEnd(text=start.text, outcome='failed', error=exc)
+            return TurnEnd(text=start.text, outcome='completed', result=result)
         return await _run_prompt(
             self.session,
             start.text,
