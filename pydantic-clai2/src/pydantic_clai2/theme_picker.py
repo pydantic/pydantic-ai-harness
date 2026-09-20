@@ -34,8 +34,6 @@ def theme_preview(name: str, *, width: int) -> str:
         for line in ('## Summary', 'Adds a searchable theme picker.'):
             for event in parser.parse_line(line):
                 renderer.render(event)
-        for event in parser.finalize():
-            renderer.render(event)
         palette = theme.current()
         console.print(
             Syntax('return "ready"', 'python', theme='monokai', background_color=palette.bg if palette else 'default')
