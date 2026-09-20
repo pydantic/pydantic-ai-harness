@@ -236,10 +236,9 @@ def _create_shell(
             session.tool_retries = updated.tool_retries
         elif key == 'run.request_limit':
             session.usage_limits = replace(session.usage_limits or UsageLimits(), request_limit=updated.request_limit)
-        elif key == 'display.theme':
-            if console.is_terminal and previous_theme != updated.theme:
-                theme.apply(updated.theme, output=console.file)
-            previous_theme = updated.theme
+        elif key == 'display.theme' and console.is_terminal and previous_theme != updated.theme:
+            theme.apply(updated.theme, output=console.file)
+        previous_theme = updated.theme
 
     context = CommandContext(
         settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting, project=project
