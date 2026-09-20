@@ -186,7 +186,7 @@ class StatusLine:
             self._height, self._rows = height, rows
         text = text[: max(0, width - 1)]
         highlight = frame % (len(text) + 12) - 6
-        shades = tuple(theme.sgr(color) for color in (theme.INFO, theme.ACCENT, theme.INFO, theme.THINKING))
+        shades = tuple(theme.sgr(color) for color in (theme.SUGAR, theme.LIGHT_PURPLE, theme.LITHIUM, theme.PURPLE))
         warning = theme.sgr(theme.WARNING)
         muted = theme.sgr(theme.MUTED)
 

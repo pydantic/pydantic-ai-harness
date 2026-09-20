@@ -36,8 +36,21 @@ from .tool_output import ToolOutput, print_tool_header, terminal_text
 
 
 def markdown_style() -> RenderStyle:
-    """Use Termflow's Markdown colours for the active built-in palette."""
-    return theme.current().to_render_style()
+    """Keep the existing Markdown colours unless a Termflow palette is selected."""
+    palette = theme.current()
+    if palette is not None:
+        return palette.to_render_style()
+    return RenderStyle(
+        bright=theme.LITHIUM,
+        head=theme.PURPLE,
+        symbol=theme.CALCIUM,
+        grey=theme.GREY,
+        dark=theme.DARK_PURPLE,
+        mid=theme.ELEMENT_PURPLE,
+        light=theme.GREY,
+        link=theme.AQUA,
+        error=theme.CALCIUM,
+    )
 
 
 class StreamRenderer:
@@ -158,7 +171,7 @@ class StreamRenderer:
         if content and not self._heading_printed:
             if self._thinking:
                 # No newline: the rendered reasoning continues on the heading's line.
-                self.console.print('Thinking ', style=theme.THINKING, end='')
+                self.console.print('Thinking ', style=theme.color(theme.THINKING), end='')
             self._heading_printed = True
         self._buffer += content
         while '\n' in self._buffer:
@@ -183,7 +196,7 @@ class StreamRenderer:
             elif isinstance(event, CodeBlockEndEvent):
                 # Lex the whole fence so multiline strings and comments keep their state.
                 with self.console.capture() as capture:
-                    self.console.rule(Text(self._code_language), align='left', style=theme.MUTED)
+                    self.console.rule(Text(self._code_language), align='left', style=theme.color(theme.MUTED))
                     self.console.print(
                         Syntax(
                             '\n'.join(self._code_lines),
@@ -193,7 +206,7 @@ class StreamRenderer:
                             word_wrap=True,
                         )
                     )
-                    self.console.rule(style=theme.MUTED)
+                    self.console.rule(style=theme.color(theme.MUTED))
                 (self._writer or self.console.file).write(capture.get())
                 self._code_lines = []
             else:

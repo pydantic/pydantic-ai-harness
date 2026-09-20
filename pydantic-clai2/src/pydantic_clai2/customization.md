@@ -17,7 +17,9 @@ contract; this guide is shipped with the package for use without a checkout.
 - Use a custom model/provider: supply a Pydantic AI Agent to chat from a Python
   launcher. There is no host.register_provider or host.register_model API.
 - Select colours: /theme opens the Termflow palette picker; /theme tokyo_night
-  selects directly and persists display.theme. /set exposes the same preference.
+  selects directly and persists display.theme. /theme default restores CLAI's
+  existing appearance. Browsing previews a sample conversation without applying
+  the candidate. /set exposes the same preference.
 - Replace the prompt editor, splash, streaming Markdown, built-in model catalog,
   or add custom palettes: currently a CLAI source change, not a supported
   PluginHost extension. A command can own its own UI instead. You can add a
@@ -273,14 +275,16 @@ Return a Rich renderable, or None to let the next renderer/default handle it.
 CLAI flushes streaming text before printing it. First matching non-None renderer
 wins. Do not print from an event observer when a renderer can do the job.
 Use host.console for plugin-owned console output outside streaming handlers.
-Use pydantic_clai2.theme roles ACCENT, INFO, WARNING, ERROR, MUTED, THINKING,
-not hard-coded colours. These roles use the selected terminal palette's ANSI slots.
-Only termflow.themes.PALETTES are selectable; catppuccin_mocha is the default.
-theme.current().to_render_style() supplies Markdown and menu colours. Termflow
-applies foreground, background, and ANSI slots via OSC and CLAI resets them to
-terminal defaults on exit; redirected output receives no palette changes.
-The early splash, syntax highlighting, and diff colours do not follow selection.
-Raw ANSI uses theme.sgr. StreamRenderer owns text and
+Resolve pydantic_clai2.theme roles ACCENT, INFO, WARNING, ERROR, MUTED, THINKING
+with theme.color(role) at render time, not hard-coded colours. Raw ANSI uses
+theme.sgr(role), which resolves the selected colours itself. Choices are default
+(the unchanged CLAI appearance) and termflow.themes.PALETTES. theme.current()
+returns the selected TerminalPalette or None for default. Starting and exiting
+in default leaves terminal colours untouched. For bundled palettes, Termflow
+applies foreground, background, and ANSI slots via OSC; returning to default or
+exiting resets terminal colours. Redirected output receives no palette changes.
+The early splash keeps brand colours and syntax keeps Monokai. Default diffs stay
+unchanged; bundled palettes use Termflow's diff defaults. StreamRenderer owns text and
 thinking, not tool-specific rendering.
 
 Add a fragment to the status row with host.status_segment:

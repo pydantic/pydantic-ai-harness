@@ -100,9 +100,9 @@ async def test_shimmer_without_spinner(monkeypatch: pytest.MonkeyPatch, truecolo
     assert all(frame == plain[0] for frame in plain)
     assert all(len(frame) == 39 for frame in plain)
     assert frames[0] != frames[10]
-    assert '38;2;' not in frames[0]
-    assert '\x1b[35m' in frames[0]
-    assert '\x1b[36m' in output.getvalue()
+    assert ('38;2;' in frames[0]) == truecolor
+    assert ('\x1b[38;2;155;119;255m' if truecolor else '\x1b[35m') in frames[0]
+    assert ('\x1b[38;2;0;255;235m' if truecolor else '\x1b[96m') not in output.getvalue()
     assert '\n' not in output.getvalue()
 
 

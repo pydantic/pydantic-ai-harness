@@ -7,11 +7,10 @@ from pydantic_ai import FunctionToolCallEvent, FunctionToolResultEvent
 from pydantic_ai.messages import ToolCallPart, ToolReturnPart
 from pydantic_ai_harness.filesystem import FileChangeRequestEvent, FileEditedEvent, FileWrittenEvent
 from pydantic_ai_harness.shell import CommandFinishedEvent, CommandOutputEvent, CommandStartedEvent
-from rich.color import Color
 from rich.console import Console
 from rich.text import Text
 
-from pydantic_clai2 import StreamRenderer
+from pydantic_clai2 import StreamRenderer, theme
 from pydantic_clai2.config import Settings, resolve_settings
 
 
@@ -116,10 +115,10 @@ async def test_tool_header_colors(name: str, arguments: dict[str, str], show_too
     # Text.from_ansi drops the final newline; check spacing on the terminal output itself.
     assert output.getvalue().endswith('\n\n')
     text = Text.from_ansi(output.getvalue())
-    assert text.get_style_at_offset(console, 0).color == Color.from_ansi(8)
-    assert text.get_style_at_offset(console, 2).color == Color.from_ansi(12)
+    assert text.get_style_at_offset(console, 0).color == console.get_style(theme.MUTED).color
+    assert text.get_style_at_offset(console, 2).color == console.get_style(theme.ACCENT).color
     if arguments:
-        assert text.get_style_at_offset(console, 3 + len(name)).color == Color.from_ansi(8)
+        assert text.get_style_at_offset(console, 3 + len(name)).color == console.get_style(theme.MUTED).color
 
 
 def test_output_setting_is_opt_in() -> None:

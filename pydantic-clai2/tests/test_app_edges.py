@@ -36,7 +36,7 @@ def inputs(monkeypatch: pytest.MonkeyPatch, values: list[str | BaseException]) -
             style = kwargs['style']
             assert isinstance(style, BaseStyle)
             for selector in ('class:bottom-toolbar', 'class:bottom-toolbar.text'):
-                assert style.get_attrs_for_style_str(selector).color == theme.current().ansi[5].lstrip('#')
+                assert style.get_attrs_for_style_str(selector).color == theme.color(theme.THINKING).lstrip('#')
 
         async def prompt_async(self, label: str, **kwargs: object) -> str:
             value = values.pop(0)

@@ -8,7 +8,6 @@ from pathlib import Path
 
 from pydantic import JsonValue, TypeAdapter
 from pydantic_ai.models import known_model_names
-from termflow.themes import PALETTES  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.completion import (  # pyright: ignore[reportMissingTypeStubs]
     CompleteEvent,
     Completer,
@@ -18,6 +17,7 @@ from termflow.tui.completion import (  # pyright: ignore[reportMissingTypeStubs]
 
 from .config import SETTING_FIELDS, PluginSettings
 from .settings_store import SettingsStore
+from .theme import names as theme_names
 
 
 def is_command_input(text: str) -> bool:
@@ -159,7 +159,7 @@ def set_completions(args: list[str]) -> Iterable[str]:
     if len(args) <= 1:
         return (*SETTING_FIELDS, 'api_key')
     if len(args) == 2 and args[0] == 'display.theme':
-        return PALETTES
+        return theme_names()
     if len(args) == 2 and args[0] == 'model':
         names = known_model_names()
         providers = sorted({name.partition(':')[0] + ':' for name in names} | {'openai-codex:'})

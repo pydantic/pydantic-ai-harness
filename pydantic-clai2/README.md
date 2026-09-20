@@ -609,32 +609,39 @@ only. Structured outputs are supported and displayed after completion.
 /theme
 /theme tokyo_night
 /set display.theme github_light
-/config reset display.theme
+/theme default
 ```
 
-`/theme` opens a searchable picker with colour samples. Enter saves your choice;
-Esc or Ctrl-C closes it without changes. `/theme NAME` and `/set display.theme NAME`
-apply the same validated preference immediately and save it for future sessions.
-Tab completes the installed Termflow palette names. `/set` also includes a theme
-row; its reset action applies the default immediately. `/config reset display.theme`
-removes the saved override for the next startup.
+`/theme` opens a searchable picker. Its preview shows a sample conversation with
+Markdown, thinking, a tool call, syntax highlighting, warnings, errors, and the
+input/status area. Each bundled palette paints the sample's foreground and
+background. Browsing does not apply a palette or save a setting. Enter confirms;
+Esc or Ctrl-C keeps your current choice. Narrow terminals show the list alone.
 
-Choices come directly from Termflow's bundled registry, including `catppuccin_mocha`,
-`catppuccin_latte`, `tokyo_night`, and `github_light`. CLAI defines no extra palettes.
-The default is `catppuccin_mocha`, a bundled dark palette. Markdown and newly opened
-menus use Termflow's `to_render_style()`; shell roles use the terminal's ANSI slots.
+`default` preserves CLAI's existing brand colours, including Markdown, menus,
+status, and diff highlighting. Starting and exiting with this choice leaves your
+terminal palette untouched. The default preview has no forced background.
+`/theme default` restores this appearance after trying another palette.
 
-Termflow applies the palette to the terminal foreground, background, and 16 ANSI
-colours through OSC escape sequences. Supported terminals also recolour existing
-ANSI-styled scrollback. CLAI resets these colours to the terminal's configured
-defaults on exit, including failure and cancellation. Unsupported terminals may
-ignore palette changes. Redirected output receives no palette-changing sequences.
-This changes terminal colours, not your terminal configuration file.
+All other choices come from Termflow's bundled registry, including
+`catppuccin_mocha`, `catppuccin_latte`, `tokyo_night`, and `github_light`. CLAI adds
+no new palettes. `/theme NAME` and `/set display.theme NAME` apply the same
+validated preference immediately and save it for future sessions. Tab completes
+these names. The `/set` theme row also lets you reset immediately;
+`/config reset display.theme` removes the saved override for the next startup.
 
-The early startup splash keeps its brand colours because settings are not loaded
-yet. Syntax highlighting retains Termflow's Monokai default, and diffs retain
-Termflow's default diff colours; those are separate from its terminal palettes.
-Theme selection adds no model requests or telemetry.
+For a bundled palette, Markdown and newly opened menus use Termflow's
+`to_render_style()`, and shell roles use its colours. Termflow changes the terminal
+foreground, background, and 16 ANSI slots via OSC escape sequences. Supported
+terminals may also recolour existing ANSI-styled scrollback. CLAI resets terminal
+colours when you return to `default` or exit a selected palette, including failure
+and cancellation. Unsupported terminals may ignore these changes. Redirected
+output receives no palette-changing sequences. Your terminal configuration file
+is not modified.
+
+The early splash retains its brand colours. Syntax highlighting keeps Monokai;
+bundled palettes use Termflow's default diff colours. Theme selection adds no
+model requests or telemetry.
 
 ### Streaming
 
@@ -710,8 +717,9 @@ repeated completion heading before the diff or output.
 
 Native capability events drive specialized output: `FileEditedEvent` renders its
 bounded unified diff using Termflow `DiffRenderer`, the same renderer Code Puppy
-uses, with Termflow's default addition and deletion backgrounds and brighter
-markers. Code syntax colours retain the Monokai default. Successful file writes also show the proposed diff from their matching
+uses. The default appearance keeps CLAI's existing addition and deletion
+backgrounds; bundled palettes use Termflow's defaults. Both use brighter markers.
+Code syntax colours retain the Monokai default. Successful file writes also show the proposed diff from their matching
 `FileChangeRequestEvent`: new files show additions, overwrites show before/after
 changes. Without a matching request event, only the written path is shown. Failed
 or cancelled writes do not display a success diff. Large diffs retain the

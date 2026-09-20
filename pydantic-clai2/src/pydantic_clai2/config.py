@@ -1,7 +1,8 @@
 """Validated settings, independent of persistence and terminal code."""
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
-from termflow.themes import PALETTES  # pyright: ignore[reportMissingTypeStubs]
+
+from .theme import names
 
 
 class Settings(BaseModel):
@@ -24,7 +25,7 @@ class Settings(BaseModel):
         default=None, description='Naming model override; null uses the current model.'
     )
     theme: str = Field(
-        default='catppuccin_mocha', description='Built-in Termflow terminal palette; /theme lists choices.'
+        default='default', description='Keep CLAI colours, or select a bundled Termflow palette with /theme.'
     )
     thinking: bool = Field(default=True, description="Show the model's thinking as it streams.")
     splash: bool = Field(default=True, description='Animate the startup splash. Takes effect next start.')
@@ -49,8 +50,8 @@ class Settings(BaseModel):
     @classmethod
     def validate_theme(cls, value: str) -> str:
         """Keep picker, project files, and saved preferences on the same registry."""
-        if value not in PALETTES:
-            raise ValueError(f'Unknown theme: {value}. Choose from: {", ".join(PALETTES)}')
+        if value not in names():
+            raise ValueError(f'Unknown theme: {value}. Choose from: {", ".join(names())}')
         return value
 
 

@@ -175,5 +175,5 @@ async def test_edit_uses_termflow_diff_renderer() -> None:
     text = output.getvalue()
     assert '● edit_file demo.py' in Text.from_ansi(text).plain
     assert 'old' in text and 'new' in text
-    assert '\x1b[48;2;14;68;41m' in text  # Termflow's default addition background.
-    assert '\x1b[48;2;103;6;12m' in text  # Termflow's default deletion background.
+    assert '\x1b[48;2;70;82;88m' in text  # addition rows: Aqua over Dark Purple
+    assert '\x1b[48;2;104;43;54m' in text  # deletion rows: Calcium over Dark Purple

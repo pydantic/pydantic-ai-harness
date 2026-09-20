@@ -161,14 +161,15 @@ the host does this for renderers, so do not call `console.print` from inside an
 
 ## Colours
 
-`/theme` selects only `termflow.themes.PALETTES`; do not define CLAI palettes.
-Termflow owns terminal palette application/reset and `to_render_style()` for
-Markdown and menus. `theme.current()` reads the session's active palette through
-a settings reader shared with menu workers. `theme.use(...)` owns reset on exit.
-Use the ANSI roles in `theme.py` (`ACCENT`, `INFO`, `WARNING`, `ERROR`, `MUTED`,
-`THINKING`) for Rich, and `theme.sgr(...)` for raw ANSI. The early splash keeps
-its brand constants; heavy imports in `theme.py` stay lazy for startup.
-Syntax and diffs use Termflow's defaults, not per-palette custom definitions.
+`/theme` offers the unchanged `default` appearance and `termflow.themes.PALETTES`.
+Do not define new palettes. Resolve brand roles with `theme.color(...)` for Rich;
+`theme.sgr(...)` resolves raw ANSI itself. `theme.current()` returns a Termflow
+palette or `None` for the original appearance. Termflow owns palette application
+and reset; `theme.use(...)` leaves the terminal untouched in the default session.
+Markdown keeps its original style by default and uses `to_render_style()` for a
+selected palette. The preview renders a sample without OSC changes or persistence.
+Heavy imports in `theme.py` stay lazy for the splash. Syntax keeps Monokai;
+default diff colours stay unchanged, while bundled palettes use Termflow defaults.
 
 ## File map
 
@@ -207,7 +208,7 @@ Syntax and diffs use Termflow's defaults, not per-palette custom definitions.
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |
 | `repo_context.py` | the built-in `repo_context` plugin over harness `RepoContext` |
-| `theme.py` | Termflow palette scope, ANSI roles, splash colours, `sgr()` |
+| `theme.py` | Existing brand roles, opt-in Termflow palette scope, `color()`, `sgr()` |
 | `theme_picker.py` | `/theme` picker over Termflow's bundled palettes |
 
 Keep files concise - we don't need any 10,000 line files. Single responsibility.

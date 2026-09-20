@@ -746,25 +746,37 @@ when upgrading; `/set model NAME` also saves the model in this list.
 /set display.theme github_light
 ```
 
-`/theme` without arguments opens the searchable picker. It offers only palettes
-from `termflow.themes.PALETTES`, with `catppuccin_mocha` as the default. The picker,
-`/set`, project settings, and persisted `display.theme` values share validation.
-Selection applies immediately and persists; cancelling the picker changes nothing.
-A project override takes precedence again on the next startup.
+`/theme` without arguments opens a searchable picker with a sample conversation,
+including Markdown, thinking, tool output, code, warnings, errors, and the input
+area. Browsing previews colours without applying them; Enter confirms, and Esc
+or Ctrl-C cancels. Choices are `default` and `termflow.themes.PALETTES`.
+`default` preserves CLAI's existing appearance without changing terminal colours
+on startup or exit. `/theme default` restores it after a palette selection.
+The picker, `/set`, project settings, and persisted `display.theme` values share
+validation. A project override takes precedence again on the next startup.
 
-Use the `ACCENT`, `INFO`, `WARNING`, `ERROR`, `MUTED`, and `THINKING` roles from
-`pydantic_clai2.theme` for Rich output, and `theme.sgr(role)` for raw ANSI surfaces.
-These roles use the terminal's ANSI slots. `theme.current()` returns the active
-Termflow `TerminalPalette`. Use `theme.current().to_render_style()` when building
-Termflow menus to read its Markdown colours at render time.
+```python
+from rich.console import Console
+from pydantic_clai2 import theme
 
-Termflow changes the live terminal foreground, background, and ANSI palette via
-OSC sequences. CLAI resets them to the terminal's configured defaults on shell
-exit, including errors and cancellation, and does not emit palette changes to
-redirected output. Unsupported terminals may ignore the changes. Palette changes
-can recolour ANSI-styled scrollback. The early splash retains its brand colours;
-syntax and diff highlighting retain Termflow's defaults. Plugins cannot register
-custom palettes. Theme selection adds no model requests, hooks, or telemetry.
+Console().print('Ready for your next prompt.', style=theme.color(theme.INFO))
+```
+
+Resolve the `ACCENT`, `INFO`, `WARNING`, `ERROR`, `MUTED`, and `THINKING` roles
+through `theme.color(role)` at render time. The constants retain their brand
+values; the resolver reads the active palette. `theme.sgr(role)` resolves raw
+ANSI surfaces itself. `theme.current()` returns the selected Termflow
+`TerminalPalette`, or `None` for the existing default appearance.
+
+Selecting a bundled palette changes terminal foreground, background, and ANSI
+slots via Termflow's OSC sequences. CLAI resets them to terminal defaults when
+you return to `default` or exit a selected palette, including errors and
+cancellation. Redirected output receives no palette-changing sequences.
+Unsupported terminals may ignore changes; supported ones may recolour ANSI
+scrollback. The early splash retains brand colours, and syntax keeps Monokai.
+Diff colours stay unchanged in `default`; bundled palettes use Termflow's diff
+defaults. Plugins cannot register custom palettes. Theme selection adds no model
+requests, hooks, or telemetry.
 
 ### Persisting conversation changes
 

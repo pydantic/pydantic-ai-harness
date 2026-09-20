@@ -16,7 +16,6 @@ from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.test import TestModel
 from pydantic_ai_harness.step_persistence.conversations import SqliteConversationStore
 from rich.console import Console
-from termflow.themes import PALETTES  # pyright: ignore[reportMissingTypeStubs]
 
 import pydantic_clai2
 from pydantic_clai2 import DEFAULT_PLUGINS, chat, theme
@@ -99,9 +98,10 @@ async def main(root: Path, mode: str) -> None:
 
         async def prompt_async(self, label: str, **kwargs: object) -> str:
             nonlocal reloads
-            assert theme.current().name == store.load().theme
+            palette = theme.current()
+            assert (palette.name if palette is not None else 'default') == store.load().theme
             assert [item.text for item in self.completer.get_completions(Document('/theme '), CompleteEvent())] == list(
-                PALETTES
+                theme.names()
             )
             assert not list(self.completer.get_completions(Document('/theme github_light '), CompleteEvent()))
             assert [item.text for item in self.completer.get_completions(Document('/rel'), CompleteEvent())] == [

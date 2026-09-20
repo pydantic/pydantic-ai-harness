@@ -13,19 +13,22 @@ from .commands import Commands
 
 
 def completion_style() -> Style:
-    colors = theme.current().ansi
+    muted = theme.color(theme.MUTED)
+    thinking = theme.color(theme.THINKING)
+    primary = theme.color(theme.LITHIUM)
+    panel = theme.color(theme.ELEMENT_PURPLE)
     return Style.from_dict(
         {
-            'frame.border': colors[8],
-            'bottom-toolbar': f'noreverse bg:default {colors[5]}',
-            'bottom-toolbar.text': f'noreverse bg:default {colors[5]}',
+            'frame.border': muted,
+            'bottom-toolbar': f'noreverse bg:default {thinking}',
+            'bottom-toolbar.text': f'noreverse bg:default {thinking}',
             'completion-menu': 'bg:default',
-            'completion-menu.completion': f'bg:default {colors[8]}',
-            'completion-menu.completion.current': f'bg:default {colors[12]} bold',
-            'completion-menu.meta.completion': f'bg:default {colors[8]}',
-            'completion-menu.meta.completion.current': f'bg:default {colors[12]}',
+            'completion-menu.completion': f'bg:default {muted}',
+            'completion-menu.completion.current': f'bg:default {primary} bold',
+            'completion-menu.meta.completion': f'bg:default {muted}',
+            'completion-menu.meta.completion.current': f'bg:default {primary}',
             'scrollbar.background': 'bg:default',
-            'scrollbar.button': f'bg:default {colors[8]}',
+            'scrollbar.button': f'bg:default {panel}',
         }
     )
 
