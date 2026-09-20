@@ -65,8 +65,9 @@ def test_settings_form_validates_and_converts() -> None:
     assert model_settings_from_json(everything).to_model_settings() == everything
     with pytest.raises(ValidationError):
         ModelSettingsForm(max_tokens=0)
+    assert model_settings_from_json({'nope': 1}).to_model_settings() is None
     with pytest.raises(ValidationError):
-        model_settings_from_json({'nope': 1})
+        ModelSettingsForm.model_validate({'nope': 1})
 
 
 def test_store_round_trips_model_settings(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from anyio import create_task_group
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import History
+from pydantic import ValidationError
 from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
@@ -496,7 +497,20 @@ class _Shell(Generic[DepsT, OutputT]):
             self.console.print()
             return TurnEnd(text=start.text, outcome='cancelled')
         self.session.plugins = (*self.plugins, *self.loader.capabilities())
-        self.session.model_settings = self.context.model_settings(self.session.model or _model_label(self.agent))
+        model = self.session.model or _model_label(self.agent)
+        try:
+            self.session.model_settings = self.context.model_settings(model)
+        except ValidationError as exc:
+            self.console.print(
+                f'Invalid saved model settings for {model}. Fix or reset them with /model_settings {model}.',
+                style=theme.ERROR,
+                markup=False,
+            )
+            for error in exc.errors(include_input=False, include_url=False):
+                location = '.'.join(str(part) for part in error['loc'])
+                self.console.print(f'{location}: {error["msg"]}', style=theme.ERROR, markup=False)
+            self.console.print()
+            return TurnEnd(text=start.text, outcome='failed', error=exc)
         return await _run_prompt(
             self.session,
             start.text,

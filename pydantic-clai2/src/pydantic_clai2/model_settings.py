@@ -3,6 +3,12 @@
 import re
 from typing import Literal
 
+from anthropic.types.beta import (
+    BetaThinkingBlockBindingParam,
+    BetaThinkingConfigAdaptiveParam,
+    BetaThinkingConfigEnabledParam,
+    BetaThinkingConfigParam,
+)
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.models.openai import OpenAIResponsesModelSettings
@@ -63,6 +69,33 @@ class ModelSettingsForm(BaseModel):
     anthropic_effort: Literal['low', 'medium', 'high', 'xhigh', 'max'] | None = Field(
         default=None, description='Claude response effort.'
     )
+    anthropic_thinking_display: Literal['updates', 'summarized'] | None = Field(
+        default=None,
+        description=(
+            "How Fable 5.1 reports reasoning between tool calls. 'updates' shows status lines while "
+            "reasoning stays hidden; 'summarized' folds them into a condensed trace."
+        ),
+    )
+    anthropic_preserved_thinking: Literal['error', 'drop_block'] | None = Field(
+        default=None,
+        description=(
+            'Preserved thinking. How Anthropic handles a replayed thinking block whose conversation '
+            "prefix changed: 'error' rejects the request, 'drop_block' continues without that turn's reasoning."
+        ),
+    )
+    anthropic_interleaved_thinking: bool | None = Field(
+        default=None, description='Let Claude 4 think between tool calls (adds the interleaved-thinking beta).'
+    )
+
+    glm_thinking: Literal['enabled', 'disabled'] | None = Field(
+        default=None, description='GLM deep-thinking mode. Newer GLM models also decide this themselves.'
+    )
+    glm_clear_thinking: bool | None = Field(
+        default=None, description='GLM: true clears earlier reasoning; false preserves it (GLM-4.5 and newer).'
+    )
+    glm_reasoning_effort: Literal['max', 'xhigh', 'high', 'medium', 'low', 'minimal', 'none'] | None = Field(
+        default=None, description='GLM chain-of-thought effort (GLM-5.2 and newer).'
+    )
 
     custom_params: dict[str, JsonValue] | None = Field(
         default=None, description='Custom request body parameters. Dotted keys nest; custom values win.'
@@ -99,8 +132,11 @@ class ModelSettingsForm(BaseModel):
             settings['service_tier'] = self.service_tier
         settings.update(self._openai_settings())
         settings.update(self._anthropic_settings())
+        body = self._glm_body()
         if self.custom_params:
-            settings['extra_body'] = expand_params(pairs=self.custom_params)
+            body.update(expand_params(pairs=self.custom_params))
+        if body:
+            settings['extra_body'] = body
         return settings or None
 
     def _openai_settings(self) -> OpenAIResponsesModelSettings:
@@ -121,18 +157,71 @@ class ModelSettingsForm(BaseModel):
         anthropic = AnthropicModelSettings()
         if self.anthropic_effort is not None:
             anthropic['anthropic_effort'] = self.anthropic_effort
-        if self.anthropic_thinking_mode == 'enabled':
-            if self.max_tokens is None:
+        thinking = self._anthropic_thinking()
+        if thinking is not None:
+            anthropic['anthropic_thinking'] = thinking
+            if thinking['type'] == 'enabled' and self.max_tokens is None:
                 anthropic['max_tokens'] = (self.anthropic_thinking_budget or 10000) + 4096
-            anthropic['anthropic_thinking'] = {
-                'type': 'enabled',
-                'budget_tokens': self.anthropic_thinking_budget or 10000,
-            }
-        elif self.anthropic_thinking_mode == 'adaptive':
-            anthropic['anthropic_thinking'] = {'type': 'adaptive'}
-        elif self.anthropic_thinking_mode == 'disabled':
-            anthropic['anthropic_thinking'] = {'type': 'disabled'}
+        betas = self._anthropic_betas(thinking=thinking)
+        if betas:
+            anthropic['extra_headers'] = {'anthropic-beta': ','.join(betas)}
         return anthropic
+
+    def _anthropic_thinking(self) -> BetaThinkingConfigParam | None:
+        """The `thinking` object, carrying Fable 5.1's `display` and `block_binding` keys.
+
+        `display` and `block_binding` only exist on the enabled and adaptive shapes, so asking
+        for one picks adaptive unless a mode was chosen. Core adds the block-binding beta when
+        `block_binding` is present.
+        """
+        mode = self.anthropic_thinking_mode
+        if mode is None:
+            if self.anthropic_thinking_display is None and self.anthropic_preserved_thinking is None:
+                return None
+            mode = 'adaptive'
+        if mode == 'disabled':
+            return {'type': 'disabled'}
+        thinking: BetaThinkingConfigEnabledParam | BetaThinkingConfigAdaptiveParam
+        if mode == 'enabled':
+            thinking = {'type': 'enabled', 'budget_tokens': self.anthropic_thinking_budget or 10000}
+        else:
+            thinking = {'type': 'adaptive'}
+        if self.anthropic_thinking_display is not None:
+            thinking['display'] = self.anthropic_thinking_display
+        if self.anthropic_preserved_thinking is not None:
+            thinking['block_binding'] = BetaThinkingBlockBindingParam(
+                prefix_mismatch_behavior=self.anthropic_preserved_thinking
+            )
+        return thinking
+
+    def _anthropic_betas(self, *, thinking: BetaThinkingConfigParam | None) -> list[str]:
+        """Betas these controls need. Core attaches the thinking-binding beta itself.
+
+        The display beta follows the `display` value that actually reaches the body, so a
+        disabled mode does not ask for it.
+        """
+        betas: list[str] = []
+        if self.anthropic_interleaved_thinking:
+            betas.append('interleaved-thinking-2025-05-14')
+        if thinking is not None and thinking['type'] != 'disabled' and thinking.get('display') == 'updates':
+            betas.append('thinking-display-updates-2026-08-18')
+        return betas
+
+    def _glm_body(self) -> dict[str, JsonValue]:
+        """GLM's native `thinking` and `reasoning_effort` fields; proxies adjust via custom params.
+
+        Only keys the user set are sent: GLM-5 decides whether to think on its own, so forcing
+        `type` would override that.
+        """
+        thinking: dict[str, JsonValue] = {}
+        if self.glm_thinking is not None:
+            thinking['type'] = self.glm_thinking
+        if self.glm_clear_thinking is not None:
+            thinking['clear_thinking'] = self.glm_clear_thinking
+        body: dict[str, JsonValue] = {'thinking': thinking} if thinking else {}
+        if self.glm_reasoning_effort is not None and self.glm_thinking != 'disabled':
+            body['reasoning_effort'] = self.glm_reasoning_effort
+        return body
 
 
 def model_defaults(*, model: str) -> dict[str, JsonValue]:
@@ -153,5 +242,8 @@ def model_defaults(*, model: str) -> dict[str, JsonValue]:
 
 
 def model_settings_from_json(values: dict[str, JsonValue], *, model: str = '') -> ModelSettingsForm:
-    """Resolve saved overrides against family defaults, then validate."""
-    return ModelSettingsForm.model_validate({**model_defaults(model=model), **values})
+    """Read shared preferences, ignoring keys from newer versions without changing the store.
+
+    Known fields still validate normally. New edits use the strict form directly.
+    """
+    return ModelSettingsForm.model_validate({**model_defaults(model=model), **values}, extra='ignore')

@@ -748,6 +748,19 @@ Tab completes added models.
 on the next prompt. `r` resets a field; Esc or Ctrl-C goes back. Fixed choices
 open a picker; numeric fields accept typed values, and empty input resets.
 
+Model preferences are shared across checkouts. Reading saved preferences ignores
+unknown fields, so newer settings do not break an older reader with this
+compatibility fix. Editing or resetting a known field preserves unknown fields
+in the store. New edits still reject unknown keys and invalid values.
+An invalid value in a known field stops that turn with a repair message, not the
+shell; use `/model_settings` to fix or reset it and try again. CLAI does not silently
+run with different settings or delete saved preferences.
+
+Older branches must receive this fix too. The minimum read-side backport is
+`ModelSettingsForm.model_validate(values, extra='ignore')` in
+`model_settings_from_json`; keep the form itself strict. Also backport preservation
+of unknown keys on save and the shell's model-settings validation error handler.
+
 The editor offers OpenAI reasoning effort, Responses reasoning context, mode,
 summary, and verbosity, and Claude classic/adaptive thinking and effort.
 The editor hides generic request fields such as timeouts and penalties.
@@ -775,6 +788,26 @@ Pydantic AI owns adaptive-thinking translation and preserved-thinking replay,
 including Fable 5.1's recovery when a changed conversation prefix invalidates a
 thinking block. CLAI does not strip thinking or implement a second recovery loop.
 See [core's thinking block binding documentation](https://pydantic.dev/docs/ai/models/anthropic/#thinking-block-binding).
+
+For native Anthropic models, **Preserved Thinking** controls
+`thinking.block_binding.prefix_mismatch_behavior`: `error` rejects a mismatched
+prefix; `drop_block` continues without the mismatched reasoning block. It appears
+on adaptive-capable Claude models. Fable 5.1 also exposes **Thinking Display**:
+`updates` or `summarized`. Setting either control without a thinking mode selects
+adaptive thinking; neither can be combined with disabled thinking. Resetting the
+mode clears its budget, display, and binding overrides. **Interleaved Thinking**
+adds the beta header on classic Claude 4 models. CLAI adds the display beta when
+requesting updates; core adds the block-binding beta. These native controls do
+not add Anthropic protocol support to third-party Chat Completions endpoints.
+
+GLM-4.5 and newer expose **Thinking (GLM)** and **Clear Thinking (GLM)**;
+GLM-5.2 and newer also expose **Reasoning Effort (GLM)**. Clear Thinking set to
+true clears earlier reasoning; false preserves it. These controls send GLM's
+native `thinking.type`, `thinking.clear_thinking`, and `reasoning_effort` body
+fields. Only explicit overrides are sent. Disabled thinking cannot be combined
+with an effort override. A proxy that needs `chat_template_kwargs` instead of
+this native shape still needs custom parameters. Custom parameters win over the
+generated body on conflict.
 
 Open `custom_params` for Code Puppy-style **Custom Params**. Enter adds or edits
 `key = value`; editing the key renames it. `d` deletes a pair and Esc goes back.

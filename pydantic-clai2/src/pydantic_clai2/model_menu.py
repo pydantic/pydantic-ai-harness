@@ -82,7 +82,12 @@ class ModelSettingsSource:
             form = self._validated(row, raw)
         except (ValidationError, ValueError) as exc:
             return f'{row.key}: {first_error(exc) if isinstance(exc, ValidationError) else str(exc)}'
-        self._store.save_model_settings(self.model, form.model_dump(exclude_none=True))
+        saved = {
+            key: value
+            for key, value in self._store.model_settings(self.model).items()
+            if key not in ModelSettingsForm.model_fields
+        }
+        self._store.save_model_settings(self.model, {**saved, **form.model_dump(exclude_none=True)})
         return f'Saved {row.key} for {self.model}. Applies when this model is selected.'
 
     def reset(self, row: FieldRow) -> str:
@@ -91,6 +96,8 @@ class ModelSettingsSource:
         saved.pop(row.key, None)
         if row.key == 'anthropic_thinking_mode':
             saved.pop('anthropic_thinking_budget', None)
+            saved.pop('anthropic_thinking_display', None)
+            saved.pop('anthropic_preserved_thinking', None)
         self._store.save_model_settings(self.model, saved)
         return f'Reset {row.key} for {self.model}.'
 
@@ -99,7 +106,12 @@ class ModelSettingsSource:
             value = _JSON.validate_json(text)
         except ValidationError:
             value = text
-        form = ModelSettingsForm.model_validate({**self._store.model_settings(self.model), row.key: value})
+        saved = {
+            key: value
+            for key, value in self._store.model_settings(self.model).items()
+            if key in ModelSettingsForm.model_fields
+        }
+        form = ModelSettingsForm.model_validate({**saved, row.key: value})
         validate_model_options(model=self.model, form=form)
         return form
 
@@ -112,8 +124,14 @@ def _setting_label(key: str) -> str:
         'anthropic_thinking_mode': 'Extended Thinking',
         'anthropic_thinking_budget': 'Thinking Budget',
         'anthropic_effort': 'Effort',
+        'anthropic_thinking_display': 'Thinking Display',
+        'anthropic_preserved_thinking': 'Preserved Thinking',
+        'anthropic_interleaved_thinking': 'Interleaved Thinking',
+        'glm_thinking': 'Thinking (GLM)',
+        'glm_clear_thinking': 'Clear Thinking (GLM)',
+        'glm_reasoning_effort': 'Reasoning Effort (GLM)',
     }
-    return labels.get(key, key.removeprefix('openai_').replace('_', ' ').title())
+    return labels.get(key, key.removeprefix('openai_').removeprefix('anthropic_').replace('_', ' ').title())
 
 
 def _choices(annotation: object) -> tuple[str, ...]:

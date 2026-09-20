@@ -26,6 +26,12 @@ def model_options(*, model: str) -> dict[str, tuple[str, ...]]:
             options['anthropic_thinking_budget'] = ()
         if claude.get('anthropic_supports_effort', False):
             options['anthropic_effort'] = _anthropic_efforts(name=name)
+        if adaptive:
+            options['anthropic_preserved_thinking'] = ()
+        if any(tag in name.lower() for tag in _FABLE_5_1_TAGS):
+            options['anthropic_thinking_display'] = ('updates', 'summarized')
+        if not adaptive and re.match(r'claude-(?:opus|sonnet|haiku)-4', name.lower()):
+            options['anthropic_interleaved_thinking'] = ()
         if claude.get('anthropic_disallows_sampling_settings', False):
             for key in ('temperature', 'top_p', 'top_k'):
                 options.pop(key, None)
@@ -37,6 +43,12 @@ def model_options(*, model: str) -> dict[str, tuple[str, ...]]:
         options.pop('temperature')
         options.pop('seed')
         options['thinking'] = ()
+    glm = _glm_version(name=name)
+    if glm is not None and glm >= (4, 5):
+        options['glm_thinking'] = ()
+        options['glm_clear_thinking'] = ()
+        if glm >= (5, 2):
+            options['glm_reasoning_effort'] = ()
     return options
 
 
@@ -90,6 +102,22 @@ def validate_model_options(*, model: str, form: ModelSettingsForm) -> None:
             and form.anthropic_effort in ('xhigh', 'max')
         ):
             raise ValueError('This model requires thinking for xhigh or max effort.')
+    if form.anthropic_thinking_mode == 'disabled' and (
+        form.anthropic_thinking_display is not None or form.anthropic_preserved_thinking is not None
+    ):
+        raise ValueError('Set extended thinking to enabled or adaptive before using its display or binding.')
+    if form.glm_thinking == 'disabled' and form.glm_reasoning_effort is not None:
+        raise ValueError('Set GLM thinking to enabled before setting its reasoning effort.')
+
+
+# Fable 5.1 surfaces its inter-tool progress updates; both spellings appear in the wild.
+_FABLE_5_1_TAGS: tuple[str, ...] = ('fable-5-1', '5-1-fable', 'fable-5.1', '5.1-fable')
+
+
+def _glm_version(*, name: str) -> tuple[int, int] | None:
+    """The GLM generation in a name, as a pair so 4.10 sorts above 4.5."""
+    match = re.search(r'\bglm-(\d+)(?:\.(\d+))?', name.lower())
+    return (int(match[1]), int(match[2] or 0)) if match else None
 
 
 def _openai_efforts(*, name: str) -> tuple[str, ...]:

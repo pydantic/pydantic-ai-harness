@@ -20,6 +20,7 @@ from pydantic_clai2.command_context import CommandContext
 from pydantic_clai2.commands import Command
 from pydantic_clai2.config import Settings
 from pydantic_clai2.field_menu import Runners
+from pydantic_clai2.model_menu import model_settings_command
 from pydantic_clai2.settings_store import SettingsStore
 
 PromptT = TypeVar('PromptT')
@@ -146,3 +147,59 @@ async def test_keys_command_in_shell(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert api_keys.load_keys()['SHELL_KEY'].get_secret_value() == 'private-value'
     assert '/keys' in output.getvalue()
     assert 'private-value' not in output.getvalue()
+
+
+async def test_unknown_saved_model_settings_do_not_break_chat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    inputs(monkeypatch, ['hello', '/exit'])
+    store = SettingsStore(tmp_path / 'config.db')
+    store.save_model_settings('test', {'temperature': 0.5, 'future_setting': {'nested': True}})
+    output = io.StringIO()
+    await chat(
+        Agent(TestModel(custom_output_text='Compatible settings work.')),
+        deps=None,
+        console=Console(file=output, width=120),
+        store=store,
+    )
+    assert 'Compatible settings work.' in output.getvalue()
+    assert 'Invalid saved model settings' not in output.getvalue()
+    assert store.model_settings('test') == {'temperature': 0.5, 'future_setting': {'nested': True}}
+
+
+async def test_invalid_saved_model_settings_can_be_repaired_without_exiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs(monkeypatch, ['first attempt', '/model_settings test', 'second attempt', '/exit'])
+    store = SettingsStore(tmp_path / 'config.db')
+    store.save_model_settings('test', {'temperature': 'private-invalid-value', 'future_setting': True})
+    requests: list[str] = []
+
+    store.add_model(name='test')
+    script = Script(lists=[pick('temperature'), MenuResult(cancelled=True)], choices=[], texts=[typed('0.5')])
+
+    async def edit_settings(context: CommandContext, args: list[str]) -> str:
+        return await model_settings_command(context, args, runners=script.runners)
+
+    monkeypatch.setattr('pydantic_clai2._app.model_settings_command', edit_settings)
+
+    class Repair(AbstractCapability[None]):
+        async def before_model_request(
+            self, ctx: RunContext[None], request_context: ModelRequestContext
+        ) -> ModelRequestContext:
+            requests.append('request')
+            return request_context
+
+    output = io.StringIO()
+    await chat(
+        Agent(TestModel(custom_output_text='Recovered successfully.'), deps_type=type(None), capabilities=[Repair()]),
+        deps=None,
+        console=Console(file=output, width=120),
+        store=store,
+    )
+    assert requests == ['request']
+    text = output.getvalue()
+    assert 'Invalid saved model settings for test' in text
+    assert '/model_settings test' in text
+    assert 'temperature:' in text
+    assert 'private-invalid-value' not in text
+    assert 'Recovered successfully.' in text
+    assert store.model_settings('test') == {'temperature': 0.5, 'future_setting': True}

@@ -30,6 +30,9 @@ This is a partial implementation, not a claim of full runtime parity.
 | Relevant settings | Remove broad generic fields; hide sampling controls for reasoning GPT models; preserve saved fields for cleanup |
 | GPT-6/GPT-5.6 defaults | Apply the requested seven defaults before saved overrides, independent of provider prefix; reset restores inheritance |
 | Custom params | Existing add/edit/rename/delete flow retained; custom body values applied last |
+| GLM controls | Native thinking type and clear-thinking body fields from GLM-4.5; reasoning effort from GLM-5.2 |
+| Claude controls | Classic interleaved thinking, Fable 5.1 thinking display, and preserved-thinking prefix mismatch behavior |
+| Shared-store compatibility | Ignore unknown saved keys, preserve them on edit/reset, keep new edits strict; invalid known values return to the prompt |
 
 The shared `FieldMenu` still owns editing. `/set` retains searchable keys and
 its custom-value choice row. The store holds only explicit model overrides.
@@ -41,9 +44,9 @@ The full-runtime scope requested by the user is **not finished**:
 - Code Puppy's main/sub-agent retries: global fallback, per-model overrides,
   exception classification, jittered backoff, progress reset, total-attempt cap,
   partial-output handling, logging, and sub-agent inheritance.
-- Provider-specific GLM thinking/clear-thinking/effort controls and translations;
-  Gemini's separate thinking-enabled/level controls; Claude interleaved thinking
-  and thinking-display controls. A generic `thinking` row is not 1:1 parity.
+- GLM proxy-specific translation to `chat_template_kwargs`; the current controls
+  emit GLM's native body shape. Gemini's separate thinking-enabled/level controls
+  and Claude's separate clear-thinking control are still missing.
 - Code Puppy's numeric ranges, rounding/step hints, initial numeric input, and
   display formatting. CLAI still uses its existing validated Pydantic bounds.
 - Catalog output-token defaults (catalog value, then 15% of context clamped to
@@ -95,8 +98,7 @@ four retry rows until both main and delegated runs consume their values.
 
 ## Verification
 
-- 184 focused tests passed across model configuration/defaults, model and settings
-  menus, key menus, provider setup flows, and app command edges.
+- The full CLAI suite passed: 871 tests, one skipped.
 - Repository Ruff check/format and strict Pyright on modified source/tests passed.
 - Focused coverage reached every branch in the four settings/menu modules.
   The coverage command's overall 100% gate was not met: six pre-existing
