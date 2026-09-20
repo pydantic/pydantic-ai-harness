@@ -127,6 +127,20 @@ which can retain globals removed from source; initialize plugin state explicitly
 
 Plugins are trusted code running as you. Only install what you trust.
 
+## Worktree startup
+
+```bash
+clai2 --worktree my-task
+```
+
+`--worktree` (or `-w`) creates `<repository-root>/.worktrees/NAME` and changes to
+that directory before reading project settings or activating plugins. Relative paths in your plugin, the coding tools,
+and `repo_context` therefore refer to that checkout. User plugins and settings
+still load from the same database directory, even with a relative `--database`
+path. Only committed project files reach the new checkout. Worktrees and their
+`clai/NAME` branches stay on disk after the session ends; plugins do not own their
+cleanup. See [Git worktrees](README.md#git-worktrees) for naming and cleanup.
+
 ## The built-in plugins
 
 The coding tools are a plugin too, and so are asking you multiple-choice
@@ -538,6 +552,11 @@ The editor remains active during agent turns: users can draft and queue messages
 but turns and slash commands execute sequentially. Shift-Enter inserts a newline;
 Enter submits. Alt-Enter remains a fallback for terminals that cannot distinguish
 Shift-Enter. Modified-key reporting is enabled only while the editor owns input.
+Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
+including trailing whitespace. Spaces, tabs, and newlines separate words. Text
+after the cursor is preserved. Your terminal must send Option as Alt/Meta for
+this shortcut; legacy and modified-key encodings are supported.
+
 Completion rows remain visible while a replacement lookup runs, but stale results
 cannot be selected. Popup height changes reuse available space without adding
 blank transcript lines on each key. Completion providers should be read-only.
@@ -566,7 +585,8 @@ into the transcript. Large output bursts during resize spill to a private tempor
 file and are flushed in order after the viewport is rebuilt.
 The Termflow smoothing defaults match Code Puppy: responses use 12 ms ticks, a 0.5-second
 catch-up window, and at least one character per tick; thinking uses 20 ms ticks,
-a 0.4-second window, and at least two characters per tick. Plugins do not need their own redraw logic. Pending message previews appear
+a 0.4-second window, and at least two characters per tick, and renders as dimmed
+Markdown after the `Thinking` heading on the same row. Plugins do not need their own redraw logic. Pending message previews appear
 above the editor in execution order (`Follow-up:` for messages, `Command:` for
 slash commands), and disappear when consumed. The preview is read-only; clipping
 and flattening multiline text for display do not change the submitted text.
@@ -608,6 +628,9 @@ settings = host.settings(NotifySettings)
 ```
 
 Bad or missing values fail at startup with a message naming your plugin.
+CLAI ignores unknown names in its own saved settings and preserves their values for
+other versions or branches. This does not relax validation of plugin declarations
+or `host.settings(Model)`.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 

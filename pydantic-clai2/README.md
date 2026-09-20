@@ -37,6 +37,13 @@ Prose outside fences still streams line by line. Unlabelled and Markdown fences
 stay literal, including indentation and blank lines; unknown languages use plain
 text. Long code lines wrap to the terminal width.
 
+## Word deletion
+
+Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
+including trailing whitespace. Spaces, tabs, and newlines separate words. Text
+after the cursor is preserved. Your terminal must send Option as Alt/Meta for
+this shortcut; legacy and modified-key encodings are supported.
+
 ## Interrupting a turn
 
 Press Esc or Ctrl-C to cancel the active agent turn without discarding your draft.
@@ -170,6 +177,48 @@ pyramid, with CLAI lettering. The persistent `CLAI 2.0` banner uses `ansi_shadow
 The splash is disabled for redirected output, CLI arguments, small terminals,
 Windows, `NO_COLOR`, or `CLAI_NO_SPLASH=1`.
 
+## Git worktrees
+
+```bash
+clai2 --worktree my-task
+clai2 -w
+```
+
+A Git worktree is another checkout of the same repository with its own branch
+and working files. Run these commands inside a repository with at least one
+commit. `--worktree NAME` creates a `clai/NAME` branch from the current `HEAD`
+and starts CLAI at `<repository-root>/.worktrees/NAME`.
+`-w` is the short form; omit the name to generate one. Names start with a letter
+or digit and contain only ASCII letters, digits, hyphens, and underscores.
+
+After checkout succeeds, CLAI adds `/.worktrees/` to Git's local `info/exclude`
+file to keep generated checkouts out of `git status`, without changing your
+tracked `.gitignore`.
+Uncommitted changes, ignored files, and untracked files are not copied. Project settings, repository instructions, and coding
+tools use the new worktree root. Your user settings and plugins stay available;
+a relative `--database` path still refers to the directory you launched from.
+
+CLAI prints the new path and branch. Existing branches and non-empty directories
+are rejected. If checkout fails, CLAI tries to remove only the branch it just
+created, without forcing deletion. If cleanup or the ignore edit fails, the error
+names the retained branch or checkout for recovery. The worktree and branch
+remain after exit, including startup
+errors after creation, so CLAI does not delete your work. Enter that directory
+and run `clai2 --resume` to continue a saved session. `--worktree` cannot be
+combined with `--resume`, `config`, or `plugins`.
+
+When you no longer need the checkout, use Git's own cleanup commands from your
+original repository root. Without `--force`, Git refuses to remove a dirty worktree:
+
+```bash
+git worktree remove .worktrees/my-task
+git branch -d clai/my-task
+```
+
+A worktree separates working files, not permissions. CLAI's default tools can
+still access files outside it. Creation runs before the agent starts and emits
+no agent telemetry spans.
+
 ## Codex authentication
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:
@@ -220,6 +269,11 @@ A repository can add its own layer with a `.clai/settings.json` file; see
 Codex tokens are not written to the settings database. Plugin settings are arbitrary
 JSON stored in plaintext in this database, including secrets if you put them there.
 Pass secret references or use plugin-owned credential storage instead of embedding keys.
+
+When you switch versions or branches, CLAI ignores saved setting names it does not
+recognize and leaves their stored values unchanged. Missing settings use the current
+defaults. New writes still reject unknown names and invalid values. Invalid saved
+values for known settings and unsupported database schema versions still cause an error.
 
 ```text
 /set
@@ -707,9 +761,10 @@ Streaming uses the defaults from [Code Puppy's smoothing adapters](https://githu
 
 - Markdown uses Termflow `SmoothWriter`: 12 ms ticks, 0.5-second catch-up,
   minimum one visible character per tick. Markdown is parsed line-by-line.
-- Thinking deltas feed `StreamSmoother` immediately: 20 ms ticks, 0.4-second
-  catch-up, minimum two characters per tick. They display as dim literal text,
-  without waiting for newlines or interpreting Markdown.
+- Reasoning runs through the same Markdown pipeline with Termflow's dim
+  renderer, at Code Puppy's thinking pace: 20 ms ticks, 0.4-second catch-up,
+  minimum two characters per tick. The `Thinking` heading ends without a
+  newline, so the first rendered reasoning line continues on the heading's row.
 - Both writers feed the terminal scroll region directly. Partial text does not
   wait for an editor refresh, and a completed line does not clear the input box.
 - Smoothing applies only to interactive terminal output. Redirected output is
