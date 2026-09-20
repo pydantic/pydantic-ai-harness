@@ -89,3 +89,14 @@ def test_custom_params_edit_keeps_unknown_fields(tmp_path: Path) -> None:
     }
     menu.save(pairs={})
     assert context.store.model_settings(model) == {'future_setting': True}
+
+
+@pytest.mark.parametrize('key', ['', 'a..b', ' .x', 'x.'])
+def test_invalid_custom_keys_are_validation_errors(key: str) -> None:
+    with pytest.raises(ValidationError, match='nonempty dot-separated'):
+        model_settings_from_json({'custom_params': {key: 1}})
+
+
+def test_empty_custom_parameters_are_valid() -> None:
+    assert ModelSettingsForm(custom_params=None).to_model_settings() is None
+    assert ModelSettingsForm(custom_params={}).to_model_settings() is None

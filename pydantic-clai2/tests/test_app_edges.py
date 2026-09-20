@@ -13,14 +13,15 @@ from pydantic_ai import Agent, ModelRequestContext, RunContext
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.models.test import TestModel
 from rich.console import Console
+from termflow.tui import MenuItem  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import api_keys, chat, key_menu
 from pydantic_clai2.command_context import CommandContext
 from pydantic_clai2.commands import Command
 from pydantic_clai2.config import Settings
-from pydantic_clai2.field_menu import Runners
-from pydantic_clai2.model_menu import model_settings_command
+from pydantic_clai2.field_menu import FieldMenu, Runners
+from pydantic_clai2.model_menu import ModelSettingsSource, model_settings_command
 from pydantic_clai2.settings_store import SettingsStore
 
 PromptT = TypeVar('PromptT')
@@ -165,16 +166,27 @@ async def test_unknown_saved_model_settings_do_not_break_chat(tmp_path: Path, mo
     assert store.model_settings('test') == {'temperature': 0.5, 'future_setting': {'nested': True}}
 
 
+@pytest.mark.parametrize('invalid_key', ['temperature', '', 'a..b'])
 async def test_invalid_saved_model_settings_can_be_repaired_without_exiting(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_key: str
 ) -> None:
     inputs(monkeypatch, ['first attempt', '/model_settings test', 'second attempt', '/exit'])
     store = SettingsStore(tmp_path / 'config.db')
-    store.save_model_settings('test', {'temperature': 'private-invalid-value', 'future_setting': True})
+    if invalid_key == 'temperature':
+        store.save_model_settings('test', {'temperature': 'private-invalid-value', 'future_setting': True})
+    else:
+        store.save_model_settings(
+            'test', {'custom_params': {invalid_key: 'private-invalid-value'}, 'future_setting': True}
+        )
     requests: list[str] = []
 
     store.add_model(name='test')
-    script = Script(lists=[pick('temperature'), MenuResult(cancelled=True)], choices=[], texts=[typed('0.5')])
+    if invalid_key == 'temperature':
+        script = Script(lists=[pick('temperature'), MenuResult(cancelled=True)], choices=[], texts=[typed('0.5')])
+    else:
+        menu = FieldMenu(ModelSettingsSource(store, 'test'))
+        reset = menu.reset_marker(object(), MenuItem('Custom params', value='custom_params'))
+        script = Script(lists=[reset, MenuResult(cancelled=True)], choices=[], texts=[])
 
     async def edit_settings(context: CommandContext, args: list[str]) -> str:
         return await model_settings_command(context, args, runners=script.runners)
@@ -199,7 +211,10 @@ async def test_invalid_saved_model_settings_can_be_repaired_without_exiting(
     text = output.getvalue()
     assert 'Invalid saved model settings for test' in text
     assert '/model_settings test' in text
-    assert 'temperature:' in text
+    assert ('temperature:' if invalid_key == 'temperature' else 'custom_params:') in text
     assert 'private-invalid-value' not in text
     assert 'Recovered successfully.' in text
-    assert store.model_settings('test') == {'temperature': 0.5, 'future_setting': True}
+    expected = (
+        {'temperature': 0.5, 'future_setting': True} if invalid_key == 'temperature' else {'future_setting': True}
+    )
+    assert store.model_settings('test') == expected

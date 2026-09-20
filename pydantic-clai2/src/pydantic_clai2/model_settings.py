@@ -9,7 +9,7 @@ from anthropic.types.beta import (
     BetaThinkingConfigEnabledParam,
     BetaThinkingConfigParam,
 )
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.models.openai import OpenAIResponsesModelSettings
 from pydantic_ai.settings import ModelSettings
@@ -100,6 +100,14 @@ class ModelSettingsForm(BaseModel):
     custom_params: dict[str, JsonValue] | None = Field(
         default=None, description='Custom request body parameters. Dotted keys nest; custom values win.'
     )
+
+    @field_validator('custom_params')
+    @classmethod
+    def valid_custom_params(cls, value: dict[str, JsonValue] | None) -> dict[str, JsonValue] | None:
+        """Reject malformed persisted keys before request conversion can raise outside validation."""
+        if value is not None:
+            expand_params(pairs=value)
+        return value
 
     def to_model_settings(self) -> ModelSettings | None:
         """What `agent.run(model_settings=...)` receives; `None` when nothing is set.

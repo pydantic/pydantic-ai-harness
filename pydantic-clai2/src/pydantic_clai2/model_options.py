@@ -17,24 +17,7 @@ def model_options(*, model: str) -> dict[str, tuple[str, ...]]:
     if provider in ('openai', 'openai-chat', 'openai-responses', 'openai-codex'):
         options = _openai_options(provider=provider, name=name, family_defaults=family_defaults)
     elif provider == 'anthropic':
-        options.pop('seed')
-        options['top_p'] = ()
-        claude = anthropic_model_profile(name) or {}
-        adaptive = claude.get('anthropic_supports_adaptive_thinking', False)
-        options['anthropic_thinking_mode'] = ('adaptive', 'disabled') if adaptive else ('enabled', 'disabled')
-        if not adaptive:
-            options['anthropic_thinking_budget'] = ()
-        if claude.get('anthropic_supports_effort', False):
-            options['anthropic_effort'] = _anthropic_efforts(name=name)
-        if adaptive:
-            options['anthropic_preserved_thinking'] = ()
-        if any(tag in name.lower() for tag in _FABLE_5_1_TAGS):
-            options['anthropic_thinking_display'] = ('updates', 'summarized')
-        if not adaptive and re.match(r'claude-(?:opus|sonnet|haiku)-4', name.lower()):
-            options['anthropic_interleaved_thinking'] = ()
-        if claude.get('anthropic_disallows_sampling_settings', False):
-            for key in ('temperature', 'top_p', 'top_k'):
-                options.pop(key, None)
+        options = _anthropic_options(name=name)
     elif provider in ('google', 'google-gla', 'google-vertex'):
         options['top_p'] = ()
         if name.startswith(('gemini-2.5', 'gemini-3')):
@@ -43,12 +26,35 @@ def model_options(*, model: str) -> dict[str, tuple[str, ...]]:
         options.pop('temperature')
         options.pop('seed')
         options['thinking'] = ()
+        if provider in ('openrouter', 'vllm'):
+            options = _openai_options(provider='openai-chat', name=name, family_defaults=family_defaults)
     glm = _glm_version(name=name)
     if glm is not None and glm >= (4, 5):
         options['glm_thinking'] = ()
         options['glm_clear_thinking'] = ()
         if glm >= (5, 2):
             options['glm_reasoning_effort'] = ()
+    return options
+
+
+def _anthropic_options(*, name: str) -> dict[str, tuple[str, ...]]:
+    options: dict[str, tuple[str, ...]] = {key: () for key in ('max_tokens', 'temperature', 'top_p', 'custom_params')}
+    claude = anthropic_model_profile(name) or {}
+    adaptive = claude.get('anthropic_supports_adaptive_thinking', False)
+    options['anthropic_thinking_mode'] = ('adaptive', 'disabled') if adaptive else ('enabled', 'disabled')
+    if not adaptive:
+        options['anthropic_thinking_budget'] = ()
+    if claude.get('anthropic_supports_effort', False):
+        options['anthropic_effort'] = _anthropic_efforts(name=name)
+    if adaptive:
+        options['anthropic_preserved_thinking'] = ()
+    if any(tag in name.lower() for tag in _FABLE_5_1_TAGS):
+        options['anthropic_thinking_display'] = ('updates', 'summarized')
+    if not adaptive and re.match(r'claude-(?:opus|sonnet|haiku)-4', name.lower()):
+        options['anthropic_interleaved_thinking'] = ()
+    if claude.get('anthropic_disallows_sampling_settings', False):
+        for key in ('temperature', 'top_p', 'top_k'):
+            options.pop(key, None)
     return options
 
 
