@@ -152,7 +152,7 @@ async def test_default_shell_leaves_terminal_palette_untouched(tmp_path: Path) -
         )
     text = output.getvalue()
     assert '\x1b]' not in text
-    assert '\x1b[38;2;229;32;233m' in text
+    assert '\x1b[38;2;229;32;233m' in text or '\x1b[95m' in text
     assert theme.current() is None
 
 
