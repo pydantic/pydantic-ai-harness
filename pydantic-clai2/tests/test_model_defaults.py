@@ -165,3 +165,8 @@ def test_chat_compatible_reasoning_defaults_can_be_overridden(tmp_path: Path, pr
     assert menu.row_for('openai_reasoning_summary') is None
     source.reset(row)
     assert source.current(row) == 'medium'
+
+
+@pytest.mark.parametrize('model', ['custom:gpt-6', 'custom:o3'])
+def test_unknown_provider_does_not_claim_chat_protocol_support(model: str) -> None:
+    assert set(model_options(model=model)) == {'max_tokens', 'thinking', 'custom_params'}

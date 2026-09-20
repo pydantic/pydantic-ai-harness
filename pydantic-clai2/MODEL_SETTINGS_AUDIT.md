@@ -98,11 +98,11 @@ four retry rows until both main and delegated runs consume their values.
 
 ## Verification
 
-- The full CLAI suite passed: 871 tests, one skipped.
+- The full CLAI suite passed: 980 tests, one skipped. The final provider-fallback
+  regression suite also passed (62 tests).
 - Repository Ruff check/format and strict Pyright on modified source/tests passed.
-- Focused coverage reached every branch in the four settings/menu modules.
-  The coverage command's overall 100% gate was not met: six pre-existing
-  `FieldSource` protocol method ellipses are counted as uncovered statements.
+- Combined full-suite and final regression coverage reached 100% of CLAI
+  statements and branches using its own coverage configuration.
 - Fresh tmux sessions running `uv run clai2` with isolated settings verified the
   model picker, GPT defaults, choice edits and reset, editing a different Claude
   model without changing the active GPT model, numeric input, return navigation,
