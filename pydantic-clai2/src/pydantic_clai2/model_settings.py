@@ -3,7 +3,11 @@
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic_ai.models.anthropic import AnthropicModelSettings
+from pydantic_ai.models.openai import OpenAIResponsesModelSettings
 from pydantic_ai.settings import ModelSettings
+
+from .custom_params import expand_params
 
 
 class ModelSettingsForm(BaseModel):
@@ -32,6 +36,35 @@ class ModelSettingsForm(BaseModel):
     )
     service_tier: Literal['auto', 'default', 'flex', 'priority'] | None = Field(
         default=None, description='Provider service tier (OpenAI).'
+    )
+
+    openai_reasoning_effort: Literal['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] | None = Field(
+        default=None, description='OpenAI reasoning effort. Overrides generic thinking.'
+    )
+    openai_reasoning_context: Literal['auto', 'current_turn', 'all_turns'] | None = Field(
+        default=None, description='Responses reasoning retained across turns.'
+    )
+    openai_reasoning_mode: Literal['standard', 'pro'] | None = Field(
+        default=None, description='Responses reasoning mode.'
+    )
+    openai_reasoning_summary: Literal['auto', 'concise', 'detailed'] | None = Field(
+        default=None, description='Responses reasoning summary display.'
+    )
+    openai_text_verbosity: Literal['low', 'medium', 'high'] | None = Field(
+        default=None, description='Responses answer verbosity.'
+    )
+    anthropic_thinking_mode: Literal['enabled', 'adaptive', 'disabled'] | None = Field(
+        default=None, description='Claude thinking mode. Overrides generic thinking.'
+    )
+    anthropic_thinking_budget: int | None = Field(
+        default=None, ge=1024, description='Classic thinking token budget, below max_tokens. Default: 10000.'
+    )
+    anthropic_effort: Literal['low', 'medium', 'high', 'xhigh', 'max'] | None = Field(
+        default=None, description='Claude response effort.'
+    )
+
+    custom_params: dict[str, JsonValue] | None = Field(
+        default=None, description='Custom request body parameters. Dotted keys nest; custom values win.'
     )
 
     def to_model_settings(self) -> ModelSettings | None:
@@ -63,7 +96,42 @@ class ModelSettingsForm(BaseModel):
             settings['thinking'] = self.thinking
         if self.service_tier is not None:
             settings['service_tier'] = self.service_tier
+        settings.update(self._openai_settings())
+        settings.update(self._anthropic_settings())
+        if self.custom_params:
+            settings['extra_body'] = expand_params(pairs=self.custom_params)
         return settings or None
+
+    def _openai_settings(self) -> OpenAIResponsesModelSettings:
+        openai = OpenAIResponsesModelSettings()
+        if self.openai_reasoning_effort is not None:
+            openai['openai_reasoning_effort'] = self.openai_reasoning_effort
+        if self.openai_reasoning_context is not None:
+            openai['openai_reasoning_context'] = self.openai_reasoning_context
+        if self.openai_reasoning_mode is not None:
+            openai['openai_reasoning_mode'] = self.openai_reasoning_mode
+        if self.openai_reasoning_summary is not None:
+            openai['openai_reasoning_summary'] = self.openai_reasoning_summary
+        if self.openai_text_verbosity is not None:
+            openai['openai_text_verbosity'] = self.openai_text_verbosity
+        return openai
+
+    def _anthropic_settings(self) -> AnthropicModelSettings:
+        anthropic = AnthropicModelSettings()
+        if self.anthropic_effort is not None:
+            anthropic['anthropic_effort'] = self.anthropic_effort
+        if self.anthropic_thinking_mode == 'enabled':
+            if self.max_tokens is None:
+                anthropic['max_tokens'] = (self.anthropic_thinking_budget or 10000) + 4096
+            anthropic['anthropic_thinking'] = {
+                'type': 'enabled',
+                'budget_tokens': self.anthropic_thinking_budget or 10000,
+            }
+        elif self.anthropic_thinking_mode == 'adaptive':
+            anthropic['anthropic_thinking'] = {'type': 'adaptive'}
+        elif self.anthropic_thinking_mode == 'disabled':
+            anthropic['anthropic_thinking'] = {'type': 'disabled'}
+        return anthropic
 
 
 def model_settings_from_json(values: dict[str, JsonValue]) -> ModelSettingsForm:

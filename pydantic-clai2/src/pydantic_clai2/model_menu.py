@@ -11,9 +11,11 @@ from termflow.tui.menu import Menu, MenuResult  # pyright: ignore[reportMissingT
 from . import openrouter, vllm
 from ._rendering import markdown_style
 from .command_context import CommandContext
+from .custom_params import CustomParamsMenu
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow, shown
 from .menu_worker import menu_key, run_worker
 from .model_catalog import CatalogModel, catalog
+from .model_options import model_options, validate_model_options
 from .model_settings import ModelSettingsForm
 from .settings_store import SettingsStore
 
@@ -44,10 +46,17 @@ class ModelSettingsSource:
     def rows(self) -> list[FieldRow]:
         """Every form field with its description and any fixed choices."""
         rows: list[FieldRow] = []
+        options = model_options(model=self.model)
+        saved = self._store.model_settings(self.model)
         for key, info in ModelSettingsForm.model_fields.items():
+            if key not in options and key not in saved:
+                continue
             rows.append(
                 FieldRow(
-                    key=key, description=info.description or '', default='(not set)', choices=_choices(info.annotation)
+                    key=key,
+                    description=info.description or '',
+                    default='(not set)',
+                    choices=options.get(key, ()) or _choices(info.annotation),
                 )
             )
         return rows
@@ -60,16 +69,16 @@ class ModelSettingsSource:
         """Why `text` is not valid for the row, or `None` if it is."""
         try:
             self._validated(row, text)
-        except ValidationError as exc:
-            return first_error(exc)
+        except (ValidationError, ValueError) as exc:
+            return first_error(exc) if isinstance(exc, ValidationError) else str(exc)
         return None
 
     def apply(self, row: FieldRow, raw: str) -> str:
         """Validate the whole form with this change, then save it."""
         try:
             form = self._validated(row, raw)
-        except ValidationError as exc:
-            return f'{row.key}: {first_error(exc)}'
+        except (ValidationError, ValueError) as exc:
+            return f'{row.key}: {first_error(exc) if isinstance(exc, ValidationError) else str(exc)}'
         self._store.save_model_settings(self.model, form.model_dump(exclude_none=True))
         return f'Saved {row.key} for {self.model}. Applies when this model is selected.'
 
@@ -77,6 +86,8 @@ class ModelSettingsSource:
         """Drop one override."""
         saved = self._store.model_settings(self.model)
         saved.pop(row.key, None)
+        if row.key == 'anthropic_thinking_mode':
+            saved.pop('anthropic_thinking_budget', None)
         self._store.save_model_settings(self.model, saved)
         return f'Reset {row.key} for {self.model}.'
 
@@ -85,7 +96,9 @@ class ModelSettingsSource:
             value = _JSON.validate_json(text)
         except ValidationError:
             value = text
-        return ModelSettingsForm.model_validate({**self._store.model_settings(self.model), row.key: value})
+        form = ModelSettingsForm.model_validate({**self._store.model_settings(self.model), row.key: value})
+        validate_model_options(model=self.model, form=form)
+        return form
 
 
 def _choices(annotation: object) -> tuple[str, ...]:
@@ -196,9 +209,9 @@ class ModelMenu:
         """Browse one provider without changing the active model."""
         return ModelMenu(self._context, provider=provider)
 
-    def settings_menu(self, name: str) -> FieldMenu:
-        """The field editor for one model's overrides."""
-        return FieldMenu(ModelSettingsSource(self._context.store, name))
+    def edit_settings(self, *, name: str, runners: Runners) -> list[str]:
+        """Run the same settings flow as the direct slash command."""
+        return run_model_settings(store=self._context.store, model=name, runners=runners)
 
 
 def _tokens(count: int | None) -> str:
@@ -228,7 +241,7 @@ def _run_provider(menu: ModelMenu, runners: Runners, messages: list[str]) -> boo
         value = result.item.value
         if isinstance(value, _EditSettings):
             cursor = menu.index_of(value.model)
-            messages += run_flow(menu.settings_menu(value.model), runners)
+            messages += menu.edit_settings(name=value.model, runners=runners)
             continue
         if isinstance(value, str):
             messages.append(menu.choose(value))
@@ -262,3 +275,26 @@ class _ConnectProvider(Exception):
         self.provider = provider
         self.messages = messages
         super().__init__()
+
+
+async def model_settings_command(context: CommandContext, args: list[str], *, runners: Runners = TERMINAL) -> str:
+    """Edit the current or a named saved model without switching models."""
+    if len(args) > 1:
+        raise ValueError('Usage: /model_settings [NAME]')
+    name = args[0] if args else context.settings.model
+    if not name:
+        raise ValueError('No model selected. Use /add_model first.')
+    if name not in context.store.models():
+        raise ValueError(f'Model not added: {name}. Use /add_model {name} first.')
+    messages = await run_worker(lambda: run_model_settings(store=context.store, model=name, runners=runners))
+    return '\n'.join(messages) or 'No changes.'
+
+
+def run_model_settings(*, store: SettingsStore, model: str, runners: Runners) -> list[str]:
+    """Both entry points use the same field editor and custom-params submenu."""
+    custom = CustomParamsMenu(store=store, model=model)
+    return run_flow(
+        FieldMenu(ModelSettingsSource(store, model)),
+        runners,
+        submenus={'custom_params': lambda: custom.run(runners=runners)},
+    )

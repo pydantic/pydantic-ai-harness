@@ -121,7 +121,7 @@ class FieldMenu:
         return '\n'.join(lines)
 
     def build(self, initial: int = 0) -> Menu:
-        """The field list. `r` returns a reset marker instead of a row."""
+        """The field list. `R` returns a reset marker instead of a row."""
         return (
             MenuBuilder(self._source.title)
             .style(markdown_style())
@@ -129,7 +129,7 @@ class FieldMenu:
             .searchable()
             .initial_index(min(initial, len(self.rows) - 1))
             .preview(self.details)
-            .on_key('r', self.reset_marker)
+            .on_key('R', self.reset_marker)
             .footer_hint(_LIST_HINT)
             .key_source(menu_key)
             .build()
@@ -214,7 +214,9 @@ TERMINAL = Runners()
 """The real terminal."""
 
 
-def run_flow(menu: FieldMenu, runners: Runners = TERMINAL) -> list[str]:
+def run_flow(
+    menu: FieldMenu, runners: Runners = TERMINAL, *, submenus: dict[str, Callable[[], list[str]]] | None = None
+) -> list[str]:
     """List, edit, back to the list, until Esc. Returns the messages to show afterwards."""
     messages: list[str] = []
     cursor = 0
@@ -233,6 +235,9 @@ def run_flow(menu: FieldMenu, runners: Runners = TERMINAL) -> list[str]:
         if row is None:
             return messages
         cursor = menu.rows.index(row)
+        if submenus and row.key in submenus:
+            messages.extend(submenus[row.key]())
+            continue
         message = _edit(menu, row, runners)
         if message is not None:
             messages.append(message)

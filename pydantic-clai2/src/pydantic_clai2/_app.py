@@ -35,7 +35,7 @@ from .input_history import input_history
 from .interrupts import Interrupts
 from .key_menu import keys_command
 from .live_prompt import LivePrompt
-from .model_menu import open_add_model_menu
+from .model_menu import model_settings_command, open_add_model_menu
 from .model_picker import model_command, model_completions
 from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
@@ -266,6 +266,14 @@ def _create_shell(
             description='Add and use a model, or browse providers and model settings',
             handler=lambda args: context.set_setting(['model', *args]) if args else open_add_model_menu(context),
             complete=lambda args: set_completions(['model', *args]) if len(args) <= 1 else (),
+        )
+    )
+    commands.register(
+        Command(
+            name='model_settings',
+            description='Edit settings for the current or a named added model',
+            handler=lambda args: model_settings_command(context, args),
+            complete=lambda args: model_completions(context, args),
         )
     )
     commands.register(Command(name='help', description='Show commands', handler=commands.help))

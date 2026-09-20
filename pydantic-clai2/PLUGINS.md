@@ -738,6 +738,49 @@ selects one without the menu. Its Tab suggestions contain only added models.
 The list persists across sessions. The currently configured model is retained
 when upgrading; `/set model NAME` also saves the model in this list.
 
+### Model settings and custom parameters
+
+`/model_settings` edits the current model. `/model_settings PROVIDER:NAME`
+edits another added model without selecting it. Tab completes added models.
+`Ctrl+S` in `/add_model` opens the same editor. Edits save immediately and apply
+on the next prompt. `R` resets a field; Esc or Ctrl-C closes the menu.
+
+The editor offers OpenAI reasoning effort, Responses reasoning context, mode,
+summary, and verbosity, and Claude classic/adaptive thinking and effort.
+Choices depend on the model and API: Chat Completions does not get Responses
+controls, `all_turns` appears only on compatible models, and adaptive Claude
+models do not get a token budget. Classic thinking budgets must be at least
+1024 and below an explicit `max_tokens`. If classic thinking has no output cap,
+CLAI reserves the thinking budget plus 4096 output tokens. Other unset fields
+use the provider default.
+Explicit native thinking settings take precedence over generic `thinking`.
+No retry settings are included.
+
+Pydantic AI owns adaptive-thinking translation and preserved-thinking replay,
+including Fable 5.1's recovery when a changed conversation prefix invalidates a
+thinking block. CLAI does not strip thinking or implement a second recovery loop.
+See [core's thinking block binding documentation](https://pydantic.dev/docs/ai/models/anthropic/#thinking-block-binding).
+
+Open `custom_params` for Code Puppy-style **Custom Params**. Enter adds or edits
+`key = value`; editing the key renames it. `d` deletes a pair and Esc goes back.
+Dotted keys nest in the request body's `extra_body`, for example:
+
+```text
+chat_template_kwargs.thinking = medium
+reasoning.effort = max
+```
+
+Values accept JSON booleans, numbers, null, arrays, and objects, or unquoted
+text. Quote numeric-looking strings to keep them strings. Parameters are saved
+per model and applied last, overriding built-in request fields on conflict.
+An extra-body object replaces the corresponding generated object, rather than
+deep-merging it. For example, overriding `reasoning.effort` replaces the generated
+`reasoning` object; include custom `reasoning.context` too if you need both.
+They deliberately bypass the model compatibility checks: the endpoint must
+support what you send. This is also the escape hatch for custom endpoints and
+provider options not listed in the form. Reset `custom_params` to remove all
+pairs. Do not put credentials here: values are stored as plaintext in SQLite.
+
 ### Persisting conversation changes
 
 Use `await host.conversation.commit_messages(messages)` for between-turn history
