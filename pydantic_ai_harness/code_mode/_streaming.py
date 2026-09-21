@@ -42,7 +42,10 @@ def decode_partial_args(args_text: str) -> PartialArgs | None:
     """
     try:
         return _PARTIAL_ARGS_ADAPTER.validate_python(from_json(args_text, allow_partial='trailing-strings'))
-    except (ValueError, ValidationError):
+    except (TypeError, ValueError, ValidationError):
+        # `TypeError` covers raw surrogate code points in the streamed text: pydantic-core's
+        # JSON decoder rejects them before any value exists, and `from_json` raises rather
+        # than returning a parse error. Undecodable is the same as partial: no launch.
         return None
 
 

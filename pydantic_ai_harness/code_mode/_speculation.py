@@ -31,6 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Annotated, Any, Generic, Literal
 
+import anyio
 from pydantic import Strict, TypeAdapter, ValidationError
 from pydantic_ai.messages import (
     AgentStreamEvent,
@@ -824,11 +825,18 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         }
 
     async def close(self) -> None:
-        """Run-end cleanup: cancel every launch no snippet ever claimed."""
+        """Run-end cleanup: cancel every launch no snippet ever claimed.
+
+        Shielded: a run cancelled through an anyio scope is level-triggered, so without the
+        shield the first ``_cancel_watch`` await below would be re-cancelled and every later
+        watch's launches would keep running past the run's end. Each ``_cancel_watch`` await is
+        bounded by ``CANCEL_TIMEOUT_SECONDS``, so the shield cannot hold the unwind hostage.
+        """
         parts, self._parts = self._parts, {}
         self._index_to_part.clear()
-        for watch in parts.values():
-            await self._cancel_watch(watch)
+        with anyio.CancelScope(shield=True):
+            for watch in parts.values():
+                await self._cancel_watch(watch)
 
     async def _evict(
         self, ctx: RunContext[AgentDepsT], watch: _PartWatch
