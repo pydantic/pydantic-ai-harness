@@ -348,6 +348,9 @@ Keep these limitations in mind:
   from an earlier statement waits for that statement.
 - Calls are found in the streamed text, so a call spelled inside a string literal or a
   comment can start too. It is discarded when the snippet finishes.
+- Lookahead stops at a call to a tool outside the speculation allowlist, so later reads
+  cannot overtake that tool's writes. To overlap a blocking read with later calls, that read
+  must also be eligible. Streamed parts following another model tool call wait for dispatch.
 - `sequential` tools never speculate, and nothing speculates when the run's parallel
   execution mode is `sequential`.
 - Hooks on a speculated tool run when it starts, not when the snippet claims it. Hooks,

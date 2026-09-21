@@ -571,7 +571,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         # paren has streamed, even while its enclosing statement (an `if` arm, a `with` body) is
         # still being generated. Rescans recount every occurrence in the grown prefix, so
         # `demanded` is reconciled to the count rather than incremented.
-        extracted_calls, walked = _text_literal_calls(code, step.eligible)
+        extracted_calls, walked = _text_literal_calls(self._ordered_prefix(code), step.eligible)
         if not self._charge_scan_work(watch, walked):
             return
         seen: dict[str, int] = {}
@@ -694,6 +694,16 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
 
     # -- execution side ---------------------------------------------------------------------
 
+    def _ordered_prefix(self, code: str) -> str:
+        """Do not speculate beyond a tool whose effects are not declared safe."""
+        step = self._current_step
+        names = set(step.wrapped_tools) | step.sanitized_to_original.keys()
+        for name in names - step.eligible:
+            match = re.search(rf'\b{re.escape(name)}\s*\(', code)
+            if match is not None:
+                code = code[: match.start()]
+        return code
+
     async def prelaunch_for_execution(
         self, ctx: RunContext[AgentDepsT], execution: RunCodeExecution, code: str
     ) -> None:
@@ -712,7 +722,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
             # sandbox parser applies its own resource limits at dispatch.
             return
         try:
-            body = ast.parse(code).body
+            body = ast.parse(self._ordered_prefix(code)).body
         except (SyntaxError, ValueError, RecursionError, MemoryError):
             return
         extracted_calls = _literal_calls(body, step.eligible)

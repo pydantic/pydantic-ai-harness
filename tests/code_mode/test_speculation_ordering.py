@@ -17,7 +17,8 @@ def anyio_backend() -> str:
 
 
 @pytest.mark.anyio
-async def test_read_waits_for_preceding_sequential_write() -> None:
+@pytest.mark.parametrize('native_write', [False, True])
+async def test_read_waits_for_preceding_sequential_write(native_write: bool) -> None:
     value = 'before'
     reads: list[str] = []
 
@@ -34,13 +35,17 @@ async def test_read_waits_for_preceding_sequential_write() -> None:
         if len(messages) > 1:
             yield 'done'
             return
-        yield {0: DeltaToolCall(name='write', json_args='{}')}
-        yield {1: DeltaToolCall(name='run_code', json_args=json.dumps({'code': 'await read()'}))}
+        code = 'await read()'
+        if native_write:
+            yield {0: DeltaToolCall(name='write', json_args='{}')}
+        else:
+            code = 'write()\nawait read()'
+        yield {1: DeltaToolCall(name='run_code', json_args=json.dumps({'code': code}))}
 
     agent = Agent(
         FunctionModel(stream_function=stream),
         tools=[Tool(write, sequential=True), Tool(read)],
-        capabilities=[CodeMode(tools=['read'], speculate=['read'])],
+        capabilities=[CodeMode(tools=['read'] if native_write else 'all', speculate=['read'])],
     )
     result = await agent.run('go')
     returns = [

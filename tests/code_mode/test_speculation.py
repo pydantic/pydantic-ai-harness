@@ -218,9 +218,9 @@ class TestSpeculation:
 
         assert result.output == 'done'
         assert sorted(log.calls) == [('search', 'alpha'), ('side_effect', 'x')]
-        assert log.started_during_stream == 1
-        assert capability.speculation_stats.launched == 1
-        assert capability.speculation_stats.adopted == 1
+        assert log.started_during_stream == 0
+        assert capability.speculation_stats.launched == 0
+        assert capability.speculation_stats.adopted == 0
 
     async def test_variable_arguments_are_not_speculated(self):
         """A call whose argument is a variable has no literal identity to launch early."""
@@ -1355,7 +1355,7 @@ class TestDeclaredSpeculation:
                 yield {1: DeltaToolCall(json_args=args[offset : offset + 16])}
                 await asyncio.sleep(0)
 
-        capability = CodeMode[None](speculate=['search'])
+        capability = CodeMode[None](speculate=['search', 'gate'])
         agent: Agent[None, str] = Agent(
             FunctionModel(stream_function=stream_code),
             deps_type=type(None),
@@ -1367,12 +1367,12 @@ class TestDeclaredSpeculation:
 
         assert result.output == 'done'
         assert sorted(starts) == ['alpha', 'beta']
-        assert capability.speculation_stats.launched == 2
-        assert capability.speculation_stats.adopted == 1
+        assert capability.speculation_stats.launched == 3
+        assert capability.speculation_stats.adopted == 2
         assert capability.speculation_stats.evicted == 1
         metadata = _run_code_return_metadata(result.all_messages())
         speculation_meta: dict[str, Any] = metadata['speculation']
-        assert speculation_meta['hits'] == 1
+        assert speculation_meta['hits'] == 2
         assert speculation_meta['misses'] == 0
         assert speculation_meta['wasted'] == 1
         assert speculation_meta['hidden_ms'] >= 0
@@ -1436,7 +1436,7 @@ class TestTierComposition:
             await asyncio.wait_for(gate_started.wait(), timeout=5)
             yield {1: DeltaToolCall(json_args=chunks[-1])}
 
-        capability = CodeMode[None](eager=True, speculate=['search'])
+        capability = CodeMode[None](eager=True, speculate=['search', 'gate'])
         agent: Agent[None, str] = Agent(
             FunctionModel(stream_function=stream_code),
             deps_type=type(None),
@@ -1448,12 +1448,12 @@ class TestTierComposition:
 
         assert result.output == 'done'
         assert sorted(starts) == ['alpha', 'beta']
-        assert capability.speculation_stats.launched == 2
-        assert capability.speculation_stats.adopted == 1
+        assert capability.speculation_stats.launched == 3
+        assert capability.speculation_stats.adopted == 2
         assert capability.speculation_stats.evicted == 1
         metadata = _run_code_return_metadata(result.all_messages())
         speculation_meta: dict[str, Any] = metadata['speculation']
-        assert speculation_meta['hits'] == 1
+        assert speculation_meta['hits'] == 2
         assert speculation_meta['misses'] == 0
         assert speculation_meta['wasted'] == 1
         assert speculation_meta['hidden_ms'] >= 0
