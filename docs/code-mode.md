@@ -33,7 +33,7 @@ Durable execution integrations can record nested calls for deterministic replay.
 Code mode requires the Monty sandbox, available via the `codemode` extra (the `code-mode` extra is an equivalent alias):
 
 ```bash
-uv add "pydantic-ai-harness[codemode]"
+pip/uv-add "pydantic-ai-harness[codemode]"
 ```
 
 ## Usage
@@ -183,7 +183,7 @@ REPL: a worker crash, a type error, a host-side failure, and a syntax error befo
 Each of those renews the allowance without the model asking for a restart. An ordinary exception
 inside a snippet is not one of them.
 
-Once a session's allowance is spent, every later `run_code` call fails on arrival, including
+Once a session's duration allowance is spent, every later `run_code` call fails on arrival, including
 snippets that would cost almost nothing, because they reuse the same session. Rewriting the code
 does not help. `restart: true` is what recovers it, at the cost of the REPL state that session was
 holding, so any variables, imports, and definitions have to be recreated. `run_code` says as much
@@ -191,6 +191,14 @@ in the retry it returns, and that retry also reports the nested calls the snippe
 restarting does not throw away the only record of them. The behaviour is worth knowing when
 choosing `max_duration_secs`: set it low and a long agent run will spend it on ordinary work and
 pay a restart to continue.
+
+Monty also limits cumulative suspensions with `max_suspensions` (default 1,000 per session).
+External calls, OS callbacks, name lookups and future resolutions each consume this budget, so
+it is not a tool-call count. Consecutive snippets share it. After exhaustion, further host
+interactions fail, although pure Python using existing state may still work. `run_code` includes
+the started-call summary and explicit restart guidance: inspect partial results before continuing,
+since `restart: true` discards REPL state and replaying completed calls repeats their side effects.
+There is no automatic restart or replay for exhaustion.
 
 Nested tool calls are bounded separately by `max_tool_calls`, which defaults to 100 per `run_code`
 call. The budget is reserved before each call is scheduled, so a snippet cannot dispatch more work
@@ -206,13 +214,14 @@ model some calls are missing from what it can see. The list is context for the m
 nothing stops it from calling those tools again, so treat it as informing the next attempt rather
 than preventing a repeat.
 
-Override them with `resource_limits={'max_duration_secs': 10, 'max_memory': 134_217_728}` and
+Override them with `resource_limits={'max_duration_secs': 10, 'max_memory': 134_217_728, 'max_suspensions': 10_000}` and
 `max_tool_calls=25`. Pass `resource_limits='unlimited'` only when another execution boundary
-supplies equivalent limits.
+supplies equivalent limits. It removes the time and memory caps, but leaves Monty's default
+suspension budget in place; suspensions cannot be unlimited.
 
 When `CodeMode` runs inside a Temporal workflow, it disables `max_duration_secs`, including an
 explicit override. `run_code` is replayed in workflow code, so measuring elapsed time there could
-make replay choose a different path from the recorded workflow. The memory cap still applies. Put
+make replay choose a different path from the recorded workflow. The memory and suspension caps still apply. Put
 time-bounded work behind a Temporal activity instead.
 
 ## REPL state
@@ -346,7 +355,11 @@ Keep these limitations in mind:
   the call, so they cannot stop a call that has already started early; this is the same
   contract as eager mode.
 - At most `max_tool_calls` calls (and never more than 32) start early per `run_code` call;
-  later ones run cold.
+  later ones run cold. This speculative allowance is separate from the snippet's dispatch
+  budget: unclaimed launches are extra work, not a reservation against `max_tool_calls`.
+- Speculated tools must cooperate with asyncio cancellation. Cleanup requests cancellation
+  and waits up to five seconds per streamed call, then stops waiting. A tool that suppresses
+  cancellation can outlive the run; this timeout does not forcibly stop its work.
 - Enabling `speculate` puts runs in streaming mode, and the option is disabled under durable
   execution such as Temporal or DBOS.
 
@@ -373,7 +386,7 @@ unchanged.
 Install both integrations:
 
 ```bash
-uv add "pydantic-ai-harness[codemode,temporal]"
+pip/uv-add "pydantic-ai-harness[codemode,temporal]"
 ```
 
 Construct the named agent and its stable-ID toolsets outside the workflow, then attach
@@ -413,6 +426,11 @@ computation inside `run_code`; move time-bounded computation behind an activity.
 ## Observability
 
 Nested tool calls inside `run_code` produce their own spans when instrumented with [Logfire](https://pydantic.dev/logfire) or any OpenTelemetry backend -- the easiest way to understand what code mode actually did, since each `run_code` span fans out into the tool calls the model issued from inside the sandbox. See the [Pydantic AI Logfire docs](/ai/integrations/logfire/) for setup.
+
+Suspension-limit retries use the existing `run_code` error span and nested tool spans, rather
+than a separate capability span. The retry includes bounded started-call context and recovery
+guidance. Monty has no typed exhaustion marker, so a tool error with identical wording receives
+conditional guidance rather than a definitive exhaustion event.
 
 The `run_code` tool return also carries metadata with every nested call, keyed by call id:
 
@@ -531,6 +549,7 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 - No `import *`.
 - Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv` / `os.environ` need an `os_access` handler.
 - Tools requiring approval or with deferred (`CallDeferred`) execution are sandboxed like any other tool; without a `HandleDeferredToolCalls` (or equivalent) capability on the agent to resolve them inline, calling one from `run_code` raises an error that surfaces to the model as a retry.
+- Tool results reach the sandbox in the JSON shape their generated stub declares, since the stub is derived from the tool's JSON schema. `Decimal`, `UUID` and `datetime` arrive as strings, and mapping keys are stringified, so a `dict[int, str]` of `{1: 'a'}` arrives as `{'1': 'a'}`. `bytes` and `bytearray` are the exception: Monty carries binary natively, so they cross unchanged even though the stub declares `str` for them.
 
 ## Agent spec (YAML/JSON)
 

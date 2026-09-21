@@ -14,8 +14,6 @@ from pathlib import Path
 
 import pytest
 
-from pydantic_ai_harness.coder import DEFAULT_ALLOWED_COMMANDS
-
 _ROOT = Path(__file__).parent.parent
 _PACKAGE = _ROOT / 'pydantic_ai_harness'
 
@@ -100,7 +98,7 @@ _DOCS_DIR = _ROOT / 'docs'
 # `media.md` documents Step Persistence's storage plumbing (see `_NOT_A_CAPABILITY` above),
 # and `gh-aw.md` walks through the gh-aw engine definition under `gh-aw/`, so the
 # capability-page checks do not apply to either.
-_NON_CAPABILITY_PAGES = {'examples.md', 'gh-aw.md', 'index.md', 'media.md', 'mutation-testing.md'}
+_NON_CAPABILITY_PAGES = {'clai2.md', 'examples.md', 'gh-aw.md', 'index.md', 'media.md', 'mutation-testing.md'}
 _ACP_PAGE = 'acp.md'
 
 _SOURCE_LINK = 'github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/'
@@ -125,7 +123,9 @@ _CAPABILITY_DOC_PAGES = _capability_doc_pages()
 # or empty heading, fails instead of passing on a substring match.
 _CAPABILITY_PAGE_META = {
     'advisor.md': ('advisor', 'Advisor'),
+    'ask-user.md': ('ask_user', 'Ask User'),
     'aws-lambda.md': ('aws_lambda', 'AWS Lambda Durability'),
+    'background-tools.md': ('background_tools', 'Background Tools'),
     'code-mode.md': ('code_mode', 'Code Mode'),
     'coder.md': ('coder', 'Coder'),
     'skills.md': ('skills', 'Skills'),
@@ -135,6 +135,7 @@ _CAPABILITY_PAGE_META = {
     'memory.md': ('memory', 'Memory'),
     'modal-sandbox.md': ('modal_sandbox', 'Modal Sandbox'),
     'repo-context.md': ('repo_context', 'Repo Context'),
+    'repair-tool-arguments.md': ('repair_tool_arguments', 'Repair Tool Arguments'),
     'researcher.md': ('researcher', 'Researcher'),
     'pydantic-ai-docs.md': ('pydantic_ai_docs', 'Pydantic AI Docs'),
     'exa-search.md': ('exa', 'Exa Search'),
@@ -369,18 +370,18 @@ def test_blown_out_example_is_identical_across_surfaces(surface: str) -> None:
 
 
 def test_blown_out_example_matches_coder_defaults() -> None:
-
     block = _blown_out_block(_ROOT / _BLOWN_OUT_SURFACES[0])
-    listed = re.findall(r"'([a-z]+)'", block.split('allowed_commands = [', 1)[1].split(']', 1)[0])
-    assert tuple(listed) == tuple(DEFAULT_ALLOWED_COMMANDS), (
-        'the written-out allowlist no longer matches pydantic_ai_harness.coder.DEFAULT_ALLOWED_COMMANDS'
-    )
-    agent_source = (_PACKAGE / 'coder' / '_agent.py').read_text(encoding='utf-8')
-    identity_match = re.search(r"instructions='([^']+)'", agent_source)
-    assert identity_match, 'coder/_agent.py no longer defines an identity instruction'
-    identity = f"instructions='{identity_match.group(1)}'"
-    assert identity in block, "the blown-out example must carry coder_agent's identity instruction verbatim"
+    assert "capabilities=[Coder('.')]" in block
+    assert "name='coder'" in block
     example = (_ROOT / 'examples/coding_agent.py').read_text(encoding='utf-8')
-    assert identity in example and 'denied_env_patterns=LLM_API_KEY_ENV_PATTERNS' in example, (
-        'examples/coding_agent.py drifted from the coder_agent composition'
-    )
+    assert "name='coder'" in example and 'capabilities=[Coder(workspace or Path.cwd())]' in example
+
+
+@pytest.mark.parametrize('surface', ['README.md', 'docs/index.md'])
+def test_coder_entry_page_describes_current_tools(surface: str) -> None:
+    text = (_ROOT / surface).read_text(encoding='utf-8')
+    introduction = text.split('## Capabilities', 1)[0]
+    assert 'Shell commands are unrestricted' in introduction
+    assert 'allowlisted shell' not in introduction
+    assert 'explorer sub-agent' not in introduction
+    assert 'no default instructions' not in introduction

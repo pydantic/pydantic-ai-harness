@@ -7,7 +7,7 @@ import inspect
 import keyword
 import re
 import warnings
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass, field, replace
 from itertools import islice
@@ -31,6 +31,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.tool_manager import ParallelExecutionMode, ToolManager
 from pydantic_ai.tools import AgentDepsT, ToolDenied, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
+from pydantic_core import to_jsonable_python
 from typing_extensions import NotRequired, Self, TypedDict
 
 try:
@@ -87,6 +88,7 @@ _RETRY_SUMMARY_MAX_CHARS = 2000
 _SANDBOX_LIMIT_MARKERS = {
     'max_duration_secs': 'time limit exceeded',
     'max_memory': 'memory limit exceeded',
+    'max_suspensions': 'suspension limit ',
 }
 
 
@@ -233,7 +235,7 @@ def _describe_started_calls(calls: dict[str, ToolCallPart], returns: dict[str, T
         lines.append(line)
         used += len(line)
     return (
-        f'{len(calls)} nested tool calls started before the limit was reached:\n'
+        f'{len(calls)} nested tool calls started before execution stopped:\n'
         + '\n'.join(lines)
         + f'\nAccount for all {len(calls)} before retrying; repeating a call repeats whatever it already did.'
     )
@@ -249,6 +251,12 @@ class CodeModeResourceLimits(TypedDict, total=False):
 
     max_duration_secs: float
     max_memory: int
+    max_suspensions: int
+    """Cumulative host-interaction budget per session, not a per-snippet tool-call count.
+
+    External calls, OS callbacks, name lookups and future resolutions consume this budget.
+    Omission keeps Monty's finite default of 1,000; it cannot be disabled.
+    """
 
 
 def _resolve_resource_limits(
@@ -266,11 +274,18 @@ def _resolve_resource_limits(
             )
     max_duration_secs = 30 if limits is None else limits.get('max_duration_secs', 30)
     max_memory = 256 * 1024 * 1024 if limits is None else limits.get('max_memory', 256 * 1024 * 1024)
+    max_suspensions = 1000 if limits is None else limits.get('max_suspensions', 1000)
+    if max_suspensions < 1:
+        raise UserError('`max_suspensions` must be at least 1')
     if in_temporal_workflow:
         # `run_code` executes in workflow code and Temporal replays it. An elapsed timer may
         # make the original run and replay take different branches, which Temporal cannot record.
         max_duration_secs = None
-    return {'max_duration_secs': max_duration_secs, 'max_memory': max_memory}
+    return {
+        'max_duration_secs': max_duration_secs,
+        'max_memory': max_memory,
+        'max_suspensions': max_suspensions,
+    }
 
 
 @dataclass
@@ -327,6 +342,56 @@ _RUN_CODE_ARGS_VALIDATOR: SchemaValidatorProt = _RUN_CODE_ADAPTER.validator  # p
 # Used to serialize tool return values before sending into Monty (dump_python)
 # and to reconstruct multimodal types (e.g. BinaryContent) from Monty results (validate_python).
 _TOOL_RETURN_CONTENT_TA: TypeAdapter[Any] = TypeAdapter(ToolReturnContent)
+
+# Values Monty holds as-is. `bytes` is here because Monty carries binary payloads
+# natively and JSON would utf-8 decode them, which arbitrary bytes fail. `Ellipsis`
+# is here because Monty holds it and JSON has no form for it at all.
+_SANDBOX_NATIVE_SCALARS = (str, bytes, bytearray, bool, int, float, type(None), type(Ellipsis))
+
+
+def _jsonable_key(key: Any) -> Any:
+    """Render one mapping key the way `to_jsonable_python` renders JSON object keys.
+
+    JSON object keys are always strings, so `_build_type_check_stubs` declares every
+    mapping as `dict[str, ...]` whatever the Python key type is. Left alone, a `Decimal`
+    key is rejected by Monty and an `int` key silently contradicts that stub, so a
+    snippet indexing with the declared `str` raises `KeyError` at runtime.
+    """
+    (jsonable_key,) = to_jsonable_python({key: None})
+    return jsonable_key
+
+
+def _jsonable_for_sandbox(value: Any) -> Any:
+    """Render the leaves Monty cannot hold as the JSON values the stubs describe.
+
+    `_build_type_check_stubs` derives each stub from the tool's JSON schema, so a
+    `Decimal`, `UUID` or `datetime` field is declared `str` there. A Python-mode dump
+    keeps the original objects instead: Monty rejects `Decimal` and `UUID` outright,
+    and a `datetime` arrives where the stub promised a `str`, so the type check passes
+    and the snippet fails at runtime.
+
+    `bytes` and `bytearray` are the deliberate exception: they cross as themselves
+    rather than as the `str` their stub declares, because Monty carries binary natively
+    and encoding it would change what every binary payload looks like inside the sandbox.
+    """
+    if isinstance(value, _SANDBOX_NATIVE_SCALARS):
+        return value
+    if isinstance(value, Mapping):
+        jsonable: dict[Any, Any] = {}
+        for key, item in value.items():  # pyright: ignore[reportUnknownVariableType]
+            jsonable_key = _jsonable_key(key)
+            if jsonable_key in jsonable:
+                raise UserError(
+                    f'A tool returned a mapping where key {key!r} renders as the JSON key '
+                    f'{jsonable_key!r}, which an earlier key already produced. The sandbox holds '
+                    'one entry per JSON key, so one of the two values would be dropped.'
+                )
+            jsonable[jsonable_key] = _jsonable_for_sandbox(item)
+        return jsonable
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_jsonable_for_sandbox(item) for item in value]  # pyright: ignore[reportUnknownVariableType]
+    return to_jsonable_python(value)
+
 
 _RUN_CODE_DESCRIPTION_HEAD = """\
 Write and run Python code in a sandboxed environment.
@@ -615,7 +680,7 @@ class RunCodeExecution:
             metadata=outcome.metadata,
         )
         # Serialize to JSON-compatible form so Monty receives only plain data.
-        return _TOOL_RETURN_CONTENT_TA.dump_python(outcome.content)
+        return _jsonable_for_sandbox(_TOOL_RETURN_CONTENT_TA.dump_python(outcome.content, warnings=False))
 
     def build_tool_return(self, result: Any) -> ToolReturn[Any]:
         """Build the single public result for the logical `run_code` call."""
@@ -684,7 +749,8 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     no single `run_code` snippet runs longer than `max_duration_secs`. It is not a run-wide budget,
     since consecutive calls share one session allowance and any reset of the session (`restart:
     true`, a crash, a type error, a host-side failure) starts a fresh one. `'unlimited'` removes
-    both caps.
+    the time and memory caps, but Monty's finite suspension budget still applies. Set
+    `max_suspensions` to bound cumulative host interactions across consecutive snippets.
     """
 
     os_access: CodeModeOS | None = None
@@ -1103,6 +1169,21 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     'arrival too and revising this code will not help. Pass `restart: true` to '
                     'start a fresh session; that discards REPL state, so recreate anything you '
                     'still need.'
+                )
+            if isinstance(e.exception(), RuntimeError) and re.fullmatch(
+                r'suspension limit [0-9]+ exceeded', e.display(format='msg')
+            ):
+                # Monty has no typed marker for this limit, and unlike a timeout it has a
+                # traceback. Keep the advice conditional: a tool could raise the same text.
+                message += (
+                    "\n\nIf this reports the sandbox session's `max_suspensions` limit, "
+                    'its cumulative host-interaction budget is exhausted. Further tool calls, '
+                    'OS callbacks, name lookups and future resolutions need a fresh session; '
+                    'revising the snippet does not replenish this budget. Pure Python using '
+                    'existing state may still work. Pass `restart: true` to start a fresh '
+                    'session; that discards all REPL variables, imports and definitions. '
+                    'Check the calls already started before continuing, and do not replay '
+                    'completed side effects.'
                 )
             raise ModelRetry(message) from e
         except MontyCrashedError as e:

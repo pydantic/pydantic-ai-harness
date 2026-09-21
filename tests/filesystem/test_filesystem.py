@@ -17,7 +17,12 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES, FileSystem
+from pydantic_ai_harness.filesystem import (
+    FILE_SYSTEM_TOOL_NAMES,
+    READ_ONLY_TOOL_NAMES,
+    RIPGREP_TOOL_NAMES,
+    FileSystem,
+)
 from pydantic_ai_harness.filesystem._toolset import (
     _NOT_A_PATH,
     _OUTSIDE_WORKSPACE,
@@ -1731,8 +1736,11 @@ class TestFileSystemCapability:
 
         tools = await filesystem.get_toolset().get_tools(context)
 
-        assert set(tools) == READ_ONLY_TOOL_NAMES
+        assert set(tools) == READ_ONLY_TOOL_NAMES - set(RIPGREP_TOOL_NAMES)
         assert 'write_file' not in tools
+
+        everything = FileSystem[None](root_dir=tmp_path, read_only=True, tools=FILE_SYSTEM_TOOL_NAMES)
+        assert set(await everything.get_toolset().get_tools(context)) == READ_ONLY_TOOL_NAMES
 
     def test_search_files_description_has_string_return_type(self) -> None:
         toolset = FileSystem().get_toolset()
@@ -1743,7 +1751,7 @@ class TestFileSystemCapability:
             '<summary>Search file contents using a regular expression.</summary>\n'
             '<returns>\n'
             '<type>str</type>\n'
-            '<description>Matching lines formatted as file:line_number:text.</description>\n'
+            '<description>Matching lines formatted as file:line_number:text, with paths relative to `cwd`.</description>\n'
             '</returns>'
         )
 
@@ -1834,15 +1842,12 @@ def _assert_no_host_root(message: str, root: Path) -> None:
 class TestModelSafeRecoverableErrors:
     """OS-raised filesystem errors must not leak absolute host paths into `ModelRetry`."""
 
-    async def test_write_through_file_hides_host_path(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        # The parent path 'hello.txt' exists as a file, so the OS itself raises
-        # the error, with the absolute host path as its filename.
-        with pytest.raises(ModelRetry) as exc_info:
+    async def test_write_through_file_names_the_parent(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        # The parent path 'hello.txt' exists as a file; the check names the
+        # model's path, not the absolute host path the OS would report.
+        with pytest.raises(ModelRetry, match="'hello.txt/nested' has a parent that is not a directory") as exc_info:
             await toolset.write_file('hello.txt/nested', 'x')
-        message = str(exc_info.value)
-        _assert_no_host_root(message, fs_root)
-        assert "'hello.txt/nested'" in message
-        assert 'Errno' in message
+        _assert_no_host_root(str(exc_info.value), fs_root)
 
     def test_outside_root_path_is_redacted(self, fs_root: Path) -> None:
         real_root = Path(os.path.realpath(fs_root))
