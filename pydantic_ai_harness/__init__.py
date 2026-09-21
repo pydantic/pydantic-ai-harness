@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from .spend import SpendLimits
     from .stackone import StackOne
     from .step_persistence import StepPersistence
+    from .structured_output import SchemaOutput
     from .subagents import SubAgent, SubAgents
     from .system_reminders import SystemReminders
     from .tool_output_limits import ToolOutputLimits
@@ -99,6 +100,7 @@ __all__ = [
     'READ_ONLY_TOOL_NAMES',
     'ReportContextUsage',
     'RepoContext',
+    'SchemaOutput',
     'Researcher',
     'Shell',
     'Skills',
@@ -169,6 +171,7 @@ _CAPABILITY_EXPORTS = {
 
 _CONSTANT_EXPORTS = {
     'DEFAULT_RESEARCHER_INSTRUCTIONS': 'researcher',
+    'SchemaOutput': 'structured_output',
     'LLM_API_KEY_ENV_PATTERNS': 'shell',
     'READ_ONLY_TOOL_NAMES': 'filesystem',
     'SubAgent': 'subagents',

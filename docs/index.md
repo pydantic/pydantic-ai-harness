@@ -186,6 +186,14 @@ Bounding what the agent may do, and keeping it on-instructions.
 | [System Reminders](system-reminders.md) | Harness | Cache-safe re-injection of guidance mid-run to counter instruction fade |
 | [Trajectory Judge](trajectory-judge.md) | Harness | A second model reviews the live run every N requests over a sliding token window and steers it mid-run |
 
+### Output
+
+What the run hands back. `SchemaOutput` is a helper you pass as `output_type`, not a capability.
+
+| Helper | Package | What it does |
+|---|---|---|
+| [Structured Output](structured-output.md) | Harness | Return a JSON Schema-shaped value the model is made to satisfy, with retries naming each violation |
+
 ### Self-extension
 
 | Capability | Package | What it does |

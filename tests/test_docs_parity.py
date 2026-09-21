@@ -146,6 +146,7 @@ _CAPABILITY_PAGE_META = {
     'compaction.md': ('compaction', 'Compaction'),
     'tool-output-limits.md': ('tool_output_limits', 'Tool Output Limits'),
     'warn-on-cache-busts.md': ('warn_on_cache_busts', 'Warn On Cache Busts'),
+    'structured-output.md': ('structured_output', 'Structured Output'),
     'step-persistence.md': ('step_persistence', 'Step Persistence'),
     'conversation-search.md': ('conversation_search', 'Conversation Search'),
     'subagents.md': ('subagents', 'Subagents'),
