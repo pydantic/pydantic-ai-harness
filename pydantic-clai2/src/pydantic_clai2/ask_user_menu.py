@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
 
@@ -19,10 +20,11 @@ from termflow.tui.layout import truncate  # pyright: ignore[reportMissingTypeStu
 from termflow.tui.terminal import raw_mode  # pyright: ignore[reportMissingTypeStubs]
 
 from . import theme
-from .menu_worker import menu_key, run_worker
+from .menu_worker import run_worker
 from .plugins import FullScreen, PluginHost
 from .prompt_buffer import PromptBuffer
 from .prompt_surface import PromptSurface
+from .question_input import Paste, question_input
 
 
 @dataclass(kw_only=True)
@@ -52,14 +54,18 @@ class QuestionMenu:
         action = 'toggle; Done submits' if self.question.multi_select else 'select'
         return f'Up/Down move - number/Enter {action} - Esc decline'
 
-    def choose(self, key: str) -> tuple[str, ...] | str | None:
+    def choose(self, key: str | Paste) -> tuple[str, ...] | str | None:
         """Apply a key; return selections only when a nonempty answer is submitted."""
+        if isinstance(key, Paste):
+            if self.editing_custom:
+                self.custom.insert(key.text.replace('\t', '    '))
+            return None
         if self.editing_custom:
             if key == 'escape':
                 self.editing_custom = False
             elif key == 'enter':
                 return self.custom.text.strip() or None
-            else:
+            elif key != 'ctrl-r':
                 self.custom.edit(key)
             return None
         count = len(self.question.options)
@@ -120,7 +126,7 @@ class QuestionMenu:
             theme.sgr(theme.MUTED) + truncate(self.hint, width) + '\x1b[0m',
         )
 
-    def run(self, *, console: Console, key_source: Callable[[], str] = menu_key) -> tuple[str, ...] | str | None:
+    def run(self, *, console: Console, key_source: Callable[[], str | Paste]) -> tuple[str, ...] | str | None:
         """Borrow the released editor surface, never entering the alternate screen."""
         surface = console.file
         if not isinstance(surface, PromptSurface):
@@ -158,19 +164,30 @@ class TerminalAnswerer:
 
     async def __call__(self, request: AskUserRequest, /) -> AskUserResponse:
         """Answer every question or decline the entire request."""
-        answers: list[AskUserAnswer] = []
         async with self._terminal, self._full_screen():
-            for position, question in enumerate(request.questions, start=1):
-                menu = QuestionMenu(question=question, position=position, total=len(request.questions))
-                operation = partial(self._runner, menu) if self._runner else partial(menu.run, console=self._console)
-                selected = await run_worker(operation)
-                if selected is None:
-                    return AskUserResponse(cancelled=True)
-                answers.append(
-                    AskUserAnswer(header=question.header, custom_answer=selected)
-                    if isinstance(selected, str)
-                    else AskUserAnswer(header=question.header, selected=selected)
-                )
+            with question_input() if self._runner is None else nullcontext(None) as key_source:
+                return await self.answer_questions(request=request, key_source=key_source)
+
+    async def answer_questions(
+        self, *, request: AskUserRequest, key_source: Callable[[], str | Paste] | None
+    ) -> AskUserResponse:
+        """Keep one decoder for the batch so pasted text cannot escape to the next question."""
+        answers: list[AskUserAnswer] = []
+        for position, question in enumerate(request.questions, start=1):
+            menu = QuestionMenu(question=question, position=position, total=len(request.questions))
+            if self._runner is not None:
+                operation = partial(self._runner, menu)
+            else:
+                assert key_source is not None
+                operation = partial(menu.run, console=self._console, key_source=key_source)
+            selected = await run_worker(operation)
+            if selected is None:
+                return AskUserResponse(cancelled=True)
+            answers.append(
+                AskUserAnswer(header=question.header, custom_answer=selected)
+                if isinstance(selected, str)
+                else AskUserAnswer(header=question.header, selected=selected)
+            )
         return AskUserResponse(answers=tuple(answers))
 
 
