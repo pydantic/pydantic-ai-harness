@@ -527,6 +527,27 @@ class TestMalformedSchemaFragments:
         assert '$.a: expected string, got array' in _first_retry(schema, {'a': []})
 
 
+class TestPathsAreUnambiguous:
+    def test_a_key_with_a_dot_is_bracketed(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {}, 'additionalProperties': False}
+
+        assert '$["a.b"]: additional property not allowed' in _first_retry(schema, {'a.b': 1})
+
+    def test_a_key_with_brackets_or_spaces_is_bracketed(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {'x[0] y': {'type': 'string'}}}
+
+        assert '$["x[0] y"]: expected string, got integer' in _first_retry(schema, {'x[0] y': 1})
+
+    def test_a_required_key_with_a_dot_is_bracketed(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'required': ['a.b'], 'properties': {'a.b': {'type': 'string'}}}
+
+        assert '$["a.b"]: required property missing' in _first_retry(schema, {})
+
+    def test_lint_findings_use_the_same_notation(self) -> None:
+        with pytest.raises(UserError, match=r'\$\["a\.b"\]: is required but is not declared'):
+            SchemaOutput({'type': 'object', 'properties': {}, 'required': ['a.b'], 'additionalProperties': False})
+
+
 class TestDraft07NumberSemantics:
     """`integer` matches any number with a zero fractional part, and JSON `1.0` parses to a float."""
 
@@ -683,6 +704,17 @@ class TestMessagesRenderJson:
         message = _first_retry(schema, {'a': 'nope'})
 
         assert "'nope' is not one of the allowed values (allowedValues: pass, fail)" in message
+
+    def test_an_enum_member_containing_the_separator_is_quoted(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {'a': {'enum': ['a, b', 'c']}}}
+
+        assert "allowedValues: 'a, b', c" in _first_retry(schema, {'a': 'a'})
+
+    @pytest.mark.parametrize('member,rendered', [('', "''"), (' x', "' x'"), ('x ', "'x '")])
+    def test_an_enum_member_that_would_vanish_bare_is_quoted(self, member: str, rendered: str) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {'a': {'enum': [member, 'ok']}}}
+
+        assert f'allowedValues: {rendered}, ok' in _first_retry(schema, {'a': 'nope'})
 
     def test_a_value_json_cannot_serialize_falls_back(self) -> None:
         schema: dict[str, Any] = {'type': 'object', 'properties': {'a': {'enum': [object()]}}}

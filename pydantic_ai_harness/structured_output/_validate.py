@@ -67,8 +67,16 @@ def _render(value: object) -> str:
 
 
 def _label(value: object) -> str:
-    """One `allowedValues` entry. Strings render bare so the list reads as a vocabulary."""
-    text = value if isinstance(value, str) else _json_literal(value)
+    """One `allowedValues` entry.
+
+    Strings render bare so the list reads as a vocabulary, unless bare rendering would be
+    ambiguous: an empty string, surrounding whitespace, or the list separator inside the
+    value would otherwise read as a different set of members.
+    """
+    if isinstance(value, str) and value and value == value.strip() and ', ' not in value:
+        text = value
+    else:
+        text = _json_literal(value)
     return _truncate(text, _LABEL_CHARS)
 
 
@@ -122,8 +130,13 @@ def json_equal(left: object, right: object) -> bool:
     return left == right
 
 
-def _child(path: str, key: str) -> str:
-    return f'{path}.{key}'
+def child_path(path: str, key: str) -> str:
+    """The path of a property, dotted for an identifier-like name and bracketed otherwise.
+
+    `$.a.b` would name both the key `a.b` and a `b` under `a`, and a retry that points the
+    model at the wrong field costs a round trip; `$["a.b"]` cannot be misread.
+    """
+    return f'{path}.{key}' if key.isidentifier() else f'{path}[{json.dumps(key)}]'
 
 
 def validate_instance(schema: Mapping[str, object], value: object, path: str = '$') -> list[str]:
@@ -218,7 +231,7 @@ def _check_object(schema: Mapping[str, object], value: object, path: str, errors
 
     additional = schema.get('additionalProperties', True)
     for key, item in value.items():
-        child = _child(path, key)
+        child = child_path(path, key)
         if key in properties:
             _apply(properties[key], item, child, errors)
         elif additional is True or covered_by_pattern(key, schema):
@@ -282,7 +295,7 @@ def _check_required(schema: Mapping[str, object], value: Mapping[str, object], p
         return
     for name in required:
         if isinstance(name, str) and name not in value:
-            errors.append(f'{_child(path, name)}: required property missing')
+            errors.append(f'{child_path(path, name)}: required property missing')
 
 
 def _check_array(schema: Mapping[str, object], value: object, path: str, errors: list[str]) -> None:

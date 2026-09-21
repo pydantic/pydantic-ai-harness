@@ -32,6 +32,7 @@ from typing import Literal
 from pydantic_ai_harness.structured_output._validate import (
     ANNOTATION_KEYWORDS,
     ENFORCED_KEYWORDS,
+    child_path,
     covered_by_pattern,
     is_array,
     is_schema,
@@ -211,7 +212,7 @@ def _lint_properties(schema: Mapping[str, object], path: str, required_path: boo
                 findings.append(
                     LintFinding(
                         'required_property_forbidden',
-                        f'{path}.{name}',
+                        child_path(path, name),
                         'is required but is not declared in properties, and additionalProperties is false',
                         scope,
                     )
@@ -222,13 +223,13 @@ def _lint_properties(schema: Mapping[str, object], path: str, required_path: boo
             findings.append(
                 LintFinding(
                     'false_schema',
-                    f'{path}.{name}',
+                    child_path(path, name),
                     'is required but its schema is false, which admits no value',
                     scope,
                 )
             )
         elif is_schema(subschema):
-            _lint_node(subschema, f'{path}.{name}', binding and name in required, findings)
+            _lint_node(subschema, child_path(path, name), binding and name in required, findings)
 
 
 def _lint_any_of(schema: Mapping[str, object], path: str, scope: LintScope, findings: list[LintFinding]) -> None:
@@ -309,7 +310,7 @@ def _scan(schema: Mapping[str, object], path: str, found: dict[str, list[str]]) 
         if is_schema(container):
             for name, subschema in container.items():
                 if is_schema(subschema):
-                    _scan(subschema, f'{path}.{name}', found)
+                    _scan(subschema, child_path(path, name), found)
 
     items = schema.get('items')
     if is_schema(items):

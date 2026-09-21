@@ -64,7 +64,8 @@ A message names at most 50 violations and counts the rest, and is cut at 10,000 
 the schema nests. A systematic mistake across a long array needs one example, not a line per
 element, and the message re-enters the model's context on every retry. An `anyOf` failure carries
 each branch's own reasons, under the same cap, so the model can see which branch it was one field
-away from satisfying.
+away from satisfying. Paths are dotted for identifier-like keys (`$.verdict`) and bracketed
+otherwise (`$["a.b"]`), so a key containing a dot is never mistaken for a nested field.
 
 ## Enforced keywords
 
