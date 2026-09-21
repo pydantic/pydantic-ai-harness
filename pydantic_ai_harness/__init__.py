@@ -100,8 +100,8 @@ __all__ = [
     'READ_ONLY_TOOL_NAMES',
     'ReportContextUsage',
     'RepoContext',
-    'SchemaOutput',
     'Researcher',
+    'SchemaOutput',
     'Shell',
     'Skills',
     'SlidingWindowCompaction',
@@ -171,9 +171,9 @@ _CAPABILITY_EXPORTS = {
 
 _CONSTANT_EXPORTS = {
     'DEFAULT_RESEARCHER_INSTRUCTIONS': 'researcher',
-    'SchemaOutput': 'structured_output',
     'LLM_API_KEY_ENV_PATTERNS': 'shell',
     'READ_ONLY_TOOL_NAMES': 'filesystem',
+    'SchemaOutput': 'structured_output',
     'SubAgent': 'subagents',
 }
 

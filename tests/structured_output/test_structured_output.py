@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import warnings
 from copy import deepcopy
 from typing import Any
@@ -83,8 +84,16 @@ class TestWiring:
         output = SchemaOutput(REPORT)
 
         assert output.name == 'structured_output'
-        assert output.description == 'Return your final response in the requested structured format.'
+        assert output.description == 'Return your final response in the requested structured format'
         assert output.max_retries == 3
+
+    def test_a_schema_description_joins_the_tool_description_cleanly(self) -> None:
+        # Core pops the schema's top-level `description` and appends it after `. `.
+        model, _ = _run({**REPORT, 'description': 'A code review report.'}, {'verdict': 'pass'})
+
+        assert model.info is not None
+        description = (model.info.output_tools or [])[0].description
+        assert description == 'Return your final response in the requested structured format. A code review report.'
 
     def test_overrides_forward_to_the_output_tool(self) -> None:
         output = SchemaOutput(REPORT, name='verdict', description='Report the verdict.', max_retries=1)
@@ -639,6 +648,22 @@ class TestLintSeesThroughRefs:
 
         assert len(_lint_warnings(schema)) == 1
 
+    def test_a_ref_with_siblings_is_refused_without_first_warning(self) -> None:
+        # The first pass cannot type `$.a` (its `type` is behind the `$ref`), so only the
+        # second pass can tell that `b` is on a required path.
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {'a': {'$ref': '#/$defs/R', 'required': ['b'], 'properties': {'b': {'enum': []}}}},
+            '$defs': {'R': {'type': 'object'}},
+        }
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            with pytest.raises(UserError, match='enum_type_mismatch'):
+                SchemaOutput(schema)
+
+        assert not [w for w in caught if 'can still succeed' in str(w.message)]
+
 
 class TestMessagesRenderJson:
     """The reply is JSON, so a correction must not tell the model to emit `True` or `None`."""
@@ -743,6 +768,97 @@ class TestPatternPropertiesDecidesCoverage:
                 }
             )
 
+    def test_a_matching_name_is_not_checked_against_a_schema_valued_additional_properties(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'patternProperties': {'^x_': {'type': 'integer'}},
+            'additionalProperties': {'type': 'string'},
+        }
+        with pytest.warns(UserWarning, match='does not enforce'):
+            output = SchemaOutput(schema)
+        result = Agent(FunctionModel(_Replay({'x_1': 1})), output_type=output).run_sync('go')
+
+        assert result.output == {'x_1': 1}
+
+    def test_a_name_matching_no_pattern_is_checked_against_it(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'patternProperties': {'^x_': {'type': 'integer'}},
+            'additionalProperties': {'type': 'string'},
+        }
+        with pytest.warns(UserWarning, match='does not enforce'):
+            output = SchemaOutput(schema)
+        model = _Replay({'other': 1})
+        with pytest.raises(UnexpectedModelBehavior):
+            Agent(FunctionModel(model), output_type=output).run_sync('go')
+
+        assert '$.other: expected string, got integer' in model.retries[0].model_response()
+
+
+class TestPatternsRunInLinearTime:
+    """The name a pattern is matched against is the model's, so matching must not backtrack."""
+
+    def test_a_backtracking_pattern_cannot_stall_validation(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'properties': {},
+            'patternProperties': {'^(a+)+$': {'type': 'string'}},
+            'additionalProperties': False,
+        }
+        with pytest.warns(UserWarning, match='does not enforce'):
+            output = SchemaOutput(schema, max_retries=1)
+        # 28 bytes: `re` needs about ten seconds here and doubles per byte, so a regression
+        # to a backtracking engine fails the bound below instead of hanging the suite.
+        model = _Replay({'a' * 28 + 'b': 'x'})
+        started = time.perf_counter()
+        with pytest.raises(UnexpectedModelBehavior):
+            Agent(FunctionModel(model), output_type=output).run_sync('go')
+
+        assert time.perf_counter() - started < 2
+        assert 'additional property not allowed' in model.retries[0].model_response()
+
+    def test_a_pattern_the_engine_rejects_exempts_nothing(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'properties': {},
+            'patternProperties': {'^(?=x)': {'type': 'string'}},
+            'additionalProperties': False,
+        }
+        with pytest.warns(UserWarning, match='does not enforce'):
+            output = SchemaOutput(schema, max_retries=1)
+        model = _Replay({'x1': 'looks covered'})
+        with pytest.raises(UnexpectedModelBehavior):
+            Agent(FunctionModel(model), output_type=output).run_sync('go')
+
+        assert '$.x1: additional property not allowed' in model.retries[0].model_response()
+
+    def test_matching_is_unanchored(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'properties': {},
+            'patternProperties': {'_id$': {'type': 'string'}},
+            'additionalProperties': False,
+        }
+        with pytest.warns(UserWarning, match='does not enforce'):
+            output = SchemaOutput(schema)
+        result = Agent(FunctionModel(_Replay({'user_id': 'u1'})), output_type=output).run_sync('go')
+
+        assert result.output == {'user_id': 'u1'}
+
+    def test_character_classes_are_unicode_aware(self) -> None:
+        # The same dialect as pydantic's own `pattern`: `\\d` is any Unicode digit, not `[0-9]`.
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'properties': {},
+            'patternProperties': {'^\\d+$': {'type': 'string'}},
+            'additionalProperties': False,
+        }
+        with pytest.warns(UserWarning, match='does not enforce'):
+            output = SchemaOutput(schema)
+        result = Agent(FunctionModel(_Replay({'\u0661': 'one'})), output_type=output).run_sync('go')
+
+        assert result.output == {'\u0661': 'one'}
+
 
 class TestLintReadsEveryDeclaredType:
     def test_an_array_valued_type_still_catches_an_impossible_enum(self) -> None:
@@ -824,3 +940,262 @@ class TestAnyOfSatisfiability:
     def test_an_optional_anyof_only_warns(self) -> None:
         with pytest.warns(UserWarning, match='can still succeed'):
             SchemaOutput({'type': 'object', 'properties': {'a': {'anyOf': [{'enum': []}]}}})
+
+
+class TestBooleanSubschemas:
+    """Since draft-06 a bare `true` or `false` may stand wherever a subschema may."""
+
+    def test_a_true_anyof_branch_accepts_everything(self) -> None:
+        _, result = _run({'type': 'object', 'properties': {'a': {'anyOf': [True]}}}, {'a': 1})
+
+        assert result.output == {'a': 1}
+
+    def test_a_false_property_schema_rejects_the_value(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {'a': False}}
+
+        assert '$.a: no value is allowed here' in _first_retry(schema, {'a': 1})
+
+    def test_a_false_property_schema_permits_the_absence(self) -> None:
+        _, result = _run({'type': 'object', 'properties': {'a': False}}, {})
+
+        assert result.output == {}
+
+    def test_false_items_rejects_every_element(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {'a': {'items': False}}}
+
+        assert '$.a[0]: no value is allowed here' in _first_retry(schema, {'a': [1]})
+
+    def test_false_items_permits_the_empty_array(self) -> None:
+        _, result = _run({'type': 'object', 'properties': {'a': {'items': False}}}, {'a': []})
+
+        assert result.output == {'a': []}
+
+    def test_true_additional_properties_admits_any_key(self) -> None:
+        _, result = _run({'type': 'object', 'properties': {}, 'additionalProperties': True}, {'extra': 1})
+
+        assert result.output == {'extra': 1}
+
+    def test_a_false_anyof_branch_is_reported_with_the_others(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {'a': {'anyOf': [False, {'type': 'string'}]}}}
+        message = _first_retry(schema, {'a': 1})
+
+        assert 'branch 0: $.a: no value is allowed here; branch 1: $.a: expected string, got integer' in message
+
+    def test_a_required_property_with_a_false_schema_is_refused(self) -> None:
+        with pytest.raises(UserError, match='false_schema'):
+            SchemaOutput({'type': 'object', 'required': ['a'], 'properties': {'a': False}})
+
+    def test_an_optional_property_with_a_false_schema_is_silent(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            SchemaOutput({'type': 'object', 'properties': {'a': False}})
+
+    def test_an_anyof_of_only_false_branches_is_refused(self) -> None:
+        with pytest.raises(UserError, match='no_satisfiable_branch'):
+            SchemaOutput({'type': 'object', 'required': ['a'], 'properties': {'a': {'anyOf': [False]}}})
+
+    def test_a_true_branch_makes_an_anyof_satisfiable(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'required': ['a'], 'properties': {'a': {'anyOf': [False, True]}}}
+
+        assert _lint_warnings(schema) == []
+
+
+class TestBoundsBindOnlyToTheirType:
+    @pytest.mark.parametrize(
+        'constraint',
+        [
+            {'type': 'integer', 'minimum': 2, 'exclusiveMaximum': 2},
+            {'type': 'number', 'exclusiveMinimum': 2, 'maximum': 2},
+            {'type': 'number', 'exclusiveMinimum': 2, 'exclusiveMaximum': 2},
+        ],
+    )
+    def test_an_exclusive_bound_meeting_its_partner_is_refused(self, constraint: dict[str, Any]) -> None:
+        with pytest.raises(UserError, match='crossed_bounds'):
+            SchemaOutput({'type': 'object', 'required': ['a'], 'properties': {'a': constraint}})
+
+    def test_an_exclusive_bound_that_leaves_room_is_satisfiable(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {'a': {'type': 'number', 'exclusiveMinimum': 1, 'maximum': 2}},
+        }
+
+        assert _lint_warnings(schema) == []
+
+    @pytest.mark.parametrize(
+        'constraint',
+        [
+            {'type': 'integer', 'minLength': 5, 'maxLength': 2},
+            {'type': 'string', 'minimum': 10, 'maximum': 1},
+            {'type': ['integer', 'string'], 'minimum': 10, 'maximum': 1},
+            {'minimum': 10, 'maximum': 1},
+        ],
+    )
+    def test_bounds_that_do_not_bind_the_declared_type_are_not_refused(self, constraint: dict[str, Any]) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'required': ['a'], 'properties': {'a': constraint}}
+
+        assert _lint_warnings(schema) == []
+
+    def test_a_crossed_bound_beyond_float_range_is_a_user_error(self) -> None:
+        with pytest.raises(UserError, match='minimum 1000') as info:
+            SchemaOutput(
+                {
+                    'type': 'object',
+                    'required': ['a'],
+                    'properties': {'a': {'type': 'integer', 'minimum': 10**400, 'maximum': 1}},
+                }
+            )
+
+        assert 'maximum 1 ' in str(info.value)
+
+
+class TestObjectKeywordsBindOnlyToObjects:
+    """`required` and `properties` say nothing about a non-object, and the validator accepts one."""
+
+    def test_a_dead_required_chain_under_a_string_typed_node_only_warns(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {'a': {'type': 'string', 'required': ['b'], 'properties': {'b': {'enum': []}}}},
+        }
+        with pytest.warns(UserWarning, match='can still succeed'):
+            output = SchemaOutput(schema)
+        result = Agent(FunctionModel(_Replay({'a': 'text'})), output_type=output).run_sync('go')
+
+        assert result.output == {'a': 'text'}
+
+    def test_a_dead_required_chain_under_an_untyped_node_only_warns(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {'a': {'required': ['b'], 'properties': {'b': {'enum': []}}}},
+        }
+
+        assert any('enum_type_mismatch' in w for w in _lint_warnings(schema))
+
+    def test_a_forbidden_required_name_under_a_non_object_node_only_warns(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {'a': {'type': ['object', 'null'], 'required': ['b'], 'additionalProperties': False}},
+        }
+
+        assert any('required_property_forbidden' in w for w in _lint_warnings(schema))
+
+
+class TestEnumAndConstAgainstTheRestOfTheNode:
+    def test_a_const_object_missing_a_required_property_is_refused(self) -> None:
+        with pytest.raises(UserError, match='does not satisfy the rest of the schema'):
+            SchemaOutput({'type': 'object', 'const': {}, 'required': ['x']})
+
+    def test_a_const_failing_a_property_schema_is_refused(self) -> None:
+        with pytest.raises(UserError, match='const_mismatch'):
+            SchemaOutput({'type': 'object', 'const': {'x': 'text'}, 'properties': {'x': {'type': 'integer'}}})
+
+    def test_an_enum_whose_every_member_fails_the_node_is_refused(self) -> None:
+        with pytest.raises(UserError, match='enum_mismatch'):
+            SchemaOutput({'type': 'object', 'enum': [{}], 'required': ['x']})
+
+    def test_one_conforming_enum_member_is_enough(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'enum': [{}, {'x': 1}], 'required': ['x']}
+
+        assert _lint_warnings(schema) == []
+        _, result = _run(schema, {'x': 1})
+        assert result.output == {'x': 1}
+
+
+class TestAnyOfBranchesDieOnlyOnTheirRequiredPath:
+    def test_a_branch_with_an_optional_dead_property_is_satisfiable(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'anyOf': [{'type': 'object', 'properties': {'x': {'type': 'string', 'enum': [1]}}}],
+        }
+        # The dead `x` still warns on its own; what must not happen is a refusal.
+        with pytest.warns(UserWarning, match='can still succeed'):
+            output = SchemaOutput(schema)
+        result = Agent(FunctionModel(_Replay({})), output_type=output).run_sync('go')
+
+        assert result.output == {}
+
+    def test_a_branch_with_a_dead_array_element_is_satisfiable(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {'a': {'anyOf': [{'type': 'array', 'items': {'enum': []}}]}},
+        }
+        with pytest.warns(UserWarning, match='can still succeed'):
+            output = SchemaOutput(schema)
+        result = Agent(FunctionModel(_Replay({'a': []})), output_type=output).run_sync('go')
+
+        assert result.output == {'a': []}
+
+    def test_a_branch_without_a_type_takes_its_parents(self) -> None:
+        # The branch applies to the same instance as its object-typed parent, so `required` binds.
+        with pytest.raises(UserError, match='no_satisfiable_branch'):
+            SchemaOutput({'type': 'object', 'anyOf': [{'required': ['x'], 'properties': {'x': {'enum': []}}}]})
+
+    def test_a_branch_under_a_parent_admitting_null_is_not_bound(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {
+                'a': {'type': ['object', 'null'], 'anyOf': [{'required': ['x'], 'properties': {'x': {'enum': []}}}]}
+            },
+        }
+
+        assert any('enum_type_mismatch' in w for w in _lint_warnings(schema))
+
+    def test_a_branch_dead_on_its_own_required_path_still_counts(self) -> None:
+        with pytest.raises(UserError, match='no_satisfiable_branch'):
+            SchemaOutput(
+                {
+                    'type': 'object',
+                    'required': ['a'],
+                    'properties': {
+                        'a': {'anyOf': [{'type': 'object', 'required': ['x'], 'properties': {'x': {'enum': []}}}]}
+                    },
+                }
+            )
+
+
+class TestRetryMessageBounds:
+    def test_the_error_list_is_capped(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {'a': {'items': {'type': 'string'}}}}
+        message = _first_retry(schema, {'a': list(range(60))})
+
+        assert '$.a[49]: expected string, got integer' in message
+        assert '$.a[50]' not in message
+        assert '$.a[49]: expected string, got integer; ... and 10 more' in message
+
+    def test_errors_are_separated_by_semicolons(self) -> None:
+        message = _first_retry(REPORT, {'totally': 'wrong', 'verdict': 'NOT-IN-ENUM'})
+
+        assert '$.totally: additional property not allowed; $.verdict:' in message
+
+    def test_an_anyof_failure_names_each_branch_reason(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'properties': {'a': {'anyOf': [{'type': 'string'}, {'type': 'object', 'required': ['id']}]}},
+        }
+        message = _first_retry(schema, {'a': {}})
+
+        assert '(branch 0: $.a: expected string, got object; branch 1: $.a.id: required property missing)' in message
+
+    def test_the_whole_message_is_bounded_in_characters(self) -> None:
+        # Two branches each carry 50 reasons quoting a 300-character value: the count cap
+        # alone would let this one `anyOf` error run past 30,000 characters.
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'properties': {'a': {'anyOf': [{'items': {'enum': ['a']}}, {'items': {'enum': ['b']}}]}},
+        }
+        message = _first_retry(schema, {'a': [{'k': 'x' * 300}] * 60})
+
+        assert 10_000 < len(message) < 10_200
+        assert '... (message truncated)' in message
+
+    def test_branch_reasons_are_capped_too(self) -> None:
+        schema: dict[str, Any] = {'type': 'object', 'properties': {'a': {'anyOf': [{'items': {'type': 'string'}}]}}}
+        message = _first_retry(schema, {'a': list(range(60))})
+
+        assert '$.a[49]: expected string, got integer; ... and 10 more)' in message
+        assert '$.a[50]' not in message

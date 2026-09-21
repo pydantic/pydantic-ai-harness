@@ -16,14 +16,20 @@ from pydantic_ai_harness.structured_output._validate import is_schema, render_re
 
 __all__ = ['SchemaOutput']
 
-# The reference's wire text, minus its second sentence ("You MUST call this tool exactly
-# once at the end of your response"). An output tool ends the run natively and there is no
-# competing text channel to foreclose, so that instruction would describe machinery the
-# model cannot observe.
-DEFAULT_DESCRIPTION = 'Return your final response in the requested structured format.'
+# The reference is Claude Code's structured-output tool, the feature the Agent SDK documents at
+# https://code.claude.com/docs/en/agent-sdk/structured-outputs. The wire text and the retry
+# budget below mirror it.
+
+# The reference's tool description, minus its second sentence ("You MUST call this tool
+# exactly once at the end of your response"). An output tool ends the run natively and there
+# is no competing text channel to foreclose, so that instruction would describe machinery the
+# model cannot observe. No trailing period: core appends the schema's own top-level
+# `description` after `. `, and a period here would put `..` on the wire.
+DEFAULT_DESCRIPTION = 'Return your final response in the requested structured format'
 
 # Core's own output budget defaults to 1, which is tight for a shape the model has to get
-# right in one attempt. The reference allows 5.
+# right in one attempt. The reference allows 5; 3 keeps a run that cannot converge from
+# spending five more model requests to find out.
 DEFAULT_MAX_RETRIES = 3
 
 
@@ -47,8 +53,9 @@ def SchemaOutput(
     Args:
         schema: A JSON Schema of `type: 'object'`. Enforced keywords are `type`,
             `properties`, `required`, `additionalProperties`, `items`, `enum`, `const` and
-            `anyOf`; anything else reaches the model as documentation but is not checked,
-            and is named in a `UserWarning` at construction.
+            `anyOf`, plus the boolean subschema forms `true` and `false`; anything else
+            reaches the model as documentation but is not checked, and is named in a
+            `UserWarning` at construction.
         name: The output tool's name, as the model and your traces see it.
         description: The output tool's description.
         max_retries: How many times the model may be asked to correct its output. Forwarded
@@ -59,8 +66,8 @@ def SchemaOutput(
         alongside other output types.
 
     Raises:
-        UserError: If the schema admits no value at all, or if core rejects it -- a root
-            that is not an object, or recursive `$ref`s.
+        UserError: If `schema` is not a JSON object, if it admits no value at all, or if
+            core rejects it -- a root that is not an object, or recursive `$ref`s.
 
     Example:
     ```python {title="schema_output.py"}
@@ -88,7 +95,7 @@ def SchemaOutput(
     schema = deepcopy(schema)
 
     findings = lint_schema(schema)
-    _report(findings)
+    _refuse(findings)
 
     structured = StructuredDict(schema)
     # Core inlines `$defs` and raises on refs that survive, so the validator never has to
@@ -96,9 +103,13 @@ def SchemaOutput(
     resolved: JsonSchemaValue = TypeAdapter(structured).json_schema()
 
     # Lint again now that `$ref`s are inlined: the first pass cannot see through a pointer,
-    # and a subschema reached only by one would otherwise go unchecked.
+    # and a subschema reached only by one would otherwise go unchecked. A node the first
+    # pass could not type (a `$ref` with siblings) may turn an optional-path finding into a
+    # refusal here, so warnings wait until both passes have had their say.
     already = {(f.code, f.path, f.scope) for f in findings}
-    _report([f for f in lint_schema(resolved) if (f.code, f.path, f.scope) not in already])
+    later = [f for f in lint_schema(resolved) if (f.code, f.path, f.scope) not in already]
+    _refuse(later)
+    _warn(findings + later)
 
     unsupported = unsupported_keywords(resolved)
     if unsupported:
@@ -134,11 +145,14 @@ def _require_object_schema(schema: object) -> None:
         )
 
 
-def _report(findings: list[LintFinding]) -> None:
+def _refuse(findings: list[LintFinding]) -> None:
     blocking = [finding for finding in findings if finding.scope == 'whole']
     if blocking:
         listed = '; '.join(finding.describe() for finding in blocking)
         raise UserError(f'SchemaOutput was given a schema that no value can satisfy: {listed}')
+
+
+def _warn(findings: list[LintFinding]) -> None:
     if findings:
         listed = '; '.join(finding.describe() for finding in findings)
         warnings.warn(

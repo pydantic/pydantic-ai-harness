@@ -14,9 +14,11 @@ failed at, and `enum`/`const` name their allowed values outright.
 from __future__ import annotations
 
 import json
-import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from functools import lru_cache
 from typing import TypeGuard
+
+from pydantic_core import SchemaError, SchemaValidator, ValidationError, core_schema
 
 # Checked against the model's reply. A subset of draft-07, matching the dialect the
 # reference tells callers to stay inside.
@@ -32,14 +34,27 @@ ANNOTATION_KEYWORDS = frozenset({'$schema', 'title', 'description', 'default', '
 _VALUE_CHARS = 300
 _LABEL_CHARS = 80
 
+# A message names at most this many violations, at the top level and again inside each
+# `anyOf` branch. A systematic mistake across a long array would otherwise produce a line
+# per element, and the whole message re-enters the model's context on every retry; one
+# example of the mistake is what a correction needs. The count cap multiplies through
+# nested `anyOf` branches, so the finished message is also bounded in characters.
+_MAX_ERRORS = 50
+_MAX_CHARS = 10_000
+
 
 def is_schema(value: object) -> TypeGuard[Mapping[str, object]]:
-    """Whether a JSON value is a subschema. JSON object keys are always strings."""
+    """Whether a JSON value is an object-form subschema. JSON object keys are always strings."""
     return isinstance(value, dict)
 
 
 def is_array(value: object) -> TypeGuard[Sequence[object]]:
     return isinstance(value, list)
+
+
+def _is_subschema(value: object) -> bool:
+    """A subschema is an object or, since draft-06, a bare boolean."""
+    return isinstance(value, bool) or is_schema(value)
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -127,14 +142,35 @@ def _walk(schema: Mapping[str, object], value: object, path: str, errors: list[s
     _check_array(schema, value, path, errors)
 
 
+def _apply(subschema: object, value: object, path: str, errors: list[str]) -> None:
+    """Validate `value` against a subschema, honouring the boolean forms.
+
+    `true` admits every value and `false` none. A fragment in any other shape is caller
+    data in the wrong form, and is ignored rather than crashed on.
+    """
+    if subschema is False:
+        errors.append(f'{path}: no value is allowed here')
+    elif is_schema(subschema):
+        _walk(subschema, value, path, errors)
+
+
 def _check_any_of(schema: Mapping[str, object], value: object, path: str, errors: list[str]) -> None:
     branches = schema.get('anyOf')
     if not is_array(branches):
         return
-    for branch in branches:
-        if is_schema(branch) and not validate_instance(branch, value, path):
+    # Each branch's own reasons are kept: told only that nothing matched, the model cannot
+    # tell which branch it was one field away from satisfying.
+    reasons: list[str] = []
+    for index, branch in enumerate(branches):
+        if not _is_subschema(branch):
+            continue
+        found: list[str] = []
+        _apply(branch, value, path, found)
+        if not found:
             return
-    errors.append(f'{path}: {_render(value)} does not match any of the allowed schemas')
+        reasons.append(f'branch {index}: {"; ".join(_bounded(found))}')
+    detail = f' ({"; ".join(reasons)})' if reasons else ''
+    errors.append(f'{path}: {_render(value)} does not match any of the allowed schemas{detail}')
 
 
 def _check_type(schema: Mapping[str, object], value: object, path: str, errors: list[str]) -> None:
@@ -180,16 +216,20 @@ def _check_object(schema: Mapping[str, object], value: object, path: str, errors
     properties: Mapping[str, object] = raw_properties if is_schema(raw_properties) else {}
     _check_required(schema, value, path, errors)
 
-    additional = schema.get('additionalProperties')
+    additional = schema.get('additionalProperties', True)
     for key, item in value.items():
+        child = _child(path, key)
         if key in properties:
-            subschema = properties[key]
-            if is_schema(subschema):
-                _walk(subschema, item, _child(path, key), errors)
-        elif additional is False and not covered_by_pattern(key, schema):
-            errors.append(f'{_child(path, key)}: additional property not allowed')
-        elif is_schema(additional):
-            _walk(additional, item, _child(path, key), errors)
+            _apply(properties[key], item, child, errors)
+        elif additional is True or covered_by_pattern(key, schema):
+            # Draft-07 scopes `additionalProperties` to names matched by neither `properties`
+            # nor `patternProperties`, whatever form it takes. The pattern's own subschema is
+            # outside the enforced dialect.
+            continue
+        elif additional is False:
+            errors.append(f'{child}: additional property not allowed')
+        else:
+            _apply(additional, item, child, errors)
 
 
 def covered_by_pattern(key: str, schema: Mapping[str, object]) -> bool:
@@ -205,11 +245,35 @@ def covered_by_pattern(key: str, schema: Mapping[str, object]) -> bool:
 
 
 def _pattern_matches(pattern: str, key: str) -> bool:
+    matcher = _compile_pattern(pattern)
+    return matcher is not None and matcher(key)
+
+
+@lru_cache(maxsize=256)
+def _compile_pattern(pattern: str) -> Callable[[str], bool] | None:
+    """A matcher on pydantic's linear-time regex engine, or `None` for a pattern it rejects.
+
+    The name being matched is the model's, and `re` backtracks: a pattern such as `^(a+)+$`
+    against a crafted name holds the event loop for a time exponential in the name's length.
+    The Rust engine pydantic uses for its own `pattern` constraint runs in linear time by
+    construction, at the price of lookaround and backreferences, which it refuses when
+    compiling. A pattern it cannot compile declares nothing, so it exempts nothing.
+
+    Matching is unanchored, as draft-07 specifies for `patternProperties`.
+    """
     try:
-        return re.search(pattern, key) is not None
-    except re.error:
-        # A pattern Python cannot compile declares nothing, so it exempts nothing.
-        return False
+        validator = SchemaValidator(core_schema.str_schema(pattern=pattern, regex_engine='rust-regex'))
+    except SchemaError:
+        return None
+
+    def matches(key: str) -> bool:
+        try:
+            validator.validate_python(key)
+        except ValidationError:
+            return False
+        return True
+
+    return matches
 
 
 def _check_required(schema: Mapping[str, object], value: Mapping[str, object], path: str, errors: list[str]) -> None:
@@ -227,11 +291,22 @@ def _check_array(schema: Mapping[str, object], value: object, path: str, errors:
     items = schema.get('items')
     # Tuple-form `items` (a list of positional schemas) is outside the enforced dialect
     # and is reported by the unsupported-keyword scan instead.
-    if not is_schema(items):
+    if not _is_subschema(items):
         return
     for index, item in enumerate(value):
-        _walk(items, item, f'{path}[{index}]', errors)
+        _apply(items, item, f'{path}[{index}]', errors)
+
+
+def _bounded(errors: Sequence[str]) -> list[str]:
+    if len(errors) <= _MAX_ERRORS:
+        return list(errors)
+    return [*errors[:_MAX_ERRORS], f'... and {len(errors) - _MAX_ERRORS} more']
 
 
 def render_retry_message(errors: Sequence[str]) -> str:
-    return 'Output does not match required schema: ' + ', '.join(errors)
+    # Individual errors already contain `, ` inside `allowedValues`, so they are separated
+    # by something else.
+    body = '; '.join(_bounded(errors))
+    if len(body) > _MAX_CHARS:
+        body = f'{body[:_MAX_CHARS]}... (message truncated)'
+    return 'Output does not match required schema: ' + body
