@@ -70,9 +70,11 @@ def test_single_select_and_number_shortcuts() -> None:
     menu = QuestionMenu(question=APPROACH, position=1, total=1)
     assert menu.title == 'Approach'
     assert menu.choose('up') is None
+    assert menu.choose('up') is None
     assert menu.choose('enter') == ('Patch',)
     assert menu.choose('1') == ('Refactor',)
     assert menu.choose('down') is None
+    assert menu.choose('tab') is None
     assert menu.choose('tab') is None
     assert menu.choose('enter') == ('Refactor',)
 
@@ -355,3 +357,81 @@ def test_wide_characters_wrap_without_losing_choice_text() -> None:
     choices = ''.join(row[2:].strip() for row in rows[1:-1])
     assert label in choices
     assert description.replace(' ', '') in choices.replace(' ', '')
+
+
+@pytest.mark.parametrize('question, shortcut', [(APPROACH, '3'), (TARGETS, '4')])
+def test_custom_answer_editing(question: Question, shortcut: str) -> None:
+    menu = QuestionMenu(question=question, position=1, total=1)
+    assert menu.choose(shortcut) is None
+    assert menu.editing_custom
+    assert menu.choose('enter') is None
+    for key in (' ', '中', 'x', 'left', 'delete', '文', 'home', 'delete', 'end', '!'):
+        assert menu.choose(key) is None
+    assert menu.choose('enter') == '中文!'
+    rows = menu.frame(width=20, height=8)
+    assert len(rows) <= 4
+    assert all(cell_len(Text.from_ansi(row).plain) <= 20 for row in rows)
+    assert '中文!' in ''.join(rows)
+    assert 'Other (type answer)' in ''.join(menu.frame(width=80, height=24))
+
+
+def test_custom_back_preserves_picks_and_draft() -> None:
+    menu = QuestionMenu(question=TARGETS, position=1, total=1)
+    menu.choose('1')
+    menu.choose('4')
+    menu.choose('x')
+    menu.choose('escape')
+    assert not menu.editing_custom
+    assert menu.selected == {0}
+    assert menu.choose('3') == ('api.py',)
+    menu.choose('4')
+    assert menu.choose('enter') == 'x'
+
+
+@pytest.mark.parametrize(
+    'keys, expected',
+    [
+        (['3', 'x', 'enter'], 'x'),
+        (['3', 'x', 'escape', '2'], ('Patch',)),
+        (['3', 'escape', 'escape'], None),
+        (['3', 'ctrl-c'], None),
+    ],
+)
+def test_custom_inline_lifecycle(keys: list[str], expected: tuple[str, ...] | str | None) -> None:
+    output = io.StringIO()
+    surface = PromptSurface(output=output, size=lambda: (80, 24))
+    surface.write('Previous conversation\n')
+    menu = QuestionMenu(question=APPROACH, position=1, total=1)
+    assert menu.run(console=Console(file=surface), key_source=iter(keys).__next__) == expected
+    assert '\x1b[?1049' not in output.getvalue()
+    assert 'Previous conversation' in output.getvalue()
+    assert '\x1b[?25h' in output.getvalue()
+
+
+async def test_custom_answer_reaches_model_through_inline_picker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr('sys.stdin', io.StringIO('3Use another approach\n'))
+    screen = ScreenLog()
+    output = io.StringIO()
+    answerer = TerminalAnswerer(full_screen=screen, console=Console(file=output))
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        if len(messages) == 1:
+            return ModelResponse(parts=[ToolCallPart('ask_user_question', {'questions': [APPROACH.model_dump()]})])
+        return ModelResponse(parts=[TextPart('done')])
+
+    result = await Agent(FunctionModel(respond), capabilities=[AskUser(answerer=answerer)]).run('go')
+    returns = [p for m in result.all_messages() for p in m.parts if isinstance(p, ToolReturnPart)]
+    assert returns[0].content == {'Approach': ['Use another approach']}
+    assert screen.events == ['taken', 'released']
+    console = Console(file=output)
+    console.print(
+        render_answer(
+            AskUserAnsweredEvent(
+                request_id='custom',
+                response=AskUserResponse(
+                    answers=(AskUserAnswer(header='Approach', custom_answer='[red]Custom answer'),)
+                ),
+            )
+        )
+    )
+    assert 'Approach: [red]Custom answer' in output.getvalue()
