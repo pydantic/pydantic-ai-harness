@@ -109,7 +109,24 @@ clai2 plugins add NAME module[:attr] [JSON] saves for the next startup.
 /plugins opens the management menu. Removing a drop-in disables it persistently;
 delete its source file yourself to remove it from disk.
 
-The second built-in is ask_user (pydantic_clai2.ask_user_menu:activate): the
+The built-in code_mode (pydantic_ai_harness.code_mode:CodeMode) is enabled by
+default and runs eligible tools as Python functions in Monty's run_code sandbox.
+Monty is installed with CLAI. /plugins disable code_mode restores native tool
+calls; /plugins remove code_mode restores enabled defaults. Saved overrides,
+including earlier disabled preferences, keep precedence. Configure constructor
+options with the same id, for example:
+
+```text
+/plugins add code_mode pydantic_ai_harness.code_mode:CodeMode '{"tools": ["read_file", "grep"], "max_tool_calls": 50}'
+```
+
+Default sandbox limits and tool selection come from Harness. No mounts, OS
+handler, or eager execution are enabled. Wrapped tools retain their host access,
+so CodeMode does not sandbox Coder's file and shell permissions. Disable both
+coder and code_mode to remove coding tools and Python execution. Do not add a
+second CodeMode under another name or to an agent using DEFAULT_PLUGINS.
+
+The built-in ask_user (pydantic_clai2.ask_user_menu:activate): the
 harness AskUser capability with a full-screen terminal menu as its answerer, so
 the model can ask the user multiple-choice questions mid-run through
 ask_user_question. /plugins disable ask_user removes the tool. To answer the

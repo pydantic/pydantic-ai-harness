@@ -36,6 +36,7 @@ def test_catalog_covers_public_harness_capabilities() -> None:
                 expected.add(f'pydantic_ai_harness.{module}:{node.name}')
     integrated = {
         'pydantic_ai_harness.coder:Coder',
+        'pydantic_ai_harness.code_mode:CodeMode',
         'pydantic_ai_harness.ask_user:AskUser',
         'pydantic_ai_harness.repo_context:RepoContext',
     }
@@ -44,6 +45,7 @@ def test_catalog_covers_public_harness_capabilities() -> None:
     assert len({plugin.id for plugin in DEFAULT_PLUGINS}) == len(DEFAULT_PLUGINS)
     assert {plugin.id for plugin in DEFAULT_PLUGINS if plugin.enabled} == {
         'coder',
+        'code_mode',
         'ask_user',
         'repo_context',
         'compaction',

@@ -145,22 +145,52 @@ cleanup. See [Git worktrees](README.md#git-worktrees) for naming and cleanup.
 
 The coding tools are a plugin too, and so are asking you multiple-choice
 questions mid-run, reading the repository's instruction file, and keeping the
-conversation inside the context window. These five plugins are marked
+conversation inside the context window. The following plugins are marked
 `(built-in)` and enabled unless you say otherwise:
 
 | Id | Backed by | Settings | Does |
 |---|---|---|---|
 | `coder` | `pydantic_ai_harness.coder:Coder` | `{"unrestricted_filesystem": true, "repo_context": false}` | the file and shell tools |
+| `code_mode` | `pydantic_ai_harness.code_mode:CodeMode` | `{}` | Monty-backed Python execution wrapping eligible tools behind `run_code` |
 | `ask_user` | `pydantic_clai2.ask_user_menu:activate` | `{}` | the `ask_user_question` tool: multiple-choice questions answered from the terminal |
 | `repo_context` | `pydantic_clai2.repo_context` | `{}` | reads `CLAUDE.md` or `AGENTS.md` from the launch directory into the instructions |
 | `persistence` | `pydantic_clai2.sessions` | `{}` | Harness step checkpoints for interrupted session recovery |
 | `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
 
+### CodeMode and Monty
+
+`code_mode` uses the Harness capability directly, with Monty installed as part of
+CLAI. It wraps eligible tools from all enabled plugins, not just `coder`, using
+Harness's tool-selection rules. `/plugins disable code_mode` restores native
+calls next turn; `/plugins enable code_mode` restores `run_code`.
+`/plugins remove code_mode` resets to enabled defaults. Saved declarations,
+including explicit disable choices from earlier versions, keep precedence;
+without an override the new default is enabled. Do not register a second
+CodeMode under another name.
+
+Configure JSON constructor options with the same id:
+
+```text
+/plugins add code_mode pydantic_ai_harness.code_mode:CodeMode '{"tools": ["read_file", "grep"], "max_tool_calls": 50}'
+```
+
+For Python-only options such as mounts or an OS handler, replace `code_mode`
+with a module that calls `host.add(CodeMode(...))`. The stock declaration adds
+neither: direct host access is unavailable, while wrapped tools retain their
+permissions, including Coder's unrestricted file and shell access. Disable
+both `coder` and `code_mode` to remove coding tools and Python execution.
+
+Defaults are 100 nested tool calls per invocation, a 30-second execution and
+256 MiB heap backstop per Monty session, and no eager execution. These are not
+whole-conversation budgets. See [Harness CodeMode](../pydantic_ai_harness/code_mode/README.md)
+for sandbox restrictions and limit semantics. CLAI adds no separate telemetry;
+Harness and core trace `run_code` and nested tools through configured instrumentation.
+
 ### Optional harness capabilities
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
+`Coder`, `CodeMode`, `AskUser`, and `RepoContext` use the integrated entries above instead of
 appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
@@ -182,8 +212,7 @@ Removing an optional built-in restores its disabled declaration; enable and
 disable choices persist between launches. Project, drop-in, and saved declarations
 retain their usual precedence over built-ins.
 
-`/plugins disable coder` gives you a chat-only CLAI (a writing or research setup
-with `ExaSearch` instead, say); `/plugins enable coder` brings the tools back;
+`/plugins disable coder` removes the file and shell tools; `/plugins enable coder` brings the tools back;
 `/plugins remove coder` cannot forget a built-in, so it resets it to its
 defaults. `/plugins disable repo_context` stops the instruction file from being
 read. To run a built-in with different options, add your own declaration under

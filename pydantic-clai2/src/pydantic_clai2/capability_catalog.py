@@ -2,13 +2,12 @@
 
 from .config import PluginSettings
 
-# Coder, AskUser and RepoContext already have shell-integrated built-in entries.
+# Coder, CodeMode, AskUser and RepoContext already have shell-integrated built-in entries.
 _FACTORIES = (
     ('advisor', 'advisor:Advisor'),
     ('aws_lambda', 'aws_lambda:AWSLambdaDurability'),
     ('browser_use', 'browser_use:BrowserUse'),
     ('capability_creation', 'capability_creation:CapabilityCreation'),
-    ('code_mode', 'code_mode:CodeMode'),
     ('clamp_oversized_messages', 'compaction:ClampOversizedMessages'),
     ('clear_tool_results', 'compaction:ClearToolResults'),
     ('deduplicate_file_reads', 'compaction:DeduplicateFileReads'),

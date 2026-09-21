@@ -1,17 +1,24 @@
 """Settings survive upgrades, branch switches, and rejected operations."""
 
+import io
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from pydantic_ai import Agent
+from pydantic_ai.models.test import TestModel
+from rich.console import Console
 
-from pydantic_clai2.commands import config_command
+from pydantic_clai2 import DEFAULT_PLUGINS
+from pydantic_clai2.commands import Commands, config_command
 from pydantic_clai2.config import PluginSettings, Settings
 from pydantic_clai2.field_menu import FieldMenu
 from pydantic_clai2.model_menu import ModelSettingsSource
 from pydantic_clai2.model_settings import model_settings_from_json
+from pydantic_clai2.plugin_loader import PluginLoader
+from pydantic_clai2.plugins import SessionStart
 from pydantic_clai2.settings_store import SettingsStore
 
 
@@ -152,3 +159,36 @@ def test_historical_model_preferences_survive_new_editor(tmp_path: Path) -> None
     expected = dict(original)
     expected.pop('temperature')
     assert SettingsStore(path).model_settings('openai:gpt-4o') == expected
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+async def test_saved_code_mode_preference_overrides_new_default(tmp_path: Path, enabled: bool) -> None:
+    path = tmp_path / 'config.db'
+    SettingsStore(path)
+    declaration = (
+        '{"id":"code_mode","factory":"pydantic_ai_harness.code_mode:CodeMode",'
+        '"enabled":' + ('true' if enabled else 'false') + ',"settings":{"max_tool_calls":7}}'
+    )
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute('INSERT INTO plugins VALUES (?, ?)', ('code_mode', declaration))
+    store = SettingsStore(path)
+    builtin = next(plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'code_mode')
+    assert builtin.enabled
+    loader: PluginLoader[None] = PluginLoader(
+        store=store,
+        console=Console(file=io.StringIO()),
+        commands=Commands(),
+        session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=store.load()),
+        builtin=(builtin,),
+    )
+    await loader.load_all()
+    try:
+        assert len(loader.capabilities()) == int(enabled)
+        assert store.plugins()[0].settings == {'max_tool_calls': 7}
+        assert store.plugins()[0].enabled is enabled
+        with closing(sqlite3.connect(path)) as connection:
+            assert connection.execute('SELECT declaration FROM plugins WHERE id = ?', ('code_mode',)).fetchone() == (
+                declaration,
+            )
+    finally:
+        await loader.close('exit')

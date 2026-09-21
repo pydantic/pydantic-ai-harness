@@ -2,13 +2,15 @@
 
 A separately installable terminal client for Pydantic AI. The coding tools,
 `Coder(unrestricted_filesystem=True)`, are the built-in `coder` plugin: on by
-default, `/plugins disable coder` for a chat-only shell. The model can also ask
+default, `/plugins disable coder` to remove those tools. The model can also ask
 you multiple-choice questions mid-run through the built-in `ask_user` plugin;
 see [Questions from the model](#questions-from-the-model). The built-in
 `repo_context` plugin reads `AGENTS.md` or `CLAUDE.md` from the launch directory
 into the agent's instructions; `/plugins disable repo_context` turns that off.
 Context management is the built-in `compaction` plugin,
 [described below](#compacting-the-conversation).
+The built-in `code_mode` plugin runs eligible tools through Monty by default;
+see [Code Mode](#code-mode).
 The `/plugins` menu also lists every other harness capability, disabled by
 default. Press Space to enable one. Some need optional packages, credentials,
 or constructor settings first; see [optional harness capabilities](PLUGINS.md#optional-harness-capabilities).
@@ -27,6 +29,37 @@ Use `/set display.tool_output true` to show detailed output again, or
 `/set display.tool_output false` to return to summaries. In detailed mode,
 `display.shell_lines` and `display.grep_lines` limit previews to 20 lines by
 default. Plugin-provided rendering, including interactive questions, is unchanged.
+
+## Code Mode
+
+The stock CLI enables `code_mode`, backed by Harness
+[`CodeMode`](../pydantic_ai_harness/code_mode/README.md) and Monty. Monty is
+installed with CLAI. Eligible tools, including Coder's file and shell tools,
+become async Python functions inside `run_code`, letting the model combine
+calls and process their results in one snippet.
+
+```text
+/plugins disable code_mode
+/plugins enable code_mode
+/plugins add code_mode pydantic_ai_harness.code_mode:CodeMode '{"tools": ["read_file", "grep"], "max_tool_calls": 50}'
+```
+
+Disabling restores native tool calls on the next turn. Removing the declaration
+restores the enabled default. Existing saved settings and disabled preferences
+are preserved; installations without an override now enable CodeMode.
+Custom `chat()` launchers get this default only with `builtin_plugins=DEFAULT_PLUGINS`.
+
+CLAI uses Harness defaults: 100 nested tool calls per invocation, a 30-second
+execution and 256 MiB heap backstop per Monty session, no mounts or OS handler,
+and no eager execution. These are not whole-conversation budgets. The sandbox
+cannot directly access the host filesystem, but tools invoked from it retain
+their own permissions, including Coder's unrestricted file and shell access.
+CodeMode does not make Coder a security sandbox. Disable both `coder` and
+`code_mode` to remove coding tools and Python execution.
+
+CLAI adds no CodeMode-specific telemetry: Harness and core trace `run_code` and
+nested tool calls through the configured instrumentation, including the built-in
+Logfire plugin.
 
 ## Code highlighting
 

@@ -75,7 +75,7 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
   (`agent.run(capabilities=...)`), so "active for the next prompt" is the
   natural unit; nothing rebuilds the agent.
 - **Built-ins are declarations, not code paths.** `DEFAULT_PLUGINS` in
-  `_app.py` lists what CLAI ships enabled (`coder`, `ask_user`, `repo_context`,
+  `_app.py` lists what CLAI ships enabled (`coder`, `code_mode`, `ask_user`, `repo_context`,
   `compaction`, `persistence`, `logfire`). The loader treats them like drop-ins with the lowest
   precedence: a store declaration with the same id replaces one, `disable`
   persists an override, `remove` resets it. Do not special-case `Coder`
