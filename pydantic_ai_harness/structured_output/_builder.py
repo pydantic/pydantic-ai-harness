@@ -12,7 +12,12 @@ from pydantic_ai import ModelRetry, StructuredDict, ToolOutput
 from pydantic_ai.exceptions import UserError
 
 from pydantic_ai_harness.structured_output._lint import LintFinding, lint_schema, unsupported_keywords
-from pydantic_ai_harness.structured_output._validate import is_schema, render_retry_message, validate_instance
+from pydantic_ai_harness.structured_output._validate import (
+    bounded,
+    is_schema,
+    render_retry_message,
+    validate_instance,
+)
 
 __all__ = ['SchemaOutput']
 
@@ -148,13 +153,18 @@ def _require_object_schema(schema: object) -> None:
 def _refuse(findings: list[LintFinding]) -> None:
     blocking = [finding for finding in findings if finding.scope == 'whole']
     if blocking:
-        listed = '; '.join(finding.describe() for finding in blocking)
-        raise UserError(f'SchemaOutput was given a schema that no value can satisfy: {listed}')
+        raise UserError(f'SchemaOutput was given a schema that no value can satisfy: {_listed(blocking)}')
+
+
+def _listed(findings: list[LintFinding]) -> str:
+    # One dead subschema reached through many required names is many findings, and nesting
+    # multiplies them. The first handful say what is wrong; the rest only lengthen the message.
+    return '; '.join(bounded([finding.describe() for finding in findings]))
 
 
 def _warn(findings: list[LintFinding]) -> None:
     if findings:
-        listed = '; '.join(finding.describe() for finding in findings)
+        listed = _listed(findings)
         warnings.warn(
             f'SchemaOutput was given a schema with a part that no value can satisfy: {listed}. '
             'The run can still succeed while those fields are left unset.',

@@ -26,7 +26,8 @@ of value.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import islice
 from typing import Literal
 
 from pydantic_ai_harness.structured_output._validate import (
@@ -45,6 +46,18 @@ LintScope = Literal['whole', 'subschema']
 
 _NUMERIC = frozenset({'integer', 'number'})
 _OBJECT = frozenset({'object'})
+
+# Every type name draft-07 defines. `_check_type` matches the reply's type against the
+# declared names, widening only `number` to admit an integer, so a node that names none
+# of these admits no value at all.
+_TYPE_NAMES = ('null', 'boolean', 'object', 'array', 'number', 'string', 'integer')
+
+# How many findings one `additionalProperties` subschema may contribute. Every required name
+# it governs repeats it, and nesting multiplies those repeats: a 1.7 KB schema nested twenty
+# deep reaches a million findings saying the same thing. Capping each level keeps the total
+# proportional to the schema, and a node's own findings come before anything it recurses into,
+# so the reasons that decide a refusal survive the cut.
+_MAX_ADDITIONAL_FINDINGS = 64
 
 # Lower and upper bound keywords, grouped by the instance type they constrain. Every
 # lower bound is compared with every upper bound of its group, so an inclusive bound
@@ -99,6 +112,11 @@ def _declared_types(schema: Mapping[str, object]) -> list[str]:
     return []
 
 
+def _names_a_type(declared: list[str]) -> bool:
+    """Whether a `type` leaves the node any value at all. One recognised name among typos is enough."""
+    return any(name in _TYPE_NAMES for name in declared)
+
+
 def _binds(schema: Mapping[str, object], applies_to: frozenset[str]) -> bool:
     """Whether a keyword that constrains only `applies_to` types constrains every value this node admits."""
     declared = _declared_types(schema)
@@ -107,12 +125,32 @@ def _binds(schema: Mapping[str, object], applies_to: frozenset[str]) -> bool:
 
 def _lint_node(schema: Mapping[str, object], path: str, required_path: bool, findings: list[LintFinding]) -> None:
     scope: LintScope = 'whole' if required_path else 'subschema'
+    _lint_type(schema, path, scope, findings)
     _lint_enum(schema, path, scope, findings)
     _lint_const(schema, path, scope, findings)
     _lint_bounds(schema, path, scope, findings)
     _lint_properties(schema, path, required_path, findings)
     _lint_any_of(schema, path, scope, findings)
     _lint_branches(schema, path, findings)
+
+
+def _lint_type(schema: Mapping[str, object], path: str, scope: LintScope, findings: list[LintFinding]) -> None:
+    """A node whose every declared type name is unknown admits nothing; one real name saves it.
+
+    `type: ['strng', 'string']` is a typo the model can still satisfy, so a list is a finding
+    only when no name in it is recognised.
+    """
+    declared = _declared_types(schema)
+    if declared and not _names_a_type(declared):
+        findings.append(
+            LintFinding(
+                'unknown_type',
+                path,
+                f'declares type {" or ".join(declared)!r}, which no JSON value has; '
+                f'the types are {", ".join(_TYPE_NAMES)}',
+                scope,
+            )
+        )
 
 
 def _lint_enum(schema: Mapping[str, object], path: str, scope: LintScope, findings: list[LintFinding]) -> None:
@@ -206,17 +244,27 @@ def _lint_properties(schema: Mapping[str, object], path: str, required_path: boo
     binding = required_path and _binds(schema, _OBJECT)
     scope: LintScope = 'whole' if binding else 'subschema'
 
-    if schema.get('additionalProperties') is False:
-        for name in required:
-            if name not in properties and not covered_by_pattern(name, schema):
-                findings.append(
-                    LintFinding(
-                        'required_property_forbidden',
-                        child_path(path, name),
-                        'is required but is not declared in properties, and additionalProperties is false',
-                        scope,
-                    )
+    # Supplying a required name that neither `properties` nor `patternProperties` declares
+    # is the only way to satisfy `required` for it, and `additionalProperties` decides
+    # whether that is possible: `false` forbids the name, and a subschema has to admit a value.
+    additional = schema.get('additionalProperties')
+    undeclared = (
+        [name for name in required if name not in properties and not covered_by_pattern(name, schema)]
+        if additional is False or is_schema(additional)
+        else []
+    )
+    if additional is False:
+        for name in undeclared:
+            findings.append(
+                LintFinding(
+                    'required_property_forbidden',
+                    child_path(path, name),
+                    'is required but is not declared in properties, and additionalProperties is false',
+                    scope,
                 )
+            )
+    elif is_schema(additional):
+        _lint_additional(additional, path, undeclared, binding, findings)
 
     for name, subschema in properties.items():
         if subschema is False and name in required:
@@ -230,6 +278,33 @@ def _lint_properties(schema: Mapping[str, object], path: str, required_path: boo
             )
         elif is_schema(subschema):
             _lint_node(subschema, child_path(path, name), binding and name in required, findings)
+
+
+def _lint_additional(
+    additional: Mapping[str, object],
+    path: str,
+    undeclared: list[str],
+    binding: bool,
+    findings: list[LintFinding],
+) -> None:
+    """Lint an object-form `additionalProperties` once and report it at every name it governs.
+
+    Every undeclared required name meets the same subschema, so traversing it per name would
+    cost a pass each, and nesting would multiply those passes level by level. One traversal
+    against an empty base path leaves findings that a prefix turns into each name's own path,
+    capped so that nesting cannot multiply the findings either.
+
+    With no required name reaching it the subschema only turns extra keys away, which an
+    instance satisfies by sending none. That is the reading `items` gets, so the findings stay
+    at subschema scope and are reported once at the position `unsupported_keywords` uses.
+    """
+    subtree: list[LintFinding] = []
+    _lint_node(additional, '', bool(undeclared) and binding, subtree)
+    if not subtree:
+        return
+    prefixes = [child_path(path, name) for name in undeclared] or [f'{path}.*']
+    expanded = (replace(finding, path=prefix + finding.path) for prefix in prefixes for finding in subtree)
+    findings.extend(islice(expanded, _MAX_ADDITIONAL_FINDINGS))
 
 
 def _lint_any_of(schema: Mapping[str, object], path: str, scope: LintScope, findings: list[LintFinding]) -> None:
@@ -273,10 +348,12 @@ def _inherit_type(parent: Mapping[str, object], branch: Mapping[str, object]) ->
     """An `anyOf` branch applies to the same instance as its parent, so the parent's `type` binds it too.
 
     Only a branch without its own `type` takes the parent's, and it takes the whole list, so a
-    parent admitting `object` or `null` still leaves the branch's object keywords unbound.
+    parent admitting `object` or `null` still leaves the branch's object keywords unbound. A
+    parent naming no type is left where it is rather than copied down, so the finding names the
+    node that spelled it wrong instead of every branch under it.
     """
     parent_types = _declared_types(parent)
-    if 'type' in branch or not parent_types:
+    if 'type' in branch or not _names_a_type(parent_types):
         return branch
     return {**branch, 'type': parent_types}
 

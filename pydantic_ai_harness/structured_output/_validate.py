@@ -181,7 +181,7 @@ def _check_any_of(schema: Mapping[str, object], value: object, path: str, errors
         _apply(branch, value, path, found)
         if not found:
             return
-        reasons.append(f'branch {index}: {"; ".join(_bounded(found))}')
+        reasons.append(f'branch {index}: {"; ".join(bounded(found))}')
     detail = f' ({"; ".join(reasons)})' if reasons else ''
     errors.append(f'{path}: {_render(value)} does not match any of the allowed schemas{detail}')
 
@@ -310,7 +310,8 @@ def _check_array(schema: Mapping[str, object], value: object, path: str, errors:
         _apply(items, item, f'{path}[{index}]', errors)
 
 
-def _bounded(errors: Sequence[str]) -> list[str]:
+def bounded(errors: Sequence[str]) -> list[str]:
+    """At most `_MAX_ERRORS` of them, with a count of what was left out."""
     if len(errors) <= _MAX_ERRORS:
         return list(errors)
     return [*errors[:_MAX_ERRORS], f'... and {len(errors) - _MAX_ERRORS} more']
@@ -319,7 +320,7 @@ def _bounded(errors: Sequence[str]) -> list[str]:
 def render_retry_message(errors: Sequence[str]) -> str:
     # Individual errors already contain `, ` inside `allowedValues`, so they are separated
     # by something else.
-    body = '; '.join(_bounded(errors))
+    body = '; '.join(bounded(errors))
     if len(body) > _MAX_CHARS:
         body = f'{body[:_MAX_CHARS]}... (message truncated)'
     return 'Output does not match required schema: ' + body

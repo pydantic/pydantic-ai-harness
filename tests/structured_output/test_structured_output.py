@@ -1231,3 +1231,134 @@ class TestRetryMessageBounds:
 
         assert '$.a[49]: expected string, got integer; ... and 10 more)' in message
         assert '$.a[50]' not in message
+
+
+class TestUnknownTypeNames:
+    def test_a_required_property_with_a_misspelled_type_is_refused(self) -> None:
+        with pytest.raises(UserError, match='unknown_type'):
+            SchemaOutput({'type': 'object', 'required': ['a'], 'properties': {'a': {'type': 'strng'}}})
+
+    def test_the_finding_names_the_types_that_exist(self) -> None:
+        with pytest.raises(UserError, match='null, boolean, object, array, number, string, integer'):
+            SchemaOutput({'type': 'object', 'required': ['a'], 'properties': {'a': {'type': 'strng'}}})
+
+    def test_an_optional_property_with_a_misspelled_type_only_warns(self) -> None:
+        assert any(
+            'unknown_type' in w for w in _lint_warnings({'type': 'object', 'properties': {'a': {'type': 'str'}}})
+        )
+
+    def test_a_type_list_of_only_unknown_names_is_refused(self) -> None:
+        with pytest.raises(UserError, match='unknown_type'):
+            SchemaOutput({'type': 'object', 'required': ['a'], 'properties': {'a': {'type': ['strng', 'objct']}}})
+
+    def test_one_real_name_in_the_list_is_enough(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {'a': {'type': ['strng', 'string']}},
+        }
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            SchemaOutput(schema)
+
+    def test_an_anyof_branch_does_not_inherit_a_type_that_names_none(self) -> None:
+        # The parent spelled it wrong, so the parent is the finding. Copying it down would
+        # have every branch report a type it never declared.
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'properties': {'a': {'type': 'strng', 'anyOf': [{'required': ['b']}, {'minLength': 1}]}},
+        }
+
+        assert _lint_warnings(schema) == [
+            "SchemaOutput was given a schema with a part that no value can satisfy: $.a: declares type 'strng', "
+            'which no JSON value has; the types are null, boolean, object, array, number, string, integer '
+            '(unknown_type). The run can still succeed while those fields are left unset.'
+        ]
+
+    def test_a_misspelled_root_type_is_named_as_well_as_refused(self) -> None:
+        with pytest.raises(UserError, match='root_not_object.*unknown_type'):
+            SchemaOutput({'type': 'objct', 'properties': {}})
+
+    @pytest.mark.parametrize('declared', [[], [1, 2]])
+    def test_a_type_that_declares_no_name_is_not_a_finding(self, declared: list[Any]) -> None:
+        # `_check_type` enforces nothing when no name survives, so every value still satisfies.
+        schema: dict[str, Any] = {'type': 'object', 'required': ['a'], 'properties': {'a': {'type': declared}}}
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            SchemaOutput(schema)
+
+
+class TestRequiredNamesFallToAdditionalProperties:
+    def test_a_required_undeclared_name_is_linted_against_the_subschema(self) -> None:
+        with pytest.raises(UserError, match=r'\$\.a: enum is empty'):
+            SchemaOutput({'type': 'object', 'required': ['a'], 'properties': {}, 'additionalProperties': {'enum': []}})
+
+    def test_a_subschema_that_admits_values_is_satisfiable(self) -> None:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            SchemaOutput(
+                {'type': 'object', 'required': ['a'], 'properties': {}, 'additionalProperties': {'type': 'string'}}
+            )
+
+    def test_a_name_covered_by_pattern_properties_is_not_held_against_it(self) -> None:
+        # `patternProperties` exempts the name, so `additionalProperties` never sees it and
+        # the dead subschema is left as the warning any extra key would meet.
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'required': ['a'],
+            'properties': {},
+            'patternProperties': {'^a$': {'type': 'string'}},
+            'additionalProperties': {'enum': []},
+        }
+        raised = _lint_warnings(schema)
+
+        assert not any(r'$.a' in w for w in raised)
+        assert any(r'$.*' in w for w in raised)
+
+    def test_a_dead_subschema_with_no_required_name_is_a_warning_not_a_refusal(self) -> None:
+        # Nothing forces an extra key, so the empty object satisfies the schema; the model
+        # that does send one cannot win, which is what `subschema` scope is for.
+        schema: dict[str, Any] = {'type': 'object', 'properties': {}, 'additionalProperties': {'enum': []}}
+
+        assert any(r'$.*' in w for w in _lint_warnings(schema))
+
+    def test_a_deeply_nested_dead_subschema_is_still_refused_and_stays_readable(self) -> None:
+        # Every name repeats the same subschema, so depth multiplies the findings. Capping
+        # each level has to leave the reason that decides the refusal in place.
+        node: dict[str, Any] = {'enum': []}
+        for _ in range(20):
+            node = {'type': 'object', 'required': ['a', 'b'], 'properties': {}, 'additionalProperties': node}
+        started = time.perf_counter()
+
+        with pytest.raises(UserError, match='enum is empty') as caught:
+            SchemaOutput(node)
+
+        assert time.perf_counter() - started < 1
+        assert len(str(caught.value)) < 10_000
+
+    def test_the_subschema_is_traversed_once_however_many_names_reach_it(self) -> None:
+        # Linting it per name would cost a pass each, and nesting would multiply those passes
+        # level by level: at depth 16 the schema below is under 1.5 KB.
+        node: dict[str, Any] = {'type': 'string'}
+        for _ in range(16):
+            node = {'type': 'object', 'required': ['a', 'b'], 'properties': {}, 'additionalProperties': node}
+        started = time.perf_counter()
+
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            SchemaOutput(node)
+
+        assert time.perf_counter() - started < 1
+
+    def test_each_required_name_is_reported_at_its_own_path(self) -> None:
+        with pytest.raises(UserError, match=r'\$\.a: .*; \$\.b: '):
+            SchemaOutput(
+                {'type': 'object', 'required': ['a', 'b'], 'properties': {}, 'additionalProperties': {'enum': []}}
+            )
+
+    def test_a_node_that_is_not_declared_an_object_only_warns(self) -> None:
+        schema: dict[str, Any] = {
+            'type': 'object',
+            'properties': {'a': {'required': ['b'], 'additionalProperties': {'enum': []}}},
+        }
+        assert any(r'$.a.b' in w for w in _lint_warnings(schema))

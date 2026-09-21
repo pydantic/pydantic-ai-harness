@@ -115,20 +115,32 @@ SchemaOutput({'type': 'object', 'properties': {}, 'required': ['verdict'], 'addi
 #> UserError: ... $.verdict: is required but is not declared in properties, ...
 ```
 
-Checks: a root that is not an object, a required property that `additionalProperties: false`
-forbids or whose schema is `false`, an `enum` that is empty or whose every value fails the rest of
-its node (its `type`, `required`, `properties` and so on), a `const` that fails likewise or sits
-outside its `enum`, an `anyOf` none of whose branches can be satisfied, and crossed bounds
-(`minimum` above `maximum`, an exclusive bound meeting its partner, and the
+Checks: a root that is not an object, a `type` naming none of the seven JSON Schema types, a
+required property that `additionalProperties` either forbids or hands a subschema admitting no
+value, a required property whose own schema is `false`, an `enum` that is empty or whose every
+value fails the rest of its node (its `type`, `required`, `properties` and so on), a `const` that
+fails likewise or sits outside its `enum`, an `anyOf` none of whose branches can be satisfied, and
+crossed bounds (`minimum` above `maximum`, an exclusive bound meeting its partner, and the
 `length`/`items`/`properties` pairs). Crossed bounds are linted even though they are not enforced
 at validation time: an impossible bound is a bug in the schema either way, and construction is the
 cheap place to say so.
+
+A misspelled `type` is worth naming because nothing else reports it: a reply's type is matched
+against the declared name, with `number` the only widening, so `strng` matches nothing a model can
+send. A `type` list is a finding only when every name in it is unknown, since `['strng', 'string']`
+still admits a string.
 
 A keyword is held against a node only where it binds. Crossed numeric bounds on a node typed
 `string` admit every string, and `required` on a node that does not declare `type: 'object'` leaves
 a non-object value acceptable; the lint treats both as satisfiable, which is what validation does
 with them. An `anyOf` branch is ruled out only by a finding on its own required path, not by one
 under an optional property or array element it can leave unset.
+
+A required name that neither `properties` nor `patternProperties` declares is validated against
+`additionalProperties`, so a subschema there that admits no value is a finding at that name's path.
+With no required name reaching it the same subschema only turns extra keys away, which an instance
+satisfies by sending none, so it is reported at `$.*` as a warning rather than a refusal. That is
+the reading `items` gets for the same reason.
 
 ## Retries
 
