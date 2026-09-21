@@ -422,6 +422,7 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
     _parts: dict[str, _PartWatch] = field(default_factory=dict[str, _PartWatch], init=False)
     _index_to_part: dict[int, str] = field(default_factory=dict[int, str], init=False)
     _run_step: int | None = field(default=None, init=False)
+    _tool_part_indexes: set[int] = field(default_factory=set[int], init=False)
 
     def stash_step(
         self,
@@ -462,7 +463,18 @@ class SpeculationCoordinator(Generic[AgentDepsT]):
         """Feed one stream event; launches tasks for any newly speculatable calls."""
         if self._run_step != ctx.run_step:
             self._run_step = ctx.run_step
+            self._tool_part_indexes.clear()
             await self._retire_stale(ctx)
+        if isinstance(event, PartStartEvent) and not isinstance(event.part, ToolCallPart):
+            self._tool_part_indexes.discard(event.index)
+        if isinstance(event, PartStartEvent) and isinstance(event.part, ToolCallPart):
+            preceded = bool(self._tool_part_indexes - {event.index})
+            self._tool_part_indexes.add(event.index)
+            if preceded:
+                # Earlier calls may mutate the state this snippet reads. Prelaunch at normal
+                # dispatch instead, after the tool manager has enforced execution ordering.
+                self._index_to_part.pop(event.index, None)
+                return
         match event:
             case PartStartEvent(part=ToolCallPart() as part) if part.tool_name == _RUN_CODE_TOOL_NAME:
                 watch = _PartWatch(tool_call_id=part.tool_call_id, run_step=ctx.run_step)

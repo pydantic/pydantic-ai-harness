@@ -140,9 +140,10 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     is adopted instead of starting cold. Pass the names of tools that are safe to run early, or
     `'declared'` to trust what the tools declare about themselves (`Tool(metadata={'read_only':
     True})` or the MCP `readOnlyHint` annotation). At most `max_tool_calls` (and never more than
-    32) calls start early per `run_code` call. Composes with `eager`. Inactive under durable
-    execution and when the run's parallel execution mode is sequential. See the Code Mode guide
-    for the mechanics.
+    32) calls start early per `run_code` call, and they do not reserve from `max_tool_calls`:
+    unclaimed launches are extra bounded work alongside the dispatches the snippet makes.
+    Composes with `eager`. Inactive under durable execution and when the run's parallel
+    execution mode is sequential. See the Code Mode guide for the mechanics.
     """
 
     dynamic_catalog: bool = False
