@@ -98,6 +98,29 @@ directory instead. None of this changes plugin APIs. See
 [Codex authentication](README.md#codex-authentication) for storage and security
 details.
 
+## Desktop notifications
+
+The default-enabled `notifications` plugin (`pydantic_clai2.notifications`)
+observes `turn_end` for completed and failed turns and `AskUserRequestedEvent`
+before the answer picker waits. Cancelled turns do not notify. It registers no
+tools or instructions and has no plugin settings. Its title is `CLAI2`; its
+messages contain only generic status text, never conversation content or errors.
+
+macOS uses `/usr/bin/osascript`; enable Script Editor notifications in System
+Settings > Notifications. Linux uses `/usr/bin/notify-send` when installed and a desktop
+notification service is available. OS permissions and Focus settings determine
+delivery. Windows, SSH, headless mode, and redirected output are skipped. Local
+tmux needs no passthrough because delivery uses the OS, not terminal escapes.
+The plugin does not detect focus and submits notifications even in the active
+terminal. Submission is awaited with a two-second timeout; missing services,
+nonzero exits, and timeouts are nonfatal. Cancellation still propagates. It emits
+no notification-specific telemetry.
+
+`/plugins disable notifications` persists an off override. Use
+`/plugins enable notifications` to load it again or `/plugins remove notifications`
+to restore the built-in default. Normal plugin unloading discards its handlers;
+there are no background workers to stop.
+
 ## Logfire: default agent tracing
 
 The built-in `logfire` plugin (`pydantic_clai2.logfire`) is enabled by default in
@@ -181,9 +204,13 @@ clai2 --worktree my-task
 that directory before reading project settings or activating plugins. Relative paths in your plugin, the coding tools,
 and `repo_context` therefore refer to that checkout. User plugins and settings
 still load from the same database directory, even with a relative `--database`
-path. Only committed project files reach the new checkout. Worktrees and their
-`clai/NAME` branches stay on disk after the session ends; plugins do not own their
-cleanup. See [Git worktrees](README.md#git-worktrees) for naming and cleanup.
+path. Only committed project files reach the new checkout. After interactive
+shutdown and plugin cleanup, CLAI offers to remove the linked worktree, defaulting
+to keep. This includes existing linked worktrees. Removal uses Git without
+`--force` and keeps the branch; dirty or locked checkouts stay on disk.
+Headless runs, piped input, and startup errors do not prompt. `/new`, `/resume`,
+and `/reload` keep the checkout in use. Plugins do not own worktree cleanup.
+See [Git worktrees](README.md#git-worktrees) for naming and cleanup.
 
 ## The built-in plugins
 
