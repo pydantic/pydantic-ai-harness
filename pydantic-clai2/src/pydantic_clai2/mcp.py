@@ -54,7 +54,9 @@ def activate(host: PluginHost[None]) -> None:
         if not config.enabled:
             continue
         if isinstance(config, StdioServer):
-            transport = StdioTransport(command=config.command, args=config.args, env=config.env, cwd=config.cwd)
+            transport = StdioTransport(
+                command=config.command, args=config.args, env=config.env, cwd=config.cwd, keep_alive=False
+            )
         else:
             transport = StreamableHttpTransport(url=str(config.url), headers=config.headers)
         server: MCPToolset[None] = MCPToolset(transport, id=f'mcp_{name}')

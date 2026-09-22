@@ -1,6 +1,7 @@
 """MCP plugin configuration, discovery, and core-managed tool execution."""
 
 import io
+import os
 import sys
 from pathlib import Path
 
@@ -125,7 +126,10 @@ async def test_loader_persistence_disable_and_project_trust(tmp_path: Path) -> N
 @pytest.mark.parametrize('with_tool', [True, False])
 async def test_real_stdio_discovery_and_agent_run(tmp_path: Path, with_tool: bool) -> None:
     script = tmp_path / 'server.py'
+    pid_file = tmp_path / 'server.pid'
     script.write_text(
+        'import os\nfrom pathlib import Path\n'
+        f'Path({str(pid_file)!r}).write_text(str(os.getpid()))\n'
         'from mcp.server.fastmcp import FastMCP\n'
         'server = FastMCP("test")\n'
         + ('@server.tool()\ndef ping() -> str:\n    return "pong"\n' if with_tool else '')
@@ -134,6 +138,9 @@ async def test_real_stdio_discovery_and_agent_run(tmp_path: Path, with_tool: boo
     host = make_host({'servers': {'local': {'transport': 'stdio', 'command': sys.executable, 'args': [str(script)]}}})
     expected = 'local_ping' if with_tool else 'No tools provided by local.'
     assert await host.commands.execute_async('/mcp tools local') == expected
+    if sys.platform != 'win32':
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
     # A second connection exercises cleanup after the discovery context closes.
     result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run(
         'Use the available tools.'
@@ -142,3 +149,6 @@ async def test_real_stdio_discovery_and_agent_run(tmp_path: Path, with_tool: boo
         assert 'pong' in result.output
     else:
         assert result.output == 'success (no tool calls)'
+    if sys.platform != 'win32':
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
