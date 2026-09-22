@@ -236,7 +236,7 @@ replace descriptor-based I/O used by write snapshots, `write_file`, and
 implementation and register that capability with `Agent(capabilities=[...])`
 so filesystem events retain their capability ownership.
 
-`open_read` returns a binary stream for the pre-change snapshot. `open_write`
+`open_read` returns a binary stream for the pre-change snapshot and edit source. `open_write`
 returns `(stream, created)`: a seekable, non-truncated binary stream and
 whether this open exclusively created the file. When `read_back=True`, the
 stream must be readable from position zero. When `create=False`, a missing

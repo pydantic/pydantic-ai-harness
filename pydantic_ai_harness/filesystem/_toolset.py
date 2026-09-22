@@ -299,18 +299,6 @@ def _disk_hash(chunks: Iterable[bytes]) -> str:
     return digest.hexdigest()[:12]
 
 
-def _read_canonical_text(path: Path) -> str:
-    """Read a text file as the canonical hash view, without newline translation.
-
-    `Path.open` is used because `Path.read_text` only accepts `newline` on
-    Python 3.13+, while `open` has had it since 3.10. Keep `errors` strict,
-    matching `read_text`'s default, so invalid UTF-8 surfaces the same way
-    it did before the `newline` handling was made explicit.
-    """
-    with path.open(encoding='utf-8', newline='') as f:
-        return f.read()
-
-
 def _announced_state(
     resolved: Path,
     path: str,
@@ -518,7 +506,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 self.add_function(registrations[name], name=name)
 
     def open_read(self, resolved: Path) -> BinaryIO:
-        """Open an authorized path for a write's pre-change snapshot.
+        """Open an authorized path for a write's pre-change snapshot or an edit's source.
 
         The caller closes the binary stream. Override alongside `open_write`
         for storage without local file descriptors.
@@ -909,15 +897,12 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         resolved = self._safe_resolve(path, write=True)
         if not resolved.is_file():
             raise FileNotFoundError(f'File not found: {path}')
-        with resolved.open('rb') as f:
-            if _is_binary(f.read(8192)):
+        with self.open_read(resolved) as source:
+            head = source.read(8192)
+            if _is_binary(head):
                 raise ValueError(f'{path} is a binary file; edit_file only edits text files.')
-
-        # Reading and writing with `newline=''` disables universal-newline
-        # translation, so the text is the canonical bytes-on-disk view that
-        # `read_file` hashes, and the replacement preserves `\r\n` exactly
-        # instead of writing `\r\r\n` through a translating writer on Windows.
-        text = _read_canonical_text(resolved)
+            # Decode without universal-newline translation to preserve CRLF and hashes.
+            text = (head + source.read()).decode('utf-8')
         current_hash = _content_hash(text)
 
         if expected_hash is not None:

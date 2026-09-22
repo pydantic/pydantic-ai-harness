@@ -103,6 +103,7 @@ class TestFileSystemToolsetOpening:
             'Write and edit'
         )
         assert target.read_text() == 'edited'
+        assert len(toolset.streams) == 4
         assert toolset.opens == [(True, True), (True, False)]
         assert all(source.closed for source in toolset.streams)
 
