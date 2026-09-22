@@ -98,9 +98,10 @@ def test_invalid_configuration(server: JsonValue) -> None:
         make_host({'servers': {'test': server}})
 
 
-def test_invalid_name() -> None:
+@pytest.mark.parametrize('name', ['bad-name', 'a_b', '0server'])
+def test_invalid_name(name: str) -> None:
     with pytest.raises(ValidationError):
-        make_host({'servers': {'bad-name': {'transport': 'stdio', 'command': 'python'}}})
+        make_host({'servers': {name: {'transport': 'stdio', 'command': 'python'}}})
 
 
 async def test_loader_persistence_disable_and_project_trust(tmp_path: Path) -> None:

@@ -34,7 +34,8 @@ as the JSON argument instead. Replace the example endpoint with your server.
 Stdio settings also accept `cwd` and `env`; HTTP settings accept `headers`.
 HTTP redirects are rejected; configure the final MCP endpoint URL.
 Each server accepts `enabled: false` to keep its configuration without using it.
-Names start with a letter and contain letters, digits, or underscores.
+Names start with a letter and contain only letters and digits. Underscores are
+reserved for the separator so server/tool name pairs cannot produce the same name.
 The model sees tools prefixed by server name, for example `local_search`.
 
 `/mcp` and `/mcp list` show names, transports, and enabled state, not connection

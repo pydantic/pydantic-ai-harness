@@ -42,7 +42,7 @@ class MCPSettings(BaseModel):
 
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
     servers: dict[
-        Annotated[str, Field(pattern=r'^[A-Za-z][A-Za-z0-9_]*$')],
+        Annotated[str, Field(pattern=r'^[A-Za-z][A-Za-z0-9]*$')],
         Annotated[StdioServer | HTTPServer, Field(discriminator='transport')],
     ] = Field(default_factory=dict)
 
