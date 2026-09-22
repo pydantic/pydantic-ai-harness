@@ -160,6 +160,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 | [Modal Workspace](pydantic_ai_harness/modal_workspace/) | Harness | Modal-backed workspace operations for agent runs |
 | [E2B Workspace](pydantic_ai_harness/e2b_workspace/) | Harness | E2B-backed workspace operations for agent runs |
 | [Sprite Workspace](pydantic_ai_harness/sprites/) | Harness | Fly.io Sprites-backed workspace operations for agent runs |
+| [S3 Filesystem](pydantic_ai_harness/s3_filesystem/) | Harness | Direct S3 file operations and command-visible mounting through s3fs-fuse |
 
 ### Tools & native abilities
 

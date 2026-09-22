@@ -117,6 +117,9 @@ daytona = [
 sprites = [
     "sprites-py>=0.7.0,<0.8",
 ]
+s3 = [
+    "boto3>=1.35.0",
+]
 
 [project.urls]
 Homepage = 'https://github.com/pydantic/pydantic-ai-harness'
@@ -152,7 +155,7 @@ lint = [
 
 [tool.uv.sources]
 # Draft stack dependency on pydantic/pydantic-ai#6492. Before merge, replace this pin with the released version containing workspace support.
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "196090e0b8a6ade1c1a090caf89a498fb008d1ae" }
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "b19e31ef555c3f9443b8d641c12352856a9dc553" }
 
 [tool.hatch.version]
 source = 'uv-dynamic-versioning'

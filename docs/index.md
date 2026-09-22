@@ -159,6 +159,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 | [Modal Workspace](modal-workspace.md) | Harness | Modal-backed workspace operations for agent runs |
 | [E2B Workspace](e2b-workspace.md) | Harness | E2B-backed workspace operations for agent runs |
 | [Sprite Workspace](sprite-workspace.md) | Harness | Fly.io Sprites-backed workspace operations for agent runs |
+| [S3 Filesystem](s3-filesystem.md) | Harness | Direct S3 file operations and command-visible mounting through s3fs-fuse |
 
 ### Tools & native abilities
 
