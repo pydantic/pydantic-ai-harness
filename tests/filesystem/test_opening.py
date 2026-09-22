@@ -77,7 +77,7 @@ class StreamFileSystem(FileSystem[None]):
 
 
 def reject_descriptor(*args: object, **kwargs: object) -> int:
-    raise AssertionError('Custom streams must not require OS descriptors')
+    raise AssertionError('Custom streams must not require OS descriptors')  # pragma: no cover
 
 
 class TestFileSystemToolsetOpening:
@@ -118,6 +118,8 @@ class TestFileSystemToolsetOpening:
         assert (tmp_path / 'file.txt').read_text() == 'second'
         assert toolset.opens == [(True, True), (False, True), (True, True)]
         assert all(source.closed for source in toolset.streams)
+        for source in toolset.streams:
+            source.close()
 
     async def test_missing_edit_does_not_create(self, tmp_path: Path) -> None:
         toolset = StreamToolset(tmp_path)
