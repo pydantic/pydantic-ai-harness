@@ -15,7 +15,8 @@ or constructor settings first; see [optional harness capabilities](PLUGINS.md#op
 The built-in `mcp` plugin includes the MCP client and `/mcp` command. Configure
 trusted stdio or Streamable HTTP servers through plugin settings; no server is
 connected by default. `/mcp` lists configuration, and `/mcp tools NAME` connects
-briefly to discover tools. During runs, core manages connections and prefixes
+briefly to discover tools. HTTP redirects are rejected; use the final endpoint URL.
+During runs, core manages connections and prefixes
 tool names with the configured server name. Local server programs still need to
 be installed separately. Settings are plain JSON, so avoid storing secrets there.
 See [Connect MCP servers](PLUGINS.md#connect-mcp-servers) for configuration and

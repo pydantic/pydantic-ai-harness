@@ -2,6 +2,7 @@
 
 from typing import Annotated, Literal
 
+import httpx
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from pydantic_ai.capabilities import Toolset
@@ -46,6 +47,17 @@ class MCPSettings(BaseModel):
     ] = Field(default_factory=dict)
 
 
+def http_client(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """Do not let a configured endpoint redirect MCP requests to another server."""
+    return httpx.AsyncClient(
+        headers=headers, timeout=timeout or httpx.Timeout(30, read=300), auth=auth, follow_redirects=False
+    )
+
+
 def activate(host: PluginHost[None]) -> None:
     """Register configured servers without connecting until a run or explicit discovery."""
     settings = host.settings(MCPSettings)
@@ -58,7 +70,9 @@ def activate(host: PluginHost[None]) -> None:
                 command=config.command, args=config.args, env=config.env, cwd=config.cwd, keep_alive=False
             )
         else:
-            transport = StreamableHttpTransport(url=str(config.url), headers=config.headers)
+            transport = StreamableHttpTransport(
+                url=str(config.url), headers=config.headers, httpx_client_factory=http_client
+            )
         server: MCPToolset[None] = MCPToolset(transport, id=f'mcp_{name}')
         servers[name] = server
         host.add(Toolset(server.prefixed(name)))

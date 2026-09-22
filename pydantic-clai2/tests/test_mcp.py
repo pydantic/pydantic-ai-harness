@@ -5,6 +5,7 @@ import os
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 from pydantic import JsonValue, ValidationError
 from pydantic_ai import Agent
@@ -14,7 +15,7 @@ from rich.console import Console
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
-from pydantic_clai2.mcp import activate
+from pydantic_clai2.mcp import activate, http_client
 from pydantic_clai2.plugin_loader import PluginLoader
 from pydantic_clai2.plugins import PluginHost, SessionStart
 from pydantic_clai2.settings_store import SettingsStore
@@ -29,6 +30,25 @@ def make_host(settings: dict[str, JsonValue]) -> PluginHost[None]:
     host: PluginHost[None] = PluginHost(name='mcp', console=Console(file=io.StringIO()), settings=settings)
     activate(host)
     return host
+
+
+async def test_http_client_rejects_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+
+    async def respond(transport: httpx.AsyncHTTPTransport, request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(307, headers={'location': 'http://127.0.0.1/private'}, request=request)
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', respond)
+    async with http_client(headers={'X-Test': 'present'}) as client:
+        response = await client.post('https://example.com/mcp')
+        assert response.status_code == 307
+        assert len(requests) == 1
+        assert requests[0].headers['X-Test'] == 'present'
+        assert client.timeout.read == 300
+    async with http_client(timeout=httpx.Timeout(5), auth=httpx.BasicAuth('user', 'password')) as client:
+        assert client.timeout.read == 5
+        assert isinstance(client.auth, httpx.BasicAuth)
 
 
 async def test_empty_builtin() -> None:

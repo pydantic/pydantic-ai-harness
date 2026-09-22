@@ -32,6 +32,7 @@ Configure a local server using an executable and an argument list, not a shell c
 For Streamable HTTP, use `{"servers":{"remote":{"transport":"http","url":"https://example.com/mcp"}}}`
 as the JSON argument instead. Replace the example endpoint with your server.
 Stdio settings also accept `cwd` and `env`; HTTP settings accept `headers`.
+HTTP redirects are rejected; configure the final MCP endpoint URL.
 Each server accepts `enabled: false` to keep its configuration without using it.
 Names start with a letter and contain letters, digits, or underscores.
 The model sees tools prefixed by server name, for example `local_search`.
