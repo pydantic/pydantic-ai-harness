@@ -33,7 +33,7 @@ Durable execution integrations can record nested calls for deterministic replay.
 Code mode requires the Monty sandbox, available via the `codemode` extra (the `code-mode` extra is an equivalent alias):
 
 ```bash
-uv add "pydantic-ai-harness[codemode]"
+pip/uv-add "pydantic-ai-harness[codemode]"
 ```
 
 ## Usage
@@ -183,7 +183,7 @@ REPL: a worker crash, a type error, a host-side failure, and a syntax error befo
 Each of those renews the allowance without the model asking for a restart. An ordinary exception
 inside a snippet is not one of them.
 
-Once a session's allowance is spent, every later `run_code` call fails on arrival, including
+Once a session's duration allowance is spent, every later `run_code` call fails on arrival, including
 snippets that would cost almost nothing, because they reuse the same session. Rewriting the code
 does not help. `restart: true` is what recovers it, at the cost of the REPL state that session was
 holding, so any variables, imports, and definitions have to be recreated. `run_code` says as much
@@ -191,6 +191,14 @@ in the retry it returns, and that retry also reports the nested calls the snippe
 restarting does not throw away the only record of them. The behaviour is worth knowing when
 choosing `max_duration_secs`: set it low and a long agent run will spend it on ordinary work and
 pay a restart to continue.
+
+Monty also limits cumulative suspensions with `max_suspensions` (default 1,000 per session).
+External calls, OS callbacks, name lookups and future resolutions each consume this budget, so
+it is not a tool-call count. Consecutive snippets share it. After exhaustion, further host
+interactions fail, although pure Python using existing state may still work. `run_code` includes
+the started-call summary and explicit restart guidance: inspect partial results before continuing,
+since `restart: true` discards REPL state and replaying completed calls repeats their side effects.
+There is no automatic restart or replay for exhaustion.
 
 Nested tool calls are bounded separately by `max_tool_calls`, which defaults to 100 per `run_code`
 call. The budget is reserved before each call is scheduled, so a snippet cannot dispatch more work
@@ -206,25 +214,182 @@ model some calls are missing from what it can see. The list is context for the m
 nothing stops it from calling those tools again, so treat it as informing the next attempt rather
 than preventing a repeat.
 
-Override them with `resource_limits={'max_duration_secs': 10, 'max_memory': 134_217_728}` and
+Override them with `resource_limits={'max_duration_secs': 10, 'max_memory': 134_217_728, 'max_suspensions': 10_000}` and
 `max_tool_calls=25`. Pass `resource_limits='unlimited'` only when another execution boundary
-supplies equivalent limits.
+supplies equivalent limits. It removes the time and memory caps, but leaves Monty's default
+suspension budget in place; suspensions cannot be unlimited.
 
 When `CodeMode` runs inside a Temporal workflow, it disables `max_duration_secs`, including an
 explicit override. `run_code` is replayed in workflow code, so measuring elapsed time there could
-make replay choose a different path from the recorded workflow. The memory cap still applies. Put
+make replay choose a different path from the recorded workflow. The memory and suspension caps still apply. Put
 time-bounded work behind a Temporal activity instead.
 
 ## REPL state
 
 State persists between `run_code` calls within the same agent run -- variables, imports, and function definitions carry over. Pass `restart: true` in the tool call to reset state. If a worker crash or host-side execution failure invalidates the session, `run_code` returns a model retry that reports the reset; the next snippet must recreate any required state.
 
+## Eager execution
+
+Normally, `CodeMode` waits for the model to finish writing a `run_code` call before it
+runs any code. Set `eager=True` to start sooner:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import CodeMode
+
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    capabilities=[CodeMode(eager=True)],
+)
+```
+
+For example, suppose the model produces this code one line at a time:
+
+```python
+first = await fetch_item(item_id=1)
+second = await fetch_item(item_id=2)
+[first, second]
+```
+
+With eager mode, the first call to `fetch_item` can begin as soon as the first line is
+complete. `CodeMode` continues receiving the remaining lines at the same time. Without
+eager mode, neither call begins until the model has produced the whole snippet.
+
+The code still counts as one `run_code` call. It uses one REPL session, one tool-call limit,
+and one combined result. Hooks on `fetch_item` and other tools called by the code still run.
+Hooks around `run_code` itself run only after the model has finished writing the call, so
+they cannot approve or change lines that eager mode has already run.
+
+Configured Monty resource limits still apply. Eager fragments and the remaining code share
+the same session duration and memory allowances.
+
+Keep these limitations in mind:
+
+- Eager mode cannot undo side effects from code that has already run.
+- If the model later requests `restart: true`, some work may run again.
+- If the model changes an earlier line while streaming, `CodeMode` resets the REPL and asks
+  the model to send the code again.
+- Eager mode trusts that the provider preserves the streamed `run_code` part and its tool
+  name. If a provider removes or renames the part, the work that already ran cannot be
+  undone.
+- Eager execution is used only when `run_code` is the first tool call in a model response.
+  Later tool calls wait for normal dispatch so they run in the order the model requested.
+- Eager mode is disabled when using durable execution such as Temporal or DBOS.
+- Eager mode needs asyncio, like the rest of the sandbox executor.
+- If a statement is interrupted before it finishes, for example because the call failed
+  validation, the session restarts and the next snippet must recreate its state.
+- Nested tools called from eager statements must cooperate with asyncio cancellation. When
+  a run ends or a streamed call is invalidated, `CodeMode` cancels the in-flight work and
+  waits a bounded time (currently 5 seconds) for it to release. Work that does not release
+  in time is abandoned; it cannot start further tool calls.
+- Tools called from statements that ran early are traced before the `run_code` span opens.
+
+## Speculative execution
+
+`speculate` starts side-effect-free tool calls while the model is still writing the
+`run_code` call. As the `code` argument streams in, `CodeMode` looks for calls to the named
+tools whose arguments are all keyword literals. Each one starts once the line that completes
+it has streamed, even if the statement around it (an `if` arm, a `with` body) is not finished
+yet. When the completed snippet runs and reaches the same call, it takes the result that is
+already in flight instead of starting the tool cold. This overlaps tool latency with
+model generation (speculative programmatic tool calling,
+<https://alexzhang13.github.io/blog/2026/spec-ptc/>).
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness import CodeMode
+
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    capabilities=[CodeMode(speculate=['search', 'fetch'])],
+)
+```
+
+Name only tools that are safe to run early: a speculated call can run for a branch the
+snippet never takes, so it must be harmless to repeat or discard. Calls the snippet never
+claims are cancelled when the snippet finishes successfully. A snippet that fails before it
+runs (a syntax or type error) keeps its launches so the retry can claim them; whatever the
+retry leaves unclaimed is cancelled when the following model step starts.
+
+Instead of naming tools, pass `speculate='declared'` to trust what the tools say about
+themselves: tools marked `Tool(..., metadata={'read_only': True})`, and MCP tools whose
+server publishes the `readOnlyHint` annotation. Idempotence is not enough, an idempotent
+delete still deletes, so `idempotent` declarations do not count. A declaration is the tool
+author's claim, not a proof, so `'declared'` extends the same trust to authors that an
+explicit list places in you.
+
+```python
+from pydantic_ai import Agent, Tool
+from pydantic_ai_harness import CodeMode
+
+
+def search(query: str) -> str:
+    """Look something up."""
+    return f'results for {query}'
+
+
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    capabilities=[CodeMode(speculate='declared')],
+    tools=[Tool(search, metadata={'read_only': True})],
+)
+```
+
+Speculation also runs when the snippet starts executing: the complete code is scanned and
+every eligible literal call that is not already in flight starts at once, so a sequence of
+`await`s collects from calls that are all running instead of waiting for each in turn. A call
+inside an `if`/`else` starts for both arms; the taken arm claims its result and the other
+launch is discarded. Discarded launches are the cost of hiding branch latency, which is why
+eligibility demands side-effect freedom.
+
+Keep these limitations in mind:
+
+- Only calls with literal keyword arguments can start early. A call whose argument comes
+  from an earlier statement waits for that statement.
+- Calls are found in the streamed text, so a call spelled inside a string literal or a
+  comment can start too. It is discarded when the snippet finishes.
+- Lookahead stops at a call to a tool outside the speculation allowlist, so later reads
+  cannot overtake that tool's writes. To overlap a blocking read with later calls, that read
+  must also be eligible. Streamed parts following another model tool call wait for dispatch.
+- `sequential` tools never speculate, and nothing speculates when the run's parallel
+  execution mode is `sequential`.
+- Hooks on a speculated tool run when it starts, not when the snippet claims it. Hooks,
+  approval, and guardrails on `run_code` itself run only after the model has finished writing
+  the call, so they cannot stop a call that has already started early; this is the same
+  contract as eager mode.
+- At most `max_tool_calls` calls (and never more than 32) start early per `run_code` call;
+  later ones run cold. This speculative allowance is separate from the snippet's dispatch
+  budget: unclaimed launches are extra work, not a reservation against `max_tool_calls`.
+- Speculated tools must cooperate with asyncio cancellation. Cleanup requests cancellation
+  and waits up to five seconds per streamed call, then stops waiting. A tool that suppresses
+  cancellation can outlive the run; this timeout does not forcibly stop its work.
+- Enabling `speculate` puts runs in streaming mode, and the option is disabled under durable
+  execution such as Temporal or DBOS.
+
+`speculate` composes with `eager=True`: eager execution runs the statements the model has
+finished writing, and speculation starts the calls it has not reached yet (branch arms, calls
+after a slow statement). Statements that eager mode runs claim those launches too.
+
+Aggregate counters are available on `CodeMode.speculation_stats` (`launched`, `adopted`,
+`evicted`). The lifecycle is also emitted as
+[capability events](https://pydantic.dev/docs/ai/core-concepts/hooks/) in the `code_mode`
+namespace, so UIs and other capabilities can follow it live from the run's event stream:
+`SpeculativeCodeUpdateEvent` (the decoded snippet so far, with its closed-statement
+boundary), `SpeculativeCallLaunchedEvent` (with the launching statement's line span and a
+`phase` of `streaming` or `execution`), `SpeculativeCallSettledEvent` (only while the stream
+is still flowing; a call that finishes later reports its state on its claimed or evicted
+event instead), and, once the snippet runs, `SpeculativeCallClaimedEvent`,
+`SpeculativeCallMissedEvent`, and `SpeculativeCallEvictedEvent`. When speculation did work for a `run_code` call, the return's
+history-only metadata gains a `speculation` entry (`hits`, `hidden_ms`, `misses`, `wasted`)
+alongside the nested `tool_calls`/`tool_returns` records; the content the model sees is
+unchanged.
+
 ## Temporal durability
 
 Install both integrations:
 
 ```bash
-uv add "pydantic-ai-harness[codemode,temporal]"
+pip/uv-add "pydantic-ai-harness[codemode,temporal]"
 ```
 
 Construct the named agent and its stable-ID toolsets outside the workflow, then attach
@@ -264,6 +429,11 @@ computation inside `run_code`; move time-bounded computation behind an activity.
 ## Observability
 
 Nested tool calls inside `run_code` produce their own spans when instrumented with [Logfire](https://pydantic.dev/logfire) or any OpenTelemetry backend -- the easiest way to understand what code mode actually did, since each `run_code` span fans out into the tool calls the model issued from inside the sandbox. See the [Pydantic AI Logfire docs](/ai/integrations/logfire/) for setup.
+
+Suspension-limit retries use the existing `run_code` error span and nested tool spans, rather
+than a separate capability span. The retry includes bounded started-call context and recovery
+guidance. Monty has no typed exhaustion marker, so a tool error with identical wording receives
+conditional guidance rather than a definitive exhaustion event.
 
 The `run_code` tool return also carries metadata with every nested call, keyed by call id:
 
@@ -382,6 +552,7 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 - No `import *`.
 - Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv` / `os.environ` need an `os_access` handler.
 - Tools requiring approval or with deferred (`CallDeferred`) execution are sandboxed like any other tool; without a `HandleDeferredToolCalls` (or equivalent) capability on the agent to resolve them inline, calling one from `run_code` raises an error that surfaces to the model as a retry.
+- Tool results reach the sandbox in the JSON shape their generated stub declares, since the stub is derived from the tool's JSON schema. `Decimal`, `UUID` and `datetime` arrive as strings, and mapping keys are stringified, so a `dict[int, str]` of `{1: 'a'}` arrives as `{'1': 'a'}`. `bytes` and `bytearray` are the exception: Monty carries binary natively, so they cross unchanged even though the stub declares `str` for them.
 
 ## Agent spec (YAML/JSON)
 

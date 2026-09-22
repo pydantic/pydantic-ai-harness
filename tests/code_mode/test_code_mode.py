@@ -10,12 +10,19 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import warnings as _warnings
 from collections.abc import AsyncIterator
+from dataclasses import replace as dc_replace
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 from unittest.mock import MagicMock
+from uuid import UUID
 
+import anyio
 import pytest
+from pydantic import BaseModel
 from pydantic_ai import (
     AbstractToolset,
     Agent,
@@ -23,25 +30,49 @@ from pydantic_ai import (
     Tool,
     ToolDefinition,
 )
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, Capability, Instrumentation, ToolSearch
+from pydantic_ai.exceptions import ApprovalRequired as _ApprovalRequired
 from pydantic_ai.exceptions import ModelRetry, UserError
-from pydantic_ai.messages import ToolCallPart
+from pydantic_ai.messages import (
+    BinaryContent,
+    InstructionPart,
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    NativeToolReturnPart,
+    NativeToolSearchReturnPart,
+    SystemPromptPart,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    ToolSearchReturnPart,
+    UserPromptPart,
+)
+from pydantic_ai.messages import ToolReturn as ToolReturnMsg
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tool_manager import ParallelExecutionMode, ToolManager
+from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved, ToolDenied
+from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME, ToolSearchToolset, parse_discovered_tools
 from pydantic_ai.toolsets.abstract import ToolsetTool
+from pydantic_ai.toolsets.combined import CombinedToolset
 from pydantic_ai.toolsets.function import FunctionToolset
-from pydantic_ai.usage import RunUsage
+from pydantic_ai.usage import RequestUsage, RunUsage
 from pydantic_core import SchemaValidator, core_schema
 from pydantic_monty import NOT_HANDLED, Monty, MountDir, OSAccess, OsFunction
 from typing_extensions import Never, TypedDict
 
 from pydantic_ai_harness import CodeMode
 from pydantic_ai_harness.code_mode import CodeModeResourceLimits, CodeModeToolset
+from pydantic_ai_harness.code_mode._capability import (
+    _extract_discovered_names,  # pyright: ignore[reportPrivateUsage]
+)
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
-    _global_mode_is_sequential,
     _sanitize_tool_name,
+    global_mode_is_sequential,
 )
 
 _entered_toolsets: list[CodeModeToolset[Never]] = []
@@ -96,7 +127,6 @@ async def build_ctx(
     Use this for tests that call `call_tool` -- `CodeModeToolset` requires
     `ctx.tool_manager` to be set.
     """
-    from pydantic_ai.tool_manager import ToolManager
 
     await toolset.__aenter__()
     _entered_toolsets.append(toolset)
@@ -140,6 +170,48 @@ class Person(TypedDict):
 def lookup_person(person: Person, count: int = 1) -> str:
     """Look up details for a person."""
     return f'{count}x {person["name"]} @ {person["home"]["street"]}'
+
+
+class Receipt(BaseModel):
+    """Fields whose Python type is not a JSON scalar."""
+
+    amount: Decimal
+    ident: UUID
+    when: datetime
+
+
+def get_receipt() -> Receipt:
+    """Fetch a receipt."""
+    return Receipt(
+        amount=Decimal('1.50'),
+        ident=UUID('00000000-0000-0000-0000-000000000001'),
+        when=datetime(2026, 1, 1),
+    )
+
+
+def get_prices() -> dict[Decimal, str]:
+    """Fetch prices by amount."""
+    return {Decimal('1.50'): 'USD'}
+
+
+def get_labels() -> dict[int, str]:
+    """Fetch labels by id."""
+    return {1: 'one'}
+
+
+def get_blobs() -> set[bytes]:
+    """Fetch binary blobs."""
+    return {b'\xff\xfe'}
+
+
+def get_sentinel() -> Any:
+    """Fetch a sentinel."""
+    return ...
+
+
+def get_colliding_labels() -> Any:
+    """Fetch labels whose keys collide once stringified."""
+    return {1: 'from-int', '1': 'from-str'}
 
 
 # Hand-built `ToolDefinition` objects + a tiny stub toolset are used by
@@ -346,6 +418,94 @@ class TestCodeMode:
             tools['run_code'],
         )
         assert result.return_value == {'output': 'Hello, Alice!\n'}
+
+    async def test_tool_result_crosses_in_the_shape_the_stub_declares(self) -> None:
+        """`Decimal`, `UUID` and `datetime` reach the sandbox as their JSON form.
+
+        `_build_type_check_stubs` derives the stub from the tool's JSON schema, so
+        those fields are declared `str`. Dumping in Python mode disagreed with that:
+        Monty rejects `Decimal` and `UUID` outright, and a `datetime` arrived where
+        the stub promised a `str`, so the type check passed and the snippet failed
+        at runtime.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_receipt))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "r = await get_receipt()\n[r['amount'], r['ident'], r['when']]"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == [
+            '1.50',
+            '00000000-0000-0000-0000-000000000001',
+            '2026-01-01T00:00:00',
+        ]
+
+        # The un-dumped result is still what the message history records.
+        assert result.metadata['tool_returns']['pyd_ai_code_mode__1'].content == get_receipt()
+
+    async def test_mapping_keys_cross_as_the_strings_the_stub_declares(self) -> None:
+        """A `Decimal` key reaches the sandbox as `'1.50'`, not as a `Decimal`.
+
+        JSON object keys are always strings, so the stub declares `dict[str, str]`
+        whatever the Python key type is. Leaving the key alone hit the same two
+        failures as the values: Monty rejects a `Decimal` key outright.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_prices))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "p = await get_prices()\np['1.50']"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == 'USD'
+
+    async def test_int_mapping_keys_cross_as_the_strings_the_stub_declares(self) -> None:
+        """An `int` key reaches the sandbox as `'1'`, so indexing with the declared `str` works.
+
+        This is the silent half: the stub declares `dict[str, str]`, so a snippet
+        indexing with a `str` type-checked and then raised `KeyError` against the
+        `int` key that actually arrived.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_labels))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "labels = await get_labels()\n[labels['1'], list(labels.keys())]"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == ['one', ['1']]
+
+    async def test_binary_survives_inside_a_set(self) -> None:
+        """A `set` recurses like the other array containers, so its binary leaves stay `bytes`.
+
+        Sending the set to `to_jsonable_python` whole would utf-8 decode the payload,
+        which arbitrary bytes fail.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_blobs))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'blobs = await get_blobs()\nblobs'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == [b'\xff\xfe']
+
+    async def test_ellipsis_crosses_as_itself(self) -> None:
+        """Monty holds `Ellipsis`, and JSON has no form for it, so it is left alone."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_sentinel))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'x = await get_sentinel()\nx is ...'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value is True
+
+    async def test_mapping_keys_that_collide_once_stringified_are_rejected(self) -> None:
+        """`1` and `'1'` both render as `'1'`, which would drop one value silently."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_colliding_labels))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'await get_colliding_labels()'
+        with pytest.raises(ModelRetry, match='renders as the JSON key'):
+            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
 
     async def test_run_code_can_chain_multiple_tool_calls_in_one_snippet(self) -> None:
         """A realistic LLM snippet that calls two tools in one `run_code` invocation."""
@@ -625,9 +785,78 @@ class TestCodeMode:
 
         assert executed == [0, 1, 2]
         message = exc_info.value.message
-        assert '3 nested tool calls started before the limit was reached' in message
+        assert '3 nested tool calls started before execution stopped' in message
         for value in (0, 1, 2):
             assert f"record({{'value': {value}}}) returned {value}" in message
+
+    async def test_suspensions_are_cumulative_and_need_explicit_restart(self) -> None:
+        executed: list[int] = []
+
+        def record(value: int) -> int:
+            executed.append(value)
+            return value
+
+        wrapper = CodeMode[object](resource_limits={'max_suspensions': 4}).get_wrapper_toolset(
+            _build_function_toolset(record)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        first = await wrapper.call_tool(
+            'run_code', {'code': 'saved = await record(value=0)\nsaved'}, ctx, tools['run_code']
+        )
+        assert first.return_value == 0
+        with pytest.raises(ModelRetry) as exhausted:
+            await wrapper.call_tool(
+                'run_code', {'code': 'for i in range(1, 4):\n    await record(value=i)'}, ctx, tools['run_code']
+            )
+        assert executed == [0, 1]
+        message = exhausted.value.message
+        assert 'suspension limit 4 exceeded' in message
+        assert "record({'value': 1}) returned 1" in message
+        assert '`max_suspensions`' in message
+        assert '`restart: true`' in message
+        assert 'discards all REPL variables, imports and definitions' in message
+        assert 'do not replay completed side effects' in message
+
+        with pytest.raises(ModelRetry, match='suspension limit 4 exceeded'):
+            await wrapper.call_tool('run_code', {'code': 'await record(value=2)'}, ctx, tools['run_code'])
+        assert executed == [0, 1]
+        kept = await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+        assert kept.return_value == 0
+
+        fresh = await wrapper.call_tool(
+            'run_code', {'code': 'await record(value=99)', 'restart': True}, ctx, tools['run_code']
+        )
+        assert fresh.return_value == 99
+        assert executed == [0, 1, 99]
+        with pytest.raises(ModelRetry, match="name 'saved' is not defined"):
+            await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+
+    async def test_suspension_wording_in_tool_error_does_not_require_restart(self) -> None:
+        def boom() -> None:
+            raise RuntimeError('suspension limit 1000 exceeded')
+
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(boom))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        await wrapper.call_tool('run_code', {'code': 'saved = 42'}, ctx, tools['run_code'])
+        with pytest.raises(ModelRetry) as error:
+            await wrapper.call_tool('run_code', {'code': 'await boom()'}, ctx, tools['run_code'])
+        assert "If this reports the sandbox session's `max_suspensions` limit" in error.value.message
+        assert 'before the limit was reached' not in error.value.message
+        result = await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+        assert result.return_value == 42
+
+    @pytest.mark.parametrize('limit', [0, -1])
+    async def test_suspension_budget_must_be_positive(self, limit: int) -> None:
+        wrapper = CodeModeToolset[object](
+            wrapped=_build_function_toolset(add), resource_limits={'max_suspensions': limit}
+        )
+        with pytest.raises(UserError, match='`max_suspensions` must be at least 1'):
+            await wrapper.__aenter__()
 
     async def test_duration_exhaustion_points_at_restart(self) -> None:
         """A spent duration allowance tells the model to restart, not to rewrite the snippet.
@@ -753,6 +982,7 @@ class TestCodeMode:
                 'y = 0\nfor i in range(100_000_000):\n    y += i\ny',
             ),
             'max_memory': ({'max_memory': 8 * 1024 * 1024}, 'x = [0] * 50_000_000\nlen(x)'),
+            'max_suspensions': ({'max_suspensions': 2}, 'await add(a=3, b=4)'),
         }
         assert set(exhaust_by_limit) == set(CodeModeResourceLimits.__annotations__), (
             'a new resource limit needs a case here, so that exhausting it is shown to still '
@@ -780,7 +1010,6 @@ class TestCodeMode:
         `BinaryContent` is the case that motivates naming a value by type: it reaches the summary
         as the raw object, so rendering it would put its whole payload in the retry.
         """
-        from pydantic_ai.messages import BinaryContent
 
         def shapes(tag: str, rows: list[int], opts: dict[str, int]) -> dict[str, Any]:
             """Return a mix of payload shapes."""
@@ -953,9 +1182,6 @@ class TestCodeMode:
         It has a recorded return, so lumping it in with the successes would tell the model not to
         repeat a call whose tool never executed.
         """
-        from pydantic_ai.capabilities import HandleDeferredToolCalls
-        from pydantic_ai.exceptions import ApprovalRequired as _ApprovalRequired
-        from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolDenied
 
         def needs_approval(value: int) -> str:
             """A tool that requires approval."""
@@ -965,6 +1191,8 @@ class TestCodeMode:
             return DeferredToolResults(
                 approvals={call.tool_call_id: ToolDenied(message='nope') for call in requests.approvals}
             )
+
+        from pydantic_ai.capabilities import HandleDeferredToolCalls  # noqa: PLC0415  # optional-version probe
 
         wrapper = CodeMode[object](max_tool_calls=1).get_wrapper_toolset(_build_function_toolset(needs_approval))
         assert isinstance(wrapper, CodeModeToolset)
@@ -1019,7 +1247,7 @@ class TestCodeMode:
         assert 'more not shown' in message
         # The count is the part that survives truncation, so it has to stay exact: it is what
         # tells the model the visible list is incomplete.
-        assert '30 nested tool calls started before the limit was reached' in message
+        assert '30 nested tool calls started before execution stopped' in message
         assert 'Account for all 30 before retrying' in message
 
     async def test_exhausted_budget_on_sequential_tool_preserves_completed_calls(self) -> None:
@@ -1247,15 +1475,6 @@ class TestCodeMode:
 
     async def test_agent_run_preserves_repl_between_code_calls(self) -> None:
         """Code Mode keeps one REPL across model steps in an agent run."""
-        from pydantic_ai.messages import (
-            ModelMessage,
-            ModelRequest,
-            ModelResponse,
-            TextPart,
-            ToolCallPart,
-            ToolReturnPart,
-        )
-        from pydantic_ai.models.function import AgentInfo, FunctionModel
 
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             response_count = sum(isinstance(message, ModelResponse) for message in messages)
@@ -1384,7 +1603,6 @@ class TestCodeMode:
 
     async def test_native_tool_named_run_code_raises_user_error(self) -> None:
         """A native tool named `run_code` raises UserError (reserved name)."""
-        from pydantic_ai.exceptions import UserError
 
         def run_code() -> str:
             """A tool that collides with the reserved name."""
@@ -1399,7 +1617,6 @@ class TestCodeMode:
 
     async def test_sandboxed_tool_named_run_code_raises_user_error(self) -> None:
         """A sandboxed tool named `run_code` raises UserError (conflicts with meta-tool)."""
-        from pydantic_ai.exceptions import UserError
 
         def run_code() -> str:
             """A tool that collides with the meta-tool name."""
@@ -1730,7 +1947,6 @@ class TestCodeMode:
         assert 'async def search' in description
 
         # Second call must not warn again.
-        import warnings as _warnings
 
         with _warnings.catch_warnings():
             _warnings.simplefilter('error')
@@ -1738,7 +1954,6 @@ class TestCodeMode:
 
     async def test_tool_with_return_schema_does_not_warn(self) -> None:
         """A sandboxed tool WITH a return_schema does not trigger the warning."""
-        import warnings as _warnings
 
         td = ToolDefinition(
             name='get_user',
@@ -1763,15 +1978,6 @@ class TestCodeMode:
         sandbox dispatches to a wrapped tool, and the second model turn observes the
         tool's return value before producing the final text output.
         """
-        from pydantic_ai.messages import (
-            ModelMessage,
-            ModelRequest,
-            ModelResponse,
-            TextPart,
-            ToolCallPart,
-            ToolReturnPart,
-        )
-        from pydantic_ai.models.function import AgentInfo, FunctionModel
 
         observed_tool_calls: list[str] = []
         observed_tool_returns: list[Any] = []
@@ -1835,7 +2041,6 @@ class TestCodeMode:
         `test_tool_search_toolset_deferred_tool_not_in_run_code`; this exercises the
         end-to-end path through `Agent`.)
         """
-        from pydantic_ai.capabilities import Capability
 
         capability = Capability[object](
             id='demo',
@@ -1880,9 +2085,6 @@ class TestCodeMode:
         tool keeps `defer_loading=True` across the reveal (it records what the capability asked
         for), so the fold-in has to key on the run's revealed-tool set instead.
         """
-        from pydantic_ai.capabilities import Capability
-        from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
-        from pydantic_ai.models.function import AgentInfo, FunctionModel
 
         capability = Capability[object](
             id='demo',
@@ -2079,7 +2281,6 @@ class TestCodeMode:
 
     async def test_tool_returning_tool_return_is_unwrapped(self) -> None:
         """A wrapped tool that returns a `ToolReturn` has its value unwrapped for the sandbox."""
-        from pydantic_ai.messages import ToolReturn as ToolReturnMsg
 
         def fancy() -> Any:
             """Return a ToolReturn with metadata."""
@@ -2101,7 +2302,6 @@ class TestCodeMode:
 
     async def test_approval_required_surfaces_as_model_retry(self) -> None:
         """Tools that raise ApprovalRequired inside the sandbox surface as ModelRetry."""
-        from pydantic_ai.exceptions import ApprovalRequired as _ApprovalRequired
 
         def needs_approval() -> str:
             """A tool that requires approval."""
@@ -2124,12 +2324,9 @@ class TestCodeMode:
         with the original denial message preserved in the trace.
         """
         try:
-            from pydantic_ai.capabilities import HandleDeferredToolCalls
+            from pydantic_ai.capabilities import HandleDeferredToolCalls  # noqa: PLC0415  # optional-version probe
         except ImportError:  # pragma: no cover -- only fires on floor-slim CI, which doesn't gate on coverage
             pytest.skip('Requires pydantic-ai-slim with `HandleDeferredToolCalls` (next release after 1.86.1)')
-
-        from pydantic_ai.exceptions import ApprovalRequired as _ApprovalRequired
-        from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolDenied
 
         def needs_approval() -> str:
             """A tool that requires approval."""
@@ -2156,12 +2353,9 @@ class TestCodeMode:
         deferral after approval is *not* re-resolved -- it bubbles up to the caller.
         """
         try:
-            from pydantic_ai.capabilities import HandleDeferredToolCalls
+            from pydantic_ai.capabilities import HandleDeferredToolCalls  # noqa: PLC0415  # optional-version probe
         except ImportError:  # pragma: no cover -- only fires on floor-slim CI, which doesn't gate on coverage
             pytest.skip('Requires pydantic-ai-slim with `HandleDeferredToolCalls` (next release after 1.86.1)')
-
-        from pydantic_ai.exceptions import ApprovalRequired as _ApprovalRequired
-        from pydantic_ai.tools import DeferredToolRequests, DeferredToolResults, ToolApproved
 
         def always_needs_approval(ctx: RunContext[object]) -> str:
             """Raises `ApprovalRequired` every time, even after being approved."""
@@ -2224,7 +2418,6 @@ class TestCodeMode:
     async def test_tool_returning_binary_image_is_returned_directly(self) -> None:
         """A tool that returns BinaryContent passes through the sandbox and is
         returned as native multimodal content (not wrapped in a dict)."""
-        from pydantic_ai.messages import BinaryContent
 
         image_bytes = b'\x89PNG\r\n\x1a\n fake image data'
 
@@ -2247,7 +2440,6 @@ class TestCodeMode:
     async def test_tool_returning_binary_image_with_print_uses_list_format(self) -> None:
         """When print output accompanies a multimodal return, the result is a list
         so _split_content can extract the image for native delivery."""
-        from pydantic_ai.messages import BinaryContent
 
         image_bytes = b'\x89PNG fake'
 
@@ -2276,7 +2468,6 @@ class TestCodeMode:
     async def test_tool_returning_list_with_binary_image_and_print(self) -> None:
         """A list result containing multimodal items with print output gets flattened
         so _split_content can find each multimodal item at the top level."""
-        from pydantic_ai.messages import BinaryContent
 
         image_bytes = b'\x89PNG list'
 
@@ -2306,8 +2497,6 @@ class TestCodeMode:
     async def test_tool_returning_tool_return_with_binary_content(self) -> None:
         """A tool that wraps a BinaryContent in a ToolReturn has the image properly unwrapped
         and returned as native multimodal content."""
-        from pydantic_ai.messages import BinaryContent
-        from pydantic_ai.messages import ToolReturn as ToolReturnMsg
 
         image_bytes = b'\x89PNG wrapped'
 
@@ -2337,15 +2526,6 @@ class TestCodeMode:
     @pytest.mark.skipif(not logfire_installed, reason='logfire not installed')
     async def test_sandboxed_tool_calls_produce_otel_spans(self, capfire: CaptureLogfire) -> None:
         """Sandboxed tool calls dispatched through ToolManager produce OTel execute_tool spans."""
-        from pydantic_ai.capabilities import Instrumentation
-        from pydantic_ai.messages import (
-            ModelMessage,
-            ModelResponse,
-            TextPart,
-            ToolCallPart,
-        )
-        from pydantic_ai.models.function import AgentInfo, FunctionModel
-        from pydantic_ai.models.instrumented import InstrumentationSettings
 
         call_count = 0
 
@@ -2542,6 +2722,102 @@ class TestCodeMode:
         with pytest.raises(ModelRetry, match='Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, tools['run_code'])
 
+    async def test_cancelled_scope_teardown_awaits_dispatched_work(self) -> None:
+        """The executor's cleanup `gather` is shielded from an already-cancelled anyio
+        scope, so still-pending dispatched work unwinds gracefully before `run_code`
+        returns (#559).
+
+        The sandbox defers `blocker()` and `cleanup_tool()`, then calls the sequential
+        `barrier()`. The barrier awaits `blocker` first, leaving `cleanup_tool`'s task
+        in `_pending`; cancelling the scope kills `blocker` at the barrier await, so
+        the executor's cleanup owns a still-running dispatched task while the enclosing
+        scope stays cancelled. Without the shield, that scope re-cancels the host every
+        event-loop cycle: either the cleanup `gather` is abandoned outright (the pending
+        task outlives `run_code`) or each re-cancel is forwarded through the `gather` to
+        the pending task, breaking every await of its cancellation handler. With the
+        shield the task sees exactly one cancellation, its handler's awaits survive, and
+        the runner stays blocked in the cleanup until the handler is released. Sequencing
+        is event-driven; the yield loop only gives an unshielded cleanup cycles to
+        misbehave.
+        """
+        blocker_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        cancel_seen = asyncio.Event()
+        release = asyncio.Event()
+        unwound = asyncio.Event()
+        extra_cancels = 0
+
+        async def blocker() -> str:
+            blocker_started.set()
+            await asyncio.Event().wait()
+            return 'unreachable'  # pragma: no cover
+
+        async def cleanup_tool() -> str:
+            nonlocal extra_cancels
+            cleanup_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_seen.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:  # pragma: no cover - regression path without the teardown shield
+                        extra_cancels += 1
+                unwound.set()
+                raise
+            return 'unreachable'  # pragma: no cover
+
+        def barrier() -> str:
+            return 'unreachable'  # pragma: no cover - cancelled at the barrier, never dispatched
+
+        class _SeqToolset(AbstractToolset[object]):
+            """Marks `barrier` as sequential; the other tools stay parallel."""
+
+            def __init__(self) -> None:
+                self._inner = _build_function_toolset(blocker, cleanup_tool, barrier)
+
+            @property
+            def id(self) -> str | None:
+                return None  # pragma: no cover
+
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
+                tools = await self._inner.get_tools(ctx)
+                return {
+                    n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) if n == 'barrier' else t
+                    for n, t in tools.items()
+                }
+
+            async def call_tool(
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
+            ) -> Any:
+                return await self._inner.call_tool(name, tool_args, ctx, tool)
+
+        wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        scope = anyio.CancelScope()
+
+        async def runner() -> None:
+            with scope:
+                code = 'a = blocker()\nb = cleanup_tool()\nbarrier()'
+                await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
+        task = asyncio.create_task(runner())
+        await blocker_started.wait()
+        await cleanup_started.wait()
+        scope.cancel()
+        await cancel_seen.wait()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done(), 'cleanup must wait for dispatched work to finish unwinding'
+        release.set()
+        await task
+        assert scope.cancelled_caught
+        assert unwound.is_set()
+        assert extra_cancels == 0, f'cancelled scope must not re-cancel dispatched work, got {extra_cancels} re-cancels'
+
     async def test_worker_crash_becomes_model_retry_and_resets_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A `MontyCrashedError` (worker death) becomes a retry with the session reset.
 
@@ -2573,7 +2849,6 @@ class TestCodeMode:
     async def test_sequential_tool_rendered_as_sync_and_resolved_inline(self) -> None:
         """A tool with `sequential=True` is rendered as `def` (sync) and
         resolved inline at FunctionSnapshot via `resume({'return_value': ...})`."""
-        from dataclasses import replace as dc_replace
 
         class _SeqToolset(AbstractToolset[object]):
             """Marks add as sequential; greet stays parallel."""
@@ -2634,7 +2909,6 @@ class TestCodeMode:
     async def test_sequential_tool_barrier_awaits_pending_parallel_tasks(self) -> None:
         """When a sequential tool is called while parallel tasks are pending,
         the pending tasks are awaited first (barrier) before dispatching."""
-        from dataclasses import replace as dc_replace
 
         class _SeqToolset(AbstractToolset[object]):
             def __init__(self) -> None:
@@ -2692,7 +2966,6 @@ class TestCodeMode:
 
     async def test_sequential_tool_error_surfaces_as_model_retry(self) -> None:
         """An error from a sequential tool (resolved inline) surfaces as ModelRetry."""
-        from dataclasses import replace as dc_replace
 
         class _SeqToolset(AbstractToolset[object]):
             def __init__(self) -> None:
@@ -2724,7 +2997,6 @@ class TestCodeMode:
     async def test_global_sequential_mode_forces_sequential_resolution(self) -> None:
         """When the parallel execution mode is `sequential`, tool calls inside the
         sandbox are resolved sequentially via FutureSnapshot. Signatures stay `async def`."""
-        from pydantic_ai.tool_manager import ToolManager
 
         wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
@@ -2750,9 +3022,6 @@ class TestCodeMode:
     async def test_global_sequential_overrides_per_tool_sequential(self) -> None:
         """When global sequential mode is active AND a tool has `sequential=True`,
         the tool is deferred (not resolved inline) and handled via FutureSnapshot."""
-        from dataclasses import replace as dc_replace
-
-        from pydantic_ai.tool_manager import ToolManager
 
         class _SeqToolset(AbstractToolset[object]):
             def __init__(self) -> None:
@@ -2813,8 +3082,6 @@ class TestToolSearchIntegration:
 
     async def test_search_tool_stays_native(self) -> None:
         """search_tools is kept as a native tool even with tools='all'."""
-        from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME
-        from pydantic_ai.toolsets.combined import CombinedToolset
 
         search_toolset = _StaticToolset([_search_tool_def()])
         func_toolset = _build_function_toolset(add)
@@ -2833,7 +3100,6 @@ class TestToolSearchIntegration:
 
     async def test_search_tools_description_appended(self) -> None:
         """search_tools description gets a modifier appended about run_code functions."""
-        from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME
 
         original_desc = 'There are additional tools. Search here.'
         toolset = _StaticToolset([_search_tool_def(description=original_desc)])
@@ -2877,7 +3143,6 @@ class TestToolSearchIntegration:
         pass-through so those flags reach `Model.prepare_request` unaltered. `search_tools`
         is native alongside `run_code`.
         """
-        from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME, ToolSearchToolset
 
         def later(x: int) -> str:
             """A deferred-loading tool."""
@@ -2901,8 +3166,6 @@ class TestToolSearchIntegration:
 
     async def test_tool_search_toolset_discovered_tool_in_run_code(self) -> None:
         """End-to-end: once `search_tools` has discovered the deferred tool, it folds into `run_code`."""
-        from pydantic_ai.messages import ModelMessage, ModelRequest, ToolSearchReturnPart
-        from pydantic_ai.toolsets._tool_search import ToolSearchToolset, parse_discovered_tools
 
         def later(x: int) -> str:
             """A deferred-loading tool."""
@@ -2944,7 +3207,6 @@ class TestToolSearchIntegration:
 
     def test_code_mode_ordering(self) -> None:
         """CodeMode declares ordering: outermost position, wraps ToolSearch."""
-        from pydantic_ai.capabilities._tool_search import ToolSearch
 
         ordering = CodeMode().get_ordering()
         assert ordering is not None
@@ -2983,8 +3245,6 @@ class TestDynamicCatalog:
         await toolset.get_tools(ctx)
         instructions = await toolset.get_instructions(ctx)
 
-        from pydantic_ai.messages import InstructionPart
-
         # No upstream instructions → the catalog is the only InstructionPart returned.
         assert isinstance(instructions, InstructionPart)
         assert 'async def add' in instructions.content
@@ -2992,7 +3252,6 @@ class TestDynamicCatalog:
         assert instructions.dynamic is True
 
     async def test_get_instructions_appends_to_upstream_string(self) -> None:
-        from pydantic_ai.messages import InstructionPart
 
         class _UpstreamToolset(FunctionToolset[object]):
             async def get_instructions(self, ctx: RunContext[object]) -> str:  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -3011,7 +3270,6 @@ class TestDynamicCatalog:
         assert 'async def add' in instructions[1].content
 
     async def test_get_instructions_appends_to_upstream_sequence(self) -> None:
-        from pydantic_ai.messages import InstructionPart
 
         class _UpstreamToolset(FunctionToolset[object]):
             async def get_instructions(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -3105,7 +3363,6 @@ class TestDynamicCatalog:
     # -- discovery announcement: local search path ------------------------
 
     async def test_announce_on_local_search_return(self) -> None:
-        from pydantic_ai.messages import ModelRequest, SystemPromptPart, ToolCallPart
 
         cap = CodeMode[object](dynamic_catalog=True)
         ctx = build_run_context(None)
@@ -3127,7 +3384,6 @@ class TestDynamicCatalog:
 
     async def test_no_announce_when_disabled(self) -> None:
         """With `dynamic_catalog=False`, the hooks are inert even on a real search return."""
-        from pydantic_ai.messages import ToolCallPart
 
         cap = CodeMode[object]()
         ctx = build_run_context(None)
@@ -3141,7 +3397,6 @@ class TestDynamicCatalog:
         assert ctx.pending_messages == []
 
     async def test_announce_skipped_when_no_discoveries(self) -> None:
-        from pydantic_ai.messages import ToolCallPart
 
         cap = CodeMode[object](dynamic_catalog=True)
         ctx = build_run_context(None)
@@ -3156,7 +3411,6 @@ class TestDynamicCatalog:
 
     async def test_no_announce_for_non_search_tool(self) -> None:
         """`tool_kind != 'tool-search'` short-circuits before reading the result."""
-        from pydantic_ai.messages import ToolCallPart
 
         cap = CodeMode[object](dynamic_catalog=True)
         ctx = build_run_context(None)
@@ -3172,7 +3426,6 @@ class TestDynamicCatalog:
         assert ctx.pending_messages == []
 
     async def test_no_duplicate_announcement_for_same_tool(self) -> None:
-        from pydantic_ai.messages import ToolCallPart
 
         cap = CodeMode[object](dynamic_catalog=True)
         ctx = build_run_context(None)
@@ -3192,8 +3445,6 @@ class TestDynamicCatalog:
     # -- discovery announcement: native search path -----------------------
 
     async def test_announce_on_native_search_return_part(self) -> None:
-        from pydantic_ai.messages import ModelRequest, ModelResponse, NativeToolSearchReturnPart, SystemPromptPart
-        from pydantic_ai.usage import RequestUsage
 
         cap = CodeMode[object](dynamic_catalog=True)
         ctx = build_run_context(None)
@@ -3217,8 +3468,6 @@ class TestDynamicCatalog:
         assert isinstance(part, SystemPromptPart) and '`weather`' in part.content
 
     async def test_no_announce_for_unrelated_response_parts(self) -> None:
-        from pydantic_ai.messages import ModelResponse, NativeToolReturnPart, TextPart
-        from pydantic_ai.usage import RequestUsage
 
         cap = CodeMode[object](dynamic_catalog=True)
         ctx = build_run_context(None)
@@ -3244,9 +3493,6 @@ class TestDynamicCatalog:
         ],
     )
     def test_extract_discovered_names_handles_malformed(self, content: Any, expected: list[str]) -> None:
-        from pydantic_ai_harness.code_mode._capability import (
-            _extract_discovered_names,  # pyright: ignore[reportPrivateUsage]
-        )
 
         assert _extract_discovered_names(content) == expected
 
@@ -3263,20 +3509,6 @@ class TestDynamicCatalog:
              system content is no longer hoisted (pydantic/pydantic-ai#5509) — so the model
              sees the announcement inline and replies.
         """
-        from pydantic_ai.capabilities import ToolSearch
-        from pydantic_ai.messages import (
-            ModelMessage,
-            ModelRequest,
-            ModelResponse,
-            SystemPromptPart,
-            TextPart,
-            ToolCallPart,
-            ToolReturnPart,
-            ToolSearchReturnPart,
-            UserPromptPart,
-        )
-        from pydantic_ai.models.function import AgentInfo, FunctionModel
-        from pydantic_ai.usage import RequestUsage
 
         captured_prompt_texts: list[list[str]] = []
         captured_descriptions: list[str] = []
@@ -3336,16 +3568,6 @@ class TestDynamicCatalog:
 
     async def test_run_code_calls_eager_tool_with_catalog_in_instructions(self) -> None:
         """An eager tool whose signature lives in instructions is still callable via `run_code`."""
-        from pydantic_ai.messages import (
-            ModelMessage,
-            ModelRequest,
-            ModelResponse,
-            TextPart,
-            ToolCallPart,
-            ToolReturnPart,
-        )
-        from pydantic_ai.models.function import AgentInfo, FunctionModel
-        from pydantic_ai.usage import RequestUsage
 
         def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             run_code_def = next(td for td in info.function_tools if td.name == 'run_code')
@@ -3607,7 +3829,6 @@ def _search_tool_def(description: str = 'Search for tools.') -> ToolDefinition:
     Carries `tool_kind='tool-search'`, matching what pydantic-ai emits (since 1.95.0);
     CodeMode routes it native off `tool_kind`, not its name.
     """
-    from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME
 
     return ToolDefinition(
         name=_SEARCH_TOOLS_NAME,
@@ -3618,7 +3839,7 @@ def _search_tool_def(description: str = 'Search for tools.') -> ToolDefinition:
 
 
 class TestGlobalModeIsSequential:
-    """`_global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
+    """`global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
 
     v1's `get_parallel_execution_mode` takes the pending calls list; v2 dropped
     the argument. The helper inspects arity and calls the matching shape, so
@@ -3632,8 +3853,8 @@ class TestGlobalModeIsSequential:
         def sequential(calls: list[ToolCallPart]) -> ParallelExecutionMode:
             return 'sequential'
 
-        assert _global_mode_is_sequential(parallel) is False
-        assert _global_mode_is_sequential(sequential) is True
+        assert global_mode_is_sequential(parallel) is False
+        assert global_mode_is_sequential(sequential) is True
 
     def test_v2_signature_without_arguments(self) -> None:
         def parallel() -> ParallelExecutionMode:
@@ -3642,5 +3863,5 @@ class TestGlobalModeIsSequential:
         def sequential() -> ParallelExecutionMode:
             return 'sequential'
 
-        assert _global_mode_is_sequential(parallel) is False
-        assert _global_mode_is_sequential(sequential) is True
+        assert global_mode_is_sequential(parallel) is False
+        assert global_mode_is_sequential(sequential) is True

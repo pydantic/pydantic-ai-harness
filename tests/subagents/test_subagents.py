@@ -23,6 +23,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
 
 from pydantic_ai_harness.subagents import SubAgent, SubAgents, SubAgentToolset
@@ -347,7 +348,6 @@ class TestDelegation:
         They are bound to capability instances registered in the parent run; sharing
         them is `shared_capabilities`' job (see the `_inherited_toolsets` docstring).
         """
-        from pydantic_ai.toolsets import FunctionToolset
 
         @dataclass
         class _ToolCapability(AbstractCapability[object]):
@@ -750,6 +750,30 @@ class TestContainErrors:
         # A setup bug must reach the developer even under containment, not become a retry.
         with pytest.raises(UserError):
             await parent.run('go')
+
+    async def test_first_party_cancellation_bypasses_containment(self) -> None:
+        def call_stop(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[ToolCallPart('stop', {}, tool_call_id='s1')])
+
+        canceller = Agent(FunctionModel(call_stop), name='canceller')
+
+        @canceller.tool
+        def stop(ctx: RunContext[object]) -> str:
+            ctx.cancel()
+            return 'ignored'
+
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('canceller'),
+            capabilities=[SubAgents(agents=[SubAgent(canceller, contain_errors=True)])],
+        )
+        result = await parent.run('go')
+        # `RunCancelled` is a plain `Exception`: a deliberate `ctx.cancel()` in the child must
+        # escape containment so pydantic-ai isolates it as a failed delegate return, not become
+        # a `Sub-agent ... crashed` retry that invites the parent to re-delegate.
+        assert result.output == 'all done'
+        assert not _delegate_retries(result)
+        returns = _delegate_returns(result)
+        assert any('The sub-agent run was cancelled' in r for r in returns)
 
     async def test_on_failure_does_not_soften_contained_crash(self) -> None:
         boomer = Agent(_crash(), name='boomer')

@@ -119,6 +119,61 @@ jobs:
             echo 'redis=true' >> "$GITHUB_OUTPUT"
           fi
 
+  clai-test:
+    name: CLAI test (${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        python: ['3.11', '3.14']
+    defaults:
+      run:
+        working-directory: pydantic-clai2
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: false
+      - run: uv sync --locked --all-packages --group dev
+      - run: uv run --no-sync coverage run -m pytest -p no:cacheprovider tests
+        env:
+          COVERAGE_FILE: .coverage.${{ matrix.python }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: clai2-coverage-${{ matrix.python }}
+          path: pydantic-clai2/.coverage.*
+          include-hidden-files: true
+          if-no-files-found: error
+
+  clai-coverage:
+    name: CLAI coverage
+    needs: [clai-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: pydantic-clai2
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: clai2-coverage-*
+          path: pydantic-clai2/coverage-data
+          merge-multiple: true
+      - run: uv sync --locked --all-packages --group dev
+      - run: uv run --no-sync coverage combine coverage-data
+      - run: uv run --no-sync coverage report
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -132,7 +187,7 @@ jobs:
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
           cache-suffix: lint
 
-      - run: uv sync --locked --all-groups --all-extras
+      - run: uv sync --locked --all-packages --all-groups --all-extras
 
       - uses: pre-commit/action@646c83fcd040023954eafda54b4db0192ce70507 # v3.0.0
         with:
@@ -141,6 +196,15 @@ jobs:
           SKIP: no-commit-to-branch
 
       - run: make typecheck
+
+      # `gh-aw/pydantic.md` is the engine definition GitHub Agentic Workflows
+      # compiles into a consumer's workflow, read from this repository's default
+      # branch. A merge therefore reaches every consumer on their next recompile
+      # and nothing downstream re-checks it, so this is the only gate: the
+      # frontmatter fields gh-aw reads are validated here, and `--published`
+      # refuses a pin PyPI does not serve, which is the version a generated
+      # workflow installs before its agent starts.
+      - run: uv run --script scripts/gh_aw_engine_version.py --published
 
   test:
     runs-on: ubuntu-latest
@@ -167,9 +231,28 @@ jobs:
           python-version: ${{ matrix.python-version }}
           enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
 
-      - run: uv sync --locked --group dev ${{ matrix.install.extras }}
+      - if: matrix.python-version != '3.10'
+        run: uv sync --locked --group dev ${{ matrix.install.extras }}
+      # Lock ceilings allow 3.10-compatible fallbacks without upgrading the test dependencies.
+      - if: matrix.python-version == '3.10'
+        shell: bash
+        run: |
+          uv venv --python 3.10
+          env -u UV_LOCKED uv export --frozen --all-extras --no-emit-workspace --no-hashes \
+            | sed 's/==/<=/' > "$RUNNER_TEMP/constraints.txt"
+          python3 - <<'PY' > "$RUNNER_TEMP/overrides.txt"
+          import tomllib
+          from pathlib import Path
+
+          config = tomllib.loads(Path('pyproject.toml').read_text())
+          print('\n'.join(config['tool']['uv']['override-dependencies']))
+          PY
+          uv pip install --group dev --editable . --requirements pyproject.toml \
+            --constraints "$RUNNER_TEMP/constraints.txt" --overrides "$RUNNER_TEMP/overrides.txt" \
+            ${{ matrix.install.extras }}
       - run: mkdir -p coverage-data
-      - run: uv run coverage run -m pytest
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: .venv/bin/python -m coverage run -m pytest
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: coverage-${{ matrix.python-version }}-${{ matrix.install.name }}
@@ -178,9 +261,9 @@ jobs:
 
   # Verify the harness still works against the lowest direct-dep versions we claim
   # compatibility with (the `>=` floors in pyproject.toml — including pydantic-ai-slim
-  # but also any other direct dep). The default `test` matrix above resolves against
-  # the lock (= latest published satisfying our constraints); this job exercises the
-  # entire claimed compatibility envelope. Mirrors pydantic-ai's `test-lowest-versions`
+  # but also any other direct dep). The `test` matrix uses the lock on Python 3.11+
+  # and its version ceilings on 3.10; this job checks the lower bounds.
+  # Mirrors pydantic-ai's `test-lowest-versions`
   # job so the convention is consistent across the workspace.
   #
   # Bleeding-edge compat with pydantic-ai's main branch is verified by pydantic-ai's
@@ -207,10 +290,16 @@ jobs:
       # The lock validation must be off here: this job deviates from the lock
       # on purpose, and under UV_LOCKED=1 the lowest-direct resolution fails
       # because uv refuses to write the lowest-resolved lockfile it produces.
-      - run: uv sync --resolution lowest-direct --group dev --all-extras
+      - if: matrix.python-version != '3.10'
+        run: uv sync --resolution lowest-direct --group dev --all-extras
         env:
           UV_LOCKED: '0'
-      - run: uv run --no-sync pytest
+      - if: matrix.python-version == '3.10'
+        run: |
+          uv venv --python 3.10
+          uv pip install --resolution lowest-direct --group dev --editable . --requirements pyproject.toml --all-extras
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: .venv/bin/python -m pytest
 
   # Verify the harness works against the latest published pydantic-ai packages,
   # not just the lock. The `test` matrix resolves against the lock, so harness
@@ -244,6 +333,7 @@ jobs:
             --upgrade-package pydantic-ai-slim \
             --upgrade-package pydantic-graph
       - run: uv sync --locked --group dev --all-extras
+      - run: sudo apt-get update && sudo apt-get install -y ripgrep
       - run: uv run --no-sync pytest
 
   # Guard the pymongo-free import path. The `test` matrix's slim job installs the
@@ -472,7 +562,7 @@ jobs:
 
   check:
     if: always()
-    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, localstack-integration, mongodb-integration, redis-integration]
+    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, clai-test, clai-coverage, localstack-integration, mongodb-integration, redis-integration]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
@@ -513,44 +603,73 @@ jobs:
       - run: uv build
       - uses: pypa/gh-action-pypi-publish@ed0c53931b1dc9bd32cbe73a98c7f6766f8a527e # v1.13.0
 
-  send-tweet:
-    name: Send tweet
+  # `gh-aw/pydantic.md` pins the `pydantic-ai-harness` release a generated gh-aw
+  # workflow installs, and consumers compile the definition straight from the
+  # default branch. Shipping a bump is therefore an ordinary pull request against
+  # that file, and this job publishes nothing: it only notices that the release
+  # just cut is not the release the definition names, and asks for that pull
+  # request. Skipping it costs nothing beyond consumers staying on the pinned
+  # version.
+  #
+  # An issue rather than a pull request, because a pull request opened with
+  # GITHUB_TOKEN triggers no workflow runs: it would arrive with none of this
+  # repository's required checks and could never satisfy them.
+  gh-aw-engine-pin-reminder:
+    name: gh-aw engine / pin reminder
     needs: [release]
     # Same skipped-ancestor opt-out as `release` above.
     if: ${{ !cancelled() && needs.release.result == 'success' }}
     runs-on: ubuntu-latest
-    environment: release
-
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
     steps:
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          python-version: '3.12'
-      - name: Install dependencies
-        run: pip install tweepy==4.14.0
-      - name: Send tweet
-        shell: python
-        run: |
-          import os
-          import tweepy
+          persist-credentials: false
 
-          client = tweepy.Client(
-              access_token=os.getenv("TWITTER_ACCESS_TOKEN"),
-              access_token_secret=os.getenv("TWITTER_ACCESS_TOKEN_SECRET"),
-              consumer_key=os.getenv("TWITTER_CONSUMER_KEY"),
-              consumer_secret=os.getenv("TWITTER_CONSUMER_SECRET"),
-          )
-          version = os.getenv("VERSION")
-          tweet = os.getenv("TWEET").format(version=version)
-          client.create_tweet(text=tweet)
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: false
+
+      # `uv run --script` resolves the guard script's dependencies from PyPI
+      # without a lockfile, so it runs in its own step with no token in the
+      # environment. The step below holds the token and runs only `gh`.
+      - id: engine
+        run: echo "version=$(uv run --script scripts/gh_aw_engine_version.py)" >> "$GITHUB_OUTPUT"
+
+      - name: Ask for a pin bump when the release moved past the definition
         env:
-          # The tag ref (e.g. "v1.2.3") already carries the leading v, so it is
-          # used verbatim in both the message and the release URL.
-          VERSION: ${{ github.ref_name }}
-          TWEET: |
-            Pydantic AI Harness {version} is out! 🎉
+          GH_TOKEN: ${{ github.token }}
+          PINNED: ${{ steps.engine.outputs.version }}
+        run: |
+          pinned="$PINNED"
+          released="${GITHUB_REF_NAME#v}"
+          if [ "$pinned" = "$released" ]; then
+            echo "The gh-aw engine definition already pins ${released}."
+            exit 0
+          fi
 
-            https://github.com/pydantic/pydantic-ai-harness/releases/tag/{version}
-          TWITTER_CONSUMER_KEY: ${{ secrets.TWITTER_CONSUMER_KEY }}
-          TWITTER_CONSUMER_SECRET: ${{ secrets.TWITTER_CONSUMER_SECRET }}
-          TWITTER_ACCESS_TOKEN: ${{ secrets.TWITTER_ACCESS_TOKEN }}
-          TWITTER_ACCESS_TOKEN_SECRET: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
+          title="Bump the gh-aw engine pin to ${released}"
+          # `--search` matches words rather than the phrase, so it narrows the
+          # listing and the exact title is compared here.
+          if gh issue list --state open --search "${title} in:title" \
+            --json title --jq '.[].title' | grep -qxF "${title}"; then
+            echo "An open issue already asks for this: ${title}"
+            exit 0
+          fi
+
+          # A heredoc rather than an inline `--body`: the body is Markdown with
+          # blank lines and backticks, and only `$pinned` and `$released` are
+          # meant to expand.
+          cat > "${RUNNER_TEMP}/pin-reminder.md" <<EOF
+          \`gh-aw/pydantic.md\` on the default branch still pins \`engine.version: ${pinned}\`, and ${released} is now released.
+
+          gh-aw compiles that file from the default branch, so a pull request bumping \`engine.version\` to ${released} is what ships the new pin: consumers pick it up on their next recompile.
+
+          Lint refuses a pin PyPI does not serve, so that pull request goes green once ${released} is on PyPI.
+          EOF
+
+          gh issue create --title "${title}" --body-file "${RUNNER_TEMP}/pin-reminder.md"

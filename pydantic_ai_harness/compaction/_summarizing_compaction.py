@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncIterable, Callable, Sequence
+from dataclasses import KW_ONLY, dataclass, field, replace
 from typing import TYPE_CHECKING, Any, cast
 
 from pydantic_ai._run_context import AgentDepsT
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.agent import EventStreamHandler
+from pydantic_ai.capabilities import AbstractCapability, durable_operation
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -22,6 +23,7 @@ from pydantic_ai.messages import (
 )
 from pydantic_ai.models import Model
 from pydantic_ai.models.fallback import FallbackModel
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import RunContext
 
 from pydantic_ai_harness._usage import reserved_usage_limits
@@ -50,7 +52,7 @@ from pydantic_ai_harness.compaction._shared import (
 )
 
 if TYPE_CHECKING:
-    from pydantic_ai.messages import ModelRequestPart, UserContent
+    from pydantic_ai.messages import AgentStreamEvent, ModelRequestPart, UserContent
     from pydantic_ai.models import AbstractModel, ModelRequestContext
 
 _DEFAULT_SUMMARY_PROMPT = """\
@@ -85,6 +87,10 @@ preamble, no markdown fences.
 {messages}
 </messages>\
 """
+
+_DEFAULT_INSTRUCTIONS = (
+    'You are a context summarization assistant. Extract the most important information from conversations.'
+)
 
 _SUMMARY_PREFIX = 'Summary of previous conversation:\n\n'
 
@@ -150,8 +156,27 @@ def _model_family(model: str | AbstractModel | None) -> str | None:
     return tail or None
 
 
-def _format_messages(messages: Sequence[ModelMessage], *, skip_previous_summary: bool = False) -> str:
-    """Render messages into a human-readable string for summarization."""
+def _truncate_with_marker(text: str, max_chars: int) -> str:
+    """Truncate *text* to *max_chars* characters, an explicit marker counted within the cap."""
+    if len(text) <= max_chars:
+        return text
+    marker = '[...]'
+    if max_chars <= len(marker):
+        return marker[:max_chars]
+    return f'{text[: max_chars - len(marker)]}{marker}'
+
+
+def _format_messages(
+    messages: Sequence[ModelMessage],
+    *,
+    skip_previous_summary: bool = False,
+    tool_return_max_chars: int | None = 500,
+) -> str:
+    """Render messages into a human-readable string for summarization.
+
+    Tool returns are truncated to `tool_return_max_chars` characters with the shared
+    truncation marker; `None` renders them whole.
+    """
     lines: list[str] = []
     for msg in messages:
         if isinstance(msg, ModelRequest):
@@ -165,9 +190,9 @@ def _format_messages(messages: Sequence[ModelMessage], *, skip_previous_summary:
                 ):
                     lines.append(f'System: {part.content}')
                 elif isinstance(part, ToolReturnPart):
-                    content_str = str(part.content)[:500]
-                    if len(str(part.content)) > 500:
-                        content_str += '...'
+                    content_str = str(part.content)
+                    if tool_return_max_chars is not None:
+                        content_str = _truncate_with_marker(content_str, tool_return_max_chars)
                     lines.append(f'Tool [{part.tool_name}]: {content_str}')
         else:
             for part in msg.parts:
@@ -232,6 +257,20 @@ def _is_kept_user_message(message: ModelRequest) -> bool:
     return message.metadata is not None and message.metadata.get(_KEPT_USER_MESSAGE_METADATA) is True
 
 
+async def drain_summary_events(
+    _ctx: RunContext[object],
+    events: AsyncIterable[AgentStreamEvent],
+) -> None:
+    """An `event_stream_handler` that consumes summary events and yields nothing to the caller.
+
+    Pass this as `SummarizingCompaction(event_stream_handler=drain_summary_events)` when the summary
+    endpoint requires a streaming request but the events themselves are not wanted. Supplying
+    any handler selects the streaming request path; this one just discards what it receives.
+    """
+    async for _ in events:
+        pass
+
+
 @dataclass
 class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """LLM-powered conversation compaction.
@@ -269,6 +308,24 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     When `None`, inherits the model the request being compacted is going to. Core starts
     that as the run's model, so the two differ only where a capability replaced
     `ModelRequestContext.model`; set this explicitly to pin the summarizer regardless.
+    """
+
+    model_settings: ModelSettings | None = field(default=None, kw_only=True)
+    """Settings for the dedicated summary model call.
+
+    These merge over defaults carried by `model`, allowing the summary call to use a
+    policy that differs from the running agent without mutating the model.
+    """
+
+    event_stream_handler: EventStreamHandler[object] | None = field(default=None, kw_only=True)
+    """If set, this handler is passed to the nested summary run, so the summarizer's own
+    model-streaming events surface to the caller.
+
+    Setting it also selects the streaming request path, which is what a summarizer endpoint
+    that rejects non-streaming requests needs; pass `drain_summary_events` to take that path without
+    handling the events. Left `None`, the summary request is non-streaming, which is what an
+    endpoint that rejects streaming requests needs. The handler receives the summary run's own
+    `RunContext`, never the outer run's, and the outer `Agent.run(...)` handler is not inherited.
     """
 
     max_messages: int | None = None
@@ -312,6 +369,14 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     Must contain a ``{messages}`` placeholder.
     """
 
+    instructions: str = field(default=_DEFAULT_INSTRUCTIONS, kw_only=True)
+    """Instructions for the internal agent that writes the summary.
+
+    `summary_prompt` shapes the user turn of the summary request; this sets the internal
+    agent's static instructions, which Pydantic AI sends in the request's system prompt.
+    Override it when the summarizer endpoint requires a fixed leading instruction.
+    """
+
     tokenizer: Callable[[str], int] | None = None
     """Optional tokenizer for accurate token counting.
 
@@ -349,6 +414,10 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     """Per-message character cap for ``keep_user_messages``; oversized messages are truncated
     with an explicit marker (the shared truncation-marker convention)."""
 
+    tool_return_max_chars: int | None = field(default=500, kw_only=True)
+    """Per-return character cap when rendering tool results for the summarizer. `None` renders
+    them whole."""
+
     receipts: bool = False
     """When ``True``, append a deterministic compaction receipt after the summary noting how
     much history was summarized, that the summary is secondhand, and -- when a
@@ -357,6 +426,10 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
     Opt-in for now: the receipt text is content, so defaulting it on is deferred to the
     benchmark eval-rig pass.  The mechanism itself is structural.
     """
+
+    # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    _: KW_ONLY
+    id: str | None = 'summarizing_compaction'
 
     def __post_init__(self) -> None:
         if self.max_messages is None and self.max_tokens is None and self.max_fraction is None:
@@ -370,6 +443,8 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
             raise ValueError('keep_tokens must be non-negative.')
         if self.keep_user_messages_max_chars < 1:
             raise ValueError('keep_user_messages_max_chars must be positive.')
+        if self.tool_return_max_chars is not None and self.tool_return_max_chars < 1:
+            raise ValueError('tool_return_max_chars must be positive.')
 
     def with_focus(self, focus: str) -> SummarizingCompaction[AgentDepsT]:
         """Return a copy whose summary prompt prioritizes `focus`.
@@ -474,17 +549,8 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         return out
 
     def _truncate(self, text: str, max_chars: int | None = None) -> str:
-        from pydantic_ai_harness.tool_output_limits import TruncationStrategy
-        from pydantic_ai_harness.tool_output_limits._payload import truncate_text
-
         limit = self.keep_user_messages_max_chars if max_chars is None else max_chars
-        truncated = truncate_text(text, limit, TruncationStrategy.head)
-        if len(truncated) <= limit:
-            return truncated
-        marker = '[...]'
-        if limit <= len(marker):
-            return marker[:limit]
-        return f'{text[: limit - len(marker)]}{marker}'
+        return _truncate_with_marker(text, limit)
 
     def _bound_sequence(self, content: Sequence[UserContent]) -> tuple[list[UserContent], bool]:
         """Apply the same per-part character budget to a sequence-shaped user prompt.
@@ -591,6 +657,7 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         request_context.messages = compacted
         return request_context
 
+    @durable_operation('summarize')
     async def _summarize(
         self,
         messages: list[ModelMessage],
@@ -601,7 +668,11 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         """Generate a summary for the given messages using the configured model."""
         from pydantic_ai import Agent
 
-        formatted = _format_messages(messages, skip_previous_summary=previous_summary is not None)
+        formatted = _format_messages(
+            messages,
+            skip_previous_summary=previous_summary is not None,
+            tool_return_max_chars=self.tool_return_max_chars,
+        )
         prompt = self.summary_prompt.format(messages=formatted)
 
         if previous_summary is not None:
@@ -624,7 +695,14 @@ class SummarizingCompaction(AbstractCapability[AgentDepsT]):
         # `Model[Any]`, mirroring core's own `reinject_system_prompt` idiom.
         agent: Agent[None, str] = Agent(
             cast('Model[Any] | str', model),
-            instructions='You are a context summarization assistant. Extract the most important information from conversations.',
+            name='summarizing_compaction',
+            instructions=self.instructions,
+            model_settings=self.model_settings,
         )
-        result = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
+        result = await agent.run(
+            prompt,
+            usage=ctx.usage,
+            usage_limits=reserved_usage_limits(ctx.usage_limits),
+            event_stream_handler=self.event_stream_handler,
+        )
         return result.output.strip()

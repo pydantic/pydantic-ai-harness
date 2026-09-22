@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+import base64
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic_ai import CallToolsNode, ModelRequestNode
-from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.capabilities import AbstractCapability, durable_operation
 from pydantic_ai.capabilities.abstract import AgentNode, NodeResult, WrapRunHandler
 from pydantic_ai.messages import ModelMessage, ModelResponse, ToolCallPart
 from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.run import AgentRunResult
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 
-from pydantic_ai_harness.step_persistence._context import current_run_id, live_run_history, snapshot_saved
+from pydantic_ai_harness.step_persistence._context import (
+    current_run_id,
+    live_run_history,
+)
+from pydantic_ai_harness.step_persistence._events import SnapshotSaved
 from pydantic_ai_harness.step_persistence._helpers import is_provider_valid
 from pydantic_ai_harness.step_persistence._store import InMemoryStepStore, StepStore
 from pydantic_ai_harness.step_persistence._types import (
@@ -81,14 +87,17 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     `Agent.run(..., message_history=...)`.
     """
 
+    # Override the inherited default ID because durable-operation recovery needs a stable identity.
+    id: str | None = field(default='step_persistence', kw_only=True)
+
     store: StepStore = field(default_factory=InMemoryStepStore)
     """Backend that records events, snapshots, and tool effects."""
 
     agent_name: str | None = None
     """Logical agent name (e.g. `code_librarian`, `reproducer`).
 
-    Used as a stable prefix for the auto-derived `run_id` so store
-    inspection shows readable IDs like `code_librarian-a3b2`.
+    Used as a stable prefix for the context-derived `run_id` so store
+    inspection identifies both the agent and the durable run.
     """
 
     run_id: str | None = None
@@ -108,10 +117,10 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
        deterministic tool-call ids, so a silent collision would erase
        the `unknown_after_crash` signal. Use `conversation_id=` on
        `Agent.run` for multi-turn grouping.
-    2. **`agent_name` set, `run_id` unset** → `{agent_name}-{short-uuid}`,
-       freshly materialised per `.run()`. Reusing the capability instance
-       yields distinct ids. Recommended default for delegate capabilities.
-    3. **Neither set** → `ctx.run_id` per `.run()`, falling back to UUID4.
+    2. **`agent_name` set, `run_id` unset** -> path-safe encoding of both values.
+       Reusing the capability instance yields distinct ids because the agent
+       graph assigns each run its own id.
+    3. **Neither set** -> `ctx.run_id` per `.run()`.
     """
 
     parent_run_id: str | None = None
@@ -126,6 +135,18 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
 
     metadata: dict[str, str] = field(default_factory=_empty_metadata)
     """Free-form metadata stored on the `RunRecord` and on each event."""
+
+    capture_frontier: bool = False
+    """Also checkpoint accepted inputs and model tool-call frontiers before execution.
+
+    These additional writes make first-request failures and process kills before a
+    settled tool cycle inspectable. They do not make side effects safe to replay.
+    """
+
+    _event_sequence: int = field(default=0, init=False, repr=False)
+    _snapshot_sequence: int = field(default=0, init=False, repr=False)
+    _last_snapshot_messages: list[ModelMessage] | None = field(default=None, init=False, repr=False)
+    _last_snapshot_step: int | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def from_spec(cls, *args: Any, **kwargs: Any) -> StepPersistence[Any]:
@@ -182,21 +203,99 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         """
         inferred_parent = self.parent_run_id if self.parent_run_id is not None else current_run_id.get()
         resolved_run_id = self.run_id or self._derive_run_id(ctx)
-        if resolved_run_id == self.run_id and inferred_parent == self.parent_run_id:
-            return self
         return replace(self, run_id=resolved_run_id, parent_run_id=inferred_parent)
 
     def _derive_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
+        if ctx.run_id is None:
+            raise RuntimeError('StepPersistence needs the agent graph to assign `RunContext.run_id`.')
         if self.agent_name is not None:
-            return f'{self.agent_name}-{uuid4().hex[:8]}'
-        return ctx.run_id or str(uuid4())
+            agent_name_bytes = self.agent_name.encode()
+            payload = f'{len(agent_name_bytes)}:{self.agent_name}{ctx.run_id}'.encode()
+            encoded = base64.urlsafe_b64encode(payload).decode().rstrip('=')
+            derived = f'sp-{encoded}'
+            if len(derived) > 200:
+                raise ValueError("derived StepPersistence run_id exceeds FileStepStore's 200-character limit")
+            return derived
+        return ctx.run_id
 
     def _effective_run_id(self, ctx: RunContext[AgentDepsT]) -> str:
         if self.run_id is not None:
             return self.run_id
-        return ctx.run_id or str(uuid4())
+        if ctx.run_id is not None:
+            return ctx.run_id
+        raise RuntimeError('StepPersistence run id was not materialized by `for_run`.')
 
-    def _make_event(
+    @durable_operation('register_run')
+    async def _register_run(
+        self,
+        *,
+        run_id: str,
+        conversation_id: str | None,
+        parent_run_id: str | None,
+        agent_name: str | None,
+        metadata: dict[str, str],
+        registration_id: str,
+    ) -> None:
+        existing = await self.store.get_run(run_id=run_id)
+        if existing is not None and existing.registration_id == registration_id:
+            return
+        if existing is not None:
+            raise ValueError(
+                f'StepPersistence: run_id {run_id!r} is already in the store. '
+                '`run_id` is single-shot; pass `conversation_id=` to '
+                '`Agent.run` for multi-turn grouping instead.'
+            )
+        await self.store.register_run(
+            RunRecord(
+                run_id=run_id,
+                conversation_id=conversation_id,
+                parent_run_id=parent_run_id,
+                agent_name=agent_name,
+                metadata=metadata,
+                registration_id=registration_id,
+            )
+        )
+
+    @durable_operation('registration_id')
+    async def _registration_id(self) -> str:
+        return str(uuid4())
+
+    @durable_operation('append_event')
+    async def _append_event(
+        self,
+        *,
+        run_id: str,
+        kind: EventKind,
+        step_index: int,
+        conversation_id: str | None,
+        parent_run_id: str | None,
+        agent_name: str | None,
+        tool_call_id: str | None = None,
+        tool_name: str | None = None,
+        error: str | None = None,
+        metadata: dict[str, str],
+        event_index: int,
+    ) -> None:
+        await self.store.append_event(
+            StepEvent(
+                run_id=run_id,
+                kind=kind,
+                step_index=step_index,
+                timestamp=datetime.now(timezone.utc),
+                conversation_id=conversation_id,
+                parent_run_id=parent_run_id,
+                agent_name=agent_name,
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                error=error,
+                metadata=metadata,
+                # Hook order is deterministic under replay. The sequence distinguishes repeated
+                # events within one step, while the other fields keep the key inspectable.
+                idempotency_key=f'{event_index}:{step_index}:{kind}:{tool_call_id or ""}',
+            )
+        )
+
+    async def _record_event(
         self,
         ctx: RunContext[AgentDepsT],
         *,
@@ -204,8 +303,10 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         tool_call_id: str | None = None,
         tool_name: str | None = None,
         error: str | None = None,
-    ) -> StepEvent:
-        return StepEvent(
+    ) -> None:
+        event_index = self._event_sequence
+        self._event_sequence += 1
+        await self._append_event(
             run_id=self._effective_run_id(ctx),
             kind=kind,
             step_index=ctx.run_step,
@@ -216,6 +317,100 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
             tool_name=tool_name,
             error=error,
             metadata=dict(self.metadata),
+            event_index=event_index,
+        )
+
+    @durable_operation('save_snapshot')
+    async def _persist_snapshot(
+        self,
+        *,
+        run_id: str,
+        step_index: int,
+        messages: list[ModelMessage],
+        conversation_id: str | None,
+        parent_run_id: str | None,
+        agent_name: str | None,
+        state: SnapshotState = 'complete',
+        snapshot_index: int,
+    ) -> None:
+        await self.store.save_snapshot(
+            ContinuableSnapshot(
+                run_id=run_id,
+                step_index=step_index,
+                messages=deepcopy(messages),
+                conversation_id=conversation_id,
+                parent_run_id=parent_run_id,
+                agent_name=agent_name,
+                timestamp=datetime.now(timezone.utc),
+                state=state,
+                # The store scopes keys by run id. Within that scope the sequence distinguishes
+                # separate save calls, step_index identifies the graph position, and state keeps
+                # settled and interrupted histories distinct. `for_run` creates the capability
+                # instance that owns this zero-based counter, so each run starts at zero. Replay
+                # executes the same saves in order and regenerates the claimed key; a new save
+                # advances to a key no earlier write has used.
+                idempotency_key=f'{snapshot_index}:{step_index}:{state}',
+            )
+        )
+
+    async def _save_snapshot(
+        self,
+        *,
+        run_id: str,
+        step_index: int,
+        messages: list[ModelMessage],
+        conversation_id: str | None,
+        parent_run_id: str | None,
+        agent_name: str | None,
+        state: SnapshotState = 'complete',
+    ) -> None:
+        snapshot_index = self._snapshot_sequence
+        self._snapshot_sequence += 1
+        await self._persist_snapshot(
+            run_id=run_id,
+            step_index=step_index,
+            messages=messages,
+            conversation_id=conversation_id,
+            parent_run_id=parent_run_id,
+            agent_name=agent_name,
+            state=state,
+            snapshot_index=snapshot_index,
+        )
+        # Rebuilt on durable replay even when the operation body is journaled. Reading
+        # the external store here would make replay take different save branches.
+        self._last_snapshot_messages = deepcopy(messages)
+        self._last_snapshot_step = step_index
+
+    @durable_operation('record_tool_effect')
+    async def _record_tool_effect(self, run_id: str, tool_call_id: str, tool_name: str) -> None:
+        await self.store.record_tool_effect(
+            ToolEffectRecord(tool_call_id=tool_call_id, tool_name=tool_name, run_id=run_id, status='started')
+        )
+
+    @durable_operation('finish_tool_effect')
+    async def _finish_tool_effect(
+        self,
+        run_id: str,
+        tool_call_id: str,
+        tool_name: str,
+        status: Literal['completed', 'failed'],
+        error: str | None = None,
+    ) -> None:
+        prior = await self.store.get_tool_effect(run_id=run_id, tool_call_id=tool_call_id)
+        now = datetime.now(timezone.utc)
+        await self.store.record_tool_effect(
+            ToolEffectRecord(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                run_id=run_id,
+                status=status,
+                started_at=prior.started_at if prior is not None else now,
+                ended_at=now,
+                idempotency_key=prior.idempotency_key if prior is not None else None,
+                effect_summary=prior.effect_summary
+                if prior is not None and prior.effect_summary is not None
+                else error,
+            )
         )
 
     async def wrap_run(
@@ -226,42 +421,33 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
     ) -> AgentRunResult[Any]:
         """Push this run's id onto the contextvar so nested delegates can read it."""
         token = current_run_id.set(self._effective_run_id(ctx))
-        saved_token = snapshot_saved.set(0)
         history_token = live_run_history.set(None)
         try:
             return await handler()
         finally:
             live_run_history.reset(history_token)
-            snapshot_saved.reset(saved_token)
             current_run_id.reset(token)
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Register run lineage and emit `run_started`.
 
-        When the caller pinned an explicit `run_id`, reject reuse -- the
+        Reject reuse by a distinct registration -- the
         tool-effect ledger keys on `(run_id, tool_call_id)` and providers
         reuse deterministic tool-call ids, so a second `Agent.run` with
-        the same explicit `run_id` would silently collide. The auto-derived
-        cases cannot trigger this check because each call materialises a
-        fresh id in `for_run`.
+        the same `run_id` would silently collide. A journaled registration id
+        distinguishes a retry of this durable operation from a new run.
         """
         run_id = self._effective_run_id(ctx)
-        if self.run_id is not None and await self.store.get_run(run_id=run_id) is not None:
-            raise ValueError(
-                f'StepPersistence: run_id {run_id!r} is already in the store. '
-                'Explicit `run_id` is single-shot; pass `conversation_id=` to '
-                '`Agent.run` for multi-turn grouping instead.'
-            )
-        await self.store.register_run(
-            RunRecord(
-                run_id=run_id,
-                conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
-                agent_name=self.agent_name,
-                metadata=dict(self.metadata),
-            )
+        registration_id = await self._registration_id()
+        await self._register_run(
+            run_id=run_id,
+            conversation_id=ctx.conversation_id,
+            parent_run_id=self.parent_run_id,
+            agent_name=self.agent_name,
+            metadata=dict(self.metadata),
+            registration_id=registration_id,
         )
-        await self.store.append_event(self._make_event(ctx, kind='run_started'))
+        await self._record_event(ctx, kind='run_started')
 
     async def after_run(
         self,
@@ -275,7 +461,9 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         `after_node_run` it carries the correct `step_index`, whereas by
         `after_run` `ctx.run_step` is reset to 0 -- so re-saving would both
         duplicate the tail and stamp a misleading `step_index`. We save only
-        when the run ended past the newest boundary snapshot.
+        when the final content differs from the newest boundary snapshot,
+        including same-length rewrites. The comparison uses per-run copied
+        state, not an external store read which could change under durable replay.
 
         That covers a run which reached no provider-valid boundary at all, and
         `Agent.run_stream`, which ends through `SetFinalResult` rather than a
@@ -283,19 +471,10 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         boundary -- leaving `after_run` the only hook that sees the full run.
         """
         messages = result.all_messages()
-        if len(messages) > snapshot_saved.get():
-            if is_provider_valid(messages):
-                await self.store.save_snapshot(
-                    ContinuableSnapshot(
-                        run_id=self._effective_run_id(ctx),
-                        step_index=ctx.run_step,
-                        messages=list(messages),
-                        conversation_id=ctx.conversation_id,
-                        parent_run_id=self.parent_run_id,
-                        agent_name=self.agent_name,
-                    )
-                )
-        await self.store.append_event(self._make_event(ctx, kind='run_completed'))
+        if self._last_snapshot_messages != messages and is_provider_valid(messages):
+            step = self._last_snapshot_step if self._last_snapshot_step is not None else ctx.run_step
+            await self._save_continuable_snapshot(ctx, list(messages), step)
+        await self._record_event(ctx, kind='run_completed')
         return result
 
     def _stash_live_history(self, ctx: RunContext[AgentDepsT]) -> None:
@@ -328,14 +507,20 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         step_index: int,
         state: SnapshotState = 'complete',
     ) -> None:
-        await self.store.save_snapshot(
-            ContinuableSnapshot(
-                run_id=self._effective_run_id(ctx),
-                step_index=step_index,
-                messages=messages,
+        await self._save_snapshot(
+            run_id=self._effective_run_id(ctx),
+            step_index=step_index,
+            messages=messages,
+            conversation_id=ctx.conversation_id,
+            parent_run_id=self.parent_run_id,
+            agent_name=self.agent_name,
+            state=state,
+        )
+        await ctx.emit(
+            SnapshotSaved(
+                persistence_run_id=self._effective_run_id(ctx),
                 conversation_id=ctx.conversation_id,
-                parent_run_id=self.parent_run_id,
-                agent_name=self.agent_name,
+                step_index=step_index,
                 state=state,
             )
         )
@@ -367,10 +552,10 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         if stashed is not None:
             messages, step_index = stashed
             captured = list(messages)
-            if _has_model_response(captured):
+            if _has_model_response(captured) or (self.capture_frontier and captured):
                 state: SnapshotState = 'complete' if is_provider_valid(captured) else 'interrupted'
                 await self._save_continuable_snapshot(ctx, captured, step_index, state)
-        await self.store.append_event(self._make_event(ctx, kind='run_failed', error=repr(error)))
+        await self._record_event(ctx, kind='run_failed', error=repr(error))
         raise error
 
     async def before_model_request(
@@ -378,7 +563,15 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         ctx: RunContext[AgentDepsT],
         request_context: ModelRequestContext,
     ) -> ModelRequestContext:
-        await self.store.append_event(self._make_event(ctx, kind='model_request_started'))
+        if self.capture_frontier:
+            self._stash_live_history(ctx)
+            await self._save_continuable_snapshot(
+                ctx,
+                list(ctx.messages),
+                ctx.run_step,
+                'complete' if is_provider_valid(ctx.messages) else 'interrupted',
+            )
+        await self._record_event(ctx, kind='model_request_started')
         return request_context
 
     async def after_model_request(
@@ -388,7 +581,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
         response: ModelResponse,
     ) -> ModelResponse:
-        await self.store.append_event(self._make_event(ctx, kind='model_request_completed'))
+        await self._record_event(ctx, kind='model_request_completed')
         return response
 
     async def on_model_request_error(
@@ -405,7 +598,7 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         `on_run_error`'s save covers it. A failure the model layer recovers
         from (retry, fallback) needs no rescue at all.
         """
-        await self.store.append_event(self._make_event(ctx, kind='model_request_failed', error=repr(error)))
+        await self._record_event(ctx, kind='model_request_failed', error=repr(error))
         raise error
 
     async def before_tool_execute(
@@ -417,21 +610,12 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         args: dict[str, Any],
     ) -> dict[str, Any]:
         run_id = self._effective_run_id(ctx)
-        await self.store.record_tool_effect(
-            ToolEffectRecord(
-                tool_call_id=call.tool_call_id,
-                tool_name=tool_def.name,
-                run_id=run_id,
-                status='started',
-            )
-        )
-        await self.store.append_event(
-            self._make_event(
-                ctx,
-                kind='tool_call_started',
-                tool_call_id=call.tool_call_id,
-                tool_name=tool_def.name,
-            )
+        await self._record_tool_effect(run_id, call.tool_call_id, tool_def.name)
+        await self._record_event(
+            ctx,
+            kind='tool_call_started',
+            tool_call_id=call.tool_call_id,
+            tool_name=tool_def.name,
         )
         return args
 
@@ -445,26 +629,12 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         result: Any,
     ) -> Any:
         run_id = self._effective_run_id(ctx)
-        prior = await self.store.get_tool_effect(run_id=run_id, tool_call_id=call.tool_call_id)
-        await self.store.record_tool_effect(
-            ToolEffectRecord(
-                tool_call_id=call.tool_call_id,
-                tool_name=tool_def.name,
-                run_id=run_id,
-                status='completed',
-                started_at=prior.started_at if prior is not None else datetime.now(timezone.utc),
-                ended_at=datetime.now(timezone.utc),
-                idempotency_key=prior.idempotency_key if prior is not None else None,
-                effect_summary=prior.effect_summary if prior is not None else None,
-            )
-        )
-        await self.store.append_event(
-            self._make_event(
-                ctx,
-                kind='tool_call_completed',
-                tool_call_id=call.tool_call_id,
-                tool_name=tool_def.name,
-            )
+        await self._finish_tool_effect(run_id, call.tool_call_id, tool_def.name, 'completed')
+        await self._record_event(
+            ctx,
+            kind='tool_call_completed',
+            tool_call_id=call.tool_call_id,
+            tool_name=tool_def.name,
         )
         return result
 
@@ -478,28 +648,13 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         error: Exception,
     ) -> Any:
         run_id = self._effective_run_id(ctx)
-        prior = await self.store.get_tool_effect(run_id=run_id, tool_call_id=call.tool_call_id)
-        prior_summary = prior.effect_summary if prior is not None else None
-        await self.store.record_tool_effect(
-            ToolEffectRecord(
-                tool_call_id=call.tool_call_id,
-                tool_name=tool_def.name,
-                run_id=run_id,
-                status='failed',
-                started_at=prior.started_at if prior is not None else datetime.now(timezone.utc),
-                ended_at=datetime.now(timezone.utc),
-                idempotency_key=prior.idempotency_key if prior is not None else None,
-                effect_summary=prior_summary if prior_summary is not None else repr(error),
-            )
-        )
-        await self.store.append_event(
-            self._make_event(
-                ctx,
-                kind='tool_call_failed',
-                tool_call_id=call.tool_call_id,
-                tool_name=tool_def.name,
-                error=repr(error),
-            )
+        await self._finish_tool_effect(run_id, call.tool_call_id, tool_def.name, 'failed', repr(error))
+        await self._record_event(
+            ctx,
+            kind='tool_call_failed',
+            tool_call_id=call.tool_call_id,
+            tool_name=tool_def.name,
+            error=repr(error),
         )
         raise error
 
@@ -518,9 +673,9 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         `ctx.messages`, so its request is folded in before validation --
         without it a worker killed right after a completed tool call would
         leave no resume point at all (#373). `is_provider_valid` doubles as a
-        defense in case a custom node reshapes history, and the saved count
-        goes to `snapshot_saved` so `after_run` can tell whether the run ended
-        past this boundary.
+        defense in case a custom node reshapes history. `after_run` compares the
+        saved content with the final history, including same-length rewrites
+        by other capabilities.
 
         This save is the durable one: it lands in the store while the run is
         still healthy, so it survives a hard kill that fires no hook. The
@@ -537,19 +692,28 @@ class StepPersistence(AbstractCapability[AgentDepsT]):
         """
         self._stash_live_history(ctx)
         messages = list(ctx.messages)
+        if self.capture_frontier and isinstance(node, ModelRequestNode):
+            await self._save_continuable_snapshot(
+                ctx, messages, ctx.run_step, 'complete' if is_provider_valid(messages) else 'interrupted'
+            )
         if isinstance(node, CallToolsNode):
             if isinstance(result, ModelRequestNode):
                 messages = [*messages, result.request]
             if is_provider_valid(messages):
-                await self.store.save_snapshot(
-                    ContinuableSnapshot(
-                        run_id=self._effective_run_id(ctx),
-                        step_index=ctx.run_step,
-                        messages=messages,
+                await self._save_snapshot(
+                    run_id=self._effective_run_id(ctx),
+                    step_index=ctx.run_step,
+                    messages=messages,
+                    conversation_id=ctx.conversation_id,
+                    parent_run_id=self.parent_run_id,
+                    agent_name=self.agent_name,
+                )
+                await ctx.emit(
+                    SnapshotSaved(
+                        persistence_run_id=self._effective_run_id(ctx),
                         conversation_id=ctx.conversation_id,
-                        parent_run_id=self.parent_run_id,
-                        agent_name=self.agent_name,
+                        step_index=ctx.run_step,
+                        state='complete',
                     )
                 )
-                snapshot_saved.set(len(messages))
         return result

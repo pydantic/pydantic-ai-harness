@@ -22,6 +22,9 @@ from collections.abc import Callable, Container, Coroutine
 from dataclasses import dataclass, field
 from typing import Any
 
+import anyio
+from opentelemetry import context as otel_context
+
 try:
     from pydantic_monty import (
         CollectString,
@@ -45,8 +48,13 @@ DispatchFn = Callable[[str, dict[str, Any]], Coroutine[Any, Any, Any]]
 
 MontyState = FunctionSnapshot | FutureSnapshot | NameLookupSnapshot | MontyComplete
 
-# A coroutine not yet scheduled on the event loop, or its running Task.
-PendingCall = asyncio.Task[Any] | Coroutine[Any, Any, Any]
+
+@dataclass
+class PendingCall:
+    """A dispatched call and the suspension context under which it executes."""
+
+    call: asyncio.Task[Any] | Coroutine[Any, Any, Any]
+    context: otel_context.Context
 
 
 def is_sandbox_panic(exc: BaseException) -> bool:
@@ -120,7 +128,8 @@ class MontyExecutor:
                     state = await self._resolve_futures(state)
         finally:
             cancelled: list[asyncio.Task[Any]] = []
-            for call in self._pending.values():
+            for pending in self._pending.values():
+                call = pending.call
                 if isinstance(call, asyncio.Task):
                     call.cancel()
                     cancelled.append(call)
@@ -131,8 +140,15 @@ class MontyExecutor:
                 # point; await them so dispatched work (e.g. sub-agent runs mutating shared
                 # usage) has fully unwound before this returns. `return_exceptions=True` keeps
                 # one task's teardown error from masking the original exception, and the
-                # results are deliberately discarded.
-                await asyncio.gather(*cancelled, return_exceptions=True)
+                # results are deliberately discarded. Shielded: run cancellation can land here
+                # with an enclosing anyio scope already cancelled, and that scope re-cancels
+                # its tasks on every event-loop cycle -- each delivery either aborts this await
+                # outright (abandoning the tasks mid-unwind) or is forwarded through the
+                # `gather` into every task, breaking any await their cleanup performs. The
+                # shield holds for anyio-scope cancellation; a raw second `Task.cancel()` can
+                # still pierce it.
+                with anyio.CancelScope(shield=True):
+                    await asyncio.gather(*cancelled, return_exceptions=True)
         return state
 
     async def _handle_function(self, snapshot: FunctionSnapshot) -> MontyState:
@@ -160,7 +176,7 @@ class MontyExecutor:
             for cid in list(self._pending):
                 self._pre_resolved[cid] = await _await_external(self._pending.pop(cid))
             try:
-                call = self.dispatch(name, snapshot.kwargs)
+                call = self._dispatch(snapshot, parallel=False)
             except Exception as exc:
                 return snapshot.resume({'exception': exc})
             # The wrapped outcome (`{'return_value': ...}` / `{'exception': ...}`) is already
@@ -169,7 +185,7 @@ class MontyExecutor:
 
         # Deferred execution -- resolved later at FutureSnapshot.
         try:
-            call = self.dispatch(name, snapshot.kwargs)
+            call = self._dispatch(snapshot, parallel=not self.global_sequential)
         except Exception as exc:
             # `dispatch` refused the call before building its coroutine (e.g. an exhausted
             # per-snippet budget). Deliver the error at the sandbox call site, the same way a
@@ -178,13 +194,20 @@ class MontyExecutor:
             # the snippet can still return them. Nothing was scheduled, so there is no task to
             # clean up and no further work is admitted.
             return snapshot.resume({'exception': exc})
-        if self.global_sequential:
-            # Keep the bare coroutine unscheduled; it's awaited one-at-a-time to avoid interleaving.
-            self._pending[snapshot.call_id] = call
-        else:
-            # Schedule now as a Task so concurrently-deferred calls actually run in parallel.
-            self._pending[snapshot.call_id] = asyncio.ensure_future(call)
+        self._pending[snapshot.call_id] = call
         return snapshot.resume({'future': ...})
+
+    def _dispatch(self, snapshot: FunctionSnapshot, *, parallel: bool) -> PendingCall:
+        # Compatibility with Monty before https://github.com/pydantic/monty/pull/885.
+        trace_context: Callable[[], otel_context.Context] = getattr(snapshot, 'trace_context', otel_context.get_current)
+        context = trace_context()
+        token = otel_context.attach(context)
+        try:
+            call = self.dispatch(snapshot.function_name, snapshot.kwargs)
+            # Tasks inherit the active context; bare coroutines need it restored when awaited.
+            return PendingCall(asyncio.ensure_future(call) if parallel else call, context)
+        finally:
+            otel_context.detach(token)
 
     async def _resolve_futures(self, snapshot: FutureSnapshot) -> MontyState:
         """Resolve the deferred calls a `FutureSnapshot` is waiting on."""
@@ -200,7 +223,7 @@ class MontyExecutor:
         # gather returns, so the cleanup in `run` can still cancel them if this is cancelled.
         gather_ids = [cid for cid in pending_ids if cid not in results]
         if gather_ids:
-            settled = await asyncio.gather(*(self._pending[cid] for cid in gather_ids), return_exceptions=True)
+            settled = await asyncio.gather(*(self._pending[cid].call for cid in gather_ids), return_exceptions=True)
             for cid, outcome in zip(gather_ids, settled):
                 del self._pending[cid]
                 results[cid] = _wrap_gathered(outcome)
@@ -210,10 +233,13 @@ class MontyExecutor:
 
 async def _await_external(call: PendingCall) -> ExternalReturnValue | ExternalException:
     """Await a single deferred call and wrap its outcome for Monty."""
+    token = otel_context.attach(call.context)
     try:
-        result = await call
+        result = await call.call
     except Exception as exc:
         return ExternalException(exception=exc)
+    finally:
+        otel_context.detach(token)
     return ExternalReturnValue(return_value=result)
 
 

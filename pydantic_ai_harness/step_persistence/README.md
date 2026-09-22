@@ -74,13 +74,36 @@ primitive for it (see [Three-level identity](#three-level-identity)).
   `(run_id, tool_call_id)` and providers reuse deterministic tool-call
   ids, so a silent collision would erase the `unknown_after_crash`
   signal. Use `conversation_id=` for multi-turn grouping instead.
-- **`agent_name` set, `run_id` unset** derives `'{agent_name}-{8-char-hex}'`,
-  freshly materialised in `for_run` per `.run()` call. Reusing one
-  capability instance across runs yields distinct ids
-  (`code_librarian-a3b2`, `code_librarian-c9d1`, and so on). This is the
-  recommended default for delegate capabilities.
-- **Neither set** falls back to `ctx.run_id` (pydantic_ai's auto-generated
-  id) per `.run()` call, and to a UUID4 if that is absent.
+- **`agent_name` set, `run_id` unset** derives
+  a path-safe base64url encoding of the complete `(agent_name, ctx.run_id)`
+  pair. The encoding is injective within `FileStepStore`'s 200-character
+  limit, so replay addresses the same stored run without collisions between
+  distinct accepted context ids. A longer derived id raises `ValueError`
+  before backend selection, including with the memory, SQLite, and Mongo
+  stores.
+- **Neither set** uses `ctx.run_id` unchanged. A missing context run id raises
+  `RuntimeError` because inventing one would disconnect replayed writes.
+
+## Durable execution
+
+`StepPersistence` has the stable capability id `step_persistence`, so it can
+be attached alongside a Pydantic AI durability capability without passing
+`id=`. Pass an explicit id only when the same agent has more than one
+`StepPersistence` instance.
+
+Six store boundaries are durable operations: registration identity, run
+registration, event append, snapshot save, tool-effect start, and tool-effect
+completion or failure. Every persisted timestamp is read inside one of those
+operations, so replay uses the journaled value instead of reading the workflow
+wall clock again. The journaled registration identity makes a retried
+registration idempotent while a distinct reuse of the same run id still fails.
+
+Events and snapshots written by the capability carry deterministic per-run
+idempotency keys. Every built-in store suppresses a key it already applied,
+while records created directly with `idempotency_key=None` retain append
+behavior. Snapshot keys use a per-run save sequence together with
+`step_index` and `state`. Replay produces the same sequence, while distinct
+snapshots at the same step and state retain their write order and newer history.
 
 The orchestrator pattern -- one logical agent serving many turns -- uses
 `conversation_id`, not a shared `run_id`:
@@ -313,12 +336,14 @@ configured retention can delete older snapshots.
     - `run.json` -- `RunRecord` (lineage)
     - `events.jsonl` -- append-only `StepEvent`s
     - `tool_effects.jsonl` -- append-only `ToolEffectRecord`s, scoped to this run
+    - `snapshot-keys.jsonl` -- replay-suppression keys retained independently
+      of snapshot pruning
     - `snapshots/{seq}.json` -- `ContinuableSnapshot`s, named by a per-run
       monotonic counter (NOT `step_index`, which would collide when the
       same `run_id` is reused across `Agent.run` calls -- `ctx.run_step`
       resets to 0 each call).
 - `SqliteStepStore(database='runs.db')` -- single SQLite file with tables
-  `runs`, `events`, `snapshots`, `tool_effects`, and a sibling `media`
+  `runs`, `events`, `snapshots`, `snapshot_idempotency_keys`, `tool_effects`, and a sibling `media`
   table for externalized blobs (see [Persisting media](#persisting-media)
   below). WAL mode is enabled; `tool_effects` upserts per
   `(run_id, tool_call_id)` so the latest state wins; snapshots use
@@ -330,11 +355,11 @@ configured retention can delete older snapshots.
   `check_same_thread=False` because hook calls are dispatched onto a
   worker thread.
 - `MongoStepStore(client= or db_url=, database=...)` -- MongoDB collections
-  `runs`, `events`, `snapshots`, `tool_effects`, and `counters` (atomic
-  `$inc` for monotonic `seq`). `runs._id = run_id` enforces the single-shot
-  `run_id` contract. Needs the `mongodb` extra
-  (`pip install pydantic-ai-harness[mongodb]`, which installs
-  `pymongo>=4.17.0`); pass a shared `AsyncMongoClient` as `client=`, or a
+  `runs`, `events`, `snapshots`, `snapshot_idempotency_keys`, `tool_effects`,
+  and `counters` (atomic `$inc` for monotonic `seq`). Run registration uses an
+  atomic insert by `runs._id = run_id`; duplicate ids raise `ValueError`.
+  Needs the `mongodb` extra
+  (which installs `pymongo>=4.17.0`); pass a shared `AsyncMongoClient` as `client=`, or a
   connection string as `db_url=` (the store then owns the client -- call
   `await store.aclose()` to release it).
   Externalizes individual parts at or above `media_threshold_bytes` by
@@ -353,11 +378,13 @@ IDs should still sanitise first.
 
 ### What `MongoStepStore` creates on first write
 
-The store issues `createIndex` on its first write, for eight indexes:
+The store issues `createIndex` on its first write, for ten indexes:
 `conversation_id` and `parent_run_id` (both sparse) plus `started_at` on
-`runs`; `(run_id, seq)` on `events`; `(run_id, seq)` and
+`runs`; `(run_id, seq)` and unique keyed `(run_id, idempotency_key)` on
+`events`; `(run_id, seq)`, unique keyed `(run_id, idempotency_key)`, and
 `(run_id, state, seq)` on `snapshots`; and a unique `(run_id, tool_call_id)`
-plus `(run_id, status)` on `tool_effects`. Its default
+plus `(run_id, status)` on `tool_effects`. The idempotency indexes include only
+documents whose key is a string, so `None` retains append behavior. Its default
 `MongoMediaStore` adds one more (see the [media docs](../media/)). Three
 consequences worth knowing before pointing the store at an existing
 deployment:
@@ -374,6 +401,20 @@ so their keys become BSON field names: keys containing `.` or starting with
 `$` need [MongoDB 5.0 or later](https://www.mongodb.com/docs/manual/core/dot-dollar-considerations/),
 and a key containing a NULL byte is rejected by the BSON encoder before it
 reaches the server. CI exercises both Mongo backends against `mongo:8`.
+
+Install MongoDB support:
+
+uv:
+
+```bash
+uv add "pydantic-ai-harness[mongodb]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-harness[mongodb]"
+```
 
 ## Bounding snapshot growth
 
@@ -440,6 +481,23 @@ upgrade-only: a release that predates text externalization treats every marker
 as binary, so it cannot validate a snapshot containing an externalized text
 marker. Keep a current reader for persisted snapshots that contain those
 markers.
+
+Reserved-key escaping is a second marker-format generation with the same rule
+for these stores: a payload using the marker format's namespaced keys is moved
+into a versioned reserved mapping (the `__harness_external_escaped_keys__`
+stash, stamped with the format version under `__harness_external_marker_format__`),
+and the current reader moves those values back to their own keys. Compatibility
+the other way is upgrade-only. A reader that predates the escaping format
+re-inlines the externalized field correctly, but it leaves both reserved keys
+sitting in the restored payload rather than removing them. A marker carrying
+both, stamped with a version this reader does not know, is rejected rather than
+restored with the reserved values stripped: `restore_media` raises `ValueError`,
+and `latest_snapshot` surfaces it to the caller for the file, sqlite, and mongo
+stores. `list_snapshots` is different: each store treats the failed snapshot as
+unparsable, skips it, and logs the error, so an unknown version shows up as a
+missing snapshot rather than an exception. That rejection is the version gate
+and is intended, but store users have to anticipate it. Keep a current reader
+for persisted snapshots that contain escaped markers.
 
 | StepStore           | Default `media_store`                  | Where blobs live                      |
 | ------------------- | --------------------------------------- | ------------------------------------- |
@@ -623,6 +681,115 @@ your own `MediaStore` (five methods: `put`, `get`, `exists`, `public_url`,
 `get_metadata`) and pass it via `store=` / `media_store=`. Please open an issue if you ship one -- we want to feed
 the eventual shared adapter layer with N >= 3 real implementations before
 abstracting.
+
+## Conversation heads and background names
+
+`pydantic_ai_harness.step_persistence.conversations` provides
+`SqliteConversationStore`, `ConversationSummary`, and `SavedConversation` for
+multi-turn applications. A conversation head is separate from per-run checkpoints:
+it includes accepted prompts and between-run edits such as compaction. Do not
+reconstruct it by concatenating overlapping run snapshots.
+
+`save(summary=..., messages=...)` compares the supplied content revision and
+returns the committed summary. A stale writer or a deleted session raises
+`ConversationConflict`. `get(conversation_id=...)` restores messages through the
+same media format used by step snapshots. `listing(query=..., limit=..., offset=...)`
+returns summaries without loading messages; search matches saved user/assistant
+text and metadata using Unicode case folding, including text entries within
+multimodal prompts. Search does not include tool output, reasoning, or discarded
+pre-compaction history. Unknown metadata schema versions are rejected.
+
+Metadata naming uses a separate version. `name(source=..., title=..., ...)` cannot
+overwrite a newer content revision, newer name, or a manual title. Naming does not
+change the activity timestamp. `delete(source=...)` removes the conversation and
+associated run records from the same SQLite database atomically, retaining shared
+media. It is not secure erasure. A local live PID marks an unfinished conversation
+as busy; this is not a distributed lease and the database must not be shared
+between hosts. PID reuse is conservatively treated as busy.
+
+The database is created owner-only where supported. Contents are not encrypted.
+There is no automatic conversation TTL or media garbage collection.
+
+`pydantic_ai_harness.step_persistence.naming` provides a tool-free naming agent
+and `SessionNamer`, a worker owned by the application's task group. `submit(id)`
+coalesces jobs in a queue bounded to ten sessions. `run()` processes one job at a
+time until its owner cancels it. `backfill(entries)` considers up to ten newest
+entries. Naming failures are logged at debug level and leave existing metadata
+usable; cancellation propagates. Applications must join the worker before closing
+its model clients or storage dependencies.
+
+Names consist of a short title, subtitle, and up to four tags. The model receives
+the prior title/detail plus a bounded 2,400-character current conversation tail.
+This is deliberately not a message-index cursor: compaction and recovery can
+replace the list. Generated names become eligible again after 16 content
+revisions. Manual names are not changed. Naming requests have a 60-second worker
+timeout and the provided `generate_name` helper allows at most two model requests
+and 250 output tokens. The helper's agent is named `session_namer`, has no tools,
+and does not inherit the foreground agent's capabilities.
+
+Core's agent spans attribute auxiliary model calls to `session_namer`; no second
+span hierarchy is emitted. Successful naming response token counts are stored
+separately from foreground history, including results rejected as stale while the
+session still exists. Failed or timed-out requests may incur provider usage not
+available to the application. Monetary pricing of auxiliary calls is not included
+in retained-history cost. Applications choose the naming model and disclose the
+additional provider requests to their users.
+
+## Earlier checkpoints and notifications
+
+Set `capture_frontier=True` to save accepted request histories before model
+requests and the model response frontier before tool execution. The default is
+`False` to preserve existing checkpoint frequency. CLAI enables it. A first model
+request failure can then retain its prompt, and a process killed mid-tool-cycle
+can retain the proposed calls and arguments even before a cycle settles.
+
+`inspect_recovery(store=..., run_id=...)` in
+`pydantic_ai_harness.step_persistence.recovery` returns the newest and settled
+snapshots, unresolved effects, and names of recorded completed/failed tools.
+It does not infer that an effect is safe to replay.
+
+These are still message checkpoints, not graph-state checkpoints. Snapshots at
+unsettled frontiers are `interrupted` and remain off the default read path.
+`after_run` compares final content, not only message count, to catch same-length
+or shortened history rewrites. Put the recorder before capabilities whose
+`after_run` transforms history: core runs after-hooks in reverse order. Snapshot
+message values are copied before storage so later mutations cannot alter a saved
+in-memory checkpoint through shared references.
+
+`SnapshotSaved` is a typed capability event emitted after a checkpoint write
+completes. It carries `persistence_run_id`, `conversation_id`, `step_index`, and
+`state`. Subscribe using core's `hooks.on.event(SnapshotSaved)` or CLAI's
+`host.on(SnapshotSaved)`. Store writes are the source of truth; notifications may
+repeat during durable replay and observer failures cannot undo committed writes.
+
+### Core boundary for stronger interrupted-step recovery
+
+Automatic execution recovery is not implemented. Two core contracts should be
+addressed before promising it:
+
+1. `on_run_error` should expose authoritative post-cleanup history. Today Harness
+   stashes a live list reference from node/request hooks because the outer error
+   context can reference the start-of-run list. That depends on core continuing
+   to mutate the working history in place. Core's cancellation result APIs are
+   useful to callers, but do not establish the same contract for every error hook.
+2. An awaited checkpoint boundary should expose normalized results as individual
+   tools settle, including accompanying user content, retries, and parallel
+   siblings. `after_tool_execute` sees raw results before all normalization;
+   `after_node_run` sees a settled batch. `FunctionToolResultEvent` exposes a
+   normalized result, but observing a stream is not an atomic commit of that
+   result with the tool-effect ledger and the execution frontier.
+
+A hard kill during a parallel batch can therefore leave a completed effect with
+no persisted result. A `started` effect is unknown after a crash, and even a
+`failed` tool may have made partial external changes. Returning to an older
+`complete` checkpoint does not undo those changes. Tools with external effects
+need their own idempotency/reconciliation strategy. No Harness event can make an
+external side effect atomic with a local SQLite write.
+
+Tests cover a real subprocess kill, early-request failure, final-history rewrite,
+revision conflicts, and bounded/cancelled naming. The kill test confirms that
+frontier capture survives without error hooks; it is not an exactly-once execution
+guarantee.
 
 ## What this capability does not do
 
