@@ -975,7 +975,7 @@ class TestReminder:
         assert not any(isinstance(item, CachePoint) for item in content)
         reminder_text = cast(str, content[1])
         assert '1. [~] Do X' in reminder_text
-        assert 'step-x' not in reminder_text
+        assert '[step-x]' in reminder_text
 
     async def test_breakpoint_anchors_list_content(self) -> None:
         store = InMemoryPlanStore()
