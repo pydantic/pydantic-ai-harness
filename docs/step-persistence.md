@@ -310,7 +310,7 @@ The helper reads the active `run_id` from the `StepPersistence` `ContextVar` and
     - `snapshot-keys.jsonl` -- replay-suppression keys retained independently of snapshot pruning
     - `snapshots/{seq}.json` -- `ContinuableSnapshot`s, named by a per-run monotonic counter (not `step_index`, which would collide when the same `run_id` is reused across `Agent.run` calls, since `ctx.run_step` resets to 0 each call).
 - `SqliteStepStore(database='runs.db')` -- single SQLite file with tables `runs`, `events`, `snapshots`, `snapshot_idempotency_keys`, `tool_effects`, and a sibling `media` table for externalized blobs (see [Persisting media](#persisting-media) below). WAL mode is enabled; `tool_effects` upserts per `(run_id, tool_call_id)` so the latest state wins; snapshots use `AUTOINCREMENT seq` to mirror `FileStepStore._next_snapshot_seq`. Databases created before the snapshot `state` column existed gain it automatically on open (existing rows read as `complete`). Pass `connection=` instead of `database=` to share a `sqlite3.Connection` with the rest of your application; the connection must be opened with `check_same_thread=False` because hook calls are dispatched onto a worker thread.
-- `MongoStepStore(client= or db_url=, database=...)` -- MongoDB collections `runs`, `events`, `snapshots`, `snapshot_idempotency_keys`, `tool_effects`, and `counters` (atomic `$inc` allocates the monotonic `seq`). Run registration uses an atomic insert by `runs._id = run_id`; duplicate ids raise `ValueError`. Needs the `mongodb` extra (`pip install pydantic-ai-harness[mongodb]`, which installs `pymongo>=4.17.0`); pass a shared `AsyncMongoClient` as `client=`, or a connection string as `db_url=` (the store then owns the client -- call `await store.aclose()` to release it). Individual parts at or above `media_threshold_bytes` externalize by default to a `MongoMediaStore` on the same client. That is a per-value offload, not an aggregate cap: a snapshot of many below-threshold parts can still exceed MongoDB's 16 MiB document limit and fail on insert, so lower the threshold if that is a risk for your workload.
+- `MongoStepStore(client= or db_url=, database=...)` -- MongoDB collections `runs`, `events`, `snapshots`, `snapshot_idempotency_keys`, `tool_effects`, and `counters` (atomic `$inc` allocates the monotonic `seq`). Run registration uses an atomic insert by `runs._id = run_id`; duplicate ids raise `ValueError`. Needs the `mongodb` extra (which installs `pymongo>=4.17.0`); pass a shared `AsyncMongoClient` as `client=`, or a connection string as `db_url=` (the store then owns the client -- call `await store.aclose()` to release it). Individual parts at or above `media_threshold_bytes` externalize by default to a `MongoMediaStore` on the same client. That is a per-value offload, not an aggregate cap: a snapshot of many below-threshold parts can still exceed MongoDB's 16 MiB document limit and fail on insert, so lower the threshold if that is a risk for your workload.
 
 All implement the same async `StepStore` protocol, so capability hooks never block the event loop on the file/sqlite backends (I/O is dispatched via `anyio.to_thread`); the Mongo backend is natively async.
 
@@ -325,6 +325,12 @@ The store issues `createIndex` on its first write, for ten indexes: `conversatio
 - Index builds against already-populated collections cost time and I/O on that first call.
 
 `RunRecord.metadata` and `StepEvent.metadata` are stored as nested documents, so their keys become BSON field names: keys containing `.` or starting with `$` need [MongoDB 5.0 or later](https://www.mongodb.com/docs/manual/core/dot-dollar-considerations/), and a key containing a NULL byte is rejected by the BSON encoder before it reaches the server. CI exercises both Mongo backends against `mongo:8`.
+
+Install MongoDB support:
+
+```bash
+pip/uv-add "pydantic-ai-harness[mongodb]"
+```
 
 ## Bounding snapshot growth
 
@@ -353,6 +359,8 @@ Bounded retention discards older per-step snapshots, including pre-compaction on
 `BinaryContent` payloads (images, audio, documents, video) inlined as base64 inside a snapshot would balloon every file or row containing the message; a large text part (e.g. a big tool-return string) does the same and can push a `MongoStepStore` snapshot past MongoDB's 16 MiB document cap ([#440](https://github.com/pydantic/pydantic-ai-harness/issues/440)). The file, sqlite, and mongo backends externalize any `BinaryContent.data`, and any part whose string `content` is at or above **64 KiB**, through a configured `MediaStore`, leaving a URI reference in the snapshot. The same `media_threshold_bytes` governs binary and text alike; there is no separate text knob. Round-trip is transparent: `latest_snapshot(...).messages[*]` returns the original `BinaryContent` bytes and text.
 
 Text externalization is not Mongo-only and has no opt-out short of `media_store=None`: the walker is shared, so an existing `FileStepStore` or `SqliteStepStore` deployment starts writing blobs for large text parts as well as binary ones from this release on. Snapshots written before it still restore -- the reader recognises the older binary marker shape. This compatibility is upgrade-only: a release that predates text externalization treats every marker as binary, so it cannot validate a snapshot containing an externalized text marker. Keep a current reader for persisted snapshots that contain those markers.
+
+Reserved-key escaping is a second marker-format generation with the same rule for these stores: a payload using the marker format's namespaced keys is moved into a versioned reserved mapping (the `__harness_external_escaped_keys__` stash, stamped with the format version under `__harness_external_marker_format__`), and the current reader moves those values back to their own keys. Compatibility the other way is upgrade-only. A reader that predates the escaping format re-inlines the externalized field correctly, but it leaves both reserved keys sitting in the restored payload rather than removing them. A marker carrying both, stamped with a version this reader does not know, is rejected rather than restored with the reserved values stripped: `restore_media` raises `ValueError`, and `latest_snapshot` surfaces it to the caller for the file, sqlite, and mongo stores. `list_snapshots` is different: each store treats the failed snapshot as unparsable, skips it, and logs the error, so an unknown version shows up as a missing snapshot rather than an exception. That rejection is the version gate and is intended, but store users have to anticipate it. Keep a current reader for persisted snapshots that contain escaped markers.
 
 | StepStore           | Default `media_store`                  | Where blobs live                      |
 | ------------------- | --------------------------------------- | ------------------------------------- |
@@ -485,6 +493,115 @@ pydantic_ai providers transparently download bytes from a URL when the target mo
 ### Persisting to unsupported backends
 
 DynamoDB, Postgres, Redis, GCS, and other backends are out of scope for this release. Write your own `StepStore` (about ten methods on a Protocol) or your own `MediaStore` (five methods: `put`, `get`, `exists`, `public_url`, `get_metadata`) and pass it via `store=` / `media_store=`. Please open an issue if you ship one -- we want to feed the eventual shared adapter layer with N >= 3 real implementations before abstracting.
+
+## Conversation heads and background names
+
+`pydantic_ai_harness.step_persistence.conversations` provides
+`SqliteConversationStore`, `ConversationSummary`, and `SavedConversation` for
+multi-turn applications. A conversation head is separate from per-run checkpoints:
+it includes accepted prompts and between-run edits such as compaction. Do not
+reconstruct it by concatenating overlapping run snapshots.
+
+`save(summary=..., messages=...)` compares the supplied content revision and
+returns the committed summary. A stale writer or a deleted session raises
+`ConversationConflict`. `get(conversation_id=...)` restores messages through the
+same media format used by step snapshots. `listing(query=..., limit=..., offset=...)`
+returns summaries without loading messages; search matches saved user/assistant
+text and metadata using Unicode case folding, including text entries within
+multimodal prompts. Search does not include tool output, reasoning, or discarded
+pre-compaction history. Unknown metadata schema versions are rejected.
+
+Metadata naming uses a separate version. `name(source=..., title=..., ...)` cannot
+overwrite a newer content revision, newer name, or a manual title. Naming does not
+change the activity timestamp. `delete(source=...)` removes the conversation and
+associated run records from the same SQLite database atomically, retaining shared
+media. It is not secure erasure. A local live PID marks an unfinished conversation
+as busy; this is not a distributed lease and the database must not be shared
+between hosts. PID reuse is conservatively treated as busy.
+
+The database is created owner-only where supported. Contents are not encrypted.
+There is no automatic conversation TTL or media garbage collection.
+
+`pydantic_ai_harness.step_persistence.naming` provides a tool-free naming agent
+and `SessionNamer`, a worker owned by the application's task group. `submit(id)`
+coalesces jobs in a queue bounded to ten sessions. `run()` processes one job at a
+time until its owner cancels it. `backfill(entries)` considers up to ten newest
+entries. Naming failures are logged at debug level and leave existing metadata
+usable; cancellation propagates. Applications must join the worker before closing
+its model clients or storage dependencies.
+
+Names consist of a short title, subtitle, and up to four tags. The model receives
+the prior title/detail plus a bounded 2,400-character current conversation tail.
+This is deliberately not a message-index cursor: compaction and recovery can
+replace the list. Generated names become eligible again after 16 content
+revisions. Manual names are not changed. Naming requests have a 60-second worker
+timeout and the provided `generate_name` helper allows at most two model requests
+and 250 output tokens. The helper's agent is named `session_namer`, has no tools,
+and does not inherit the foreground agent's capabilities.
+
+Core's agent spans attribute auxiliary model calls to `session_namer`; no second
+span hierarchy is emitted. Successful naming response token counts are stored
+separately from foreground history, including results rejected as stale while the
+session still exists. Failed or timed-out requests may incur provider usage not
+available to the application. Monetary pricing of auxiliary calls is not included
+in retained-history cost. Applications choose the naming model and disclose the
+additional provider requests to their users.
+
+## Earlier checkpoints and notifications
+
+Set `capture_frontier=True` to save accepted request histories before model
+requests and the model response frontier before tool execution. The default is
+`False` to preserve existing checkpoint frequency. CLAI enables it. A first model
+request failure can then retain its prompt, and a process killed mid-tool-cycle
+can retain the proposed calls and arguments even before a cycle settles.
+
+`inspect_recovery(store=..., run_id=...)` in
+`pydantic_ai_harness.step_persistence.recovery` returns the newest and settled
+snapshots, unresolved effects, and names of recorded completed/failed tools.
+It does not infer that an effect is safe to replay.
+
+These are still message checkpoints, not graph-state checkpoints. Snapshots at
+unsettled frontiers are `interrupted` and remain off the default read path.
+`after_run` compares final content, not only message count, to catch same-length
+or shortened history rewrites. Put the recorder before capabilities whose
+`after_run` transforms history: core runs after-hooks in reverse order. Snapshot
+message values are copied before storage so later mutations cannot alter a saved
+in-memory checkpoint through shared references.
+
+`SnapshotSaved` is a typed capability event emitted after a checkpoint write
+completes. It carries `persistence_run_id`, `conversation_id`, `step_index`, and
+`state`. Subscribe using core's `hooks.on.event(SnapshotSaved)` or CLAI's
+`host.on(SnapshotSaved)`. Store writes are the source of truth; notifications may
+repeat during durable replay and observer failures cannot undo committed writes.
+
+### Core boundary for stronger interrupted-step recovery
+
+Automatic execution recovery is not implemented. Two core contracts should be
+addressed before promising it:
+
+1. `on_run_error` should expose authoritative post-cleanup history. Today Harness
+   stashes a live list reference from node/request hooks because the outer error
+   context can reference the start-of-run list. That depends on core continuing
+   to mutate the working history in place. Core's cancellation result APIs are
+   useful to callers, but do not establish the same contract for every error hook.
+2. An awaited checkpoint boundary should expose normalized results as individual
+   tools settle, including accompanying user content, retries, and parallel
+   siblings. `after_tool_execute` sees raw results before all normalization;
+   `after_node_run` sees a settled batch. `FunctionToolResultEvent` exposes a
+   normalized result, but observing a stream is not an atomic commit of that
+   result with the tool-effect ledger and the execution frontier.
+
+A hard kill during a parallel batch can therefore leave a completed effect with
+no persisted result. A `started` effect is unknown after a crash, and even a
+`failed` tool may have made partial external changes. Returning to an older
+`complete` checkpoint does not undo those changes. Tools with external effects
+need their own idempotency/reconciliation strategy. No Harness event can make an
+external side effect atomic with a local SQLite write.
+
+Tests cover a real subprocess kill, early-request failure, final-history rewrite,
+revision conflicts, and bounded/cancelled naming. The kill test confirms that
+frontier capture survives without error hooks; it is not an exactly-once execution
+guarantee.
 
 ## What this capability does not do
 

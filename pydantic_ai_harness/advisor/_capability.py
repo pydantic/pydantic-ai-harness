@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -12,8 +11,9 @@ from pydantic_ai.exceptions import ModelRetry, UnexpectedModelBehavior, UserErro
 from pydantic_ai.messages import ModelResponse
 from pydantic_ai.models import ModelRequestContext, parse_model_id
 from pydantic_ai.native_tools import AdvisorTool
+from pydantic_ai.output import OutputSpec
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import AgentDepsT, AgentNativeTool, RunContext
+from pydantic_ai.tools import AgentDepsT, AgentNativeTool, RunContext, Tool
 
 _LIMIT_REACHED = 'Advisor consultation limit reached for this model request. Continue without further advice.'
 
@@ -54,6 +54,14 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
     separate Pydantic AI agent.
     """
 
+    output_type: OutputSpec[object]
+    """Output specification for local consultations, defaulting to text.
+
+    A non-default specification selects local execution in `auto` mode and is
+    incompatible with `native` mode. Successful consultations return the
+    validated output directly to the executor.
+    """
+
     max_uses: int | None
     """Maximum consultations in one executor model request.
 
@@ -81,6 +89,13 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
     Native execution keeps the provider's transcript behavior unchanged.
     """
 
+    id: str | None = 'advisor'
+    """One-off: an agent has one advisor, and its tool name is fixed.
+
+    Declared here rather than only passed up from `__init__`, so the class states it where a reader
+    -- and Pydantic AI, deciding what two of this capability under one `id` mean -- can see it.
+    """
+
     _local_uses: int = field(init=False, repr=False, default=0)
 
     def __init__(
@@ -88,6 +103,7 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
         model: ModelSelection,
         *,
         mode: Literal['auto', 'native', 'local'] = 'auto',
+        output_type: OutputSpec[object] = str,
         max_uses: int | None = None,
         max_tokens: int | None = None,
         caching: Literal['5m', '1h'] | None = None,
@@ -100,6 +116,10 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
         if max_tokens is not None and max_tokens < 1024:
             raise ValueError('Advisor.max_tokens must be at least 1024')
 
+        if mode == 'native' and output_type is not str:
+            raise ValueError("Advisor.output_type is not supported in mode='native'")
+
+        self.output_type = output_type
         self.model = model
         self.mode = mode
         self.max_uses = max_uses
@@ -116,18 +136,13 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
             raise ValueError("Advisor.max_uses is not supported by OpenRouter in mode='native'")
 
         native: AgentNativeTool[AgentDepsT] | bool
-        local: Callable[[RunContext[AgentDepsT], str], Awaitable[str]] | bool
+        local: Tool[AgentDepsT] | bool
         if mode == 'native':
             native = self._required_native_advisor
             local = False
         else:
 
-            async def advisor(ctx: RunContext[AgentDepsT], prompt: str) -> str:
-                """Consult a stronger model about a difficult or high-impact decision.
-
-                Include the complete question and all relevant context in `prompt`
-                because conversation history may not be available to the advisor.
-                """
+            async def advisor(ctx: RunContext[AgentDepsT], prompt: str) -> object:
                 if max_uses is not None:
                     if self._local_uses >= max_uses:
                         return _LIMIT_REACHED
@@ -136,10 +151,16 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
                 settings = ModelSettings(max_tokens=max_tokens) if max_tokens is not None else None
                 advisor_agent = Agent(
                     model,
-                    output_type=str,
+                    name='advisor',
+                    output_type=output_type,
                     instructions=(
-                        'You are an expert advisor. Give concise, actionable advice to the executor model '
-                        'about the question it sends you. Do not address the end user.'
+                        'You are an expert advisor. '
+                        + (
+                            'Give concise, actionable advice to the executor model about the question it sends you. '
+                            if output_type is str
+                            else "Answer the executor model's question using the configured output format. "
+                        )
+                        + 'Do not address the end user.'
                     ),
                     model_settings=settings,
                 )
@@ -154,8 +175,16 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
                     raise ModelRetry(str(e)) from e
                 return result.output
 
-            local = advisor
-            native = False if mode == 'local' else self._native_advisor
+            local = Tool(
+                advisor,
+                description=(
+                    'Consult a stronger model about a difficult or high-impact decision. '
+                    + ('' if output_type is str else 'Returns a validated answer in the configured output format. ')
+                    + 'Include the complete question and all relevant context in `prompt` '
+                    'because conversation history may not be available to the advisor.'
+                ),
+            )
+            native = False if mode == 'local' or output_type is not str else self._native_advisor
         super().__init__(
             native=native,
             local=local,
@@ -169,6 +198,7 @@ class Advisor(NativeOrLocalTool[AgentDepsT]):
         return Advisor(
             self.model,
             mode=self.mode,
+            output_type=self.output_type,
             max_uses=self.max_uses,
             max_tokens=self.max_tokens,
             caching=self.caching,

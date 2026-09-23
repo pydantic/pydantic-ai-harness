@@ -2,97 +2,86 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
-from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
 from pydantic_ai.tools import AgentDepsT
 
+from pydantic_ai_harness.coder._instructions import INSTRUCTIONS
 from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.filesystem import FileSystem
-from pydantic_ai_harness.planning import Planning
+from pydantic_ai_harness.repair_tool_arguments import RepairToolArguments
 from pydantic_ai_harness.repo_context import RepoContext
-from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, Shell
-from pydantic_ai_harness.subagents import SubAgent, SubAgents
-from pydantic_ai_harness.tool_output_limits import ToolOutputLimits
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS, MAX_FOREGROUND_WAIT, Shell
+from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Truncate
 
-DEFAULT_ALLOWED_COMMANDS: tuple[str, ...] = (
-    'git',
-    'rg',
-    'grep',
-    'find',
-    'ls',
-    'cat',
-    'sed',
-    'head',
-    'tail',
-    'python',
-    'uv',
-    'pytest',
-    'ruff',
-    'make',
-)
-"""Commands available to `Coder` unless an explicit allowlist is supplied."""
+FILE_TOOL_NAMES: tuple[str, ...] = ('read_file', 'write_file', 'edit_file', 'list_files', 'grep')
+"""The `FileSystem` tools `Coder` registers; `shell` covers directory creation, file metadata, and the rest."""
 
 
-def _explorer(workspace: str | Path) -> SubAgent[AgentDepsT]:
-    agent = Agent[AgentDepsT](  # pyright: ignore[reportCallIssue, reportArgumentType]
-        name='explorer',
-        description='Explore the codebase and answer questions without modifying anything',
-        instructions='Answer with concrete paths and evidence.',
-        capabilities=[
-            FileSystem[AgentDepsT](workspace, read_only=True),
-            RepoContext[AgentDepsT](workspace_dir=Path(workspace)),
-        ],
+class _BoundToolOutputs(ToolOutputLimits[AgentDepsT]):
+    id: str | None = None
+
+    def get_toolset(self) -> None:
+        """Coder uses bounded truncation, so no spill-retrieval tool is needed."""
+        return None
+
+
+MAX_READ_CHARS = 60000
+"""Characters of complete lines per `read_file`, kept under `MAX_OUTPUT_CHARS` so the output cap never cuts a read."""
+
+MAX_OUTPUT_CHARS = 64000
+"""Characters kept from any tool result."""
+
+
+def _file_system(workspace: Path, *, unrestricted: bool) -> FileSystem[AgentDepsT]:
+    file_system = FileSystem[AgentDepsT](
+        root_dir=workspace, content_hashes=False, max_read_chars=MAX_READ_CHARS, tools=FILE_TOOL_NAMES
     )
-    return SubAgent(agent)
+    if unrestricted:
+        return replace(file_system, root_dir=workspace.anchor, cwd=workspace, protected_patterns=[])
+    return file_system
 
 
 class Coder(CombinedCapability[AgentDepsT]):
-    """A complete coding-agent harness built as a regular combined capability.
+    """Autonomous local coding with six tools and context management.
 
-    See the class definition and [Coder docs](https://pydantic.dev/docs/ai/harness/coder/) for the exact composition.
-
-    It ships with no default instructions: modern models don't need procedural coaching, and the composed capabilities
-    contribute their own tool guidance. Pass `instructions=` to add your own.
-
-    The command allowlist is a guardrail against accidents, not a security boundary. Validation checks only the first
-    token, and allowed commands such as `python`, `git`, `uv`, and `make` can spawn arbitrary processes. Run untrusted
-    work in an OS-level sandbox such as `ModalSandbox` or a container.
+    Commands are unrestricted and can outlive runs. Use an OS sandbox for
+    untrusted work. Additional instructions supplement the default guidance.
+    `repo_context=False` leaves out the bundled `RepoContext`, for hosts that
+    bind their own and would otherwise load the instruction files twice.
     """
 
     def __init__(
         self,
         workspace: str | Path = '.',
         *,
-        allowed_commands: Sequence[str] | None = None,
-        subagents: Sequence[SubAgent[AgentDepsT]] | None = None,
         instructions: str | None = None,
+        unrestricted_filesystem: bool = False,
+        repo_context: bool = True,
     ) -> None:
-        delegates = [_explorer(workspace)] if subagents is None else subagents
-        capabilities: list[AbstractCapability[AgentDepsT]] = []
-        if instructions is not None:
-            capabilities.append(Capability[AgentDepsT](instructions=instructions))
-        capabilities.extend(
-            [
-                FileSystem[AgentDepsT](workspace),
-                Shell[AgentDepsT](
-                    cwd=workspace,
-                    allowed_commands=DEFAULT_ALLOWED_COMMANDS if allowed_commands is None else allowed_commands,
-                    denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
-                ),
-                RepoContext[AgentDepsT](workspace_dir=Path(workspace)),
-                Planning[AgentDepsT](),
-            ]
-        )
-        if delegates:
-            capabilities.append(SubAgents[AgentDepsT](agents=delegates, agent_folders=None))
-        capabilities.extend(
-            [
-                ClearToolResults[AgentDepsT](max_fraction=0.7),
-                WarnNearLimits[AgentDepsT](max_context_fraction=0.9),
-                ToolOutputLimits[AgentDepsT](),
-            ]
-        )
+        root = Path(workspace).resolve()
+        capabilities: list[AbstractCapability[AgentDepsT]] = [
+            Capability[AgentDepsT](instructions=INSTRUCTIONS + ('\n' + instructions if instructions else '')),
+            _file_system(root, unrestricted=unrestricted_filesystem),
+            Shell[AgentDepsT](
+                cwd=root,
+                denied_commands=[],
+                default_timeout=MAX_FOREGROUND_WAIT,
+                allow_interactive=True,
+                denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
+                tools=['shell'],
+            ),
+        ]
+        if repo_context:
+            capabilities.append(RepoContext[AgentDepsT](workspace_dir=root, expose_inventory_tool=False))
+        capabilities += [
+            ClearToolResults[AgentDepsT](max_fraction=0.7),
+            WarnNearLimits[AgentDepsT](max_context_fraction=0.9),
+            _BoundToolOutputs[AgentDepsT](
+                id=None, bands=[Band(over=MAX_OUTPUT_CHARS, action=Truncate(max_chars=MAX_OUTPUT_CHARS))]
+            ),
+            RepairToolArguments[AgentDepsT](),
+        ]
         super().__init__(capabilities)

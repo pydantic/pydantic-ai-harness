@@ -140,7 +140,7 @@ jobs:
           print(' '.join(f'--upgrade-package {re.match(r"[A-Za-z0-9._-]+", spec).group()}' for spec in specs))
           PY
           )
-          uv sync --all-extras --group lint --group dev ${upgrade_overridden}
+          uv sync --all-packages --all-extras --group lint --group dev ${upgrade_overridden}
 
       # The invariant this workflow exists for: every overridden package resolved to something
       # the candidate declares it supports. Without this, an override that quietly vetoes a

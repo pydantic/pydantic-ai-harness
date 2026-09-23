@@ -85,6 +85,20 @@ acts on the run and one verb phrase states its entire contract. Never invent a
 nominalization for an action, and never name a capability after the problem it
 solves.
 
+## Telemetry
+
+OpenTelemetry is part of a feature's design, not a follow-up. Every new
+capability decides what it emits before it merges, from the point of view of
+someone operating a run in production and asking what happened, why the run
+changed course, and what it cost.
+
+Emitting nothing is a valid answer when core's own spans already cover the work.
+It is an answer to state in the docs, not a step to skip.
+
+The house pattern (spans on `ctx.tracer`, attribute naming, content behind
+`trace_include_content`) is in `agent_docs/capability-authoring.md`
+"Telemetry".
+
 ## Coding standards
 
 - Python 3.10+ (target version for pyright and ruff)
@@ -138,6 +152,30 @@ CI runs the repository-wide typecheck, test, and combined coverage gates.
 Do not run repository-wide Pyright, pytest, or coverage locally.
 If CI reports a coverage gap, run coverage only for the flagged file or focused test.
 
+### Workspace And Python 3.10
+
+```bash
+uv sync --locked --all-packages --all-extras --group lint
+```
+
+Harness and `pydantic-clai2` share the root `uv.lock`, `.venv`, and Pyright
+configuration. Workspace commands require Python 3.11+ because CLAI depends on
+Termflow. Harness's package metadata and Pyright target remain Python 3.10+.
+Tracking issue: https://github.com/pydantic/pydantic-ai-harness/issues/875.
+
+```bash
+uv venv /tmp/harness-py310 --python 3.10
+uv pip install --python /tmp/harness-py310/bin/python --resolution lowest-direct --group dev \
+  --editable . --requirements pyproject.toml --all-extras
+/tmp/harness-py310/bin/python -m pytest -p no:cacheprovider tests/code_mode
+```
+
+Use `uv pip` for Python 3.10 to resolve Harness without CLAI's Python requirement.
+CI retains Python 3.10 slim, all-extras, and lowest-versions jobs. The slim and
+all-extras installs use the shared lock's versions as ceilings, allowing older
+releases when a locked dependency requires Python 3.11+. Run the environment's
+Python directly so `uv run` does not select the workspace interpreter.
+
 ## File structure
 
 The tree is discoverable by listing it; only the conventions that are not are
@@ -175,6 +213,11 @@ need.
   `from pydantic_ai_harness.filesystem._toolset import _content_hash`). When a
   branch is only reachable by calling a private helper directly, mark it
   `# pragma: no cover` rather than reaching into the helper from a test.
+- Test async behavior directly, following `agent_docs/concurrency.md`: assert
+  the cancellation, the ordering, or the cleanup itself rather than the output
+  it happens to produce; order steps with `Event`s instead of sleeps; and reach
+  the real trigger (a real outer `anyio` cancel scope, the Trio parametrization
+  where the suite has it) rather than a stand-in.
 
 ## Contributing rules for AICAs
 

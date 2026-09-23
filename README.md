@@ -18,8 +18,16 @@ Everything here is one primitive: a [capability](https://ai.pydantic.dev/capabil
 
 Install with [`uv`](https://docs.astral.sh/uv/):
 
+uv:
+
 ```bash
 uv add "pydantic-ai-harness[anthropic]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-harness[anthropic]"
 ```
 
 ```python
@@ -33,16 +41,24 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-That's a complete [coding agent](pydantic_ai_harness/coder/): [workspace-rooted file access](pydantic_ai_harness/filesystem/), [allowlisted shell](pydantic_ai_harness/shell/), [repo orientation](pydantic_ai_harness/repo_context/), [planning](pydantic_ai_harness/planning/), a read-only [explorer sub-agent](pydantic_ai_harness/subagents/), and [context management](pydantic_ai_harness/compaction/) that survives long sessions, and it runs anywhere a Pydantic AI agent runs. [`agent.to_cli_sync()`](https://ai.pydantic.dev/cli/) opens it as a chat in your terminal, [`agent.to_web()`](https://ai.pydantic.dev/web/) in the browser, and [`Coder`](pydantic_ai_harness/coder/)'s exported `coder_agent` runs without writing a file at all, combined with [`clai`](https://ai.pydantic.dev/cli/) (the Pydantic AI CLI) and [`uvx`](https://docs.astral.sh/uv/guides/tools/):
+Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
 ```bash
-uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
 ```
 
 Every model works: swap the string for [any provider's](https://ai.pydantic.dev/models/). Need more? Add capabilities to the list; here's the same coder on `gpt-5.6-sol`, with web search and cross-session memory:
 
+uv:
+
 ```bash
 uv add "pydantic-ai-slim[openai]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-slim[openai]"
 ```
 
 ```python
@@ -65,66 +81,22 @@ agent = Agent(
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is not a framework inside the framework; it's a [`CombinedCapability`](https://ai.pydantic.dev/capabilities/custom/) bundling the same blocks you can use directly. This is the exact agent the exported [`coder_agent`](pydantic_ai_harness/coder/) gives you, written out block by block:
+`Coder` is a regular combined capability: [`FileSystem`](pydantic_ai_harness/filesystem/) with five of its tools and content hashes off, [`Shell`](pydantic_ai_harness/shell/) with its persistent `shell` tool and no allowlist, [`RepoContext`](pydantic_ai_harness/repo_context/), [`ClearToolResults` and `WarnNearLimits`](pydantic_ai_harness/compaction/), and a bounded [`ToolOutputLimits`](pydantic_ai_harness/tool_output_limits/), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](pydantic_ai_harness/coder/) lists the exact configuration.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
 ```python
-from pathlib import Path
-
 from pydantic_ai import Agent
-from pydantic_ai_harness import (
-    ClearToolResults,
-    FileSystem,
-    LLM_API_KEY_ENV_PATTERNS,
-    Planning,
-    RepoContext,
-    Shell,
-    SubAgent,
-    SubAgents,
-    ToolOutputLimits,
-    WarnNearLimits,
-)
-
-allowed_commands = [
-    'git', 'rg', 'grep', 'find', 'ls', 'cat', 'sed', 'head', 'tail',
-    'python', 'uv', 'pytest', 'ruff', 'make',
-]
-
-explorer = SubAgent(
-    Agent(
-        name='explorer',
-        description='Explore the codebase and answer questions without modifying anything',
-        instructions='Answer with concrete paths and evidence.',
-        capabilities=[
-            FileSystem('.', read_only=True),
-            RepoContext(workspace_dir=Path('.')),
-        ],
-    )
-)
+from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
     'anthropic:claude-fable-5',
     name='coder',
-    instructions='You are a coding agent built on Pydantic AI.',
-    capabilities=[
-        FileSystem('.'),  # read/write/edit/search, path-traversal safe
-        Shell(  # allowlisted commands, LLM API keys stripped from their environment
-            cwd='.',
-            allowed_commands=allowed_commands,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
-        ),
-        RepoContext(workspace_dir=Path('.')),  # loads AGENTS.md/CLAUDE.md + repo structure
-        Planning(),  # structured task plans the model maintains
-        SubAgents(agents=[explorer], agent_folders=None),  # delegate exploration off the main context
-        ClearToolResults(max_fraction=0.7),  # clears old tool results near the limit
-        WarnNearLimits(max_context_fraction=0.9),  # warns the model before it hits limits
-        ToolOutputLimits(),  # bounds oversized tool results
-    ],
+    capabilities=[Coder('.')],
 )
 ```
 
-Start from the harness and remove what you don't want, or start from the blocks and build up; both are first-class. Constructor arguments (working directory, command allowlist, window sizes) thread through to the underlying capabilities.
+See the Coder documentation for tool signatures, persistent shell lifecycle, and migration from the previous planning/delegation composition.
 
 ## Capabilities
 
@@ -136,7 +108,7 @@ Complete agent stacks as regular combined capabilities: one import gives you a w
 
 | Harness | Package | What it provides |
 |---|---|---|
-| [Coder](pydantic_ai_harness/coder/) | Harness | A complete coding-agent stack: files, shell, repo context, planning, a read-only explorer sub-agent, and context controls |
+| [Coder](pydantic_ai_harness/coder/) | Harness | Six coding tools, persistent shell commands, autonomous guidance, and context controls |
 | [Researcher](pydantic_ai_harness/researcher/) | Harness | A complete web-research stack: search, page fetching, a delegated sub-researcher, and bounded tool output |
 
 ### Execution environments
@@ -145,8 +117,8 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 
 | Capability | Package | What it does |
 |---|---|---|
-| [FileSystem](pydantic_ai_harness/filesystem/) | Harness | Read, write, edit, search files under a root; path-traversal and symlink safe, secrets read-only |
-| [Shell](pydantic_ai_harness/shell/) | Harness | Command execution with allowlists, denylists, timeouts, and credential-stripping |
+| [FileSystem](pydantic_ai_harness/filesystem/) | Harness | Read, write, edit, list, and search files under a root, with opt-in ripgrep tools; path-traversal and symlink safe, secrets read-only |
+| [Shell](pydantic_ai_harness/shell/) | Harness | Command execution with allowlists, denylists, timeouts, credential-stripping, and opt-in commands that outlive the run |
 | [Modal Sandbox](pydantic_ai_harness/modal_sandbox/) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
 
 ### Tools & native abilities
@@ -188,6 +160,7 @@ How the agent thinks and divides the work.
 | [Subagents](pydantic_ai_harness/subagents/) | Harness | Delegate self-contained tasks to named child agents |
 | [Dynamic Workflow](pydantic_ai_harness/dynamic_workflow/) | Harness | The model orchestrates sub-agents from one Python script: fan-out, chain, vote in a single tool call, with hard `max_agent_calls` budgets |
 | [Advisor](pydantic_ai_harness/advisor/) | Harness | Let an executor consult a stronger model mid-run |
+| [Background Tools](pydantic_ai_harness/background_tools/) | Harness | Run selected tools concurrently; results arrive as follow-up messages |
 
 ### Context management
 
@@ -220,12 +193,15 @@ Bounding what the agent may do, and keeping it on-instructions.
 
 | Capability | Package | What it does |
 |---|---|---|
+| [Repair Tool Arguments](pydantic_ai_harness/repair_tool_arguments/) | Harness | Repair malformed JSON tool arguments before schema validation. |
 | [Guardrails](pydantic_ai_harness/guardrails/) | Harness | Validate/block/redact user input, tool calls, tool results, and output, including secret masking and parallel async guards |
 | [Prompt Injection Defender](pydantic_ai_harness/prompt_injection_defender/) | Harness | Classify local tool results for indirect prompt injection and optionally withhold high-risk results |
 | [Spend Limits](pydantic_ai_harness/spend/) | Harness | Cross-window USD/token budgets and per-response cost tracking, per model and per tenant |
+| [Ask User](pydantic_ai_harness/ask_user/) | Harness | Let the model ask the user multiple-choice questions mid-run; you supply the answerer (terminal, web, test) |
 | [Tool approval](https://ai.pydantic.dev/deferred-tools#human-in-the-loop-tool-approval) | Core | Flag tool calls that need human approval before they run |
 | [Handle Deferred Tool Calls](https://ai.pydantic.dev/capabilities/handle-deferred-tool-calls/) | Core | Resolve approval-deferred tool calls programmatically |
 | [System Reminders](pydantic_ai_harness/system_reminders/) | Harness | Cache-safe re-injection of guidance mid-run to counter instruction fade |
+| [Trajectory Judge](pydantic_ai_harness/trajectory_judge/) | Harness | A second model reviews the live run every N requests over a sliding token window and steers it mid-run |
 
 ### Self-extension
 
@@ -240,6 +216,7 @@ Outside the loop: how runs persist, survive failures, and get observed and confi
 | Capability | Package | What it does |
 |---|---|---|
 | [Durable execution](https://ai.pydantic.dev/capabilities/durable_execution/overview/) | Core | Runs that survive restarts and failures on [Temporal](https://ai.pydantic.dev/capabilities/durable_execution/temporal/), [DBOS](https://ai.pydantic.dev/capabilities/durable_execution/dbos/), or [Prefect](https://ai.pydantic.dev/capabilities/durable_execution/prefect/), with [Restate](https://ai.pydantic.dev/capabilities/durable_execution/restate/), [Kitaru](https://ai.pydantic.dev/capabilities/durable_execution/kitaru/), and [Airflow](https://ai.pydantic.dev/capabilities/durable_execution/airflow/) integrations |
+| [AWS Lambda durability](pydantic_ai_harness/aws_lambda/) | Harness | Checkpoint model requests and tool calls into AWS Lambda durable function steps |
 | [Step Persistence](pydantic_ai_harness/step_persistence/) | Harness | Save, restore, resume (`continue_run`), and fork (`fork_run`) runs; file/SQLite/Mongo backends |
 | [Instrumentation](https://ai.pydantic.dev/capabilities/instrumentation/) | Core | OpenTelemetry GenAI spans for every model and tool call; the raw material for [Logfire](https://pydantic.dev/logfire) traces |
 | [Managed Prompt](pydantic_ai_harness/logfire/) | Harness | Back instructions with a [Logfire](https://pydantic.dev/logfire)-managed prompt; version and roll out without redeploying |
@@ -291,8 +268,16 @@ Everything is observable: `logfire.instrument_pydantic_ai()` gives you [a full t
 
 ## Installation
 
+uv:
+
 ```bash
 uv add pydantic-ai-harness
+```
+
+pip:
+
+```bash
+pip install pydantic-ai-harness
 ```
 
 This installs [`pydantic-ai-slim`](https://ai.pydantic.dev/install/) with it, so it works on its own; you don't need to install Pydantic AI separately. Model providers and the CLI come via extras that pass through to Pydantic AI: `pydantic-ai-harness[anthropic]`, `[cli]`. Some capabilities need their own extra for optional dependencies; each capability's page gives its exact install line. Requires Python 3.10+.

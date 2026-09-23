@@ -13,11 +13,16 @@ import functools
 import warnings as _warnings
 from collections.abc import AsyncIterator
 from dataclasses import replace as dc_replace
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 from unittest.mock import MagicMock
+from uuid import UUID
 
+import anyio
 import pytest
+from pydantic import BaseModel
 from pydantic_ai import (
     AbstractToolset,
     Agent,
@@ -66,8 +71,8 @@ from pydantic_ai_harness.code_mode._capability import (
 from pydantic_ai_harness.code_mode._toolset import (  # pyright: ignore[reportPrivateUsage]
     _SEARCH_TOOLS_MODIFIER,
     _TOOL_SEARCH_ADDENDUM,
-    _global_mode_is_sequential,
     _sanitize_tool_name,
+    global_mode_is_sequential,
 )
 
 _entered_toolsets: list[CodeModeToolset[Never]] = []
@@ -165,6 +170,48 @@ class Person(TypedDict):
 def lookup_person(person: Person, count: int = 1) -> str:
     """Look up details for a person."""
     return f'{count}x {person["name"]} @ {person["home"]["street"]}'
+
+
+class Receipt(BaseModel):
+    """Fields whose Python type is not a JSON scalar."""
+
+    amount: Decimal
+    ident: UUID
+    when: datetime
+
+
+def get_receipt() -> Receipt:
+    """Fetch a receipt."""
+    return Receipt(
+        amount=Decimal('1.50'),
+        ident=UUID('00000000-0000-0000-0000-000000000001'),
+        when=datetime(2026, 1, 1),
+    )
+
+
+def get_prices() -> dict[Decimal, str]:
+    """Fetch prices by amount."""
+    return {Decimal('1.50'): 'USD'}
+
+
+def get_labels() -> dict[int, str]:
+    """Fetch labels by id."""
+    return {1: 'one'}
+
+
+def get_blobs() -> set[bytes]:
+    """Fetch binary blobs."""
+    return {b'\xff\xfe'}
+
+
+def get_sentinel() -> Any:
+    """Fetch a sentinel."""
+    return ...
+
+
+def get_colliding_labels() -> Any:
+    """Fetch labels whose keys collide once stringified."""
+    return {1: 'from-int', '1': 'from-str'}
 
 
 # Hand-built `ToolDefinition` objects + a tiny stub toolset are used by
@@ -371,6 +418,94 @@ class TestCodeMode:
             tools['run_code'],
         )
         assert result.return_value == {'output': 'Hello, Alice!\n'}
+
+    async def test_tool_result_crosses_in_the_shape_the_stub_declares(self) -> None:
+        """`Decimal`, `UUID` and `datetime` reach the sandbox as their JSON form.
+
+        `_build_type_check_stubs` derives the stub from the tool's JSON schema, so
+        those fields are declared `str`. Dumping in Python mode disagreed with that:
+        Monty rejects `Decimal` and `UUID` outright, and a `datetime` arrived where
+        the stub promised a `str`, so the type check passed and the snippet failed
+        at runtime.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_receipt))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "r = await get_receipt()\n[r['amount'], r['ident'], r['when']]"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == [
+            '1.50',
+            '00000000-0000-0000-0000-000000000001',
+            '2026-01-01T00:00:00',
+        ]
+
+        # The un-dumped result is still what the message history records.
+        assert result.metadata['tool_returns']['pyd_ai_code_mode__1'].content == get_receipt()
+
+    async def test_mapping_keys_cross_as_the_strings_the_stub_declares(self) -> None:
+        """A `Decimal` key reaches the sandbox as `'1.50'`, not as a `Decimal`.
+
+        JSON object keys are always strings, so the stub declares `dict[str, str]`
+        whatever the Python key type is. Leaving the key alone hit the same two
+        failures as the values: Monty rejects a `Decimal` key outright.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_prices))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "p = await get_prices()\np['1.50']"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == 'USD'
+
+    async def test_int_mapping_keys_cross_as_the_strings_the_stub_declares(self) -> None:
+        """An `int` key reaches the sandbox as `'1'`, so indexing with the declared `str` works.
+
+        This is the silent half: the stub declares `dict[str, str]`, so a snippet
+        indexing with a `str` type-checked and then raised `KeyError` against the
+        `int` key that actually arrived.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_labels))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = "labels = await get_labels()\n[labels['1'], list(labels.keys())]"
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == ['one', ['1']]
+
+    async def test_binary_survives_inside_a_set(self) -> None:
+        """A `set` recurses like the other array containers, so its binary leaves stay `bytes`.
+
+        Sending the set to `to_jsonable_python` whole would utf-8 decode the payload,
+        which arbitrary bytes fail.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_blobs))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'blobs = await get_blobs()\nblobs'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value == [b'\xff\xfe']
+
+    async def test_ellipsis_crosses_as_itself(self) -> None:
+        """Monty holds `Ellipsis`, and JSON has no form for it, so it is left alone."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_sentinel))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'x = await get_sentinel()\nx is ...'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value is True
+
+    async def test_mapping_keys_that_collide_once_stringified_are_rejected(self) -> None:
+        """`1` and `'1'` both render as `'1'`, which would drop one value silently."""
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(get_colliding_labels))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        code = 'await get_colliding_labels()'
+        with pytest.raises(ModelRetry, match='renders as the JSON key'):
+            await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
 
     async def test_run_code_can_chain_multiple_tool_calls_in_one_snippet(self) -> None:
         """A realistic LLM snippet that calls two tools in one `run_code` invocation."""
@@ -650,9 +785,78 @@ class TestCodeMode:
 
         assert executed == [0, 1, 2]
         message = exc_info.value.message
-        assert '3 nested tool calls started before the limit was reached' in message
+        assert '3 nested tool calls started before execution stopped' in message
         for value in (0, 1, 2):
             assert f"record({{'value': {value}}}) returned {value}" in message
+
+    async def test_suspensions_are_cumulative_and_need_explicit_restart(self) -> None:
+        executed: list[int] = []
+
+        def record(value: int) -> int:
+            executed.append(value)
+            return value
+
+        wrapper = CodeMode[object](resource_limits={'max_suspensions': 4}).get_wrapper_toolset(
+            _build_function_toolset(record)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        first = await wrapper.call_tool(
+            'run_code', {'code': 'saved = await record(value=0)\nsaved'}, ctx, tools['run_code']
+        )
+        assert first.return_value == 0
+        with pytest.raises(ModelRetry) as exhausted:
+            await wrapper.call_tool(
+                'run_code', {'code': 'for i in range(1, 4):\n    await record(value=i)'}, ctx, tools['run_code']
+            )
+        assert executed == [0, 1]
+        message = exhausted.value.message
+        assert 'suspension limit 4 exceeded' in message
+        assert "record({'value': 1}) returned 1" in message
+        assert '`max_suspensions`' in message
+        assert '`restart: true`' in message
+        assert 'discards all REPL variables, imports and definitions' in message
+        assert 'do not replay completed side effects' in message
+
+        with pytest.raises(ModelRetry, match='suspension limit 4 exceeded'):
+            await wrapper.call_tool('run_code', {'code': 'await record(value=2)'}, ctx, tools['run_code'])
+        assert executed == [0, 1]
+        kept = await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+        assert kept.return_value == 0
+
+        fresh = await wrapper.call_tool(
+            'run_code', {'code': 'await record(value=99)', 'restart': True}, ctx, tools['run_code']
+        )
+        assert fresh.return_value == 99
+        assert executed == [0, 1, 99]
+        with pytest.raises(ModelRetry, match="name 'saved' is not defined"):
+            await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+
+    async def test_suspension_wording_in_tool_error_does_not_require_restart(self) -> None:
+        def boom() -> None:
+            raise RuntimeError('suspension limit 1000 exceeded')
+
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(boom))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        await wrapper.call_tool('run_code', {'code': 'saved = 42'}, ctx, tools['run_code'])
+        with pytest.raises(ModelRetry) as error:
+            await wrapper.call_tool('run_code', {'code': 'await boom()'}, ctx, tools['run_code'])
+        assert "If this reports the sandbox session's `max_suspensions` limit" in error.value.message
+        assert 'before the limit was reached' not in error.value.message
+        result = await wrapper.call_tool('run_code', {'code': 'saved'}, ctx, tools['run_code'])
+        assert result.return_value == 42
+
+    @pytest.mark.parametrize('limit', [0, -1])
+    async def test_suspension_budget_must_be_positive(self, limit: int) -> None:
+        wrapper = CodeModeToolset[object](
+            wrapped=_build_function_toolset(add), resource_limits={'max_suspensions': limit}
+        )
+        with pytest.raises(UserError, match='`max_suspensions` must be at least 1'):
+            await wrapper.__aenter__()
 
     async def test_duration_exhaustion_points_at_restart(self) -> None:
         """A spent duration allowance tells the model to restart, not to rewrite the snippet.
@@ -778,6 +982,7 @@ class TestCodeMode:
                 'y = 0\nfor i in range(100_000_000):\n    y += i\ny',
             ),
             'max_memory': ({'max_memory': 8 * 1024 * 1024}, 'x = [0] * 50_000_000\nlen(x)'),
+            'max_suspensions': ({'max_suspensions': 2}, 'await add(a=3, b=4)'),
         }
         assert set(exhaust_by_limit) == set(CodeModeResourceLimits.__annotations__), (
             'a new resource limit needs a case here, so that exhausting it is shown to still '
@@ -1042,7 +1247,7 @@ class TestCodeMode:
         assert 'more not shown' in message
         # The count is the part that survives truncation, so it has to stay exact: it is what
         # tells the model the visible list is incomplete.
-        assert '30 nested tool calls started before the limit was reached' in message
+        assert '30 nested tool calls started before execution stopped' in message
         assert 'Account for all 30 before retrying' in message
 
     async def test_exhausted_budget_on_sequential_tool_preserves_completed_calls(self) -> None:
@@ -2517,6 +2722,102 @@ class TestCodeMode:
         with pytest.raises(ModelRetry, match='Type error in code'):
             await wrapper.call_tool('run_code', {'code': 'x'}, ctx, tools['run_code'])
 
+    async def test_cancelled_scope_teardown_awaits_dispatched_work(self) -> None:
+        """The executor's cleanup `gather` is shielded from an already-cancelled anyio
+        scope, so still-pending dispatched work unwinds gracefully before `run_code`
+        returns (#559).
+
+        The sandbox defers `blocker()` and `cleanup_tool()`, then calls the sequential
+        `barrier()`. The barrier awaits `blocker` first, leaving `cleanup_tool`'s task
+        in `_pending`; cancelling the scope kills `blocker` at the barrier await, so
+        the executor's cleanup owns a still-running dispatched task while the enclosing
+        scope stays cancelled. Without the shield, that scope re-cancels the host every
+        event-loop cycle: either the cleanup `gather` is abandoned outright (the pending
+        task outlives `run_code`) or each re-cancel is forwarded through the `gather` to
+        the pending task, breaking every await of its cancellation handler. With the
+        shield the task sees exactly one cancellation, its handler's awaits survive, and
+        the runner stays blocked in the cleanup until the handler is released. Sequencing
+        is event-driven; the yield loop only gives an unshielded cleanup cycles to
+        misbehave.
+        """
+        blocker_started = asyncio.Event()
+        cleanup_started = asyncio.Event()
+        cancel_seen = asyncio.Event()
+        release = asyncio.Event()
+        unwound = asyncio.Event()
+        extra_cancels = 0
+
+        async def blocker() -> str:
+            blocker_started.set()
+            await asyncio.Event().wait()
+            return 'unreachable'  # pragma: no cover
+
+        async def cleanup_tool() -> str:
+            nonlocal extra_cancels
+            cleanup_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancel_seen.set()
+                while not release.is_set():
+                    try:
+                        await release.wait()
+                    except asyncio.CancelledError:  # pragma: no cover - regression path without the teardown shield
+                        extra_cancels += 1
+                unwound.set()
+                raise
+            return 'unreachable'  # pragma: no cover
+
+        def barrier() -> str:
+            return 'unreachable'  # pragma: no cover - cancelled at the barrier, never dispatched
+
+        class _SeqToolset(AbstractToolset[object]):
+            """Marks `barrier` as sequential; the other tools stay parallel."""
+
+            def __init__(self) -> None:
+                self._inner = _build_function_toolset(blocker, cleanup_tool, barrier)
+
+            @property
+            def id(self) -> str | None:
+                return None  # pragma: no cover
+
+            async def get_tools(self, ctx: RunContext[object]) -> dict[str, ToolsetTool[object]]:
+                tools = await self._inner.get_tools(ctx)
+                return {
+                    n: dc_replace(t, tool_def=dc_replace(t.tool_def, sequential=True)) if n == 'barrier' else t
+                    for n, t in tools.items()
+                }
+
+            async def call_tool(
+                self, name: str, tool_args: dict[str, Any], ctx: RunContext[object], tool: ToolsetTool[object]
+            ) -> Any:
+                return await self._inner.call_tool(name, tool_args, ctx, tool)
+
+        wrapper = CodeModeToolset[object](wrapped=_SeqToolset(), tool_selector='all')
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+
+        scope = anyio.CancelScope()
+
+        async def runner() -> None:
+            with scope:
+                code = 'a = blocker()\nb = cleanup_tool()\nbarrier()'
+                await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+
+        task = asyncio.create_task(runner())
+        await blocker_started.wait()
+        await cleanup_started.wait()
+        scope.cancel()
+        await cancel_seen.wait()
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert not task.done(), 'cleanup must wait for dispatched work to finish unwinding'
+        release.set()
+        await task
+        assert scope.cancelled_caught
+        assert unwound.is_set()
+        assert extra_cancels == 0, f'cancelled scope must not re-cancel dispatched work, got {extra_cancels} re-cancels'
+
     async def test_worker_crash_becomes_model_retry_and_resets_state(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """A `MontyCrashedError` (worker death) becomes a retry with the session reset.
 
@@ -3538,7 +3839,7 @@ def _search_tool_def(description: str = 'Search for tools.') -> ToolDefinition:
 
 
 class TestGlobalModeIsSequential:
-    """`_global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
+    """`global_mode_is_sequential` dispatches across pydantic-ai v1 and v2.
 
     v1's `get_parallel_execution_mode` takes the pending calls list; v2 dropped
     the argument. The helper inspects arity and calls the matching shape, so
@@ -3552,8 +3853,8 @@ class TestGlobalModeIsSequential:
         def sequential(calls: list[ToolCallPart]) -> ParallelExecutionMode:
             return 'sequential'
 
-        assert _global_mode_is_sequential(parallel) is False
-        assert _global_mode_is_sequential(sequential) is True
+        assert global_mode_is_sequential(parallel) is False
+        assert global_mode_is_sequential(sequential) is True
 
     def test_v2_signature_without_arguments(self) -> None:
         def parallel() -> ParallelExecutionMode:
@@ -3562,5 +3863,5 @@ class TestGlobalModeIsSequential:
         def sequential() -> ParallelExecutionMode:
             return 'sequential'
 
-        assert _global_mode_is_sequential(parallel) is False
-        assert _global_mode_is_sequential(sequential) is True
+        assert global_mode_is_sequential(parallel) is False
+        assert global_mode_is_sequential(sequential) is True

@@ -1,9 +1,7 @@
 # Compaction
 
 A menu of strategies for keeping an agent's conversation history within a model's context
-window. Most are Pydantic AI `Capability` classes that edit the message history just before each
-request goes out. `FallbackCompaction` is instead a composing `CompactionStrategy` used through
-`TieredCompaction` or `compact_now`; it has no request trigger of its own. Edits **persist** into the
+window. These Pydantic AI `Capability` classes edit the message history just before each request goes out. `FallbackCompaction` optionally triggers its chain at a token threshold and also works as a composing `CompactionStrategy`. Edits **persist** into the
 run's message history, so a trim, clear, or summary carries forward to later steps (it is not
 recomputed from the full history every turn).
 
@@ -31,6 +29,8 @@ alternative: they work with every model and keep the compaction logic (and its c
 | `ReportContextUsage` | zero-LLM | Reports context usage to your application; never edits history | You want a live context gauge in a UI |
 
 ## Triggers
+
+Instruction replacement and withdrawal records contribute their full rendered system text to token estimates. Superseded updates before a new instruction baseline are excluded.
 
 Every size-based strategy triggers on `max_messages`, `max_tokens` (estimated), or `max_fraction`.
 Token counts anchor on the provider-reported usage of the most recent model response when one is
@@ -179,20 +179,25 @@ window, and only observes:
 ```python
 from pydantic_ai import Agent
 from pydantic_ai_harness import ReportContextUsage, SummarizingCompaction
+from pydantic_ai_harness.compaction import ContextUsageEvent
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
         SummarizingCompaction(max_fraction=0.9, keep_messages=20),
-        ReportContextUsage(on_usage=lambda usage: print(f'{usage.fraction:.0%}')),
+        ReportContextUsage(),
     ],
 )
+
+@agent.on_event(ContextUsageEvent)
+async def show(ctx, event):
+    print(f'{event.fraction:.0%}')
 ```
 
 Each reading carries `used_tokens`, `window_tokens`, and `resolved` -- `False` when the window is the
 fallback rather than the model's real one, so a gauge can show that the percentage is a guess.
-`on_usage` may be a coroutine function, so a gauge that pushes over a socket does not need a sync
-bridge.
+Migration: `on_usage` remains supported but is deprecated. Move its callback body to a
+`ContextUsageEvent` subscription.
 
 Order matters: register the monitor *after* a compaction capability to observe the corrected current
 history after same-cycle compaction, or before it to see what triggered the compaction.
@@ -252,6 +257,7 @@ subclasses pass through immediately; `fallback_on` rejects types that do not der
 from pydantic_ai_harness import FallbackCompaction, SlidingWindowCompaction, SummarizingCompaction
 
 fallback = FallbackCompaction(
+    max_fraction=0.85,
     fallback_chain=[
         SummarizingCompaction(max_messages=1, keep_tokens=20_000),
         SlidingWindowCompaction(max_messages=1, keep_tokens=20_000),
@@ -259,9 +265,17 @@ fallback = FallbackCompaction(
 )
 ```
 
-The strategies' trigger fields are not consulted when a composing strategy calls `compact`
-directly. Put `fallback` inside `TieredCompaction` to give the chain a context trigger, or pass it
-to `compact_now` for manual compaction.
+Register `fallback` directly with `Agent(..., capabilities=[fallback])`. Its optional
+`max_tokens` or `max_fraction` trigger runs the chain only when estimated context tokens
+exceed the threshold. Fractions resolve against the request's model; `context_window`
+overrides its window and `fallback_context_window` supplies an unknown model's window.
+`tokenizer` customizes token estimation. The hook preserves pinned parts and persists
+compacted history, emitting the standard `compact_messages` span when history changes.
+
+With neither trigger configured, the request hook does nothing. Direct `compact()` and
+`compact_now()` calls run the chain regardless of its threshold, so it remains usable
+inside other composing strategies and for manual compaction. Each child's own trigger
+is bypassed when the chain calls its `compact()` method.
 
 ## `ClampOversizedMessages`: surviving a runaway generation
 
@@ -382,6 +396,28 @@ finite request limit for the pending parent request. Pass `model_settings` to gi
 settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
 without mutating the model or the settings dictionary.
 
+The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch
+the summary as it is written, or pass `drain_summary_events` to take the streaming request path
+without handling the events -- which is what a summarizer endpoint that rejects non-streaming
+requests needs:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.compaction import SummarizingCompaction, drain_summary_events
+
+agent = Agent(
+    'openai:gpt-5.6-terra',
+    capabilities=[
+        SummarizingCompaction(max_messages=60, event_stream_handler=drain_summary_events),
+    ],
+)
+```
+
+Neither transport works everywhere, which is why this is a choice rather than a default: some
+endpoints reject non-streaming requests and others reject streaming ones. The handler receives the
+summary run's own `RunContext` and event stream; the outer `Agent.run(...)` handler is not inherited
+and never sees the summary token deltas.
+
 By default `incremental=True` updates the newest existing summary from a prior compaction as an
 anchor rather than regenerating it from scratch. This changes the summary-call prompt from earlier
 releases; set `incremental=False` to retain the prior regeneration behavior. `preserve_first_user_message=True` keeps the original task turn even
@@ -392,6 +428,12 @@ Both prompt surfaces of the summary request are fields: `summary_prompt` is the 
 must contain a `{messages}` placeholder), and `instructions` sets the internal agent's static instructions,
 which Pydantic AI sends in the request's system prompt. Override `instructions` when the summarizer
 endpoint requires a fixed leading instruction.
+
+The messages served into that template are rendered to text, and each tool return is capped per return at
+`tool_return_max_chars` (default 500) characters using the same explicit truncation marker as kept user
+turns. Raise it, or set it to `None` to render each return whole, when the summarizer's context window is
+large enough to absorb the payloads. `max_tokens` and `keep_tokens` control when compaction runs and which
+history messages are retained; they do not cap the summary-request payload.
 
 ## Usage accounting
 
@@ -449,6 +491,11 @@ to keep span cardinality low. Attributes:
 harness-specific. Token counts use the strategy's `tokenizer` when set, otherwise the
 ~4-chars-per-token heuristic.
 Raw message content is not recorded.
+
+`SummarizingCompaction` runs its summarizer as a nested `Agent` named `summarizing_compaction`,
+so under `Agent.instrument_all()` (or `logfire.instrument_pydantic_ai()`) its runs carry
+`agent_name = summarizing_compaction`. Filter on that to track summarization usage and cost
+separately from the parent agent.
 
 ## Compaction receipts
 
@@ -565,4 +612,6 @@ outcome changes what compaction keeps or drops.
 
 These strategies compress or drop context *inside* the window. Moving large tool outputs *out* of the
 window -- overflowing them to a file the agent (or a subagent) can query on demand -- is a separate
-capability, not lossy truncation. Prefer it over capping individual tool outputs.
+capability, not lossy truncation. Within `SummarizingCompaction`, `tool_return_max_chars` makes the
+summarizer's per-return cap tunable (or `None` to render returns whole), but the summary request still
+reads a lossy rendering; prefer tool output limits when a payload must be queryable in full.

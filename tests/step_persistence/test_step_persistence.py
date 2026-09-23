@@ -360,9 +360,25 @@ class TestFileStepStore:
     async def test_snapshot_record_suppresses_retry_if_key_ledger_write_was_interrupted(self, tmp_path: Path) -> None:
         store = FileStepStore(tmp_path)
         snapshot = ContinuableSnapshot(run_id='r1', step_index=1, messages=[], idempotency_key='0:1:complete')
+        snapshot_dir = tmp_path / 'r1' / 'snapshots'
+        snapshot_dir.mkdir(parents=True)
+        (snapshot_dir / 'broken.json').write_text('{', encoding='utf-8')
         await store.save_snapshot(snapshot)
         (tmp_path / 'r1' / 'snapshot-keys.jsonl').unlink()
-        (tmp_path / 'r1' / 'snapshots' / 'broken.json').write_text('{', encoding='utf-8')
+
+        await store.save_snapshot(snapshot)
+
+        assert await store.list_snapshots(run_id='r1') == [snapshot]
+
+    async def test_snapshot_scan_skips_a_partially_written_snapshot_file(self, tmp_path: Path) -> None:
+        # The corrupt file is the only one in the directory on purpose: the key scan returns as soon as
+        # it reads a snapshot carrying the same key, so a directory that also held a good one would only
+        # reach the corrupt file when `glob` happened to yield it first, which is filesystem order.
+        store = FileStepStore(tmp_path)
+        snapshot = ContinuableSnapshot(run_id='r1', step_index=1, messages=[], idempotency_key='0:1:complete')
+        snap_dir = tmp_path / 'r1' / 'snapshots'
+        snap_dir.mkdir(parents=True)
+        (snap_dir / 'broken.json').write_text('{', encoding='utf-8')
 
         await store.save_snapshot(snapshot)
 
@@ -1432,25 +1448,20 @@ class TestCapabilityHookBranches:
         assert [e.kind for e in events] == ['run_completed']
 
     async def test_after_run_saves_fallback_snapshot_when_no_node_snapshot(self) -> None:
-        """With no `CallToolsNode` snapshot taken, `after_run` saves the final valid history."""
+        """The fallback and its committed notification execute inside a real agent run."""
+
+        class FinalOnly(StepPersistence[None]):
+            async def after_node_run(
+                self, ctx: RunContext[None], *, node: AgentNode[None], result: NodeResult[None]
+            ) -> NodeResult[None]:
+                return result
+
         store = InMemoryStepStore()
-        cap: StepPersistence[object] = StepPersistence(store=store)
-        ctx = build_run_context(deps=None, run_id='r1', run_step=3)
-
-        valid: list[ModelMessage] = [
-            ModelRequest(parts=[UserPromptPart(content='hi')]),
-            ModelResponse(parts=[TextPart(content='done')]),
-        ]
-        result: AgentRunResult[str] = AgentRunResult(
-            output='out',
-            _state=GraphAgentState(message_history=valid, run_id='r1'),
-        )
-
-        await cap.after_run(ctx, result=result)
-
+        agent = Agent(TestModel(custom_output_text='done'), deps_type=type(None), capabilities=[FinalOnly(store=store)])
+        result = await agent.run('hi', run_id='r1')
         snap = await store.latest_snapshot(run_id='r1')
         assert snap is not None
-        assert snap.step_index == 3
+        assert snap.messages == result.all_messages()
         assert len(snap.messages) == 2
 
     async def test_on_model_request_error_records_event_and_reraises(self) -> None:

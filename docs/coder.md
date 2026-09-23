@@ -1,155 +1,150 @@
 ---
 title: Coder
-description: A complete Pydantic AI coding-agent harness assembled from transparent capabilities.
+description: Autonomous coding with six tools and context management.
+goal: >-
+  Show that Coder is an assembly of linked, individually usable capabilities. The composition
+  list is the point of this page: keep every component hyperlinked to its own page, and keep this
+  page in sync with pydantic_ai_harness/coder/README.md.
 ---
 
 # Coder
 
-`Coder` gives a Pydantic AI agent a complete, opinionated stack for working in a local codebase.
-It is a regular [combined capability](https://pydantic.dev/docs/ai/capabilities/custom/#composition-and-middleware-semantics) made from the [capabilities](https://pydantic.dev/docs/ai/capabilities/overview/) below, so you can use it as-is or take it apart.
+`Coder` gives a Pydantic AI agent tools and guidance for investigating, editing, and testing a local codebase.
+It is a regular combined capability made from [`FileSystem`](filesystem.md), [`Shell`](shell.md), [`RepoContext`](repo-context.md), and the [context management](compaction.md) capabilities, so you can use it whole or take it apart.
 
-> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
+> While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://pydantic.dev/docs/ai/harness/#version-policy).
 
 ## Usage
 
-Hand the agent a task directly:
-
-```python
-from pydantic_ai import Agent
-from pydantic_ai_harness import Coder
-
-agent = Agent('anthropic:claude-fable-5', capabilities=[Coder('.')])
-
-result = agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
-print(result.output)
-#> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
-```
-
-The same agent works with every Pydantic AI interface: [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) starts an interactive chat in your terminal, and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) serves a browser chat UI.
-
-Or skip the file entirely and run the exported [`coder_agent`](#api-reference) with [`clai`](https://pydantic.dev/docs/ai/cli/#custom-agents) (the Pydantic AI CLI), via [`uvx`](https://docs.astral.sh/uv/guides/tools/):
+Install the Coder extra to include ripgrep (`rg`), which backs the `list_files` and `grep` tools:
 
 ```bash
-uvx --with pydantic-ai-harness clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+pip/uv-add "pydantic-ai-harness[coder]"
 ```
 
-## What's inside
-
-It is literally these capabilities combined, in this order:
-
-- [`FileSystem`](filesystem.md): read, write, edit, and search tools rooted at the workspace, path-traversal and symlink safe
-- [`Shell`](shell.md): allowlisted commands rooted at the workspace (a guardrail, not a security boundary), with common LLM provider API-key variables filtered from inherited command environments
-- [`RepoContext`](repo-context.md): repository instructions and structure
-- [`Planning`](planning.md): a plan the agent creates and keeps current during multi-step work
-- [`SubAgents`](subagents.md): delegation, with a read-only `explorer` sub-agent by default
-- [`ClearToolResults`](compaction.md): clears stale tool results at 70% of the model context window
-- [`WarnNearLimits`](compaction.md): warns the agent at 90% of the model context window
-- [`ToolOutputLimits`](tool-output-limits.md): bounds how much context any single tool result can consume
-
-Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries.
-
-### Instructions
-
-`Coder` ships with **no default instructions**: modern models don't need procedural coaching ("work step by step", "run the tests"), and each composed capability already contributes its own tool guidance. Pass `instructions='...'` to add your own (identity, tone, or house rules) and it becomes a regular instructions capability at the front of the composition. The exported `coder_agent` separately carries the identity instruction `You are a coding agent built on Pydantic AI.`
-
-The command allowlist is a guardrail against accidents, not a security boundary. Validation checks only the first token, and allowlisted commands such as `python`, `git`, `uv`, and `make` can spawn arbitrary processes, so a model that wants to work around the allowlist can. For untrusted work, run the agent inside an OS-level sandbox such as [`ModalSandbox`](modal-sandbox.md) or a container.
-
-### Not included by default
-
-Other capabilities pair well with `Coder`; add them alongside it in `capabilities`:
-
-- [Web Search](https://pydantic.dev/docs/ai/capabilities/web-search/) and [Web Fetch](https://pydantic.dev/docs/ai/capabilities/web-fetch/) (core): look up docs and error messages on the web
-- [Skills](skills.md): reusable procedure documents the agent loads on demand
-- [Memory](memory.md): persistent memory across conversations
-- [Conversation Search](conversation-search.md): let the agent search earlier sessions
-- [Guardrails](guardrails.md): validate what the agent does before and after it acts
-- [Dynamic Workflow](dynamic-workflow.md): let the agent author multi-step workflows; best activated on demand
-
-```python
-from pydantic_ai import Agent
-from pydantic_ai.capabilities import WebSearch
-from pydantic_ai_harness import Coder, Memory
-from pydantic_ai_harness.memory import FileStore
-
-agent = Agent(
-    'anthropic:claude-fable-5',
-    capabilities=[
-        Coder(),
-        WebSearch(),  # look up docs and error messages on the web
-        Memory(FileStore('.agent-memory')),  # remembers across sessions
-    ],
-)
-```
-
-Add [`Skills('skills')`](skills.md) to the list once you have a `skills/` directory of `SKILL.md` procedures to point it at (it validates the directory eagerly, and needs the `skills` extra).
-
-To remove or replace one of the built-in components instead, start from the blown-out form below and adjust the list.
-
-## Blown-out equivalent
-
-This is the exact agent the exported `coder_agent` gives you (plus an explicit model), written out block by block:
+The extra installs `ripgrep==14.1.0` except on Android, where `rg` must be supplied separately on `PATH`.
+Add a provider extra such as `[coder,anthropic]` when needed.
+Commands run on the host without an allowlist;
+use an OS-level sandbox or container for untrusted work. Path restrictions on file tools are not a shell sandbox.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
 ```python
-from pathlib import Path
-
 from pydantic_ai import Agent
-from pydantic_ai_harness import (
-    ClearToolResults,
-    FileSystem,
-    LLM_API_KEY_ENV_PATTERNS,
-    Planning,
-    RepoContext,
-    Shell,
-    SubAgent,
-    SubAgents,
-    ToolOutputLimits,
-    WarnNearLimits,
-)
-
-allowed_commands = [
-    'git', 'rg', 'grep', 'find', 'ls', 'cat', 'sed', 'head', 'tail',
-    'python', 'uv', 'pytest', 'ruff', 'make',
-]
-
-explorer = SubAgent(
-    Agent(
-        name='explorer',
-        description='Explore the codebase and answer questions without modifying anything',
-        instructions='Answer with concrete paths and evidence.',
-        capabilities=[
-            FileSystem('.', read_only=True),
-            RepoContext(workspace_dir=Path('.')),
-        ],
-    )
-)
+from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
     'anthropic:claude-fable-5',
     name='coder',
-    instructions='You are a coding agent built on Pydantic AI.',
-    capabilities=[
-        FileSystem('.'),  # read/write/edit/search, path-traversal safe
-        Shell(  # allowlisted commands, LLM API keys stripped from their environment
-            cwd='.',
-            allowed_commands=allowed_commands,
-            denied_env_patterns=LLM_API_KEY_ENV_PATTERNS,
-        ),
-        RepoContext(workspace_dir=Path('.')),  # loads AGENTS.md/CLAUDE.md + repo structure
-        Planning(),  # structured task plans the model maintains
-        SubAgents(agents=[explorer], agent_folders=None),  # delegate exploration off the main context
-        ClearToolResults(max_fraction=0.7),  # clears old tool results near the limit
-        WarnNearLimits(max_context_fraction=0.9),  # warns the model before it hits limits
-        ToolOutputLimits(),  # bounds oversized tool results
-    ],
+    capabilities=[Coder('.')],
 )
 ```
+
+```python
+result = agent.run_sync('Investigate the failing parser test, fix the cause, and run focused checks.')
+print(result.output)
+```
+
+The exported `pydantic_ai_harness.coder:coder_agent` is the same composition, model-less and named `coder`.
+Use it with the Pydantic AI CLI:
+
+```bash
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+```
+
+## Composition
+
+`Coder(workspace)` is these capabilities, in this order:
+
+1. A `Capability` carrying the default instructions, plus any `instructions=` you pass.
+2. [`FileSystem`](filesystem.md)`(root_dir=workspace, content_hashes=False, max_read_chars=60000, tools=FILE_TOOL_NAMES)`, where
+   `FILE_TOOL_NAMES` is `read_file`, `write_file`, `edit_file`, `list_files`, and `grep`.
+3. [`Shell`](shell.md)`(cwd=workspace, denied_commands=[], allow_interactive=True, default_timeout=270, denied_env_patterns=LLM_API_KEY_ENV_PATTERNS, tools=['shell'])`.
+4. [`RepoContext`](repo-context.md)`(workspace_dir=workspace, expose_inventory_tool=False)` for repository instructions and structure.
+   Pass `repo_context=False` to leave it out when the agent already binds its own `RepoContext`, so the
+   instruction files are not loaded twice.
+
+Then the plumbing, which the agent never calls directly:
+
+5. [`ClearToolResults`](compaction.md)`(max_fraction=0.7)` and [`WarnNearLimits`](compaction.md)`(max_context_fraction=0.9)`.
+6. A private [`ToolOutputLimits`](tool-output-limits.md) specialization that truncates any tool result over 64,000 characters
+   without adding a spill-retrieval tool.
+7. [`RepairToolArguments`](repair-tool-arguments.md) repairs malformed JSON tool arguments before normal validation (see below).
+
+Every tool comes from `FileSystem` or `Shell`; those pages document each one in full. Build the same
+agent from the pieces to change any setting, for example to keep content hashes, add `list_directory`,
+or allowlist commands.
+
+## Six tools
+
+| Tool | Behavior |
+| --- | --- |
+| `read_file(path, offset=0, limit=None)` | Zero-based line offset, one-based displayed line numbers, up to 2,000 lines or 60,000 characters of complete lines; the continuation hint names the exact next offset, and a line too long for the window is named and skippable. No hash header. |
+| `write_file(path, content)` | Create a file in an existing directory, or replace one. No `expected_hash`. |
+| `edit_file(path, old_text, new_text)` or `edit_file(path, replacements=[...])` | Exact replacements, each matching once; a batch is checked in memory and written only if every replacement matches. |
+| `list_files(path='.', glob=None)` | `rg --files`, sorted by path, respecting ignore files and skipping hidden files. |
+| `grep(pattern, ...)` | Ripgrep search with `path`, `glob`, `file_type`, `ignore_case`, `literal`, and `context` (0 to 20). |
+| `shell(command, mode='foreground', timeout=270)` | Unrestricted commands rooted at the workspace that outlive the run. |
+
+Results are bounded by `FileSystem`'s caps (2,000 lines or 60,000 characters per `read_file`, 1,000 lines or files per search or listing) and Coder's 64,000-character
+tool-output limit; a truncation marker means more output was omitted, so narrow the search rather than
+assuming it was complete. A `read_file` window stays under the output limit, so paging by `offset` never skips lines. Use `shell` for `mkdir`, `find`, process inspection, and `kill`. File writes
+keep the standalone filesystem's protected-path rules (`.git`, `.env`, keys, and secrets); shell can bypass
+these rules. Coder does not include planning, delegation, or the run-scoped `run_command` family.
+
+## Filesystem scope
+
+File tools are workspace-scoped by default. For trusted local use,
+`Coder(unrestricted_filesystem=True)` sets `FileSystem(root_dir=<workspace drive root>, cwd=workspace,
+protected_patterns=[])`: relative paths still resolve from the workspace, and absolute paths anywhere on
+the drive are accepted. On POSIX this permits paths such as `/tmp/example.py`; on Windows this covers the
+workspace drive, not other drives. OS permissions and file-change event listeners still apply. This permits
+modifying secrets and repository metadata: use it only when you trust the agent and its inputs. Shell commands
+were already unrestricted.
+
+## Long-running commands
+
+`shell` is the [`Shell`](shell.md) capability's persistent tool. Foreground waits at most 270 seconds
+(or a smaller positive `timeout`) and then returns handles for the same running process; background returns
+them immediately. Both end with a PID, an absolute output log path, and an absolute JSON status path whose
+`exit_code` is `null` while the command runs; foreground puts the last 16,000 bytes of output before them. Commands outlive the agent run, so servers keep running; there
+is no completion notification or automatic wake-up after a final response. The Shell page covers the
+supervisor, cleanup, and the `CommandStartedEvent`, `CommandOutputEvent`, and `CommandFinishedEvent` progress
+events a UI can subscribe to.
+
+The default instructions tell the agent to finish required work before giving a final response: do other
+useful work, then poll status and output until completion or a genuine blocker.
+Servers may remain running after startup and readiness are verified. Common LLM API-key environment
+variables are filtered from command environments; other host credentials and files remain accessible.
+
+## Instructions
+
+The default instructions keep engineering guidance brief: autonomous investigation and completion,
+focused changes and verification, and pragmatic DRY, YAGNI, SOLID, and the Zen of Python.
+Tool descriptions supply tool usage; `RepoContext` supplies repository instructions and structure.
+`Coder(instructions='...')` appends project-specific guidance rather than replacing defaults.
+Use it for additional policy, such as file-size limits or a preferred verification workflow.
+
+## Tool argument repair
+
+`Coder` composes [`RepairToolArguments`](repair-tool-arguments.md), which uses `json-repair` for malformed JSON before Pydantic AI validates the tool schema.
+Valid JSON and already-parsed arguments pass through unchanged. Missing fields and invalid types still
+follow normal validation and retry behavior. Repair applies to tools added alongside Coder too.
+If the repair parser raises a value or recursion error, original arguments go through normal validation.
+
+Repair is heuristic: malformed input can be ambiguous, and inferred strings may differ from the model's
+intent. It does not supply a schema to the repair library or bypass exact edit matching.
+Each attempt emits a `repair_tool_arguments` span through `ctx.tracer`, without arguments or file
+contents. Other Coder operations rely on core tool spans and on the events its `FileSystem` and `Shell`
+capabilities emit.
+
+## Benchmarking
+
+See the [Terminal-Bench 2.1 playbook](https://github.com/pydantic/pydantic-ai-harness/blob/main/pydantic_ai_harness/coder/TERMINAL_BENCH.md)
+for running Coder inside Harbor, pinning the adapter and harness, and inspecting trial results.
 
 See the [source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/coder/).
 
 ## API reference
 
 ::: pydantic_ai_harness.coder.Coder
-
-::: pydantic_ai_harness.coder.coder_agent

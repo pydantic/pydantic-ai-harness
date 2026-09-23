@@ -9,7 +9,7 @@ from pathlib import Path
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 
-from pydantic_ai_harness.shell._toolset import ShellToolset
+from pydantic_ai_harness.shell._toolset import RUN_SCOPED_TOOL_NAMES, ShellToolset
 
 _DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
     'rm',
@@ -77,6 +77,13 @@ class Shell(AbstractCapability[AgentDepsT]):
     max_output_chars: int = 50_000
     """Maximum characters of output returned to the model. Must be positive."""
 
+    max_file_bytes: int | None = field(default=None, kw_only=True)
+    """Optional POSIX per-file size limit for run-scoped children, not total disk usage.
+
+    Must be positive. Unsupported platforms, `persist_cwd`, and the persistent
+    `shell` tool are rejected. The parent is unchanged; a lower inherited hard limit still applies.
+    """
+
     persist_cwd: bool = False
     """If True, track cd commands and adjust the working directory for subsequent calls."""
 
@@ -104,6 +111,18 @@ class Shell(AbstractCapability[AgentDepsT]):
     `LLM_API_KEY_ENV_PATTERNS` for a ready-made provider-credential denylist.
     """
 
+    tools: Sequence[str] = RUN_SCOPED_TOOL_NAMES
+    """Which tools to register, from `SHELL_TOOL_NAMES`.
+
+    The default is the run-scoped family: `run_command`, `start_command`,
+    `check_command`, and `stop_command`, whose processes are killed when the run
+    ends. Name `shell` to register the persistent tool instead: its commands
+    outlive the run, a foreground call waits at most `default_timeout` seconds
+    (capped at 270) before returning handles to the still-running process, and
+    the model reads the returned log and status files with its other tools.
+    `persist_cwd` does not apply to `shell`; each command starts at `cwd`.
+    """
+
     def __post_init__(self) -> None:
         """Resolve the built-in denylist according to the selected policy."""
         if self.denied_commands is _DEFAULT_DENIED_COMMANDS:
@@ -118,8 +137,10 @@ class Shell(AbstractCapability[AgentDepsT]):
             denied_operators=self.denied_operators,
             default_timeout=self.default_timeout,
             max_output_chars=self.max_output_chars,
+            max_file_bytes=self.max_file_bytes,
             persist_cwd=self.persist_cwd,
             allow_interactive=self.allow_interactive,
             env=self.env,
             denied_env_patterns=self.denied_env_patterns,
+            tools=self.tools,
         )
