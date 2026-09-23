@@ -7,12 +7,11 @@ import contextlib
 import html
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Annotated, Any, Protocol, TypeAlias, runtime_checkable
+from typing import TYPE_CHECKING, Annotated, Protocol, TypeAlias, runtime_checkable
 
 from pydantic import Field, TypeAdapter
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler
-from pydantic_ai.exceptions import UserError
+from pydantic_ai.capabilities import AbstractCapability, WrapRunHandler, durable_operation
 from pydantic_ai.messages import (
     ModelMessage,
     ModelResponse,
@@ -79,7 +78,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
 
     Long-horizon runs drift: instructions fade, unsupported claims compound, and the agent
     wanders off the goal. A `TrajectoryJudge` evaluates the most recent `window` tokens of
-    the run's trajectory every `every` model requests, concurrently with the run, and
+    the run's trajectory every `every` model requests, concurrently outside durable execution, and
     delivers exactly one verdict per evaluation: `AllGood`, or `Steer` with a corrective
     message. Steering is enqueued into the run (`RunContext.enqueue`, `'asap'` priority)
     with attribution to the judge, so the running agent course-corrects while recovery is
@@ -91,8 +90,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     `usage_limits`: each launch claims one request on the shared usage before the
     evaluation starts, so the parent's next preflight and sibling launches account for the
     in-flight call, and a launch the request budget cannot fit is skipped. An evaluation
-    failure is raised on the run at the next cadence tick or at run end; give the judge a
-    fallback model (via `agent`) if you need it to degrade instead.
+    failure is raised immediately in durable runs, or at the next cadence tick or run end
+    otherwise; give the judge a fallback model (via `agent`) if you need it to degrade instead.
 
     ```python
     from pydantic_ai import Agent
@@ -113,10 +112,10 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     Several judges can watch one run: add one `TrajectoryJudge` per concern to
     `capabilities`. Each schedules and evaluates independently.
 
-    A judged run inside a durable workflow or flow (Temporal, DBOS, Prefect) is rejected
-    with `UserError` before the first model request: the evaluation is launched from a
-    capability hook in orchestration context, so its model calls would not be checkpointed
-    and could repeat on replay. Run judged work outside durable execution.
+    Inside a durable workflow or flow, each evaluation is awaited on its cadence tick
+    and checkpointed as the `judge` operation. Replay reuses its verdict and usage without
+    calling the judging model again. Binding to a durable-capable agent requires an
+    explicit, stable `id`; ordinary runs retain concurrent evaluation.
     """
 
     model: Model | KnownModelName | str | None = None
@@ -163,8 +162,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
             instructions = _JUDGE_INSTRUCTIONS
             if self.instructions is not None:
                 instructions = f'{_JUDGE_INSTRUCTIONS}\n\nYour review focus:\n{self.instructions}'
-            # No `output_type` here: `_evaluate` sets it per run, the one seam that
-            # enforces the verdict contract for built-in and caller-supplied judges alike.
+            # `_ask` sets `output_type` per run for built-in and caller-supplied judges alike.
             self._judge = Agent(self.model, instructions=instructions)
         else:
             if self.model is not None:
@@ -188,22 +186,6 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         """
         return replace(self)
 
-    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Reject a judged run inside a durable workflow or flow, before any budget is spent.
-
-        The evaluation is launched from a capability hook, so it would run in orchestration
-        context: its model calls would not be checkpointed (and could repeat on replay,
-        billing included) and enqueued steering would not persist across replay. A
-        durable-capable agent run outside its workflow or flow is unaffected, matching how
-        core's durability capabilities scope their own `before_run` rejections.
-        """
-        if _in_durable_context(ctx):
-            raise UserError(
-                '`TrajectoryJudge` cannot be used inside a durable workflow or flow: the judge '
-                'evaluation runs in orchestration context, so its model calls are not checkpointed '
-                'and can repeat on replay. Run judged work outside durable execution.'
-            )
-
     async def after_model_request(
         self,
         ctx: RunContext[AgentDepsT],
@@ -217,13 +199,19 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         silently dropped. The evaluation itself runs as a background task: the trajectory is
         rendered synchronously (no race with later mutation), the judge call and any
         steering enqueue happen concurrently with the run, and the steering is delivered
-        when the run next drains its pending messages.
+        when the run next drains its pending messages. Inside durable execution, await
+        the evaluation here so the checkpointed operation cannot outlive its cadence tick.
         """
         self._collect_finished()
         self._steps += 1
         if self._steps % self.every == 0 and self._task is None and self._claim_request(ctx):
             prompt = _judge_prompt([*request_context.messages, response], self.window)
-            self._task = asyncio.create_task(self._evaluate(ctx, prompt), name=f'trajectory-judge:{self._judge_name()}')
+            if _in_durable_context(ctx):
+                await self._evaluate(ctx, prompt)
+            else:
+                self._task = asyncio.create_task(
+                    self._evaluate(ctx, prompt), name=f'trajectory-judge:{self._judge_name()}'
+                )
         return response
 
     def _claim_request(self, ctx: RunContext[AgentDepsT]) -> bool:
@@ -256,7 +244,7 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
             self._claim_held = False
             ctx.usage.requests -= 1
 
-    async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[Any]:
+    async def wrap_run(self, ctx: RunContext[AgentDepsT], *, handler: WrapRunHandler) -> AgentRunResult[object]:
         """Run the agent, then settle the judge: surface a finished failure, cancel the rest.
 
         An evaluation still in flight when the run ends is cancelled rather than awaited;
@@ -277,8 +265,8 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
     async def _evaluate(self, ctx: RunContext[AgentDepsT], prompt: str) -> None:
         """Run the judge once and enqueue attributed steering when it says to steer.
 
-        `output_type=[AllGood, Steer]` is set here, at the run boundary, so the verdict
-        contract holds at runtime whatever output type the judge agent was configured with.
+        `_ask` enforces the verdict contract at the judge's run boundary. Only the
+        rendered prompt and verdict cross that durable-operation boundary.
 
         The judge runs against the shared `usage` under a request limit raised by exactly
         one: the launch's claim occupies a slot in `usage.requests` for the whole
@@ -288,23 +276,28 @@ class TrajectoryJudge(AbstractCapability[AgentDepsT]):
         coroutine starts never reaches the `finally`, so `_discard_in_flight` releases the
         claim instead.
 
-        Provider failures propagate out of this task as-is (`ModelAPIError` subclasses from
-        the model layer) and are re-raised on the run by `_collect_finished`.
+        Provider failures propagate as-is (`ModelAPIError` subclasses from the model layer).
+        Background failures are re-raised on the run by `_collect_finished`.
         """
         try:
-            result = await self._judge.run(
-                prompt,
-                output_type=[AllGood, Steer],
-                usage=ctx.usage,
-                usage_limits=_claim_offset_limits(ctx.usage_limits),
-            )
+            verdict = await self._ask(ctx, prompt)
         finally:
             self._release_claim(ctx)
-        verdict = result.output
         if isinstance(verdict, Steer):
             ctx.enqueue(f'Steering from trajectory judge {self._judge_name()!r}: {verdict.message}')
         if self.on_verdict is not None:
             self.on_verdict(verdict)
+
+    @durable_operation('judge')
+    async def _ask(self, ctx: RunContext[AgentDepsT], prompt: str) -> TrajectoryVerdict:
+        """Checkpoint the verdict and usage; keep enqueueing and callbacks on the caller."""
+        result = await self._judge.run(
+            prompt,
+            output_type=[AllGood, Steer],
+            usage=ctx.usage,
+            usage_limits=_claim_offset_limits(ctx.usage_limits),
+        )
+        return result.output
 
     def _collect_finished(self) -> None:
         """Reap a finished evaluation, re-raising its failure on the run."""
@@ -409,8 +402,8 @@ class _Durability(Protocol):
 
 
 # Mirrors `code_mode._toolset._in_temporal_workflow`, which checks Temporal alone because only
-# Temporal replays `run_code`. This one covers every engine because the judge launch is unsafe
-# under all of them; fold the two together if a shared durable-detection helper ever lands.
+# Temporal replays `run_code`. This one covers every engine to await checkpointed evaluations;
+# fold the two together if a shared durable-detection helper ever lands.
 def _in_durable_context(ctx: RunContext[AgentDepsT]) -> bool:
     """Whether this run executes inside a durable workflow or flow, without importing the optional extras."""
     return any(

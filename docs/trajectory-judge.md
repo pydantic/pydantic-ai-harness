@@ -17,7 +17,7 @@ Long-horizon runs drift. Instructions fade, unsupported claims compound, and the
 
 ## The solution
 
-`TrajectoryJudge` reviews the run's recent trajectory with a second model on a cadence: every `every` model requests, the most recent `window` tokens of the conversation (user messages, assistant messages, tool calls, and tool results, rendered as a transcript) go to the judge model for evaluation. The evaluation runs concurrently with the agent, so the run is never blocked waiting on a judge.
+`TrajectoryJudge` reviews the run's recent trajectory with a second model on a cadence: every `every` model requests, the most recent `window` tokens of the conversation (user messages, assistant messages, tool calls, and tool results, rendered as a transcript) go to the judge model for evaluation. Outside durable execution, the evaluation runs concurrently with the agent. Inside a durable workflow or flow, the run waits for each evaluation so its verdict can be checkpointed and reused on replay.
 
 The judge delivers exactly one verdict per evaluation, as its output type:
 
@@ -50,7 +50,7 @@ print(result.output)
 - `every` counts model requests within the run; the judge evaluates on each multiple.
 - `window` bounds what each evaluation sees: the transcript is clamped to its most recent `window` tokens (estimated at ~4 characters per token), so per-evaluation cost stays bounded no matter how long the run gets.
 - At most one evaluation per judge is in flight at a time. A cadence tick that finds the previous evaluation still running is skipped, so a slow judge falls behind rather than piling up concurrent calls.
-- An evaluation still in flight when the run ends is cancelled: its steering would have nowhere to go.
+- Outside durable execution, an evaluation still in flight when the run ends is cancelled: its steering would have nowhere to go. Durable runs await evaluations, including ticks on the final model response.
 
 ## Several judges
 
@@ -109,10 +109,19 @@ agent = Agent(
 ## Cost and failure semantics
 
 - The judge's model usage is threaded onto the run's `usage` and respects the run's `usage_limits`: each launch claims one request on the shared usage before the evaluation starts, so the parent's next request and concurrent judges account for in-flight evaluations and the shared request limit cannot be exceeded. A launch the request budget cannot fit skips the tick, like one that finds an evaluation still in flight.
-- An evaluation failure is raised on the run at the next cadence tick or at run end; judge failures are never silently dropped. If you need a judge to degrade instead, give it a fallback model through `agent` (for example a `FallbackModel`): resilience policy belongs to the judge agent, not to fields on the capability.
-- A judged run inside a [durable execution](/ai/capabilities/durable_execution/overview/) workflow or flow (Temporal, DBOS, Prefect) is rejected with `UserError` before the first model request: the evaluation is launched from a capability hook in orchestration context, so its model calls would not be checkpointed and could repeat on replay. A durable-capable agent run outside its workflow or flow is unaffected. Run judged work outside durable execution.
+- In durable runs, an evaluation failure propagates at the cadence tick. Outside durable execution, it is raised at the next cadence tick or at run end; judge failures are never silently dropped. If you need a judge to degrade instead, give it a fallback model through `agent` (for example a `FallbackModel`): resilience policy belongs to the judge agent, not to fields on the capability.
+
+## Durable execution
+
+Inside a durable workflow or flow (Temporal, DBOS, Prefect), each eligible cadence tick waits for the judge. This adds the evaluation's latency to the run, but avoids leaving a checkpointed operation in a background task when the run ends. Several judges are awaited in hook order rather than evaluated concurrently.
+
+Give each judge an explicit, stable `id` when binding the agent to a durability capability, for example `TrajectoryJudge(id='evidence-check', model='anthropic:claude-haiku-4-5', every=20)`. Core requires this even if you later run the durable-capable agent outside its workflow or flow. The attribution `name` does not replace `id`.
+
+The `judge` durable operation records the evaluation's verdict and usage. Replay reuses those values without asking the judging model again. Prompt rendering, the shared request claim, steering delivery, and `on_verdict` remain outside the operation. The callback can therefore run again during replay; do not use it for non-idempotent side effects. Outside a workflow or flow, evaluations still run concurrently.
 
 ## Observability
+
+The nested judge agent supplies the model-call spans; this capability adds no custom spans.
 
 `on_verdict` is called with each verdict after it is processed (after any steering has been enqueued):
 

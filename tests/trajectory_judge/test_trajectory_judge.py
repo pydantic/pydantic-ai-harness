@@ -11,7 +11,7 @@ import pytest
 from pydantic import ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UsageLimitExceeded, UserError
+from pydantic_ai.exceptions import UsageLimitExceeded
 from pydantic_ai.messages import (
     BinaryContent,
     ModelMessage,
@@ -772,27 +772,28 @@ class TestUsageCoordination:
 
 
 class TestDurableExecution:
-    async def test_rejected_inside_a_durable_container(self) -> None:
-        """A judged run inside a durable workflow or flow fails fast, before any model request."""
+    async def test_awaited_inside_a_durable_container(self) -> None:
+        """A judged run awaits the verdict before returning its final response."""
 
         class DBOSDurability(AbstractCapability[None]):
             in_durable_context = True
 
         DBOSDurability.__module__ = 'pydantic_ai.durable_exec.dbos'
 
-        def main_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:  # pragma: no cover
-            return _text_response('never reached')
+        def main_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return _text_response('done')
 
         capabilities: list[AbstractCapability[None]] = [
             DBOSDurability(),
-            TrajectoryJudge(model=_steer_model(), every=1),
+            TrajectoryJudge(model=_all_good_model(), every=1),
         ]
         agent = Agent(FunctionModel(main_fn), deps_type=type(None), capabilities=capabilities)
-        with pytest.raises(UserError, match='durable workflow or flow'):
-            await agent.run('do the thing')
+        result = await agent.run('do the thing')
+        assert result.output == 'done'
+        assert result.usage.requests == 2
 
     async def test_durable_capable_agent_outside_its_container_is_judged(self) -> None:
-        """Only the durable container is rejected; the same agent run plainly keeps its judge."""
+        """Outside its durable container, the agent keeps concurrent judging."""
 
         class DBOSDurability(AbstractCapability[None]):
             in_durable_context = False
