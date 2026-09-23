@@ -867,6 +867,23 @@ Its Tab suggestions contain only added models.
 The list persists across sessions. The currently configured model is retained
 when upgrading; `/set model NAME` also saves the model in this list.
 
+Opening an OpenAI provider (`openai`, `openai-chat`, or `openai-responses`),
+Anthropic, DeepSeek, or `openai-codex` queries its live model list. OpenAI also
+honors `OPENAI_BASE_URL`. API-key providers use core's environment-based
+authentication. Codex uses CLAI's saved credentials through core's token refresh;
+`/login openai-codex` reconnects an expired login. Discovery runs only for the
+selected provider and has a ten-second deadline. A missing credential, request
+failure, or empty result falls back to catalog suggestions with a notice in the
+model preview. Other providers keep the built-in catalog, and OpenRouter and
+vLLM keep their existing connection flows.
+
+Live entries retain known prices and context limits. Unknown metadata stays
+unknown, and the current model remains visible even if the endpoint omits it.
+Listing a model does not establish that your account can run it. Provider lists
+can include non-chat models; choose one compatible with the selected model API.
+Browsing does not change the saved list or active model; Enter selects and saves a model.
+No plugin hook or settings schema changes are needed for discovery.
+
 ### Terminal themes
 
 Theme selection and cancellation do not print status messages. Terminal colour

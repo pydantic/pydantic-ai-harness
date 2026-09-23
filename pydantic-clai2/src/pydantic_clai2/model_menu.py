@@ -1,6 +1,5 @@
 """The `/add_model` menu: pick the model for the next prompt, or edit one model's settings."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, get_args, get_origin
 
@@ -14,7 +13,7 @@ from .command_context import CommandContext
 from .custom_params import CustomParamsMenu
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow, shown
 from .menu_worker import menu_key, run_worker
-from .model_catalog import CatalogModel, catalog
+from .model_catalog import CatalogModel, catalog, provider_catalog
 from .model_options import model_options, validate_model_options
 from .model_settings import ModelSettingsForm, model_defaults
 from .settings_store import SettingsStore
@@ -161,14 +160,26 @@ def _choices(annotation: object) -> tuple[str, ...]:
 class ModelMenu:
     """The model list with a details pane; Enter picks, `Ctrl+S` opens that model's settings."""
 
-    def __init__(self, context: CommandContext, *, provider: str | None = None) -> None:
-        """The current model is always listed, even when no source knows it."""
+    def __init__(
+        self,
+        context: CommandContext,
+        *,
+        provider: str | None = None,
+        models: list[CatalogModel] | None = None,
+        notice: str | None = None,
+    ) -> None:
+        """Keep menu construction offline; the async runner supplies discovered models."""
         self._context = context
-        self.models = [
-            model
-            for model in catalog(include=[context.settings.model or ''])
-            if provider is None or model.name.partition(':')[0] == provider
-        ]
+        self.notice = notice
+        self.models = (
+            models
+            if models is not None
+            else [
+                model
+                for model in catalog(include=[context.settings.model or ''])
+                if provider is None or model.name.partition(':')[0] == provider
+            ]
+        )
 
     @property
     def current(self) -> str | None:
@@ -199,6 +210,8 @@ class ModelMenu:
             f'prices    {model.prices or "unknown"}',
             f'settings  {", ".join(f"{key}={shown(value)}" for key, value in overrides.items()) or "none"}',
         ]
+        if self.notice:
+            lines.extend(['', self.notice])
         return '\n'.join(lines)
 
     def build(self, initial: int = 0) -> Menu:
@@ -264,20 +277,6 @@ def _tokens(count: int | None) -> str:
     return f'{count:,} tokens' if count is not None else ''
 
 
-def run_model_flow(menu: ModelMenu, runners: Runners = TERMINAL, *, connect_provider: bool = False) -> list[str]:
-    """Show the list; Enter picks and closes, `Ctrl+S` edits settings and returns to the list."""
-    messages: list[str] = []
-    while True:
-        selection = runners.run_list(menu.build_providers())
-        if selection.cancelled or selection.item is None or not isinstance(selection.item.value, str):
-            return messages
-        if selection.item.value in ('openrouter', 'vllm') and connect_provider:
-            raise _ConnectProvider(messages, provider=selection.item.value)
-        provider_menu = menu.for_provider(selection.item.value)
-        if _run_provider(provider_menu, runners, messages):
-            return messages
-
-
 def _run_provider(menu: ModelMenu, runners: Runners, messages: list[str]) -> bool:
     cursor = menu.index_of(menu.current)
     while True:
@@ -294,35 +293,25 @@ def _run_provider(menu: ModelMenu, runners: Runners, messages: list[str]) -> boo
         return True
 
 
-async def open_add_model_menu(
-    context: CommandContext, *, run: Callable[[ModelMenu], list[str]] | None = None, runners: Runners = TERMINAL
-) -> str:
-    """Show the menu in a thread; the pick and any settings edits apply to the next prompt."""
-
-    def flow(menu: ModelMenu) -> list[str]:
-        return run_model_flow(menu, runners, connect_provider=True)
-
-    accumulated: list[str] = []
+async def open_add_model_menu(context: CommandContext, *, runners: Runners = TERMINAL) -> str:
+    """Discover only the selected provider, outside the menu worker and its terminal scope."""
+    menu = ModelMenu(context)
+    messages: list[str] = []
     while True:
-        try:
-            messages = await run_worker(lambda: (run or flow)(ModelMenu(context)))
-        except _ConnectProvider as request:
-            accumulated.extend(request.messages)
-            connector = openrouter.connect if request.provider == 'openrouter' else vllm.connect
+        selection = await run_worker(lambda: runners.run_list(menu.build_providers()))
+        if selection.cancelled or selection.item is None or not isinstance(selection.item.value, str):
+            return '\n'.join(messages) or 'No changes.'
+        provider = selection.item.value
+        if provider in ('openrouter', 'vllm'):
+            connector = openrouter.connect if provider == 'openrouter' else vllm.connect
             result = await connector(context, [])
             if result == 'Connection cancelled.':
                 continue
-            return '\n'.join([*accumulated, result])
-        return '\n'.join([*accumulated, *messages]) or 'No changes.'
-
-
-class _ConnectProvider(Exception):
-    """Release the menu worker before prompting or awaiting provider discovery."""
-
-    def __init__(self, messages: list[str], *, provider: str) -> None:
-        self.provider = provider
-        self.messages = messages
-        super().__init__()
+            return '\n'.join([*messages, result])
+        models, notice = await provider_catalog(provider=provider, current=context.settings.model)
+        provider_menu = ModelMenu(context, models=models, notice=notice)
+        if await run_worker(lambda: _run_provider(provider_menu, runners, messages)):
+            return '\n'.join(messages) or 'No changes.'
 
 
 async def model_settings_command(context: CommandContext, args: list[str], *, runners: Runners = TERMINAL) -> str:

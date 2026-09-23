@@ -1,0 +1,347 @@
+interactions:
+- request:
+    body: ''
+    headers:
+      accept:
+      - application/json
+      accept-encoding:
+      - gzip, deflate, br, zstd
+      connection:
+      - keep-alive
+      host:
+      - api.openai.com
+      user-agent:
+      - AsyncOpenAI/Python 2.54.0
+      x-stainless-arch:
+      - arm64
+      x-stainless-async:
+      - async:asyncio
+      x-stainless-lang:
+      - python
+      x-stainless-os:
+      - MacOS
+      x-stainless-package-version:
+      - 2.54.0
+      x-stainless-read-timeout:
+      - '10'
+      x-stainless-retry-count:
+      - '0'
+      x-stainless-runtime:
+      - CPython
+      x-stainless-runtime-version:
+      - 3.14.6
+    method: GET
+    uri: https://api.openai.com/v1/models
+  response:
+    body:
+      string: "{\n  \"object\": \"list\",\n  \"data\": [\n    {\n      \"id\": \"text-embedding-ada-002\",\n
+        \     \"object\": \"model\",\n      \"created\": 1671217299,\n      \"owned_by\":
+        \"openai-internal\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\":
+        \"whisper-1\",\n      \"object\": \"model\",\n      \"created\": 1677532384,\n
+        \     \"owned_by\": \"openai-internal\",\n      \"shutdown_date\": \"2027-02-26\"\n
+        \   },\n    {\n      \"id\": \"gpt-3.5-turbo\",\n      \"object\": \"model\",\n
+        \     \"created\": 1677610602,\n      \"owned_by\": \"openai\",\n      \"shutdown_date\":
+        \"2026-10-23\"\n    },\n    {\n      \"id\": \"tts-1\",\n      \"object\":
+        \"model\",\n      \"created\": 1681940951,\n      \"owned_by\": \"openai-internal\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-3.5-turbo-16k\",\n
+        \     \"object\": \"model\",\n      \"created\": 1683758102,\n      \"owned_by\":
+        \"openai-internal\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\":
+        \"gpt-4-0613\",\n      \"object\": \"model\",\n      \"created\": 1686588896,\n
+        \     \"owned_by\": \"openai\",\n      \"shutdown_date\": \"2026-10-23\"\n
+        \   },\n    {\n      \"id\": \"gpt-4\",\n      \"object\": \"model\",\n      \"created\":
+        1687882411,\n      \"owned_by\": \"openai\",\n      \"shutdown_date\": \"2026-10-23\"\n
+        \   },\n    {\n      \"id\": \"davinci-002\",\n      \"object\": \"model\",\n
+        \     \"created\": 1692634301,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-09-28\"\n    },\n    {\n      \"id\": \"babbage-002\",\n      \"object\":
+        \"model\",\n      \"created\": 1692634615,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2026-09-28\"\n    },\n    {\n      \"id\": \"gpt-3.5-turbo-instruct\",\n
+        \     \"object\": \"model\",\n      \"created\": 1692901427,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-09-28\"\n    },\n    {\n      \"id\":
+        \"gpt-3.5-turbo-instruct-0914\",\n      \"object\": \"model\",\n      \"created\":
+        1694122472,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": null\n
+        \   },\n    {\n      \"id\": \"gpt-3.5-turbo-1106\",\n      \"object\": \"model\",\n
+        \     \"created\": 1698959748,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-09-28\"\n    },\n    {\n      \"id\": \"tts-1-hd\",\n      \"object\":
+        \"model\",\n      \"created\": 1699046015,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"tts-1-1106\",\n
+        \     \"object\": \"model\",\n      \"created\": 1699053241,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"tts-1-hd-1106\",\n
+        \     \"object\": \"model\",\n      \"created\": 1699053533,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"text-embedding-3-small\",\n
+        \     \"object\": \"model\",\n      \"created\": 1705948997,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"text-embedding-3-large\",\n
+        \     \"object\": \"model\",\n      \"created\": 1705953180,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-3.5-turbo-0125\",\n
+        \     \"object\": \"model\",\n      \"created\": 1706048358,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-10-23\"\n    },\n    {\n      \"id\":
+        \"gpt-4-turbo\",\n      \"object\": \"model\",\n      \"created\": 1712361441,\n
+        \     \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-10-23\"\n
+        \   },\n    {\n      \"id\": \"gpt-4-turbo-2024-04-09\",\n      \"object\":
+        \"model\",\n      \"created\": 1712601677,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2026-10-23\"\n    },\n    {\n      \"id\": \"gpt-4o\",\n
+        \     \"object\": \"model\",\n      \"created\": 1715367049,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-4o-2024-05-13\",\n
+        \     \"object\": \"model\",\n      \"created\": 1715368132,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-10-23\"\n    },\n    {\n      \"id\":
+        \"gpt-4o-mini-2024-07-18\",\n      \"object\": \"model\",\n      \"created\":
+        1721172717,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": null\n
+        \   },\n    {\n      \"id\": \"gpt-4o-mini\",\n      \"object\": \"model\",\n
+        \     \"created\": 1721172741,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        null\n    },\n    {\n      \"id\": \"gpt-4o-2024-08-06\",\n      \"object\":
+        \"model\",\n      \"created\": 1722814719,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"omni-moderation-latest\",\n
+        \     \"object\": \"model\",\n      \"created\": 1731689265,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"omni-moderation-2024-09-26\",\n
+        \     \"object\": \"model\",\n      \"created\": 1732734466,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"o1-2024-12-17\",\n
+        \     \"object\": \"model\",\n      \"created\": 1734326976,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-10-23\"\n    },\n    {\n      \"id\":
+        \"o1\",\n      \"object\": \"model\",\n      \"created\": 1734375816,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-10-23\"\n    },\n    {\n      \"id\":
+        \"computer-use-preview\",\n      \"object\": \"model\",\n      \"created\":
+        1734655677,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n
+        \   },\n    {\n      \"id\": \"o3-mini\",\n      \"object\": \"model\",\n
+        \     \"created\": 1737146383,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-10-23\"\n    },\n    {\n      \"id\": \"o3-mini-2025-01-31\",\n      \"object\":
+        \"model\",\n      \"created\": 1738010200,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2026-10-23\"\n    },\n    {\n      \"id\": \"gpt-4o-2024-11-20\",\n
+        \     \"object\": \"model\",\n      \"created\": 1739331543,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"computer-use-preview-2025-03-11\",\n
+        \     \"object\": \"model\",\n      \"created\": 1741377021,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n    },\n    {\n      \"id\":
+        \"gpt-4o-mini-search-preview-2025-03-11\",\n      \"object\": \"model\",\n
+        \     \"created\": 1741390858,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-07-23\"\n    },\n    {\n      \"id\": \"gpt-4o-mini-search-preview\",\n
+        \     \"object\": \"model\",\n      \"created\": 1741391161,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-4o-transcribe\",\n
+        \     \"object\": \"model\",\n      \"created\": 1742068463,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2027-02-26\"\n    },\n    {\n      \"id\":
+        \"gpt-4o-mini-transcribe\",\n      \"object\": \"model\",\n      \"created\":
+        1742068596,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": \"2027-02-26\"\n
+        \   },\n    {\n      \"id\": \"o1-pro-2025-03-19\",\n      \"object\": \"model\",\n
+        \     \"created\": 1742251504,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-10-23\"\n    },\n    {\n      \"id\": \"o1-pro\",\n      \"object\":
+        \"model\",\n      \"created\": 1742251791,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2026-10-23\"\n    },\n    {\n      \"id\": \"gpt-4o-mini-tts\",\n
+        \     \"object\": \"model\",\n      \"created\": 1742403959,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"o3-2025-04-16\",\n
+        \     \"object\": \"model\",\n      \"created\": 1744133301,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-12-11\"\n    },\n    {\n      \"id\":
+        \"o4-mini-2025-04-16\",\n      \"object\": \"model\",\n      \"created\":
+        1744133506,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-10-23\"\n
+        \   },\n    {\n      \"id\": \"o3\",\n      \"object\": \"model\",\n      \"created\":
+        1744225308,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": null\n
+        \   },\n    {\n      \"id\": \"o4-mini\",\n      \"object\": \"model\",\n
+        \     \"created\": 1744225351,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-10-23\"\n    },\n    {\n      \"id\": \"gpt-4.1-2025-04-14\",\n      \"object\":
+        \"model\",\n      \"created\": 1744315746,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-4.1\",\n
+        \     \"object\": \"model\",\n      \"created\": 1744316542,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-4.1-mini-2025-04-14\",\n
+        \     \"object\": \"model\",\n      \"created\": 1744317547,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-4.1-mini\",\n
+        \     \"object\": \"model\",\n      \"created\": 1744318173,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-4.1-nano-2025-04-14\",\n
+        \     \"object\": \"model\",\n      \"created\": 1744321025,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-10-23\"\n    },\n    {\n      \"id\":
+        \"gpt-4.1-nano\",\n      \"object\": \"model\",\n      \"created\": 1744321707,\n
+        \     \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-10-23\"\n
+        \   },\n    {\n      \"id\": \"gpt-image-1\",\n      \"object\": \"model\",\n
+        \     \"created\": 1745517030,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-10-23\"\n    },\n    {\n      \"id\": \"o3-pro\",\n      \"object\":
+        \"model\",\n      \"created\": 1748475349,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"o3-pro-2025-06-10\",\n
+        \     \"object\": \"model\",\n      \"created\": 1749166761,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-12-11\"\n    },\n    {\n      \"id\":
+        \"o4-mini-deep-research\",\n      \"object\": \"model\",\n      \"created\":
+        1749685485,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n
+        \   },\n    {\n      \"id\": \"o3-deep-research\",\n      \"object\": \"model\",\n
+        \     \"created\": 1749840121,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-07-23\"\n    },\n    {\n      \"id\": \"gpt-4o-transcribe-diarize\",\n
+        \     \"object\": \"model\",\n      \"created\": 1750798887,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2027-02-26\"\n    },\n    {\n      \"id\":
+        \"o3-deep-research-2025-06-26\",\n      \"object\": \"model\",\n      \"created\":
+        1750865219,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n
+        \   },\n    {\n      \"id\": \"o4-mini-deep-research-2025-06-26\",\n      \"object\":
+        \"model\",\n      \"created\": 1750866121,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2026-07-23\"\n    },\n    {\n      \"id\": \"gpt-5-chat-latest\",\n
+        \     \"object\": \"model\",\n      \"created\": 1754073306,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n    },\n    {\n      \"id\":
+        \"gpt-5-2025-08-07\",\n      \"object\": \"model\",\n      \"created\": 1754075360,\n
+        \     \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-12-11\"\n
+        \   },\n    {\n      \"id\": \"gpt-5\",\n      \"object\": \"model\",\n      \"created\":
+        1754425777,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": null\n
+        \   },\n    {\n      \"id\": \"gpt-5-mini-2025-08-07\",\n      \"object\":
+        \"model\",\n      \"created\": 1754425867,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2026-12-11\"\n    },\n    {\n      \"id\": \"gpt-5-mini\",\n
+        \     \"object\": \"model\",\n      \"created\": 1754425928,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5-nano-2025-08-07\",\n
+        \     \"object\": \"model\",\n      \"created\": 1754426303,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-12-11\"\n    },\n    {\n      \"id\":
+        \"gpt-5-nano\",\n      \"object\": \"model\",\n      \"created\": 1754426384,\n
+        \     \"owned_by\": \"system\",\n      \"shutdown_date\": null\n    },\n    {\n
+        \     \"id\": \"gpt-audio-2025-08-28\",\n      \"object\": \"model\",\n      \"created\":
+        1756256146,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": null\n
+        \   },\n    {\n      \"id\": \"gpt-realtime\",\n      \"object\": \"model\",\n
+        \     \"created\": 1756271701,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2027-01-20\"\n    },\n    {\n      \"id\": \"gpt-realtime-2025-08-28\",\n
+        \     \"object\": \"model\",\n      \"created\": 1756271773,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-audio\",\n
+        \     \"object\": \"model\",\n      \"created\": 1756339249,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2027-01-20\"\n    },\n    {\n      \"id\":
+        \"gpt-5-codex\",\n      \"object\": \"model\",\n      \"created\": 1757527818,\n
+        \     \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n
+        \   },\n    {\n      \"id\": \"gpt-image-1-mini\",\n      \"object\": \"model\",\n
+        \     \"created\": 1758845821,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-12-01\"\n    },\n    {\n      \"id\": \"gpt-5-pro-2025-10-06\",\n      \"object\":
+        \"model\",\n      \"created\": 1759469707,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2026-12-11\"\n    },\n    {\n      \"id\": \"gpt-5-pro\",\n
+        \     \"object\": \"model\",\n      \"created\": 1759469822,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-audio-mini\",\n
+        \     \"object\": \"model\",\n      \"created\": 1759512027,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2027-01-20\"\n    },\n    {\n      \"id\":
+        \"gpt-audio-mini-2025-10-06\",\n      \"object\": \"model\",\n      \"created\":
+        1759512137,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n
+        \   },\n    {\n      \"id\": \"gpt-5-search-api\",\n      \"object\": \"model\",\n
+        \     \"created\": 1759514629,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        null\n    },\n    {\n      \"id\": \"gpt-realtime-mini\",\n      \"object\":
+        \"model\",\n      \"created\": 1759517133,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2027-01-20\"\n    },\n    {\n      \"id\": \"sora-2\",\n
+        \     \"object\": \"model\",\n      \"created\": 1759708615,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-09-24\"\n    },\n    {\n      \"id\":
+        \"sora-2-pro\",\n      \"object\": \"model\",\n      \"created\": 1759708663,\n
+        \     \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-09-24\"\n
+        \   },\n    {\n      \"id\": \"gpt-5-search-api-2025-10-14\",\n      \"object\":
+        \"model\",\n      \"created\": 1760043960,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.1-chat-latest\",\n
+        \     \"object\": \"model\",\n      \"created\": 1762547951,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n    },\n    {\n      \"id\":
+        \"gpt-5.1-2025-11-13\",\n      \"object\": \"model\",\n      \"created\":
+        1762800353,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": null\n
+        \   },\n    {\n      \"id\": \"gpt-5.1\",\n      \"object\": \"model\",\n
+        \     \"created\": 1762800673,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        null\n    },\n    {\n      \"id\": \"gpt-5.1-codex\",\n      \"object\": \"model\",\n
+        \     \"created\": 1762988221,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        \"2026-07-23\"\n    },\n    {\n      \"id\": \"gpt-5.1-codex-mini\",\n      \"object\":
+        \"model\",\n      \"created\": 1763007109,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2026-07-23\"\n    },\n    {\n      \"id\": \"gpt-5.1-codex-max\",\n
+        \     \"object\": \"model\",\n      \"created\": 1763671532,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n    },\n    {\n      \"id\":
+        \"gpt-image-1.5\",\n      \"object\": \"model\",\n      \"created\": 1764030620,\n
+        \     \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-12-01\"\n
+        \   },\n    {\n      \"id\": \"gpt-5.2-2025-12-11\",\n      \"object\": \"model\",\n
+        \     \"created\": 1765313028,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        null\n    },\n    {\n      \"id\": \"gpt-5.2\",\n      \"object\": \"model\",\n
+        \     \"created\": 1765313051,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        null\n    },\n    {\n      \"id\": \"gpt-5.2-pro-2025-12-11\",\n      \"object\":
+        \"model\",\n      \"created\": 1765343959,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.2-pro\",\n
+        \     \"object\": \"model\",\n      \"created\": 1765343983,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.2-chat-latest\",\n
+        \     \"object\": \"model\",\n      \"created\": 1765344352,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-08-10\"\n    },\n    {\n      \"id\":
+        \"gpt-4o-mini-transcribe-2025-12-15\",\n      \"object\": \"model\",\n      \"created\":
+        1765610407,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": null\n
+        \   },\n    {\n      \"id\": \"gpt-4o-mini-transcribe-2025-03-20\",\n      \"object\":
+        \"model\",\n      \"created\": 1765610545,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": \"2027-01-20\"\n    },\n    {\n      \"id\": \"gpt-4o-mini-tts-2025-03-20\",\n
+        \     \"object\": \"model\",\n      \"created\": 1765610731,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n    },\n    {\n      \"id\":
+        \"gpt-4o-mini-tts-2025-12-15\",\n      \"object\": \"model\",\n      \"created\":
+        1765610837,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": null\n
+        \   },\n    {\n      \"id\": \"gpt-realtime-mini-2025-12-15\",\n      \"object\":
+        \"model\",\n      \"created\": 1765612007,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-audio-mini-2025-12-15\",\n
+        \     \"object\": \"model\",\n      \"created\": 1765760008,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"chatgpt-image-latest\",\n
+        \     \"object\": \"model\",\n      \"created\": 1765925279,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-12-01\"\n    },\n    {\n      \"id\":
+        \"gpt-5.2-codex\",\n      \"object\": \"model\",\n      \"created\": 1766164985,\n
+        \     \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n
+        \   },\n    {\n      \"id\": \"gpt-5.3-codex\",\n      \"object\": \"model\",\n
+        \     \"created\": 1770537915,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        null\n    },\n    {\n      \"id\": \"gpt-realtime-1.5\",\n      \"object\":
+        \"model\",\n      \"created\": 1771461469,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-audio-1.5\",\n
+        \     \"object\": \"model\",\n      \"created\": 1771550885,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-4o-search-preview\",\n
+        \     \"object\": \"model\",\n      \"created\": 1771905534,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-4o-search-preview-2025-03-11\",\n
+        \     \"object\": \"model\",\n      \"created\": 1771905621,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": \"2026-07-23\"\n    },\n    {\n      \"id\":
+        \"gpt-5.3-chat-latest\",\n      \"object\": \"model\",\n      \"created\":
+        1772236571,\n      \"owned_by\": \"system\",\n      \"shutdown_date\": \"2026-08-10\"\n
+        \   },\n    {\n      \"id\": \"gpt-5.4-2026-03-05\",\n      \"object\": \"model\",\n
+        \     \"created\": 1772654062,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        null\n    },\n    {\n      \"id\": \"gpt-5.4-pro\",\n      \"object\": \"model\",\n
+        \     \"created\": 1772659601,\n      \"owned_by\": \"system\",\n      \"shutdown_date\":
+        null\n    },\n    {\n      \"id\": \"gpt-5.4-pro-2026-03-05\",\n      \"object\":
+        \"model\",\n      \"created\": 1772659657,\n      \"owned_by\": \"system\",\n
+        \     \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.4\",\n
+        \     \"object\": \"model\",\n      \"created\": 1772691852,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.4-nano-2026-03-17\",\n
+        \     \"object\": \"model\",\n      \"created\": 1773450837,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.4-nano\",\n
+        \     \"object\": \"model\",\n      \"created\": 1773450870,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.4-mini-2026-03-17\",\n
+        \     \"object\": \"model\",\n      \"created\": 1773451076,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.4-mini\",\n
+        \     \"object\": \"model\",\n      \"created\": 1773451123,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-image-2\",\n
+        \     \"object\": \"model\",\n      \"created\": 1776399795,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-image-2-2026-04-21\",\n
+        \     \"object\": \"model\",\n      \"created\": 1776399994,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.5\",\n
+        \     \"object\": \"model\",\n      \"created\": 1776824847,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.5-2026-04-23\",\n
+        \     \"object\": \"model\",\n      \"created\": 1776839241,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.5-pro\",\n
+        \     \"object\": \"model\",\n      \"created\": 1776894349,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.5-pro-2026-04-23\",\n
+        \     \"object\": \"model\",\n      \"created\": 1776894470,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"chat-latest\",\n
+        \     \"object\": \"model\",\n      \"created\": 1777704602,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-realtime-translate\",\n
+        \     \"object\": \"model\",\n      \"created\": 1777950216,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-realtime-2\",\n
+        \     \"object\": \"model\",\n      \"created\": 1778006032,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-realtime-whisper\",\n
+        \     \"object\": \"model\",\n      \"created\": 1778012060,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.6-sol\",\n
+        \     \"object\": \"model\",\n      \"created\": 1782228018,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.6-terra\",\n
+        \     \"object\": \"model\",\n      \"created\": 1782228459,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-5.6-luna\",\n
+        \     \"object\": \"model\",\n      \"created\": 1782228658,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-realtime-2.1\",\n
+        \     \"object\": \"model\",\n      \"created\": 1782254687,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-realtime-2.1-mini\",\n
+        \     \"object\": \"model\",\n      \"created\": 1782254706,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-transcribe\",\n
+        \     \"object\": \"model\",\n      \"created\": 1785168027,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-live-transcribe\",\n
+        \     \"object\": \"model\",\n      \"created\": 1785168034,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-6-astra\",\n
+        \     \"object\": \"model\",\n      \"created\": 1787853604,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-image-2.5-flare\",\n
+        \     \"object\": \"model\",\n      \"created\": 1788563147,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-image-2.5-sunburst\",\n
+        \     \"object\": \"model\",\n      \"created\": 1788563162,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-image-2.5-flare-2026-09-08\",\n
+        \     \"object\": \"model\",\n      \"created\": 1788851006,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-image-2.5-sunburst-2026-09-08\",\n
+        \     \"object\": \"model\",\n      \"created\": 1788851010,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-live-1\",\n
+        \     \"object\": \"model\",\n      \"created\": 1788889407,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-6-sol\",\n
+        \     \"object\": \"model\",\n      \"created\": 1789405937,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    },\n    {\n      \"id\": \"gpt-6-luna\",\n
+        \     \"object\": \"model\",\n      \"created\": 1789406102,\n      \"owned_by\":
+        \"system\",\n      \"shutdown_date\": null\n    }\n  ]\n}"
+    headers:
+      content-type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+version: 1

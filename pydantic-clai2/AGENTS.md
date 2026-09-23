@@ -150,9 +150,10 @@ actions, `.footer_hint` for the key legend, `markdown_style()` for colours.
 - Widget runners are a `Runners` value passed into the loops; tests pass
   scripted ones (`tests/menu_script.py`). Only the real `widget.run()`
   one-liners are `no cover`.
-- Model sources live in `model_catalog.py`. To add one (models.dev, a provider
-  API), write a function returning `CatalogModel`s and merge it in `catalog()`.
-  The menu never talks to a source directly.
+- Offline model sources merge in `model_catalog.catalog()`. Live provider calls
+  live in `model_discovery.py`; `model_catalog.provider_catalog()` combines their
+  names with known metadata. Discovery runs between menu workers, only for the
+  selected provider. The menu never talks to a provider API directly.
 - Per-model settings are the editable subset of core's `ModelSettings`,
   declared once as `ModelSettingsForm` with descriptions and bounds. Extend the
   form, not the menu, to expose another setting.
@@ -197,9 +198,10 @@ bundled palettes use Termflow defaults.
 | `screen.py` | `Screen`, what `host.full_screen()` binds to during a prompt |
 | `field_menu.py` | the shared field editor (`FieldSource`, `FieldMenu`, `Runners`, `run_flow`) |
 | `set_menu.py` | `/set`: `SettingsSource` over `CommandContext` |
-| `model_menu.py` | `/add_model`: provider discovery, `ModelSettingsSource`, `run_model_flow` |
+| `model_menu.py` | `/add_model`: provider discovery, `ModelSettingsSource`, `open_add_model_menu` |
 | `model_picker.py` | `/model`: selection and completion of saved models |
-| `model_catalog.py` | model sources (genai-prices today) merged by `catalog()` |
+| `model_catalog.py` | offline sources in `catalog()`, live names with metadata in `provider_catalog()` |
+| `model_discovery.py` | live provider catalogs using core authentication, bounded requests, and fallback notices |
 | `model_settings.py` | `ModelSettingsForm`, the editable subset of `ModelSettings` |
 | `logfire.py` | the default-enabled, locally configured Logfire plugin over core `Instrumentation` |
 | `compaction.py` | the built-in `compaction` plugin: harness `FallbackCompaction([SummarizingCompaction, SlidingWindowCompaction])`, `/compact`, the context alert |

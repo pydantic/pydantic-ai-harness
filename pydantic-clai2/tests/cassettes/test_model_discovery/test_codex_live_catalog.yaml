@@ -1,0 +1,28 @@
+interactions:
+- request:
+    body: ''
+    headers:
+      accept:
+      - '*/*'
+      accept-encoding:
+      - gzip, deflate, br, zstd
+      connection:
+      - keep-alive
+      host:
+      - chatgpt.com
+      originator:
+      - pydantic-ai
+      user-agent:
+      - python-httpx2/2.12.0
+    method: GET
+    uri: https://chatgpt.com/backend-api/codex/models?client_version=0.156.1
+  response:
+    body:
+      string: '{"models":[{"slug":"gpt-6-astra","visibility":"list"},{"slug":"gpt-6-sol","visibility":"list"},{"slug":"gpt-6-luna","visibility":"list"},{"slug":"gpt-reserve","visibility":"hide"},{"slug":"gpt-5.6-sol","visibility":"list"},{"slug":"gpt-5.6-terra","visibility":"list"},{"slug":"gpt-5.6-luna","visibility":"list"},{"slug":"gpt-daybreak-blue-latest","visibility":"list"},{"slug":"gpt-5.5","visibility":"list"},{"slug":"codex-auto-review","visibility":"hide"}]}'
+    headers:
+      content-type:
+      - application/json
+    status:
+      code: 200
+      message: OK
+version: 1

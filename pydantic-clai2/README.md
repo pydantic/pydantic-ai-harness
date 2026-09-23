@@ -380,14 +380,26 @@ only the saved list. `/model NAME` switches directly to an added model.
 The currently configured model is kept in the list when upgrading.
 
 `/add_model` opens a searchable provider list, then a model picker for that provider.
-Esc from the model list returns to providers. Providers are unique prefixes from
-the merged catalog, including `openai-codex`. Its suggestions include
-`gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol`, and `gpt-6-astra`; availability
-depends on your account. Unknown prices and context limits are not inferred.
+Esc from the model list returns to providers. Selecting OpenAI (including
+`openai-chat` and `openai-responses`), Anthropic, DeepSeek, or `openai-codex`
+queries that provider's live model list. OpenAI-compatible servers configured
+through `OPENAI_BASE_URL` use the same discovery path. API-key providers use core's
+environment-based authentication; Codex uses your CLAI login and core's token refresh.
+Run `/login openai-codex` if the menu asks you to reconnect.
 
-The model catalog combines genai-prices' catalog
-filtered to providers Pydantic AI can run, plus core's own model list, plus
-whatever you have set now. The left side shows model names and marks the current
+Discovery runs only for the provider you open, with a ten-second deadline.
+Missing credentials, a failed request, or an empty list keeps the built-in catalog
+available and shows a notice in the model preview. Other providers keep their
+catalog suggestions; OpenRouter and vLLM retain their existing connection flows.
+Browsing does not add or select a model. `/model` and its completion still list
+only models you have saved.
+
+Live results retain known prices and context limits from genai-prices, plus your
+current model even if the endpoint omits it. A listed model is not a guarantee
+that your account can run it. Provider lists can include non-chat models; choose
+one compatible with the selected model API. Unknown prices and context limits are not inferred.
+The fallback catalog combines genai-prices' catalog filtered to providers
+Pydantic AI can run, core's own model list, and whatever you have set now. The left side shows model names and marks the current
 model; token counts stay in the details. The right side shows the provider, context window,
 prices, and any settings you have saved for that model. Type to filter. Enter
 saves it in your model list and makes it the model for the next prompt. `Ctrl+S` opens that model's settings:

@@ -427,9 +427,13 @@ not enable fast mode. The stored values remain `service_tier=priority` and
 `service_tier=default`, so older CLAI versions can read them. A custom
 `service_tier` body parameter still takes precedence.
 
-To extend the built-in picker in a CLAI source change, add a source returning
-CatalogModel values in model_catalog.py and merge it in catalog(). Adding a
-catalog row does not implement provider support. Editable per-model settings
+The provider picker queries live catalogs for OpenAI and its chat/responses aliases,
+Anthropic, DeepSeek, and Codex. Failed or empty discovery falls back to the offline
+catalog with a notice. OpenRouter and vLLM keep their own connection flows.
+To extend live discovery in a CLAI source change, update `model_discovery.py`;
+`model_catalog.provider_catalog()` attaches known metadata. Offline sources return
+`CatalogModel` values merged by `catalog()`. Adding a catalog row does not implement
+provider support. Editable per-model settings
 are declared in ModelSettingsForm in model_settings.py; extend that form, not a
 second editor. Credentials belong in provider-supported storage, not model
 settings. /login currently covers Codex, not arbitrary provider authentication.

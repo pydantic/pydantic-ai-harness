@@ -1,14 +1,12 @@
-"""Models the `/add_model` menu can offer, with what is known about each.
-
-genai-prices is the first source. Add another (models.dev, a provider API) as one more
-function returning `CatalogModel`s and merge it in `catalog()`.
-"""
+"""Offline model metadata and live provider names for the `/add_model` menu."""
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from genai_prices.data_snapshot import get_snapshot
 from pydantic_ai.models import known_model_names
+
+from . import model_discovery
 
 EXTRA_PROVIDERS = frozenset({'openai-codex'})
 """Provider prefixes core can run but does not list in `known_model_names()`."""
@@ -52,6 +50,22 @@ def genai_prices_models() -> list[CatalogModel]:
     return found
 
 
+async def provider_catalog(*, provider: str, current: str | None = None) -> tuple[list[CatalogModel], str | None]:
+    """Prefer live names while retaining known metadata and the current model."""
+    names, notice = await model_discovery.discover_models(provider=provider)
+    if names == []:
+        names, notice = None, 'No live models returned.\nUsing the built-in catalog.'
+    included = [current] if current else []
+    if names is not None:
+        included.extend(names)
+    models = [
+        model
+        for model in catalog(include=included)
+        if model.provider == provider and (names is None or model.name in included)
+    ]
+    return models, notice
+
+
 def catalog(*, include: Iterable[str] = ()) -> list[CatalogModel]:
     """Every source merged and sorted by name; `include` adds names not in any source."""
     models = {model.name: model for model in genai_prices_models()}
@@ -62,5 +76,10 @@ def catalog(*, include: Iterable[str] = ()) -> list[CatalogModel]:
     ):
         if name and name not in models:
             provider, _, label = name.partition(':')
-            models[name] = CatalogModel(name=name, provider=provider, label=label)
+            original = models.get(f'openai:{label}') if provider in ('openai-chat', 'openai-responses') else None
+            models[name] = (
+                replace(original, name=name, provider=provider)
+                if original is not None
+                else CatalogModel(name=name, provider=provider, label=label)
+            )
     return [models[name] for name in sorted(models)]
