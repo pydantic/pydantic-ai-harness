@@ -12,6 +12,16 @@ Context management is the built-in `compaction` plugin,
 The `/plugins` menu also lists every other harness capability, disabled by
 default. Press Space to enable one. Some need optional packages, credentials,
 or constructor settings first; see [optional harness capabilities](PLUGINS.md#optional-harness-capabilities).
+The built-in `mcp` plugin includes the MCP client and `/mcp` command. Configure
+trusted stdio or Streamable HTTP servers through plugin settings; no server is
+connected by default. `/mcp` lists configuration, and `/mcp tools NAME` connects
+briefly to discover tools. HTTP redirects are rejected; use the final endpoint URL.
+During runs, core manages connections and prefixes
+tool names with the configured server name. Local server programs still need to
+be installed separately. Settings are plain JSON, so avoid storing secrets there.
+See [Connect MCP servers](PLUGINS.md#connect-mcp-servers) for configuration and
+trust guidance. `/plugins disable mcp` removes its command and tools.
+
 Python 3.11+ is required by Termflow. Tracking issue: https://github.com/pydantic/pydantic-ai-harness/issues/875.
 
 CLAI file tools can access paths outside the workspace, including `/tmp`, and do
@@ -28,6 +38,28 @@ Use `/set display.tool_output true` to show detailed output again, or
 `display.shell_lines` and `display.grep_lines` limit previews to 20 lines by
 default. Plugin-provided rendering, including interactive questions, is unchanged.
 
+## Desktop notifications
+
+The built-in `notifications` plugin is enabled by default. Interactive sessions
+send a desktop notification when a turn finishes or fails, and when the model
+asks a question through `ask_user`. Cancelled turns do not notify. Messages use
+the title `CLAI2` and generic status text, not prompts, answers, paths, or errors.
+
+macOS uses the system `osascript` notification service. Allow notifications for
+Script Editor in System Settings > Notifications; Focus modes can suppress them.
+Linux uses `/usr/bin/notify-send` when installed and a desktop notification service is
+available. Windows, redirected output, headless mode, and SSH sessions do not
+send notifications. These are local OS notifications, not terminal escape
+sequences, so local tmux sessions need no passthrough configuration. CLAI does
+not detect terminal focus; notifications are submitted even while you are
+looking at the terminal. Delivery and presentation depend on OS settings.
+
+Use `/plugins disable notifications` to persistently turn them off and
+`/plugins enable notifications` to restore them. `/plugins remove notifications`
+resets the built-in default. Missing services, nonzero exits, and a two-second
+submission timeout do not fail the turn. No notification-specific telemetry is
+emitted.
+
 ## Code highlighting
 
 Fenced code uses the fence's language for syntax highlighting. CLAI renders a
@@ -35,7 +67,16 @@ block when its closing fence arrives, or when the text part ends if the fence
 is unfinished. This keeps multiline strings and comments correctly colored.
 Prose outside fences still streams line by line. Unlabelled and Markdown fences
 stay literal, including indentation and blank lines; unknown languages use plain
-text. Long code lines wrap to the terminal width.
+text. Long code lines wrap to the terminal width. Response and reasoning code
+blocks use the terminal foreground and ANSI syntax colours, rather than pale
+text intended for a dark background. Bundled themes supply their own ANSI colours.
+
+## Word deletion
+
+Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
+including trailing whitespace. Spaces, tabs, and newlines separate words. Text
+after the cursor is preserved. Your terminal must send Option as Alt/Meta for
+this shortcut; legacy and modified-key encodings are supported.
 
 ## Interrupting a turn
 
@@ -61,26 +102,38 @@ tool side effects cannot be undone.
 ```text
 Follow-up: Add tests for the change
 Command: /usage
-┌─ Working ⠋ ──────────────────────────────────┐
-│> Draft your next message here                 │
-└──────────────────────────────────────────────┘
+─ Working ⠋ ────────────────────────────────────
+/
+/resume Browse or restore a saved session
+/set Change settings; no arguments opens menu
+────────────────────────────────────────────────
 model | context: ... | running: shell
 ```
 
 The prompt sits above the footer with one editable line when empty. It grows
-for wrapped or pasted text and completion suggestions, not to fill the terminal.
+for wrapped or pasted text, not to fill the terminal. Text pastes of five or more
+lines, or at least 1,000 characters, display as `[paste N lines]`. The full text
+is still submitted and saved in input history. Move the cursor inside a folded
+paste to reveal it for editing; recalled history shows the full text.
+Completion suggestions
+appear below the draft, between the top and bottom rules. The rows carry no
+side borders and no prompt marker, so they cannot drift out of alignment.
 History search stays compact too. The bordered prompt area stays visible below
 streamed output while CLAI works, and remains editable. A `Working` label and
-animated spinner appear in the box's top border while a turn or its lifecycle
+animated spinner, in the same pink accent as tool names, appear in the box's top border while a turn or its lifecycle
 hooks are active, without adding a row to the input area. The animation uses the editor's existing refresh
 cycle and disappears when work finishes, fails, or is cancelled. It is not part
-of your draft or submitted message. Full-screen menus temporarily hide it along
+of your draft or submitted message. The editor reserves rows below a terminal
+scroll region. Both partial and completed output stream directly above it,
+without erasing or repainting the input box. Typing updates the draft row; a
+nonblinking highlighted cell marks the cursor. Full-screen menus temporarily hide it along
 with the editor. Enter submits a message to an in-memory queue. Pending text appears above the editor as `Follow-up:`
 previews, with queued slash commands labeled `Command:`. Previews are shown in
 execution order and disappear as each submission starts. Long or multiline messages
 have a single-line preview; large queues show a `+N more queued` summary to leave
 room for the editor. The original message text is unchanged. The footer also shows
-the number waiting. This is a read-only preview, not a queue editor.
+the number waiting. This is a read-only preview, not a queue editor. Control bytes in completion-derived
+text are escaped in previews and prompt echoes; the submitted text is unchanged.
 
 Messages and slash commands run in submission order, after the current turn and its cleanup
 finish. They do not interrupt or steer the active turn. An unsubmitted draft stays
@@ -162,6 +215,80 @@ pyramid, with CLAI lettering. The persistent `CLAI 2.0` banner uses `ansi_shadow
 The splash is disabled for redirected output, CLI arguments, small terminals,
 Windows, `NO_COLOR`, or `CLAI_NO_SPLASH=1`.
 
+## Headless mode
+
+```bash
+clai2 -p "Explain this repository" -m anthropic:claude-sonnet-4-6
+clai2 -p "Continue the task" --resume SESSION-ID
+```
+
+`-p` / `--prompt` requires prompt text as an argument, never reads stdin,
+and runs one turn through tools to completion. Only the final answer is printed
+to stdout, without Markdown rendering, wrapping, banners, thinking, or tool output.
+Errors go to stderr with a nonzero exit status; Ctrl-C exits with status 130.
+The turn is saved and can be resumed. With `-p`, `--resume` requires an explicit
+session ID; the browser cannot open. Prompt text is literal, not a slash command.
+
+`-m` is the short form of `--model`. It overrides the saved, project, and
+`CLAI_MODEL` model for this invocation without changing your saved preference.
+It also works in interactive mode.
+
+Headless mode skips the `ask_user` plugin, including saved replacements, without
+changing your preferences. Full-screen plugin requests fail rather than waiting
+for input. Other enabled plugins and coding tools still run with your permissions.
+Trusted third-party plugins must not read input or print directly to stdout;
+CLAI cannot enforce that contract on arbitrary Python code. Plugin load failures
+abort headless runs. Background session naming is not started.
+
+## Git worktrees
+
+```bash
+clai2 --worktree my-task
+clai2 -w
+```
+
+A Git worktree is another checkout of the same repository with its own branch
+and working files. Run these commands inside a repository with at least one
+commit. `--worktree NAME` creates a `clai/NAME` branch from the current `HEAD`
+and starts CLAI at `<repository-root>/.worktrees/NAME`.
+`-w` is the short form; omit the name to generate one. Names start with a letter
+or digit and contain only ASCII letters, digits, hyphens, and underscores.
+
+After checkout succeeds, CLAI adds `/.worktrees/` to Git's local `info/exclude`
+file to keep generated checkouts out of `git status`, without changing your
+tracked `.gitignore`.
+Uncommitted changes, ignored files, and untracked files are not copied. Project settings, repository instructions, and coding
+tools use the new worktree root. Your user settings and plugins stay available;
+a relative `--database` path still refers to the directory you launched from.
+
+CLAI prints the new path and branch. Existing branches and non-empty directories
+are rejected. If checkout fails, CLAI tries to remove only the branch it just
+created, without forcing deletion. If cleanup or the ignore edit fails, the error
+names the retained branch or checkout for recovery.
+
+On normal interactive exit from a linked worktree, CLAI asks whether to remove
+its checkout. Enter, Ctrl-C, or EOF keeps it; only `y` or `yes` confirms removal.
+This also applies when launching inside an existing linked worktree. Git removal
+runs without `--force`, so dirty or locked worktrees are kept with an explanation.
+The branch is kept even when removal succeeds. The main checkout is not offered
+for removal. Headless runs, piped input, and startup errors keep the worktree
+without prompting. `/new`, `/resume`, and `/reload` do not remove the checkout:
+they leave the shell using the same working directory.
+Enter a retained directory and run `clai2 --resume` to continue a saved session. `--worktree` cannot be
+combined with `--resume`, `config`, or `plugins`.
+
+When you no longer need the checkout, use Git's own cleanup commands from your
+original repository root. Without `--force`, Git refuses to remove a dirty worktree:
+
+```bash
+git worktree remove .worktrees/my-task
+git branch -d clai/my-task
+```
+
+A worktree separates working files, not permissions. CLAI's default tools can
+still access files outside it. Creation runs before the agent starts and emits
+no agent telemetry spans.
+
 ## Codex authentication
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:
@@ -213,6 +340,11 @@ Codex tokens are not written to the settings database. Plugin settings are arbit
 JSON stored in plaintext in this database, including secrets if you put them there.
 Pass secret references or use plugin-owned credential storage instead of embedding keys.
 
+When you switch versions or branches, CLAI ignores saved setting names it does not
+recognize and leaves their stored values unchanged. Missing settings use the current
+defaults. New writes still reject unknown names and invalid values. Invalid saved
+values for known settings and unsupported database schema versions still cause an error.
+
 ```text
 /set
 /set model <Tab>
@@ -236,9 +368,11 @@ not change output-validation or HTTP transport retries.
 
 ## Models and their settings
 
-`/model` selects from models you have already added. Its flat, searchable picker
-and Tab completion use only that saved list. `/model NAME` switches directly to
-an added model. The currently configured model is kept in the list when upgrading.
+`/model` selects from models you have already added. Choose **Add a model...**
+to browse providers and select a new model without leaving the command. This
+option is available even when no models have been added. Tab completion uses
+only the saved list. `/model NAME` switches directly to an added model.
+The currently configured model is kept in the list when upgrading.
 
 `/add_model` opens a searchable provider list, then a model picker for that provider.
 Esc from the model list returns to providers. Providers are unique prefixes from
@@ -252,10 +386,111 @@ whatever you have set now. The left side shows model names and marks the current
 model; token counts stay in the details. The right side shows the provider, context window,
 prices, and any settings you have saved for that model. Type to filter. Enter
 saves it in your model list and makes it the model for the next prompt. `Ctrl+S` opens that model's settings:
-`max_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `timeout`, the two
-penalties, `parallel_tool_calls`, `thinking`, and `service_tier`. They are
+the model-aware request and thinking controls described below. They are
 saved per model and passed to every run with that model. Unsupported settings
 may be ignored or rejected by the provider; select only settings your provider supports. `/add_model NAME` sets the model without the menu.
+
+### Model settings and custom parameters
+
+`/model_settings` opens a searchable list of added models. Enter configures a
+model without changing the active model. Esc returns from settings to this list;
+Esc again closes it. `/model_settings PROVIDER:NAME` opens that model directly.
+Tab completes added models.
+`Ctrl+S` in `/add_model` opens the same editor. Edits save immediately and apply
+on the next prompt. `r` resets a field; Esc or Ctrl-C goes back. Fixed choices
+open a picker; numeric fields accept typed values, and empty input resets.
+
+First add `openai-codex:gpt-6-astra` with `/add_model`, then open `/model_settings openai-codex:gpt-6-astra`
+(or your saved Codex model), then **Service Tier / Fast Mode**. Choose
+**Fast (priority)** to request fast processing, or **Standard (default)** to
+turn it off. [Codex fast mode](https://developers.openai.com/codex/speed)
+uses more ChatGPT credits and depends on model and account availability. It does
+not lower reasoning effort. Reset restores the existing model default; it does
+not enable fast mode. The stored values remain `service_tier=priority` and
+`service_tier=default`, so older CLAI versions can read them. A custom
+`service_tier` body parameter still takes precedence.
+
+Model preferences are shared across checkouts. Reading saved preferences ignores
+unknown fields, so newer settings do not break an older reader with this
+compatibility fix. Editing or resetting a known field preserves unknown fields
+in the store. New edits still reject unknown keys and invalid values.
+An invalid value in a known field stops that turn with a repair message, not the
+shell; use `/model_settings` to fix or reset it and try again. CLAI does not silently
+run with different settings or delete saved preferences.
+
+Older branches must receive this fix too. The minimum read-side backport is
+`ModelSettingsForm.model_validate(values, extra='ignore')` in
+`model_settings_from_json`; keep the form itself strict. Also backport preservation
+of unknown keys on save and the shell's model-settings validation error handler.
+
+The editor offers OpenAI reasoning effort, Responses reasoning context, mode,
+summary, and verbosity, and Claude classic/adaptive thinking and effort.
+The editor hides generic request fields such as timeouts and penalties.
+Reasoning GPT models do not show sampling controls. Previously saved overrides
+remain visible so they can be reset. Choices depend on the model and API: Chat Completions does not get Responses
+controls. OpenRouter and vLLM GPT routes expose Chat Completions reasoning effort
+and service tier, not Responses-only controls. `all_turns` appears only on compatible models, and adaptive Claude
+models do not get a token budget. Classic thinking budgets must be at least
+1024 and below an explicit `max_tokens`. If classic thinking has no output cap,
+CLAI reserves the thinking budget plus 4096 output tokens. Other unset fields
+use the provider default.
+Explicit native thinking settings take precedence over generic `thinking`.
+GPT-6 and GPT-5.6 families, including provider-qualified and namespaced names,
+default to `thinking=true`, `service_tier=default`, reasoning effort `medium`,
+context `all_turns`, mode `standard`, summary `detailed`, and verbosity `low`.
+Explicit per-model values win; reset restores the family default without saving
+it as an override. Other models keep their existing defaults. Provider-specific
+fields are consumed only by APIs that support them; this does not add Responses
+controls to Chat Completions or other protocols.
+
+Code Puppy runtime parity is not complete. In particular, its progress-aware
+main/sub-agent streaming retries require core recovery support before CLAI can
+expose working retry controls. See [the parity audit](MODEL_SETTINGS_AUDIT.md).
+
+Pydantic AI owns adaptive-thinking translation and preserved-thinking replay,
+including Fable 5.1's recovery when a changed conversation prefix invalidates a
+thinking block. CLAI does not strip thinking or implement a second recovery loop.
+See [core's thinking block binding documentation](https://pydantic.dev/docs/ai/models/anthropic/#thinking-block-binding).
+
+For native Anthropic models, **Preserved Thinking** controls
+`thinking.block_binding.prefix_mismatch_behavior`: `error` rejects a mismatched
+prefix; `drop_block` continues without the mismatched reasoning block. It appears
+on adaptive-capable Claude models. Fable 5.1 also exposes **Thinking Display**:
+`updates` or `summarized`. Setting either control without a thinking mode selects
+adaptive thinking; neither can be combined with disabled thinking. Resetting the
+mode clears its budget, display, and binding overrides. **Interleaved Thinking**
+adds the beta header on classic Claude 4 models. CLAI adds the display beta when
+requesting updates; core adds the block-binding beta. These native controls do
+not add Anthropic protocol support to third-party Chat Completions endpoints.
+
+GLM-4.5 and newer expose **Thinking (GLM)** and **Clear Thinking (GLM)**;
+GLM-5.2 and newer also expose **Reasoning Effort (GLM)**. Clear Thinking set to
+true clears earlier reasoning; false preserves it. These controls send GLM's
+native `thinking.type`, `thinking.clear_thinking`, and `reasoning_effort` body
+fields. Only explicit overrides are sent. Disabled thinking cannot be combined
+with an effort override. A proxy that needs `chat_template_kwargs` instead of
+this native shape still needs custom parameters. Custom parameters win over the
+generated body on conflict.
+
+Open `custom_params` for Code Puppy-style **Custom Params**. Enter adds or edits
+`key = value`; editing the key renames it. `d` deletes a pair and Esc goes back.
+Dotted keys nest in the request body's `extra_body`, for example:
+
+```text
+chat_template_kwargs.thinking = medium
+reasoning.effort = max
+```
+
+Values accept JSON booleans, numbers, null, arrays, and objects, or unquoted
+text. Quote numeric-looking strings to keep them strings. Parameters are saved
+per model and applied last, overriding built-in request fields on conflict.
+An extra-body object replaces the corresponding generated object, rather than
+deep-merging it. For example, overriding `reasoning.effort` replaces the generated
+`reasoning` object; include custom `reasoning.context` too if you need both.
+They deliberately bypass the model compatibility checks: the endpoint must
+support what you send. This is also the escape hatch for custom endpoints and
+provider options not listed in the form. Reset `custom_params` to remove all
+pairs. Do not put credentials here: values are stored as plaintext in SQLite.
 
 For `/set` and `/add_model`, Tab completes setting names, boolean values, and model names from Pydantic AI's
 built-in catalog without network access. Provider prefixes include `openai-codex:`,
@@ -264,8 +499,17 @@ the provider prefix, then enter the model identifier; suggestions do not establi
 subscription availability. Custom model identifiers are accepted too.
 
 The command registry uses Termflow's `Completer`, `Document`, and `Completion`
-types. The current input widget and popup still use prompt-toolkit through a small
-adapter; replacing that editor with a Termflow-based editor is separate work.
+types. Completion rows stay visible while replacement suggestions are computed;
+stale suggestions cannot be selected. Provider errors appear in the footer
+without ending the session. A blocked completion lookup does not hold menus or
+shutdown open; its late result is discarded. Lookups use one daemon worker with
+one latest queued request, so a stuck provider cannot create a thread per key. Reopening or growing the popup reuses free
+space above the editor instead of adding blank transcript lines.
+The interactive editor draws its own pinned prompt and completion rows,
+using Termflow's layout helpers. It does not run a prompt-toolkit Application or
+renderer. The keyboard decoder and history-file backend still come from
+prompt-toolkit, preserving bracketed paste and modified-key handling. Redirected
+input retains the simple PromptSession path.
 `/set SETTING` shows its current value. `/set` changes apply to subsequent prompts
 and preserve conversation history; splash changes apply at next startup.
 
@@ -327,10 +571,12 @@ the project file. `/plugins disable repo_context` turns it off, for this and
 every later session; `/plugins enable repo_context` brings it back. See
 [PLUGINS.md](PLUGINS.md#the-built-in-plugins) for its settings.
 
-Interactive commands: `/login`, `/set`, `/model`, `/add_model`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/add_model`, `/model_settings`, `/help`, `/new`, `/resume`, `/exit`, `/config`,
 `/plugins`, `/reload`, `/usage`, `/cost`, and `/compact` from the built-in `compaction` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
-and paths after `@`. Path completion inserts a path; it does not attach file contents.
+and paths after `@`. Suggestions match any substring, case-sensitively. For paths,
+matching applies to the filename within the typed directory. Path completion inserts
+a path; it does not attach file contents.
 Unknown command-shaped input such as `/missing` still reports an error instead
 of reaching the model. Absolute paths such as `/Users/me/Desktop/Screenshot.png`
 are prompts, not commands: a slash, dot, or backslash in the first token after
@@ -343,8 +589,20 @@ the agent's configured tools determine how it can access it. Separately, bracket
 paste of existing image paths creates attachments as described in
 [Pasting images](#pasting-images).
 
-Up/down recall saved prompt history. Ctrl-D exits. Ctrl-C at input clears the line; during a run it cancels
-the turn and returns to input. No cancelled run is automatically retried.
+Up/down move through multiline drafts, then recall saved prompt history.
+Enter submits a prompt when idle and queues a separate follow-up turn when busy.
+To steer instead, first queue the message with Enter, then press Alt+Enter
+(Option+Enter). This sends the oldest queued follow-up to the active run at its
+next opportunity without cancelling in-flight tools or changing your draft.
+Each Alt+Enter sends one message. If the run is no longer accepting steering,
+the message stays queued. Slash commands and exit signals are not steered or
+skipped over. With no queued message, Alt+Enter does nothing.
+While running, the input box shows both shortcuts.
+Shift-Enter inserts a newline. CLAI requests modified
+key reporting while the editor is active and releases it for menus and on exit.
+Ctrl-R searches history; Enter accepts a search
+result without submitting it. Ctrl-D exits when the draft is empty. Ctrl-C at
+input clears the line; during a run it cancels the turn and returns to input. No cancelled run is automatically retried.
 
 ## Reload CLAI during development
 
@@ -544,9 +802,10 @@ refresh with the next request; `/compact` alone does not change them.
 
 Ask, for example, "Create a plugin with a custom menu" or "Use my model provider".
 The default agent has a `read_clai_customization_guide` tool and a short instruction
-to read it before advising on CLAI customization. The guide is bundled with the
-installed package and loaded only when the tool is called, not included in every
-prompt. No network access or source checkout is needed to read it.
+to read it before advising on CLAI customization. That hint is placed after the coding
+guidance the plugins contribute and before the repository instruction file. The guide
+is bundled with the installed package and loaded only when the tool is called, not
+included in every prompt. No network access or source checkout is needed to read it.
 This tool needs no arguments and ignores extra arguments supplied by a model.
 Other tools keep their existing validation.
 
@@ -581,23 +840,60 @@ interrupted responses and tool results. Failed turns leave the previous history
 intact. External tool side effects may already have occurred. History is in memory
 only. Structured outputs are supported and displayed after completion.
 
-CLAI is painted in the Pydantic brand palette: Lithium magenta for headings,
-the banner, and the thing to look at; Calcium for list markers and errors; Aqua
-for links and added diff lines; Pydantic AI cyan for guidance; purple with a
-magenta-to-white shimmer for the active status line and plain purple while idle;
-brand grey for tool previews and hints. On terminals without 24-bit
-colour the nearest of the 16 standard colours is used. Every colour lives in
-`theme.py`. This is local to CLAI; it does not change your terminal's colours
-or Termflow defaults elsewhere. Code block syntax highlighting retains Termflow's
-Monokai default.
+### Themes
 
-Streaming matches Code Puppy's separate output and thinking paths:
+```text
+/theme
+/theme tokyo_night
+/set display.theme github_light
+/theme default
+```
+
+Theme selection and cancellation are silent.
+
+`/theme` opens a searchable picker. Its preview shows a sample conversation with
+Markdown, thinking, a tool call, syntax highlighting, warnings, errors, and the
+input/status area. Each bundled palette paints the sample's foreground and
+background. Browsing does not apply a palette or save a setting. Enter confirms;
+Esc or Ctrl-C keeps your current choice. Narrow terminals show the list alone.
+
+`default` preserves CLAI's existing brand colours, including Markdown, menus,
+status, and diff highlighting. Starting and exiting with this choice leaves your
+terminal palette untouched. The default preview has no forced background.
+`/theme default` restores this appearance after trying another palette.
+
+All other choices come from Termflow's bundled registry, including
+`catppuccin_mocha`, `catppuccin_latte`, `tokyo_night`, and `github_light`. CLAI adds
+no new palettes. `/theme NAME` and `/set display.theme NAME` apply the same
+validated preference immediately and save it for future sessions. Tab completes
+these names. The `/set` theme row also lets you reset immediately;
+`/config reset display.theme` removes the saved override for the next startup.
+
+For a bundled palette, Markdown and newly opened menus use Termflow's
+`to_render_style()`, and shell roles use its colours. Termflow changes the terminal
+foreground, background, and 16 ANSI slots via OSC escape sequences. Supported
+terminals may also recolour existing ANSI-styled scrollback. CLAI resets terminal
+colours when you return to `default` or exit a selected palette, including failure
+and cancellation. Unsupported terminals may ignore these changes. Redirected
+output receives no palette-changing sequences. Your terminal configuration file
+is not modified.
+
+The early splash retains its brand colours. Code uses the terminal foreground
+and ANSI syntax colours; bundled palettes use Termflow's default diff colours. Theme selection adds no
+model requests or telemetry.
+
+### Streaming
+
+Streaming uses the defaults from [Code Puppy's smoothing adapters](https://github.com/mpfaffenberger/code_puppy/blob/a862bf478b63822c9d97093f81e4f827e1c53d6e/code_puppy/agents/smooth_stream.py):
 
 - Markdown uses Termflow `SmoothWriter`: 12 ms ticks, 0.5-second catch-up,
   minimum one visible character per tick. Markdown is parsed line-by-line.
-- Thinking deltas feed `StreamSmoother` immediately: 20 ms ticks, 0.4-second
-  catch-up, minimum two characters per tick. They display as dim literal text,
-  without waiting for newlines or interpreting Markdown.
+- Reasoning runs through the same Markdown pipeline with Termflow's dim
+  renderer, at Code Puppy's thinking pace: 20 ms ticks, 0.4-second catch-up,
+  minimum two characters per tick. The `Thinking` heading ends without a
+  newline, so the first rendered reasoning line continues on the heading's row.
+- Both writers feed the terminal scroll region directly. Partial text does not
+  wait for an editor refresh, and a completed line does not clear the input box.
 - Smoothing applies only to interactive terminal output. Redirected output is
   written directly. Parts drain before the next heading, tool status, or prompt.
 
@@ -620,6 +916,13 @@ still wait for a newline or part boundary, as in Code Puppy's Markdown path.
 Tool calls print once with a filled-circle marker and the tool name, followed by one blank line. Long names
 are truncated to one terminal row. Completion activity remains in the footer
 rather than adding a separate `Finished:` line to the transcript.
+
+Markdown link labels are clickable in terminals that support OSC 8 hyperlinks.
+The URL stays visible beside the label for other terminals and redirected output.
+URLs longer than 2,048 characters are shown without clickable metadata to limit
+streaming output size.
+Links survive viewport resizing; following one uses your terminal's usual click
+modifier (often Cmd-click or Ctrl-click).
 
 ## Grep previews
 
@@ -660,9 +963,10 @@ repeated completion heading before the diff or output.
 
 Native capability events drive specialized output: `FileEditedEvent` renders its
 bounded unified diff using Termflow `DiffRenderer`, the same renderer Code Puppy
-uses. Addition backgrounds are muted teal (`#203c3b`), deletion backgrounds are
-muted burgundy (`#432d3b`), and brighter markers distinguish the changes. Code
-syntax colors are unchanged. Successful file writes also show the proposed diff from their matching
+uses. The default appearance keeps CLAI's existing addition and deletion
+backgrounds; bundled palettes use Termflow's defaults. Both use brighter markers.
+Code uses the terminal foreground and ANSI syntax colours on the terminal
+background. Successful file writes also show the proposed diff from their matching
 `FileChangeRequestEvent`: new files show additions, overwrites show before/after
 changes. Without a matching request event, only the written path is shown. Failed
 or cancelled writes do not display a success diff. Large diffs retain the
@@ -693,11 +997,23 @@ output count, updated after each turn and hidden until a response has price data
 After `/compact`, the footer keeps the previous figure until the next turn;
 `/cost` and `/usage` read the retained history immediately.
 
-Prompt-toolkit owns the editor, cursor, and footer during both input and agent
-turns. Complete output lines scroll above the editor; the incomplete streaming
-line is displayed separately above the input frame until it is complete. Status
-refreshes ten times per second. Terminals shorter than six rows or narrower than
-four columns omit the input border. Redirected output has no live editor or footer.
+The shell owns a pinned editor below a VT terminal scroll region, with Termflow
+layout and completion helpers. Rich and Termflow transcript output scroll above
+it without repainting the editor. The hardware cursor stays hidden during input;
+a nonblinking reverse-video cell marks the editing position. Status and resize
+checks run ten times per second, writing only changed rows. Terminals shorter
+than six rows or narrower than six columns omit the border. Below three rows,
+the draft is retained but hidden until the terminal grows. The pinned surface
+requires VT scrolling-margin support. While resizing, the visible viewport goes
+blank and incoming output is buffered. After 250 ms without another size change,
+CLAI redraws recent transcript at the new width and restores the current draft.
+It does not clear terminal scrollback or conversation history. The repaint cache
+retains up to 2,000 lines and one million characters per editor, plus a bounded
+partial line; it includes startup and plugin lifecycle notices and is carried
+across shell reloads. Output arriving during resize
+is kept separately and flushed in order, spilling to a private temporary file
+for large bursts. Full-screen menus release scrolling margins and detach the keyboard reader before taking over.
+Redirected output has no live editor or footer.
 No model requests or telemetry are added for status reporting.
 
 A plugin can append its own fragment to the row with `host.status_segment`, such
@@ -751,13 +1067,21 @@ plugin list. Use `/plugins list` to print it. Plugins are trusted code running a
 ## Questions from the model
 
 When the task is ambiguous, the model can call `ask_user_question` instead of
-guessing. Each question opens a full-screen menu: options as rows, the question
-and the highlighted option's description alongside, `question 2 of 3` in the
-title when there are several. Enter picks one; on multi-select questions Space
-toggles and Enter confirms (with nothing toggled, Enter picks the highlighted
-option); Esc or Ctrl-C declines, which the model is told so it can make a
-stated choice and carry on. Your picks are printed to the
-transcript afterwards.
+guessing. Questions appear inline, with the conversation still visible above a
+compact numbered picker. Use Up/Down and Enter, or press an option's number to
+select it. For multiple selections, Enter or a number toggles a choice; select
+`Done` to submit. At least one choice is required. Esc or Ctrl-C declines the
+whole request, which the model is told so it can make a stated choice and carry
+on. Several questions show progress in the title. The editor's draft is
+preserved, and your picks are printed to the transcript afterwards.
+
+The inline `ask_user_question` picker also offers `Other (type answer)`.
+Choose it to type your own answer instead of the suggested options, including for
+multi-select questions. Enter submits nonblank text. Esc returns to the choices
+and keeps your draft; Ctrl-C declines the whole request. Backspace and arrow keys
+edit the text. Multiline paste is inserted as text and waits for Enter; it does
+not submit an answer or select choices. The conversation stays visible while you type. Custom answers
+appear in the transcript and reach the model as a one-item list under the question's header.
 
 The menu is the built-in `ask_user` plugin around the harness's
 [`AskUser`](../docs/ask-user.md) capability. The capability only knows an

@@ -8,12 +8,56 @@ Everything a plugin can do goes through one object, the `PluginHost`. There is n
 global registry to import and no magic file to name. You get a `host`, you tell it
 what you want, you're done.
 
+## Connect MCP servers
+
+The enabled built-in `mcp` plugin provides `/mcp`. CLAI includes the MCP client;
+there is no extra client package to install. Local server programs and their
+runtimes still need to be installed separately. No servers are configured by
+default, and loading the plugin does not start programs or contact endpoints.
+
+Only configure servers you trust. Stdio servers run programs with your user
+permissions. HTTP servers receive tool arguments and can return untrusted content.
+Plugin settings are stored as plain JSON, not in the credential store. Prefer
+inherited environment variables for local credentials; do not paste secrets into
+slash commands, project files, or saved `headers`/`env` settings.
+
+Configure a local server using an executable and an argument list, not a shell command:
+
+```text
+/plugins add mcp pydantic_clai2.mcp '{"servers":{"local":{"transport":"stdio","command":"python","args":["/absolute/path/to/server.py"]}}}'
+/mcp
+/mcp tools local
+```
+
+For Streamable HTTP, use `{"servers":{"remote":{"transport":"http","url":"https://example.com/mcp"}}}`
+as the JSON argument instead. Replace the example endpoint with your server.
+Stdio settings also accept `cwd` and `env`; HTTP settings accept `headers`.
+HTTP redirects are rejected; configure the final MCP endpoint URL.
+Each server accepts `enabled: false` to keep its configuration without using it.
+Names start with a letter and contain only letters and digits. Underscores are
+reserved for the separator so server/tool name pairs cannot produce the same name.
+The model sees tools prefixed by server name, for example `local_search`.
+
+`/mcp` and `/mcp list` show names, transports, and enabled state, not connection
+health or credentials. `/mcp tools NAME` connects to one enabled server, lists
+its prefixed tool names, then closes that connection. Connection errors are
+reported by the shell. During agent runs, core's `MCPToolset` owns connection
+startup, tool execution, and cleanup. The plugin adds no telemetry beyond core's
+tool spans. It does not enable MCP sampling or native provider-side MCP.
+
+`/plugins disable mcp` removes both the tools and command; `/plugins enable mcp`
+restores them. To replace saved configuration, `/plugins remove mcp` first, then
+run `/plugins add` again. Removing the saved override restores the empty built-in.
+Repository declarations in `.clai/settings.json` stay disabled until explicitly
+approved through `/plugins enable mcp`, like other project plugins.
+
 ## On-demand authoring help
 
 The default CLAI agent exposes `read_clai_customization_guide`. When you ask for
 customization, its instructions tell it to read this guide first. Only the short
 hint and tool description are present initially; the bundled text is read on tool
-invocation. Reading it needs neither a checkout nor a network connection.
+invocation. That hint is ordered after the guidance the plugins contribute and
+before the repository instruction file, so it never leads the system prompt. Reading it needs neither a checkout nor a network connection.
 This tool needs no arguments and ignores extra arguments supplied by a model.
 Other tools keep their existing validation.
 
@@ -53,6 +97,29 @@ backend exists, credentials go to a per-account `0600` file under the user's CLA
 directory instead. None of this changes plugin APIs. See
 [Codex authentication](README.md#codex-authentication) for storage and security
 details.
+
+## Desktop notifications
+
+The default-enabled `notifications` plugin (`pydantic_clai2.notifications`)
+observes `turn_end` for completed and failed turns and `AskUserRequestedEvent`
+before the answer picker waits. Cancelled turns do not notify. It registers no
+tools or instructions and has no plugin settings. Its title is `CLAI2`; its
+messages contain only generic status text, never conversation content or errors.
+
+macOS uses `/usr/bin/osascript`; enable Script Editor notifications in System
+Settings > Notifications. Linux uses `/usr/bin/notify-send` when installed and a desktop
+notification service is available. OS permissions and Focus settings determine
+delivery. Windows, SSH, headless mode, and redirected output are skipped. Local
+tmux needs no passthrough because delivery uses the OS, not terminal escapes.
+The plugin does not detect focus and submits notifications even in the active
+terminal. Submission is awaited with a two-second timeout; missing services,
+nonzero exits, and timeouts are nonfatal. Cancellation still propagates. It emits
+no notification-specific telemetry.
+
+`/plugins disable notifications` persists an off override. Use
+`/plugins enable notifications` to load it again or `/plugins remove notifications`
+to restore the built-in default. Normal plugin unloading discards its handlers;
+there are no background workers to stop.
 
 ## Logfire: default agent tracing
 
@@ -127,12 +194,34 @@ which can retain globals removed from source; initialize plugin state explicitly
 
 Plugins are trusted code running as you. Only install what you trust.
 
+## Worktree startup
+
+```bash
+clai2 --worktree my-task
+```
+
+`--worktree` (or `-w`) creates `<repository-root>/.worktrees/NAME` and changes to
+that directory before reading project settings or activating plugins. Relative paths in your plugin, the coding tools,
+and `repo_context` therefore refer to that checkout. User plugins and settings
+still load from the same database directory, even with a relative `--database`
+path. Only committed project files reach the new checkout. After interactive
+shutdown and plugin cleanup, CLAI offers to remove the linked worktree, defaulting
+to keep. This includes existing linked worktrees. Removal uses Git without
+`--force` and keeps the branch; dirty or locked checkouts stay on disk.
+Headless runs, piped input, and startup errors do not prompt. `/new`, `/resume`,
+and `/reload` keep the checkout in use. Plugins do not own worktree cleanup.
+See [Git worktrees](README.md#git-worktrees) for naming and cleanup.
+
 ## The built-in plugins
 
 The coding tools are a plugin too, and so are asking you multiple-choice
 questions mid-run, reading the repository's instruction file, and keeping the
 conversation inside the context window. These five plugins are marked
-`(built-in)` and enabled unless you say otherwise:
+`(built-in)` and enabled unless you say otherwise. Built-ins activate first, in
+the order listed below, so `coder`'s guidance leads the system prompt; saved,
+drop-in, and project plugins follow in name order. Registration order is also the
+order plugin instructions, renderers, and status segments are consulted in.
+`/plugins` and `/plugins list` stay alphabetical for scanning:
 
 | Id | Backed by | Settings | Does |
 |---|---|---|---|
@@ -218,13 +307,23 @@ changes its settings (`strategy`, `threshold`, `protected_tokens`,
 The second built-in, `ask_user` (`pydantic_clai2.ask_user_menu:activate`), gives
 the model the harness's `AskUser` capability: one tool, `ask_user_question`, for
 asking you one to ten multiple-choice questions when the task is ambiguous. Each
-question opens a full-screen menu on the alternate screen: the options are the
-rows, the right-hand panel shows the question and what the highlighted option
-means, the title says `question 2 of 3` when there are several. Enter picks;
-Space toggles on multi-select questions; Esc or Ctrl-C declines, which tells the
-model you declined and lets the run continue. Streaming output is flushed and the
-status row paused before the menu opens, and what you picked is printed to the
-transcript afterwards. `/plugins disable ask_user` takes the tool away.
+question appears inline above a compact numbered picker, keeping the conversation
+visible. Up/Down moves the highlight; Enter or an option's number selects it.
+For multi-select questions, Enter or a number toggles that choice; select `Done`
+to submit at least one choice. The title says `question 2 of 3` when there are
+several. Esc or Ctrl-C declines the whole request and lets the model continue.
+The picker uses `host.full_screen()` only to flush streaming output and suspend
+the editor's input reader. It does not switch to the alternate screen. The draft
+is restored on exit, and your picks are printed to the transcript afterwards.
+`/plugins disable ask_user` takes the tool away.
+
+The inline `ask_user_question` picker also offers `Other (type answer)`.
+Choose it to type your own answer instead of the suggested options, including for
+multi-select questions. Enter submits nonblank text. Esc returns to the choices
+and keeps your draft; Ctrl-C declines the whole request. Backspace and arrow keys
+edit the text. Multiline paste is inserted as text and waits for Enter; it does
+not submit an answer or select choices. The conversation stays visible while you type. Custom answers
+appear in the transcript and reach the model as a one-item list under the question's header.
 
 The capability does not know it is in a terminal. It hands an `AskUserRequest`
 to an `Answerer` (one async callable returning an `AskUserResponse`) and waits.
@@ -468,7 +567,10 @@ host.commands.register(
 ```
 
 The handler gets the arguments as a list of strings and returns the text to show.
-It may be `async`. Add `complete=` to offer Tab suggestions. Names must be unique;
+It may be `async`. Add `complete=` to offer Tab suggestions. The registry filters
+command names and returned candidates by case-sensitive substring, replacing the
+whole typed fragment when selected. Return full candidates, not just suffixes.
+Names must be unique;
 clashing with a built-in is an error at startup, not a silent override.
 
 Path-like input is not dispatched to commands. A slash, dot, or backslash in the
@@ -500,6 +602,12 @@ host.add(tools)
 `host.add` also accepts a function that takes a `RunContext` and returns a
 capability (or `None`), for tools that should only exist in some runs.
 
+Markdown in streamed answers and thinking uses OSC 8 hyperlinks for link labels
+when writing to a terminal. The URL is also shown as text. Transcript replay keeps
+hyperlinks after resize, but does not replay clipboard, title, or palette commands.
+Redirected Markdown output does not emit hyperlinks. Destinations longer than
+2,048 characters stay visible but do not get clickable metadata.
+
 ### Draw an event yourself: `@host.render(EventClass)`
 
 Built-in tool rendering shows one summary line per call by default, clipped to
@@ -530,18 +638,59 @@ never lands in the middle of a paragraph.
 
 ### Take the whole screen mid-run: `async with host.full_screen()`
 
-A full-screen widget opened from inside a tool call (the built-in `ask_user` menu
-is one) has to wait for streamed text to finish and the editor and status row to
+A widget opened from inside a tool call, including the inline `ask_user` picker,
+has to wait for streamed text to finish and the editor and status row to
 get out of the way. `host.full_screen()` flushes pending output, suspends the
 editor's input reader, and restores the editor and its draft when the block exits.
-The editor remains active during agent turns: users can draft and queue messages,
-but turns and slash commands execute sequentially. While work or turn lifecycle
-hooks are active, a `Working` label and spinner appear in the editor's top border,
+The editor remains active during agent turns. Enter queues a separate turn with
+its own `turn_start` and `turn_end` hooks. Alt+Enter (Option+Enter) sends the oldest
+queued follow-up to the active run through core's
+`RunContext.enqueue(priority='asap')`, without starting another turn, cancelling
+tools, or changing the draft. Each press sends one message. If the run is no
+longer accepting steering, the message stays queued. Slash commands and exit
+signals are not steered or skipped over. With no queued message, Alt+Enter does
+nothing. When idle, Enter starts a turn. Shift-Enter inserts a newline.
+Modified-key reporting is enabled only while the editor owns input.
+Option+Backspace (Alt+Backspace) deletes the word before the cursor, like Ctrl-W,
+including trailing whitespace. Spaces, tabs, and newlines separate words. Text
+after the cursor is preserved. Your terminal must send Option as Alt/Meta for
+this shortcut; legacy and modified-key encodings are supported.
+
+Completion rows remain visible while a replacement lookup runs, but stale results
+cannot be selected. Popup height changes reuse available space without adding
+blank transcript lines on each key. Completion providers should be read-only.
+Their errors are shown in the footer rather than ending the session; on menu
+handoff or shutdown, a blocked synchronous lookup may finish in the background
+and its result is ignored. A single daemon worker and a latest-only queue bound
+this work; a stuck provider delays further lookups, not input or process exit.
+While work or turn lifecycle
+hooks are active, a `Working` label and spinner appear in the editor's top border.
+The spinner uses the same pink `ACCENT` as tool names, while the label and border
+stay muted. The indicator appears
 without adding an input row or changing the draft. The indicator uses the editor's refresh cycle, adds no
-background task, and is hidden while a full-screen interface owns the terminal. Pending message previews appear
+background task, and is hidden while a full-screen interface owns the terminal.
+The editor reserves bottom rows with terminal scrolling margins. Both partial
+and complete output go straight to the transcript region, without suspending or
+repainting the input box. The shell paints changed editor rows itself, using
+Termflow layout helpers; it does not run a prompt-toolkit renderer. Its cursor
+is a nonblinking highlighted cell, separate from the transcript cursor.
+Resize blanks the visible viewport and buffers transcript writes until the size
+has been stable for 250 ms. It then replays a bounded recent transcript tail and
+restores the draft; it does not erase terminal scrollback or conversation history.
+The buffer includes startup and plugin lifecycle output. It retains ANSI styling,
+not arbitrary terminal-control operations.
+Use `host.full_screen()` for widgets instead of printing cursor-control sequences
+into the transcript. Large output bursts during resize spill to a private temporary
+file and are flushed in order after the viewport is rebuilt.
+The Termflow smoothing defaults match Code Puppy: responses use 12 ms ticks, a 0.5-second
+catch-up window, and at least one character per tick; thinking uses 20 ms ticks,
+a 0.4-second window, and at least two characters per tick, and renders as dimmed
+Markdown after the `Thinking` heading on the same row. Plugins do not need their own redraw logic. Pending message previews appear
 above the editor in execution order (`Follow-up:` for messages, `Command:` for
 slash commands), and disappear when consumed. The preview is read-only; clipping
 and flattening multiline text for display do not change the submitted text.
+Control bytes are escaped in completion labels, queued previews, and prompt echoes
+rather than being executed as terminal commands.
 Esc in the live editor cancels active work, including turn lifecycle hooks,
 without clearing the draft or requesting exit. While a plugin owns the screen,
 its menu retains control of Esc.
@@ -578,6 +727,9 @@ settings = host.settings(NotifySettings)
 ```
 
 Bad or missing values fail at startup with a message naming your plugin.
+CLAI ignores unknown names in its own saved settings and preserves their values for
+other versions or branches. This does not relax validation of plugin declarations
+or `host.settings(Model)`.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 
@@ -704,9 +856,155 @@ alter an already running request or revoke credentials at the provider.
 `/add_model` opens the provider catalog, connection setup, and per-model settings.
 `/add_model PROVIDER:NAME` adds a model directly. Adding a model also selects it
 for the next prompt. `/model` is a flat picker of added models, and `/model NAME`
-selects one without the menu. Its Tab suggestions contain only added models.
+selects one without the menu. Choose **Add a model...** in `/model` to browse
+providers and select a new model, including when the saved list is empty.
+Its Tab suggestions contain only added models.
 The list persists across sessions. The currently configured model is retained
 when upgrading; `/set model NAME` also saves the model in this list.
+
+### Terminal themes
+
+Theme selection and cancellation do not print status messages. Terminal colour
+controls are never replayed as conversation text.
+
+```text
+/theme tokyo_night
+/set display.theme github_light
+```
+
+`/theme` without arguments opens a searchable picker with a sample conversation,
+including Markdown, thinking, tool output, code, warnings, errors, and the input
+area. Browsing previews colours without applying them; Enter confirms, and Esc
+or Ctrl-C cancels. Choices are `default` and `termflow.themes.PALETTES`.
+`default` preserves CLAI's existing appearance without changing terminal colours
+on startup or exit. `/theme default` restores it after a palette selection.
+The picker, `/set`, project settings, and persisted `display.theme` values share
+validation. A project override takes precedence again on the next startup.
+
+```python
+from rich.console import Console
+from pydantic_clai2 import theme
+
+Console().print('Ready for your next prompt.', style=theme.color(theme.INFO))
+```
+
+Resolve the `ACCENT`, `INFO`, `WARNING`, `ERROR`, `MUTED`, and `THINKING` roles
+through `theme.color(role)` at render time. The constants retain their brand
+values; the resolver reads the active palette. `theme.sgr(role)` resolves raw
+ANSI surfaces itself. `theme.current()` returns the selected Termflow
+`TerminalPalette`, or `None` for the existing default appearance.
+
+Selecting a bundled palette changes terminal foreground, background, and ANSI
+slots via Termflow's OSC sequences. CLAI resets them to terminal defaults when
+you return to `default` or exit a selected palette, including errors and
+cancellation. Redirected output receives no palette-changing sequences.
+Unsupported terminals may ignore changes; supported ones may recolour ANSI
+scrollback. The early splash retains brand colours. Code uses the terminal
+foreground and ANSI syntax colours.
+Diff colours stay unchanged in `default`; bundled palettes use Termflow's diff
+defaults. Plugins cannot register custom palettes. Theme selection adds no model
+requests, hooks, or telemetry.
+### Model settings and custom parameters
+
+`/model_settings` opens a searchable list of added models. Enter configures a
+model without changing the active model. Esc returns from settings to this list;
+Esc again closes it. `/model_settings PROVIDER:NAME` opens that model directly.
+Tab completes added models.
+`Ctrl+S` in `/add_model` opens the same editor. Edits save immediately and apply
+on the next prompt. `r` resets a field; Esc or Ctrl-C goes back. Fixed choices
+open a picker; numeric fields accept typed values, and empty input resets.
+
+For `openai-codex` models, open `/model_settings openai-codex:gpt-6-astra`
+(or your saved Codex model), then **Service Tier / Fast Mode**. Choose
+**Fast (priority)** to request fast processing, or **Standard (default)** to
+turn it off. [Codex fast mode](https://developers.openai.com/codex/speed)
+uses more ChatGPT credits and depends on model and account availability. It does
+not lower reasoning effort. Reset restores the existing model default; it does
+not enable fast mode. The stored values remain `service_tier=priority` and
+`service_tier=default`, so older CLAI versions can read them. A custom
+`service_tier` body parameter still takes precedence.
+
+Model preferences are shared across checkouts. Reading saved preferences ignores
+unknown fields, so newer settings do not break an older reader with this
+compatibility fix. Editing or resetting a known field preserves unknown fields
+in the store. New edits still reject unknown keys and invalid values.
+An invalid value in a known field stops that turn with a repair message, not the
+shell; use `/model_settings` to fix or reset it and try again. CLAI does not silently
+run with different settings or delete saved preferences.
+
+Older branches must receive this fix too. The minimum read-side backport is
+`ModelSettingsForm.model_validate(values, extra='ignore')` in
+`model_settings_from_json`; keep the form itself strict. Also backport preservation
+of unknown keys on save and the shell's model-settings validation error handler.
+
+The editor offers OpenAI reasoning effort, Responses reasoning context, mode,
+summary, and verbosity, and Claude classic/adaptive thinking and effort.
+The editor hides generic request fields such as timeouts and penalties.
+Reasoning GPT models do not show sampling controls. Previously saved overrides
+remain visible so they can be reset. Choices depend on the model and API: Chat Completions does not get Responses
+controls. OpenRouter and vLLM GPT routes expose Chat Completions reasoning effort
+and service tier, not Responses-only controls. `all_turns` appears only on compatible models, and adaptive Claude
+models do not get a token budget. Classic thinking budgets must be at least
+1024 and below an explicit `max_tokens`. If classic thinking has no output cap,
+CLAI reserves the thinking budget plus 4096 output tokens. Other unset fields
+use the provider default.
+Explicit native thinking settings take precedence over generic `thinking`.
+GPT-6 and GPT-5.6 families, including provider-qualified and namespaced names,
+default to `thinking=true`, `service_tier=default`, reasoning effort `medium`,
+context `all_turns`, mode `standard`, summary `detailed`, and verbosity `low`.
+Explicit per-model values win; reset restores the family default without saving
+it as an override. Other models keep their existing defaults. Provider-specific
+fields are consumed only by APIs that support them; this does not add Responses
+controls to Chat Completions or other protocols.
+
+Code Puppy runtime parity is not complete. In particular, its progress-aware
+main/sub-agent streaming retries require core recovery support before CLAI can
+expose working retry controls. See [the parity audit](MODEL_SETTINGS_AUDIT.md).
+
+Pydantic AI owns adaptive-thinking translation and preserved-thinking replay,
+including Fable 5.1's recovery when a changed conversation prefix invalidates a
+thinking block. CLAI does not strip thinking or implement a second recovery loop.
+See [core's thinking block binding documentation](https://pydantic.dev/docs/ai/models/anthropic/#thinking-block-binding).
+
+For native Anthropic models, **Preserved Thinking** controls
+`thinking.block_binding.prefix_mismatch_behavior`: `error` rejects a mismatched
+prefix; `drop_block` continues without the mismatched reasoning block. It appears
+on adaptive-capable Claude models. Fable 5.1 also exposes **Thinking Display**:
+`updates` or `summarized`. Setting either control without a thinking mode selects
+adaptive thinking; neither can be combined with disabled thinking. Resetting the
+mode clears its budget, display, and binding overrides. **Interleaved Thinking**
+adds the beta header on classic Claude 4 models. CLAI adds the display beta when
+requesting updates; core adds the block-binding beta. These native controls do
+not add Anthropic protocol support to third-party Chat Completions endpoints.
+
+GLM-4.5 and newer expose **Thinking (GLM)** and **Clear Thinking (GLM)**;
+GLM-5.2 and newer also expose **Reasoning Effort (GLM)**. Clear Thinking set to
+true clears earlier reasoning; false preserves it. These controls send GLM's
+native `thinking.type`, `thinking.clear_thinking`, and `reasoning_effort` body
+fields. Only explicit overrides are sent. Disabled thinking cannot be combined
+with an effort override. A proxy that needs `chat_template_kwargs` instead of
+this native shape still needs custom parameters. Custom parameters win over the
+generated body on conflict.
+
+Open `custom_params` for Code Puppy-style **Custom Params**. Enter adds or edits
+`key = value`; editing the key renames it. `d` deletes a pair and Esc goes back.
+Dotted keys nest in the request body's `extra_body`, for example:
+
+```text
+chat_template_kwargs.thinking = medium
+reasoning.effort = max
+```
+
+Values accept JSON booleans, numbers, null, arrays, and objects, or unquoted
+text. Quote numeric-looking strings to keep them strings. Parameters are saved
+per model and applied last, overriding built-in request fields on conflict.
+An extra-body object replaces the corresponding generated object, rather than
+deep-merging it. For example, overriding `reasoning.effort` replaces the generated
+`reasoning` object; include custom `reasoning.context` too if you need both.
+They deliberately bypass the model compatibility checks: the endpoint must
+support what you send. This is also the escape hatch for custom endpoints and
+provider options not listed in the form. Reset `custom_params` to remove all
+pairs. Do not put credentials here: values are stored as plaintext in SQLite.
 
 ### Persisting conversation changes
 
@@ -759,3 +1057,14 @@ does not remove the images. Core hooks receive the native multimodal request wit
 should use core hooks rather than parsing terminal markers. There are no new
 host lifecycle hooks. Images are persisted with the conversation, including the
 accepted request when a turn fails or is cancelled.
+
+## Headless CLI runs
+
+`clai2 -p "PROMPT" [-m PROVIDER:NAME]` runs one saved turn without an editor.
+Session and turn hooks still run; stream renderers do not. Host console output
+is suppressed, and stdout contains only the final answer. Plugin load failures
+abort the run. The `ask_user` plugin is skipped even if saved settings enable or
+replace it; this does not change those settings. `host.full_screen()` raises in
+headless mode. Plugins must not bypass the host by reading terminal input or
+printing directly to stdout. `--resume SESSION-ID` restores history without a
+browser or tool replay.

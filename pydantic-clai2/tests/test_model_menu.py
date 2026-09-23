@@ -18,7 +18,7 @@ from pydantic_clai2.config import Settings
 from pydantic_clai2.field_menu import FieldMenu
 from pydantic_clai2.model_catalog import catalog, genai_prices_models, runnable_providers
 from pydantic_clai2.model_menu import ModelMenu, ModelSettingsSource, open_add_model_menu, run_model_flow
-from pydantic_clai2.model_picker import build_model_picker, model_command, model_completions
+from pydantic_clai2.model_picker import ModelPickerAction, build_model_picker, model_command, model_completions
 from pydantic_clai2.model_settings import ModelSettingsForm, model_settings_from_json
 from pydantic_clai2.settings_store import SettingsStore
 
@@ -65,8 +65,9 @@ def test_settings_form_validates_and_converts() -> None:
     assert model_settings_from_json(everything).to_model_settings() == everything
     with pytest.raises(ValidationError):
         ModelSettingsForm(max_tokens=0)
+    assert model_settings_from_json({'nope': 1}).to_model_settings() is None
     with pytest.raises(ValidationError):
-        model_settings_from_json({'nope': 1})
+        ModelSettingsForm.model_validate({'nope': 1})
 
 
 def test_store_round_trips_model_settings(tmp_path: Path) -> None:
@@ -83,13 +84,14 @@ def test_model_settings_source(tmp_path: Path) -> None:
     source = ModelSettingsSource(store, 'openai:gpt-5')
     menu = FieldMenu(source)
     keys = [row.key for row in menu.rows]
-    assert keys[:3] == ['max_tokens', 'temperature', 'top_p']
+    assert keys[:3] == ['max_tokens', 'thinking', 'service_tier']
+    assert not {'temperature', 'top_p', 'seed', 'timeout', 'top_k'} & set(keys)
     thinking = menu.row_for('thinking')
     assert thinking is not None and thinking.choices == ('true', 'false', 'minimal', 'low', 'medium', 'high', 'xhigh')
     tier = menu.row_for('service_tier')
     assert tier is not None and tier.choices == ('auto', 'default', 'flex', 'priority')
     max_tokens = menu.rows[0]
-    assert max_tokens.choices == () and source.title == 'Settings for openai:gpt-5'
+    assert max_tokens.choices == () and source.title == 'Settings - openai:gpt-5'
     assert source.problem(max_tokens, '10') is None
     assert source.problem(max_tokens, '0') == 'Input should be greater than 0'
     assert source.problem(max_tokens, 'ten') is not None
@@ -246,5 +248,36 @@ def test_empty_model_picker(tmp_path: Path) -> None:
     assert model_completions(context, []) == []
     widget = build_model_picker(context)
     assert widget.highlighted is not None
-    assert widget.highlighted.disabled
-    assert '/add_model' in widget.highlighted.label
+    assert not widget.highlighted.disabled
+    assert widget.highlighted.value is ModelPickerAction.ADD
+
+
+@pytest.mark.parametrize('initial_model', [None, 'test'])
+async def test_select_new_model_from_picker(tmp_path: Path, initial_model: str | None) -> None:
+    applied: list[str] = []
+    context = CommandContext(
+        settings=Settings(model=initial_model),
+        store=SettingsStore(tmp_path / 'config.db'),
+        clear_history=lambda: None,
+        apply_setting=lambda key, settings: applied.append(key),
+    )
+    assert context.store.models() == ([initial_model] if initial_model else [])
+    script = Script(
+        lists=[pick(ModelPickerAction.ADD), pick('anthropic'), pick('anthropic:claude-sonnet-4-5')],
+        choices=[],
+        texts=[],
+    )
+    assert await model_command(context, [], runners=script.runners) == 'Saved model. Applied.'
+    assert context.settings.model == 'anthropic:claude-sonnet-4-5'
+    assert SettingsStore(context.store.path).load().model == context.settings.model
+    assert context.settings.model in model_completions(context, [])
+    assert applied == ['model']
+
+
+async def test_cancel_adding_from_picker(tmp_path: Path) -> None:
+    context, applied = make_context(tmp_path)
+    original = context.settings.model
+    script = Script(lists=[pick(ModelPickerAction.ADD), MenuResult(cancelled=True)], choices=[], texts=[])
+    assert await model_command(context, [], runners=script.runners) == 'No changes.'
+    assert context.settings.model == original
+    assert applied == []

@@ -17,6 +17,7 @@ from termflow.tui.completion import (  # pyright: ignore[reportMissingTypeStubs]
 
 from .config import SETTING_FIELDS, PluginSettings
 from .settings_store import SettingsStore
+from .theme import names as theme_names
 
 
 def is_command_input(text: str) -> bool:
@@ -98,16 +99,16 @@ class Commands(Completer):
                 prefix = '' if word.endswith('/') else path.name
                 try:
                     for child in sorted(directory.iterdir()):
-                        if child.name.startswith(prefix):
-                            yield Completion(child.name[len(prefix) :] + ('/' if child.is_dir() else ''))
+                        if prefix in child.name:
+                            yield Completion(child.name + ('/' if child.is_dir() else ''), start_position=-len(prefix))
                 except OSError:
                     return
             return
         words = text[1:].split()
         if len(words) <= 1 and not text.endswith(' '):
             prefix = text[1:]
-            for command in self._commands.values():
-                if command.name.startswith(prefix):
+            for command in list(self._commands.values()):
+                if prefix in command.name:
                     yield Completion(
                         command.name,
                         start_position=-len(prefix),
@@ -125,7 +126,7 @@ class Commands(Completer):
             args.append('')
         prefix = args[-1] if args else ''
         for candidate in command.complete(args):
-            if candidate.startswith(prefix):
+            if prefix in candidate:
                 yield Completion(candidate, start_position=-len(prefix))
 
     def help(self, _: list[str]) -> str:
@@ -146,7 +147,7 @@ def config_command(store: SettingsStore, args: list[str]) -> str:
         store.reset(args[1])
     elif len(args) == 3 and args[0] == 'set':
         adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
-        value: JsonValue = args[2] if args[1] == 'model' else adapter.validate_json(args[2])
+        value: JsonValue = args[2] if args[1] in ('model', 'display.theme') else adapter.validate_json(args[2])
         store.set(args[1], value)
     else:
         raise ValueError('Usage: config show|get KEY|set KEY VALUE|reset KEY')
@@ -157,6 +158,8 @@ def set_completions(args: list[str]) -> Iterable[str]:
     """Complete setting names and values without network calls or credentials."""
     if len(args) <= 1:
         return (*SETTING_FIELDS, 'api_key')
+    if len(args) == 2 and args[0] == 'display.theme':
+        return theme_names()
     if len(args) == 2 and args[0] == 'model':
         names = known_model_names()
         providers = sorted({name.partition(':')[0] + ':' for name in names} | {'openai-codex:'})

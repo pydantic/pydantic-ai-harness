@@ -11,15 +11,14 @@ from types import ModuleType
 
 import anyio
 import pytest
-from prompt_toolkit.application import create_app_session, get_app
-from prompt_toolkit.data_structures import Size
+from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
-from prompt_toolkit.output.vt100 import Vt100_Output
 from pydantic_ai import Agent, AgentStreamEvent, ModelRequestContext, RunContext
 from pydantic_ai.capabilities import Hooks
 from pydantic_ai.models.test import TestModel
 from rich.console import Console
+from rich.text import Text
 from termflow.tui.completion import CompleteEvent, Document  # pyright: ignore[reportMissingTypeStubs]
 
 from pydantic_clai2 import DEFAULT_PLUGINS, Session, chat
@@ -27,6 +26,7 @@ from pydantic_clai2.command_context import CommandContext
 from pydantic_clai2.commands import Command, Commands, set_completions
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.plugins import PluginHost, TurnEnd, TurnStart
+from pydantic_clai2.prompt_surface import PromptSurface
 from pydantic_clai2.settings_store import SettingsStore
 from pydantic_clai2.splash import Splash
 
@@ -206,11 +206,13 @@ def test_set_autocomplete() -> None:
     codex = list(commands.get_completions(Document('/set model openai-codex'), CompleteEvent()))
     assert [item.text for item in codex] == ['openai-codex:', 'openai-codex:gpt-6-astra']
     assert codex[0].start_position == -len('openai-codex')
-    assert all(c.text.startswith('anthropic:') for c in models)
+    assert all('anthropic:' in c.text for c in models)
 
 
 @pytest.mark.parametrize('height', [24, 45])
-async def test_prompt_frame_stays_visible_during_tools(tmp_path: Path, height: int) -> None:
+async def test_prompt_frame_stays_visible_during_tools(
+    tmp_path: Path, height: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
     painted = anyio.Event()
     completions = anyio.Event()
     searched = anyio.Event()
@@ -224,36 +226,32 @@ async def test_prompt_frame_stays_visible_during_tools(tmp_path: Path, height: i
     finish = anyio.Event()
     done = anyio.Event()
 
-    class Output(io.StringIO):
-        def isatty(self) -> bool:
-            return True
+    transcript: list[str] = []
 
+    class Surface(PromptSurface):
         def write(self, text: str) -> int:
-            if '\x1b[6n' in text:
-                pipe.send_text('\x1b[10;1R')
+            transcript.append(text)
             return super().write(text)
 
-        def flush(self) -> None:
+        def paint(self, rows: tuple[str, ...]) -> None:
             nonlocal frame
-            screen = get_app().renderer.last_rendered_screen
-            if screen is not None:
-                frame = [
-                    ''.join(screen.data_buffer[row][col].char for col in range(80)) for row in range(screen.height)
-                ]
-                for text, event in (
-                    ('ready', painted),
-                    ('display.thinking', completions),
-                    ('reverse-i-search', searched),
-                    ('second line', pasted),
-                    ('next message', drafted),
-                    ('retained draft', queued),
-                ):
-                    if any(text in line for line in frame):
-                        event.set()
+            super().paint(rows)
+            frame = [''] * (height - len(rows)) + [Text.from_ansi(row).plain for row in rows]
+            for text, event in (
+                ('ready', painted),
+                ('display.thinking', completions),
+                ('reverse-i-search', searched),
+                ('second line', pasted),
+                ('next message', drafted),
+                ('retained draft', queued),
+            ):
+                if any(text in line for line in frame):
+                    event.set()
 
-    output = Output()
+    monkeypatch.setattr('pydantic_clai2.live_prompt.PromptSurface', Surface)
+    output = io.StringIO()
     store = SettingsStore(tmp_path / 'config.db')
-    terminal = Vt100_Output(output, lambda: Size(rows=height, columns=80), term='xterm-256color')
+    terminal = DummyOutput()
     hooks = Hooks[None]()
 
     @hooks.on.before_model_request
@@ -288,38 +286,41 @@ async def test_prompt_frame_stays_visible_during_tools(tmp_path: Path, height: i
         async with anyio.create_task_group() as tasks:
             tasks.start_soon(run)
             await painted.wait()
-            top = next(row for row, line in enumerate(frame) if '┌' in line)
-            bottom = next(row for row, line in enumerate(frame) if '└' in line)
+            top = next(row for row, line in enumerate(frame) if line and set(line) == {'─'})
+            bottom = max(row for row, line in enumerate(frame) if line and set(line) == {'─'})
             assert bottom - top == 2
             assert bottom == len(frame) - 2
             pipe.send_text('\x12')
             await searched.wait()
-            top = next(row for row, line in enumerate(frame) if '┌' in line)
-            bottom = next(row for row, line in enumerate(frame) if '└' in line)
+            top = next(row for row, line in enumerate(frame) if line and set(line) == {'─'})
+            bottom = max(row for row, line in enumerate(frame) if line and set(line) == {'─'})
             assert bottom - top == 2
             pipe.send_text('\x07/set ')
             await completions.wait()
-            top = next(row for row, line in enumerate(frame) if '┌' in line)
-            bottom = next(row for row, line in enumerate(frame) if '└' in line)
-            assert bottom - top == 7
+            top = next(row for row, line in enumerate(frame) if line and set(line) == {'─'})
+            bottom = max(row for row, line in enumerate(frame) if line and set(line) == {'─'})
+            assert bottom - top == 8
+            assert any('display.thinking' in row for row in frame[top + 1 : bottom])
+            assert all('display.thinking' not in row for row in frame[bottom + 1 :])
+            assert bottom == len(frame) - 2
             pipe.send_text('\x15\x1b[200~first line\nsecond line\x1b[201~')
             await pasted.wait()
-            top = next(row for row, line in enumerate(frame) if '┌' in line)
-            bottom = next(row for row, line in enumerate(frame) if '└' in line)
+            top = next(row for row, line in enumerate(frame) if line and set(line) == {'─'})
+            bottom = max(row for row, line in enumerate(frame) if line and set(line) == {'─'})
             assert bottom - top == 3
             pipe.send_text('\n')
             await working.wait()
             pipe.send_text('next message')
             await drafted.wait()
-            assert any('│> next message' in line for line in frame)
+            assert any(line.startswith('next message') for line in frame)
             pipe.send_text('\n/set display.thinking false\nretained draft')
             await queued.wait()
             follow_up = next(row for row, line in enumerate(frame) if 'Follow-up: next message' in line)
             command = next(row for row, line in enumerate(frame) if 'Command: /set display.thinking false' in line)
-            editor_top = next(row for row, line in enumerate(frame) if '┌' in line)
+            editor_top = next(row for row, line in enumerate(frame) if 'Working ' in line)
             assert follow_up < command < editor_top
             indicator = next(row for row, line in enumerate(frame) if 'Working ' in line)
-            draft = next(row for row, line in enumerate(frame) if '> retained draft' in line)
+            draft = next(row for row, line in enumerate(frame) if 'retained draft' in line)
             assert editor_top == indicator
             assert draft == editor_top + 1
             assert calls == 1
@@ -333,7 +334,7 @@ async def test_prompt_frame_stays_visible_during_tools(tmp_path: Path, height: i
     assert 'Turn not saved' not in output.getvalue()
     assert calls == 1
     assert not store.load().thinking
-    text = output.getvalue()
+    text = ''.join(transcript)
     assert text.index('Finished work') < text.index('> next message\n')
 
 
@@ -380,7 +381,7 @@ def test_file_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     (tmp_path / 'example.py').touch()
     monkeypatch.chdir(tmp_path)
     completions = list(Commands().get_completions(Document('read @exam'), CompleteEvent()))
-    assert any('ple.py' in completion.text for completion in completions)
+    assert [(item.text, item.start_position) for item in completions] == [('example.py', -4)]
 
 
 def test_splash_restores_streams(monkeypatch: pytest.MonkeyPatch) -> None:

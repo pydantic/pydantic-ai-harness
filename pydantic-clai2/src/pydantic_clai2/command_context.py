@@ -59,15 +59,17 @@ class CommandContext:
         """Parse typed text for `key` and check it against the whole settings model; nothing is saved."""
         adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
         value: JsonValue = (
-            raw if key == 'model' or (key == 'sessions.naming_model' and raw != 'null') else adapter.validate_json(raw)
+            raw
+            if key in ('model', 'display.theme') or (key == 'sessions.naming_model' and raw != 'null')
+            else adapter.validate_json(raw)
         )
         updated = self.settings.model_dump()
         updated[SETTING_FIELDS[key]] = value
         return value, Settings.model_validate(updated)
 
     def model_settings(self, model: str) -> ModelSettings | None:
-        """Saved overrides for `model`, ready for `agent.run`; `None` when there are none."""
-        return model_settings_from_json(self.store.model_settings(model)).to_model_settings()
+        """Family defaults plus saved overrides, ready for `agent.run`."""
+        return model_settings_from_json(self.store.model_settings(model), model=model).to_model_settings()
 
     def reset_setting(self, key: str) -> str:
         """Forget the saved override and apply the default now."""

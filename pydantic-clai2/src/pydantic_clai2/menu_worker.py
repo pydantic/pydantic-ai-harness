@@ -6,16 +6,22 @@ from contextvars import ContextVar
 from threading import Event
 from typing import TypeVar
 
+import anyio
 from termflow.tui.keys import read_key  # pyright: ignore[reportMissingTypeStubs]
 
 ResultT = TypeVar('ResultT')
 _STOP: ContextVar[Event | None] = ContextVar('menu_stop', default=None)
 
 
+def worker_stopping() -> bool:
+    """Whether the owner has requested that this menu worker release its resources."""
+    stop = _STOP.get()
+    return stop is not None and stop.is_set()
+
+
 def menu_key() -> str:
     """Poll cancellation alongside terminal input."""
-    stop = _STOP.get()
-    if stop is not None and stop.is_set():
+    if worker_stopping():
         return 'ctrl-c'
     return read_key(timeout=0.05)
 
@@ -29,7 +35,8 @@ async def run_worker(operation: Callable[[], ResultT]) -> ResultT:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
         stop.set()
-        await asyncio.shield(task)
+        with anyio.CancelScope(shield=True):
+            await asyncio.shield(task)
         raise
     finally:
         _STOP.reset(token)

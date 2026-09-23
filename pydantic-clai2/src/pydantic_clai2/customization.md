@@ -16,8 +16,12 @@ contract; this guide is shipped with the package for use without a checkout.
 - Configure a plugin: host.settings with a Pydantic settings model.
 - Use a custom model/provider: supply a Pydantic AI Agent to chat from a Python
   launcher. There is no host.register_provider or host.register_model API.
+- Select colours: /theme opens the Termflow palette picker; /theme tokyo_night
+  selects directly and persists display.theme. /theme default restores CLAI's
+  existing appearance. Browsing previews a sample conversation without applying
+  the candidate. /set exposes the same preference.
 - Replace the prompt editor, splash, streaming Markdown, built-in model catalog,
-  or global colour scheme: currently a CLAI source change, not a supported
+  or add custom palettes: currently a CLAI source change, not a supported
   PluginHost extension. A command can own its own UI instead. You can add a
   fragment to the status row with host.status_segment; you cannot redesign or
   replace the row itself.
@@ -106,12 +110,21 @@ clai2 plugins add NAME module[:attr] [JSON] saves for the next startup.
 delete its source file yourself to remove it from disk.
 
 The second built-in is ask_user (pydantic_clai2.ask_user_menu:activate): the
-harness AskUser capability with a full-screen terminal menu as its answerer, so
+harness AskUser capability with an inline numbered picker as its answerer, so
 the model can ask the user multiple-choice questions mid-run through
-ask_user_question. /plugins disable ask_user removes the tool. To answer the
+ask_user_question. The conversation remains visible. Enter or a number selects;
+for multiple selections it toggles, then Done submits. /plugins disable ask_user removes the tool. To answer the
 questions somewhere other than the terminal, declare ask_user again with a
 module whose activate(host) calls host.add(AskUser(answerer=...)) with your own
 async answerer; see PLUGINS.md.
+
+The inline `ask_user_question` picker also offers `Other (type answer)`.
+Choose it to type your own answer instead of the suggested options, including for
+multi-select questions. Enter submits nonblank text. Esc returns to the choices
+and keeps your draft; Ctrl-C declines the whole request. Backspace and arrow keys
+edit the text. Multiline paste is inserted as text and waits for Enter; it does
+not submit an answer or select choices. The conversation stays visible while you type. Custom answers
+appear in the transcript and reach the model as a one-item list under the question's header.
 
 The built-in logfire plugin (pydantic_clai2.logfire) is enabled by default in the
 stock CLI. It contributes core's Instrumentation capability using an isolated
@@ -271,8 +284,16 @@ Return a Rich renderable, or None to let the next renderer/default handle it.
 CLAI flushes streaming text before printing it. First matching non-None renderer
 wins. Do not print from an event observer when a renderer can do the job.
 Use host.console for plugin-owned console output outside streaming handlers.
-Use pydantic_clai2.theme roles ACCENT, INFO, WARNING, ERROR, MUTED, THINKING,
-not hard-coded colours. Raw ANSI uses theme.sgr. StreamRenderer owns text and
+Resolve pydantic_clai2.theme roles ACCENT, INFO, WARNING, ERROR, MUTED, THINKING
+with theme.color(role) at render time, not hard-coded colours. Raw ANSI uses
+theme.sgr(role), which resolves the selected colours itself. Choices are default
+(the unchanged CLAI appearance) and termflow.themes.PALETTES. theme.current()
+returns the selected TerminalPalette or None for default. Starting and exiting
+in default leaves terminal colours untouched. For bundled palettes, Termflow
+applies foreground, background, and ANSI slots via OSC; returning to default or
+exiting resets terminal colours. Redirected output receives no palette changes.
+The early splash keeps brand colours. Code uses the terminal foreground and ANSI
+syntax colours. Default diffs stay unchanged; bundled palettes use Termflow's diff defaults. StreamRenderer owns text and
 thinking, not tool-specific rendering.
 
 Add a fragment to the status row with host.status_segment:
@@ -294,7 +315,7 @@ repaints about ten times a second, so it runs that often: no blocking IO, no
 awaits, no printing. Return an empty string to contribute nothing that frame.
 Fragments are truncated from the right on narrow terminals and cannot set their
 own colours. host.status_segment adds to the row; replacing the row, prompt
-editor, splash, or global colour scheme is still a CLAI source change.
+editor, splash, or adding custom palettes is still a CLAI source change.
 
 ## Custom TUI menus
 
@@ -396,6 +417,16 @@ identifier, not an alias for your custom instance. Noninteractive Session expose
 resolve_model for translating overrides; chat currently configures its own
 resolver for Codex authentication, not a plugin provider registry.
 
+For `openai-codex` models, open `/model_settings openai-codex:gpt-6-astra`
+(or your saved Codex model), then **Service Tier / Fast Mode**. Choose
+**Fast (priority)** to request fast processing, or **Standard (default)** to
+turn it off. [Codex fast mode](https://developers.openai.com/codex/speed)
+uses more ChatGPT credits and depends on model and account availability. It does
+not lower reasoning effort. Reset restores the existing model default; it does
+not enable fast mode. The stored values remain `service_tier=priority` and
+`service_tier=default`, so older CLAI versions can read them. A custom
+`service_tier` body parameter still takes precedence.
+
 To extend the built-in picker in a CLAI source change, add a source returning
 CatalogModel values in model_catalog.py and merge it in catalog(). Adding a
 catalog row does not implement provider support. Editable per-model settings
@@ -418,3 +449,13 @@ edits, and verify disable removes your commands and tools. Keep README.md and
 PLUGINS.md aligned with user-facing API changes. For UI capabilities not exposed
 by PluginHost, state that limitation and propose a focused source change rather
 than monkeypatching a private global registry.
+
+## Headless invocation
+
+`clai2 -p "PROMPT" -m PROVIDER:NAME` runs one saved turn and prints only the final
+answer. Prompt text is required as an argument; stdin is not read. Use
+`--resume SESSION-ID` to continue saved history without opening the browser.
+The `ask_user` plugin is skipped without changing saved preferences. Full-screen
+requests fail, stream renderers are not called, and host console output is
+suppressed. Plugins must not read input or print directly to stdout. Errors go
+to stderr with a nonzero exit status. `-m` also works in the interactive CLI.

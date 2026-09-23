@@ -1,18 +1,16 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import Generic, TypeVar
 
 from anyio import create_task_group
 from prompt_toolkit import PromptSession
-from prompt_toolkit.filters import Always, Condition, Filter, is_done
 from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.layout import BufferControl, HSplit
-from prompt_toolkit.layout.containers import VerticalAlign
-from prompt_toolkit.layout.dimension import Dimension
+from prompt_toolkit.history import History
+from pydantic import ValidationError
 from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
@@ -38,18 +36,21 @@ from .input_history import input_history
 from .interrupts import Interrupts
 from .key_menu import keys_command
 from .live_prompt import LivePrompt
-from .model_menu import open_add_model_menu
+from .model_menu import model_settings_command, open_add_model_menu
 from .model_picker import model_command, model_completions
 from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
 from .plugins import Renderer, SessionEndReason, SessionStart, TurnEnd, TurnStart, bare_screen
 from .project_settings import ProjectSettings
+from .prompt_transcript import TranscriptBuffer
 from .reloading import reload_clai
 from .screen import Screen
 from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
 from .status import Status, StatusLine
+from .theme_picker import theme_command
+from .tool_output import terminal_text
 from .usage_report import cost_line, session_usage
 
 DepsT = TypeVar('DepsT')
@@ -68,6 +69,8 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='compaction', factory='pydantic_clai2.compaction', settings={}),
     PluginSettings(id='persistence', factory='pydantic_clai2.sessions'),
     PluginSettings(id='logfire', factory='pydantic_clai2.logfire'),
+    PluginSettings(id='notifications', factory='pydantic_clai2.notifications'),
+    PluginSettings(id='mcp', factory='pydantic_clai2.mcp'),
     *HARNESS_PLUGINS,
 )
 """Built-in declarations, including opt-in harness capabilities. `remove` restores their defaults.
@@ -101,53 +104,62 @@ async def chat(
     `project` is the parsed `.clai/settings.json`; layer its overrides into `settings` yourself.
     """
     console = console or Console()
-    console.print()
-    print_banner(console)
-    console.print(
-        '/new starts a session; /resume restores one; /exit quits. Esc or Ctrl-C interrupts a turn.', style=theme.MUTED
-    )
-    project = project or ProjectSettings()
-    _report_project(project, console)
-    use_defaults = builtin_plugins is DEFAULT_PLUGINS
-    shell = _create_shell(
-        agent,
-        deps=deps,
-        plugins=plugins,
-        usage_limits=usage_limits,
-        console=console,
-        settings=settings,
-        store=store,
-        builtin_plugins=builtin_plugins,
-        project=project,
-    )
+    transcript = TranscriptBuffer()
+    with theme.use(lambda: settings.theme if settings is not None else 'default'), transcript.capture(console):
+        console.print()
+        print_banner(console)
+        console.print(
+            '/new starts a session; /resume restores one; /exit quits. Esc or Ctrl-C interrupts a turn.',
+            style=theme.color(theme.MUTED),
+        )
+        project = project or ProjectSettings()
+        _report_project(project, console)
+        use_defaults = builtin_plugins is DEFAULT_PLUGINS
+        shell = create_shell(
+            agent,
+            deps=deps,
+            plugins=plugins,
+            usage_limits=usage_limits,
+            console=console,
+            settings=settings,
+            store=store,
+            builtin_plugins=builtin_plugins,
+            project=project,
+            transcript=transcript,
+        )
     fresh = False
     async with agent:
         while True:
             reason: SessionEndReason = 'error'
-            try:
-                async with create_task_group() as workers:
-                    workers.start_soon(shell.sessions.namer.run)
-                    try:
-                        await shell.loader.load_all(fresh=fresh)
-                        _report_project_plugins(shell.loader, console)
-                        if resume is not None:
-                            console.print(await shell.sessions.command([resume] if resume else []), markup=False)
-                            resume = None
-                        reason = await shell.run()
-                    finally:
-                        workers.cancel_scope.cancel()
-            except BaseExceptionGroup as exc:
-                if len(exc.exceptions) == 1:
-                    raise exc.exceptions[0] from None
-                raise
-            finally:
-                await shell.loader.close(reason)
+            with theme.use(lambda: shell.context.settings.theme, output=console.file if console.is_terminal else None):
+                try:
+                    async with create_task_group() as workers:
+                        workers.start_soon(shell.sessions.namer.run)
+                        try:
+                            with transcript.capture(console):
+                                await shell.loader.load_all(fresh=fresh)
+                                _report_project_plugins(shell.loader, console)
+                                if resume is not None:
+                                    console.print(
+                                        await shell.sessions.command([resume] if resume else []), markup=False
+                                    )
+                                    resume = None
+                            reason = await shell.run()
+                        finally:
+                            workers.cancel_scope.cancel()
+                except BaseExceptionGroup as exc:
+                    if len(exc.exceptions) == 1:
+                        raise exc.exceptions[0] from None
+                    raise
+                finally:
+                    with transcript.capture(console):
+                        await shell.loader.close(reason)
             if not shell.reload_requested:
                 return
             shell.reload_requested = False
             try:
                 shell = reload_clai(
-                    lambda shell=shell: _create_shell(
+                    lambda shell=shell: create_shell(
                         agent,
                         deps=deps,
                         plugins=plugins,
@@ -159,17 +171,22 @@ async def chat(
                         project=project,
                         message_history=shell.session.messages,
                         summary=shell.session.summary,
+                        transcript=shell.transcript,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 -- development edits must not discard the conversation.
-                console.print(f'Reload failed: {type(exc).__name__}: {exc}', style=theme.ERROR, markup=False)
+                with transcript.capture(console):
+                    console.print(
+                        f'Reload failed: {type(exc).__name__}: {exc}', style=theme.color(theme.ERROR), markup=False
+                    )
                 fresh = False
             else:
-                console.print('CLAI2 reloaded. Conversation preserved.', style=theme.INFO)
+                with transcript.capture(console):
+                    console.print('CLAI2 reloaded. Conversation preserved.', style=theme.color(theme.INFO))
                 fresh = True
 
 
-def _create_shell(
+def create_shell(
     agent: AbstractAgent[DepsT, OutputT],
     *,
     deps: DepsT,
@@ -182,7 +199,10 @@ def _create_shell(
     project: ProjectSettings,
     message_history: Sequence[ModelMessage] = (),
     summary: ConversationSummary | None = None,
+    transcript: TranscriptBuffer | None = None,
+    headless: bool = False,
 ) -> '_Shell[DepsT, OutputT]':
+    """Build shared session services, without attaching terminal input in headless mode."""
     settings = Settings.model_validate(settings.model_dump()) if settings is not None else Settings(model=None)
     store = store or SettingsStore()
     conversations = SqliteConversationStore(database=store.path.with_name('sessions.db'))
@@ -209,15 +229,21 @@ def _create_shell(
 
     session.resolve_model = resolve_model
     if session.model is None and agent.model is None:
-        console.print('Add a model with /add_model.', style=theme.INFO)
+        console.print('Add a model with /add_model.', style=theme.color(theme.INFO))
+
+    previous_theme = settings.theme
 
     def apply_setting(key: str, updated: Settings) -> None:
+        nonlocal previous_theme
         if key == 'model':
             session.model = updated.model
         elif key == 'run.tool_retries':
             session.tool_retries = updated.tool_retries
         elif key == 'run.request_limit':
             session.usage_limits = replace(session.usage_limits or UsageLimits(), request_limit=updated.request_limit)
+        elif key == 'display.theme' and console.is_terminal and previous_theme != updated.theme:
+            theme.apply(updated.theme, output=console.file)
+        previous_theme = updated.theme
 
     context = CommandContext(
         settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting, project=project
@@ -245,6 +271,14 @@ def _create_shell(
     )
     commands.register(
         Command(
+            name='theme',
+            description='Select a Termflow palette; no arguments opens the picker',
+            handler=lambda args: theme_command(context, args),
+            complete=lambda args: theme.names() if len(args) <= 1 else (),
+        )
+    )
+    commands.register(
+        Command(
             name='model',
             description='Select an added model; no arguments opens the picker',
             handler=lambda args: model_command(context, args),
@@ -257,6 +291,14 @@ def _create_shell(
             description='Add and use a model, or browse providers and model settings',
             handler=lambda args: context.set_setting(['model', *args]) if args else open_add_model_menu(context),
             complete=lambda args: set_completions(['model', *args]) if len(args) <= 1 else (),
+        )
+    )
+    commands.register(
+        Command(
+            name='model_settings',
+            description='Choose an added model to configure, or edit a named model',
+            handler=lambda args: model_settings_command(context, args),
+            complete=lambda args: model_completions(context, args),
         )
     )
     commands.register(Command(name='help', description='Show commands', handler=commands.help))
@@ -315,14 +357,22 @@ def _create_shell(
         if isinstance(plugin, CommandProvider):
             commands.register_many(plugin.get_commands(context))
     images = ImageInput()
-    prompt = PromptSession[str](
-        history=input_history(store.path.with_name('input-history')),
-        completer=PromptCompleter(commands),
-        complete_while_typing=True,
-        style=COMPLETION_STYLE,
-        reserve_space_for_menu=6,
-        bottom_toolbar=lambda: FormattedText([(theme.MUTED, images.notice)] if images.notice else status.toolbar()),
-    )
+    history = input_history(store.path.with_name('input-history'))
+    prompt = None
+    if not headless and not console.is_terminal:
+        prompt = PromptSession[str](
+            history=history,
+            completer=PromptCompleter(commands),
+            complete_while_typing=True,
+            style=COMPLETION_STYLE,
+            reserve_space_for_menu=6,
+            bottom_toolbar=lambda: FormattedText(
+                [
+                    (theme.color(style), text)
+                    for style, text in ([(theme.MUTED, images.notice)] if images.notice else status.toolbar())
+                ]
+            ),
+        )
     shell = _Shell(
         agent=agent,
         session=session,
@@ -333,14 +383,15 @@ def _create_shell(
         context=context,
         status=status,
         prompt=prompt,
+        history=history,
+        transcript=transcript if transcript is not None else TranscriptBuffer(),
         images=images,
         interrupts=Interrupts(),
         screen=screen,
         sessions=sessions,
     )
-    prompt.key_bindings = images.bindings(
-        queued=lambda: shell.editor.queued_messages if shell.editor is not None else ()
-    )
+    if prompt is not None:
+        prompt.key_bindings = images.bindings()
     commands.register(
         Command(name='reload', description='Reload CLAI2 code without restarting', handler=shell.request_reload)
     )
@@ -359,10 +410,12 @@ class _Shell(Generic[DepsT, OutputT]):
     console: Console
     context: CommandContext
     status: Status
-    prompt: PromptSession[str]
+    prompt: PromptSession[str] | None
+    history: History
     interrupts: Interrupts
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
+    transcript: TranscriptBuffer = field(default_factory=TranscriptBuffer)
     images: ImageInput = field(default_factory=ImageInput)
     reload_requested: bool = False
     editor: LivePrompt | None = None
@@ -374,36 +427,42 @@ class _Shell(Generic[DepsT, OutputT]):
         return 'Reloading CLAI2...'
 
     async def run(self) -> SessionEndReason:
-        show_frame = ~is_done & Condition(lambda: self.console.width >= 4 and self.console.height >= 6)
-
-        def prepare_prompt() -> None:
-            layout = self.prompt.layout
-            for window in layout.find_all_windows():
-                if isinstance(window.content, BufferControl):
-                    window.dont_extend_height = Always()
-            layout.current_window.height = lambda: Dimension(
-                min=self.prompt.reserve_space_for_menu if self.prompt.default_buffer.complete_state else 1
-            )
-            assert isinstance(layout.container, HSplit)
-            layout.container.align = VerticalAlign.BOTTOM
-
         if self.console.is_terminal:
-            self.editor = LivePrompt(self.prompt, self.console, prepare=prepare_prompt, interrupts=self.interrupts)
+            self.editor = LivePrompt(
+                console=self.console,
+                commands=self.commands,
+                history=self.history,
+                images=self.images,
+                interrupts=self.interrupts,
+                toolbar=self.status.toolbar,
+                steer=self.steer,
+                transcript=self.transcript,
+            )
             self.screen.editor = self.editor.suspended
             try:
                 async with self.editor.opened():
-                    return await self._read_loop(show_frame, prepare_prompt)
+                    return await self._read_loop()
             finally:
                 self.screen.editor = None
                 self.editor = None
-        return await self._read_loop(show_frame, prepare_prompt)
+        return await self._read_loop()
 
-    async def _read_loop(self, show_frame: Filter, prepare_prompt: Callable[[], None]) -> SessionEndReason:
+    def steer(self, text: str) -> bool:
+        """Resolve attachments and route input without printing over streamed output."""
+        try:
+            resolved, images = self.images.resolve(text)
+        except ValueError as exc:
+            self.images.notice = str(exc)
+            return True
+        if not self.session.steer(resolved, images=images):
+            return False
+        self.images.notice = f'Steering sent: {text}'
+        return True
+
+    async def _read_loop(self) -> SessionEndReason:
         while True:
             self.images.retain(
-                [self.editor.prompt.default_buffer.text, *self.editor.queued_messages]
-                if self.editor is not None
-                else []
+                [self.editor.buffer.text, *self.editor.queued_messages] if self.editor is not None else []
             )
             try:
                 self.status.model = self.session.model or _model_label(self.agent)
@@ -411,11 +470,14 @@ class _Shell(Generic[DepsT, OutputT]):
                 if self.editor is not None:
                     text = await self.editor.read()
                 else:
-                    text = (await self.prompt.prompt_async('> ', show_frame=show_frame, pre_run=prepare_prompt)).strip()
+                    assert self.prompt is not None
+                    text = (await self.prompt.prompt_async('> ')).strip()
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
-                self.console.print('Input cleared. Press Ctrl-C again within 2 seconds to exit.', style=theme.MUTED)
+                self.console.print(
+                    'Input cleared. Press Ctrl-C again within 2 seconds to exit.', style=theme.color(theme.MUTED)
+                )
                 continue
             except EOFError:
                 return 'eof'
@@ -423,7 +485,7 @@ class _Shell(Generic[DepsT, OutputT]):
             if not text:
                 continue
             if self.editor is not None:
-                self.console.print(f'> {text}', markup=False, highlight=False)
+                self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
             self.console.print()
             if is_command_input(text):
                 async with (self.editor.suspended if self.editor is not None else bare_screen)():
@@ -435,7 +497,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 continue
             if self.session.model is None and self.agent.model is None:
                 self.images.retry_text = text
-                self.console.print('Choose a model first: /set model <Tab>', style=theme.WARNING)
+                self.console.print('Choose a model first: /set model <Tab>', style=theme.color(theme.WARNING))
                 continue
             try:
                 if await self._turn(text):
@@ -448,36 +510,61 @@ class _Shell(Generic[DepsT, OutputT]):
         try:
             text, images = self.images.resolve(text)
         except ValueError as exc:
-            self.console.print(str(exc), style=theme.ERROR, markup=False)
+            self.console.print(str(exc), style=theme.color(theme.ERROR), markup=False)
             return False
         start = TurnStart(text=text)
         ended: TurnEnd | None = None
 
         async def run_turn() -> None:
             nonlocal ended
-            ended = await self._run_turn(start, images=images)
+            ended = await self.run_turn(start, images=images)
 
         completed = await self.interrupts.run(run_turn())
         self.sessions.namer.submit(self.session.summary.id)
+        if self.editor is not None:
+            await self.editor.output.drain()
         _report_interrupt(completed, self.console)
         await self.interrupts.run(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
         return self.interrupts.exit_requested
 
-    async def _run_turn(self, start: TurnStart, *, images: Sequence[BinaryContent] = ()) -> TurnEnd:
+    async def run_turn(
+        self, start: TurnStart, *, images: Sequence[BinaryContent] = (), headless: bool = False
+    ) -> TurnEnd:
+        """Apply turn hooks and settings, then run with optional terminal rendering."""
         try:
             await self.loader.fire(start)
         except PluginError as exc:
-            self.console.print(str(exc), style=theme.ERROR, markup=False)
+            self.console.print(str(exc), style=theme.color(theme.ERROR), markup=False)
             self.console.print()
             return TurnEnd(text=start.text, outcome='failed', error=exc)
         if start.cancelled:
             self.console.print(
-                f'Turn cancelled by a plugin: {start.cancel_reason or "no reason given"}', style=theme.WARNING
+                f'Turn cancelled by a plugin: {start.cancel_reason or "no reason given"}',
+                style=theme.color(theme.WARNING),
             )
             self.console.print()
             return TurnEnd(text=start.text, outcome='cancelled')
         self.session.plugins = (*self.plugins, *self.loader.capabilities())
-        self.session.model_settings = self.context.model_settings(self.session.model or _model_label(self.agent))
+        model = self.session.model or _model_label(self.agent)
+        try:
+            self.session.model_settings = self.context.model_settings(model)
+        except ValidationError as exc:
+            self.console.print(
+                f'Invalid saved model settings for {model}. Fix or reset them with /model_settings {model}.',
+                style=theme.ERROR,
+                markup=False,
+            )
+            for error in exc.errors(include_input=False, include_url=False):
+                location = '.'.join(str(part) for part in error['loc'])
+                self.console.print(f'{location}: {error["msg"]}', style=theme.ERROR, markup=False)
+            self.console.print()
+            return TurnEnd(text=start.text, outcome='failed', error=exc)
+        if headless:
+            try:
+                result = await self.session.prompt(start.text)
+            except Exception as exc:  # noqa: BLE001 -- report a failed headless turn to the CLI.
+                return TurnEnd(text=start.text, outcome='failed', error=exc)
+            return TurnEnd(text=start.text, outcome='completed', result=result)
         return await _run_prompt(
             self.session,
             start.text,
@@ -493,9 +580,9 @@ class _Shell(Generic[DepsT, OutputT]):
 def _report_project(project: ProjectSettings, console: Console) -> None:
     if project.path is None:
         return
-    console.print(f'Project settings: {project.path}', style=theme.MUTED)
+    console.print(f'Project settings: {project.path}', style=theme.color(theme.MUTED))
     if project.unknown:
-        console.print(f'Ignoring unknown settings: {", ".join(project.unknown)}', style=theme.WARNING)
+        console.print(f'Ignoring unknown settings: {", ".join(project.unknown)}', style=theme.color(theme.WARNING))
 
 
 def _report_project_plugins(loader: PluginLoader[DepsT], console: Console) -> None:
@@ -503,13 +590,13 @@ def _report_project_plugins(loader: PluginLoader[DepsT], console: Console) -> No
     if waiting:
         console.print(
             f'Project plugins not loaded; approve one with /plugins enable NAME: {", ".join(waiting)}',
-            style=theme.INFO,
+            style=theme.color(theme.INFO),
         )
 
 
 def _report_interrupt(completed: bool, console: Console) -> None:
     if not completed:
-        console.print('Turn cancelled. Use /exit to quit.', style=theme.MUTED, highlight=False)
+        console.print('Turn cancelled. Use /exit to quit.', style=theme.color(theme.MUTED), highlight=False)
         console.print()
 
 
@@ -517,7 +604,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
     try:
         console.print(await commands.execute_async(text), markup=False)
     except Exception as exc:  # noqa: BLE001 -- command failures must not exit the interactive shell.
-        console.print(str(exc), style=theme.ERROR, markup=False)
+        console.print(str(exc), style=theme.color(theme.ERROR), markup=False)
     console.print()
     _reset_status(text, status)
 
@@ -599,10 +686,10 @@ async def _run_prompt(
         raise
     except Exception as exc:  # noqa: BLE001 -- interactive boundary reports plugin/provider failures.
         await renderer.finish()
-        console.print(f'{type(exc).__name__}: {exc}', style=theme.ERROR, markup=False)
+        console.print(f'{type(exc).__name__}: {exc}', style=theme.color(theme.ERROR), markup=False)
         console.print(
             'Turn failed. Retained history may include partial progress. External tool side effects may already have occurred.',
-            style=theme.MUTED,
+            style=theme.color(theme.MUTED),
         )
         console.print()
         return TurnEnd(text=text, outcome='failed', error=exc)
