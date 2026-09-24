@@ -126,8 +126,11 @@ Done (0.1s)
 The command runs through the platform shell in CLAI's working directory, with
 the terminal's input and output, so interactive programs and pagers work. CLAI
 reports `Done` or the exit code with the elapsed time. Ctrl-C interrupts the
-command and returns to the prompt; a command that has not exited after 0.25
-seconds is killed. As at other times, a second Ctrl-C within two seconds exits
+command and returns to the prompt. The command shares CLAI's process group, so
+every process it started receives the Ctrl-C from the terminal. If the shell
+itself has not exited 0.25 seconds later it is killed, as `subprocess.run`
+does. A program started by a compound command (`a; b`) that ignores Ctrl-C can
+outlive that shell. As at other times, a second Ctrl-C within two seconds exits
 CLAI. Neither the command nor its output is added to the conversation, and a
 bare `!` is sent to the agent as an ordinary prompt. Queued `!` lines run in
 order with other queued input. `/help` lists the syntax.
