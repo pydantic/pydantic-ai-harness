@@ -454,8 +454,13 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         agent: Agent[None, str] = Agent(
             model, name='tool_output_limits', instructions='You summarize oversized tool output.'
         )
-        run = await agent.run(prompt, usage=ctx.usage, usage_limits=reserved_usage_limits(ctx.usage_limits))
-        return run.output.strip()
+        result = await agent.run(
+            prompt,
+            usage=ctx.usage,
+            usage_limits=reserved_usage_limits(ctx.usage_limits),
+            event_stream_handler=action.event_stream_handler,
+        )
+        return result.output.strip()
 
     @staticmethod
     def _summary_model(ctx: RunContext[AgentDepsT], action: Summarize) -> Model[Any] | str:
