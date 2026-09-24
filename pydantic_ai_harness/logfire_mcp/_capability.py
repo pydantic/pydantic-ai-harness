@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -10,7 +10,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -31,10 +31,15 @@ _INSTRUCTIONS = (
 )
 
 
+_ID = 'logfire-mcp'
+
+
 @dataclass(kw_only=True)
 class LogfireMCP(AbstractCapability[AgentDepsT]):
     """Query Logfire telemetry and manage observability resources through its hosted tools."""
 
+    id: str | None = _ID
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `LogfireMCP` on one agent its own."""
     description: str | None = 'Query Logfire telemetry and manage observability resources.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Logfire API key, `'oauth'` to sign in through the browser locally, or a function of the run context that returns a key.
@@ -54,9 +59,14 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
         if self.client is not None and (self.auth is not None or self.url != LOGFIRE_US_MCP_URL):
             raise UserError('`client` owns the connection, so it cannot be combined with `auth` or `url`.')
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `LogfireMCP`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the LogfireMCP connection and optional read-only selection."""
-        id = self.id or 'logfire-mcp'
+        id = self.id or _ID
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = MCPToolset(
                 self.client, id=id, include_instructions=self.include_instructions
@@ -80,7 +90,7 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             self.url,
-            id=self.id or 'logfire-mcp',
+            id=self.id or _ID,
             auth=credential(auth, env='LOGFIRE_API_KEY', service='Logfire'),
             headers=None,
             include_instructions=self.include_instructions,

@@ -116,6 +116,14 @@ class TestLogfireMCP:
         with pytest.raises(UserError, match='`client` owns the connection'):
             LogfireMCP(client='https://example.com/mcp', **settings)
 
+    def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
+        Agent(TestModel(), capabilities=[LogfireMCP(client=server, defer_loading=True)])
+
+    async def test_two_that_differ_raise(self) -> None:
+        agent = Agent(TestModel(), capabilities=[LogfireMCP(auth='a'), LogfireMCP(auth='b', url=LOGFIRE_EU_MCP_URL)])
+        with pytest.raises(UserError, match="Two `LogfireMCP` capabilities share the id 'logfire-mcp'"):
+            await agent.run('Use the tools')
+
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(LogfireMCP(auth='secret-token'))
 

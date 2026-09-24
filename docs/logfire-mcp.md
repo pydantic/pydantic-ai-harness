@@ -85,7 +85,7 @@ def logfire(ctx: RunContext[Deps]) -> LogfireMCP[Deps] | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[DynamicCapability(logfire, id='logfire')])
 ```
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `LogfireMCP` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. The capability's `id` defaults to `logfire-mcp`, so `defer_loading=True` works without one. To add more than one `LogfireMCP` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same; two that share an `id` but differ raise an error.
 
 ## Provider settings
 
