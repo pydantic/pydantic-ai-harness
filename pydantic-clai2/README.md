@@ -14,8 +14,8 @@ default. Press Space to enable one. Some need optional packages, credentials,
 or constructor settings first; see [optional harness capabilities](PLUGINS.md#optional-harness-capabilities).
 `/mcp` manages MCP servers the way Code Puppy's `/mcp` does. Bare `/mcp` shows a
 status dashboard. `/mcp install` opens a form where you name the server, pick
-`stdio`, `http`, or `sse`, edit its JSON configuration in your editor, and switch
-on OAuth sign-in for remote servers. `/mcp edit` reopens the same form.
+`stdio`, `http`, or `sse`, type its URL or command, edit the rest of its JSON
+configuration in your editor, and switch on OAuth sign-in for remote servers. `/mcp edit` reopens the same form.
 `/mcp start`, `stop`, `restart`, `status`, `logs`, `remove`, and `trust` do what
 they say, and `/mcp help` lists them all. Saved servers are available to the
 agent from the next prompt, with tool names prefixed by the server name. Nothing

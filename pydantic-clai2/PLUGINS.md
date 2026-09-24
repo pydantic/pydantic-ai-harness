@@ -43,6 +43,7 @@ separately.
  Add Custom MCP Server
  Server Name: docs              | Name   docs
  Server Type: http              | Type   http - Streamable HTTP endpoint ...
+ URL: https://mcp.example.com   |
  OAuth sign-in: on              |
  JSON Configuration (valid)     | {"type": "http", "url": "https://...", "auth": "oauth", "timeout": 330}
  Load example for http          |
@@ -53,6 +54,9 @@ separately.
 - **Server Type** switches between `stdio` (a local program), `http` (Streamable
   HTTP), and `sse` (Server-Sent Events, used by older servers). An untouched
   example follows the type; a configuration you have edited is kept.
+- **URL** (for `http` and `sse`) or **Command** (for `stdio`, the program and its
+  arguments, split like a shell would but run without one) is typed straight
+  into the form and written into the JSON.
 - **JSON Configuration** opens `$VISUAL` or `$EDITOR` (default `vi`) on the
   server's JSON, with a one-line input as a fallback when no editor runs. The
   preview says whether it is valid and why not.

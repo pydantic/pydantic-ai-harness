@@ -17,7 +17,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import get_args
 
-from pydantic import JsonValue, TypeAdapter, ValidationError
+from pydantic import HttpUrl, JsonValue, TypeAdapter, ValidationError
 from termflow.tui import MenuBuilder, MenuItem, TextInputBuilder  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.menu import Menu  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.textinput import TextInput  # pyright: ignore[reportMissingTypeStubs]
@@ -60,11 +60,21 @@ EXAMPLES: dict[ServerType, str] = {
     ),
 }
 
-NAME, TYPE, OAUTH, CONFIG, EXAMPLE, SAVE, CANCEL = 'name', 'type', 'oauth', 'json', 'example', 'save', 'cancel'
+NAME, TYPE, TARGET, OAUTH, CONFIG, EXAMPLE, SAVE, CANCEL = (
+    'name',
+    'type',
+    'target',
+    'oauth',
+    'json',
+    'example',
+    'save',
+    'cancel',
+)
 Editor = Callable[[str], str | None]
 _NAME: TypeAdapter[str] = TypeAdapter(ServerName)
 _SERVER: TypeAdapter[Server] = TypeAdapter(Server)
 _OBJECT: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
+_URL: TypeAdapter[HttpUrl] = TypeAdapter(HttpUrl)
 
 
 class ServerForm:
@@ -175,11 +185,64 @@ class ServerForm:
         self.name = name
         return True
 
+    @property
+    def target_label(self) -> str:
+        """`URL` for remote servers, `Command` for stdio ones."""
+        return 'Command' if self.type == 'stdio' else 'URL'
+
+    def target(self) -> str:
+        """The URL, or the command line with its arguments, read from the JSON."""
+        try:
+            data = _OBJECT.validate_json(self.config)
+        except ValidationError:
+            return ''
+        if self.type != 'stdio':
+            url = data.get('url')
+            return url if isinstance(url, str) else ''
+        command, args = data.get('command'), data.get('args')
+        if not isinstance(command, str):
+            return ''
+        extra = [arg for arg in args if isinstance(arg, str)] if isinstance(args, list) else []
+        return shlex.join([command, *extra])
+
+    def target_problem(self, text: str) -> str | None:
+        """Why `text` is not a usable URL or command line, or `None`."""
+        text = text.strip()
+        if self.type == 'stdio':
+            try:
+                return None if shlex.split(text) else 'Enter the program to run, then its arguments'
+            except ValueError as exc:
+                return str(exc)
+        try:
+            _URL.validate_python(text)
+        except ValidationError:
+            return 'Enter an http:// or https:// URL'
+        return None
+
+    def set_target(self, text: str) -> None:
+        """Write the URL, or split the command line into `command` and `args`."""
+        try:
+            data = _OBJECT.validate_json(self.config)
+        except ValidationError:
+            self.status = f'Fix the JSON before editing the {self.target_label}'
+            return
+        if self.type == 'stdio':
+            command, *args = shlex.split(text)
+            data['command'] = command
+            data['args'] = list[JsonValue](args)
+            if not args:
+                data.pop('args')
+        else:
+            data['url'] = text.strip()
+        self.config = json.dumps(data, indent=2)
+        self.status = None
+
     def items(self) -> list[MenuItem]:
         """The form's rows; the OAuth row only for remote servers."""
         rows = [
             MenuItem(f'Server Name: {self.name or "(not set)"}', value=NAME),
             MenuItem(f'Server Type: {self.type}', value=TYPE),
+            MenuItem(f'{self.target_label}: {self.target() or "(not set)"}', value=TARGET),
         ]
         if self.type != 'stdio':
             rows.append(MenuItem(f'OAuth sign-in: {"on" if self.oauth else "off"}', value=OAUTH))
@@ -255,6 +318,22 @@ def build_name_input(form: ServerForm) -> TextInput:
     )
 
 
+def build_target_input(form: ServerForm) -> TextInput:
+    """The URL, or the command line for a stdio server."""
+    remote = form.type != 'stdio'
+    return (
+        TextInputBuilder(form.target_label)
+        .style(markdown_style())
+        .prompt(f'{form.target_label}: ')
+        .initial(form.target())
+        .placeholder('https://example.com/mcp' if remote else 'uvx my-mcp-server --flag')
+        .validator(form.target_problem)
+        .footer_hint('Enter save - Esc cancel')
+        .key_source(menu_key)
+        .build()
+    )
+
+
 def build_json_input(form: ServerForm) -> TextInput:
     """The one-line JSON fallback when no editor could run."""
     try:
@@ -309,28 +388,38 @@ def run_form(form: ServerForm, runners: Runners = TERMINAL, editor: Editor = edi
         value = result.item.value
         values = [item.value for item in form.items()]
         cursor = values.index(value) if value in values else 0
-        if value == NAME:
-            typed = runners.run_text(build_name_input(form))
-            if not typed.cancelled and isinstance(typed.value, str):
-                form.name = typed.value.strip()
-        elif value == TYPE:
-            picked = runners.run_choice(build_type_menu(form))
-            if not picked.cancelled and picked.item is not None and picked.item.value in SERVER_TYPES:
-                form.select_type(picked.item.value)
-        elif value == OAUTH:
-            form.toggle_oauth()
-        elif value == CONFIG:
-            edited = editor(form.config)
-            if edited is None:
-                typed = runners.run_text(build_json_input(form))
-                if not typed.cancelled and isinstance(typed.value, str) and not _json_problem(typed.value):
-                    edited = json.dumps(json.loads(typed.value), indent=2)
-            if edited is not None:
-                form.config = edited
-        elif value == EXAMPLE:
-            form.load_example()
-        elif value == SAVE and form.save():
-            return True
+        if value == SAVE:
+            if form.save():
+                return True
+        else:
+            _edit_row(form, value, runners, editor)
+
+
+def _edit_row(form: ServerForm, row: object, runners: Runners, editor: Editor) -> None:
+    if row == NAME:
+        typed = runners.run_text(build_name_input(form))
+        if not typed.cancelled and isinstance(typed.value, str):
+            form.name = typed.value.strip()
+    elif row == TYPE:
+        picked = runners.run_choice(build_type_menu(form))
+        if not picked.cancelled and picked.item is not None and picked.item.value in SERVER_TYPES:
+            form.select_type(picked.item.value)
+    elif row == TARGET:
+        typed = runners.run_text(build_target_input(form))
+        if not typed.cancelled and isinstance(typed.value, str) and not form.target_problem(typed.value):
+            form.set_target(typed.value)
+    elif row == OAUTH:
+        form.toggle_oauth()
+    elif row == CONFIG:
+        edited = editor(form.config)
+        if edited is None:
+            typed = runners.run_text(build_json_input(form))
+            if not typed.cancelled and isinstance(typed.value, str) and not _json_problem(typed.value):
+                edited = json.dumps(json.loads(typed.value), indent=2)
+        if edited is not None:
+            form.config = edited
+    elif row == EXAMPLE:
+        form.load_example()
 
 
 def saved_message(form: ServerForm, server: Server) -> str:

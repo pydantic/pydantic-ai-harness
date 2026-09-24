@@ -83,14 +83,15 @@ async def test_install_stdio_through_the_form(tmp_path: Path) -> None:
 
 async def test_install_remote_with_type_swap_and_oauth(tmp_path: Path) -> None:
     script = Script(
-        lists=[pick('type'), pick('oauth'), pick('name'), pick('save')],
+        lists=[pick('type'), pick('target'), pick('target'), pick('oauth'), pick('name'), pick('save')],
         choices=[pick('http')],
-        texts=[typed('docs')],
+        texts=[typed('not a url'), typed('https://mcp.example.com/mcp'), typed('docs')],
     )
     command, store = make(tmp_path, script)
     assert (await command(['install'])).startswith('Added docs.')
     saved = store.load().servers['docs']
     assert isinstance(saved, HTTPServer)
+    assert str(saved.url) == 'https://mcp.example.com/mcp', 'an invalid URL is ignored, the valid one saved'
     assert saved.auth == 'oauth' and saved.timeout == 330, 'OAuth allows time for the browser sign-in'
     assert saved.headers is None, 'switching on OAuth drops the Authorization header'
 
@@ -126,6 +127,7 @@ def test_form_rows_preview_and_examples(tmp_path: Path) -> None:
     assert labels == [
         'Server Name: (not set)',
         'Server Type: stdio',
+        'Command: npx -y @modelcontextprotocol/server-filesystem /path/to/dir',
         'JSON Configuration (valid)',
         'Load example for stdio',
         'Save & Install',
@@ -331,3 +333,30 @@ async def test_registered_completion_through_the_command_registry(tmp_path: Path
     store.put('local', stdio())
     [mcp] = list(registry)
     assert 'local' in mcp.complete(['logs', ''])
+
+
+def test_url_and_command_rows(tmp_path: Path) -> None:
+    form = ServerForm(MCPStore(tmp_path / 'config'))
+    assert form.target_label == 'Command'
+    assert form.target_problem('uvx "unclosed') == 'No closing quotation'
+    assert form.target_problem('  ') == 'Enter the program to run, then its arguments'
+    assert form.target_problem('uvx my-server') is None
+    form.set_target('uvx my-server --flag "a b"')
+    assert json.loads(form.config)['args'] == ['my-server', '--flag', 'a b']
+    assert form.target() == "uvx my-server --flag 'a b'"
+    form.set_target('my-server')
+    assert 'args' not in json.loads(form.config)
+    form.config = '{"command": 3, "args": "x"}'
+    assert form.target() == ''
+    form.config = '{"command": "x", "args": "x"}'
+    assert form.target() == 'x'
+    form.select_type('sse')
+    assert form.target_label == 'URL' and form.target() == ''
+    assert form.target_problem('ftp://example.com') == 'Enter an http:// or https:// URL'
+    form.set_target(' https://example.com/sse ')
+    assert form.target() == 'https://example.com/sse'
+    assert 'URL: https://example.com/sse' in [item.label for item in form.items()]
+    form.config = 'broken'
+    assert form.target() == ''
+    form.set_target('https://example.com/sse')
+    assert form.status == 'Fix the JSON before editing the URL'
