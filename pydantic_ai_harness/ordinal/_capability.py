@@ -12,14 +12,12 @@ Source: https://docs.tryordinal.com/mcp/introduction
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, per_run_auth
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset
@@ -58,16 +56,12 @@ class Ordinal(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Ordinal MCP tools."""
-        return per_run_auth(self.auth, self._connect, id=self.id if self.id is not None else 'ordinal')
+        return per_run(self.auth, self._connect, id=self.id if self.id is not None else 'ordinal')
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
-        if auth is None:
-            auth = environ.get('ORDINAL_ACCESS_TOKEN')
-        if auth is None:
-            raise UserError('Set `ORDINAL_ACCESS_TOKEN` or pass `auth` to connect to Ordinal.')
         return MCPToolset(
             _ORDINAL_MCP_URL,
             id=self.id if self.id is not None else 'ordinal',
-            auth=auth,
+            auth=credential(auth, env='ORDINAL_ACCESS_TOKEN', service='Ordinal'),
             include_instructions=True,
         )
