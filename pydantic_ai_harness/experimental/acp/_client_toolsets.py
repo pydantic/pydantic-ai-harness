@@ -142,7 +142,7 @@ def acp_filesystem(session: AcpSession) -> Toolset[None] | None:
 
     ```python
     def session_config(session: AcpSession) -> AcpSessionConfig[None]:
-        fs = acp_filesystem(session) or FileSystem(root_dir=session.cwd)
+        fs = acp_filesystem(session) or FileSystem()
         return AcpSessionConfig(deps=None, capabilities=[fs], workspace=LocalWorkspaceBackend(session.cwd))
     ```
 
@@ -251,8 +251,10 @@ def acp_terminal(session: AcpSession) -> Toolset[None] | None:
 
     ```python
     def session_config(session: AcpSession) -> AcpSessionConfig[None]:
-        shell = acp_terminal(session) or Shell(cwd=session.cwd)
-        return AcpSessionConfig(deps=None, capabilities=[shell], workspace=LocalWorkspaceBackend(session.cwd))
+        shell = acp_terminal(session) or Shell()
+        # A local workspace inherits no environment; give its commands the PATH to find programs.
+        workspace = LocalWorkspaceBackend(session.cwd, env={'PATH': os.environ['PATH']})
+        return AcpSessionConfig(deps=None, capabilities=[shell], workspace=workspace)
     ```
 
     For an agent with non-`None` deps, wrap `AcpTerminalToolset[YourDeps](...)` in `Toolset`,
