@@ -308,6 +308,12 @@ async def test_shift_enter_inserts_newline_and_plain_enter_submits(sequence: str
         assert live.buffer.text == ''
 
 
+async def test_shifted_printable_reports_type_their_characters() -> None:
+    async with editor() as (live, pipe, _):
+        pipe.send_text('a\x1b[27;2;81~\x1b[27;2;33~\x1b[27;2;32~\x1b[113;2ub\r')
+        assert await live.read() == 'aQ! Qb'
+
+
 async def test_ctrl_enter_submits_like_enter() -> None:
     async with editor() as (live, pipe, _):
         pipe.send_text('draft\x1b[27;5;13~')

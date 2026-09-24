@@ -19,12 +19,14 @@ def modified_key(sequence: str) -> str | None:
     higher bits (xterm's meta is kitty's super) and the lock bits carry no meaning
     here. Printable keys with no modifiers are reported only when a terminal has
     been asked to report every key, which the editor never does, so they are not
-    turned into draft text.
+    turned into draft text. Shift alone on a printable key (or space) returns the
+    character it types: modifyOtherKeys level 2 reports `Shift+Q` as
+    `CSI 27;2;81~` and `Shift+1` as `CSI 27;2;33~`.
     """
     if not sequence.startswith('\x1b[') or sequence[-1] not in '~u':
         return None
     fields = [field.split(':')[0] for field in sequence[2:-1].split(';')]
-    if not all(field.isdigit() for field in fields):
+    if not all(field.isdecimal() for field in fields):
         return None
     numbers = [int(field) for field in fields]
     if sequence.endswith('~'):
@@ -38,12 +40,16 @@ def modified_key(sequence: str) -> str | None:
     else:
         return None
     bits = (modifiers - 1) & 7
+    char = chr(code) if 32 <= code <= 0x10FFFF else '\x00'
+    if bits == 1 and char.isprintable():
+        # iTerm2 and xterm report the shifted character; kitty reports the unshifted letter.
+        return char.upper() if len(char.upper()) == 1 else char
     base = _KEY_NAMES.get(code)
     if base is None:
-        if not bits or code < 32 or code > 0x10FFFF or not chr(code).isprintable():
+        if not bits or not char.isprintable():
             return None
         # iTerm2 reports the shifted letter where xterm and kitty report the unshifted one.
-        base = chr(code).lower() if bits & 1 else chr(code)
+        base = char.lower() if bits & 1 else char
     if bits == 1 and base == 'tab':
         return 'backtab'
     return '-'.join([name for bit, name in _MODIFIER_NAMES if bits & bit] + [base])
@@ -117,6 +123,10 @@ class PromptKeys:
             self.feed('escape', '')
         self._csi = ''
 
+    def _feed_modified(self, name: str, sequence: str) -> None:
+        """Feed a shifted printable report as the text it types, like an unmodified key."""
+        self.feed(name, name if len(name) == 1 else sequence)
+
     def dispatch(self, key: KeyPress) -> None:
         """Translate decoder tokens into editor actions and literal paste payloads."""
         if key.key == Keys.CPRResponse:
@@ -125,7 +135,7 @@ class PromptKeys:
         name = modified_key(key.data) if key.key != Keys.BracketedPaste else None
         if name is not None:
             self._escape = False
-            self.feed(name, key.data)
+            self._feed_modified(name, key.data)
             return
         if self._csi:
             # The installed decoder splits unrecognized modified keys into individual
@@ -135,7 +145,7 @@ class PromptKeys:
                 sequence, self._csi = self._csi, ''
                 name = modified_key(sequence)
                 if name is not None:
-                    self.feed(name, sequence)
+                    self._feed_modified(name, sequence)
             return
         if key.key == Keys.Escape:
             self._escape = True

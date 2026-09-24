@@ -157,6 +157,47 @@ async def test_modified_key_reports_name_shift_alt_and_control(sequence: str, ex
 
 
 @pytest.mark.parametrize(
+    ('sequence', 'text'),
+    [
+        ('\x1b[27;2;81~', 'Q'),
+        ('\x1b[27;2;113~', 'Q'),
+        ('\x1b[113;2u', 'Q'),
+        ('\x1b[27;2;33~', '!'),
+        ('\x1b[27;2;32~', ' '),
+        ('\x1b[27;2;223~', '\u00df'),
+    ],
+)
+@pytest.mark.parametrize('split', [False, True])
+async def test_shifted_printable_reports_are_typed_text(sequence: str, text: str, split: bool) -> None:
+    events: list[tuple[str, str]] = []
+    with create_pipe_input() as pipe:
+        keys = PromptKeys(source=pipe, feed=lambda key, data: events.append((key, data)), eof=lambda: None)
+        try:
+            for chunk in sequence if split else [sequence]:
+                pipe.send_text(chunk)
+                keys.read()
+            assert events == [(text, text)]
+        finally:
+            keys.stop()
+
+
+@pytest.mark.parametrize(
+    ('sequence', 'expected'),
+    [('\x1b[27;2;13~', 'shift-enter'), ('\x1b[27;2;127~', 'shift-backspace'), ('\x1b[27;2;27~', 'shift-escape')],
+)
+async def test_shifted_named_keys_keep_their_names(sequence: str, expected: str) -> None:
+    events: list[tuple[str, str]] = []
+    with create_pipe_input() as pipe:
+        keys = PromptKeys(source=pipe, feed=lambda key, data: events.append((key, data)), eof=lambda: None)
+        try:
+            pipe.send_text(sequence)
+            keys.read()
+            assert events == [(expected, sequence)]
+        finally:
+            keys.stop()
+
+
+@pytest.mark.parametrize(
     'sequence',
     [
         '\x1b[97u',
@@ -169,6 +210,8 @@ async def test_modified_key_reports_name_shift_alt_and_control(sequence: str, ex
         '\x1b[3;5;13~',
         '\x1b[?13;3u',
         '\x1b[1;2;3u',
+        '\x1b[\u00b2u',
+        '\x1b[27;2;\u00b3~',
     ],
 )
 def test_unmodified_and_functional_reports_are_not_draft_keys(sequence: str) -> None:
