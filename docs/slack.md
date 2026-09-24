@@ -114,7 +114,7 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` and `include_instructions` still apply. `include_instructions=False` stops the server's own instructions from reaching the agent.
+Use `auth` in almost every case. Pass `client` only when you need control of the connection itself: your own FastMCP client or transport, for example one with a different authentication scheme, a proxy, or MCP handlers. The client then owns the URL and authentication, so passing `client` together with `auth` raises an error. `read_only` and `include_instructions` still apply. `include_instructions=False` stops the server's own instructions from reaching the agent.
 
 A `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 

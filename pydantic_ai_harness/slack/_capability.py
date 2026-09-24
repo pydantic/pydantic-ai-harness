@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
@@ -32,7 +33,11 @@ class Slack(AbstractCapability[AgentDepsT]):
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Your own MCP client or transport, which then owns the URL and authentication."""
+    """Your own MCP client or transport, for full control of the connection. It cannot be combined with `auth`."""
+
+    def __post_init__(self) -> None:
+        if self.client is not None and self.auth is not None:
+            raise UserError('`client` owns the connection, so it cannot be combined with `auth`.')
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the Slack connection and optional read-only selection."""
