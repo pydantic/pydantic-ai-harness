@@ -6,6 +6,7 @@ from typing import NoReturn
 from pydantic_ai.exceptions import ToolFailed, UserError
 from pydantic_ai.workspaces import (
     SupportsCommands,
+    UnavailableWorkspace,
     Workspace,
     WorkspaceBackend,
     WorkspaceError,
@@ -62,3 +63,15 @@ def supports_commands(workspace: Workspace) -> bool:
     while isinstance(current, Workspace):
         current = current.wrapped if isinstance(current, WrapperWorkspace) else current.backend
     return isinstance(current, SupportsCommands)
+
+
+def workspace_attached(workspace: Workspace) -> bool:
+    """Whether the run has a real workspace, rather than core's placeholder for a run without one.
+
+    Wrappers are unwrapped through `wrapped`, not `backend`: a durable workspace refuses `backend`
+    in workflow code.
+    """
+    current: WorkspaceBackend = workspace
+    while isinstance(current, Workspace):
+        current = current.wrapped if isinstance(current, WrapperWorkspace) else current.backend
+    return not isinstance(current, UnavailableWorkspace)

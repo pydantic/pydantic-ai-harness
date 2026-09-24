@@ -547,25 +547,30 @@ def test_sub_agents_compose_the_roster_and_nothing_else(
 
 
 def test_merging_reuses_the_delegates_already_loaded_from_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A merge must not re-read `agent_folders`, because it reads them relative to the *cwd*.
+    """A merge must not re-read `agent_folders`, because the host folders may have changed since.
 
-    Both inputs resolved their disk delegates when they were constructed. Re-running
-    `__post_init__` to rebuild the roster would load them again from wherever the process happens
-    to be standing now -- so a merge after a `chdir` could hand the run a different set of
-    delegates than either capability was built with, and re-invoke `tool_resolver` besides.
+    Both inputs resolved their host disk delegates when they were constructed. Re-running
+    `__post_init__` to rebuild the roster would load them again from wherever the home folder
+    points now -- so a merge could hand the run a different set of delegates than either
+    capability was built with, and re-invoke `tool_resolver` besides.
     """
-    project = tmp_path / 'project'
-    folder = project / '.agents' / 'agents'  # `<root>/.agents/<agent_folders>/`
+    home = tmp_path / 'home'
+    folder = home / '.agents' / 'agents'  # `<home>/.agents/<agent_folders>/`
     folder.mkdir(parents=True)
     (folder / 'helper.md').write_text('---\nname: helper\ndescription: helps\n---\n\nBe helpful.\n', encoding='utf-8')
-    monkeypatch.chdir(project)
+    homes = [home, tmp_path]
+
+    def fake_home(cls: type[Path]) -> Path:
+        return homes[0]
+
+    monkeypatch.setattr(Path, 'home', classmethod(fake_home))
 
     first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')])
     second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')])
     assert 'helper' in first._by_name, 'the disk delegate is picked up at construction'  # pyright: ignore[reportPrivateUsage]
 
-    # The folder is gone by the time the two are combined, which is what a `chdir` amounts to.
-    monkeypatch.chdir(tmp_path)
+    # The folder is gone by the time the two are combined.
+    homes.pop(0)
 
     merged = SubAgents.combine([first, second])
     assert isinstance(merged, SubAgents)

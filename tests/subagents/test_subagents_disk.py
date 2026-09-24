@@ -2,20 +2,21 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models import AbstractModel
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
+from pydantic_ai.workspaces import LocalWorkspaceBackend, ReadOnlyWorkspace, UnavailableWorkspace, Workspace
 
+from pydantic_ai_harness._workspace import workspace_attached
 from pydantic_ai_harness.subagents import (
     MINIMUM_EFFORT_FLOOR,
     AgentOverride,
@@ -25,8 +26,8 @@ from pydantic_ai_harness.subagents import (
 )
 from pydantic_ai_harness.subagents._disk import (
     ParsedAgent,
+    host_folders,
     parse_agent_markdown,
-    resolve_folders,
 )
 
 pytestmark = pytest.mark.anyio
@@ -140,34 +141,19 @@ class TestParseAgentMarkdown:
         assert parse_agent_markdown('---\nname: a\n---\nB').tools == ()
 
 
-class TestResolveFolders:
-    def test_str_convention_with_claude_fallback(self, tmp_path: Path) -> None:
-        # Project root has `.agents/`; home root has neither, so it falls back to `.claude/`.
-        project = tmp_path / 'project'
-        project.mkdir()
-        (project / '.agents').mkdir()
-        home = tmp_path / 'home'
-        home.mkdir()
-        folders = resolve_folders('agents', project, home)
-        assert folders == [project / '.agents' / 'agents', home / '.claude' / 'agents']
-
-    def test_str_overrides_leaf_name(self, tmp_path: Path) -> None:
+class TestHostFolders:
+    def test_str_is_the_home_convention_with_claude_fallback(self, tmp_path: Path) -> None:
+        # The project folder is read through the run workspace, so only home is a host folder.
+        assert host_folders('agents', tmp_path) == [tmp_path / '.claude' / 'agents']
         (tmp_path / '.agents').mkdir()
-        folders = resolve_folders('reviewers', tmp_path, tmp_path)
-        assert folders == [tmp_path / '.agents' / 'reviewers']
+        assert host_folders('reviewers', tmp_path) == [tmp_path / '.agents' / 'reviewers']
 
     def test_sequence_used_verbatim(self, tmp_path: Path) -> None:
         paths = [tmp_path / 'a', tmp_path / 'b']
-        assert resolve_folders(paths, tmp_path, tmp_path) == paths
-
-    def test_cwd_equal_home_dedupes_folder(self, tmp_path: Path) -> None:
-        # When the project root equals the home root, the project and home convention
-        # folders resolve to the same directory and are deduped to a single entry.
-        (tmp_path / '.agents').mkdir()
-        assert resolve_folders('agents', tmp_path, tmp_path) == [tmp_path / '.agents' / 'agents']
+        assert host_folders(paths, tmp_path) == paths
 
     def test_duplicate_paths_in_sequence_deduped(self, tmp_path: Path) -> None:
-        assert resolve_folders([tmp_path / 'a', tmp_path / 'a'], tmp_path, tmp_path) == [tmp_path / 'a']
+        assert host_folders([tmp_path / 'a', tmp_path / 'a'], tmp_path) == [tmp_path / 'a']
 
 
 class TestDiskLoading:
@@ -178,21 +164,11 @@ class TestDiskLoading:
         cap: SubAgents[object] = SubAgents()
         assert 'planner' in cap._by_name
 
-    def test_cwd_equal_home_loads_once_without_shadow_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # When the project root equals the home root, the project and home convention
-        # folders point at the same dir; deduping them avoids loading each agent twice
-        # and emitting a spurious "shadowed" warning.
-        root = Path.cwd()
-
-        def fake_home(cls: type[Path]) -> Path:
-            return root
-
-        monkeypatch.setattr(Path, 'home', classmethod(fake_home))
-        _write_agent(root / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        with warnings.catch_warnings():
-            warnings.simplefilter('error')
-            cap: SubAgents[object] = SubAgents()
-        assert 'planner' in cap._by_name
+    def test_host_cwd_is_not_read(self) -> None:
+        # Project definitions are the workspace's; the host process's cwd is not a source.
+        _write_agent(Path.cwd() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        cap: SubAgents[object] = SubAgents()
+        assert cap._by_name == {}
 
     def test_none_disables_loading(self) -> None:
         cap: SubAgents[object] = SubAgents(agent_folders=None)
@@ -330,3 +306,151 @@ class TestModelInheritance:
         # The model-less disk agent ran on the parent's resolved model.
         assert captured['model'] is parent_model
         assert _delegate_returns(result) == ['all done']
+
+
+def _recording_model(seen: list[tuple[str | None, list[str]]], delegate_to: str | None = None) -> FunctionModel:
+    """A parent model that records each step's instructions and tool names, delegating once if asked."""
+
+    def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        request = messages[-1]
+        assert isinstance(request, ModelRequest)
+        seen.append((request.instructions, [tool.name for tool in info.function_tools]))
+        if delegate_to is not None and len(seen) == 1:
+            return ModelResponse(
+                parts=[ToolCallPart('delegate_task', {'agent_name': delegate_to, 'task': 'do it'}, tool_call_id='c1')]
+            )
+        return ModelResponse(parts=[TextPart('all done')])
+
+    return FunctionModel(model_fn)
+
+
+class TestWorkspaceDiscovery:
+    """The project folder is read through `ctx.workspace` at the start of each run."""
+
+    async def test_project_agents_come_from_the_workspace(self, tmp_path: Path) -> None:
+        _write_agent(tmp_path / '.agents' / 'agents', 'worker.md', '---\nname: worker\ndescription: Works\n---\nWork.')
+        # Neither a non-markdown file nor a directory is a definition.
+        _write_agent(tmp_path / '.agents' / 'agents', 'notes.txt', 'not an agent')
+        (tmp_path / '.agents' / 'agents' / 'nested.md').mkdir()
+        cap: SubAgents[object] = SubAgents()
+        assert cap._by_name == {}, 'nothing is read from the workspace before a run'
+
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen, delegate_to='worker'), capabilities=[cap])
+        result = await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        assert _delegate_returns(result) == ['all done']
+        instructions, tools = seen[0]
+        assert instructions is not None and '- worker: Works' in instructions
+        assert tools == ['delegate_task']
+        # The disk child inherits this model, so it records the middle step; the parent's
+        # later step sees the same listing and tool as its first.
+        assert seen[2] == seen[0]
+
+    async def test_claude_fallback_and_stem_name(self, tmp_path: Path) -> None:
+        _write_agent(tmp_path / '.claude' / 'agents', 'planner.md', 'Plan things.')
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen), capabilities=[SubAgents()])
+        await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        assert seen[0][0] is not None and '- planner' in seen[0][0]
+
+    async def test_agents_root_without_the_leaf_folder(self, tmp_path: Path) -> None:
+        # `.agents/` exists, so `.claude/` is not consulted even though only it has the leaf.
+        (tmp_path / '.agents').mkdir()
+        _write_agent(tmp_path / '.claude' / 'agents', 'planner.md', 'Plan.')
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen), capabilities=[SubAgents()])
+        await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        assert seen[0] == (None, [])
+
+    async def test_no_workspace_skips_project_discovery(self) -> None:
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen), capabilities=[SubAgents()])
+        await parent.run('go')
+        # The home agent still loads; the run just has no project folder to read.
+        assert seen[0][0] is not None and '- planner' in seen[0][0]
+
+    async def test_runs_over_unchanged_files_are_identical(self, tmp_path: Path) -> None:
+        _write_agent(tmp_path / '.agents' / 'agents', 'w.md', '---\nname: w\n---\nB')
+        cap: SubAgents[object] = SubAgents()
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen), capabilities=[cap])
+        await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        assert seen[0] == seen[1]
+        # The delegate is built once and reused, so its agent does not change between runs.
+        assert len(cap._built) == 1
+        assert cap._by_name == {}, 'per-run discovery does not leak into the shared instance'
+
+    async def test_project_shadows_home_and_identical_home_is_dropped(self, tmp_path: Path) -> None:
+        home = Path.home() / '.agents' / 'agents'
+        _write_agent(home, 'worker.md', '---\nname: worker\ndescription: home\n---\nB')
+        _write_agent(home, 'same.md', '---\nname: same\n---\nB')
+        project = tmp_path / '.agents' / 'agents'
+        _write_agent(project, 'worker.md', '---\nname: worker\ndescription: project\n---\nB')
+        _write_agent(project, 'same.md', '---\nname: same\n---\nB')
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen), capabilities=[SubAgents()])
+        with pytest.warns(UserWarning, match="Disk sub-agent 'worker' is shadowed") as record:
+            await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        assert len(record) == 1, 'the identical `same` definition is not reported as shadowed'
+        instructions = seen[0][0]
+        assert instructions is not None
+        assert '- worker: project' in instructions
+        assert instructions.count('- same') == 1
+
+    async def test_explicit_shadows_project(self, tmp_path: Path) -> None:
+        _write_agent(tmp_path / '.agents' / 'agents', 'worker.md', '---\nname: worker\ndescription: disk\n---\nB')
+        explicit = Agent(TestModel(), name='worker', description='code')
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(
+            _recording_model(seen), capabilities=[SubAgents(agents=[SubAgent(explicit)])]
+        )
+        with pytest.warns(UserWarning, match="Disk sub-agent 'worker' is shadowed"):
+            await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        assert seen[0][0] is not None and '- worker: code' in seen[0][0]
+
+    async def test_undecodable_workspace_file_is_skipped_with_warning(self, tmp_path: Path) -> None:
+        folder = tmp_path / '.agents' / 'agents'
+        folder.mkdir(parents=True)
+        (folder / 'broken.md').write_bytes(b'---\nname: broken\n---\n\xff\xfe not utf-8')
+        _write_agent(folder, 'valid.md', '---\nname: valid\n---\nWork.')
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen), capabilities=[SubAgents()])
+        with pytest.warns(UserWarning, match='Skipping unreadable disk sub-agent file'):
+            await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        instructions = seen[0][0]
+        assert instructions is not None and '- valid' in instructions and 'broken' not in instructions
+
+    async def test_explicit_folders_are_static(self, tmp_path: Path) -> None:
+        # A path sequence is host configuration: loaded once, no per-run copy, no workspace read.
+        _write_agent(tmp_path / 'defs', 'w.md', '---\nname: w\n---\nB')
+        _write_agent(tmp_path / '.agents' / 'agents', 'project.md', '---\nname: project\n---\nB')
+        cap: SubAgents[object] = SubAgents(agent_folders=[tmp_path / 'defs'])
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen), capabilities=[cap])
+        await parent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
+        instructions = seen[0][0]
+        assert instructions is not None and '- w' in instructions and 'project' not in instructions
+
+    async def test_merged_per_run_copies_keep_both_rosters(self, tmp_path: Path) -> None:
+        # Run-level capabilities under the shared id are combined after `for_run`, on the per-run copies.
+        _write_agent(tmp_path / '.agents' / 'agents', 'worker.md', '---\nname: worker\n---\nB')
+        first: SubAgents[object] = SubAgents(agents=[SubAgent(Agent(TestModel(), name='alpha'))])
+        second: SubAgents[object] = SubAgents(agents=[SubAgent(Agent(TestModel(), name='beta'))])
+        seen: list[tuple[str | None, list[str]]] = []
+        parent: Agent[object, str] = Agent(_recording_model(seen))
+        await parent.run('go', capabilities=[first, second], workspace=LocalWorkspaceBackend(tmp_path))
+        instructions = seen[0][0]
+        assert instructions is not None
+        assert all(f'- {name}' in instructions for name in ('alpha', 'beta', 'worker'))
+
+
+class TestWorkspaceAttached:
+    def test_real_and_wrapped_workspaces_are_attached(self, tmp_path: Path) -> None:
+        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
+        assert workspace_attached(workspace)
+        assert workspace_attached(ReadOnlyWorkspace(workspace))
+
+    def test_placeholder_is_not_attached(self) -> None:
+        assert not workspace_attached(Workspace(UnavailableWorkspace('none')))

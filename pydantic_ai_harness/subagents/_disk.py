@@ -1,4 +1,4 @@
-"""Load sub-agent definitions from markdown files on disk.
+"""Load sub-agent definitions from markdown files: the project's through the run workspace, the rest from the host.
 
 A definition is a markdown file with optional YAML-style frontmatter:
 
@@ -21,12 +21,15 @@ and `color` has no pyai equivalent.
 
 from __future__ import annotations
 
+import posixpath
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.settings import ThinkingLevel
+from pydantic_ai.workspaces import Workspace
 
 
 @dataclass(frozen=True)
@@ -132,6 +135,27 @@ def parse_agent_markdown(text: str) -> ParsedAgent:
     )
 
 
+@dataclass(frozen=True)
+class DiskDefinition:
+    """One loaded definition file: the delegate name it resolves to, plus its parsed contents.
+
+    Hashable, so equal definitions share one built `SubAgent`, and a home definition identical to
+    the project's (the project root *is* the home root) is dropped without a shadowing warning.
+    """
+
+    name: str
+    parsed: ParsedAgent
+
+
+def _definition(text: str, stem: str) -> DiskDefinition:
+    parsed = parse_agent_markdown(text)
+    return DiskDefinition(parsed.name or stem, parsed)
+
+
+def _warn_unreadable(path: str, exc: Exception) -> None:
+    warnings.warn(f'Skipping unreadable disk sub-agent file {path!r}: {exc}', stacklevel=3)
+
+
 def _convention_folder(root: Path, leaf: str) -> Path:
     """`<root>/.agents/<leaf>` when `.agents/` exists, else the `.claude/` equivalent."""
     if (root / '.agents').is_dir():
@@ -139,22 +163,64 @@ def _convention_folder(root: Path, leaf: str) -> Path:
     return root / '.claude' / leaf
 
 
-def resolve_folders(agent_folders: str | Sequence[Path], cwd: Path, home: Path) -> list[Path]:
-    """Resolve the configured disk source into a precedence-ordered list of folders.
+def host_folders(agent_folders: str | Sequence[Path], home: Path) -> list[Path]:
+    """The host folders to load from, in precedence order.
 
-    - a `str`: the convention `<root>/.agents/<str>/` (or `.claude/<str>/`) for the
-      project root (`cwd`) then the home root, project first.
-    - a sequence of paths: those folders verbatim, in order.
-
-    Folders resolving to the same absolute path are deduped (keeping the first), so
-    a project root equal to the home root does not scan and warn about every agent
-    twice.
+    - a `str`: the home convention `<home>/.agents/<str>/` (or `.claude/<str>/`). The project
+      convention folder is read per run through the workspace instead; see `load_workspace_definitions`.
+    - a sequence of paths: those folders verbatim, in order, deduped by absolute path (keeping the first).
     """
     if isinstance(agent_folders, str):
-        folders = [_convention_folder(cwd, agent_folders), _convention_folder(home, agent_folders)]
-    else:
-        folders = list(agent_folders)
+        return [_convention_folder(home, agent_folders)]
     seen: dict[Path, Path] = {}
-    for folder in folders:
+    for folder in agent_folders:
         seen.setdefault(folder.resolve(), folder)
     return list(seen.values())
+
+
+def load_host_definitions(folders: Sequence[Path]) -> list[DiskDefinition]:
+    """Load every `*.md` definition in `folders` from the host, in sorted name order per folder."""
+    result: list[DiskDefinition] = []
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.glob('*.md')):
+            try:
+                text = path.read_text(encoding='utf-8')
+            except (OSError, UnicodeDecodeError) as exc:
+                _warn_unreadable(str(path), exc)
+                continue
+            result.append(_definition(text, path.stem))
+    return result
+
+
+async def _is_dir(workspace: Workspace, path: str) -> bool:
+    try:
+        return (await workspace.stat(path)).is_dir
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+
+
+async def load_workspace_definitions(workspace: Workspace, leaf: str) -> list[DiskDefinition]:
+    """Load the project convention folder's definitions through the run's workspace.
+
+    The folder is `.agents/<leaf>/` under the workspace's working directory, falling back to
+    `.claude/<leaf>/` when `.agents/` is absent. Files load in sorted name order, so the roster --
+    and so the prompt listing -- is the same for every run over the same files.
+    """
+    root = '.agents' if await _is_dir(workspace, '.agents') else '.claude'
+    folder = posixpath.join(root, leaf)
+    if not await _is_dir(workspace, folder):
+        return []
+    result: list[DiskDefinition] = []
+    entries = sorted(await workspace.list_dir(folder), key=lambda entry: entry.name)
+    for entry in entries:
+        if entry.is_dir or not entry.name.endswith('.md'):
+            continue
+        try:
+            text = await workspace.read_text(entry.path)
+        except (OSError, UnicodeDecodeError) as exc:
+            _warn_unreadable(entry.path, exc)
+            continue
+        result.append(_definition(text, posixpath.splitext(entry.name)[0]))
+    return result

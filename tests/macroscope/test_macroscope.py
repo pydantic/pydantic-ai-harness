@@ -8,12 +8,20 @@ import time
 from collections.abc import Sequence
 from pathlib import Path
 
-import anyio
 import pytest
-from pydantic_ai import Agent
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.exceptions import ModelRetry, ToolFailed
 from pydantic_ai.messages import ToolReturnPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
+from pydantic_ai.workspaces import (
+    CommandResult,
+    LocalWorkspaceBackend,
+    ReadOnlyWorkspace,
+    Workspace,
+    WorkspaceCommand,
+    WorkspaceError,
+)
 
 from pydantic_ai_harness.macroscope import (
     Macroscope,
@@ -36,9 +44,14 @@ _ISSUE_LINE = (
 
 
 def _fake_cli(directory: Path, lines: Sequence[str], *, name: str = 'macroscope', sleep: float | None = None) -> str:
-    """Write an executable stand-in for `macroscope` that records argv and emits `lines` on stderr."""
+    """Write an executable stand-in for `macroscope` that records argv and cwd and emits `lines` on stderr."""
     script = directory / name
-    body = ['#!/bin/sh', 'printf \'%s\\n\' "$@" > "$0.args"', "printf 'macroscope starting\\n'"]
+    body = [
+        '#!/bin/sh',
+        'printf \'%s\\n\' "$@" > "$0.args"',
+        'pwd -P > "$0.cwd"',
+        "printf 'macroscope starting\\n'",
+    ]
     if sleep is not None:
         body.append(f'sleep {sleep}')
     body += [f"printf '%s\\n' {shlex.quote(line)} >&2" for line in lines]
@@ -52,8 +65,30 @@ def _recorded_args(command: str) -> list[str]:
     return Path(f'{command}.args').read_text().split()
 
 
-def _toolset(command: str, cwd: Path, *, base: str | None = 'main', timeout: float = 30.0) -> MacroscopeToolset[None]:
-    return MacroscopeToolset[None](command=command, cwd=cwd, base=base, timeout=timeout)
+def _toolset(
+    command: str, cwd: Path | str, *, base: str | None = 'main', timeout: float = 30.0
+) -> MacroscopeToolset[None]:
+    return MacroscopeToolset[None](command=command, cwd=Path(cwd), base=base, timeout=timeout)
+
+
+def _ctx(workspace: Workspace | None = None) -> RunContext[None]:
+    """A run context for calling the tool directly; the local workspace at `/` suits absolute cwds."""
+    return RunContext[None](
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=0,
+        workspace=workspace if workspace is not None else Workspace(LocalWorkspaceBackend('/')),
+    )
+
+
+class _FailingWorkspace(LocalWorkspaceBackend):
+    """A workspace whose commands fail with a plain `WorkspaceError`."""
+
+    async def run(self, command: WorkspaceCommand, **kwargs: object) -> CommandResult:
+        raise WorkspaceError('sandbox refused the command')
 
 
 class TestParseStream:
@@ -119,7 +154,7 @@ class TestParseStream:
 class TestRunReview:
     async def test_returns_findings(self, tmp_path: Path) -> None:
         command = _fake_cli(tmp_path, ['review_id=rev-1', _ISSUE_LINE, 'issue_status=completed'])
-        review = await _toolset(command, tmp_path).run_macroscope_review()
+        review = await _toolset(command, tmp_path).run_macroscope_review(_ctx())
         assert isinstance(review, MacroscopeReview)
         assert review.review_id == 'rev-1'
         assert review.status == 'completed'
@@ -128,59 +163,72 @@ class TestRunReview:
 
     async def test_clean_review_has_no_issues(self, tmp_path: Path) -> None:
         command = _fake_cli(tmp_path, ['review_id=rev-2', 'issue_status=completed'])
-        review = await _toolset(command, tmp_path).run_macroscope_review()
+        review = await _toolset(command, tmp_path).run_macroscope_review(_ctx())
         assert review.issues == []
 
     async def test_per_call_base_overrides_configured_base(self, tmp_path: Path) -> None:
         command = _fake_cli(tmp_path, ['review_id=rev-3', 'issue_status=completed'])
-        await _toolset(command, tmp_path, base='develop').run_macroscope_review(base='release')
+        await _toolset(command, tmp_path, base='develop').run_macroscope_review(_ctx(), base='release')
         assert _recorded_args(command) == ['codereview', '--raw', '--base', 'release']
+
+    async def test_relative_cwd_resolves_against_workspace(self, tmp_path: Path) -> None:
+        repo = tmp_path / 'repo'
+        repo.mkdir()
+        command = _fake_cli(tmp_path, ['review_id=rev-8', 'issue_status=completed'])
+        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
+        await _toolset(command, 'repo').run_macroscope_review(_ctx(workspace))
+        assert Path(f'{command}.cwd').read_text().strip() == str(repo.resolve())
 
     async def test_missing_binary_raises_model_retry(self, tmp_path: Path) -> None:
         toolset = _toolset('pai-harness-macroscope-absent', tmp_path)
         with pytest.raises(ModelRetry, match='not found'):
-            await toolset.run_macroscope_review()
+            await toolset.run_macroscope_review(_ctx())
 
     async def test_no_review_id_raises_model_retry(self, tmp_path: Path) -> None:
         command = _fake_cli(tmp_path, ['issue_status=failed'])
         with pytest.raises(ModelRetry, match='did not start'):
-            await _toolset(command, tmp_path).run_macroscope_review()
+            await _toolset(command, tmp_path).run_macroscope_review(_ctx())
 
     async def test_failed_status_with_review_id_is_returned_not_raised(self, tmp_path: Path) -> None:
         # A review that started (has a review_id) but ended `failed` is a real outcome the
         # model should see -- not an error. Only a *missing* review_id is retryable.
         command = _fake_cli(tmp_path, ['review_id=rev-7', 'issue_status=failed'])
-        review = await _toolset(command, tmp_path).run_macroscope_review()
+        review = await _toolset(command, tmp_path).run_macroscope_review(_ctx())
         assert review.review_id == 'rev-7'
         assert review.status == 'failed'
 
     async def test_timeout_kills_process_and_raises(self, tmp_path: Path) -> None:
-        # sleep(30) far exceeds the 0.2s timeout: a working kill returns promptly, whereas a
-        # broken kill would block ~30s in the shielded reap, waiting the process out. The elapsed
-        # time is the guard -- it distinguishes "killed" from "waited out" deterministically.
+        # sleep(30) far exceeds the 0.2s timeout: the workspace stops the command promptly,
+        # whereas a missed timeout would wait it out. The elapsed time is the guard.
         command = _fake_cli(tmp_path, ['review_id=rev-4', 'issue_status=completed'], sleep=30)
         started = time.monotonic()
         with pytest.raises(ModelRetry, match='timed out'):
-            await _toolset(command, tmp_path, timeout=0.2).run_macroscope_review()
+            await _toolset(command, tmp_path, timeout=0.2).run_macroscope_review(_ctx())
         elapsed = time.monotonic() - started
         assert elapsed < 5, f'review took {elapsed:.1f}s -- the process was waited out, not killed'
 
     async def test_base_omitted_lets_cli_autodetect(self, tmp_path: Path) -> None:
         # With no configured or per-call base, `--base` is dropped so the CLI picks the base itself.
         command = _fake_cli(tmp_path, ['review_id=rev-5', 'issue_status=completed'])
-        await _toolset(command, tmp_path, base=None).run_macroscope_review()
+        await _toolset(command, tmp_path, base=None).run_macroscope_review(_ctx())
         assert _recorded_args(command) == ['codereview', '--raw']
 
-    async def test_spawn_failure_raises_model_retry(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Binary passes the `which` check but fails to exec (lost +x, bad interpreter, TOCTOU).
-        command = _fake_cli(tmp_path, ['review_id=rev-6', 'issue_status=completed'])
+    async def test_exec_failure_reports_cli_output(self, tmp_path: Path) -> None:
+        # The binary is on PATH but cannot run (bad interpreter): `sh`'s reason reaches the model.
+        script = tmp_path / 'macroscope'
+        script.write_text('#!/nonexistent/interpreter\n')
+        script.chmod(0o755)
+        with pytest.raises(ModelRetry, match='did not start(?s:.*)bad interpreter'):
+            await _toolset(str(script), tmp_path).run_macroscope_review(_ctx())
 
-        async def _boom(*args: object, **kwargs: object) -> object:
-            raise PermissionError('exec denied')
+    async def test_workspace_failure_fails_the_call(self, tmp_path: Path) -> None:
+        with pytest.raises(ToolFailed, match='sandbox refused'):
+            await _toolset('macroscope', tmp_path).run_macroscope_review(_ctx(Workspace(_FailingWorkspace(tmp_path))))
 
-        monkeypatch.setattr(anyio, 'open_process', _boom)
-        with pytest.raises(ModelRetry, match='Failed to launch'):
-            await _toolset(command, tmp_path).run_macroscope_review()
+    async def test_no_tool_on_read_only_workspace(self, tmp_path: Path) -> None:
+        read_only = _ctx(ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path))))
+        assert await _toolset('macroscope', tmp_path).get_tools(read_only) == {}
+        assert list(await _toolset('macroscope', tmp_path).get_tools(_ctx())) == ['run_macroscope_review']
 
 
 class TestCapability:
@@ -211,8 +259,8 @@ class TestCapability:
 
     async def test_tool_runs_through_agent(self, tmp_path: Path) -> None:
         command = _fake_cli(tmp_path, ['review_id=rev-9', _ISSUE_LINE, 'issue_status=completed'])
-        agent = Agent(TestModel(), capabilities=[Macroscope(command=command, cwd=tmp_path, base='main')])
-        result = await agent.run('review please')
+        agent = Agent(TestModel(), capabilities=[Macroscope(command=command, base='main')])
+        result = await agent.run('review please', workspace=LocalWorkspaceBackend(tmp_path))
         returns = [
             part
             for message in result.all_messages()

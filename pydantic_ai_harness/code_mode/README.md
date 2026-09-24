@@ -569,6 +569,11 @@ a dataset you've dropped in a folder and writing a report back, editing a checko
 batch of documents. Sandboxed `pathlib` code reads and writes under the mounted path. (For
 environment variables or the clock, use `os_access` instead.)
 
+Mounts are directories on the machine running the agent, not the run's workspace. With a remote
+sandbox such as `ModalSandbox`, `Shell` and `FileSystem` act in the sandbox while mounted `pathlib`
+code still reads and writes the host. Use the workspace tools for files the model shares with its
+commands.
+
 ```python
 from pydantic_monty import MountDir
 

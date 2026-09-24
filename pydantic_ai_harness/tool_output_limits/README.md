@@ -80,9 +80,9 @@ returns untouched.
 ### Fallbacks with `then`
 
 Every action takes an optional `then`, applied when the action cannot run: a `Spill` whose
-store errors, a `Truncate` / `Summarize` on a binary payload, a `Summarize` whose model call
-raises. `then` chains, so `Summarize(then=Spill(then=Truncate()))` degrades summarize ->
-spill -> truncate.
+store errors (for example, no workspace is attached), a `Truncate` / `Summarize` on a binary
+payload, a `Summarize` whose model call raises. `then` chains, so
+`Summarize(then=Spill(then=Truncate()))` degrades summarize -> spill -> truncate.
 
 ### Per-tool overrides and filtering
 
@@ -231,13 +231,46 @@ returns non-text warns and falls back to compact JSON rather than losing the too
 
 ## Spill store
 
-Spilled payloads go through the narrow `OverflowStore` protocol. The default `LocalFileStore`
-writes one file per `(run_id, tool_call_id, retry)` under a stable root directory and keeps it
-after the run, so a later `read_tool_result` -- in this run or a subsequent agent/run -- can
-still reach it. The handle is backend-addressable (a relative key), not an absolute local
-path, so a durable backend (Temporal, a blob store, or the core `ExecutionEnvironment`
-workspace once #4352 lands) can resolve the same handle in another process. Supply your own
-backend with `store=...`.
+Spilled payloads are written into the run's workspace (`ctx.workspace`) by the default
+`WorkspaceStore`, one file per `(run_id, tool_call_id, retry)`. With a remote sandbox the files
+live in the sandbox, next to everything else the agent works on. The handle is the file's
+absolute workspace path, so a workspace file tool such as `FileSystem`'s `read_file` can open it
+too; `read_tool_result` only reads handles inside the store directory.
+
+Files go under `$TMPDIR/pydantic-ai-harness/tool-output` in the workspace (`/tmp` when `TMPDIR`
+is unset), created owner-only. A workspace that cannot run commands uses
+`.pydantic-ai-harness/tool-output` below its working directory. Pass `directory` to choose
+another location:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.tool_output_limits import ToolOutputLimits, WorkspaceStore
+
+agent = Agent('openai:gpt-4o', capabilities=[ToolOutputLimits(store=WorkspaceStore(directory='/data/spills'))])
+```
+
+Spilled files are kept for the life of the workspace; they are not pruned by this capability.
+
+With no workspace attached, a spill warns and falls back to its `then` action (a bounded
+truncation by default). For runs without a workspace, use `LocalFileStore`, which writes to the
+host's temp directory:
+
+```python
+from datetime import timedelta
+
+from pydantic_ai import Agent
+from pydantic_ai_harness.tool_output_limits import LocalFileStore, ToolOutputLimits
+
+store = LocalFileStore(cleanup_after=timedelta(hours=6))  # default: None = keep forever
+agent = Agent('openai:gpt-4o', capabilities=[ToolOutputLimits(store=store)])
+```
+
+`LocalFileStore` creates its root owner-only, rejects handles that resolve outside it, and with
+`cleanup_after` set prunes files older than that age in a background thread; a failed prune
+warns instead of failing the run.
+
+Any other backend (a blob store, a durable engine's storage) implements the `OverflowStore`
+protocol and is passed as `store=...`:
 
 ```python
 from typing import Protocol
@@ -246,50 +279,6 @@ from typing import Protocol
 class OverflowStore(Protocol):
     async def write(self, key: str, data: bytes) -> str: ...   # returns a handle
     async def read(self, handle: str) -> bytes: ...
-```
-
-### Security model (shared root, not isolation)
-
-The store root is stable and shareable on purpose -- spilled files must be readable by a later
-agent or run -- so security does not come from per-instance isolation. It comes from two
-mechanisms: the root is created with `0700` (owner-only) permissions, and `read` resolves the
-target (following symlinks) and rejects anything that escapes the root via symlink, `..`, or
-an absolute path. Handle segments are also sanitized so a crafted handle cannot traverse out.
-
-### Cleanup: keep-forever by default, opt-in TTL pruning
-
-By default the store keeps spilled files forever -- deleting on run end would break a later
-agent that still wants to read a spill. To bound disk use, opt into age-based pruning:
-
-```python
-from datetime import timedelta
-
-from pydantic_ai import Agent
-from pydantic_ai_harness import ToolOutputLimits
-from pydantic_ai_harness.tool_output_limits import LocalFileStore
-
-store = LocalFileStore(cleanup_after=timedelta(hours=6))  # default: None = keep forever
-agent = Agent('openai:gpt-4o', capabilities=[ToolOutputLimits(store=store)])
-```
-
-When set, a `write` schedules a background prune (a daemon thread, off the hot path) that
-deletes files whose modification time (`st_mtime`) is older than `cleanup_after`. Pruning is
-non-blocking and non-erroring: any failure is caught and surfaced via `warnings.warn`, never
-propagated into the agent run, so cleanup can never fail a run or block the hot path.
-Last-read time (`st_atime`) is unreliable on `noatime`/`relatime` mounts and is not used.
-
-Prefer external cleanup (cron, a sweeper) over the in-process TTL? Point it at the store root
-and delete by mtime:
-
-```python
-import time
-from pathlib import Path
-
-root = Path('/tmp/pyai_harness_overflow')  # or your configured base_dir
-cutoff = time.time() - 6 * 3600
-for path in root.rglob('*'):
-    if path.is_file() and path.stat().st_mtime < cutoff:
-        path.unlink(missing_ok=True)
 ```
 
 ## Usage accounting
@@ -332,8 +321,8 @@ again on replay.
 
 - Supersedes the spill scope of PR #185 `ToolOutputManagement` (one-way truncate / spill with
   no read-back); this capability's truncation and ANSI / binary handling are harvested from it.
-- Consumes core [#4352](https://github.com/pydantic/pydantic-ai/issues/4352) (the canonical
-  queryable-file primitive) through the `OverflowStore` seam once it lands.
+- Writes spills through the run's workspace, so they sit beside the files that
+  [FileSystem](../filesystem/) and [Shell](../shell/) tools act on.
 - Distinct from `compaction`, which compresses or drops context already inside the window, and
   from `ClampOversizedMessages` (PR #286), which clamps runaway model responses, not tool
   returns.

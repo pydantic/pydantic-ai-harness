@@ -14,7 +14,6 @@ from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness.shell import Shell
 from pydantic_ai_harness.tool_output_limits import (
     Band,
-    LocalFileStore,
     Spill,
     ToolOutputLimits,
     Truncate,
@@ -28,7 +27,7 @@ def anyio_backend() -> str:
 
 
 @pytest.mark.parametrize('output_chars', [6_000, 25_000, 120_000], ids=['truncate', 'spill', 'native-cap-then-spill'])
-async def test_shell_stacking_recipe(tmp_path: Path, output_chars: int):
+async def test_shell_stacking_recipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_chars: int):
     executable = Path(sys.executable).as_posix()
     command = f'"{executable}" -c "import sys; sys.stdout.write(\'x\' * {output_chars}); sys.exit(7)"'
 
@@ -37,14 +36,13 @@ async def test_shell_stacking_recipe(tmp_path: Path, output_chars: int):
             return ModelResponse(parts=[TextPart('done')])
         return ModelResponse(parts=[ToolCallPart('run_command', {'command': command})])
 
-    store = LocalFileStore(base_dir=tmp_path / 'results')
+    monkeypatch.setenv('TMPDIR', str(tmp_path / 'sandbox-tmp'))
     tail = Truncate(max_chars=4_000, strategy=TruncationStrategy.tail)
     agent = Agent(
         FunctionModel(respond),
         capabilities=[
             Shell(cwd=tmp_path, allowed_commands=[executable], max_output_chars=100_000),
             ToolOutputLimits(
-                store=store,
                 bands=[],
                 per_tool={
                     'run_command': [
@@ -68,7 +66,9 @@ async def test_shell_stacking_recipe(tmp_path: Path, output_chars: int):
     else:
         assert 'read_tool_result' in part.content
         assert part.metadata is not None
-        stored = (await store.read(part.metadata['overflow_handle'])).decode('utf-8')
+        handle = part.metadata['overflow_handle']
+        assert handle.startswith(f'{tmp_path}/sandbox-tmp/pydantic-ai-harness/tool-output/')
+        stored = Path(handle).read_text()
         original = f'[stdout]\n{"x" * output_chars}\n[exit code: 7]'
         if output_chars == 25_000:
             assert stored == original

@@ -14,8 +14,10 @@ from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnContent, Us
 from pydantic_ai.models import AbstractModel, Model
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets import AgentToolset
+from pydantic_ai.workspaces import WorkspaceError
 
 from pydantic_ai_harness._usage import reserved_usage_limits
+from pydantic_ai_harness._workspace import raise_tool_failure, workspace_attached
 from pydantic_ai_harness.tool_output_limits._bands import (
     Action,
     Band,
@@ -34,7 +36,7 @@ from pydantic_ai_harness.tool_output_limits._payload import (
     to_text,
     truncate_text,
 )
-from pydantic_ai_harness.tool_output_limits._store import LocalFileStore, OverflowStore
+from pydantic_ai_harness.tool_output_limits._store import LocalFileStore, OverflowStore, WorkspaceStore
 
 READ_TOOL_NAME = 'read_tool_result'
 """Name of the registered read-back tool. Its own returns are exempt from reduction."""
@@ -137,8 +139,12 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     tokenizer: Callable[[str], int] | None = None
     """Optional `(str) -> int` tokenizer for `over_tokens`. Defaults to a ~4-char heuristic."""
 
-    store: OverflowStore | None = None
-    """Backend for spilled payloads. Defaults to a `LocalFileStore`."""
+    store: OverflowStore | WorkspaceStore | None = None
+    """Backend for spilled payloads.
+
+    Defaults to a `WorkspaceStore` in the run's workspace, or a `LocalFileStore` on the host for a
+    run with no workspace attached.
+    """
 
     strip_ansi: bool = False
     """Strip ANSI escape sequences from text returns before measuring and reducing."""
@@ -158,12 +164,15 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     _: KW_ONLY
     id: str | None = 'tool_output_limits'
 
-    _store: OverflowStore = field(init=False, repr=False)
+    _store: OverflowStore | WorkspaceStore = field(init=False, repr=False)
+    _host_store: LocalFileStore | None = field(init=False, repr=False)
     _bands: list[Band] = field(init=False, repr=False)
     _per_tool: dict[str, list[Band]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._store = self.store if self.store is not None else LocalFileStore()
+        self._store = self.store if self.store is not None else WorkspaceStore()
+        # Only the default falls back: an explicitly chosen store is used as given.
+        self._host_store = LocalFileStore() if self.store is None else None
         self._bands = self._prepare_bands(self.bands)
         self._per_tool = {name: self._prepare_bands(bands) for name, bands in self.per_tool.items()}
 
@@ -179,7 +188,6 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
         """Register the `read_tool_result` tool for reading spilled payloads on demand."""
-        store = self._store
 
         async def read_tool_result(
             ctx: RunContext[AgentDepsT],
@@ -199,9 +207,22 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
                 from_end: Count `offset`/`limit` from the end of the result.
                 pattern: Optional literal substring; only lines containing it are returned.
             """
-            return await _read_slice(store, handle, offset, limit, from_end, pattern)
+            store = self._store_for(ctx)
+
+            async def read(handle: str) -> bytes:
+                if isinstance(store, WorkspaceStore):
+                    return await store.read(ctx.workspace, handle)
+                return await store.read(handle)
+
+            return await _read_slice(read, handle, offset, limit, from_end, pattern)
 
         return FunctionToolset([read_tool_result])
+
+    def _store_for(self, ctx: RunContext[AgentDepsT]) -> OverflowStore | WorkspaceStore:
+        """The store for this run: the default spills to the host when the run has no workspace."""
+        if self._host_store is not None and not workspace_attached(ctx.workspace):
+            return self._host_store
+        return self._store
 
     # --- reduction ---
 
@@ -404,8 +425,16 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         unit: _Unit,
     ) -> tuple[str | None, str | None]:
         key = _handle_key(ctx, call, unit.suffix)
+        store = self._store_for(ctx)
         try:
-            handle = await self._store.write(key, unit.data)
+            if isinstance(store, WorkspaceStore):
+                handle = await store.write(ctx.workspace, key, unit.data)
+            else:
+                handle = await store.write(key, unit.data)
+        except UserError as error:
+            # Typically no workspace is attached to the run; say so rather than degrading quietly.
+            warnings.warn(f'ToolOutputLimits: could not spill a {call.tool_name!r} result: {error}', stacklevel=2)
+            return await self._fallback(ctx, call, action.then, unit)
         except Exception:
             return await self._fallback(ctx, call, action.then, unit)
 
@@ -611,7 +640,7 @@ _MAX_READ_CHARS = 50_000
 
 
 async def _read_slice(
-    store: OverflowStore,
+    read: Callable[[str], Awaitable[bytes]],
     handle: str,
     offset: int,
     limit: int,
@@ -631,13 +660,16 @@ async def _read_slice(
     limit = min(limit, _MAX_READ_LINES)
 
     try:
-        data = await store.read(handle)
-    except OSError:
+        data = await read(handle)
+    except WorkspaceError as error:
+        raise_tool_failure(error)
+    except (OSError, UserError):
         # Return, not raise: a wrong handle (e.g. the model passing a tool-call id) or a
         # result that is no longer stored must not consume a tool retry and escalate to a
         # fatal `UnexpectedModelBehavior`. Guide the model to a valid handle instead. The
         # exception is intentionally not echoed -- a store's error can carry the resolved
-        # filesystem path or other backend detail the model has no need for.
+        # filesystem path or other backend detail the model has no need for. `UserError` is a
+        # run with no workspace attached, where no workspace spill can exist.
         return (
             f'[No stored tool result for handle {handle!r}. Use the exact handle string from a '
             '"[Tool output too large ... stored to handle ...]" marker; if the result is no longer '

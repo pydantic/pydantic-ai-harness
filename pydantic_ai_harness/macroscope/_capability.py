@@ -23,8 +23,8 @@ _REVIEW_INSTRUCTIONS = (
 class Macroscope(AbstractCapability[AgentDepsT]):
     """Runs the `macroscope` CLI code review and hands the findings to the agent.
 
-    Adds a `run_macroscope_review` tool that shells out to `macroscope codereview`,
-    parses the streamed findings, and returns them as a `MacroscopeReview`. The agent
+    Adds a `run_macroscope_review` tool that runs `macroscope codereview` in the run's
+    workspace (`ctx.workspace`, the local disk or a sandbox), parses the streamed findings, and returns them as a `MacroscopeReview`. The agent
     validates and fixes findings with its own tools -- this capability does not edit
     files, create worktrees, or commit.
 
@@ -35,8 +35,8 @@ class Macroscope(AbstractCapability[AgentDepsT]):
     agent = Agent('anthropic:claude-sonnet-5', capabilities=[Macroscope()])
     ```
 
-    The `macroscope` CLI must be installed and authenticated on the host first (see the
-    package README). This capability cannot sign in on the user's behalf; if a review
+    The `macroscope` CLI must be installed and authenticated in the workspace first (see
+    the package README). This capability cannot sign in on the user's behalf; if a review
     never starts, the tool reports that the user needs to run `macroscope` once.
     """
 
@@ -48,7 +48,7 @@ class Macroscope(AbstractCapability[AgentDepsT]):
     """Name or path of the CLI binary. Override for a non-default install location."""
 
     cwd: str | Path = '.'
-    """Repository directory the review runs in."""
+    """Repository directory the review runs in: a workspace path, relative to the workspace's working directory."""
 
     timeout: float = 600.0
     """Maximum seconds to wait for a review. Reviews call a remote service, so this is
