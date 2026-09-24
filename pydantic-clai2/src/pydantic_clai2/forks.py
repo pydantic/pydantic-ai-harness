@@ -16,8 +16,8 @@ exiting or reloading CLAI cancels them too.
 import asyncio
 import copy
 import time
-from collections.abc import Callable, Generator, Iterable, Sequence
-from contextlib import contextmanager
+from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeVar
 
@@ -100,6 +100,7 @@ class Forks(Generic[DepsT, OutputT]):
         self._busy = 0
         self._idle = asyncio.Event()
         self._idle.set()
+        self._terminal = asyncio.Lock()
         self._held: list[tuple[str, str]] = []
 
     @property
@@ -107,11 +108,15 @@ class Forks(Generic[DepsT, OutputT]):
         """Every fork started by this shell, oldest first."""
         return tuple(self._records.values())
 
-    @contextmanager
-    def busy(self) -> Generator[None]:
-        """Hold fork output while a turn or command owns the terminal."""
-        self._busy += 1
-        self._idle.clear()
+    @asynccontextmanager
+    async def busy(self) -> AsyncGenerator[None]:
+        """Hold fork output while a turn or command owns the terminal.
+
+        Entering waits for a fork announcement already rendering, so the two never interleave.
+        """
+        async with self._terminal:
+            self._busy += 1
+            self._idle.clear()
         try:
             yield
         finally:
@@ -195,8 +200,13 @@ class Forks(Generic[DepsT, OutputT]):
             )
             return
         record = self._finish(fork_id, 'done', session)
-        await self._idle.wait()
-        await self._announce(record, result.output)
+        while True:
+            await self._idle.wait()
+            async with self._terminal:
+                # A turn or command may have started between the wake-up and taking the lock.
+                if not self._busy:
+                    await self._announce(record, result.output)
+                    return
 
     def _finish(self, fork_id: int, status: ForkStatus, session: Session[DepsT, OutputT]) -> ForkRecord:
         record = self._records[fork_id]

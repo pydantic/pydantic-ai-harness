@@ -61,8 +61,8 @@ class Model:
         yield f'**answer** to {prompt}'
 
 
-def shell_for(tmp_path: Path, model: Model, output: io.StringIO):
-    return create_shell(
+async def shell_for(tmp_path: Path, model: Model, output: io.StringIO):
+    shell = create_shell(
         Agent(FunctionModel(stream_function=model.respond)),
         deps=None,
         plugins=(),
@@ -74,6 +74,10 @@ def shell_for(tmp_path: Path, model: Model, output: io.StringIO):
         project=ProjectSettings(),
         headless=True,
     )
+    # Concurrent first connections to a brand-new sessions.db can race on the store's WAL switch.
+    assert shell.session.conversations is not None
+    await shell.session.conversations.listing()
+    return shell
 
 
 @pytest.mark.parametrize(
@@ -101,7 +105,7 @@ def test_raw_commands_keep_quotes() -> None:
 
 async def test_fork_copies_history_and_reports(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = shell_for(tmp_path, model, output)
+    shell = await shell_for(tmp_path, model, output)
     await shell.session.prompt('first')
     before = shell.session.messages
 
@@ -125,7 +129,7 @@ async def test_fork_copies_history_and_reports(tmp_path: Path) -> None:
 
 async def test_fork_without_history_starts_fresh_with_model_override(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = shell_for(tmp_path, model, output)
+    shell = await shell_for(tmp_path, model, output)
     await shell.commands.execute_async('/fork @test hello')
     (record,) = shell.forks.records
     await record.task
@@ -159,7 +163,7 @@ async def test_snapshot_failure_forks_fresh(tmp_path: Path) -> None:
 
 async def test_cancel_status_and_failures(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = shell_for(tmp_path, model, output)
+    shell = await shell_for(tmp_path, model, output)
     execute = shell.commands.execute_async
 
     assert await execute('/forks') == 'No forks yet. Start one with /fork [@model] PROMPT.'
@@ -196,10 +200,10 @@ async def test_cancel_status_and_failures(tmp_path: Path) -> None:
 
 async def test_output_waits_while_busy(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = shell_for(tmp_path, model, output)
+    shell = await shell_for(tmp_path, model, output)
     forks = shell.forks
-    with forks.busy():
-        with forks.busy():
+    async with forks.busy():
+        async with forks.busy():
             forks.fork_command(['hello'])
             (record,) = forks.records
             while record.status == 'running':
@@ -213,9 +217,9 @@ async def test_output_waits_while_busy(tmp_path: Path) -> None:
 
 async def test_notices_wait_while_busy(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = shell_for(tmp_path, model, output)
+    shell = await shell_for(tmp_path, model, output)
     forks = shell.forks
-    with forks.busy():
+    async with forks.busy():
         forks.fork_command(['block'])
         forks.fork_command(['explode'])
         await model.started.wait()
@@ -228,6 +232,28 @@ async def test_notices_wait_while_busy(tmp_path: Path) -> None:
     text = output.getvalue()
     assert 'fork #2 failed after' in text
     assert 'fork #1 cancelled after' in text
+
+
+async def test_announcements_own_the_terminal(tmp_path: Path) -> None:
+    model, output = Model(), io.StringIO()
+    shell = await shell_for(tmp_path, model, output)
+    forks = shell.forks
+    async with forks.busy():
+        forks.fork_command(['one'])
+        forks.fork_command(['two'])
+        first, second = forks.records
+        while 'running' in (first.status, second.status):
+            await asyncio.sleep(0)
+    # Idle wakes both forks, but a command claims the terminal before either takes the lock.
+    async with forks.busy():
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert 'FORK #' not in output.getvalue()
+    await asyncio.gather(first.task, second.task)
+    text = output.getvalue()
+    # Announcements run one at a time: each banner is followed by its own finished line.
+    blocks = sorted((text.index(f'FORK #{n} RESPONSE'), text.index(f'fork #{n} finished')) for n in (1, 2))
+    assert blocks[0][1] < blocks[1][0]
 
 
 async def test_structured_output_prints_as_is() -> None:

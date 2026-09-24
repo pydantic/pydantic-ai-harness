@@ -583,7 +583,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
             self.console.print()
             if is_command_input(text):
-                with self.forks.busy():
+                async with self.forks.busy():
                     async with (self.editor.suspended if self.editor is not None else bare_screen)():
                         await self.interrupts.run(
                             _execute_command(self.commands, text, console=self.console, status=self.status)
@@ -596,7 +596,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 self.console.print('Choose a model first: /set model <Tab>', style=theme.color(theme.WARNING))
                 continue
             try:
-                with self.forks.busy():
+                async with self.forks.busy():
                     if await self._turn(text):
                         return 'exit'
             finally:
