@@ -559,6 +559,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 chords={'ctrl-x ctrl-s': self.speculation.toggle},
                 pinned=self.speculation.row,
                 spinner=self.spinners.active,
+                panel=self.forks.rows,
             )
             self.screen.editor = self.editor.suspended
             try:

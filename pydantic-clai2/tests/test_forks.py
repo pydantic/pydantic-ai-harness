@@ -8,20 +8,29 @@ from pathlib import Path
 from typing import Generic, TypeVar
 
 import pytest
+from prompt_toolkit.application import create_app_session
+from prompt_toolkit.history import InMemoryHistory
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from rich.console import Console
+from rich.text import Text
 
 from pydantic_clai2 import chat
 from pydantic_clai2._app import create_shell
 from pydantic_clai2._session import Session
 from pydantic_clai2.commands import Command, Commands
 from pydantic_clai2.forks import USAGE, Forks, parse_fork_args
+from pydantic_clai2.image_input import ImageInput
+from pydantic_clai2.interrupts import Interrupts
+from pydantic_clai2.live_prompt import LivePrompt
 from pydantic_clai2.plugins import HostEvent, TurnEnd, TurnStart
 from pydantic_clai2.project_settings import ProjectSettings
 from pydantic_clai2.settings_store import SettingsStore
+from pydantic_clai2.spinners import BUILTIN_SPINNERS, DEFAULT_SPINNER
 
 PromptT = TypeVar('PromptT')
 
@@ -317,6 +326,67 @@ async def test_forks_fire_turn_hooks() -> None:
     assert isinstance(ends['explode'].error, RuntimeError)
     assert ends['block'].outcome == 'cancelled'
     assert 'forbidden' not in ends
+
+
+async def test_live_rows_follow_each_fork(tmp_path: Path) -> None:
+    model, output = Model(), io.StringIO()
+    forks = shell_for(tmp_path, model, output).forks
+    assert forks.rows('*') == ()
+    async with forks.busy():
+        await forks.fork_command(['block'])
+        await forks.fork_command(['hello'])
+        await model.started.wait()
+        running, finished = forks.records
+        while finished.status == 'running':
+            await asyncio.sleep(0)
+        first, second = (Text.from_ansi(row).plain for row in forks.rows('*'))
+        assert first.startswith(' FORK #1  agent default  * 00:0')
+        assert first.endswith('starting')
+        assert second.startswith(' FORK #2  agent default  \u2713 00:0')
+        assert second.endswith('done, prints after this turn')
+    await asyncio.sleep(0)
+    assert finished.announced
+    assert [Text.from_ansi(row).plain[:9] for row in forks.rows('*')] == [' FORK #1 ']
+    for activity in ('thinking', 'tool: grep', 'running: grep', 'responding', 'working'):
+        running.progress.activity = activity
+        assert Text.from_ansi(forks.rows('*')[0]).plain.endswith(activity)
+    forks.cancel('1')
+    await asyncio.gather(running.task, return_exceptions=True)
+    assert forks.rows('*') == ()
+
+
+async def test_stream_events_drive_the_activity(tmp_path: Path) -> None:
+    model, output = Model(), io.StringIO()
+    forks = shell_for(tmp_path, model, output).forks
+    await forks.fork_command(['hello'])
+    (record,) = forks.records
+    await record.task
+    assert record.progress.activity == 'responding'
+
+
+def test_editor_paints_fork_rows_above_the_rule() -> None:
+    rows = [f'row {index}' for index in range(5)]
+    seen: list[str] = []
+
+    def panel(glyph: str) -> list[str]:
+        seen.append(glyph)
+        return rows
+
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+        live = LivePrompt(
+            console=Console(file=io.StringIO(), force_terminal=True, width=40, height=12),
+            commands=Commands(),
+            history=InMemoryHistory(),
+            images=ImageInput(),
+            interrupts=Interrupts(),
+            toolbar=lambda: [('', 'ready')],
+            clock=lambda: 0.0,
+            panel=panel,
+        )
+        plain = [Text.from_ansi(row).plain for row in live.frame()]
+    assert seen == [BUILTIN_SPINNERS[DEFAULT_SPINNER].frames[0]]
+    assert plain[:3] == ['row 0', 'row 1', '+3 more']
+    assert plain[3].startswith('\u2500')
 
 
 def test_completion(tmp_path: Path) -> None:

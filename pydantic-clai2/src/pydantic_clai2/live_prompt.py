@@ -3,7 +3,7 @@
 import asyncio
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from itertools import islice
 
@@ -48,12 +48,15 @@ class LivePrompt:
         chords: Mapping[str, Callable[[], str]] | None = None,
         pinned: Callable[[], str] = lambda: '',
         spinner: Callable[[], Spinner] = lambda: BUILTIN_SPINNERS[DEFAULT_SPINNER],
+        panel: Callable[[str], Sequence[str]] = lambda _: (),
     ) -> None:
         """Bind editing state, terminal ownership and per-session services.
 
         `chords` maps a two-key sequence such as `'ctrl-x ctrl-s'` to an action returning a
         footer notice. `pinned` returns an optional styled row painted above the footer.
         `spinner` returns the working animation; it is read on every frame, so a new choice shows at once.
+        `panel` receives the current spinner frame and returns styled rows painted above the queue,
+        such as running forks; it is read on every repaint, including between turns.
         """
         self.console = console
         self.commands = commands
@@ -66,6 +69,7 @@ class LivePrompt:
         self.chords = dict(chords or {})
         self.pinned = pinned
         self.spinner = spinner
+        self.panel = panel
         self.notice = ''
         self._chord_prefix = ''
         self.buffer = PromptBuffer(history=list(reversed(list(history.load_history_strings()))))
@@ -289,6 +293,11 @@ class LivePrompt:
         if width < 6 or height < 6:
             return tuple(self.buffer.rows(width=width, limit=1))
         rows: list[str] = []
+        panel = self.panel(self.spinner().frame(self.clock()))
+        panel_limit = max(1, height // 6)
+        rows.extend(truncate(row, width) + reset for row in panel[:panel_limit])
+        if len(panel) > panel_limit:
+            rows.append(muted + f'+{len(panel) - panel_limit} more' + reset)
         queue_limit = max(1, height // 6)
         for text in self.queued_messages[:queue_limit]:
             label = 'Command' if is_command_input(text) else 'Follow-up'

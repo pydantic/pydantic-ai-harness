@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeVar
 
 from anyio import move_on_after
-from pydantic_ai import PartStartEvent, TextPart
+from pydantic_ai import AgentStreamEvent, PartStartEvent, TextPart
 from pydantic_ai.messages import ModelMessage
 from rich.console import Console
 from rich.table import Table
@@ -33,6 +33,8 @@ from ._rendering import StreamRenderer
 from ._session import Session
 from .errors import error_message
 from .plugins import HostEvent, TurnEnd, TurnStart
+from .status import Status
+from .tool_output import terminal_text
 
 DepsT = TypeVar('DepsT')
 OutputT = TypeVar('OutputT')
@@ -65,6 +67,9 @@ class ForkRecord:
     status: ForkStatus = 'running'
     elapsed: float | None = None
     session_id: str | None = field(default=None)
+    progress: Status = field(default_factory=lambda: Status(activity='starting'))
+    """The child's live activity, fed by its stream events, for the editor's fork rows."""
+    announced: bool = False
 
     @property
     def tag(self) -> str:
@@ -74,6 +79,17 @@ class ForkRecord:
 
 async def _ignore(event: HostEvent) -> None:
     pass
+
+
+def _activity_style(activity: str) -> str:
+    # Matches Code Puppy's sub-agent rows: thinking, tool calls, and writing each get a colour.
+    if activity == 'thinking':
+        return theme.sgr(theme.THINKING)
+    if activity.startswith(('tool: ', 'running: ')):
+        return theme.sgr(theme.WARNING)
+    if activity == 'responding':
+        return theme.sgr(theme.SUCCESS)
+    return theme.sgr(theme.MUTED)
 
 
 def parse_fork_args(text: str) -> tuple[str | None, str]:
@@ -186,12 +202,19 @@ class Forks(Generic[DepsT, OutputT]):
             await session.conversations.listing(limit=1)
             self._store_ready = True
         fork_id = len(self._records) + 1
+        progress = Status(activity='starting')
+
+        async def observe(event: AgentStreamEvent) -> None:
+            progress.observe(event)
+
+        session.on_stream_event = observe
         record = ForkRecord(
             fork_id=fork_id,
             model=session.model or 'agent default',
             prompt=prompt,
             started_at=self._clock(),
             task=asyncio.create_task(self._run(fork_id, session, prompt), name=f'fork-{fork_id}'),
+            progress=progress,
         )
         self._records[fork_id] = record
         return (
@@ -249,6 +272,7 @@ class Forks(Generic[DepsT, OutputT]):
         header = Text(f' FORK #{record.fork_id} RESPONSE ', style=f'bold white on {theme.color(theme.THINKING)}')
         header.append(' ')
         header.append(record.model, style=f'bold {theme.color(theme.INFO)}')
+        record.announced = True
         self.console.print()
         self.console.print(header)
         if isinstance(output, str):
@@ -263,6 +287,33 @@ class Forks(Generic[DepsT, OutputT]):
         if record.session_id is not None:
             done += f' Continue it with /resume {record.session_id}'
         self._print(done, theme.SUCCESS)
+
+    def rows(self, glyph: str) -> tuple[str, ...]:
+        """Live editor rows: one per running fork, and one per finished fork still waiting to print.
+
+        `glyph` is the current frame of the user's `/spinner`, so forks animate with the main turn.
+        """
+        reset, muted = '\x1b[0m', theme.sgr(theme.MUTED)
+        rows: list[str] = []
+        for record in self._records.values():
+            if record.status == 'running':
+                seconds = self._clock() - record.started_at
+                mark = theme.sgr(theme.ACCENT) + glyph
+                activity = record.progress.activity
+                state = _activity_style(activity) + terminal_text(activity)
+            elif record.status == 'done' and not record.announced:
+                seconds = record.elapsed or 0.0
+                mark = theme.sgr(theme.SUCCESS) + '\u2713'
+                state = muted + 'done, prints after this turn'
+            else:
+                continue
+            minutes, secs = divmod(int(seconds), 60)
+            rows.append(
+                f'\x1b[7m{theme.sgr(theme.THINKING, bold=True)} FORK #{record.fork_id} {reset} '
+                f'{theme.sgr(theme.INFO)}{terminal_text(record.model)}{reset}  '
+                f'{mark}{reset} {muted}{minutes:02d}:{secs:02d}{reset}  {state}{reset}'
+            )
+        return tuple(rows)
 
     def cancel(self, raw_id: str) -> str:
         """`/fork cancel ID`."""
