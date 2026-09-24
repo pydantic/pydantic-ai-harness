@@ -4,8 +4,9 @@ Used by the compatibility shims left behind by the capability naming pass: a ren
 module keeps a shim package at its old path, and a renamed class keeps a module-level
 `__getattr__` alias, both emitting `HarnessDeprecationWarning` through these helpers.
 `warn_default_changed` covers an option whose default moved, where existing callers keep
-working but get different behavior, and `warn_argument_ignored` an argument that is still
-accepted but no longer does anything.
+working but get different behavior, `warn_argument_ignored` an argument that is still
+accepted but no longer does anything, and `warn_argument_renamed` an argument still accepted
+under its old name.
 """
 
 from __future__ import annotations
@@ -74,6 +75,19 @@ def warn_class_renamed(old: str, new: str, module: str) -> None:
         f'Update your imports; this deprecated alias will be removed in a future release.',
         category=HarnessDeprecationWarning,
         stacklevel=3,
+    )
+
+
+def warn_argument_renamed(owner: str, old: str, new: str, *, stacklevel: int = 3) -> None:
+    """Emit a `HarnessDeprecationWarning` that `<owner>(<old>=...)` is now `<owner>(<new>=...)`.
+
+    For an argument accepted under its old name as an alias of the new one.
+    """
+    warnings.warn(
+        f'`{owner}({old}=...)` has been renamed to `{owner}({new}=...)`. '
+        'Update the call; this deprecated alias will be removed in a future release.',
+        category=HarnessDeprecationWarning,
+        stacklevel=stacklevel,
     )
 
 

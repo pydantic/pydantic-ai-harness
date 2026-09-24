@@ -53,17 +53,22 @@ def raise_tool_failure(error: WorkspaceError) -> NoReturn:
 
 
 def supports_commands(workspace: Workspace) -> bool:
-    """Whether `workspace.run` can succeed: a workspace is attached, its innermost backend executes commands, and no policy refuses them.
+    """Whether `workspace.run` can succeed: a workspace is attached, its innermost backend executes commands, and no policy refuses them."""
+    if not workspace.attached or workspace.read_only:
+        return False
+    return isinstance(innermost_backend(workspace), SupportsCommands)
+
+
+def innermost_backend(workspace: Workspace) -> WorkspaceBackend:
+    """The backend at the bottom of `workspace`'s facades and wrappers.
 
     Wrappers are unwrapped through `wrapped`, not `backend`: a durable workspace refuses
     `backend` in workflow code, where tool registration runs.
     """
-    if not workspace.attached or workspace.read_only:
-        return False
     current: WorkspaceBackend = workspace
     while isinstance(current, Workspace):
         current = current.wrapped if isinstance(current, WrapperWorkspace) else current.backend
-    return isinstance(current, SupportsCommands)
+    return current
 
 
 def require_workspace(workspace: Workspace, owner: str) -> None:
