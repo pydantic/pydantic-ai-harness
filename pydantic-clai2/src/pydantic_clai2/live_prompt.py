@@ -3,7 +3,7 @@
 import asyncio
 import time
 from collections import deque
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import asynccontextmanager
 from itertools import islice
 
@@ -44,8 +44,14 @@ class LivePrompt:
         steer: Callable[[str], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
         transcript: TranscriptBuffer | None = None,
+        chords: Mapping[str, Callable[[], str]] | None = None,
+        pinned: Callable[[], str] = lambda: '',
     ) -> None:
-        """Bind editing state, terminal ownership and per-session services."""
+        """Bind editing state, terminal ownership and per-session services.
+
+        `chords` maps a two-key sequence such as `'ctrl-x ctrl-s'` to an action returning a
+        footer notice. `pinned` returns an optional styled row painted above the footer.
+        """
         self.console = console
         self.commands = commands
         self.history = history
@@ -54,6 +60,10 @@ class LivePrompt:
         self.toolbar = toolbar
         self.steer = steer
         self.clock = clock
+        self.chords = dict(chords or {})
+        self.pinned = pinned
+        self.notice = ''
+        self._chord_prefix = ''
         self.buffer = PromptBuffer(history=list(reversed(list(history.load_history_strings()))))
         self.output = PromptSurface(output=console.file, size=lambda: console.size, transcript=transcript)
         self.keys = PromptKeys(
@@ -112,6 +122,12 @@ class LivePrompt:
 
     def feed(self, key: str, data: str = '') -> None:
         """Route editing, completion and interrupts without rendering a widget tree."""
+        self.notice = ''
+        if not self._chord(key):
+            self._route(key, data)
+        self.paint()
+
+    def _route(self, key: str, data: str) -> None:
         if key == 'ctrl-c':
             if not self.interrupts.cancel():
                 self.buffer.replace('')
@@ -144,7 +160,19 @@ class LivePrompt:
             self.buffer.edit(key)
         if key not in ('tab', 'backtab', 'escape') and (key not in ('up', 'down') or not self._completions):
             self.refresh_completions()
-        self.paint()
+
+    def _chord(self, key: str) -> bool:
+        """Consume a chord prefix or its completion; any other second key acts on its own."""
+        if self._chord_prefix:
+            chord, self._chord_prefix = f'{self._chord_prefix} {key}', ''
+            if chord in self.chords:
+                self.notice = self.chords[chord]()
+                return True
+            return False
+        if any(chord.startswith(f'{key} ') for chord in self.chords):
+            self._chord_prefix = key
+            return True
+        return False
 
     def accept(self) -> None:
         """Accept a completion or queue the nonempty draft."""
@@ -272,7 +300,8 @@ class LivePrompt:
         # The box has no side borders and no prompt marker: the draft and the
         # suggestions are plain rows between the top and bottom rules, so no
         # row can drift out of alignment with the corners.
-        inner = max(1, height - len(rows) - 4)
+        pinned = self.pinned()
+        inner = max(1, height - len(rows) - 4 - bool(pinned))
         popup_want = min(6, len(self._completions))
         draft = self.buffer.rows(width=width, limit=max(1, min(height // 3, inner - popup_want)))
         rows.extend(draft)
@@ -284,10 +313,12 @@ class LivePrompt:
             )
             rows.append(('\x1b[7m' if index == self._selection else muted) + line + reset)
         rows.append(muted + '─' * width + reset)
+        if pinned:
+            rows.append(truncate(pinned, width) + reset)
         if self.buffer.search is not None:
             footer = f'reverse-i-search: {self.buffer.search}'
         else:
-            notice = self.images.notice or self._completion_error
+            notice = self.notice or self.images.notice or self._completion_error
             footer = (
                 ' '.join(terminal_text(notice).split())
                 if notice

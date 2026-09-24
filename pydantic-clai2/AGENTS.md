@@ -217,6 +217,9 @@ bundled palettes use Termflow defaults.
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |
 | `repo_context.py` | the built-in `repo_context` plugin over harness `RepoContext` |
+| `speculation.py` | the `run.speculative_code_mode` switch, `Ctrl+X Ctrl+S` toggle, session counters and pinned row |
+| `speculative_mode.py` | harness `CodeMode` wiring (native writes, read-only speculation allowlist, guidance), imported only while on |
+| `eager_timing.py` | eager `run_code` latency measurement and the nested-call id pattern |
 | `theme.py` | Existing brand roles, opt-in Termflow palette scope, `color()`, `sgr()` |
 | `theme_picker.py` | `/theme` picker over Termflow's bundled palettes |
 

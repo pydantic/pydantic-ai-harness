@@ -35,6 +35,7 @@ from termflow.stream import SmoothWriter  # pyright: ignore[reportMissingTypeStu
 from termflow.syntax import LANGUAGE_ALIASES  # pyright: ignore[reportMissingTypeStubs]
 
 from . import theme
+from .eager_timing import is_sandbox_call
 from .grep_output import GrepOutput
 from .tool_output import ToolOutput, print_tool_header, terminal_text
 
@@ -99,8 +100,11 @@ class StreamRenderer:
         shell_lines: int = 20,
         grep_lines: int = 20,
         renderers: Sequence[Callable[[AgentStreamEvent], RenderableType | None]] = (),
+        quiet_sandbox_calls: bool = False,
     ) -> None:
         self.console = console
+        self.quiet_sandbox_calls = quiet_sandbox_calls
+        """Skip the per-call display of tools called from `run_code`, whose snippet already filters results."""
         self._renderers = tuple(renderers)
         self.show_tool_output = show_tool_output
         self._tool_output = ToolOutput(console, shell_lines=shell_lines, show_output=show_tool_output)
@@ -121,6 +125,8 @@ class StreamRenderer:
 
     async def on_stream_event(self, event: AgentStreamEvent) -> None:
         """Bind this callback to `Session.on_stream_event`."""
+        if self.quiet_sandbox_calls and isinstance(event, CapabilityEvent) and is_sandbox_call(event.tool_call_id):
+            return
         if await self._render_with_plugins(event):
             if isinstance(event, PartStartEvent) and isinstance(event.part, (TextPart, ThinkingPart)):
                 self._thinking = isinstance(event.part, ThinkingPart)
