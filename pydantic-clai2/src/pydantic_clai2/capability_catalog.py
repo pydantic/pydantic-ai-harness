@@ -21,6 +21,7 @@ _FACTORIES = (
     ('warn_near_limits', 'compaction:WarnNearLimits'),
     ('conversation_search', 'conversation_search:ConversationSearch'),
     ('day_ai', 'day_ai:DayAI'),
+    ('daytona_sandbox', 'daytona_sandbox:DaytonaSandbox'),
     ('dynamic_workflow', 'dynamic_workflow:DynamicWorkflow'),
     ('exa_agent', 'exa:ExaAgent'),
     ('exa_search', 'exa:ExaSearch'),

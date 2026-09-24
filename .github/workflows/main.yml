@@ -36,6 +36,7 @@ jobs:
       localstack: ${{ steps.detect.outputs.localstack }}
       mongodb: ${{ steps.detect-mongodb.outputs.mongodb }}
       redis: ${{ steps.detect-redis.outputs.redis }}
+      daytona: ${{ steps.detect-daytona.outputs.daytona }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -117,6 +118,41 @@ jobs:
               exit "$status"
             fi
             echo 'redis=true' >> "$GITHUB_OUTPUT"
+          fi
+
+      # A fourth step: the Daytona live tier starts real, billed sandboxes, so it runs only
+      # when the Daytona capability, the shared workspace code it runs under, or the files
+      # that pin its dependencies change.
+      - id: detect-daytona
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          if git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- \
+            pydantic_ai_harness/__init__.py \
+            pydantic_ai_harness/_workspace.py \
+            pydantic_ai_harness/_workspace_provider.py \
+            pydantic_ai_harness/_warn.py \
+            'pydantic_ai_harness/coder/**' \
+            'pydantic_ai_harness/shell/**' \
+            'pydantic_ai_harness/filesystem/**' \
+            tests/conftest.py \
+            tests/_workspace.py \
+            tests/_tool_calls.py \
+            pydantic_ai_harness/daytona_sandbox \
+            tests/daytona_sandbox \
+            docs/daytona-sandbox.md \
+            pyproject.toml \
+            uv.lock \
+            .github/workflows/main.yml
+          then
+            echo 'daytona=false' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+            echo 'daytona=true' >> "$GITHUB_OUTPUT"
           fi
 
   clai-test:
@@ -537,6 +573,44 @@ jobs:
 
       - run: make integration-redis
 
+  daytona-live:
+    needs: [changes]
+    # Same condition as `localstack-integration`: DAYTONA_API_KEY is a repository secret, so fork and
+    # Dependabot pull requests, which cannot read it, skip instead of failing. Tags always
+    # run it.
+    if: >-
+      ${{ always()
+          && (github.ref_type == 'tag' || needs.changes.outputs.daytona == 'true')
+          && (github.event_name != 'pull_request'
+              || (github.event.pull_request.head.repo.full_name == github.repository
+                  && github.actor != 'dependabot[bot]')) }}
+    runs-on: ubuntu-latest
+    name: Daytona live tests
+    # Sandbox creation goes through Daytona's control plane; bound a wedged run.
+    timeout-minutes: 15
+    env:
+      # Without this a missing or empty DAYTONA_API_KEY is a skip, which is what a developer
+      # without a key wants and what must not happen here: the job would report green having
+      # tested nothing.
+      DAYTONA_REQUIRE_LIVE: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v8.0.0
+        with:
+          python-version: '3.14'
+          enable-cache: true # zizmor: ignore[cache-poisoning] -- Job does not produce release artifacts and does not have sensitive permissions
+          cache-suffix: daytona
+
+      - run: uv sync --locked --group dev --extra daytona
+
+      - run: PYDANTIC_AI_HARNESS_DAYTONA_LIVE=1 uv run --no-sync pytest -m daytona_live tests/daytona_sandbox -q
+        env:
+          # Scoped to this step so checkout and setup never see the secret.
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }} # zizmor: ignore[secrets-outside-env]
+
   coverage:
     needs: [test]
     runs-on: ubuntu-latest
@@ -562,7 +636,7 @@ jobs:
 
   check:
     if: always()
-    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, clai-test, clai-coverage, localstack-integration, mongodb-integration, redis-integration]
+    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, clai-test, clai-coverage, localstack-integration, mongodb-integration, redis-integration, daytona-live]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
@@ -572,8 +646,10 @@ jobs:
           # (no secrets there), and `changes` is skipped on tag events.
           # mongodb-integration and redis-integration are skipped only on the path
           # filter -- neither needs a secret, so both run on fork pull requests too.
-          # All four still vote (block the merge) when they actually run and fail.
-          allowed-skips: changes, localstack-integration, mongodb-integration, redis-integration
+          # daytona-live is skipped like localstack-integration: on the path
+          # filter and where secrets are unavailable.
+          # All five still vote (block the merge) when they actually run and fail.
+          allowed-skips: changes, localstack-integration, mongodb-integration, redis-integration, daytona-live
           jobs: ${{ toJSON(needs) }}
 
   release:
