@@ -2,8 +2,10 @@
 
 import io
 import json
+import re
 import sys
 from collections.abc import AsyncIterator, Callable
+from dataclasses import replace
 from pathlib import Path
 
 import anyio
@@ -12,8 +14,15 @@ from prompt_toolkit.application import create_app_session
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
-from pydantic_ai import Agent, PartStartEvent, RunContext
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart
+from pydantic_ai import Agent, AgentRunResultEvent, ModelRetry, PartStartEvent, RunContext
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    FunctionToolCallEvent,
+    ModelMessage,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+)
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
@@ -23,7 +32,6 @@ from pydantic_ai_harness.code_mode import (
     SpeculativeCallMissedEvent,
 )
 from pydantic_ai_harness.coder import Coder
-from pydantic_ai_harness.shell import CommandStartedEvent
 from rich.console import Console
 from rich.text import Text
 
@@ -36,6 +44,7 @@ from pydantic_clai2.eager_timing import EagerExecutionCompletedEvent
 from pydantic_clai2.image_input import ImageInput
 from pydantic_clai2.interrupts import Interrupts
 from pydantic_clai2.live_prompt import LivePrompt
+from pydantic_clai2.sandbox_calls import SandboxCallFinishedEvent, SandboxCallOrder, SandboxCallStartedEvent
 from pydantic_clai2.settings_store import SettingsStore
 from pydantic_clai2.speculation import Speculation, SpeculationCounters
 from pydantic_clai2.speculative_mode import (
@@ -81,7 +90,12 @@ class TestSwitch:
         assert switch.toggle() == 'Speculative execution on from the next turn. Ctrl+X Ctrl+S toggles it.'
         assert SettingsStore(tmp_path / 'config.db').overrides() == {'run.speculative_code_mode': True}
         assert plain(switch.row()).startswith('Speculative Execution  0 hits')
-        assert len(switch.capabilities()) == 3
+        assert [type(capability).__name__ for capability in switch.capabilities()] == [
+            'CodeMode',
+            'EagerTiming',
+            'SpeculativeExecution',
+            'ShowSandboxCalls',
+        ]
 
         switch.counters.hits = 2
         assert switch.toggle().startswith('Speculative execution off')
@@ -161,7 +175,11 @@ class TestFold:
             seen.extend(tool.name for tool in info.function_tools)
             return ModelResponse(parts=[TextPart('done')])
 
-        agent = Agent(FunctionModel(respond), capabilities=[Coder(repo_context=False), customization_guide()])
+        agent: Agent[None, str] = Agent(
+            FunctionModel(respond),
+            deps_type=type(None),
+            capabilities=[Coder[None](repo_context=False), customization_guide()],
+        )
         await agent.run('hi')
         assert {*SPECULATIVE_TOOLS, *NATIVE_TOOLS} <= set(seen)
 
@@ -276,17 +294,122 @@ class TestSpeculativeExecution:
         assert counters == SpeculationCounters(hits=2, misses=1, wasted=1, speculative_ms=250, eager_ms=1_000)
 
 
-class TestQuietSandboxCalls:
-    @pytest.mark.parametrize(
-        ('quiet', 'tool_call_id', 'shown'), [(True, 'call__1', False), (True, 'call', True), (False, 'call__1', True)]
-    )
-    async def test_nested_tool_output_is_hidden_only_while_on(
-        self, quiet: bool, tool_call_id: str, shown: bool
-    ) -> None:
+SNIPPET = """\
+text = await read_file(path="a.py")
+name = "b.py"
+other = await read_file(path=name)
+if text == "nope":
+    skipped = await read_file(path="never.py")
+try:
+    await flaky()
+except Exception:
+    pass
+try:
+    await broken()
+except Exception:
+    pass
+"""
+
+
+class TestSandboxCallDisplay:
+    async def test_calls_inside_run_code_render_like_direct_calls(self) -> None:
+        counters = SpeculationCounters()
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if len(messages) > 1:
+                yield 'done'
+                return
+            args = json.dumps({'code': SNIPPET})
+            yield {1: DeltaToolCall(name='run_code')}
+            for offset in range(0, len(args), 8):
+                yield {1: DeltaToolCall(json_args=args[offset : offset + 8])}
+                await anyio.sleep(0)
+
+        agent = fold_agent(FunctionModel(stream_function=stream), counters)
+
+        @agent.tool_plain
+        def flaky() -> str:
+            """Ask for a retry."""
+            raise ModelRetry('try again')
+
+        @agent.tool_plain
+        def broken() -> str:
+            """Fail outright."""
+            raise RuntimeError('kaboom')
+
         output = io.StringIO()
-        renderer = StreamRenderer(Console(file=output, width=120), stop_loading=lambda: None, quiet_sandbox_calls=quiet)
-        await renderer.on_stream_event(CommandStartedEvent(tool_call_id=tool_call_id, command='ls', pid=1))
-        assert ('ls' in output.getvalue()) is shown
+        renderer = StreamRenderer(Console(file=output, width=120), stop_loading=lambda: None)
+        reports: list[SandboxCallStartedEvent | SandboxCallFinishedEvent] = []
+        async with agent.run_stream_events('go') as events:
+            async for event in events:
+                if isinstance(event, AgentRunResultEvent):
+                    continue
+                if isinstance(event, (SandboxCallStartedEvent, SandboxCallFinishedEvent)):
+                    reports.append(event)
+                await renderer.on_stream_event(event)
+        await renderer.finish()
+
+        assert (counters.hits, counters.misses, counters.wasted) == (1, 1, 1)
+        started = [event.call for event in reports if isinstance(event, SandboxCallStartedEvent)]
+        assert [(call.tool_name, call.args) for call in started] == [
+            ('read_file', {'path': 'a.py'}),
+            ('read_file', {'path': 'b.py'}),
+            ('flaky', {}),
+            ('broken', {}),
+        ]
+        finished = [event.result for event in reports if isinstance(event, SandboxCallFinishedEvent)]
+        assert [call.tool_call_id for call in started] == [result.tool_call_id for result in finished]
+        assert all(re.fullmatch(r'.+__\d+', call.tool_call_id) for call in started)
+        assert [type(result).__name__ for result in finished] == [
+            'ToolReturnPart',
+            'ToolReturnPart',
+            'RetryPromptPart',
+            'RetryPromptPart',
+        ]
+        headers = [line for line in output.getvalue().splitlines() if line.startswith('\u25cf')]
+        assert headers == [
+            '\u25cf run_code',
+            "\u25cf read_file 'a.py' offset=0 limit=2000 lines",
+            "\u25cf read_file 'b.py' offset=0 limit=2000 lines",
+            '\u25cf flaky',
+            '\u25cf broken',
+        ]
+
+    async def test_plugin_renderers_see_sandbox_calls(self) -> None:
+        seen: list[str] = []
+
+        def plugin(event: AgentStreamEvent) -> str | None:
+            if isinstance(event, FunctionToolCallEvent):
+                seen.append(event.part.tool_name)
+                return 'drawn by plugin'
+            return None
+
+        output = io.StringIO()
+        renderer = StreamRenderer(Console(file=output), stop_loading=lambda: None, renderers=[plugin])
+        call = ToolCallPart(tool_name='read_file', args={'path': 'a.py'}, tool_call_id='parent__1')
+        await renderer.on_stream_event(SandboxCallStartedEvent(tool_call_id='parent__1', call=call))
+        assert seen == ['run_code', 'read_file']
+        assert output.getvalue().count('drawn by plugin') == 2
+
+    def test_each_run_code_header_renders_once(self) -> None:
+        order = SandboxCallOrder()
+        call = ToolCallPart(tool_name='read_file', tool_call_id='eager__1')
+        assert len(order.tool_events(SandboxCallStartedEvent(call=call)) or []) == 2
+        assert len(order.tool_events(SandboxCallStartedEvent(call=call)) or []) == 1
+        late = FunctionToolCallEvent(ToolCallPart(tool_name='run_code', tool_call_id='eager'))
+        assert order.tool_events(late) == []
+
+        after_stream = FunctionToolCallEvent(ToolCallPart(tool_name='run_code', tool_call_id='parent'))
+        assert order.tool_events(after_stream) is None
+        call = ToolCallPart(tool_name='read_file', tool_call_id='parent__1')
+        assert order.tool_events(SandboxCallStartedEvent(call=call)) == [FunctionToolCallEvent(call)]
+        direct = FunctionToolCallEvent(ToolCallPart(tool_name='read_file', tool_call_id='direct'))
+        assert order.tool_events(direct) is None
+        assert order.tool_events(direct) is None
+        assert order.tool_events(SandboxCallStartedEvent(call=replace(call, tool_call_id='parent__2'))) == [
+            FunctionToolCallEvent(replace(call, tool_call_id='parent__2'))
+        ]
+        assert order.tool_events(PartStartEvent(index=0, part=TextPart('hi'))) is None
 
 
 class TestChord:

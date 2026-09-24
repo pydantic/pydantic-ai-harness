@@ -13,11 +13,6 @@ NESTED_CALL = re.compile(r'(?P<parent>.+)__(?P<speculative>spec_)?\d+')
 """Harness CodeMode ids: `parent__N` for a sandbox dispatch, `parent__spec_N` for a speculative launch."""
 
 
-def is_sandbox_call(tool_call_id: str | None) -> bool:
-    """Whether an event belongs to a call made from inside `run_code`, speculative or not."""
-    return tool_call_id is not None and NESTED_CALL.fullmatch(tool_call_id) is not None
-
-
 @dataclass(kw_only=True)
 class EagerExecutionCompletedEvent(CapabilityEvent, namespace='pydantic_clai2'):
     """A completed snippet whose sandbox calls overlapped `run_code` argument streaming."""

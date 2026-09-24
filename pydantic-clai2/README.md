@@ -1065,9 +1065,12 @@ is still writing:
 The model gets instructions for writing snippets that benefit. On Anthropic
 models CLAI also sets `anthropic_eager_input_streaming`, since Anthropic
 otherwise sends tool arguments in one burst at the end, which leaves no time to
-run anything early. Tools called from inside `run_code` do not print their own
-summaries or previews; the snippet already chooses what to return. Native
-`write_file` and `edit_file` calls still show their diffs.
+run anything early.
+
+Tools called from inside `run_code` show the same headers, previews, and shell
+output as direct calls, listed under their `run_code` header in the order they
+ran. A speculative call is shown only once the snippet uses its result, so a
+launch for a branch the snippet never took does not appear.
 
 A pinned row above the footer shows the session's totals while the switch is on:
 

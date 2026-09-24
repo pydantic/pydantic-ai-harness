@@ -691,7 +691,6 @@ async def _run_prompt(
         shell_lines=settings.shell_lines,
         grep_lines=settings.grep_lines,
         renderers=renderers,
-        quiet_sandbox_calls=settings.speculative_code_mode,
     )
     status.streamed_chars = 0
     status.output_tokens = None

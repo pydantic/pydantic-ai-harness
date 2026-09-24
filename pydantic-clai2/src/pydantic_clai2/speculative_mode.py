@@ -5,8 +5,10 @@ Every tool the run has, plugin and MCP tools included, becomes a function inside
 render as usual. `shell` folds in too, as Code Puppy's shell tool does: harness `CodeMode` keeps
 tools marked with `code_arg_name` metadata native by default, so `SpeculativeExecution` clears
 that marker on every tool it sandboxes. Without it, a coding turn is all native `shell` calls
-and eager execution never starts a build or test while the model is still writing. Only the read-only trio may launch speculatively. That allowlist is the safety
-contract: an early launch may run for a branch the snippet never takes, so it is reserved for
+and eager execution never starts a build or test while the model is still writing.
+
+Only the read-only tools in `SPECULATIVE_TOOLS` may launch speculatively. That allowlist is the
+safety contract: an early launch may run for a branch the snippet never takes, so it is reserved for
 calls that are harmless to re-run or discard. Everything else waits for eager or normal
 execution.
 
@@ -16,11 +18,11 @@ the sandbox; anything remote goes through a wrapped tool such as `shell`.
 """
 
 import os
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 from pydantic_ai import RunContext
-from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.messages import AgentStreamEvent
+from pydantic_ai.capabilities import AbstractCapability, ValidatedToolArgs, WrapToolExecuteHandler
+from pydantic_ai.messages import AgentStreamEvent, RetryPromptPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.anthropic import AnthropicModelSettings
 from pydantic_ai.tools import AgentDepsT, ToolDefinition
 from pydantic_ai_harness.code_mode import (
@@ -32,7 +34,8 @@ from pydantic_ai_harness.code_mode import (
 from pydantic_monty import MountDir, OSAccess
 
 from .customization import read_clai_customization_guide
-from .eager_timing import EagerExecutionCompletedEvent, EagerTiming
+from .eager_timing import NESTED_CALL, EagerExecutionCompletedEvent, EagerTiming
+from .sandbox_calls import SandboxCallFinishedEvent, SandboxCallStartedEvent
 from .speculation import SpeculationCounters
 
 SPECULATIVE_TOOLS = ('list_files', 'read_file', 'grep', read_clai_customization_guide.__name__)
@@ -157,6 +160,73 @@ class SpeculativeExecution(AbstractCapability[AgentDepsT]):
             counters.wasted += 1
 
 
+@dataclass
+class ShowSandboxCalls(AbstractCapability[AgentDepsT]):
+    """Report tools called from inside `run_code` so they render like direct calls.
+
+    A cold call reports its start and result as it runs. A speculative launch may never be used,
+    so its call and result are held and reported under the claiming call's id only when the
+    snippet claims it; an evicted launch is dropped unseen.
+    """
+
+    _launched: dict[str, tuple[ToolCallPart, ToolReturnPart | RetryPromptPart]] = field(
+        default_factory=dict[str, tuple[ToolCallPart, ToolReturnPart | RetryPromptPart]], init=False, repr=False
+    )
+
+    async def for_run(self, ctx: RunContext[AgentDepsT]) -> 'ShowSandboxCalls[AgentDepsT]':
+        """Keep held launches per run."""
+        return ShowSandboxCalls()
+
+    async def wrap_tool_execute(
+        self,
+        ctx: RunContext[AgentDepsT],
+        *,
+        call: ToolCallPart,
+        tool_def: ToolDefinition,
+        args: ValidatedToolArgs,
+        handler: WrapToolExecuteHandler,
+    ) -> object:
+        """Report cold sandbox calls as they run; hold speculative results for the claim."""
+        nested = NESTED_CALL.fullmatch(call.tool_call_id)
+        if nested is None:
+            return await handler(args)
+        speculative = nested['speculative'] is not None
+        if not speculative:
+            await ctx.emit(SandboxCallStartedEvent(tool_call_id=call.tool_call_id, call=call))
+        try:
+            value = await handler(args)
+        except Exception as error:
+            failure = RetryPromptPart(content=str(error), tool_name=call.tool_name, tool_call_id=call.tool_call_id)
+            await self._finish(ctx, call, failure, speculative=speculative)
+            raise
+        returned = ToolReturnPart(tool_name=call.tool_name, content=value, tool_call_id=call.tool_call_id)
+        await self._finish(ctx, call, returned, speculative=speculative)
+        return value
+
+    async def _finish(
+        self,
+        ctx: RunContext[AgentDepsT],
+        call: ToolCallPart,
+        result: ToolReturnPart | RetryPromptPart,
+        *,
+        speculative: bool,
+    ) -> None:
+        if speculative:
+            self._launched[call.tool_call_id] = (call, result)
+        else:
+            await ctx.emit(SandboxCallFinishedEvent(tool_call_id=call.tool_call_id, result=result))
+
+    async def on_event(self, ctx: RunContext[AgentDepsT], *, event: AgentStreamEvent) -> None:
+        """Report a claimed launch as the claiming call; forget an evicted one."""
+        if isinstance(event, SpeculativeCallEvictedEvent):
+            self._launched.pop(event.launch_id, None)
+        elif isinstance(event, SpeculativeCallClaimedEvent) and event.launch_id in self._launched:
+            call, result = self._launched.pop(event.launch_id)
+            call_id = event.nested_tool_call_id
+            await ctx.emit(SandboxCallStartedEvent(tool_call_id=call_id, call=replace(call, tool_call_id=call_id)))
+            await ctx.emit(SandboxCallFinishedEvent(tool_call_id=call_id, result=replace(result, tool_call_id=call_id)))
+
+
 def speculative_capabilities(counters: SpeculationCounters) -> 'list[AbstractCapability[AgentDepsT]]':
     """Fold tools into `run_code` with eager execution and read-only speculation."""
     workspace = os.getcwd()
@@ -172,4 +242,5 @@ def speculative_capabilities(counters: SpeculationCounters) -> 'list[AbstractCap
         ),
         EagerTiming(),
         SpeculativeExecution(counters),
+        ShowSandboxCalls(),
     ]
