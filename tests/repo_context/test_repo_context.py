@@ -16,7 +16,7 @@ from pydantic_ai.messages import ModelMessage, ModelRequest, ToolReturnPart, Use
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
-from pydantic_ai.workspaces import LocalWorkspaceBackend, UnavailableWorkspace, Workspace
+from pydantic_ai.workspaces import LocalWorkspaceBackend, Workspace
 
 from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.filesystem import FileSystem
@@ -140,9 +140,9 @@ class TestDiscoverInstructionFiles:
     @pytest.mark.parametrize('error', [FileNotFoundError(), NotADirectoryError()])
     async def test_unreadable_model_path_does_not_block_capability_setup(self, tmp_path: Path, error: OSError) -> None:
         workspace = MagicMock(spec=Workspace)
-        workspace.resolve = AsyncMock(return_value=tmp_path.as_posix())
+        workspace.working_dir = AsyncMock(return_value=tmp_path.as_posix())
         workspace.stat = AsyncMock(side_effect=error)
-        cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
+        cap = RepoContext[object](expose_inventory_tool=False)
         ctx = _run_context(workspace=workspace)
 
         await cap.before_run(ctx)
@@ -200,7 +200,7 @@ class TestRender:
 class TestInstructions:
     async def test_includes_files_and_inventory_hint(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'be nice')
-        cap = RepoContext[object](workspace_dir=tmp_path)
+        cap = RepoContext[object]()
         ctx = _run_context(workspace=workspace)
         await cap.before_run(ctx)
         instructions = _render_capability_instructions(cap, ctx)
@@ -209,37 +209,27 @@ class TestInstructions:
         assert 'inventory_agent_context' in instructions
 
     def test_none_when_all_disabled(self, tmp_path: Path) -> None:
-        cap = RepoContext[object](workspace_dir=tmp_path, autoload_instructions=False, expose_inventory_tool=False)
+        cap = RepoContext[object](autoload_instructions=False, expose_inventory_tool=False)
         assert cap.get_instructions() is None
 
     async def test_autoload_off_keeps_inventory_hint(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'ignored')
-        cap = RepoContext[object](workspace_dir=tmp_path, autoload_instructions=False)
+        cap = RepoContext[object](autoload_instructions=False)
         await cap.before_run(_run_context(workspace=workspace))
         instructions = cap.get_instructions()
         assert isinstance(instructions, str)
         assert 'ignored' not in instructions
         assert 'inventory_agent_context' in instructions
 
-    async def test_autoload_off_does_not_require_workspace_file_access(self, tmp_path: Path) -> None:
-        agent = Agent(
-            TestModel(call_tools=[]),
-            capabilities=[RepoContext[object](workspace_dir=tmp_path, autoload_instructions=False)],
-        )
-
-        result = await agent.run('go', workspace=UnavailableWorkspace('workspace file access is disabled'))
-
-        assert result.output is not None
-
     async def test_no_files_no_inventory_is_none(self, tmp_path: Path, workspace: Workspace) -> None:
-        cap = RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False)
+        cap = RepoContext[object](expose_inventory_tool=False)
         ctx = _run_context(workspace=workspace)
         await cap.before_run(ctx)
         assert _render_capability_instructions(cap, ctx) is None
 
     async def test_files_cached_across_calls(self, tmp_path: Path, workspace: Workspace) -> None:
         _write(tmp_path / 'CLAUDE.md', 'first')
-        cap = RepoContext[object](workspace_dir=tmp_path)
+        cap = RepoContext[object]()
         ctx = _run_context(workspace=workspace)
         await cap.before_run(ctx)
         first = _render_capability_instructions(cap, ctx)
@@ -249,26 +239,34 @@ class TestInstructions:
         # Read-once: `before_run` loaded the file, so subsequent edits are not picked up.
         assert second is not None and 'second' not in second
 
-    async def test_autoload_without_workspace_raises(self, tmp_path: Path) -> None:
-        _write(tmp_path / 'CLAUDE.md', 'host instructions')
-        agent = Agent(TestModel(), capabilities=[RepoContext[object](workspace_dir=tmp_path)])
+    @pytest.mark.parametrize('autoload_instructions', [True, False])
+    async def test_no_workspace_fails_the_run(self, autoload_instructions: bool) -> None:
+        agent = Agent(TestModel(), capabilities=[RepoContext[object](autoload_instructions=autoload_instructions)])
 
-        with pytest.raises(UserError, match='No workspace is attached'):
+        with pytest.raises(UserError, match='`RepoContext` needs a workspace'):
             await agent.run('go')
+
+    async def test_walk_up_stops_at_a_home_dir_given_as_text(self, tmp_path: Path) -> None:
+        _write(tmp_path / 'CLAUDE.md', 'home instructions')
+        (tmp_path / 'repo').mkdir()
+        cap = RepoContext[object](home_dir=str(tmp_path), expose_inventory_tool=False)
+        ctx = _run_context(workspace=Workspace(LocalWorkspaceBackend(tmp_path / 'repo')))
+        await cap.before_run(ctx)
+        assert 'home instructions' in (_render_capability_instructions(cap, ctx) or '')
 
 
 class TestToolset:
     def test_get_toolset_none_when_disabled(self, tmp_path: Path) -> None:
-        assert RepoContext[object](workspace_dir=tmp_path, expose_inventory_tool=False).get_toolset() is None
+        assert RepoContext[object](expose_inventory_tool=False).get_toolset() is None
 
     def test_get_toolset_present(self, tmp_path: Path) -> None:
-        assert isinstance(RepoContext[object](workspace_dir=tmp_path).get_toolset(), RepoContextToolset)
+        assert isinstance(RepoContext[object]().get_toolset(), RepoContextToolset)
 
     async def test_inventory_tool_runs_through_agent(self, tmp_path: Path) -> None:
         _write(tmp_path / '.claude' / 'skills' / 'foo' / 'SKILL.md', 'skill')
         agent = Agent(
             TestModel(call_tools=['inventory_agent_context']),
-            capabilities=[RepoContext[object](workspace_dir=tmp_path)],
+            capabilities=[RepoContext[object]()],
         )
         backend = LocalWorkspaceBackend(working_dir=tmp_path)
         result = await agent.run('go', workspace=backend)
@@ -376,7 +374,6 @@ class TestNestedTraversal:
             capabilities=[
                 FileSystem(root_dir=tmp_path),
                 RepoContext(
-                    workspace_dir=tmp_path,
                     autoload_instructions=False,
                     expose_inventory_tool=False,
                     nested_traversal=True,
@@ -385,12 +382,12 @@ class TestNestedTraversal:
             ],
         ).run('go', workspace=LocalWorkspaceBackend(working_dir=tmp_path))
 
-    async def test_filesystem_rooted_below_the_workspace_resolves_against_its_own_root(self, tmp_path: Path) -> None:
+    async def test_filesystem_rooted_above_the_workspace_resolves_against_its_own_root(self, tmp_path: Path) -> None:
         project = tmp_path / 'project'
         _write(project / 'sub' / 'AGENTS.md', 'NESTED BODY')
         _write(project / 'sub' / 'one.py', 'one')
-        # A decoy at the path the event would name if it were wrongly rebased onto the workspace.
-        _write(tmp_path / 'sub' / 'AGENTS.md', 'DECOY BODY')
+        # A decoy at the path the event would name if it were wrongly rebased onto the working directory.
+        _write(project / 'project' / 'sub' / 'AGENTS.md', 'DECOY BODY')
 
         async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
             if _tool_returns(messages) == 0:
@@ -398,23 +395,18 @@ class TestNestedTraversal:
             else:
                 notes = _repo_notes(messages)
                 assert len(notes) == 1
-                assert 'project/sub/AGENTS.md' in notes[0]
+                assert '(sub/AGENTS.md)' in notes[0]
                 yield 'done'
 
         await Agent(
             FunctionModel(stream_function=stream),
             capabilities=[
-                FileSystem(root_dir=project),
-                RepoContext(
-                    workspace_dir=tmp_path,
-                    autoload_instructions=False,
-                    expose_inventory_tool=False,
-                    nested_traversal=True,
-                ),
+                FileSystem(root_dir=tmp_path),
+                RepoContext(autoload_instructions=False, expose_inventory_tool=False, nested_traversal=True),
             ],
-        ).run('go', workspace=LocalWorkspaceBackend(working_dir=tmp_path))
+        ).run('go', workspace=LocalWorkspaceBackend(working_dir=project))
 
-    async def test_filesystem_rooted_outside_the_workspace_enqueues_nothing(self, tmp_path: Path) -> None:
+    async def test_traversal_outside_the_working_directory_enqueues_nothing(self, tmp_path: Path) -> None:
         workspace = tmp_path / 'workspace'
         workspace.mkdir()
         elsewhere = tmp_path / 'elsewhere'
@@ -423,7 +415,9 @@ class TestNestedTraversal:
 
         async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
             if _tool_returns(messages) == 0:
-                yield {0: DeltaToolCall(name='list_directory', json_args='{"path":"."}', tool_call_id='list')}
+                yield {
+                    0: DeltaToolCall(name='list_directory', json_args='{"path":"../elsewhere"}', tool_call_id='list')
+                }
             else:
                 assert _repo_notes(messages) == []
                 yield 'done'
@@ -431,15 +425,10 @@ class TestNestedTraversal:
         await Agent(
             FunctionModel(stream_function=stream),
             capabilities=[
-                FileSystem(root_dir=elsewhere),
-                RepoContext(
-                    workspace_dir=workspace,
-                    autoload_instructions=False,
-                    expose_inventory_tool=False,
-                    nested_traversal=True,
-                ),
+                FileSystem(root_dir=tmp_path),
+                RepoContext(autoload_instructions=False, expose_inventory_tool=False, nested_traversal=True),
             ],
-        ).run('go', workspace=LocalWorkspaceBackend(working_dir=tmp_path))
+        ).run('go', workspace=LocalWorkspaceBackend(working_dir=workspace))
 
     @pytest.mark.parametrize('remove_before_return', [False, True])
     async def test_customized_sniff_fallback_warns_and_supports_non_event_tool(
@@ -465,7 +454,6 @@ class TestNestedTraversal:
             match='Traversal detection now reacts to `FileReadEvent` and `DirectoryListedEvent`',
         ):
             capability = RepoContext(
-                workspace_dir=tmp_path,
                 autoload_instructions=False,
                 expose_inventory_tool=False,
                 nested_traversal=True,
@@ -492,7 +480,6 @@ class TestNestedTraversal:
             capabilities=[
                 FileSystem(root_dir=tmp_path),
                 RepoContext(
-                    workspace_dir=tmp_path,
                     autoload_instructions=False,
                     expose_inventory_tool=False,
                     nested_traversal=True,
@@ -520,7 +507,6 @@ class TestNestedTraversal:
 
         with pytest.warns(HarnessDeprecationWarning, match='Traversal detection now reacts'):
             capability = RepoContext(
-                workspace_dir=tmp_path,
                 autoload_instructions=False,
                 expose_inventory_tool=False,
                 nested_traversal=True,
@@ -552,7 +538,6 @@ class TestNestedTraversal:
 
         with pytest.warns(HarnessDeprecationWarning, match='Traversal detection now reacts'):
             capability = RepoContext(
-                workspace_dir=workspace,
                 autoload_instructions=False,
                 expose_inventory_tool=False,
                 nested_traversal=True,
@@ -561,7 +546,7 @@ class TestNestedTraversal:
             )
 
         await Agent(FunctionModel(stream_function=stream), capabilities=[capability], tools=[list_dir]).run(
-            'go', workspace=LocalWorkspaceBackend(working_dir=tmp_path)
+            'go', workspace=LocalWorkspaceBackend(working_dir=workspace)
         )
 
 
@@ -580,7 +565,7 @@ class TestForRunAndMisc:
 
         agent = Agent(
             FunctionModel(stream_function=model),
-            capabilities=[RepoContext[object](workspace_dir=Path('.'), expose_inventory_tool=False)],
+            capabilities=[RepoContext[object](expose_inventory_tool=False)],
         )
 
         instructions: list[str] = []
@@ -616,6 +601,6 @@ async def test_disabled_nested_traversal_ignores_filesystem_event(tmp_path: Path
         FunctionModel(stream_function=stream),
         capabilities=[
             FileSystem(root_dir=tmp_path),
-            RepoContext(workspace_dir=tmp_path, nested_traversal=False, expose_inventory_tool=False),
+            RepoContext(nested_traversal=False, expose_inventory_tool=False),
         ],
     ).run('go', workspace=LocalWorkspaceBackend(working_dir=tmp_path))

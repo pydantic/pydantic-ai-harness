@@ -14,8 +14,8 @@ from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
 from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai.workspaces import Workspace
 
-from pydantic_ai_harness._warn import HarnessDeprecationWarning
-from pydantic_ai_harness._workspace import workspace_path
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, HarnessDeprecationWarning, warn_argument_ignored
+from pydantic_ai_harness._workspace import require_workspace, workspace_path
 from pydantic_ai_harness.filesystem import DirectoryListedEvent, FileReadEvent
 from pydantic_ai_harness.repo_context._loader import (
     ContextFile,
@@ -46,9 +46,12 @@ class RepoContext(AbstractCapability[AgentDepsT]):
 
     Three strategies, each independently toggleable:
 
+    Everything is read through the run's workspace, anchored at its working
+    directory; a run without a workspace fails at its start.
+
     1. Walk-up instruction autoload (`autoload_instructions`, on by default):
-       load `CLAUDE.md`/`AGENTS.md` from `workspace_dir` and every ancestor up
-       to `home_dir`, deduped, ancestor-first. These are read once at run start
+       load `CLAUDE.md`/`AGENTS.md` from the working directory and every ancestor
+       up to `home_dir`, deduped, ancestor-first. These are read once at run start
        and injected as **static system instructions** via `get_instructions`, so
        they stay in the cached prefix and never re-read per turn.
 
@@ -72,22 +75,28 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     from pathlib import Path
 
     from pydantic_ai import Agent
+    from pydantic_ai.capabilities import LocalWorkspace
     from pydantic_ai_harness.repo_context import RepoContext
 
     agent = Agent(
         'anthropic:claude-sonnet-4-6',
-        capabilities=[RepoContext(workspace_dir=Path('/workspace'), home_dir=Path('/home/agent'))],
+        capabilities=[LocalWorkspace('.'), RepoContext(home_dir=Path.home())],
     )
     ```
     """
 
-    workspace_dir: Path
-    """The deepest directory the agent works in inside the run workspace. Relative
-    paths use the workspace working directory. The walk-up and asset scan are anchored here."""
+    workspace_dir: Path | None = None
+    """Deprecated and ignored: the walk-up and asset scan are anchored at the workspace's working directory.
 
-    home_dir: Path | None = None
-    """The shallowest workspace directory to stop the walk-up at, inclusive. `None`
-    (the default) scans only `workspace_dir` -- no walk-up."""
+    Set the working directory on the workspace instead, e.g. `LocalWorkspace('./repo')`.
+    """
+
+    home_dir: str | Path | None = None
+    """The shallowest workspace directory to stop the walk-up at, inclusive, as a workspace path.
+
+    A relative path resolves against the working directory. `None` (the default)
+    scans only the working directory -- no walk-up.
+    """
 
     filenames: Sequence[str] = ('CLAUDE.md', 'AGENTS.md')
     """Instruction filenames to look for, in within-directory precedence order."""
@@ -115,7 +124,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     """Deprecated path argument used by the compatibility traversal detector."""
 
     asset_roots: Sequence[str] = ('.claude', '.agents', '.codex', '.grok')
-    """Root directories the inventory tool scans, relative to `workspace_dir`."""
+    """Root directories the inventory tool scans, relative to the working directory."""
 
     _context_files: list[ContextFile] | None = field(default=None, init=False, repr=False, compare=False)
     """Walk-up result for this run, loaded once in `before_run` via `ctx.workspace`."""
@@ -124,11 +133,13 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     """Run-scoped set of directories already surfaced by Strategy 3."""
 
     _resolved_workspace_dir: Path | None = field(default=None, init=False, repr=False, compare=False)
-    """Absolute workspace path used for this run."""
+    """The workspace's working directory for this run."""
 
     _sniff_traversal_tools: bool = field(default=False, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if self.workspace_dir is not None:
+            warn_argument_ignored('RepoContext', 'workspace_dir', WORKING_DIR_IS_THE_WORKSPACES)
         self._sniff_traversal_tools = (
             self.traversal_tool_names != _DEFAULT_TRAVERSAL_TOOL_NAMES
             or self.traversal_path_arg != _DEFAULT_TRAVERSAL_PATH_ARG
@@ -138,19 +149,21 @@ class RepoContext(AbstractCapability[AgentDepsT]):
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> RepoContext[AgentDepsT]:
         """Return a fresh per-run instance with isolated traversal/cache state."""
-        if not self._sniff_traversal_tools:
-            return replace(self)
+        # Construction already warned about any deprecated arguments; the copy must not repeat it.
         with warnings.catch_warnings():
             warnings.simplefilter('ignore', HarnessDeprecationWarning)
             return replace(self)
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Load walk-up instruction files through `ctx.workspace` so `get_instructions` is sync."""
+        """Fail without a workspace, and load walk-up instruction files so `get_instructions` is sync."""
+        require_workspace(ctx.workspace, 'RepoContext')
         if not self.autoload_instructions:
             return
         workspace = ctx.workspace
-        workspace_dir = await self._workspace(workspace, path=workspace_path(self.workspace_dir))
-        home = Path(await workspace.resolve(workspace_path(self.home_dir))) if self.home_dir is not None else None
+        workspace_dir = await self._workspace(workspace)
+        home = None
+        if self.home_dir is not None:
+            home = Path(await workspace.resolve(workspace_path(Path(self.home_dir))))
         self._context_files = await discover_instruction_files(workspace, workspace_dir, home, self.filenames)
 
     def get_instructions(self) -> str | Callable[[RunContext[AgentDepsT]], str | None] | None:
@@ -166,11 +179,8 @@ class RepoContext(AbstractCapability[AgentDepsT]):
     def _render_instructions(self) -> str | None:
         parts: list[str] = []
         if self._context_files:
-            parts.append(
-                render_context_files(
-                    self._context_files, relative_to=self._resolved_workspace_dir or self.workspace_dir
-                )
-            )
+            assert self._resolved_workspace_dir is not None, '`before_run` resolves it before loading files'
+            parts.append(render_context_files(self._context_files, relative_to=self._resolved_workspace_dir))
         if self.expose_inventory_tool:
             parts.append(_INVENTORY_HINT.format(tool_name=self.inventory_tool_name))
         return '\n\n'.join(parts) or None
@@ -179,7 +189,7 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         """The asset-inventory toolset, or `None` when the tool is disabled."""
         if not self.expose_inventory_tool:
             return None
-        return RepoContextToolset[AgentDepsT](self.workspace_dir, self.asset_roots, self.inventory_tool_name)
+        return RepoContextToolset[AgentDepsT](self.asset_roots, self.inventory_tool_name)
 
     async def after_tool_execute(
         self,
@@ -250,14 +260,15 @@ class RepoContext(AbstractCapability[AgentDepsT]):
         )
 
     def _label(self, path: Path) -> str:
+        assert self._resolved_workspace_dir is not None, 'a note is only rendered once the directory is resolved'
         try:
-            return path.relative_to(self._resolved_workspace_dir or self.workspace_dir).as_posix()
+            return path.relative_to(self._resolved_workspace_dir).as_posix()
         except ValueError:
             return path.as_posix()
 
-    async def _workspace(self, workspace: Workspace, *, path: str | None = None) -> Path:
+    async def _workspace(self, workspace: Workspace) -> Path:
         if self._resolved_workspace_dir is None:
-            self._resolved_workspace_dir = Path(await workspace.resolve(path or self.workspace_dir.as_posix()))
+            self._resolved_workspace_dir = Path(await workspace.working_dir())
         return self._resolved_workspace_dir
 
     @classmethod
