@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TypeVar
 
 import httpx
 import pytest
@@ -25,15 +26,17 @@ from pydantic_ai_harness.posthog import PostHog
 # combinations. Rebuild it before warnings are escalated by the test suite.
 Settings.model_rebuild()
 
+DepsT = TypeVar('DepsT')
 
-def _http_transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
+
+def _http_transport(toolset: AbstractToolset[DepsT]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     transport = toolset.client.transport
     assert isinstance(transport, StreamableHttpTransport)
     return transport
 
 
-def bearer(toolset: AbstractToolset[Any]) -> str:
+def bearer(toolset: AbstractToolset[DepsT]) -> str:
     auth = _http_transport(toolset).auth
     assert auth is not None
     request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
@@ -87,10 +90,17 @@ class TestPostHog:
         assert _http_transport(toolset).url == 'https://mcp.posthog.com/mcp'
         assert bearer(toolset) == 'Bearer posthog-key'
 
-    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
-    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+    @pytest.mark.parametrize(
+        ('capability', 'include'),
+        [
+            (PostHog[None](auth='posthog-key'), True),
+            (PostHog[None](auth='posthog-key', include_instructions=False), False),
+        ],
+        ids=['default', 'disabled'],
+    )
+    def test_hosted_connection_forwards_include_instructions(self, capability: PostHog[None], include: bool) -> None:
         # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
-        toolset = PostHog(auth='posthog-key', **settings).get_toolset()
+        toolset = capability.get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is include
 
@@ -110,16 +120,28 @@ class TestPostHog:
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-key' not in repr(PostHog(auth='secret-key'))
 
-    @pytest.mark.parametrize('settings', [{'auth': 'posthog-key'}, {'auth': per_user_token}, {'features': ['flags']}])
-    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+    @pytest.mark.parametrize(
+        ('auth', 'features'),
+        [('posthog-key', None), (per_user_token, None), (None, ['flags'])],
+        ids=['token', 'function', 'features'],
+    )
+    def test_client_cannot_be_combined_with_connection_settings(
+        self, auth: str | Callable[[RunContext[str | None]], str | None] | None, features: list[str] | None
+    ) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
-            PostHog(client='https://example.com/mcp', **settings)
+            PostHog[str | None](client='https://example.com/mcp', auth=auth, features=features)
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'posthog-key'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
+        'capability',
+        [
+            PostHog[str | None](id='tenant-posthog', auth='posthog-key'),
+            PostHog[str | None](id='tenant-posthog', auth=per_user_token),
+            PostHog[str | None](id='tenant-posthog', client='https://example.com/mcp'),
+        ],
+        ids=['token', 'function', 'client'],
     )
-    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
-        assert PostHog(id='tenant-posthog', **settings).get_toolset().id == 'tenant-posthog'
+    def test_custom_id_is_forwarded(self, capability: PostHog[str | None]) -> None:
+        assert capability.get_toolset().id == 'tenant-posthog'
 
     def test_defer_loading_needs_no_id(self) -> None:
         Agent(TestModel(), capabilities=[PostHog(auth='posthog-key', defer_loading=True)])
