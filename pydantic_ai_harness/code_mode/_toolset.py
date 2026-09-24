@@ -1359,7 +1359,12 @@ def _model_safe_result(value: object) -> object:
     if isinstance(value, _MODEL_NATIVE_SCALARS) or is_multi_modal_content(value):
         return value
     if _is_mapping(value):
-        return {key if _serializes({key: None}) else repr(key): _model_safe_result(item) for key, item in value.items()}
+        rendered = {
+            key if _serializes({key: None}) else repr(key): _model_safe_result(item) for key, item in value.items()
+        }
+        # A rendered key can equal an existing one (`{int: 1, "<class 'int'>": 2}`), and
+        # the dict would silently drop an entry; the whole mapping's `repr` loses nothing.
+        return rendered if len(rendered) == len(value) else repr(value)
     if _is_list_or_tuple(value):
         items = [_model_safe_result(item) for item in value]
         return tuple(items) if isinstance(value, tuple) else items

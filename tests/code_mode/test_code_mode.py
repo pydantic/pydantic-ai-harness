@@ -645,6 +645,11 @@ class TestCodeMode:
                 id='nested',
             ),
             pytest.param('{int: 1}', {"<class 'int'>": 1}, id='key'),
+            pytest.param(
+                "{'<class \\'int\\'>': 'text', int: 1}",
+                "{\"<class 'int'>\": 'text', <class 'int'>: 1}",
+                id='key-collision',
+            ),
         ],
     )
     async def test_run_code_renders_results_without_json_form_as_repr(self, code: str, expected: object) -> None:
