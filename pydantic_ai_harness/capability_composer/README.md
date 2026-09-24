@@ -153,6 +153,7 @@ It gets nothing else of the agent's: not its tools, capabilities, or output type
 Some runs are not composed:
 
 - **Structured output**: the sub-agent answers in text, so when the run's output type cannot take text (`int`, a model, `PromptedOutput` or `NativeOutput`), the agent's own model handles it and the picker is not asked. An output type that includes `str` is composed.
+- **Streaming**: `run_stream` works, but the sub-agent runs to completion first, so a composed turn streams its answer in one piece. Its tool calls reach `event_stream_handler` as they happen.
 - **After the first request**: only a run's first model request is composed. A prompt with no text, or a run resumed from a tool result, is left to the agent.
 
 Approval inside the sub-agent has to happen while it runs, with an async `ToolGuardrail` guard in `shared_capabilities` that asks the user (see [human in the loop](../guardrails/#human-in-the-loop)). Deferred approval (`GuardrailResult.approve()`, `requires_approval=True`) ends a run with `DeferredToolRequests`, which the sub-agent's text output cannot carry back.
@@ -161,7 +162,7 @@ The picker's request and the sub-agent's count toward the run's usage and `usage
 
 ## Guardrails and other request capabilities
 
-The composer sits innermost in the model request, inside every [`InputGuardrail`](../guardrails/) -- including one passed to `Agent.run(capabilities=...)` -- and after capabilities that rewrite the request. A prompt a guardrail blocks never reaches the picker, and one it redacts reaches the picker and the sub-agent redacted. An `InputGuardrail` with `parallel=True` runs its guard alongside the model request, which here means alongside the picker and the sub-agent, so they may read the prompt before the guard decides, as the agent's model would; a block still cancels them.
+The composer sits innermost in the model request, inside every [`InputGuardrail`](../guardrails/) -- including one passed to `Agent.run(capabilities=...)` -- and after capabilities that rewrite the request. A prompt a guardrail blocks never reaches the picker, and one it redacts reaches the picker and the sub-agent redacted. An `InputGuardrail` with `parallel=True` runs its guard alongside the model request, which here means alongside the picker and the whole sub-agent run. A block cancels the sub-agent, but tools it already called, such as a shell command, have run by then. Use `parallel=False` for any guard that must stop a prompt before tools act on it.
 
 Each run asks the picker again, so a conversation's model and capabilities can change from one turn to the next. The composer is not built for durable execution: a worker replaying a run would ask the picker again, and could get a different answer.
 

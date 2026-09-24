@@ -22,7 +22,7 @@ from pydantic_ai.capabilities import (
     WrapModelRequestHandler,
 )
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, UserContent, UserPromptPart
+from pydantic_ai.messages import ModelMessage, ModelResponse, TextContent, TextPart, UserContent, UserPromptPart
 from pydantic_ai.models import KnownModelName, Model, ModelRequestContext
 from pydantic_ai.tools import AgentDepsT, RunContext
 
@@ -412,16 +412,20 @@ class CapabilityComposer(AbstractCapability[AgentDepsT]):
 
 
 def _pending_text(messages: Sequence[ModelMessage]) -> str | None:
-    """The text of the user prompt in the request about to be sent; `None` when it has none."""
+    """The text of the user prompt in the request about to be sent; `None` when it has none.
+
+    Capabilities such as `SystemReminders` append their own `UserPromptPart` behind the user's, so the first
+    one is the task.
+    """
     prompts = [part.content for part in messages[-1].parts if isinstance(part, UserPromptPart)]
-    return _text_of(prompts[-1]) if prompts else None
+    return _text_of(prompts[0]) if prompts else None
 
 
 def _text_of(prompt: str | Sequence[UserContent]) -> str | None:
     """The prompt's text parts, which are all the picker reads; `None` when there are none."""
     if isinstance(prompt, str):
         return prompt
-    texts = [item for item in prompt if isinstance(item, str)]
+    texts = [item if isinstance(item, str) else item.content for item in prompt if isinstance(item, (str, TextContent))]
     return '\n'.join(texts) if texts else None
 
 

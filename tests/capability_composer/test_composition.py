@@ -14,6 +14,7 @@ from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
+    TextContent,
     TextPart,
     ToolCallPart,
     ToolReturnPart,
@@ -29,6 +30,7 @@ from pydantic_ai.usage import UsageLimits
 
 from pydantic_ai_harness.capability_composer import CapabilityComposer, ComposableCapability
 from pydantic_ai_harness.subagents import ModelOption
+from pydantic_ai_harness.system_reminders import Reminder, SystemReminders
 
 from ._doubles import (
     CATALOG,
@@ -240,6 +242,25 @@ class TestCompose:
 
         assert jev.prompts == ['look at this\nand that']
         assert 'BinaryContent' in seen[0].prompt
+
+    async def test_text_content_is_read_as_text(self):
+        jev = Jev()
+        agent = Agent(main_model([]), capabilities=[composer(jev, [])])
+
+        await agent.run([TextContent('search the web', metadata={'source': 'ui'})])
+
+        assert jev.prompts == ['search the web']
+
+    async def test_a_reminder_behind_the_prompt_is_not_read_as_the_task(self):
+        jev = Jev()
+        seen: list[Seen] = []
+        reminders = SystemReminders[object](reminders=[Reminder('Keep answers short.')])
+        agent = Agent(main_model([]), capabilities=[reminders, composer(jev, seen)])
+
+        await agent.run('write that down')
+
+        assert jev.prompts == ['write that down']
+        assert 'Keep answers short.' in seen[0].prompt
 
 
 class TestSharedCapabilities:

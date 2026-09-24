@@ -95,10 +95,10 @@ def menu_model(name: str, seen: list[Seen]) -> FunctionModel:
     def record(messages: list[ModelMessage], info: AgentInfo) -> None:
         request = messages[-1]
         assert isinstance(request, ModelRequest)
-        [prompt] = [p.content for p in request.parts if isinstance(p, UserPromptPart)]
+        prompts = [str(p.content) for p in request.parts if isinstance(p, UserPromptPart)]
         seen.append(
             Seen(
-                prompt=str(prompt),
+                prompt='\n'.join(prompts),
                 tools=sorted(tool.name for tool in info.function_tools),
                 instructions=info.instructions,
                 output_tools=[tool.name for tool in info.output_tools],
