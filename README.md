@@ -51,7 +51,18 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-`LocalWorkspace` gives the agent this directory to work in: nothing touches your machine unless you attach it. Commands inherit nothing from your environment, so the example passes `PATH` and `HOME` to let them find your tools. To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`; see [Workspaces](#workspaces).
+`LocalWorkspace` gives the agent this directory to work in: nothing touches your machine unless you attach it. Commands inherit nothing from your environment, so the example passes `PATH` and `HOME` to let them find your tools.
+
+To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`; see [Workspaces](#workspaces). With [Modal](docs/modal-sandbox.md), for example (the `python:3.12` image includes `git`):
+
+```python
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
+
+agent = Agent(
+    'anthropic:claude-sonnet-5',
+    capabilities=[ModalSandbox(image='python:3.12'), Coder()],
+)
+```
 
 Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
@@ -139,7 +150,7 @@ The workspace the agent acts in: the files it edits and the commands it runs, lo
 |---|---|---|
 | [FileSystem](pydantic_ai_harness/filesystem/) | Harness | Read, write, edit, list, and search files under a root in the run's workspace, with opt-in ripgrep tools; path-traversal checked, secrets read-only |
 | [Shell](pydantic_ai_harness/shell/) | Harness | Command execution in the run's workspace with allowlists, denylists, timeouts, credential-stripping, and opt-in commands that outlive the run |
-| [Modal Sandbox](pydantic_ai_harness/modal_sandbox/) | Harness | Commands and files in an isolated [Modal](https://modal.com) cloud sandbox |
+| [Modal Sandbox](pydantic_ai_harness/modal_sandbox/) | Harness | An isolated [Modal](https://modal.com) cloud sandbox as the run's `ctx.workspace` |
 
 ### Tools & native abilities
 

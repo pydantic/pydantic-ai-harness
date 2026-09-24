@@ -48,6 +48,17 @@ print(result.output)
 
 The workspace's working directory, here the current directory, is the project: file paths resolve from it and commands start in it. To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`, and Coder's tools edit files and run commands in the sandbox instead. Commands run without an allowlist, and the file tools' path restrictions do not apply to them.
 
+With [Modal](modal-sandbox.md), for example (the `python:3.12` image includes `git`):
+
+```python
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
+
+agent = Agent(
+    'anthropic:claude-sonnet-5',
+    capabilities=[ModalSandbox(image='python:3.12'), Coder()],
+)
+```
+
 Interfaces that start runs for you work the same way: [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) run in the attached workspace.
 
 The exported `pydantic_ai_harness.coder:coder_agent` is the same agent, model-less and named `coder`, working in the directory it is imported from.

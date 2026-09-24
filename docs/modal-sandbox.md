@@ -1,269 +1,169 @@
 ---
 title: Modal Sandbox
-description: "Run a Pydantic AI agent's shell commands and file edits in an isolated Modal cloud sandbox instead of on your host, fresh per run or shared across runs."
+description: "Run a Pydantic AI agent's shell commands and file edits in an isolated Modal cloud sandbox instead of on your host, continuing in the same sandbox across runs."
 ---
 
 # Modal Sandbox
 
-`ModalSandbox` gives an agent an isolated cloud container for running commands
-and working with files. Use it for coding, data processing, and other tasks that
-should not execute model-generated commands on the application host.
+Give an agent an isolated Modal container to work in. `ModalSandbox` supplies the container as the run's `ctx.workspace`, so the commands and file edits of `Coder`, `Shell`, and `FileSystem` happen in the sandbox, not on your machine.
 
-The capability adds shell and file tools backed by a
-[Modal sandbox](https://modal.com/docs/guide/sandbox). By default, every agent
-run gets a fresh sandbox created from a container image. The capability requests
-termination when the run ends. You can also attach an existing sandbox or reuse
-one across several runs.
+[Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/modal_sandbox/)
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](index.md#version-policy).
 
-## Quick start
-
-Install the `modal` extra and authenticate with the Modal CLI. In CI, set
-`MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` instead.
+## Install
 
 ```bash
 pip/uv-add "pydantic-ai-harness[modal]"
 ```
 
 ```bash
-py-cli modal token new                # writes ~/.modal.toml
+py-cli modal token new
 ```
 
-In CI, use environment variables instead of interactive authentication:
+Modal SDK 1.5.2 or later is required for its filesystem operations. Credentials can also be supplied through `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`.
 
-```bash
-export MODAL_TOKEN_ID=...
-export MODAL_TOKEN_SECRET=...
-```
-
-Add `ModalSandbox` to the agent:
+## A coding agent in a sandbox
 
 ```python
+import modal
 from pydantic_ai import Agent
-from pydantic_ai_harness import ModalSandbox
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-agent = Agent(
-    'anthropic:claude-sonnet-4-6',
-    capabilities=[ModalSandbox(image='python:3.12-slim')],
-)
-
-result = agent.run_sync('Create a Python script and run its tests.')
+# `Coder` needs git and ripgrep, which the default image, `python:3.12-slim`, does not have.
+image = modal.Image.debian_slim(python_version='3.12').apt_install('git', 'ripgrep')
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[ModalSandbox(image=image), Coder()])
+result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 print(result.output)
 ```
 
-During the run, the agent can create files, inspect its working directory, run
-commands, and react to command failures. The sandbox is separate from the host
-filesystem and process space.
+Construction makes no Modal requests. The first workspace operation creates the sandbox; with `Coder` or `FileSystem`, that is the start of the run.
 
-The capability contributes four tools:
+Commands run under `sh -c` in the sandbox's shell environment. Nothing from your machine's environment reaches the sandbox: pass `env=` for variables every command should get, such as a token the agent needs. `working_dir=` sets the absolute directory commands start in and relative paths resolve against; it defaults to the image's.
 
-| Tool | Purpose |
+## Continue in the same sandbox
+
+```python
+followup = agent.run_sync(
+    'Which capability would you add next, and where would it live?',
+    message_history=result.all_messages(),
+)
+```
+
+The follow-up run finds the sandbox's reference in the message history and reattaches to it, so the clone is still there. If that sandbox has expired or been terminated, the first workspace operation raises `WorkspaceUnavailableError`; no empty replacement is created.
+
+## Choose the tools
+
+`Coder` bundles the tools a coding agent needs. For a narrower agent, pick `Shell` and `FileSystem` yourself; both act in the sandbox:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai_harness.filesystem import FileSystem
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
+from pydantic_ai_harness.shell import Shell
+
+agent = Agent(
+    'anthropic:claude-sonnet-5',
+    capabilities=[ModalSandbox(), Shell(), FileSystem(read_only=True)],
+)
+```
+
+Your own tools and hooks can use `ctx.workspace` directly (`run()`, `read_text()`, `write_text()`, and the other filesystem operations). A run whose tools include none of `Shell`'s or `FileSystem`'s emits a `UserWarning` once per process, because the model then has no way to reach the sandbox; if that is intended, pass `ModalSandbox(warn_if_no_tools=False)`. The flag goes away in the stable harness release.
+
+## Reattach from a reference
+
+Persist `result.workspace.ref` to come back to the sandbox outside message history. It is `None` if the run never used its workspace.
+
+```python
+import modal
+from pydantic_ai import Agent
+from pydantic_ai.workspaces import WorkspaceRef
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
+
+image = modal.Image.debian_slim(python_version='3.12').apt_install('git', 'ripgrep')
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[ModalSandbox(image=image), Coder()])
+
+
+async def resume(ref: WorkspaceRef) -> str:
+    result = await agent.run('Run the test suite again.', workspace=ref)
+    return result.output
+```
+
+An explicit reference takes precedence over message history. Pass `workspace='new'` to `agent.run()` to start a fresh sandbox even when the history names one. Settings on `ModalSandbox` that describe a new sandbox (`image`, `app_name`, `sandbox_timeout`, `idle_timeout`, `name`) do not change one you reattach to; `working_dir` and `env` apply to every command, in a reattached sandbox too.
+
+## Manage the sandbox yourself
+
+For Modal SDK operations, hold a `ModalSandboxBackend` and call `await backend.get_client()` for the typed `modal.Sandbox`. The first call creates or attaches to the sandbox; later calls return the same object. `ModalSandboxBackend(workspace=native)` wraps a sandbox you already have; pass either that or `ref=`, not both.
+
+```python
+import modal
+from pydantic_ai import Agent
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
+
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[Coder()])
+image = modal.Image.debian_slim(python_version='3.12').apt_install('git', 'ripgrep')
+
+
+async def run_and_clean_up(prompt: str) -> str:
+    backend = ModalSandboxBackend(image=image)
+    sandbox = await backend.get_client()
+    try:
+        result = await agent.run(prompt, workspace=backend)
+        return result.output
+    finally:
+        await sandbox.terminate.aio()
+```
+
+To terminate the sandbox an agent run created, take the backend from `result.workspace.backend`; check that its `ref` is not `None` first, since `get_client()` would otherwise create a sandbox.
+
+## Lifetime and cost
+
+A sandbox keeps running, and billing, after the agent run ends: until you terminate it, until `sandbox_timeout` (default 300 seconds) runs out, or, if you set `idle_timeout`, after that many seconds without activity. Pydantic AI never terminates a sandbox; terminating it, and picking lifetimes that reap the ones you lose track of, is the application's job.
+
+- Pass a finite `timeout` to bound a command. Modal counts whole seconds, so fractional timeouts round up; a timed-out command reports the output it produced.
+- Modal has no per-command kill: cancelling a call stops the wait, but the command runs on until its timeout or the sandbox's end.
+- An expired or terminated sandbox, and rejected credentials, raise `WorkspaceUnavailableError`, which ends the run. Modal's connection and rate-limit errors propagate unchanged, so a durable execution engine can retry them.
+- The `WorkspaceRef` carries no credentials, so every worker that reattaches needs its own Modal configuration. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
+
+## Upgrading from the previous `ModalSandbox`
+
+Earlier releases shipped a `ModalSandbox` that registered its own `run_command`, `read_file`, `write_file`, and `list_directory` tools and terminated its sandbox when the run ended. The capability now only supplies the sandbox as `ctx.workspace`: it registers no tools and adds no instructions. Passing one of the previous constructor arguments raises a `UserError`, and importing one of the removed names raises an `ImportError`; both name the replacement.
+
+`ModalSandbox(image=...)` on its own still builds, but the model then has no tool that reaches the sandbox; add `Coder()`, or `Shell()` and `FileSystem()`, as shown above.
+
+### What changed in the lifecycle
+
+- A run no longer terminates the sandbox when it ends. The sandbox runs until you terminate it or a lifetime runs out (see [Lifetime and cost](#lifetime-and-cost)).
+- A run that continues a `message_history` reattaches to the sandbox the previous run used. Pass `workspace='new'` to `agent.run()` to start a fresh sandbox instead.
+- If the sandbox being reattached has expired or was terminated, the first workspace operation raises `WorkspaceUnavailableError`. No empty replacement is created.
+
+### Migration table
+
+| Previous API | Now |
 | --- | --- |
-| `run_command` | Run a shell command through `sh -c`. |
-| `read_file` | Read a UTF-8 text file with bounded output and line paging. |
-| `write_file` | Write a UTF-8 text file and create parent directories. |
-| `list_directory` | List directory entries, marking directories with `/`. |
-
-Command output labels stdout and stderr and reports non-zero exit codes to the
-model. It keeps the tail when truncating, so later diagnostics remain visible.
-File reads keep the head and return the next line offset when more content is
-available.
-
-## Lifecycle
-
-By default, each agent run creates an owned sandbox and requests its termination
-when the run exits, so expect a cold-start cost per run. Teardown waits for
-confirmation for a bounded period; if the control plane does not respond,
-`sandbox_timeout` remains the server-side cleanup backstop. The sandbox is
-provisioned when the run enters the capability toolset, even if no sandbox tool
-is called. Deferred tool loading controls which tool definitions reach the
-model; it does not defer toolset lifecycle.
-
-Attach to a sandbox managed elsewhere by ID:
-
-```python
-from pydantic_ai_harness import ModalSandbox
-
-ModalSandbox(sandbox_id='sb-abc123')
-```
-
-To share a sandbox across runs while controlling its lifetime, create and enter a
-`ModalSandboxSession` yourself:
-
-```python
-from pydantic_ai import Agent
-from pydantic_ai_harness import ModalSandbox
-from pydantic_ai_harness.modal_sandbox import ModalSandboxSession
-
-async with ModalSandboxSession(image='python:3.12-slim', sandbox_timeout=1800) as session:
-    agent = Agent(
-        'anthropic:claude-sonnet-4-6',
-        capabilities=[ModalSandbox(session=session, max_command_timeout=600)],
-    )
-    await agent.run('Install the project dependencies.')
-    await agent.run('Run the test suite in the same sandbox.')
-```
-
-Size the session's `sandbox_timeout` to the whole workload; the default 300s
-would expire partway through a multi-run session. The capability cannot see a
-reused sandbox's real lifetime, so each command there is capped at 300s unless
-`max_command_timeout` raises the ceiling.
-
-Attached and injected sandboxes are left running when an agent run ends. They
-share a filesystem and process space, so do not use the same sandbox for
-overlapping runs that need isolation.
-
-## Timeouts and output limits
-
-Every model-facing command receives a finite deadline.
-`default_command_timeout` supplies the default and `max_command_timeout`
-caps model-supplied values. Modal accepts whole-second deadlines, so fractional
-values round up without exceeding the configured integer ceiling.
-
-Modal does not expose a per-command kill operation. Cancelling the client wait
-does not stop the remote command immediately; it continues until its command
-deadline or the sandbox is terminated.
-
-Each command stream retains the last `max_output_bytes` after every transport
-chunk, and each stream's payload is also truncated separately by
-`max_output_bytes` and `max_output_lines` in the tool output, so a large stderr
-cannot crowd out stdout and the `[stdout]` / `[stderr]` labels always survive.
-Any cut is marked. Labels, truncation or continuation notes, and command status
-add a small amount beyond those payload limits. One transport chunk can
-temporarily be larger than the byte limit. Invalid UTF-8 is decoded with
-replacement characters.
-
-`read_file` checks file metadata before reading and checks the returned byte
-count again. A file that grows between those operations can temporarily exceed
-`max_read_bytes` in client memory before being rejected. Modal's filesystem
-API does not expose a bounded read, so use a bounded shell command for virtual
-files or other paths whose reported size may be misleading.
-
-`list_directory` materializes the complete directory listing before truncating
-it. Listing a directory with many entries therefore uses memory proportional to
-the number of entries; use a narrowed shell command for unusually large
-directories.
-
-Modal's SDK is asyncio-native. The capability requires an asyncio event loop and
-does not run under trio.
-
-## Errors and composition
-
-Recoverable command and filesystem failures become model retry prompts. A
-terminated sandbox raises `ModalSandboxUnavailableError` and rejected Modal
-credentials raise `ModalSandboxAuthError` (both `ModalSandboxTerminalError`
-subclasses) instead of retrying against the same unusable sandbox.
-
-The toolset is an implementation detail. The public lower-level API consists of
-`ModalSandboxSession`, `ModalSandboxExecResult`, and the typed sandbox error
-classes.
-
-Do not combine this capability with another unprefixed capability that registers
-`run_command`, `read_file`, `write_file`, or `list_directory` (e.g. the Shell or
-FileSystem capabilities). Pydantic AI rejects duplicate tool names. Prefix the
-capability before composing it with another capability that uses the same names:
-
-```python
-from pydantic_ai.capabilities import PrefixTools
-
-from pydantic_ai_harness import ModalSandbox
-
-sandbox = PrefixTools(
-    wrapped=ModalSandbox(
-        instructions=(
-            'You have a Modal cloud sandbox. Use the modal_-prefixed tools to run '
-            'shell commands and manage files in it.'
-        )
-    ),
-    prefix='modal',
-)
-```
-
-Prefixing renames the tools (`modal_run_command`, ...) but does not rewrite the
-capability's default instructions, which name the unprefixed tools -- pass
-`instructions` with text that matches the prefixed names.
-
-## Configuration
-
-```python
-from pydantic_ai_harness import ModalSandbox
-
-ModalSandbox(
-    image='python:3.12-slim',
-    sandbox_id=None,
-    session=None,
-    app_name='pydantic-ai-harness',
-    create_app_if_missing=True,
-    sandbox_timeout=300,
-    workdir=None,
-    env=None,
-    default_command_timeout=60.0,
-    max_command_timeout=None,
-    max_output_bytes=50 * 1024,
-    max_output_lines=2000,
-    max_read_bytes=5 * 1024 * 1024,
-    instructions=None,
-)
-```
-
-The default instructions state the tools, the command timeout, and its ceiling.
-Set `instructions=''` to add none, or pass your own text to replace the default.
-
-Settings used only when creating a sandbox cannot be combined with
-`sandbox_id` or an injected `session`. These conflicts fail at construction
-instead of being ignored.
-
-## Not yet supported
-
-- Streaming command output: `run_command` returns once the command finishes (or
-  hits its deadline), not incrementally.
-- Custom-built images, mounts, or `modal.Secret`: `image` takes a registry tag,
-  and `env` takes plain environment variables. For anything richer, create the
-  sandbox yourself with the Modal SDK and pass it via `sandbox_id` or `session`.
-- Spilling full output to a file: truncated file reads end with the next
-  `offset` to page from and oversized files get a shell-slice hint; truncated
-  command output gets a truncation marker. Nothing is written to a file in the
-  sandbox for the model to open.
-
-## Agent specs
-
-Register `ModalSandbox` as a custom capability type when loading an agent spec:
-
-```yaml
-model: anthropic:claude-sonnet-4-6
-capabilities:
-  - ModalSandbox:
-      image: python:3.12-slim
-      sandbox_timeout: 600
-```
-
-```python
-from pydantic_ai import Agent
-from pydantic_ai_harness import ModalSandbox
-
-agent = Agent.from_file('agent.yaml', custom_capability_types=[ModalSandbox])
-```
+| `image`, `app_name`, `create_app_if_missing` | Unchanged; they configure a newly created sandbox. `image` also takes a `modal.Image`. |
+| `env` | Unchanged, and now also applied to every command of a reattached sandbox. |
+| `sandbox_timeout` | Unchanged. It also bounds every command, since a command cannot outlive the sandbox. |
+| `workdir` | Renamed `working_dir`, which also applies in a reattached sandbox. `workdir=` still works and emits a deprecation warning. |
+| `sandbox_id` | Removed. Use `agent.run(..., workspace=WorkspaceRef(provider='modal', id=sandbox_id))`. |
+| `session` | Removed. Pass `ModalSandboxBackend(workspace=<modal.Sandbox>)` as `workspace=` to `agent.run()`. |
+| `default_command_timeout` | Removed. Use `Shell(default_timeout=...)`. |
+| `max_command_timeout` | Removed, no replacement. `sandbox_timeout` bounds every command. |
+| `max_output_bytes`, `max_output_lines` | Removed. Use `Shell(max_output_chars=...)`, or `ToolOutputLimits` for any tool. |
+| `max_read_bytes` | Removed. Use `FileSystem(max_read_lines=..., max_read_chars=...)`. |
+| `instructions` | Removed. Put guidance in the agent's `instructions`. |
+| `run_command` tool | Removed. Add `Shell()`. |
+| `read_file`, `write_file`, `list_directory` tools | Removed. Add `FileSystem()`. |
+| `ModalSandboxSession` | Removed. Use `ModalSandboxBackend(workspace=<modal.Sandbox>)` passed as `workspace=`. |
+| `ModalSandboxExecResult` | Removed. `backend.run(...)` returns `pydantic_ai.workspaces.CommandResult`. |
+| `ModalSandboxError` | Removed. Catch `pydantic_ai.workspaces.WorkspaceError`. |
+| `ModalSandboxTerminalError`, `ModalSandboxUnavailableError`, `ModalSandboxAuthError` | Removed. Catch `pydantic_ai.workspaces.WorkspaceUnavailableError`. |
 
 ## API reference
 
-- [Pydantic AI capabilities](/ai/core-concepts/capabilities/)
-- [Pydantic AI toolsets](/ai/tools-toolsets/toolsets/)
-- [Modal sandboxes](https://modal.com/docs/guide/sandbox)
-- [Modal Sandbox source code](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/modal_sandbox/)
-- [Pydantic AI Harness version policy](index.md#version-policy)
-
-
 ::: pydantic_ai_harness.modal_sandbox.ModalSandbox
 
-::: pydantic_ai_harness.modal_sandbox.ModalSandboxSession
-
-::: pydantic_ai_harness.modal_sandbox.ModalSandboxExecResult
-
-::: pydantic_ai_harness.modal_sandbox.ModalSandboxError
-
-::: pydantic_ai_harness.modal_sandbox.ModalSandboxTerminalError
-
-::: pydantic_ai_harness.modal_sandbox.ModalSandboxAuthError
-
-::: pydantic_ai_harness.modal_sandbox.ModalSandboxUnavailableError
+::: pydantic_ai_harness.modal_sandbox.ModalSandboxBackend
