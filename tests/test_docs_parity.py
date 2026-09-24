@@ -371,8 +371,7 @@ def test_blown_out_example_is_identical_across_surfaces(surface: str) -> None:
 
 def test_blown_out_example_matches_coder_defaults() -> None:
     block = _blown_out_block(_ROOT / _BLOWN_OUT_SURFACES[0])
-    assert "capabilities=[Coder('.')]" in block
-    assert "name='coder'" in block
+    assert "LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}), Coder()]" in block
     example = (_ROOT / 'examples/coding_agent.py').read_text(encoding='utf-8')
     assert (
         "name='coder'" in example

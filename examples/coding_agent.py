@@ -9,7 +9,7 @@ from pydantic_ai.models import Model
 
 from pydantic_ai_harness.coder import Coder
 
-DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'anthropic:claude-fable-5')
+DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'anthropic:claude-sonnet-5')
 
 HOST_ENV = {name: os.environ[name] for name in ('PATH', 'HOME') if name in os.environ}
 """Commands inherit nothing from this process; `PATH` and `HOME` let them find the user's tools."""

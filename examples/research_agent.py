@@ -12,6 +12,7 @@ from pydantic_ai.capabilities import WebFetch, WebSearch
 from pydantic_ai.models import Model
 
 from pydantic_ai_harness import SubAgent, SubAgents, ToolOutputLimits
+from pydantic_ai_harness.tool_output_limits import LocalFileStore
 
 DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'openai:gpt-5.6-sol')
 
@@ -28,7 +29,7 @@ sub_researcher = SubAgent(
     Agent(
         name='researcher',
         description='Research a focused sub-question on the web and report back with findings and source links',
-        capabilities=[WebSearch(local=True), WebFetch(local=True), ToolOutputLimits()],
+        capabilities=[WebSearch(local=True), WebFetch(local=True), ToolOutputLimits(store=LocalFileStore())],
     )
 )
 
@@ -42,7 +43,7 @@ def build_agent(model: Model | str = DEFAULT_MODEL) -> Agent:
             WebSearch(local=True),  # Use native search when supported, with DuckDuckGo as the local fallback.
             WebFetch(local=True),  # Use native URL fetching when supported, with a local fallback.
             SubAgents(agents=[sub_researcher], agent_folders=None),
-            ToolOutputLimits(),  # Bound large search responses.
+            ToolOutputLimits(store=LocalFileStore()),  # Bound large search responses; spills stay on this machine.
         ],
     )
 

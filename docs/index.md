@@ -21,30 +21,36 @@ Install with [`uv`](https://docs.astral.sh/uv/):
 pip/uv-add "pydantic-ai-harness[anthropic]"
 ```
 
+<!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
+
 ```python
-from pathlib import Path
+import os
 
 from pydantic_ai import Agent
-from pydantic_ai.workspaces import LocalWorkspaceBackend
-from pydantic_ai_harness import Coder
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai_harness.coder import Coder
 
-agent = Agent('anthropic:claude-fable-5', capabilities=[Coder()])
-
-result = agent.run_sync(
-    'Find out why tests/test_parser.py fails and fix the bug it caught.',
-    workspace=LocalWorkspaceBackend(working_dir=Path.cwd()),
+agent = Agent(
+    'anthropic:claude-sonnet-5',
+    capabilities=[LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}), Coder()],
 )
+```
+
+```python
+result = agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caught.')
 print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
+`LocalWorkspace` gives the agent this directory to work in: nothing touches your machine unless you attach it. Commands inherit nothing from your environment, so the example passes `PATH` and `HOME` to let them find your tools. To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`; see [Workspaces](#workspaces).
+
 Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
 ```bash
-uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-sonnet-5
 ```
 
-The bundled `coder_agent` explicitly supplies the current checkout as a local workspace.
+The bundled `coder_agent` is the example above without a model.
 
 Every model works: swap the string for [any provider's](/ai/models/overview/). Need more? Add capabilities to the list; here's the same coder on `gpt-5.6-sol`, with web search and cross-session memory:
 
@@ -53,14 +59,17 @@ pip/uv-add "pydantic-ai-slim[openai]"
 ```
 
 ```python
+import os
+
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import WebSearch
+from pydantic_ai.capabilities import LocalWorkspace, WebSearch
 from pydantic_ai_harness import Coder, Memory
 from pydantic_ai_harness.memory import FileStore
 
 agent = Agent(
     'openai:gpt-5.6-sol',
     capabilities=[
+        LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
         Coder(),
         WebSearch(),  # look up docs and error messages on the web
         Memory(FileStore('.agent-memory')),  # remembers across sessions
@@ -72,22 +81,25 @@ agent = Agent(
 
 ## No magic: it's capabilities all the way down
 
-`Coder` is a regular combined capability: [`FileSystem`](filesystem.md) with five of its tools and content hashes off, [`Shell`](shell.md) with its persistent `shell` tool and no allowlist, [`RepoContext`](repo-context.md), [`ClearToolResults` and `WarnNearLimits`](compaction.md), and a bounded [`ToolOutputLimits`](tool-output-limits.md), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](coder.md) lists the exact configuration. Pass a local workspace when running this agent, as in the example above:
+`Coder` is a regular combined capability: [`FileSystem`](filesystem.md) with five of its tools and content hashes off, [`Shell`](shell.md) with its persistent `shell` tool and no allowlist, [`RepoContext`](repo-context.md), [`ClearToolResults` and `WarnNearLimits`](compaction.md), and a bounded [`ToolOutputLimits`](tool-output-limits.md), plus its default instructions and JSON argument repair. Use it whole, or build the same agent from those capabilities to change any setting; the [Coder page](coder.md) lists the exact configuration, tool signatures, and the persistent shell lifecycle.
 
-<!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
+## Workspaces
 
-```python
-from pydantic_ai import Agent
-from pydantic_ai_harness.coder import Coder
+A [workspace](/ai/workspace/) is where an agent's files and commands live: this machine through core's `LocalWorkspace`, or an isolated sandbox. Harness capabilities don't pick one for you: a run without a workspace fails at its start with a message saying what to attach, rather than on the first tool call.
 
-agent = Agent(
-    'anthropic:claude-fable-5',
-    name='coder',
-    capabilities=[Coder('.')],
-)
-```
+The capabilities the model works in use the run's workspace, starting in its working directory: [FileSystem](filesystem.md), [Shell](shell.md), [Repo Context](repo-context.md), [Macroscope](macroscope.md), and [Coder](coder.md). Several agents, or several runs, can share one workspace: pass `workspace=result.workspace` to the next run, as the [Coder page](coder.md#sharing-a-workspace) shows.
 
-See the Coder documentation for tool signatures, persistent shell lifecycle, and migration from the previous planning/delegation composition.
+Capabilities that only keep or read their own files use the run's workspace by default, and take `workspace=LocalWorkspaceBackend(...)` to use another one, such as skills checked in next to your code while the agent works in a sandbox:
+
+- [Tool Output Limits](tool-output-limits.md) spills oversized results to `.pydantic-ai-harness/tool-output/` (`WorkspaceStore(workspace=...)`, or `store=LocalFileStore()` for this machine's temporary directory).
+- [Skills](skills.md) reads skill directories at run start (`Skills(workspace=...)`).
+- [Pydantic AI Docs](pydantic-ai-docs.md) reads a local docs checkout (`PydanticAIDocs(workspace=...)`).
+
+[Shell](shell.md) keeps background job logs in `.pydantic-ai-harness/shell/`; the `.pydantic-ai-harness/` directory gets a `.gitignore` so none of it shows up in `git status`.
+
+`FileSystem`'s `root_dir` is a guardrail for the file tools, checked before each operation. `Shell` commands are not bounded by it, and a local workspace is not a jail: use a sandbox for untrusted work.
+
+Upgrading from an earlier release? The [Coder page](coder.md#upgrading) lists what changed and how to update.
 
 ## Capabilities
 

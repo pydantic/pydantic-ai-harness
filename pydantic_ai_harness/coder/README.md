@@ -1,7 +1,7 @@
 # Coder
 
-`Coder` gives a Pydantic AI agent tools and guidance for investigating, editing, and testing a local codebase.
-It is a regular combined capability made from [`FileSystem`](https://pydantic.dev/docs/ai/harness/filesystem/), [`Shell`](https://pydantic.dev/docs/ai/harness/shell/), [`RepoContext`](https://pydantic.dev/docs/ai/harness/repo-context/), and the [context management](https://pydantic.dev/docs/ai/harness/compaction/) capabilities, so you can use it whole or take it apart.
+`Coder` gives a Pydantic AI agent tools and guidance for investigating, editing, and testing a codebase.
+It works in the run's workspace, on this machine or in a sandbox. It is a regular combined capability made from [`FileSystem`](https://pydantic.dev/docs/ai/harness/filesystem/), [`Shell`](https://pydantic.dev/docs/ai/harness/shell/), [`RepoContext`](https://pydantic.dev/docs/ai/harness/repo-context/), and the [context management](https://pydantic.dev/docs/ai/harness/compaction/) capabilities, so you can use it whole or take it apart.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://pydantic.dev/docs/ai/harness/#version-policy).
 
@@ -23,54 +23,75 @@ pip install "pydantic-ai-harness[coder]"
 
 The extra installs `ripgrep==14.1.0` except on Android, where `rg` must be supplied separately on `PATH`.
 Add a provider extra such as `[coder,anthropic]` when needed.
-Files and commands go through the run's workspace (`ctx.workspace`), and commands run there without an allowlist.
-`LocalWorkspace` runs them on the host; attach a sandbox provider's workspace for untrusted work. Path restrictions on file tools are not a shell sandbox.
+`Coder` edits files and runs commands in the run's [workspace](https://pydantic.dev/docs/ai/workspace/), and does not pick one for you: nothing touches your machine unless you attach `LocalWorkspace` from `pydantic_ai.capabilities`. A run without a workspace fails at its start.
 
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
 ```python
+import os
+
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
-    'anthropic:claude-fable-5',
-    name='coder',
-    capabilities=[Coder('.')],
+    'anthropic:claude-sonnet-5',
+    capabilities=[LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}), Coder()],
 )
 ```
 
 ```python
-from pathlib import Path
-
-from pydantic_ai.workspaces import LocalWorkspaceBackend
-
-result = agent.run_sync(
-    'Investigate the failing parser test, fix the cause, and run focused checks.',
-    workspace=LocalWorkspaceBackend(working_dir=Path.cwd()),
-)
+result = agent.run_sync('Investigate the failing parser test, fix the cause, and run focused checks.')
 print(result.output)
 ```
 
-Programmatic callers pass a workspace explicitly. Coder's Shell and FileSystem tools act on whatever workspace the run has, so attaching a sandbox provider's workspace instead of a local one moves the files they edit and the commands they run there. `Coder(workspace)` names the project directory inside that workspace; `'.'` is its working directory. Interfaces that start runs for you accept `workspace=` too, so pass it to [`agent.to_cli_sync(workspace=...)`](https://pydantic.dev/docs/ai/cli/) or [`agent.to_web(workspace=...)`](https://pydantic.dev/docs/ai/web/) the same way you pass it to `run()`.
+The workspace's working directory, here the current directory, is the project: file paths resolve from it and commands start in it. To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`, and Coder's tools edit files and run commands in the sandbox instead. Commands run without an allowlist, and the file tools' path restrictions do not apply to them.
 
-The exported `pydantic_ai_harness.coder:coder_agent` is the same composition, model-less and named `coder`.
+Interfaces that start runs for you work the same way: [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) run in the attached workspace.
+
+The exported `pydantic_ai_harness.coder:coder_agent` is the same agent, model-less and named `coder`, working in the directory it is imported from.
 Use it with the Pydantic AI CLI:
 
 ```bash
-uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-fable-5
+uvx --with "pydantic-ai-harness[coder]" clai -a pydantic_ai_harness.coder:coder_agent -m anthropic:claude-sonnet-5
 ```
 
-The bundled `coder_agent` attaches `LocalWorkspace` from `pydantic_ai.capabilities` for the directory it is imported from. Runs without an explicit `workspace=` use that checkout, and a later run continues from a local reference to it in message history; a reference to any other directory is declined.
+### The command environment
+
+Commands in a local workspace inherit nothing from the agent process. The example passes `PATH` so commands find your tools (`rg`, `git`, `uv`, anything under Homebrew or `~/.local/bin`) and `HOME` for tools that keep their configuration there; add anything else your commands need to `env`. Passing `os.environ` would hand the model's commands every secret in the process, LLM API keys included.
+
+## Sharing a workspace
+
+A workspace outlives the run that used it, so the next run can pick up where the last one left off, in the same files.
+
+To continue the conversation, pass its messages. The latest response records which workspace it ran in, and `LocalWorkspace` continues in that directory (it declines a record naming any other directory, so message history cannot point the agent somewhere else on your machine):
+
+```python
+result = agent.run_sync('Add a --verbose flag to the CLI.')
+result = agent.run_sync('Document the new flag in the README.', message_history=result.all_messages())
+```
+
+To hand the work to a different agent, or to a later run with a fresh conversation, pass the workspace itself. The reviewer below has no workspace of its own, so it works exactly where it is told:
+
+```python
+reviewer = Agent(
+    'anthropic:claude-sonnet-5',
+    capabilities=[Coder(instructions='Review the uncommitted change and run the tests. Do not edit files.')],
+)
+review = reviewer.run_sync('Review the change.', workspace=result.workspace)
+```
+
+With a sandbox this is how several agents collaborate in one isolated environment. Sub-agents need nothing extra: [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/) runs each delegate in the parent run's workspace.
 
 ## Composition
 
-`Coder(workspace)` is these capabilities, in this order:
+`Coder()` is these capabilities, in this order:
 
 1. A `Capability` carrying the default instructions, plus any `instructions=` you pass.
-2. [`FileSystem`](https://pydantic.dev/docs/ai/harness/filesystem/)`(root_dir=workspace, content_hashes=False, max_read_chars=60000, tools=FILE_TOOL_NAMES)`, where
-   `FILE_TOOL_NAMES` is `read_file`, `write_file`, `edit_file`, `list_files`, and `grep`.
-3. [`Shell`](https://pydantic.dev/docs/ai/harness/shell/)`(cwd=workspace, denied_commands=[], allow_interactive=True, default_timeout=270, tools=['shell'])`.
-4. [`RepoContext`](https://pydantic.dev/docs/ai/harness/repo-context/)`(workspace_dir=workspace, expose_inventory_tool=False)` for repository instructions and structure.
+2. [`FileSystem`](https://pydantic.dev/docs/ai/harness/filesystem/)`(content_hashes=False, max_read_chars=60000, tools=FILE_TOOL_NAMES)`, where
+   `FILE_TOOL_NAMES` is `read_file`, `write_file`, `edit_file`, `list_files`, and `grep`. Its `root_dir` is the workspace's working directory.
+3. [`Shell`](https://pydantic.dev/docs/ai/harness/shell/)`(denied_commands=[], allow_interactive=True, default_timeout=270, tools=['shell'])`.
+4. [`RepoContext`](https://pydantic.dev/docs/ai/harness/repo-context/)`(expose_inventory_tool=False)` for repository instructions and structure.
    Pass `repo_context=False` to leave it out when the agent already binds its own `RepoContext`, so the
    instruction files are not loaded twice.
 
@@ -105,9 +126,9 @@ these rules. Coder does not include planning, delegation, or the run-scoped `run
 
 ## Filesystem scope
 
-File tools are workspace-scoped by default. For trusted local use,
-`Coder(unrestricted_filesystem=True)` sets `FileSystem(root_dir='/', cwd=workspace,
-protected_patterns=[])`: relative paths still resolve from the workspace, and absolute paths anywhere in
+File tools are scoped to the workspace's working directory by default. For trusted local use,
+`Coder(unrestricted_filesystem=True)` sets `FileSystem(root_dir='/',
+protected_patterns=[])`: relative paths still resolve from the working directory, and absolute paths anywhere in
 the run's workspace are accepted, such as `/tmp/example.py`. OS permissions and file-change event listeners still apply. This permits
 modifying secrets and repository metadata: use it only when you trust the agent and its inputs. Shell commands
 were already unrestricted.
@@ -124,9 +145,8 @@ events a UI can subscribe to.
 
 The default instructions tell the agent to finish required work before giving a final response: do other
 useful work, then poll status and output until completion or a genuine blocker.
-Servers may remain running after startup and readiness are verified. Commands get the workspace's
-environment, not the agent process's: `LocalWorkspace` passes only `PATH`, `HOME`, `LANG`, and `TMPDIR`
-from the host, so provider API keys in the agent's environment do not reach commands. Host files remain
+Servers may remain running after startup and readiness are verified. Commands get only the environment
+the workspace passes (see [The command environment](#the-command-environment)); host files remain
 accessible to commands in a local workspace.
 
 ## Instructions
@@ -149,6 +169,18 @@ intent. It does not supply a schema to the repair library or bypass exact edit m
 Each attempt emits a `repair_tool_arguments` span through `ctx.tracer`, without arguments or file
 contents. Other Coder operations rely on core tool spans and on the events its `FileSystem` and `Shell`
 capabilities emit.
+
+## Upgrading
+
+This release makes the workspace the single place that decides where an agent works. Removed arguments are still accepted, emit a `HarnessDeprecationWarning` naming the fix, and are ignored.
+
+- **Attach a workspace.** `Coder`, `FileSystem`, `Shell`, `RepoContext`, and `Macroscope` fail at run start without one, as do `Skills`, `PydanticAIDocs` (with a local checkout), and `ToolOutputLimits` (when it can spill) unless given their own `workspace=` or store. Add `LocalWorkspace('.', env=...)` to the agent's capabilities, as in [Usage](#usage).
+- **Set the directory on the workspace.** `Coder('dir')`, `Shell(cwd=)`, `FileSystem(cwd=)`, `Macroscope(cwd=)`, and `RepoContext(workspace_dir=)` are ignored; use `LocalWorkspace('./dir')`.
+- **Pass the command environment.** A local workspace used to give commands the host's `PATH`, `HOME`, `LANG`, and `TMPDIR`; now they get the workspace's `env` plus `Shell(env=)`. Pass `env={'PATH': ..., 'HOME': ...}` to `LocalWorkspace` (see [The command environment](#the-command-environment)).
+- **`FileSystem(root_dir=)`** defaults to the working directory and resolves relative values from it. It must contain the working directory, symlinks that lead outside it are refused, and `root_dir='/'` turns the checks off.
+- **Harness files moved into the working directory.** Tool-output spills and Shell background-job files are under `.pydantic-ai-harness/` (git-ignored) instead of `$TMPDIR`. `ToolOutputLimits(store=LocalFileStore())` keeps spills on this machine.
+- **Skills** are read from the workspace at run start and loaded with a `load_skill` tool. [`Skills(workspace=LocalWorkspaceBackend('/app'))`](https://pydantic.dev/docs/ai/harness/skills/) reads them from somewhere else.
+- **Capability Creation** runs only when the workspace is a writable `LocalWorkspace`.
 
 ## Benchmarking
 
