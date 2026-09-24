@@ -6,6 +6,7 @@ from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from threading import Thread
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from anyio import create_task_group
@@ -23,7 +24,7 @@ from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness.step_persistence.conversations import ConversationSummary, SqliteConversationStore
 from rich.console import Console
 
-from . import theme
+from . import theme, warm_imports
 from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
@@ -150,6 +151,7 @@ async def chat(
             transcript=transcript,
         )
     fresh = False
+    warming: Thread | None = None
     async with agent:
         while True:
             reason: SessionEndReason = 'error'
@@ -166,6 +168,7 @@ async def chat(
                                         await shell.sessions.command([resume] if resume else []), markup=False
                                     )
                                     resume = None
+                            warming = warming or warm_imports.start()
                             reason = await shell.run()
                         finally:
                             workers.cancel_scope.cancel()
@@ -179,6 +182,8 @@ async def chat(
             if not shell.reload_requested:
                 return
             shell.reload_requested = False
+            if warming is not None:  # pragma: no branch -- a reload follows a run, which started warming
+                warming.join()
             try:
                 shell = reload_clai(
                     lambda shell=shell: create_shell(
