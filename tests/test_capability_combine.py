@@ -277,6 +277,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     'FallbackCompaction': Anonymous('drives a fallback chain; several independent chains compose'),
     'InputGuardrail': Anonymous('several guards is the design'),
     'JevCapabilityComposer': Anonymous('one per model menu and catalog; each adds its picks, the last model pick wins'),
+    '_Pick': Anonymous('one per catalog entry Jev picked; its tools give way to another of its class'),
     'OutputGuardrail': Anonymous('several guards is the design'),
     'PromptInjectionDefender': Anonymous('one per `tool_filter`; several scopes compose'),
     'ToolGuardrail': Anonymous('several guards is the design'),

@@ -13,14 +13,18 @@ from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, TypeAdapter
 from pydantic_ai import Agent, CapabilityEvent, Choices, UseEnumMemberDocstrings
-from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WebFetch, WebSearch
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WebFetch, WebSearch, WrapperCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelRequest, UserContent, UserPromptPart
 from pydantic_ai.models import KnownModelName, Model
 from pydantic_ai.settings import ModelSettings
-from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
+from pydantic_ai.toolsets import AbstractToolset, AgentToolset
+from pydantic_ai.toolsets._dynamic import DynamicToolset
 
 from pydantic_ai_harness.filesystem import FileSystem
+from pydantic_ai_harness.guardrails import InputGuardrail
+from pydantic_ai_harness.guardrails._shared import as_guards, evaluate_all
 from pydantic_ai_harness.planning import Planning
 from pydantic_ai_harness.pydantic_ai_docs import PydanticAIDocs
 from pydantic_ai_harness.repo_context import RepoContext
@@ -48,12 +52,13 @@ class Thinking(UseEnumMemberDocstrings, str, Enum):
     """Hard problems: debugging, design, or large changes"""
 
 
-ComposeAction: TypeAlias = Literal['compose', 'escalate', 'fallthrough']
+ComposeAction: TypeAlias = Literal['compose', 'escalate', 'fallthrough', 'blocked']
 """What the composer did with Jev's pick.
 
 - `compose`: the run uses the model and capabilities Jev picked.
 - `escalate`: Jev was unsure of the model, so the run uses its capabilities on `unsure_model`.
 - `fallthrough`: Jev picked no capabilities, so the run is left as the agent configured it.
+- `blocked`: one of the agent's input guardrails blocked the prompt, so Jev was not asked.
 """
 
 
@@ -308,13 +313,18 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
         if text is None or self._run_event is not None:
             return self
 
-        with ctx.tracer.start_as_current_span(f'{_NAME} compose') as span:
-            composition = await self.compose(text, usage_ctx=ctx)
+        agent_capabilities = _leaves(ctx.agent.root_capability if ctx.agent is not None else None)
+        with ctx.tracer.start_as_current_span(_NAME + ' compose') as span:
+            screened = await _screen(ctx, text, agent_capabilities)
+            if screened is None:
+                _record(span, ctx, None, None, 'blocked', self._unsure)
+                return self
+            composition = await self.compose(screened, usage_ctx=ctx)
             action = self._action(composition)
-            _record(span, ctx, text, composition, action, self._unsure)
+            _record(span, ctx, screened, composition, action, self._unsure)
         if action == 'fallthrough':
             return self
-        present = _classes_in(ctx.agent.root_capability if ctx.agent is not None else None)
+        present = {type(capability) for capability in agent_capabilities}
         return self.capability_for(
             replace(
                 composition,
@@ -346,7 +356,8 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
         """The capability that applies `composition` to a run: its catalog entries, model, and thinking effort."""
         option = self._options[composition.model]
         entries: list[AbstractCapability[AgentDepsT]] = [
-            self.catalog[key].capability.from_spec(**self.catalog[key].arguments) for key in composition.capabilities
+            _Pick(wrapped=self.catalog[key].capability.from_spec(**self.catalog[key].arguments))
+            for key in composition.capabilities
         ]
         # A copy of the composer carries the picks, as `for_run` intends for per-run state.
         picked = copy(self)
@@ -378,13 +389,58 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
         return 'compose'
 
 
-def _classes_in(capability: AbstractCapability[AgentDepsT] | None) -> set[type[AbstractCapability[AgentDepsT]]]:
-    """The classes of `capability` and of every capability combined into it."""
-    if capability is None:
-        return set()
-    if isinstance(capability, CombinedCapability):
-        return {cls for inner in capability.capabilities for cls in _classes_in(inner)}
-    return {type(capability)}
+@dataclass
+class _Pick(WrapperCapability[AgentDepsT]):
+    """A catalog entry Jev picked for one run.
+
+    Its tools give way to another capability of its class that the run also has: one passed to
+    `Agent.run`, which `for_run` cannot see, or the same entry picked by an earlier composer. Both would
+    register the same tool names, and the run would fail on the conflict.
+    """
+
+    def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
+        toolset = self.wrapped.get_toolset()
+        if toolset is None:
+            return None
+        if not isinstance(toolset, AbstractToolset):
+            return DynamicToolset[AgentDepsT](toolset).filtered(self._unless_shadowed)
+        return toolset.filtered(self._unless_shadowed)  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
+
+    def _unless_shadowed(self, ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> bool:
+        rivals = [leaf for leaf in _leaves(ctx.root_capability) if isinstance(_unpicked(leaf), type(self.wrapped))]
+        first = next((_unpicked(leaf) for leaf in rivals), self.wrapped)
+        return first is self.wrapped and all(isinstance(leaf, _Pick) for leaf in rivals)
+
+
+def _unpicked(capability: AbstractCapability[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
+    return capability.wrapped if isinstance(capability, _Pick) else capability
+
+
+def _leaves(capability: AbstractCapability[AgentDepsT] | None) -> list[AbstractCapability[AgentDepsT]]:
+    """Every capability in the tree, wrappers and the capabilities they wrap included."""
+    leaves: list[AbstractCapability[AgentDepsT]] = []
+    if capability is not None:
+        capability.apply(leaves.append)
+    return leaves
+
+
+async def _screen(
+    ctx: RunContext[AgentDepsT], prompt: str, capabilities: Sequence[AbstractCapability[AgentDepsT]]
+) -> str | None:
+    """The prompt as the agent's input guardrails leave it for Jev.
+
+    Redacted where one redacts; `None` where one blocks it or returns anything but prompt text. The
+    guardrails run again, as usual, on the run's first model request.
+    """
+    for guardrail in capabilities:
+        if not isinstance(guardrail, InputGuardrail):
+            continue
+        verdict, _ = await evaluate_all(as_guards(guardrail.guard, capability='InputGuardrail'), ctx, prompt)
+        if verdict.action == 'replace' and isinstance(verdict.replacement, str):
+            prompt = verdict.replacement
+        elif verdict.action != 'allow':
+            return None
+    return prompt
 
 
 def _latest_prompt(ctx: RunContext[AgentDepsT]) -> str | Sequence[UserContent] | None:
@@ -408,20 +464,28 @@ def _text_of(prompt: str | Sequence[UserContent]) -> str | None:
 
 
 def _record(
-    span: Span, ctx: RunContext[AgentDepsT], prompt: str, composition: Composition, action: ComposeAction, unsure: str
+    span: Span,
+    ctx: RunContext[AgentDepsT],
+    prompt: str | None,
+    composition: Composition | None,
+    action: ComposeAction,
+    unsure: str,
 ) -> None:
     if not span.is_recording():
+        return
+    span.set_attribute('jev_composer.action', action)
+    if composition is None:
+        # Blocked: the prompt is not recorded, since it may hold what the guardrail blocked it for.
         return
     span.set_attributes(
         {
             'jev_composer.model': composition.model,
             'jev_composer.thinking': composition.thinking.value,
             'jev_composer.capabilities': list(composition.capabilities),
-            'jev_composer.action': action,
-            **{f'jev_composer.confidence.{key}': value for key, value in composition.confidence.items()},
+            **{'jev_composer.confidence.' + key: value for key, value in composition.confidence.items()},
         }
     )
     if action != 'fallthrough':
         span.set_attribute('jev_composer.run_model', unsure if action == 'escalate' else composition.model)
-    if ctx.trace_include_content:
+    if prompt is not None and ctx.trace_include_content:
         span.set_attribute('jev_composer.prompt', prompt)

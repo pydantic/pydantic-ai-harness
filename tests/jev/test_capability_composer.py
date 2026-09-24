@@ -155,6 +155,7 @@ class TestSchema:
                             'anyOf': [
                                 {'const': 'notes', 'description': 'Keep notes'},
                                 {'const': 'clock', 'description': 'Tell the time'},
+                                {'const': 'dial', 'description': 'Make a call'},
                             ],
                             'type': 'string',
                         },

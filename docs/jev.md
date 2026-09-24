@@ -123,11 +123,11 @@ A docstring says what a capability is. Jev decides better from what a request wo
 
 ## What changes and what doesn't
 
-The picks apply to the whole run: every model request in it uses the picked model and has the picked capabilities. The agent's instructions, output type, message history, dependencies, tools, and other capabilities are unchanged. A picked entry whose class the agent already has is not added a second time, since both would register the same tools; capabilities passed to `Agent.run(capabilities=...)` are not checked.
+The picks apply to the whole run: every model request in it uses the picked model and has the picked capabilities. The agent's instructions, output type, message history, dependencies, tools, and other capabilities are unchanged. A picked entry whose class the agent already has is not added a second time, since both would register the same tools, and the agent's configuration of it is the one that applies. When the run gets that class some other way -- passed to `Agent.run(capabilities=...)`, or picked by a second composer -- the pick's tools give way to it on each request: the run's own configuration still wins, so a pick cannot widen what the run was given.
 
 Jev's request counts toward the run's usage and its `usage_limits`. It is a separate request made through its own agent, so a [spend limits](spend.md) capability on your agent does not price it.
 
-Jev reads the text of the run's prompt, or of the latest user prompt in `message_history` when the run is given none, before any model request is made. A capability that redacts or rewrites model requests therefore does not cover what is sent to Jev: redact the prompt before calling `Agent.run` if it can hold data that must not leave your system.
+Jev reads the text of the run's prompt, or of the latest user prompt in `message_history` when the run is given none, before any model request is made. The agent's [input guardrails](guardrails.md) screen that text first: when one blocks the prompt, Jev is not asked and the guardrail blocks the run as usual, and when one redacts it, Jev reads the redacted text. Their guards therefore run twice per run, once before Jev and once on the first model request, which matters for a slow or paid guard. Only guardrails on the agent are seen; put an `InputGuardrail` on the agent rather than passing it to `Agent.run` if it must cover Jev. Other capabilities that rewrite model requests do not cover what is sent to Jev.
 
 Each run asks Jev again, so a conversation's model and capabilities can change from one turn to the next. The composer is not built for durable execution: a worker that re-derives a run's capabilities would ask Jev again, and could get a different answer.
 
@@ -139,9 +139,9 @@ Each decision is a `jev_capability_composer compose` span on the run's tracer, w
 |---|---|
 | `jev_composer.model`, `jev_composer.thinking`, `jev_composer.capabilities` | what Jev picked |
 | `jev_composer.confidence.<field>` | Jev's confidence per field |
-| `jev_composer.action` | `compose`, `escalate` (unsure of the model, so the run uses `unsure_model`), or `fallthrough` (no capabilities picked) |
-| `jev_composer.run_model` | the `models` key the run uses, unless it fell through |
-| `jev_composer.prompt` | the text Jev read, only when the run includes content in traces |
+| `jev_composer.action` | `compose`, `escalate` (unsure of the model, so the run uses `unsure_model`), `fallthrough` (no capabilities picked), or `blocked` (an input guardrail blocked the prompt, so Jev was not asked) |
+| `jev_composer.run_model` | the `models` key the run uses, when the picks were applied |
+| `jev_composer.prompt` | the text Jev read, after any redaction, only when the run includes content in traces; never recorded for a blocked prompt |
 
 Jev's request appears as its own agent span under it. When the picks are applied, the run emits a `CapabilitiesComposedEvent` into its event stream as it starts; its `escalated` field says whether `unsure_model` replaced Jev's pick.
 
