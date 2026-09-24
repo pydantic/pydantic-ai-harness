@@ -15,11 +15,14 @@ or constructor settings first; see [optional harness capabilities](PLUGINS.md#op
 `/mcp` manages MCP servers the way Code Puppy's `/mcp` does. Bare `/mcp` shows a
 status dashboard. `/mcp install` opens a form where you name the server, pick
 `stdio`, `http`, or `sse`, type its URL or command, edit the rest of its JSON
-configuration in your editor, and switch on OAuth sign-in for remote servers. `/mcp edit` reopens the same form.
-`/mcp start`, `stop`, `restart`, `status`, `logs`, `auth`, `remove`, and `trust`
-do what they say, and `/mcp help` lists them all. Saved servers are available to the
-agent from the next prompt, with tool names prefixed by the server name. Nothing
-connects until a prompt runs or you use `/mcp start`. See
+configuration in your editor, and switch on OAuth sign-in for remote servers.
+`/mcp edit NAME` reopens the same form. `/mcp start NAME`, `stop NAME`,
+`restart NAME`, `status NAME`, `logs NAME [LINES]`, `auth NAME [logout]`,
+`remove NAME`, and `trust [status|accept|revoke]` manage servers, and `/mcp help`
+lists them all. Saved servers are available to the agent from the next prompt,
+with tool names prefixed by the server name. A server connects on the first
+prompt that needs it (or `/mcp start`) and stays connected; one that cannot
+connect is marked `error` and left out rather than failing the prompt. See
 [Connect MCP servers](PLUGINS.md#connect-mcp-servers) for storage, secrets, OAuth,
 and project trust. `/plugins disable mcp` removes the command and tools.
 

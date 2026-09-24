@@ -212,9 +212,7 @@ async def test_start_stop_restart_logs_and_agent_use(tmp_path: Path) -> None:
 
     result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
     assert 'pong' in result.output
-    assert_exited(pid_file)
-
-    assert 'Started local with 1 tools' in await run('/mcp start local')
+    assert '+ local' in await run('/mcp'), 'the first prompt connects a ready server and keeps it'
     held = pid_file.read_text()
     assert 'already running' in await run('/mcp start local')
     dashboard = await run('/mcp')
@@ -222,7 +220,7 @@ async def test_start_stop_restart_logs_and_agent_use(tmp_path: Path) -> None:
     assert 'local_ping' in await run('/mcp status local')
     result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
     assert 'pong' in result.output
-    assert pid_file.read_text() == held, 'a started server keeps one process across runs'
+    assert pid_file.read_text() == held, 'a connected server keeps one process across runs'
 
     assert 'Started local' in await run('/mcp restart local')
     assert pid_file.read_text() != held
@@ -364,3 +362,12 @@ def test_plugin_settings_accept_the_old_transport_key() -> None:
 
 def test_fastmcp_info_logging_stays_off_the_prompt() -> None:
     assert logging.getLogger('fastmcp.client.auth.oauth').getEffectiveLevel() >= logging.WARNING
+
+
+async def test_a_server_that_cannot_connect_does_not_fail_the_prompt(tmp_path: Path) -> None:
+    store = MCPStore(tmp_path / 'config', workspace=tmp_path)
+    host = make_host({}, store)
+    store.put('broken', StdioServer(type='stdio', command=sys.executable, args=['-c', 'raise SystemExit(3)']))
+    result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
+    assert result.output == 'success (no tool calls)'
+    assert '! broken' in await host.commands.execute_async('/mcp')

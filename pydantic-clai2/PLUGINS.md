@@ -72,14 +72,15 @@ separately.
   they were issued for: changing the URL signs in again. OAuth needs `https`,
   except for loopback servers.
 
-The dashboard shows each server as `running` (connected by `/mcp start`),
-`ready` (enabled; connects when a prompt runs), `stopped`, or `error` (a failed
-start, or a referenced environment variable that is not set). Saved and enabled
-servers are available to the agent from the next prompt; `/mcp start` is not
-required. It keeps one connection open between prompts instead of starting the
-server for each prompt, and records the server's tools. `/mcp stop` disconnects
-the server and disables it until `/mcp start`. The model sees tools prefixed by
-server name, for example `local_search`.
+The dashboard shows each server as `running` (connected), `ready` (enabled;
+connects on the next prompt), `stopped`, or `error` (a failed connection, or a
+referenced environment variable that is not set). Saved and enabled servers are
+available to the agent from the next prompt; `/mcp start` is not required, but
+connects now and lists the tools. Once connected, a server stays connected
+between prompts. A server that cannot connect is marked `error` and left out of
+the prompt instead of failing it; `/mcp logs NAME` shows why. `/mcp stop`
+disconnects the server and disables it until `/mcp start`. The model sees tools
+prefixed by server name, for example `local_search`.
 
 Only install servers you trust. Stdio servers run programs with your user
 permissions, launched as an executable plus arguments without a shell. Remote
@@ -114,7 +115,9 @@ between the working directory and the git root). Because a stdio server runs a
 program, its servers do not load until you run `/mcp trust accept`. Trust is
 stored in your `mcp.json`, keyed by the file's path and a SHA-256 of its
 contents: any change to the file unloads its servers until you accept again, and
-a repository cannot trust itself. `/mcp stop` on a project server lasts for the
+a repository cannot trust itself. A symlinked project file or `.clai` folder is
+never trusted, so a repository cannot point at a file you trusted elsewhere.
+`/mcp stop` on a project server lasts for the
 session; edit the project file to change it permanently. When a name exists in
 both places, your own server wins.
 

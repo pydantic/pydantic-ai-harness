@@ -288,6 +288,7 @@ async def test_project_file_trust(tmp_path: Path) -> None:
     project.unlink()
     project.mkdir()
     assert store.trust_state(project) == 'changed', 'an unreadable file fails closed'
+    assert store.project_servers() == {}
 
 
 def test_user_servers_shadow_project_servers(tmp_path: Path) -> None:
@@ -360,3 +361,57 @@ def test_url_and_command_rows(tmp_path: Path) -> None:
     assert form.target() == ''
     form.set_target('https://example.com/sse')
     assert form.status == 'Fix the JSON before editing the URL'
+
+
+async def test_surplus_arguments_are_rejected(tmp_path: Path) -> None:
+    command, store = make(tmp_path)
+    store.put('local', stdio())
+    for args in (['remove', 'local', 'oops'], ['start', 'local', 'x'], ['start-all', 'typo'], ['stop-all', 'x']):
+        with pytest.raises(ValueError, match='unexpected'):
+            await command(args)
+    with pytest.raises(ValueError, match='Usage: /mcp trust'):
+        await command(['trust', 'accept', 'junk'])
+    assert 'local' in store.load().servers
+
+
+async def test_symlinked_project_file_is_never_trusted(tmp_path: Path) -> None:
+    command, store = make(tmp_path)
+    elsewhere = tmp_path / 'trusted.json'
+    elsewhere.write_text('{"servers": {"team": {"type": "stdio", "command": "team-server"}}}')
+    project = tmp_path / 'repo' / PROJECT_MCP_FILE
+    project.parent.mkdir()
+    project.symlink_to(elsewhere)
+    with pytest.raises(ValueError, match='symlink'):
+        await command(['trust', 'accept'])
+    data = store.load()
+    store.save(data.model_copy(update={'trusted_projects': {str(project.absolute()): 'x'}}))
+    assert store.trust_state(project) == 'untrusted' and store.project_servers() == {}
+
+
+async def test_revoke_disconnects_project_servers(tmp_path: Path) -> None:
+    server = tmp_path / 'server.py'
+    server.write_text('from mcp.server.fastmcp import FastMCP\nFastMCP("t").run()\n')
+    command, _ = make(tmp_path)
+    project = tmp_path / 'repo' / PROJECT_MCP_FILE
+    project.parent.mkdir()
+    project.write_text(
+        json.dumps({'servers': {'team': {'type': 'stdio', 'command': sys.executable, 'args': [str(server)]}}})
+    )
+    await command(['trust', 'accept'])
+    assert 'Started team' in await command(['start', 'team'])
+    assert 'Revoked' in await command(['trust', 'revoke'])
+    assert command.servers._connections == {}  # pyright: ignore[reportPrivateUsage]
+
+
+def test_oauth_toggle_restores_a_short_timeout(tmp_path: Path) -> None:
+    form = ServerForm(MCPStore(tmp_path / 'config'))
+    form.select_type('http')
+    form.config = '{"url": "https://example.com/mcp", "timeout": 30}'
+    form.toggle_oauth()
+    assert json.loads(form.config)['timeout'] == 330
+    form.toggle_oauth()
+    assert json.loads(form.config) == {'url': 'https://example.com/mcp', 'timeout': 30}
+    form.config = '{"url": "https://example.com/mcp", "timeout": 330}'
+    form.toggle_oauth()
+    form.toggle_oauth()
+    assert json.loads(form.config)['timeout'] == 330, 'a timeout the user chose is kept'

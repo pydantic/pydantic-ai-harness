@@ -5,11 +5,11 @@ credential (`mcp-NAME`) using CLAI's credential store: the keyring, chunked for 
 or a private file when no keyring exists. FastMCP keys entries by server URL, so a new URL signs in again.
 """
 
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import SupportsFloat
 
-import anyio
 from anyio import to_thread
 from fastmcp.client.auth import OAuth
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
@@ -30,6 +30,7 @@ class _Entry(BaseModel):
         return self.expires_at is None or self.expires_at > now
 
 
+_WRITES = threading.Lock()
 _BUNDLE: TypeAdapter[dict[str, _Entry]] = TypeAdapter(dict[str, _Entry])
 Bundle = dict[str, _Entry]
 
@@ -47,7 +48,7 @@ def _load(name: str) -> Bundle:
     try:
         raw = load_codex_credentials(account=account(name))
         return _BUNDLE.validate_json(raw) if raw else {}
-    except (UserError, ValidationError):
+    except (UserError, ValidationError, UnicodeDecodeError):
         return {}  # An unreadable bundle means signing in again, not a failed connection.
 
 
@@ -66,7 +67,6 @@ class TokenStore:
     def __init__(self, name: str) -> None:
         """Entries are stored under the `mcp-NAME` credential account."""
         self.name = name
-        self._lock = anyio.Lock()
 
     def signed_in(self) -> bool:
         """Whether tokens are stored; they may still need a refresh."""
@@ -78,10 +78,15 @@ class TokenStore:
         delete_credentials(account=account(self.name))
 
     async def _update(self, change: Callable[[Bundle], int]) -> int:
-        async with self._lock:
-            bundle = await to_thread.run_sync(_load, self.name)
+        return await to_thread.run_sync(self._update_now, change)
+
+    def _update_now(self, change: Callable[[Bundle], int]) -> int:
+        # One lock for every store: FastMCP writes the token and the client entry for a server through
+        # separate store instances, and each write rewrites the whole credential.
+        with _WRITES:
+            bundle = _load(self.name)
             count = change(bundle)
-            await to_thread.run_sync(_save, self.name, bundle)
+            _save(self.name, bundle)
             return count
 
     async def ttl_many(

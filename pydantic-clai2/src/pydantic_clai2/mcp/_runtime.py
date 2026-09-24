@@ -1,9 +1,9 @@
 """Server lifecycle: which servers exist, which the agent may use, and which hold a connection.
 
-Enabled servers are offered to every run. Core's `MCPToolset` connects on entry and closes on
-exit, so a server with no held connection starts for each prompt and stops after it. `start`
-additionally holds a connection open between prompts and records the server's tools, which is
-what the dashboard reports as `running`. `stop` releases it and disables the server.
+Enabled servers are offered to every run. The first prompt (or `/mcp start`) connects a `ready`
+server and holds the connection open between prompts, which the dashboard reports as `running`.
+A server that fails to connect is marked `error` and left out, so it cannot fail the prompt.
+`stop` releases the connection and disables the server.
 """
 
 import time
@@ -126,6 +126,13 @@ class MCPServers:
             return f'{name} is already running with {len(connection.tools)} tools.'
         if missing(entry.server):
             return f'{name} is enabled but cannot connect: {self.problem(entry)}.'
+        problem = await self._open(name, connection)
+        if problem:
+            return f'Could not start {name}: {problem}. See /mcp logs {name}.'
+        return f'Started {name} with {len(connection.tools)} tools. The agent can use them on your next prompt.'
+
+    async def _open(self, name: str, connection: _Connection) -> str | None:
+        """Hold the connection and record its tools; the failure, logged, or `None`."""
         stack = AsyncExitStack()
         try:
             await stack.enter_async_context(connection.toolset)
@@ -134,11 +141,11 @@ class MCPServers:
             await stack.aclose()
             connection.error = f'{type(exc).__name__}: {exc}'
             self.log(name, f'start failed: {connection.error}')
-            return f'Could not start {name}: {connection.error}. See /mcp logs {name}.'
+            return connection.error
         connection.stack, connection.started, connection.error = stack, time.monotonic(), None
         connection.tools = tuple(f'{name}_{tool.name}' for tool in listed)
         self.log(name, f'started with {len(listed)} tools')
-        return f'Started {name} with {len(listed)} tools. The agent can use them on your next prompt.'
+        return None
 
     async def stop(self, name: str) -> str:
         """Release the connection and disable the server."""
@@ -185,16 +192,24 @@ class MCPServers:
     async def toolset(self, ctx: RunContext[None]) -> AbstractToolset[None] | None:
         """The enabled servers for this run, each prefixed with its name."""
         await self.sync()
-        usable = [entry for entry in self.entries() if self.state(entry) in ('running', 'ready')]
-        toolsets = [(await self._connection(entry)).toolset.prefixed(entry.name) for entry in usable]
+        toolsets: list[AbstractToolset[None]] = []
+        for entry in self.entries():
+            if self.state(entry) not in ('running', 'ready'):
+                continue
+            connection = await self._connection(entry)
+            if connection.stack is None and await self._open(entry.name, connection):
+                continue  # A server that cannot connect is marked `error`, not allowed to fail the prompt.
+            toolsets.append(connection.toolset.prefixed(entry.name))
         return CombinedToolset(toolsets) if toolsets else None
 
     async def list_tools(self, name: str) -> list[str]:
         """Connect if needed and list the server's prefixed tool names."""
         entry = self.get(name)
-        toolset = (await self._connection(entry)).toolset
-        async with toolset:
-            return [f'{name}_{tool.name}' for tool in await toolset.list_tools()]
+        connection = await self._connection(entry)
+        async with connection.toolset:
+            tools = await connection.toolset.list_tools()
+        connection.error = None
+        return [f'{name}_{tool.name}' for tool in tools]
 
     def log(self, name: str, message: str) -> None:
         """Append a lifecycle line to the server's log, next to its captured stderr."""

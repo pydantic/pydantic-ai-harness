@@ -51,6 +51,11 @@ def _uptime(seconds: float | None) -> str:
     return f'{hours}h {minutes}m' if hours else f'{minutes}m {secs}s' if minutes else f'{secs}s'
 
 
+def _no_arguments(usage: str, args: list[str]) -> None:
+    if args:
+        raise ValueError(f'Usage: /mcp {usage} (unexpected {" ".join(args)!r})')
+
+
 @dataclass(kw_only=True)
 class MCPCommand:
     """Parse `/mcp` arguments and dispatch. Menus run through `runners` so tests can script them."""
@@ -166,6 +171,8 @@ class MCPCommand:
 
     async def _server_action(self, action: str, name: str, extra: list[str]) -> str:
         entry = self.servers.get(name)
+        if action not in ('logs', 'auth'):
+            _no_arguments(f'{action} NAME', extra)
         if action == 'status':
             return self.details(entry)
         if action == 'logs':
@@ -185,9 +192,9 @@ class MCPCommand:
             saved = await run_worker(lambda: edit_form(self.servers.store, name, self.runners, self.editor))
             if saved is None:
                 return 'No changes.'
+            new_name, message = saved
             await self.servers.sync()
-            renamed = name not in {entry.name for entry in self.servers.entries()}
-            return saved if renamed or not running else f'{saved}\n{await self.servers.restart(name)}'
+            return f'{message}\n{await self.servers.restart(new_name)}' if running else message
         methods = {'start': self.servers.start, 'stop': self.servers.stop, 'restart': self.servers.restart}
         return await methods[action](name)
 
@@ -218,11 +225,13 @@ class MCPCommand:
             raise ValueError('Usage: /mcp install (opens the add-server form)')
         return await run_worker(lambda: install_form(self.servers.store, self.runners, self.editor))
 
-    async def _start_all(self, _: list[str]) -> str:
+    async def _start_all(self, args: list[str]) -> str:
+        _no_arguments('start-all', args)
         entries = self.servers.entries()
         return '\n'.join([await self.servers.start(entry.name) for entry in entries]) or 'No MCP servers to start.'
 
-    async def _stop_all(self, _: list[str]) -> str:
+    async def _stop_all(self, args: list[str]) -> str:
+        _no_arguments('stop-all', args)
         entries = self.servers.entries()
         return '\n'.join([await self.servers.stop(entry.name) for entry in entries]) or 'No MCP servers to stop.'
 
@@ -230,7 +239,7 @@ class MCPCommand:
         store = self.servers.store
         path = store.project_file()
         action = args[0] if args else 'status'
-        if action not in ('status', 'accept', 'revoke'):
+        if len(args) > 1 or action not in ('status', 'accept', 'revoke'):
             raise ValueError('Usage: /mcp trust [status|accept|revoke]')
         if path is None:
             return 'No .clai/mcp_servers.json between here and the repository root.'
@@ -239,6 +248,7 @@ class MCPCommand:
             names = ', '.join(store.project_servers()) or 'none'
             return f'Trusted {path}. Servers loaded: {names}. Any edit to the file requires trusting it again.'
         if action == 'revoke':
+            revoked = store.revoke(path)
             await self.servers.sync()
-            return f'Revoked trust in {path}.' if store.revoke(path) else f'{path} was not trusted.'
+            return f'Revoked trust in {path}.' if revoked else f'{path} was not trusted.'
         return f'{path}: {store.trust_state(path)}'

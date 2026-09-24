@@ -94,6 +94,7 @@ class ServerForm:
             else EXAMPLES['stdio']
         )
         self.status: str | None = None
+        self._raised_from: int | float | None = None
 
     def name_problem(self, name: str) -> str | None:
         """Why `name` cannot be saved, or `None`."""
@@ -138,20 +139,26 @@ class ServerForm:
             return False
 
     def toggle_oauth(self) -> None:
-        """Switch browser sign-in on or off, allowing time for the sign-in when switching on."""
+        """Switch browser sign-in on or off.
+
+        A timeout too short for a browser sign-in is raised while OAuth is on, and restored when it is switched off.
+        """
         try:
             data = _OBJECT.validate_json(self.config)
         except ValidationError:
             self.status = 'Fix the JSON before switching OAuth'
             return
+        timeout = data.get('timeout')
         if data.get('auth') == 'oauth':
             data.pop('auth')
-            if data.get('timeout') == OAUTH_TIMEOUT:
-                data.pop('timeout')
+            if self._raised_from is not None and timeout == OAUTH_TIMEOUT:
+                data['timeout'] = self._raised_from
+            self._raised_from = None
             self.status = None
         else:
             data['auth'] = 'oauth'
-            data['timeout'] = OAUTH_TIMEOUT
+            if isinstance(timeout, int | float) and timeout < OAUTH_TIMEOUT:
+                self._raised_from, data['timeout'] = timeout, OAUTH_TIMEOUT
             self.status = None
             headers = data.get('headers')
             if isinstance(headers, dict) and any(key.lower() == 'authorization' for key in headers):
@@ -444,9 +451,11 @@ def install_form(store: MCPStore, runners: Runners = TERMINAL, editor: Editor = 
     return saved_message(form, store.load().servers[form.name])
 
 
-def edit_form(store: MCPStore, name: str, runners: Runners = TERMINAL, editor: Editor = edit_in_editor) -> str | None:
-    """`/mcp edit NAME`: the same form, prefilled. Returns the saved name's message, or `None` when cancelled."""
+def edit_form(
+    store: MCPStore, name: str, runners: Runners = TERMINAL, editor: Editor = edit_in_editor
+) -> tuple[str, str] | None:
+    """`/mcp edit NAME`: the same form, prefilled. The saved name and message, or `None` when cancelled."""
     form = ServerForm(store, name=name, server=store.load().servers[name])
     if not run_form(form, runners, editor):
         return None
-    return saved_message(form, store.load().servers[form.name])
+    return form.name, saved_message(form, store.load().servers[form.name])
