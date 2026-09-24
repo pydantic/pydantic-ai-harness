@@ -419,8 +419,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         # A workspace path, absolute or relative to the workspace's working directory, resolved
         # against the workspace a call acts on; `None` bounds calls by the working directory itself.
         self._root_spelling = None if root_dir is None else workspace_path(root_dir)
-        # The scope `prepare` resolved for this run's workspace, reused by every call against it.
-        self._prepared: _Scope | None = None
+        # The scope the first call resolved, reused by every later call against the same workspace.
+        self._resolved: _Scope | None = None
         self._allowed_patterns = list(allowed_patterns)
         self._denied_patterns = list(denied_patterns)
         self._protected_patterns = list(protected_patterns)
@@ -466,33 +466,29 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             tools = {name: tool for name, tool in tools.items() if name not in RIPGREP_TOOL_NAMES}
         return tools
 
-    async def prepare(self, workspace: Workspace) -> None:
-        """Resolve the boundary in the run's workspace once, for every call of the run to reuse.
-
-        Raises `UserError` when the working directory is outside `root_dir`.
-        """
-        self._prepared = await self._scope(workspace)
-
     async def _scope(self, workspace: WorkspaceBackend) -> _Scope:
-        """Resolve the boundary and working directory inside `workspace`.
+        """Resolve the boundary and working directory inside `workspace`, once per workspace.
 
-        The working directory is canonical by the workspace contract, so it is not resolved again.
+        Resolution waits for the first file operation, so a run that never touches a file does no
+        workspace I/O. The working directory is canonical by the workspace contract, so it is not
+        resolved again. Raises `UserError` when the working directory is outside `root_dir`.
         """
-        if self._prepared is not None and self._prepared.workspace is workspace:
-            return self._prepared
+        if self._resolved is not None and self._resolved.workspace is workspace:
+            return self._resolved
         facade = _as_workspace(workspace)
         cwd = posixpath.normpath(await facade.working_dir())
-        if self._root_spelling is None:
-            return _Scope(workspace=facade, root=cwd, cwd=cwd)
-        root = await facade.resolve(self._root_spelling)
-        if root != '/':
-            root = await facade.realpath(root)
-        if not _contains(root, cwd):
-            raise UserError(
-                f'The working directory {cwd!r} is outside root_dir {root!r}. '
-                'Set `root_dir` to a directory that contains it, or leave it unset to use the working directory.'
-            )
-        return _Scope(workspace=facade, root=root, cwd=cwd)
+        root = cwd
+        if self._root_spelling is not None:
+            root = await facade.resolve(self._root_spelling)
+            if root != '/':
+                root = await facade.realpath(root)
+            if not _contains(root, cwd):
+                raise UserError(
+                    f'The working directory {cwd!r} is outside root_dir {root!r}. '
+                    'Set `root_dir` to a directory that contains it, or leave it unset to use the working directory.'
+                )
+        self._resolved = _Scope(workspace=facade, root=root, cwd=cwd)
+        return self._resolved
 
     def _matches(self, path: str, pattern: str) -> bool:
         """Glob-match a relative path, treating a leading `**/` as 'any directory, including the root'.

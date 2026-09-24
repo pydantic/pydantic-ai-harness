@@ -46,7 +46,7 @@ from pydantic_ai_harness.filesystem._toolset import (
     _sanitize_recoverable_error,
 )
 
-from .._tool_calls import call_tool
+from .._tool_calls import call_tool, call_tools
 from .._workspace import local_workspace
 
 
@@ -58,6 +58,27 @@ class ReadOnlyMount(LocalWorkspaceBackend):
 
     async def make_dir(self, path: str) -> None:
         raise WorkspaceReadOnlyError('read-only mount')
+
+
+class UntouchableWorkspace(WorkspaceBackend):
+    """A sandbox-like workspace whose first operation would create a billed environment, so any operation fails."""
+
+    @property
+    def ref(self) -> None:
+        return None
+
+    async def working_dir(self) -> str:
+        raise AssertionError('the workspace was touched')  # pragma: no cover
+
+
+class CountingWorkspace(LocalWorkspaceBackend):
+    """A local workspace that counts `working_dir` calls."""
+
+    working_dir_calls = 0
+
+    async def working_dir(self) -> str:
+        self.working_dir_calls += 1
+        return await super().working_dir()
 
 
 class FailingWorkspace(LocalWorkspaceBackend):
@@ -302,7 +323,7 @@ class TestPathSecurity:
 
 
 class TestRootDir:
-    """`root_dir` is resolved once at run start, against the run's workspace."""
+    """`root_dir` is resolved on the run's first file operation, against the run's workspace."""
 
     @pytest.fixture(autouse=True)
     def asyncio_only(self, anyio_backend: object) -> None:
@@ -321,12 +342,22 @@ class TestRootDir:
         )
         assert 'shared notes' in result
 
-    async def test_root_below_the_working_directory_fails_the_run(self, tmp_path: Path) -> None:
+    async def test_root_below_the_working_directory_fails_the_first_file_operation(self, tmp_path: Path) -> None:
         (tmp_path / 'src').mkdir()
+        capabilities = [FileSystem[None](root_dir='src')]
+        assert await call_tools(capabilities, [], workspace=local_workspace(tmp_path)) == []
         with pytest.raises(UserError, match=r"The working directory '.*' is outside root_dir '.*/src'"):
-            await call_tool(
-                [FileSystem[None](root_dir='src')], 'list_directory', {}, workspace=local_workspace(tmp_path)
-            )
+            await call_tool(capabilities, 'list_directory', {}, workspace=local_workspace(tmp_path))
+
+    async def test_the_boundary_is_resolved_once_per_run(self, tmp_path: Path) -> None:
+        (tmp_path / 'a.txt').write_text('a\n')
+        workspace = CountingWorkspace(tmp_path)
+        read: tuple[str, dict[str, object]] = ('read_file', {'path': 'a.txt'})
+        await call_tools([FileSystem[None]()], [read, read], workspace=workspace)
+        assert workspace.working_dir_calls == 1
+
+    async def test_a_run_without_file_operations_does_no_workspace_io(self) -> None:
+        assert await call_tools([FileSystem[None](root_dir='/srv')], [], workspace=UntouchableWorkspace()) == []
 
     async def test_no_workspace_fails_the_run(self) -> None:
         with pytest.raises(UserError, match='`FileSystem` needs a workspace'):

@@ -122,8 +122,8 @@ Relative paths resolve from the workspace's working directory, which is also
 the default `root_dir`. Set `root_dir` higher, such as a parent holding sibling
 projects, to let the model reach beyond the project directory without spelling
 out absolute paths. The working directory must be inside `root_dir`; a
-`root_dir` below it fails the run at its start. To work in a subdirectory, set
-it on the workspace instead (`LocalWorkspace('./repo')`).
+`root_dir` below it fails the run on its first file operation. To work in a
+subdirectory, set it on the workspace instead (`LocalWorkspace('./repo')`).
 
 `list_directory`, `find_files`, `search_files`, `list_files`, and `grep` return
 paths relative to the working directory, even when searching a subdirectory.

@@ -49,7 +49,7 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     `None` (the default) is the workspace's working directory; a relative path
     resolves against it. Set it higher to let the model reach beyond the
     working directory, e.g. a parent holding sibling projects; the working
-    directory must be inside it, or the run fails at its start. `'/'` turns
+    directory must be inside it, or the run fails on its first file operation. `'/'` turns
     the containment checks off.
     """
 
@@ -119,7 +119,7 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     """
 
     _run_toolset: FileSystemToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
-    """This run's toolset, which `before_run` prepares; `None` outside a run."""
+    """This run's toolset, which resolves the boundary on its first operation; `None` outside a run."""
 
     def __post_init__(self) -> None:
         if self.cwd is not None:
@@ -139,19 +139,14 @@ class FileSystem(AbstractCapability[AgentDepsT]):
                 raise ValueError(f'{name} must be a positive integer, got {value!r}')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> FileSystem[AgentDepsT]:
-        """A per-run copy whose toolset `before_run` prepares against the run's workspace."""
+        """A per-run copy with its own toolset, so the boundary it resolves stays with this run."""
         run = replace_no_init(self)
         run._run_toolset = run._make_toolset()
         return run
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
-        """Fail without a workspace, and resolve the boundary once for the run.
-
-        Raises `UserError` when the working directory is outside `root_dir`.
-        """
+        """Fail without a workspace, without touching it: the boundary waits for the first file operation."""
         require_workspace(ctx.workspace, 'FileSystem')
-        assert self._run_toolset is not None, '`for_run` gives every run its own toolset'
-        await self._run_toolset.prepare(ctx.workspace)
 
     def get_toolset(self) -> FileSystemToolset[AgentDepsT] | FilteredToolset[AgentDepsT]:
         """The filesystem toolset: this run's, once `for_run` has made one."""
