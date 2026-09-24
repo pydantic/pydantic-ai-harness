@@ -8,48 +8,134 @@ Everything a plugin can do goes through one object, the `PluginHost`. There is n
 global registry to import and no magic file to name. You get a `host`, you tell it
 what you want, you're done.
 
+## Startup
+
+`clai2 --help` parses arguments without loading the agent or plugins. Interactive
+startup defers model menus and provider integrations until you open those menus,
+log in, or run a prompt. Once the prompt is ready, a background thread imports
+them, so the first prompt usually finds them loaded; if it arrives sooner, it waits
+for the rest of those imports. Enabled plugins still load before the first prompt;
+their initialization contributes to startup time.
+`/login` offers both Codex and GitHub Copilot without loading their integrations for
+completion. Copilot requests use your saved login through the lazy provider resolver.
+
 ## Connect MCP servers
 
-The enabled built-in `mcp` plugin provides `/mcp`. CLAI includes the MCP client;
-there is no extra client package to install. Local server programs and their
-runtimes still need to be installed separately. No servers are configured by
-default, and loading the plugin does not start programs or contact endpoints.
-
-Only configure servers you trust. Stdio servers run programs with your user
-permissions. HTTP servers receive tool arguments and can return untrusted content.
-Plugin settings are stored as plain JSON, not in the credential store. Prefer
-inherited environment variables for local credentials; do not paste secrets into
-slash commands, project files, or saved `headers`/`env` settings.
-
-Configure a local server using an executable and an argument list, not a shell command:
+`/mcp` is the front door for MCP servers, modelled on Code Puppy's `/mcp`. The
+built-in `mcp` plugin provides it and includes the MCP client; local server
+programs and their runtimes (`npx`, `uvx`, ...) still need to be installed
+separately.
 
 ```text
-/plugins add mcp pydantic_clai2.mcp '{"servers":{"local":{"transport":"stdio","command":"python","args":["/absolute/path/to/server.py"]}}}'
-/mcp
-/mcp tools local
+/mcp                                  status dashboard (also /mcp list, /mcp status)
+/mcp install                          add a server in the form below
+/mcp start NAME | stop NAME | restart NAME | start-all | stop-all
+/mcp status NAME                      target, env references, tools, last error
+/mcp tools NAME                       connect and list the tools the agent sees
+/mcp logs NAME [LINES]                server stderr and lifecycle events
+/mcp auth NAME [logout]               sign in to an OAuth server again, or sign out
+/mcp edit NAME                        the same form, prefilled
+/mcp remove NAME
+/mcp trust [status|accept|revoke]     load this repository's .clai/mcp_servers.json
+/mcp help
 ```
 
-For Streamable HTTP, use `{"servers":{"remote":{"transport":"http","url":"https://example.com/mcp"}}}`
-as the JSON argument instead. Replace the example endpoint with your server.
-Stdio settings also accept `cwd` and `env`; HTTP settings accept `headers`.
-HTTP redirects are rejected; configure the final MCP endpoint URL.
-Each server accepts `enabled: false` to keep its configuration without using it.
-Names start with a letter and contain only letters and digits. Underscores are
-reserved for the separator so server/tool name pairs cannot produce the same name.
-The model sees tools prefixed by server name, for example `local_search`.
+`/mcp install` opens Code Puppy's custom server form:
 
-`/mcp` and `/mcp list` show names, transports, and enabled state, not connection
-health or credentials. `/mcp tools NAME` connects to one enabled server, lists
-its prefixed tool names, then closes that connection. Connection errors are
-reported by the shell. During agent runs, core's `MCPToolset` owns connection
-startup, tool execution, and cleanup. The plugin adds no telemetry beyond core's
-tool spans. It does not enable MCP sampling or native provider-side MCP.
+```text
+ Add Custom MCP Server
+ Server Name: docs              | Name   docs
+ Server Type: http              | Type   http - Streamable HTTP endpoint ...
+ URL: https://mcp.example.com   |
+ OAuth sign-in: on              |
+ JSON Configuration (valid)     | {"type": "http", "url": "https://...", "auth": "oauth", "timeout": 330}
+ Load example for http          |
+ Save & Install                 | Configuration is valid
+ Cancel                         |
+```
 
-`/plugins disable mcp` removes both the tools and command; `/plugins enable mcp`
-restores them. To replace saved configuration, `/plugins remove mcp` first, then
-run `/plugins add` again. Removing the saved override restores the empty built-in.
-Repository declarations in `.clai/settings.json` stay disabled until explicitly
-approved through `/plugins enable mcp`, like other project plugins.
+- **Server Type** switches between `stdio` (a local program), `http` (Streamable
+  HTTP), and `sse` (Server-Sent Events, used by older servers). An untouched
+  example follows the type; a configuration you have edited is kept.
+- **URL** (for `http` and `sse`) or **Command** (for `stdio`, the program and its
+  arguments, split like a shell would but run without one) is typed straight
+  into the form and written into the JSON.
+- **JSON Configuration** opens `$VISUAL` or `$EDITOR` (default `vi`) on the
+  server's JSON, with a one-line input as a fallback when no editor runs. The
+  preview says whether it is valid and why not.
+- **OAuth sign-in** appears for `http` and `sse` servers. Switching it on sets
+  `"auth": "oauth"`, allows 330 seconds for the handshake so there is time to
+  sign in, and drops any `Authorization` header. FastMCP runs discovery, dynamic
+  client registration, PKCE, and a browser sign-in through a loopback callback
+  when the server connects. The access and refresh tokens and the registered
+  client go to your OS keyring (the `mcp-NAME` entry under `pydantic-clai2`, or a
+  private `credentials-mcp-NAME.json` when no keyring exists), so restarting CLAI
+  reuses or refreshes them instead of signing in again. Tokens belong to the URL
+  they were issued for: changing the URL signs in again. OAuth needs `https`,
+  except for loopback servers.
+
+The dashboard shows each server as `running` (connected), `ready` (enabled;
+connects on the next prompt), `stopped`, or `error` (a failed connection, or a
+referenced environment variable that is not set). Saved and enabled servers are
+available to the agent from the next prompt; `/mcp start` is not required, but
+connects now and lists the tools. Once connected, a server stays connected
+between prompts. A server that cannot connect is marked `error` and left out of
+the prompt instead of failing it; `/mcp logs NAME` shows why. `/mcp stop`
+disconnects the server and disables it until `/mcp start`. The model sees tools
+prefixed by server name, for example `local_search`.
+
+Only install servers you trust. Stdio servers run programs with your user
+permissions, launched as an executable plus arguments without a shell. Remote
+servers receive tool arguments and can return untrusted content. HTTP redirects
+are rejected; configure the final endpoint URL.
+
+### Where servers are stored
+
+`/mcp install` and `/mcp edit` write `mcp.json` in the CLAI config folder
+(`~/.config/pydantic-clai2/`, or under `$XDG_CONFIG_HOME`). The file is created
+readable only by you. Do not put secrets in it: write `$VAR` or `${VAR}` in an
+`env` or `headers` value and CLAI fills it from its own environment when it
+connects, so the file holds only the reference; a server whose variable is
+unset shows as `error` until you set it. Stdio server stderr goes to `mcp_logs/NAME.log` next to
+`mcp.json`, which `/mcp logs` reads. The file shape is:
+
+```json
+{"servers": {"local": {"type": "stdio", "command": "uvx", "args": ["my-mcp-server"], "env": {"TOKEN": "$MY_TOKEN"}},
+             "remote": {"type": "http", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer $API_KEY"}}}}
+```
+
+Stdio servers also accept `cwd`; `http` and `sse` servers accept `auth: "oauth"`;
+every server accepts `timeout` (seconds for the initialize handshake) and
+`enabled: false`. Names start with a letter and contain letters, digits, and
+hyphens. Underscores are reserved for the separator so server/tool name pairs
+cannot produce the same name.
+
+### Project servers and trust
+
+A repository can commit `.clai/mcp_servers.json` (same `servers` shape, found
+between the working directory and the git root). Because a stdio server runs a
+program, its servers do not load until you run `/mcp trust accept`. Trust is
+stored in your `mcp.json`, keyed by the file's path and a SHA-256 of its
+contents: any change to the file unloads its servers until you accept again, and
+a repository cannot trust itself. A symlinked project file or `.clai` folder is
+never trusted, so a repository cannot point at a file you trusted elsewhere.
+`/mcp stop` on a project server lasts for the
+session; edit the project file to change it permanently. When a name exists in
+both places, your own server wins.
+
+### Plugin settings and gaps
+
+Servers configured the older way, as plugin settings
+(`/plugins add mcp pydantic_clai2.mcp '{"servers": {...}}'`), still load and show
+up in `/mcp` with source `plugin`; change or remove them through `/plugins`.
+The older `"transport"` key is still read as `"type"`.
+`/plugins disable mcp` removes both the tools and the command.
+
+Compared with Code Puppy, CLAI has one agent, so there are no per-agent server
+bindings and no `silence-warning` command: every enabled server is offered to
+the agent. There is no built-in server catalog, so there is no `/mcp search`.
+The plugin adds no telemetry beyond core's tool spans, and does not enable MCP
+sampling or native provider-side MCP.
 
 ## On-demand authoring help
 
@@ -90,13 +176,53 @@ Output-validation and HTTP transport retry budgets are unchanged.
 
 ## Credentials
 
-CLAI's `/login openai-codex` and the vllm and openrouter connections store tokens
+CLAI's `/login openai-codex`, `/login github-copilot`, and the vllm and openrouter connections store tokens
 in the configured keyring backend, not plugin settings. Large token bundles use
 multiple entries to fit Windows Credential Manager's size limit. When no keyring
 backend exists, credentials go to a per-account `0600` file under the user's CLAI config
 directory instead. None of this changes plugin APIs. See
 [Codex authentication](README.md#codex-authentication) for storage and security
 details.
+
+### GitHub Copilot subscriptions
+
+```bash
+uv run clai2
+```
+
+Run `/login github-copilot`, then open `/add_model` and choose `github-copilot`.
+The provider menu also starts login when no credentials exist. No application
+registration or client ID configuration is required. CLAI supplies the same
+[public Copilot OAuth client ID as Pi](https://github.com/earendil-works/pi/blob/fde38ed7c2f64434beffc6c0ec3b9994cb89ae23/packages/ai/src/auth/oauth/github-copilot.ts#L10-L11)
+and requests `read:user` access to your GitHub profile. This identifies the existing
+Copilot OAuth application, not a separately registered CLAI application.
+`GITHUB_COPILOT_CLIENT_ID` is an optional override for your own device-enabled OAuth
+application; unset or blank uses the bundled default. The workspace pins the merged
+Pydantic AI device-flow implementation until its release.
+
+Login prints a code and `https://github.com/login/device`, then starts polling.
+Open the link on this or another device and approve only your own session's code.
+CLAI does not launch a browser, so a text browser cannot block login or take over
+an SSH terminal. Ctrl-C stops polling; GitHub controls expiry. There is no localhost callback.
+GitHub authorization does not establish Copilot access: the menu queries your
+account's catalog and keeps only picker-enabled `/chat/completions` models.
+The shared model menu includes details and `Ctrl+S` settings. Subscription and
+organization policy still control inference access. A known ID also works with
+`/add_model github-copilot:claude-haiku-4.5`.
+
+The `github-copilot` keyring account is separate from Codex and named API keys.
+Without a keyring, CLAI reports the plaintext `credentials-github-copilot.json`
+fallback, created with mode `0600`. Tokens and issuance time stay out of settings,
+history, and login output. Expiring tokens require another `/login github-copilot`;
+there is no automatic refresh. Failed or cancelled authorization preserves the
+previous login.
+
+Saved login takes precedence over `GITHUB_COPILOT_API_KEY`,
+`GITHUB_COPILOT_API_TOKEN`, and `COPILOT_GITHUB_TOKEN`, checked in that order when
+no login is saved. CLAI does not read `GH_TOKEN`, `GITHUB_TOKEN`, or another
+application's token files. This is shell-owned authentication, not a plugin API.
+Core owns inference and its telemetry; CLAI adds no login-specific spans.
+Bare `/login` continues to sign in to Codex.
 
 ## Desktop notifications
 
@@ -544,6 +670,13 @@ tools for cleanup; it does not undo completed side effects or retry the run.
 Retained failed turns and restored interrupted sessions are marked interrupted so
 core can close unanswered tool calls on the next prompt without replaying them.
 A prompt cancelled by `turn_start` never starts an agent run and is not retained.
+`/fork` fires both hooks for its background run too: a `turn_start` that cancels
+the prompt refuses the fork, and `turn_end` arrives when the fork finishes.
+
+Codex token-refresh failures show `/login openai-codex` recovery advice, including
+when the SDK wraps them as connection errors. This changes only the terminal
+message: `turn_end.error` still contains the original exception and its chain.
+Headless runs show the same advice on stderr and exit with code 1.
 
 Every other name is a Pydantic AI lifecycle hook, spelled exactly as on core's
 `Hooks().on`, with the same handler signature. The ones people reach for:
@@ -597,6 +730,9 @@ host.commands.register(
 ```
 
 The handler gets the arguments as a list of strings and returns the text to show.
+Arguments are split like a shell command line, so quotes group words. Pass
+`raw=True` to receive the unsplit argument text as one string instead (an empty
+list when there is none); `/fork` does this so prompts keep their apostrophes.
 It may be `async`. Add `complete=` to offer Tab suggestions. The registry filters
 command names and returned candidates by case-sensitive substring, replacing the
 whole typed fragment when selected. Return full candidates, not just suffixes.
@@ -795,6 +931,26 @@ readable text only; the colours in the row belong to CLAI. A fragment that raise
 shows its error name in the row instead, so one broken plugin cannot take the
 footer down.
 
+### Offer a spinner: `host.spinner(name, frames, *, interval, description)`
+
+Adds a working animation to `/spinner`. The user selects it there or with
+`/set display.spinner NAME`; registering does not select it.
+
+```python
+from pydantic_clai2.plugins import PluginHost
+
+
+def activate(host: PluginHost[None]) -> None:
+    host.spinner('wave', ['~   ', ' ~  ', '  ~ ', '   ~'], interval=0.1, description='a small wave')
+```
+
+Frames are capped at 40 characters and padded to one terminal width, and
+`interval` is clamped to 0.02-1 seconds per frame (0.2 by default). A blank or
+spaced name, an empty frame list, or a control character in a frame raises
+`ValueError` during activation. A plugin spinner replaces a builtin of the same
+name; the user's `spinners.json` replaces both. Unloading the plugin removes it,
+and a selected spinner that is gone shows the default `working`.
+
 ## Rules that keep plugins predictable
 
 - Handlers are `async`. There is no sync variant of anything.
@@ -943,6 +1099,9 @@ Tab completes added models.
 `Ctrl+S` in `/add_model` opens the same editor. Edits save immediately and apply
 on the next prompt. `r` resets a field; Esc or Ctrl-C goes back. Fixed choices
 open a picker; numeric fields accept typed values, and empty input resets.
+
+The built-in model catalog and `/set model` completions include
+`openai-codex:gpt-6-sol` and `openai-codex:gpt-6-luna`.
 
 For `openai-codex` models, open `/model_settings openai-codex:gpt-6-astra`
 (or your saved Codex model), then **Service Tier / Fast Mode**. Choose
