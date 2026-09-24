@@ -102,7 +102,7 @@ async def test_enter_queues_alt_enter_steers_oldest(sequence: str) -> None:
         assert await live.read() == 'idle prompt'
 
 
-@pytest.mark.parametrize('head', ['/help', KeyboardInterrupt(), EOFError(), 'follow up'])
+@pytest.mark.parametrize('head', ['/help', '!git status', KeyboardInterrupt(), EOFError(), 'follow up'])
 @pytest.mark.parametrize('available', [False, True])
 async def test_unavailable_steering_preserves_queue(head: str | KeyboardInterrupt | EOFError, available: bool) -> None:
     attempted: list[str] = []

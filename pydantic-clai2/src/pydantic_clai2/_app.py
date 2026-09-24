@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -47,6 +47,8 @@ from .screen import Screen
 from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
+from .shell_passthrough import HELP as SHELL_HELP
+from .shell_passthrough import run_shell_command, shell_command
 from .speculation import Speculation
 from .status import Status, StatusLine
 from .theme_picker import theme_command
@@ -343,7 +345,9 @@ def create_shell(
             complete=lambda args: model_completions(context, args),
         )
     )
-    commands.register(Command(name='help', description='Show commands', handler=commands.help))
+    commands.register(
+        Command(name='help', description='Show commands', handler=lambda args: f'{commands.help(args)}\n{SHELL_HELP}')
+    )
     commands.register(
         Command(
             name='new',
@@ -505,6 +509,10 @@ class _Shell(Generic[DepsT, OutputT]):
         self.images.notice = f'Steering sent: {text}'
         return True
 
+    def _released(self) -> AbstractAsyncContextManager[None]:
+        """Hand the terminal to a command or shell, restoring the editor afterwards."""
+        return (self.editor.suspended if self.editor is not None else bare_screen)()
+
     async def _read_loop(self) -> SessionEndReason:
         while True:
             self.images.retain(
@@ -534,8 +542,14 @@ class _Shell(Generic[DepsT, OutputT]):
             if self.editor is not None:
                 self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
             self.console.print()
+            if (command := shell_command(text)) is not None:
+                async with self._released():
+                    await run_shell_command(command, console=self.console, interrupts=self.interrupts)
+                if self.interrupts.exit_requested:
+                    return 'exit'
+                continue
             if is_command_input(text):
-                async with (self.editor.suspended if self.editor is not None else bare_screen)():
+                async with self._released():
                     await self.interrupts.run(
                         _execute_command(self.commands, text, console=self.console, status=self.status)
                     )
