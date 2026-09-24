@@ -297,18 +297,17 @@ class LivePrompt:
         muted, reset = theme.sgr(theme.MUTED), '\x1b[0m'
         if width < 6 or height < 6:
             return tuple(self.buffer.rows(width=width, limit=1))
-        rows: list[str] = []
-        panel = self.panel(self.spinner().frame(self.clock()))
-        panel_limit = max(1, height // 6)
-        rows.extend(truncate(row, width) + reset for row in panel[:panel_limit])
-        if len(panel) > panel_limit:
-            rows.append(muted + f'+{len(panel) - panel_limit} more' + reset)
-        queue_limit = max(1, height // 6)
-        for text in self.queued_messages[:queue_limit]:
-            label = 'Command' if is_command_input(text) else 'Follow-up'
-            rows.append(muted + truncate(f'{label}: {" ".join(terminal_text(text).split())}', width) + reset)
-        if len(self.queued_messages) > queue_limit:
-            rows.append(muted + f'+{len(self.queued_messages) - queue_limit} more queued' + reset)
+        # `paint` keeps `height - 2` rows; the title, one draft row, the rule, and the footer need four.
+        room = height - 6
+        limit = max(1, height // 6)
+        panel = [truncate(row, width) + reset for row in self.panel(self.spinner().frame(self.clock()))]
+        rows = _capped(panel, limit=limit, room=room, more=muted + '+{} more' + reset)
+        queued = [
+            muted + truncate(f'{label}: {" ".join(terminal_text(text).split())}', width) + reset
+            for text in self.queued_messages
+            for label in ('Command' if is_command_input(text) else 'Follow-up',)
+        ]
+        rows += _capped(queued, limit=limit, room=room - len(rows), more=muted + '+{} more queued' + reset)
         title = ''
         if self.interrupts.active:
             head, glyph = ' Working ', self.spinner().frame(self.clock())
@@ -417,3 +416,13 @@ class LivePrompt:
             self._completion_worker.close()
             self.console.file = original
             self.output.release()
+
+
+def _capped(rows: list[str], *, limit: int, room: int, more: str) -> list[str]:
+    """Up to `limit` rows plus a `more` count for the rest, never taller than `room`."""
+    if len(rows) <= min(limit, room):
+        return rows
+    if room <= 0:
+        return []
+    shown = rows[: min(limit, room - 1)]
+    return [*shown, more.format(len(rows) - len(shown))]

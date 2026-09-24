@@ -299,6 +299,8 @@ async def test_forks_fire_turn_hooks() -> None:
             event.cancel('policy says no')
         elif isinstance(event, TurnStart) and event.text == 'draft':
             event.text = 'rewritten'
+        elif isinstance(event, TurnStart) and event.text == 'broken hook':
+            raise RuntimeError('hook broke')
 
     forks = Forks(
         console=Console(file=output, width=200),
@@ -308,6 +310,8 @@ async def test_forks_fire_turn_hooks() -> None:
     )
     with pytest.raises(ValueError, match='Fork cancelled by a plugin: policy says no'):
         await forks.fork_command(['forbidden'])
+    with pytest.raises(RuntimeError, match='hook broke'):
+        await forks.fork_command(['broken hook'])
     assert forks.records == ()
     await forks.fork_command(['draft'])
     await forks.fork_command(['explode'])
@@ -325,7 +329,10 @@ async def test_forks_fire_turn_hooks() -> None:
     assert ends['explode'].outcome == 'failed'
     assert isinstance(ends['explode'].error, RuntimeError)
     assert ends['block'].outcome == 'cancelled'
-    assert 'forbidden' not in ends
+    # A refused fork still closes its turn, as a refused foreground turn does.
+    assert ends['forbidden'].outcome == 'cancelled'
+    assert ends['broken hook'].outcome == 'failed'
+    assert isinstance(ends['broken hook'].error, RuntimeError)
 
 
 async def test_live_rows_follow_each_fork(tmp_path: Path) -> None:
@@ -364,7 +371,16 @@ async def test_stream_events_drive_the_activity(tmp_path: Path) -> None:
     assert record.progress.activity == 'responding'
 
 
-def test_editor_paints_fork_rows_above_the_rule() -> None:
+@pytest.mark.parametrize(
+    ('height', 'panel_rows'),
+    [
+        (12, ['row 0', 'row 1', '+3 more']),
+        (8, ['row 0', '+4 more']),
+        (7, ['+5 more']),
+        (6, []),
+    ],
+)
+def test_editor_paints_fork_rows_above_the_rule(height: int, panel_rows: list[str]) -> None:
     rows = [f'row {index}' for index in range(5)]
     seen: list[str] = []
 
@@ -374,7 +390,7 @@ def test_editor_paints_fork_rows_above_the_rule() -> None:
 
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
         live = LivePrompt(
-            console=Console(file=io.StringIO(), force_terminal=True, width=40, height=12),
+            console=Console(file=io.StringIO(), force_terminal=True, width=40, height=height),
             commands=Commands(),
             history=InMemoryHistory(),
             images=ImageInput(),
@@ -385,8 +401,10 @@ def test_editor_paints_fork_rows_above_the_rule() -> None:
         )
         plain = [Text.from_ansi(row).plain for row in live.frame()]
     assert seen == [BUILTIN_SPINNERS[DEFAULT_SPINNER].frames[0]]
-    assert plain[:3] == ['row 0', 'row 1', '+3 more']
-    assert plain[3].startswith('\u2500')
+    # The surface keeps `height - 2` rows, so fork rows give way before the title, draft, rule, and footer.
+    assert len(plain) <= height - 2
+    assert plain[: len(panel_rows)] == panel_rows
+    assert plain[len(panel_rows)].startswith('\u2500')
 
 
 def test_completion(tmp_path: Path) -> None:

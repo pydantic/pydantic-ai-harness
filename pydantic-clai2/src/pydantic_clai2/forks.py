@@ -191,8 +191,14 @@ class Forks(Generic[DepsT, OutputT]):
         A plugin that cancels or rejects the prompt refuses the fork, as it would refuse a turn.
         """
         begin = TurnStart(text=prompt)
-        await self._fire(begin)
+        # Every `turn_start` gets its `turn_end`, as in the foreground, so plugins can close per-turn state.
+        try:
+            await self._fire(begin)
+        except Exception as exc:
+            await self._fire(TurnEnd(text=begin.text, outcome='failed', error=exc))
+            raise
         if begin.cancelled:
+            await self._fire(TurnEnd(text=begin.text, outcome='cancelled'))
             raise ValueError(f'Fork cancelled by a plugin: {begin.cancel_reason or "no reason given"}')
         prompt = begin.text
         session = self._spawn(model, self._snapshot())
