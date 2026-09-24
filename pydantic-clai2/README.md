@@ -1047,27 +1047,26 @@ as Code Puppy. It is off by default and saved as `run.speculative_code_mode`, so
 `/set run.speculative_code_mode true` does the same. The next turn uses the new
 value; a turn already running keeps the tools it started with.
 
-While it is on, every tool except `write_file`, `edit_file`, and `shell` becomes
-an async function inside one harness `CodeMode` `run_code` tool (`CodeMode` keeps
-tools that run a program from a string, like `shell`, native): a
+While it is on, every tool except `write_file` and `edit_file` becomes an async
+function inside one harness `CodeMode` `run_code` tool, `shell` included: a
 persistent Python sandbox with the working directory mounted read-write at its
 real path, isolated environment variables, the host clock, and no network. The
 model writes one snippet that calls many tools, and CLAI runs it while the model
 is still writing:
 
 - **Eager execution** runs each complete statement as soon as it has streamed,
-  so a slow tool call starts before the snippet is finished.
+  so a slow `shell` build or test starts before the snippet is finished.
 - **Speculation** starts `list_files`, `read_file`, and `grep` calls whose
   arguments are all literals the moment their line has streamed. Only these
   read-only tools speculate, because an early call may belong to a branch the
-  snippet never takes.
+  snippet never takes. Writes and shell commands never start speculatively.
 
 The model gets instructions for writing snippets that benefit. On Anthropic
 models CLAI also sets `anthropic_eager_input_streaming`, since Anthropic
 otherwise sends tool arguments in one burst at the end, which leaves no time to
 run anything early. Tools called from inside `run_code` do not print their own
 summaries or previews; the snippet already chooses what to return. Native
-`write_file`, `edit_file`, and `shell` calls display as before.
+`write_file` and `edit_file` calls still show their diffs.
 
 A pinned row above the footer shows the session's totals while the switch is on:
 

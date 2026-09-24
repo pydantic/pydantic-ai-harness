@@ -41,7 +41,7 @@ from pydantic_clai2.speculative_mode import (
     GUIDANCE,
     NATIVE_TOOLS,
     SPECULATIVE_TOOLS,
-    ReportSpeculation,
+    SpeculativeExecution,
     speculative_capabilities,
 )
 
@@ -164,6 +164,23 @@ class TestFold:
         await agent.run('hi')
         assert {*SPECULATIVE_TOOLS, *NATIVE_TOOLS} <= set(seen)
 
+    async def test_coder_shell_folds_into_run_code(self) -> None:
+        seen: list[AgentInfo] = []
+
+        def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            seen.append(info)
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent: Agent[None, str] = Agent(
+            streamed(respond),
+            capabilities=[Coder(repo_context=False), *speculative_capabilities(SpeculationCounters())],
+        )
+        await agent.run('hi')
+        [info] = seen
+        tools = {tool.name: tool for tool in info.function_tools}
+        assert sorted(tools) == ['edit_file', 'run_code', 'write_file']
+        assert 'async def shell(' in (tools['run_code'].description or '')
+
     async def test_writes_stay_native_and_guidance_rides_along(self) -> None:
         seen: list[AgentInfo] = []
 
@@ -241,10 +258,10 @@ def claimed(*, ready: bool, elapsed_ms: float) -> SpeculativeCallClaimedEvent:
     )
 
 
-class TestReportSpeculation:
+class TestSpeculativeExecution:
     async def test_partial_hits_count_without_time(self) -> None:
         counters = SpeculationCounters()
-        report = ReportSpeculation[None](counters)
+        report = SpeculativeExecution[None](counters)
         ctx = RunContext[None](deps=None, model=TestModel(), usage=RunUsage())
         for event in (
             claimed(ready=True, elapsed_ms=250),

@@ -2,8 +2,10 @@
 
 Every tool the run has, plugin and MCP tools included, becomes a function inside harness
 `CodeMode`'s `run_code` except `write_file` and `edit_file`, which stay native so their diffs
-render as usual. Harness also keeps tools that execute a string as a program, such as `shell`,
-native, so the model never writes a script that passes a second script as a string. Only the read-only trio may launch speculatively. That allowlist is the safety
+render as usual. `shell` folds in too, as Code Puppy's shell tool does: harness `CodeMode` keeps
+tools marked with `code_arg_name` metadata native by default, so `SpeculativeExecution` clears
+that marker on every tool it sandboxes. Without it, a coding turn is all native `shell` calls
+and eager execution never starts a build or test while the model is still writing. Only the read-only trio may launch speculatively. That allowlist is the safety
 contract: an early launch may run for a branch the snippet never takes, so it is reserved for
 calls that are harmless to re-run or discard. Everything else waits for eager or normal
 execution.
@@ -14,7 +16,7 @@ the sandbox; anything remote goes through a wrapped tool such as `shell`.
 """
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability
@@ -39,10 +41,10 @@ NATIVE_TOOLS = frozenset({'write_file', 'edit_file'})
 """CLAI's equivalents of Code Puppy's native `create_file` and `replace_in_file`."""
 
 GUIDANCE = """\
-Speculative execution is on. Use `write_file`, `edit_file`, and tools that run
-a program from a string, such as `shell`, as native tools outside `run_code`;
-they are not available as functions inside the sandbox. Every other tool is an
-async function inside `run_code`, a persistent sandboxed Python REPL. Call `run_code` with a Python snippet to use them; do
+Speculative execution is on. Use `write_file` and `edit_file` as native tools,
+outside `run_code`; they are not available as functions inside the sandbox.
+Every other tool, including `shell`, is an async function inside `run_code`, a
+persistent sandboxed Python REPL. Call `run_code` with a Python snippet to use them; do
 not attempt to call those functions as native tools.
 
 The sandbox also has direct capabilities, no function call needed:
@@ -51,8 +53,8 @@ The sandbox also has direct capabilities, no function call needed:
   `pathlib.Path` to read, write, glob, and stat project files directly.
 - Environment variables (isolated), in-memory scratch files, and the real
   clock (`time` module) work.
-- There is NO network in the sandbox: anything remote goes through a tool,
-  such as the native `shell` (e.g. `curl`).
+- There is NO network in the sandbox: anything remote goes through a
+  function like `shell` (e.g. `curl`).
 
 Use raw Python strings for regex patterns so backslashes are not invalid escapes.
 
@@ -82,8 +84,10 @@ determines how fast it runs:
 4. Never introduce a variable just to pass it: `q = "x"` followed by
    `grep(pattern=q)` runs cold; `grep(pattern="x")` runs early. Repeat the
    literal even if it feels less DRY; here, DRY loses to speed.
-5. Only the read functions speculate, but eager execution runs any sandbox
-   call as soon as its statement closes, before generation ends.
+5. Writes and shell commands never speculate, but eager execution can
+   execute them as soon as their statements close, before generation ends.
+   Put a slow build or test command on its own early line so it runs while
+   you write the rest of the snippet.
    Obtain required approval BEFORE emitting a side-effectful statement;
    later code cannot undo it. Run independent calls concurrently with
    `await asyncio.gather(...)` (positional awaitables only; no other
@@ -106,8 +110,8 @@ def _sandboxed(ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> bool:
 
 
 @dataclass
-class ReportSpeculation(AbstractCapability[AgentDepsT]):
-    """Teach the snippet shape, stream tool arguments, and count outcomes into the session row."""
+class SpeculativeExecution(AbstractCapability[AgentDepsT]):
+    """Fold code tools in, teach the snippet shape, stream tool arguments, and count outcomes."""
 
     counters: SpeculationCounters
 
@@ -121,6 +125,18 @@ class ReportSpeculation(AbstractCapability[AgentDepsT]):
         Other providers stream tool arguments already and ignore the setting.
         """
         return {'anthropic_eager_input_streaming': True}
+
+    async def prepare_tools(self, ctx: RunContext[AgentDepsT], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
+        """Clear `code_arg_name` so `CodeMode` sandboxes `shell` like any other tool.
+
+        Core runs this inside every capability's wrapper toolset, so `CodeMode` sees the result.
+        """
+        return [
+            replace(tool_def, metadata={k: v for k, v in tool_def.metadata.items() if k != 'code_arg_name'})
+            if tool_def.metadata and 'code_arg_name' in tool_def.metadata and _sandboxed(ctx, tool_def)
+            else tool_def
+            for tool_def in tool_defs
+        ]
 
     async def on_event(self, ctx: RunContext[AgentDepsT], *, event: AgentStreamEvent) -> None:
         """Consume telemetry without retaining generated code or rendering anything."""
@@ -151,5 +167,5 @@ def speculative_capabilities(counters: SpeculationCounters) -> 'list[AbstractCap
             os_access=OSAccess(),
         ),
         EagerTiming(),
-        ReportSpeculation(counters),
+        SpeculativeExecution(counters),
     ]
