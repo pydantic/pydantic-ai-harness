@@ -41,8 +41,9 @@ async def connections_for(capability: GoogleWorkspace[str | None], deps: str | N
     return connections
 
 
-def no_credential(ctx: RunContext[object]) -> None:
-    return None
+def per_user_token(ctx: RunContext[str | None]) -> str | None:
+    """Read the run's token from its deps, as an app serving many users would."""
+    return ctx.deps
 
 
 def user_token(ctx: RunContext[str]) -> str:
@@ -124,7 +125,7 @@ class TestGoogleWorkspace:
 
 class TestPerRunAuth:
     async def test_each_run_connects_with_its_own_credential(self) -> None:
-        capability = GoogleWorkspace[str | None](['gmail', 'calendar'], auth=lambda ctx: ctx.deps)
+        capability = GoogleWorkspace[str | None](['gmail', 'calendar'], auth=per_user_token)
         alice = await connections_for(capability, 'alice-token')
         bob = await connections_for(capability, 'bob-token')
         assert [bearer(connection) for connection in alice] == ['Bearer alice-token', 'Bearer alice-token']
@@ -135,17 +136,17 @@ class TestPerRunAuth:
         self, missing: str | None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setenv('GOOGLE_ACCESS_TOKEN', 'deployment-token')
-        capability = GoogleWorkspace[str | None]('gmail', auth=lambda ctx: ctx.deps)
+        capability = GoogleWorkspace[str | None]('gmail', auth=per_user_token)
         assert await connections_for(capability, missing) == []
 
     async def test_provider_returning_oauth_raises(self) -> None:
-        capability = GoogleWorkspace[str | None]('gmail', auth=lambda ctx: ctx.deps)
+        capability = GoogleWorkspace[str | None]('gmail', auth=per_user_token)
         with pytest.raises(UserError, match="must return an API key or token, not 'oauth'"):
             await connections_for(capability, 'oauth')
 
     def test_provider_does_not_need_environment_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('GOOGLE_ACCESS_TOKEN', raising=False)
-        GoogleWorkspace[object]('gmail', auth=no_credential).get_toolset()
+        GoogleWorkspace[str | None]('gmail', auth=per_user_token).get_toolset()
 
     async def test_read_only_applies_per_run(self, connections: list[tuple[str, str | None]]) -> None:
         capability = GoogleWorkspace[str]('gmail', auth=user_token, read_only=True)

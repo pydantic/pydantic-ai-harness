@@ -71,8 +71,9 @@ async def connections_for(capability: Slack[str | None], deps: str | None) -> li
     return connections
 
 
-def no_credential(ctx: RunContext[object]) -> None:
-    return None
+def per_user_token(ctx: RunContext[str | None]) -> str | None:
+    """Read the run's token from its deps, as an app serving many users would."""
+    return ctx.deps
 
 
 def bearer(toolset: AbstractToolset[Any]) -> str:
@@ -103,7 +104,7 @@ class TestSlack:
         assert isinstance(request, ModelRequest)
         assert ('Provider instructions.' in (request.instructions or '')) is include
 
-    @pytest.mark.parametrize('settings', [{'auth': 'token'}, {'auth': no_credential}])
+    @pytest.mark.parametrize('settings', [{'auth': 'token'}, {'auth': per_user_token}])
     def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Slack(client='https://example.com/mcp', **settings)
@@ -119,7 +120,7 @@ class TestSlack:
             Agent(TestModel(), capabilities=[Slack(auth='a'), Slack(auth='b', read_only=True)])
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'token'}, {'auth': no_credential}, {'client': 'https://example.com/mcp'}]
+        'settings', [{'auth': 'token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
     )
     def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
         assert Slack(id='tenant-slack', **settings).get_toolset().id == 'tenant-slack'
@@ -149,7 +150,7 @@ class TestSlack:
 
 class TestPerRunAuth:
     async def test_each_run_connects_with_its_own_credential(self) -> None:
-        capability = Slack[str | None](auth=lambda ctx: ctx.deps)
+        capability = Slack[str | None](auth=per_user_token)
         [alice] = await connections_for(capability, 'xoxp-alice')
         [bob] = await connections_for(capability, 'xoxp-bob')
         assert (bearer(alice), bearer(bob)) == ('Bearer xoxp-alice', 'Bearer xoxp-bob')
@@ -158,10 +159,10 @@ class TestPerRunAuth:
     async def test_no_credential_means_no_tools(self, missing: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
         # The environment token is set to show a function never falls back to it.
         monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-deployment')
-        capability = Slack[str | None](auth=lambda ctx: ctx.deps)
+        capability = Slack[str | None](auth=per_user_token)
         assert await connections_for(capability, missing) == []
 
     async def test_provider_returning_oauth_raises(self) -> None:
-        capability = Slack[str | None](auth=lambda ctx: ctx.deps)
+        capability = Slack[str | None](auth=per_user_token)
         with pytest.raises(UserError, match="must return an API key or token, not 'oauth'"):
             await connections_for(capability, 'oauth')
