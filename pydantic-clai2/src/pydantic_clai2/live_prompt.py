@@ -300,7 +300,9 @@ class LivePrompt:
         # The box has no side borders and no prompt marker: the draft and the
         # suggestions are plain rows between the top and bottom rules, so no
         # row can drift out of alignment with the corners.
-        pinned = self.pinned()
+        # The pinned row only takes a spare row: `paint` keeps `height - 2` rows, and the title,
+        # one draft row, the rule, and the footer come first.
+        pinned = self.pinned() if height - len(rows) - 5 >= 1 else ''
         inner = max(1, height - len(rows) - 4 - bool(pinned))
         popup_want = min(6, len(self._completions))
         draft = self.buffer.rows(width=width, limit=max(1, min(height // 3, inner - popup_want)))

@@ -1047,11 +1047,14 @@ as Code Puppy. It is off by default and saved as `run.speculative_code_mode`, so
 `/set run.speculative_code_mode true` does the same. The next turn uses the new
 value; a turn already running keeps the tools it started with.
 
-While it is on, every tool except `write_file` and `edit_file` becomes an async
-function inside one harness `CodeMode` `run_code` tool, `shell` included: a
-persistent Python sandbox with the working directory mounted read-write at its
-real path, isolated environment variables, the host clock, and no network. The
-model writes one snippet that calls many tools, and CLAI runs it while the model
+While it is on, every tool except `write_file` and `edit_file` becomes a
+function inside one harness `CodeMode` `run_code` tool, `shell` included. Other
+tools that run a program passed as a string, such as a workflow plugin, stay
+native as `CodeMode` keeps them by default.
+
+`run_code` is a persistent Python sandbox with the working directory mounted
+read-write at its real path, isolated environment variables, the host clock
+(through `datetime`), and no network. The model writes one snippet that calls many tools, and CLAI runs it while the model
 is still writing:
 
 - **Eager execution** runs each complete statement as soon as it has streamed,

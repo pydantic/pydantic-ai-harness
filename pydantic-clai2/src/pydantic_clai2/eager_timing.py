@@ -6,7 +6,15 @@ from time import perf_counter
 
 from pydantic_ai import RunContext
 from pydantic_ai.capabilities import AbstractCapability, ValidatedToolArgs, WrapToolExecuteHandler
-from pydantic_ai.messages import AgentStreamEvent, CapabilityEvent, PartEndEvent, PartStartEvent, ToolCallPart
+from pydantic_ai.messages import (
+    AgentStreamEvent,
+    CapabilityEvent,
+    PartDeltaEvent,
+    PartEndEvent,
+    PartStartEvent,
+    ToolCallPart,
+    ToolCallPartDelta,
+)
 from pydantic_ai.tools import AgentDepsT, ToolDefinition
 
 NESTED_CALL = re.compile(r'(?P<parent>.+)__(?P<speculative>spec_)?\d+')
@@ -40,6 +48,10 @@ class EagerTiming(AbstractCapability[AgentDepsT]):
     _windows: dict[tuple[int, str], _StreamWindow] = field(
         default_factory=dict[tuple[int, str], _StreamWindow], init=False, repr=False
     )
+    _by_index: dict[tuple[int, int], _StreamWindow] = field(
+        default_factory=dict[tuple[int, int], _StreamWindow], init=False, repr=False
+    )
+    """The same windows by response part index, since some providers re-key a call mid-stream."""
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> 'EagerTiming[AgentDepsT]':
         """Keep windows per run."""
@@ -48,9 +60,21 @@ class EagerTiming(AbstractCapability[AgentDepsT]):
     async def on_event(self, ctx: RunContext[AgentDepsT], *, event: AgentStreamEvent) -> None:
         """Open a window at a tool call's first streamed byte and close it at its last."""
         if isinstance(event, PartStartEvent) and isinstance(event.part, ToolCallPart):
-            self._windows[(ctx.run_step, event.part.tool_call_id)] = _StreamWindow()
+            window = _StreamWindow()
+            self._windows[(ctx.run_step, event.part.tool_call_id)] = window
+            self._by_index[(ctx.run_step, event.index)] = window
+        elif (
+            isinstance(event, PartDeltaEvent)
+            and isinstance(event.delta, ToolCallPartDelta)
+            and event.delta.tool_call_id
+        ):
+            # Harness re-keys a call when a delta carries a new id; nested dispatches then use that id.
+            window = self._by_index.setdefault((ctx.run_step, event.index), _StreamWindow())
+            self._windows[(ctx.run_step, event.delta.tool_call_id)] = window
         elif isinstance(event, PartEndEvent) and isinstance(event.part, ToolCallPart):
-            self._windows.setdefault((ctx.run_step, event.part.tool_call_id), _StreamWindow()).ended = perf_counter()
+            window = self._by_index.pop((ctx.run_step, event.index), None) or _StreamWindow()
+            window.ended = perf_counter()
+            self._windows[(ctx.run_step, event.part.tool_call_id)] = window
 
     async def wrap_tool_execute(
         self,

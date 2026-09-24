@@ -4,7 +4,7 @@ Every tool the run has, plugin and MCP tools included, becomes a function inside
 `CodeMode`'s `run_code` except `write_file` and `edit_file`, which stay native so their diffs
 render as usual. `shell` folds in too, as Code Puppy's shell tool does: harness `CodeMode` keeps
 tools marked with `code_arg_name` metadata native by default, so `SpeculativeExecution` clears
-that marker on every tool it sandboxes. Without it, a coding turn is all native `shell` calls
+that marker on `shell` only (`FOLDED_CODE_TOOLS`). Without it, a coding turn is all native `shell` calls
 and eager execution never starts a build or test while the model is still writing.
 
 Only the read-only tools in `SPECULATIVE_TOOLS` may launch speculatively. That allowlist is the
@@ -47,19 +47,28 @@ The customization guide reads a file shipped inside the package and takes no arg
 NATIVE_TOOLS = frozenset({'write_file', 'edit_file'})
 """CLAI's equivalents of Code Puppy's native `create_file` and `replace_in_file`."""
 
+FOLDED_CODE_TOOLS = frozenset({'shell'})
+"""Tools marked `code_arg_name` that fold in anyway, as Code Puppy's shell tool does.
+
+Other code-running tools, such as a workflow or capability-authoring plugin, keep harness
+`CodeMode`'s default and stay native, so the model never passes a program as a string literal.
+"""
+
 GUIDANCE = """\
 Speculative execution is on. Use `write_file` and `edit_file` as native tools,
 outside `run_code`; they are not available as functions inside the sandbox.
-Every other tool, including `shell`, is an async function inside `run_code`, a
+Every other tool, including `shell`, is a function inside `run_code`, a
 persistent sandboxed Python REPL. Call `run_code` with a Python snippet to use them; do
-not attempt to call those functions as native tools.
+not attempt to call those functions as native tools. `await` the functions that
+`run_code` lists as `async def`; call the ones listed as plain `def` without `await`.
 
 The sandbox also has direct capabilities, no function call needed:
 
 - The workspace is mounted read-write at its real absolute path: use
   `pathlib.Path` to read, write, glob, and stat project files directly.
-- Environment variables (isolated), in-memory scratch files, and the real
-  clock (`time` module) work.
+- Environment variables (isolated) and in-memory scratch files work. For the
+  real clock use `datetime.datetime.now()` or `datetime.date.today()`; the
+  `time` module and `asyncio.sleep` are unavailable.
 - There is NO network in the sandbox: anything remote goes through a
   function like `shell` (e.g. `curl`).
 
@@ -134,13 +143,13 @@ class SpeculativeExecution(AbstractCapability[AgentDepsT]):
         return {'anthropic_eager_input_streaming': True}
 
     async def prepare_tools(self, ctx: RunContext[AgentDepsT], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
-        """Clear `code_arg_name` so `CodeMode` sandboxes `shell` like any other tool.
+        """Clear `code_arg_name` on `FOLDED_CODE_TOOLS` so `CodeMode` sandboxes them.
 
         Core runs this inside every capability's wrapper toolset, so `CodeMode` sees the result.
         """
         return [
             replace(tool_def, metadata={k: v for k, v in tool_def.metadata.items() if k != 'code_arg_name'})
-            if tool_def.metadata and 'code_arg_name' in tool_def.metadata and _sandboxed(ctx, tool_def)
+            if tool_def.name in FOLDED_CODE_TOOLS and tool_def.metadata and 'code_arg_name' in tool_def.metadata
             else tool_def
             for tool_def in tool_defs
         ]
@@ -172,6 +181,8 @@ class ShowSandboxCalls(AbstractCapability[AgentDepsT]):
     _launched: dict[str, tuple[ToolCallPart, ToolReturnPart | RetryPromptPart]] = field(
         default_factory=dict[str, tuple[ToolCallPart, ToolReturnPart | RetryPromptPart]], init=False, repr=False
     )
+    _evicted: set[str] = field(default_factory=set[str], init=False, repr=False)
+    """Launches evicted while still running, whose late result must not be held."""
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> 'ShowSandboxCalls[AgentDepsT]':
         """Keep held launches per run."""
@@ -211,7 +222,9 @@ class ShowSandboxCalls(AbstractCapability[AgentDepsT]):
         *,
         speculative: bool,
     ) -> None:
-        if speculative:
+        if speculative and call.tool_call_id in self._evicted:
+            self._evicted.discard(call.tool_call_id)
+        elif speculative:
             self._launched[call.tool_call_id] = (call, result)
         else:
             await ctx.emit(SandboxCallFinishedEvent(tool_call_id=call.tool_call_id, result=result))
@@ -219,7 +232,10 @@ class ShowSandboxCalls(AbstractCapability[AgentDepsT]):
     async def on_event(self, ctx: RunContext[AgentDepsT], *, event: AgentStreamEvent) -> None:
         """Report a claimed launch as the claiming call; forget an evicted one."""
         if isinstance(event, SpeculativeCallEvictedEvent):
-            self._launched.pop(event.launch_id, None)
+            if event.state == 'pending':
+                self._evicted.add(event.launch_id)
+            else:
+                self._launched.pop(event.launch_id, None)
         elif isinstance(event, SpeculativeCallClaimedEvent) and event.launch_id in self._launched:
             call, result = self._launched.pop(event.launch_id)
             call_id = event.nested_tool_call_id
