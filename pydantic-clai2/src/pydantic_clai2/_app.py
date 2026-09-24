@@ -2,7 +2,7 @@
 
 import asyncio
 import sys
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Generic, TypeVar
@@ -59,6 +59,8 @@ from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
 from .speculation import Speculation
+from .spinner_picker import spinner_command, spinner_completions
+from .spinners import Spinner, Spinners
 from .status import Status, StatusLine
 from .theme_picker import theme_command
 from .tool_output import terminal_text
@@ -407,6 +409,15 @@ def create_shell(
         conversation=session,
         status=status,
     )
+    spinners = Spinners(selected=lambda: context.settings.spinner, registered=loader.spinners)
+    commands.register(
+        Command(
+            name='spinner',
+            description='Select the working animation; no arguments opens the picker',
+            handler=lambda args: spinner_command(context, spinners, args),
+            complete=lambda args: spinner_completions(spinners, args),
+        )
+    )
     commands.register(
         Command(
             name='plugins',
@@ -452,6 +463,7 @@ def create_shell(
         screen=screen,
         sessions=sessions,
         speculation=Speculation(context=context, console=console),
+        spinners=spinners,
     )
     if prompt is not None:
         prompt.key_bindings = images.bindings()
@@ -479,6 +491,7 @@ class _Shell(Generic[DepsT, OutputT]):
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
     speculation: Speculation
+    spinners: Spinners
     transcript: TranscriptBuffer = field(default_factory=TranscriptBuffer)
     images: ImageInput = field(default_factory=ImageInput)
     reload_requested: bool = False
@@ -505,6 +518,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 transcript=self.transcript,
                 chords={'ctrl-x ctrl-s': self.speculation.toggle},
                 pinned=self.speculation.row,
+                spinner=self.spinners.active,
             )
             self.screen.editor = self.editor.suspended
             try:
@@ -664,6 +678,7 @@ class _Shell(Generic[DepsT, OutputT]):
             status=self.status,
             renderers=self.loader.renderers(),
             screen=self.screen,
+            spinner=self.spinners.active,
         )
 
 
@@ -724,6 +739,7 @@ async def _run_prompt(
     status: Status,
     renderers: Sequence[Renderer[AgentStreamEvent]],
     screen: Screen,
+    spinner: Callable[[], Spinner],
     images: Sequence[BinaryContent] = (),
 ) -> TurnEnd:
     renderer = StreamRenderer(
@@ -749,7 +765,7 @@ async def _run_prompt(
 
     session.on_context_usage = context_usage
     session.on_stream_event = observe
-    status_line = StatusLine(console, status, enabled=screen.editor is None)
+    status_line = StatusLine(console, status, enabled=screen.editor is None, spinner=spinner)
 
     @asynccontextmanager
     async def take_screen() -> AsyncGenerator[None]:
