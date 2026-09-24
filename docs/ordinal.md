@@ -40,8 +40,6 @@ print(result.output)
 
 Set `ORDINAL_ACCESS_TOKEN` to an Ordinal access token, or pass `auth=` a token. On your own machine, `auth='oauth'` signs you in through the browser instead. To serve several users from one agent, pass a function instead (see [Per-user credentials](#per-user-credentials)). Then start by listing workspaces. Every other Ordinal tool needs a `workspaceSlug` from `ordinal_get_workspace_context`.
 
-`Ordinal` has no settings for custom clients, tool filtering, or approval. For those, use Pydantic AI's generic [`MCP`](/ai/capabilities/mcp/) capability or [`MCPToolset`](/ai/mcp/) directly.
-
 ## Per-user credentials
 
 `auth` decides which Ordinal account each run uses:
@@ -81,6 +79,25 @@ Each run connects as its own user, so concurrent runs never share an account.
 Your app gets each user's token, stores it, and refreshes it. For example, a "Connect Ordinal" button that runs the OAuth flow from [Before you start](#before-you-start) and saves the token to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
 With durable execution such as Temporal, read the token from the run's deps rather than from a global, since the function may run in another process. The capability's `id` defaults to `ordinal`, so `defer_loading=True` works without one. To add more than one `Ordinal` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same; two that share an `id` but differ raise an error.
+
+## Tool selection and approval
+
+To filter tools or require approval in your application, wrap the toolset with the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this asks for approval before every tool call, which suits tools that publish or schedule posts:
+
+```python
+from pydantic_ai import Agent
+from pydantic_ai.messages import DeferredToolRequests
+from pydantic_ai_harness import Ordinal
+
+capability = Ordinal()
+agent = Agent(
+    'openai:gpt-5.6-sol',
+    toolsets=[capability.get_toolset().approval_required()],
+    output_type=[str, DeferredToolRequests],
+)
+```
+
+Handle the approval requests with the [deferred tools workflow](/ai/tools-toolsets/deferred-tools/). To cap the size of tool output, add [Tool Output Limits](tool-output-limits.md).
 
 ## Connection customization
 
