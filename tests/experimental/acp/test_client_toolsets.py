@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import cast
 
 import anyio
 import pytest
 from acp import Client, schema, text_block
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import Toolset
-from pydantic_ai.exceptions import ToolFailed
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -19,6 +17,7 @@ from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import RunUsage
 from pydantic_ai.workspaces import LocalWorkspaceBackend, ReadOnlyWorkspace, Workspace
 
+from pydantic_ai_harness._workspace import READ_ONLY_FAILURE
 from pydantic_ai_harness.code_mode import CodeMode, CodeModeToolset
 from pydantic_ai_harness.experimental.acp import (
     AcpFileSystemToolset,
@@ -29,17 +28,14 @@ from pydantic_ai_harness.experimental.acp import (
     acp_filesystem,
     acp_terminal,
 )
+from tests._tool_calls import call_tool  # pyright: ignore[reportMissingTypeStubs]
 from tests.experimental.acp._acp_clients import RecordingClient  # pyright: ignore[reportMissingTypeStubs]
 
 pytestmark = pytest.mark.anyio
 
 
-def _ctx(workspace: Workspace | None = None) -> RunContext[None]:
-    if workspace is None:
-        return RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
-    return RunContext[None](
-        deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1, workspace=workspace
-    )
+def _ctx() -> RunContext[None]:
+    return RunContext[None](deps=None, model=TestModel(), usage=RunUsage(), prompt=None, messages=[], run_step=1)
 
 
 def _session(client: Client, capabilities: schema.ClientCapabilities | None) -> AcpSession:
@@ -169,17 +165,16 @@ async def test_acp_filesystem_read_only_client_reads_via_acp_and_writes_locally(
     )
     capability = acp_filesystem(session)
     assert capability is not None
-    toolset = cast(AcpFileSystemToolset[None], capability.toolset)
 
-    assert await toolset.read_file('notes.txt') == 'hello'
+    assert await call_tool([capability], 'read_file', {'path': 'notes.txt'}) == 'hello'
     assert client.reads == [(str(tmp_path / 'notes.txt'), 'sid')]  # the read routed through the editor
-    await toolset.write_file(_ctx(), 'out.txt', 'data')
+    await call_tool([capability], 'write_file', {'path': 'out.txt', 'content': 'data'})
     assert client.writes == []  # the client was never asked to write
     assert (tmp_path / 'out.txt').read_text() == 'data'  # the write landed on local disk
     # With a session workspace configured, the write goes through it instead.
     read_only = ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path)))
-    with pytest.raises(ToolFailed, match='read-only'):
-        await toolset.write_file(_ctx(read_only), 'other.txt', 'data')
+    refused = await call_tool([capability], 'write_file', {'path': 'other.txt', 'content': 'data'}, workspace=read_only)
+    assert refused == READ_ONLY_FAILURE
     assert not (tmp_path / 'other.txt').exists()
 
 
