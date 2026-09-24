@@ -3745,7 +3745,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["anthropic", "mcp", "openai"], git = "https://github.com/pydantic/pydantic-ai?subdirectory=pydantic_ai_slim&rev=f4a37f59732e6d182bb02ecec9ae2252c0a7b328" },
     { name = "pyfiglet", specifier = ">=1.0.4" },
     { name = "rich", specifier = ">=14" },
-    { name = "termflow-md", specifier = ">=0.9.2,<0.10" },
+    { name = "termflow-md", specifier = ">=0.9.3,<0.10" },
 ]
 
 [[package]]
@@ -7761,15 +7761,15 @@ wheels = [
 
 [[package]]
 name = "termflow-md"
-version = "0.9.2"
+version = "0.9.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "pygments" },
     { name = "wcwidth" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ab/cf/ca8d76356b43bb0010c5155e92fe7a928d24aaf09cc20de360ef6f89662b/termflow_md-0.9.2.tar.gz", hash = "sha256:462755e06d0d6a86c6813edfe96fcb7be663d591a18affb7d65e23da57ac7ff3", size = 163941, upload-time = "2026-09-11T15:45:12.653Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/83/72eb9e56a2609e0f9832eef8fef696ee94b5cf73fb1f164a7d82b6c26d4b/termflow_md-0.9.3.tar.gz", hash = "sha256:1cabf9ad3b066f2eb848fad3dcdadaf32c8e8bcc46adec60fc1ac2eb65f0ea20", size = 168629, upload-time = "2026-09-24T16:36:46.75Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/30/3c/e6d944da0620b3985d293bedbb99de7b17d790f7434c9d6602496d5ce5e3/termflow_md-0.9.2-py3-none-any.whl", hash = "sha256:0140ff63f8870801b5eb9f0519704cefe2fa3f4aafc55ab5d8ac26f2aad3a00e", size = 95760, upload-time = "2026-09-11T15:45:11.53Z" },
+    { url = "https://files.pythonhosted.org/packages/73/93/d6b95a69eece72a79c3bd92e28cc48d6c7493b9d720ff244ddc9885681ba/termflow_md-0.9.3-py3-none-any.whl", hash = "sha256:569f1ac99d466d1ddd91ec057139965864ffb678da6d0f9da30ee4a458c9f6fb", size = 95796, upload-time = "2026-09-24T16:36:45.369Z" },
 ]
 
 [[package]]
