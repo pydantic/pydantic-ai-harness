@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TypeVar
 
 import httpx
 import pytest
@@ -25,15 +26,17 @@ from pydantic_ai_harness.grain import Grain
 # combinations. Rebuild it before warnings are escalated by the test suite.
 Settings.model_rebuild()
 
+DepsT = TypeVar('DepsT')
 
-def _http_transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
+
+def _http_transport(toolset: AbstractToolset[DepsT]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     transport = toolset.client.transport
     assert isinstance(transport, StreamableHttpTransport)
     return transport
 
 
-def bearer(toolset: AbstractToolset[Any]) -> str:
+def bearer(toolset: AbstractToolset[DepsT]) -> str:
     auth = _http_transport(toolset).auth
     assert auth is not None
     request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
@@ -97,10 +100,14 @@ class TestGrain:
         assert _http_transport(toolset).url == 'https://api.grain.com/_/mcp'
         assert bearer(toolset) == 'Bearer grain-token'
 
-    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
-    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+    @pytest.mark.parametrize(
+        ('capability', 'include'),
+        [(Grain[None](auth='grain-token'), True), (Grain[None](auth='grain-token', include_instructions=False), False)],
+        ids=['default', 'disabled'],
+    )
+    def test_hosted_connection_forwards_include_instructions(self, capability: Grain[None], include: bool) -> None:
         # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
-        toolset = Grain(auth='grain-token', **settings).get_toolset()
+        toolset = capability.get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is include
 
@@ -120,16 +127,24 @@ class TestGrain:
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Grain(auth='secret-token'))
 
-    @pytest.mark.parametrize('auth', ['grain-token', per_user_token])
-    def test_client_cannot_be_combined_with_auth(self, auth: Any) -> None:
+    @pytest.mark.parametrize('auth', ['grain-token', per_user_token], ids=['token', 'function'])
+    def test_client_cannot_be_combined_with_auth(
+        self, auth: str | Callable[[RunContext[str | None]], str | None]
+    ) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
-            Grain(client='https://example.com/mcp', auth=auth)
+            Grain[str | None](client='https://example.com/mcp', auth=auth)
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'grain-token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
+        'capability',
+        [
+            Grain[str | None](id='tenant-grain', auth='grain-token'),
+            Grain[str | None](id='tenant-grain', auth=per_user_token),
+            Grain[str | None](id='tenant-grain', client='https://example.com/mcp'),
+        ],
+        ids=['token', 'function', 'client'],
     )
-    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
-        assert Grain(id='tenant-grain', **settings).get_toolset().id == 'tenant-grain'
+    def test_custom_id_is_forwarded(self, capability: Grain[str | None]) -> None:
+        assert capability.get_toolset().id == 'tenant-grain'
 
     def test_defer_loading_needs_no_id(self) -> None:
         Agent(TestModel(), capabilities=[Grain(auth='grain-token', defer_loading=True)])
