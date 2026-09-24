@@ -48,6 +48,7 @@ from .screen import Screen
 from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
+from .speculation import Speculation
 from .status import Status, StatusLine
 from .theme_picker import theme_command
 from .tool_output import terminal_text
@@ -434,6 +435,7 @@ def create_shell(
         interrupts=Interrupts(),
         screen=screen,
         sessions=sessions,
+        speculation=Speculation(context=context, console=console),
     )
     if prompt is not None:
         prompt.key_bindings = images.bindings()
@@ -460,6 +462,7 @@ class _Shell(Generic[DepsT, OutputT]):
     interrupts: Interrupts
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
+    speculation: Speculation
     transcript: TranscriptBuffer = field(default_factory=TranscriptBuffer)
     images: ImageInput = field(default_factory=ImageInput)
     reload_requested: bool = False
@@ -482,6 +485,8 @@ class _Shell(Generic[DepsT, OutputT]):
                 toolbar=self.status.toolbar,
                 steer=self.steer,
                 transcript=self.transcript,
+                chords={'ctrl-x ctrl-s': self.speculation.toggle},
+                pinned=self.speculation.row,
             )
             self.screen.editor = self.editor.suspended
             try:
@@ -511,6 +516,7 @@ class _Shell(Generic[DepsT, OutputT]):
             )
             try:
                 self.status.model = self.session.model or _model_label(self.agent)
+                self.status.workspace = self.session.workspace
                 self.status.status_segments = tuple(self.loader.status_segments())
                 if self.editor is not None:
                     text = await self.editor.read()
@@ -589,7 +595,7 @@ class _Shell(Generic[DepsT, OutputT]):
             )
             self.console.print()
             return TurnEnd(text=start.text, outcome='cancelled')
-        self.session.plugins = (*self.plugins, *self.loader.capabilities())
+        self.session.plugins = (*self.plugins, *self.loader.capabilities(), *self.speculation.capabilities())
         model = self.session.model or _model_label(self.agent)
         try:
             self.session.model_settings = self.context.model_settings(model)

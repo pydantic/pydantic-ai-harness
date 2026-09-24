@@ -6,6 +6,7 @@ import math
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from decimal import Decimal
+from pathlib import Path
 from typing import cast
 
 from pydantic_ai import AgentStreamEvent, FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
@@ -21,6 +22,7 @@ from rich.console import Console
 from typing_extensions import Self
 
 from . import theme
+from .tool_output import terminal_text
 from .usage_report import format_cost
 
 StatusSegment = Callable[[], str]
@@ -32,6 +34,8 @@ class Status:
     """Reported context and explicitly approximate live output counts."""
 
     model: str = 'agent default'
+    workspace: str = ''
+    """The session's working directory; hidden while empty."""
     context_tokens: int | None = None
     context_alert: bool = False
     """Paint the context figure `WARNING`; set by whoever knows the window, such as the `compaction` plugin."""
@@ -71,7 +75,9 @@ class Status:
         if self.output_tokens is not None:
             output = f'{self.output_tokens:,} output tokens'
         cost = '' if self.cost is None else f' | {format_cost(self.cost)}'
-        head = f'{frame} {self.model} | context: '.lstrip()
+        # A POSIX directory name may hold a newline or an escape sequence; keep it inert on every painter.
+        workspace = f' | {_short_path(terminal_text(self.workspace, keep=""))}' if self.workspace else ''
+        head = f'{frame} {self.model}{workspace} | context: '.lstrip()
         return head, context, f' tokens | {output}{cost} | {self.activity}', self._plugin_text()
 
     def _plugin_text(self) -> str:
@@ -206,6 +212,14 @@ class StatusLine:
             self._draw(frame)
             frame += 1
             await asyncio.sleep(0.1)
+
+
+def _short_path(path: str, limit: int = 40) -> str:
+    """Abbreviate the home directory, then keep the path's tail, the part that tells worktrees apart."""
+    # `Path.home()` raises `RuntimeError` when the account has no resolvable home directory.
+    with contextlib.suppress(ValueError, RuntimeError):
+        path = str(Path('~', Path(path).relative_to(Path.home())))
+    return path if len(path) <= limit else '…' + path[-(limit - 1) :]
 
 
 def _printable(text: str) -> str:
