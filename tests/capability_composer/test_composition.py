@@ -1,4 +1,4 @@
-"""How `JevCapabilityComposer` hands a turn to the sub-agent Jev composed."""
+"""How `CapabilityComposer` hands a turn to the sub-agent the picker composed."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from pydantic_ai.tools import RunContext, Tool
 from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.usage import UsageLimits
 
-from pydantic_ai_harness.jev import ComposableCapability, JevCapabilityComposer
+from pydantic_ai_harness.capability_composer import CapabilityComposer, ComposableCapability
 from pydantic_ai_harness.subagents import ModelOption
 
 from ._doubles import (
@@ -89,8 +89,8 @@ class TestCompose:
     async def test_the_sub_agent_runs_its_tools_and_only_its_answer_is_recorded(self):
         tools: list[list[str]] = []
         jev = Jev(model='worker', capabilities=('notes', 'clock'))
-        picker = JevCapabilityComposer[object](
-            models={'worker': tool_then_answer(tools)}, catalog=CATALOG, jev_model=jev.model_
+        picker = CapabilityComposer[object](
+            models={'worker': tool_then_answer(tools)}, catalog=CATALOG, picker_model=jev.model_
         )
 
         result = await Agent(main_model([]), capabilities=[picker]).run('what time is it?')
@@ -112,8 +112,8 @@ class TestCompose:
             return ModelResponse(parts=[TextPart(content='fixed')])
 
         jev = Jev(model='deep')
-        picker = JevCapabilityComposer[object](
-            models={'deep': FunctionModel(respond)}, catalog=CATALOG, jev_model=jev.model_
+        picker = CapabilityComposer[object](
+            models={'deep': FunctionModel(respond)}, catalog=CATALOG, picker_model=jev.model_
         )
         history: list[ModelMessage] = [
             ModelRequest.user_text_prompt('the test fails'),
@@ -157,8 +157,11 @@ class TestCompose:
                     calls.append(event.part.tool_name)
 
         jev = Jev(model='worker', capabilities=('clock',))
-        picker = JevCapabilityComposer[object](
-            models={'worker': tool_then_answer([])}, catalog=CATALOG, jev_model=jev.model_, event_stream_handler=handler
+        picker = CapabilityComposer[object](
+            models={'worker': tool_then_answer([])},
+            catalog=CATALOG,
+            picker_model=jev.model_,
+            event_stream_handler=handler,
         )
 
         await Agent(main_model([]), capabilities=[picker]).run('what time is it?')
@@ -184,7 +187,7 @@ class TestCompose:
         jev = Jev(model='deep', thinking='medium')
         agent = Agent(
             main_model([]),
-            capabilities=[JevCapabilityComposer(models={'deep': thinker}, catalog=CATALOG, jev_model=jev.model_)],
+            capabilities=[CapabilityComposer(models={'deep': thinker}, catalog=CATALOG, picker_model=jev.model_)],
         )
 
         await agent.run('write that down')
@@ -204,7 +207,7 @@ class TestCompose:
         jev = Jev(model='deep', thinking='low')
         agent = Agent(
             main_model([]),
-            capabilities=[JevCapabilityComposer(models={'deep': option}, catalog=CATALOG, jev_model=jev.model_)],
+            capabilities=[CapabilityComposer(models={'deep': option}, catalog=CATALOG, picker_model=jev.model_)],
         )
 
         await agent.run('write that down')
@@ -288,10 +291,10 @@ class TestApproval:
                 return FunctionToolset([Tool(delete, requires_approval=True)])
 
         jev = Jev(model='worker', capabilities=('guarded',))
-        picker = JevCapabilityComposer[object](
+        picker = CapabilityComposer[object](
             models={'worker': tool_then_answer([])},
             catalog={'guarded': ComposableCapability(description='Delete things', capability=Guarded)},
-            jev_model=jev.model_,
+            picker_model=jev.model_,
         )
 
         with pytest.raises(UserError, match='DeferredToolRequests'):
@@ -299,18 +302,18 @@ class TestApproval:
 
 
 class TestUsage:
-    async def test_jev_and_the_sub_agent_count_toward_the_run(self):
+    async def test_the_picker_and_the_sub_agent_count_toward_the_run(self):
         """Core also counts the agent's own request step, which the sub-agent's answer stands in for."""
         result = await Agent(main_model([]), capabilities=[composer(Jev(), [])]).run('write that down')
 
         assert result.usage.requests == 3
 
-    @pytest.mark.parametrize('request_limit', [1, 2], ids=['jev', 'sub-agent'])
-    async def test_the_run_limits_cover_jev_and_the_sub_agent(self, request_limit: int):
+    @pytest.mark.parametrize('request_limit', [1, 2], ids=['picker', 'sub-agent'])
+    async def test_the_run_limits_cover_the_picker_and_the_sub_agent(self, request_limit: int):
         tools: list[list[str]] = []
         jev = Jev(model='worker', capabilities=('clock',))
-        picker = JevCapabilityComposer[object](
-            models={'worker': tool_then_answer(tools)}, catalog=CATALOG, jev_model=jev.model_
+        picker = CapabilityComposer[object](
+            models={'worker': tool_then_answer(tools)}, catalog=CATALOG, picker_model=jev.model_
         )
 
         with pytest.raises(UsageLimitExceeded):
@@ -323,7 +326,7 @@ class TestUsage:
 
 class TestEscalation:
     async def test_an_unsure_model_pick_uses_the_last_entry(self):
-        """The capabilities Jev picked are kept; only the uncertain model pick is replaced."""
+        """The capabilities the picker picked are kept; only the uncertain model pick is replaced."""
         seen: list[Seen] = []
         jev = Jev(model='fast', capabilities=('notes',), confidence={'model': 0.3})
         agent = Agent(main_model([]), capabilities=[composer(jev, seen)])
@@ -370,7 +373,7 @@ class TestFallthrough:
         assert calls == ['main']
         assert events.composed == []
 
-    async def test_jev_is_asked_only_on_the_first_request(self):
+    async def test_the_picker_is_asked_only_on_the_first_request(self):
         jev = Jev(capabilities=())
         agent = Agent(tool_then_answer([]), toolsets=[Clock().get_toolset()], capabilities=[composer(jev, [])])
 
@@ -444,13 +447,13 @@ class TestTracing:
         await agent.run('write that down')
 
         assert dict(compose_span(exporter).attributes or {}) == {
-            'jev_composer.model': 'strong',
-            'jev_composer.thinking': 'high',
-            'jev_composer.capabilities': ('notes', 'clock'),
-            'jev_composer.action': 'compose',
-            'jev_composer.run_model': 'strong',
-            'jev_composer.confidence.model': 0.9,
-            'jev_composer.confidence.thinking': 0.8,
+            'capability_composer.model': 'strong',
+            'capability_composer.thinking': 'high',
+            'capability_composer.capabilities': ('notes', 'clock'),
+            'capability_composer.action': 'compose',
+            'capability_composer.run_model': 'strong',
+            'capability_composer.confidence.model': 0.9,
+            'capability_composer.confidence.thinking': 0.8,
         }
 
     async def test_the_span_records_an_escalation(self):
@@ -462,9 +465,9 @@ class TestTracing:
         await agent.run('write that down')
 
         attributes = dict(compose_span(exporter).attributes or {})
-        assert attributes['jev_composer.action'] == 'escalate'
-        assert attributes['jev_composer.model'] == 'fast'
-        assert attributes['jev_composer.run_model'] == 'strong'
+        assert attributes['capability_composer.action'] == 'escalate'
+        assert attributes['capability_composer.model'] == 'fast'
+        assert attributes['capability_composer.run_model'] == 'strong'
 
     async def test_the_span_records_a_fallthrough_and_the_prompt_when_allowed(self):
         provider, exporter = recording_tracer()
@@ -474,9 +477,9 @@ class TestTracing:
         await agent.run('hi')
 
         attributes = dict(compose_span(exporter).attributes or {})
-        assert attributes['jev_composer.action'] == 'fallthrough'
-        assert 'jev_composer.run_model' not in attributes
-        assert attributes['jev_composer.prompt'] == 'hi'
+        assert attributes['capability_composer.action'] == 'fallthrough'
+        assert 'capability_composer.run_model' not in attributes
+        assert attributes['capability_composer.prompt'] == 'hi'
 
     async def test_nothing_is_recorded_without_a_recording_span(self):
         agent = Agent(main_model([]), capabilities=[composer(Jev(), [])])

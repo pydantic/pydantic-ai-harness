@@ -1,12 +1,12 @@
-"""Jev capabilities: fast typed decisions from TypeSafe's Jev model, inside a harness agent."""
+"""Capability composer: a picker model composes a sub-agent for each prompt from a menu and an allowlist."""
 
-from pydantic_ai_harness.jev._capability import (
+from pydantic_ai_harness.capability_composer._capability import (
     SKILLS_DIRECTORY,
     CapabilitiesComposedEvent,
+    CapabilityComposer,
     ComposableCapability,
     ComposeAction,
     Composition,
-    JevCapabilityComposer,
     Thinking,
     default_catalog,
 )
@@ -17,7 +17,7 @@ __all__ = [
     'ComposableCapability',
     'ComposeAction',
     'Composition',
-    'JevCapabilityComposer',
+    'CapabilityComposer',
     'Thinking',
     'default_catalog',
 ]

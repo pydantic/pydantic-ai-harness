@@ -1,4 +1,4 @@
-"""How `JevCapabilityComposer` sits inside the run's input guardrails, wherever they are configured."""
+"""How `CapabilityComposer` sits inside the run's input guardrails, wherever they are configured."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ def redact(prompt: str) -> GuardrailResult:
 
 class TestInputGuardrails:
     @pytest.mark.parametrize('on', ['agent', 'run'])
-    async def test_a_blocked_prompt_never_reaches_jev(self, on: str):
+    async def test_a_blocked_prompt_never_reaches_the_picker(self, on: str):
         jev = Jev()
         events = Events()
         guardrail = InputGuardrail[object](guard=no_secrets)
@@ -51,7 +51,7 @@ class TestInputGuardrails:
         assert jev.prompts == ['write that down']
 
     @pytest.mark.parametrize('guardrail_first', [True, False])
-    async def test_jev_and_the_sub_agent_read_the_redacted_prompt(self, guardrail_first: bool):
+    async def test_the_picker_and_the_sub_agent_read_the_redacted_prompt(self, guardrail_first: bool):
         """The composer sits inside the guardrail however the two are listed."""
         jev = Jev()
         seen: list[Seen] = []

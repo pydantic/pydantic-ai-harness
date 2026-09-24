@@ -1,20 +1,22 @@
-"""Hand-run check of `JevCapabilityComposer` picks against labelled prompts.
+"""Hand-run check of `CapabilityComposer` picks against labelled prompts.
 
-Not collected by pytest and not wired into CI: it calls the live Jev API, which needs a TypeSafe key and
-costs a request per prompt. Run it after changing the model menu, a catalog description, or the Jev version:
+Not collected by pytest and not wired into CI: it calls the picker live, which costs a request per prompt
+(and, for the default Jev picker, needs a TypeSafe key). Run it after changing the model menu, a catalog
+description, or the picker or its version:
 
-    TYPESAFE_API_KEY=... uv run python scripts/jev_eval.py
-    TYPESAFE_API_KEY=... uv run python scripts/jev_eval.py --jev-model typesafe:jev-1.13.0 --repeat 3
+    TYPESAFE_API_KEY=... uv run python scripts/capability_composer_eval.py
+    TYPESAFE_API_KEY=... uv run python scripts/capability_composer_eval.py --picker-model typesafe:jev-1.13.0 --repeat 3
+    uv run python scripts/capability_composer_eval.py --picker-model openai-codex:gpt-6-luna
 
-It asks Jev about every prompt in `jev_eval_prompts.txt` with the docs' example menu and the default
+It asks the picker about every prompt in `capability_composer_eval_prompts.txt` with the docs' example menu and the default
 catalog, and reports per section:
 
 - how often the model pick matches the label, and how often prompts labelled `none` fall through,
 - how often a handed-off prompt got every capability its label needs, per tier, and which were missed,
 - for each `confidence_threshold`, how the unsure picks would land with each fallback: every `models` key as
-  `unsure_model`, or one tier above Jev's pick. `under` counts runs on a weaker model than the label.
+  `unsure_model`, or one tier above the picker's pick. `under` counts runs on a weaker model than the label.
 
-Only Jev is called; no sub-agent runs. Tune against part of the set and check against the rest, or the
+Only the picker is called; no sub-agent runs. Tune against part of the set and check against the rest, or the
 numbers describe the prompts rather than the composer.
 """
 
@@ -26,10 +28,10 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic_ai_harness.jev import Composition, JevCapabilityComposer, default_catalog
+from pydantic_ai_harness.capability_composer import CapabilityComposer, Composition, default_catalog
 from pydantic_ai_harness.subagents import ModelOption
 
-PROMPTS = Path(__file__).with_name('jev_eval_prompts.txt')
+PROMPTS = Path(__file__).with_name('capability_composer_eval_prompts.txt')
 MENU = {
     'fast': ModelOption(
         'openai-codex:gpt-6-luna',
@@ -61,14 +63,14 @@ class Case:
 
 @dataclass(frozen=True)
 class Outcome:
-    """What Jev picked for a case."""
+    """What the picker picked for a case."""
 
     case: Case
     composition: Composition
 
     @property
     def fell_through(self) -> bool:
-        """Jev picked no capabilities, so the main agent keeps the turn."""
+        """The picker picked no capabilities, so the main agent keeps the turn."""
         return not self.composition.capabilities
 
     @property
@@ -93,10 +95,8 @@ def load(path: Path) -> list[Case]:
     return cases
 
 
-async def ask(
-    composer: JevCapabilityComposer[object], cases: list[Case], repeat: int, concurrency: int
-) -> list[Outcome]:
-    """Ask Jev about every case `repeat` times, with at most `concurrency` requests in flight."""
+async def ask(composer: CapabilityComposer[object], cases: list[Case], repeat: int, concurrency: int) -> list[Outcome]:
+    """Ask the picker about every case `repeat` times, with at most `concurrency` requests in flight."""
     queue = iter([case for case in cases for _ in range(repeat)])
     outcomes: list[Outcome] = []
 
@@ -155,7 +155,7 @@ def report(name: str, outcomes: list[Outcome]) -> None:
 async def main() -> None:
     """Run the check."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--jev-model', default='typesafe:jev-latest')
+    parser.add_argument('--picker-model', default='typesafe:jev-latest')
     parser.add_argument('--repeat', type=int, default=1, help='ask about each prompt this many times')
     parser.add_argument('--concurrency', type=int, default=8)
     parser.add_argument('--section', help='only run this section')
@@ -164,7 +164,7 @@ async def main() -> None:
         parser.error('--concurrency and --repeat must be at least 1')
 
     cases = [case for case in load(PROMPTS) if args.section in (None, case.section)]
-    composer = JevCapabilityComposer[object](models=MENU, catalog=default_catalog(), jev_model=args.jev_model)
+    composer = CapabilityComposer[object](models=MENU, catalog=default_catalog(), picker_model=args.picker_model)
     outcomes = await ask(composer, cases, args.repeat, args.concurrency)
     for section in dict.fromkeys(case.section for case in cases):
         report(section, [o for o in outcomes if o.case.section == section])

@@ -1,4 +1,4 @@
-"""Test doubles for `JevCapabilityComposer`.
+"""Test doubles for `CapabilityComposer`.
 
 Jev is stood in for by a `FunctionModel` that answers the composer's output tool and reports
 `provider_details['confidence']` the way Pydantic AI's `TypeSafeModel` does.
@@ -19,7 +19,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import RunContext, Tool
 from pydantic_ai.toolsets import FunctionToolset
 
-from pydantic_ai_harness.jev import CapabilitiesComposedEvent, ComposableCapability, JevCapabilityComposer
+from pydantic_ai_harness.capability_composer import CapabilitiesComposedEvent, CapabilityComposer, ComposableCapability
 from pydantic_ai_harness.subagents import ModelOption
 
 
@@ -130,14 +130,14 @@ def main_model(calls: list[str]) -> FunctionModel:
     return FunctionModel(respond, stream_function=stream)
 
 
-def composer(jev: Jev, seen: list[Seen], **kwargs: object) -> JevCapabilityComposer[object]:
-    return JevCapabilityComposer(
+def composer(jev: Jev, seen: list[Seen], **kwargs: object) -> CapabilityComposer[object]:
+    return CapabilityComposer(
         models={
             'fast': ModelOption(menu_model('fast', seen), description='Quick answers'),
             'strong': ModelOption(menu_model('strong', seen), description='Hard problems'),
         },
         catalog=CATALOG,
-        jev_model=jev.model_,
+        picker_model=jev.model_,
         **kwargs,  # pyright: ignore[reportArgumentType]
     )
 
@@ -162,5 +162,5 @@ def recording_tracer() -> tuple[TracerProvider, InMemorySpanExporter]:
 
 
 def compose_span(exporter: InMemorySpanExporter) -> ReadableSpan:
-    [span] = [s for s in exporter.get_finished_spans() if s.name == 'jev_capability_composer compose']
+    [span] = [s for s in exporter.get_finished_spans() if s.name == 'capability_composer compose']
     return span

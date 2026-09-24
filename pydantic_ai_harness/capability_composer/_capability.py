@@ -1,4 +1,4 @@
-"""Jev capability composer: Jev composes a sub-agent for each prompt and hands it the turn."""
+"""Capability composer: a picker model composes a sub-agent for each prompt and hands it the turn."""
 
 from __future__ import annotations
 
@@ -39,13 +39,13 @@ from pydantic_ai_harness.subagents._models import as_option, model_label
 if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
-_NAME = 'jev_capability_composer'
+_NAME = 'capability_composer'
 
 
 class Thinking(UseEnumMemberDocstrings, str, Enum):
     """How much reasoning effort a request needs."""
 
-    # Jev reads these docstrings as each option's meaning.
+    # The picker reads these docstrings as each option's meaning.
 
     low = 'low'
     """Routine or single-step work"""
@@ -56,11 +56,11 @@ class Thinking(UseEnumMemberDocstrings, str, Enum):
 
 
 ComposeAction: TypeAlias = Literal['compose', 'escalate', 'fallthrough']
-"""What the composer did with Jev's pick.
+"""What the composer did with the picker's answer.
 
-- `compose`: a sub-agent on the model and capabilities Jev picked handled the turn.
-- `escalate`: Jev was unsure of the model, so the sub-agent ran its capabilities on `unsure_model`.
-- `fallthrough`: Jev picked no capabilities, so the agent's own model handled the turn.
+- `compose`: a sub-agent on the model and capabilities the picker picked handled the turn.
+- `escalate`: the picker was unsure of the model, so the sub-agent ran its capabilities on `unsure_model`.
+- `fallthrough`: the picker picked no capabilities, so the agent's own model handled the turn.
 """
 
 
@@ -69,7 +69,7 @@ class ComposableCapability:
     """One catalog entry: a capability class, what to build it with, and when a run needs it."""
 
     description: str
-    """What the capability is for. Jev reads it to decide whether a request needs it."""
+    """What the capability is for. The picker reads it to decide whether a request needs it."""
 
     capability: type[AbstractCapability[object]]
     """The capability class, built fresh for each run that picks it."""
@@ -87,7 +87,7 @@ class ComposableCapability:
     ) -> ComposableCapability:
         """A catalog entry described by the first line of `capability`'s docstring unless `description` is given.
 
-        A docstring says what a capability is; Jev decides best from what a request needs it for, so a
+        A docstring says what a capability is; the picker decides best from what a request needs it for, so a
         description written for that tends to route better.
         """
         doc = inspect.getdoc(capability) or ''
@@ -104,7 +104,7 @@ SKILLS_DIRECTORY = Path('.agents/skills')
 
 
 def default_catalog() -> dict[str, ComposableCapability]:
-    """The allowlist `JevCapabilityComposer` picks from when no `catalog` is given.
+    """The allowlist `CapabilityComposer` picks from when no `catalog` is given.
 
     Every entry needs no third-party API key and gets its configuration from a default: the working
     directory for `RepoContext`, and `SKILLS_DIRECTORY` for `Skills`. An entry whose requirement is not
@@ -119,7 +119,7 @@ def default_catalog() -> dict[str, ComposableCapability]:
             capability=FileSystem,
         ),
         'shell': ComposableCapability(
-            # Jev does not infer that changing code means running its tests, so the description says so: this
+            # The picker does not infer that changing code means running its tests, so the description says so: this
             # took shell recall on code changes from 25% to 89% on a labelled set.
             description=(
                 'Run commands such as tests, linters, builds, and git. '
@@ -169,7 +169,7 @@ def default_catalog() -> dict[str, ComposableCapability]:
 
 @dataclass(frozen=True, kw_only=True)
 class Composition:
-    """What Jev picked for one prompt."""
+    """What the picker picked for one prompt."""
 
     model: str
     """The key of the chosen `models` entry."""
@@ -179,24 +179,24 @@ class Composition:
     """Keys of the chosen catalog entries, in catalog order."""
 
     confidence: Mapping[str, float]
-    """Jev's confidence per field (`model`, `thinking`, `capabilities`), from 0 to 1."""
+    """The picker's confidence per field (`model`, `thinking`, `capabilities`), from 0 to 1."""
 
 
 @dataclass(kw_only=True)
-class CapabilitiesComposedEvent(CapabilityEvent, namespace='jev', name='capabilities_composed'):
-    """Jev composed a sub-agent, which is about to handle the turn."""
+class CapabilitiesComposedEvent(CapabilityEvent, namespace='capability_composer', name='capabilities_composed'):
+    """The picker composed a sub-agent, which is about to handle the turn."""
 
     model: str
-    """The `models` key the sub-agent runs on: Jev's pick, or `unsure_model` when `escalated`."""
+    """The `models` key the sub-agent runs on: the picker's pick, or `unsure_model` when `escalated`."""
     thinking: Thinking
     capabilities: tuple[str, ...]
     """The catalog keys the sub-agent is built with. A pick of a `shared_capabilities` class is not listed."""
     escalated: bool
-    """Whether Jev was unsure of the model, so the sub-agent runs on `unsure_model` instead of its pick."""
+    """Whether the picker was unsure of the model, so the sub-agent runs on `unsure_model` instead of its pick."""
 
 
 class _Picks(BaseModel):
-    """The fields Jev fills. `_picks_type` narrows `model` and `capabilities` to one composer's options."""
+    """The fields the picker fills. `_picks_type` narrows `model` and `capabilities` to one composer's options."""
 
     model: str
     thinking: Thinking
@@ -224,13 +224,13 @@ _CONFIDENCE = TypeAdapter(dict[str, float])
 
 
 @dataclass
-class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
-    """Let [Jev](https://typesafe.ai) compose a sub-agent for each prompt and hand it the turn.
+class CapabilityComposer(AbstractCapability[AgentDepsT]):
+    """Let a picker model compose a sub-agent for each prompt and hand it the turn.
 
-    On a run's first model request, one Jev request picks a model from `models`, a thinking effort, and the
+    On a run's first model request, one request to `picker_model` picks a model from `models`, a thinking effort, and the
     capabilities from `catalog` the prompt needs. The composer builds that sub-agent, runs it on the
     conversation so far, and returns its answer as the model response, so the agent's own model is not
-    called. When Jev is unsure of the model, the sub-agent runs on `unsure_model`, the strongest entry by
+    called. When the picker is unsure of the model, the sub-agent runs on `unsure_model`, the strongest entry by
     default. When it picks no capabilities, the agent's own model handles the prompt as usual.
 
     The sub-agent is an independent run. Of the agent's configuration it gets the conversation, `deps`,
@@ -238,12 +238,12 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
 
     ```python
     from pydantic_ai import Agent
-    from pydantic_ai_harness.jev import JevCapabilityComposer
+    from pydantic_ai_harness.capability_composer import CapabilityComposer
 
     agent = Agent(
         'openai-codex:gpt-6-sol',
         capabilities=[
-            JevCapabilityComposer(
+            CapabilityComposer(
                 models={
                     'fast': 'openai-codex:gpt-6-luna',
                     'medium': 'openai-codex:gpt-6-sol',
@@ -254,15 +254,16 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
     )
     ```
 
-    Jev runs through Pydantic AI's `TypeSafeModel`, which reads `TYPESAFE_API_KEY`.
+    The default picker is [Jev](https://typesafe.ai), a classifier that answers in a few hundred milliseconds
+    with a confidence per field. It runs through Pydantic AI's `TypeSafeModel`, which reads `TYPESAFE_API_KEY`.
     """
 
     models: Mapping[str, Model | KnownModelName | str | ModelOption]
-    """The model menu Jev picks from. A `ModelOption.description` tells Jev what the entry is for, and
-    `ModelOption.settings` apply to the sub-agent, overriding the thinking effort Jev picked."""
+    """The model menu the picker picks from. A `ModelOption.description` tells the picker what the entry is for, and
+    `ModelOption.settings` apply to the sub-agent, overriding the thinking effort the picker picked."""
 
     catalog: Mapping[str, ComposableCapability] = field(default_factory=default_catalog)
-    """The capabilities Jev picks from. Defaults to `default_catalog()`, an allowlist that needs no API keys."""
+    """The capabilities the picker picks from. Defaults to `default_catalog()`, an allowlist that needs no API keys."""
 
     instructions: str | None = None
     """Instructions for the sub-agent. The agent's own instructions are not passed on."""
@@ -276,16 +277,20 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
     """Receives the sub-agent's events, such as its tool calls, which the agent's own event stream does not carry."""
 
     confidence_threshold: float = 0.4
-    """Minimum Jev confidence in the model pick to use it; below it the sub-agent runs on `unsure_model`.
+    """Minimum picker confidence in the model pick to use it; below it the sub-agent runs on `unsure_model`.
 
     A picker that reports no confidence is trusted."""
 
     unsure_model: str | None = None
-    """The `models` key to run on when Jev is unsure of the model pick. Defaults to the last entry, so order
+    """The `models` key to run on when the picker is unsure of the model pick. Defaults to the last entry, so order
     the menu from cheapest to strongest: an unsure pick then costs a stronger model rather than a wrong one."""
 
-    jev_model: Model | str = 'typesafe:jev-latest'
-    """The model that composes. Pin a version (`typesafe:jev-1.13.0`) once the threshold is tuned."""
+    picker_model: Model | str = 'typesafe:jev-latest'
+    """The model that picks: Jev by default, or any model that can fill a structured output.
+
+    Only a picker that reports confidence, as Jev does, can be unsure, so `confidence_threshold` and
+    `unsure_model` do not apply to a language model. Pin a Jev version (`typesafe:jev-1.13.0`) once the
+    threshold is tuned."""
 
     _options: dict[str, ModelOption] = field(init=False, repr=False, compare=False)
     _unsure: str = field(init=False, repr=False, compare=False)
@@ -293,9 +298,9 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
 
     def __post_init__(self) -> None:
         if not self.models:
-            raise UserError('JevCapabilityComposer needs at least one entry in `models`.')
+            raise UserError('CapabilityComposer needs at least one entry in `models`.')
         if not self.catalog:
-            raise UserError('JevCapabilityComposer needs at least one entry in `catalog`.')
+            raise UserError('CapabilityComposer needs at least one entry in `catalog`.')
         if not 0.0 <= self.confidence_threshold <= 1.0:
             raise UserError(f'confidence_threshold must be between 0 and 1, got {self.confidence_threshold}.')
         if self.unsure_model is not None and self.unsure_model not in self.models:
@@ -303,7 +308,7 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
         self._options = {key: as_option(value) for key, value in self.models.items()}
         self._unsure = self.unsure_model or list(self.models)[-1]
         self._picker = Agent(
-            self.jev_model,
+            self.picker_model,
             name=_NAME,
             output_type=_picks_type(
                 {key: option.description or model_label(option.model) for key, option in self._options.items()},
@@ -318,7 +323,7 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
         return None
 
     def get_ordering(self) -> CapabilityOrdering:
-        """Sit innermost and inside `InputGuardrail`, so Jev reads the prompt as the capabilities before it leave it."""
+        """Sit innermost and inside `InputGuardrail`, so the picker reads the prompt as the capabilities before it leave it."""
         return CapabilityOrdering(position='innermost', wrapped_by=[InputGuardrail])
 
     async def wrap_model_request(
@@ -328,7 +333,7 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
         request_context: ModelRequestContext,
         handler: WrapModelRequestHandler,
     ) -> ModelResponse:
-        """On a run's first request, hand the turn to a sub-agent Jev composed, or fall through to `handler`."""
+        """On a run's first request, hand the turn to a sub-agent the picker composed, or fall through to `handler`."""
         parameters = request_context.model_request_parameters
         # The sub-agent answers in text, so a run that needs structured output is left to the agent's model.
         takes_text = parameters.allow_text_output and parameters.output_mode in ('text', 'tool')
@@ -368,7 +373,7 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
         return ModelResponse(parts=[TextPart(content=result.output)], model_name=result.response.model_name)
 
     async def compose(self, prompt: str, *, usage_ctx: RunContext[AgentDepsT] | None = None) -> Composition:
-        """Ask Jev what `prompt` needs. Usage counts toward `usage_ctx`'s run and its limits when given."""
+        """Ask the picker what `prompt` needs. Usage counts toward `usage_ctx`'s run and its limits when given."""
         result = await self._picker.run(
             prompt,
             usage=usage_ctx.usage if usage_ctx is not None else None,
@@ -413,7 +418,7 @@ def _pending_text(messages: Sequence[ModelMessage]) -> str | None:
 
 
 def _text_of(prompt: str | Sequence[UserContent]) -> str | None:
-    """The prompt's text parts, which are all Jev reads; `None` when there are none."""
+    """The prompt's text parts, which are all the picker reads; `None` when there are none."""
     if isinstance(prompt, str):
         return prompt
     texts = [item for item in prompt if isinstance(item, str)]
@@ -432,14 +437,14 @@ def _record(
         return
     span.set_attributes(
         {
-            'jev_composer.action': action,
-            'jev_composer.model': composition.model,
-            'jev_composer.thinking': composition.thinking.value,
-            'jev_composer.capabilities': list(composition.capabilities),
-            **{'jev_composer.confidence.' + key: value for key, value in composition.confidence.items()},
+            'capability_composer.action': action,
+            'capability_composer.model': composition.model,
+            'capability_composer.thinking': composition.thinking.value,
+            'capability_composer.capabilities': list(composition.capabilities),
+            **{'capability_composer.confidence.' + key: value for key, value in composition.confidence.items()},
         }
     )
     if action != 'fallthrough':
-        span.set_attribute('jev_composer.run_model', unsure if action == 'escalate' else composition.model)
+        span.set_attribute('capability_composer.run_model', unsure if action == 'escalate' else composition.model)
     if ctx.trace_include_content:
-        span.set_attribute('jev_composer.prompt', prompt)
+        span.set_attribute('capability_composer.prompt', prompt)
