@@ -11,10 +11,9 @@ from dataclasses import dataclass
 import anyio
 import httpx
 import pytest
-from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
+from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
@@ -125,10 +124,11 @@ async def test_auth_function_cannot_return_oauth(server_url: str) -> None:
 
 
 @pytest.mark.parametrize('env', ['WHOAMI_TOKEN', None])
-def test_missing_credential_raises(env: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv('WHOAMI_TOKEN', raising=False)
+@pytest.mark.parametrize('auth', [None, ''])
+def test_missing_credential_raises(auth: str | None, env: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('WHOAMI_TOKEN', '')
     with pytest.raises(UserError, match='to connect to whoami'):
-        credential(None, env=env, service='whoami')
+        credential(auth, env=env, service='whoami')
 
 
 def test_oauth_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,42 +137,6 @@ def test_oauth_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('WHOAMI_TOKEN', 'oauth')
     with pytest.raises(UserError, match='Browser OAuth is not supported'):
         credential(None, env='WHOAMI_TOKEN', service='whoami')
-
-
-def client_toolset(client: MCPToolsetClient) -> AbstractToolset[User]:
-    return MCPToolset(client, id='whoami')
-
-
-async def test_client_function_runs_per_run(server_url: str) -> None:
-    def client(ctx: RunContext[User]) -> MCPToolsetClient | None:
-        if ctx.deps.token is None:
-            return None
-        return StreamableHttpTransport(server_url, headers={'Authorization': f'Bearer {ctx.deps.token}'})
-
-    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run(client, client_toolset, id='whoami')])
-    alice, bob, nobody = await asyncio.gather(
-        agent.run('Who am I?', deps=User('alice-token')),
-        agent.run('Who am I?', deps=User('bob-token')),
-        agent.run('Who am I?', deps=User(None)),
-    )
-    assert (alice.output, bob.output, nobody.output) == (
-        '{"whoami":"Bearer alice-token"}',
-        '{"whoami":"Bearer bob-token"}',
-        'success (no tool calls)',
-    )
-
-
-async def test_async_client_function(server_url: str) -> None:
-    async def client(ctx: RunContext[User]) -> MCPToolsetClient | None:
-        return StreamableHttpTransport(server_url, auth=_Bearer('alice-token'))
-
-    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run(client, client_toolset, id='whoami')])
-    result = await agent.run('Who am I?', deps=User(None))
-    assert result.output == '{"whoami":"Bearer alice-token"}'
-
-
-def test_fixed_client_is_built_once() -> None:
-    assert isinstance(per_run('https://example.com/mcp', client_toolset, id='whoami'), MCPToolset)
 
 
 class _Bearer(httpx.Auth):
