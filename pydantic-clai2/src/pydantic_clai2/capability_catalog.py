@@ -19,6 +19,7 @@ _FACTORIES = (
     ('summarizing_compaction', 'compaction:SummarizingCompaction'),
     ('tiered_compaction', 'compaction:TieredCompaction'),
     ('warn_near_limits', 'compaction:WarnNearLimits'),
+    ('composio', 'composio:Composio'),
     ('conversation_search', 'conversation_search:ConversationSearch'),
     ('dynamic_workflow', 'dynamic_workflow:DynamicWorkflow'),
     ('exa_agent', 'exa:ExaAgent'),
