@@ -13,12 +13,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
-from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
+from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 from pydantic_ai import RunContext
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset
 
-from ._settings import Server, Servers, StdioServer, http_client, missing, resolve
+from ._settings import Server, Servers, SSEServer, StdioServer, http_client, missing, oauth, resolve
 from ._store import MCPStore
 
 Source = Literal['user', 'plugin', 'project']
@@ -225,6 +225,7 @@ class MCPServers:
 
     def _build(self, entry: ServerEntry) -> MCPToolset[None]:
         server = entry.server
+        transport: StdioTransport | StreamableHttpTransport | SSETransport
         if isinstance(server, StdioServer):
             self.store.logs.mkdir(parents=True, exist_ok=True)
             transport = StdioTransport(
@@ -235,11 +236,26 @@ class MCPServers:
                 keep_alive=False,
                 log_file=self.log_path(entry.name),
             )
+            timeout = server.timeout
+        elif isinstance(server, SSEServer):
+            transport = SSETransport(
+                url=str(server.url),
+                headers=resolve(server.headers),
+                auth=oauth(server),
+                httpx_client_factory=http_client,
+            )
+            timeout = server.init_timeout()
+        else:
+            transport = StreamableHttpTransport(
+                url=str(server.url),
+                headers=resolve(server.headers),
+                auth=oauth(server),
+                httpx_client_factory=http_client,
+            )
+            timeout = server.init_timeout()
+        if timeout is None:
             return MCPToolset(transport, id=f'mcp_{entry.name}')
-        http = StreamableHttpTransport(
-            url=str(server.url), headers=resolve(server.headers), auth=server.auth, httpx_client_factory=http_client
-        )
-        return MCPToolset(http, id=f'mcp_{entry.name}')
+        return MCPToolset(transport, id=f'mcp_{entry.name}', init_timeout=timeout)
 
 
 def not_owned(entry: ServerEntry, store: MCPStore) -> str | None:

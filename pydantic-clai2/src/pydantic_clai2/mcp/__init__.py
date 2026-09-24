@@ -1,6 +1,6 @@
 """The built-in `mcp` plugin: `/mcp` manages MCP servers the way Code Puppy's `/mcp` does.
 
-Servers live in `mcp.json` in the CLAI config folder, written by `/mcp install` and `/mcp edit`.
+Servers live in `mcp.json` in the CLAI config folder, written by the `/mcp install` and `/mcp edit` form.
 A repository's `.clai/mcp_servers.json` loads after `/mcp trust accept`. Servers given as plugin
 settings (`/plugins add mcp pydantic_clai2.mcp JSON`) still load, read-only.
 """
@@ -10,24 +10,32 @@ from pydantic_ai.toolsets import DynamicToolset
 
 from ..commands import Command
 from ..plugins import PluginHost, SessionEnd
-from ._catalog import CATALOG, CatalogArg, CatalogEntry
 from ._command import HELP, MCPCommand
-from ._menus import ServerForm, catalog_details, catalog_menu, edit_menu, install_menu
+from ._form import EXAMPLES, ServerForm, edit_form, edit_in_editor, install_form, run_form
 from ._runtime import MCPServers, ServerEntry, State
-from ._settings import HTTPServer, MCPSettings, Server, ServerSettings, StdioServer, http_client
+from ._settings import (
+    HTTPServer,
+    MCPSettings,
+    RemoteServer,
+    Server,
+    ServerSettings,
+    SSEServer,
+    StdioServer,
+    http_client,
+)
 from ._store import PROJECT_MCP_FILE, MCPStore, UserFile
 
 __all__ = [
-    'CATALOG',
+    'EXAMPLES',
     'HELP',
     'PROJECT_MCP_FILE',
-    'CatalogArg',
-    'CatalogEntry',
     'HTTPServer',
     'MCPCommand',
     'MCPServers',
     'MCPSettings',
     'MCPStore',
+    'RemoteServer',
+    'SSEServer',
     'Server',
     'ServerEntry',
     'ServerForm',
@@ -36,11 +44,11 @@ __all__ = [
     'StdioServer',
     'UserFile',
     'activate',
-    'catalog_details',
-    'catalog_menu',
-    'edit_menu',
+    'edit_form',
+    'edit_in_editor',
     'http_client',
-    'install_menu',
+    'install_form',
+    'run_form',
 ]
 
 

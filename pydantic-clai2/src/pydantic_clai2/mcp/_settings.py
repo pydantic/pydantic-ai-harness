@@ -1,15 +1,24 @@
-"""Server configuration models shared by the user file, project file, catalog, and plugin settings."""
+"""Server configuration models, in the JSON shape Code Puppy's `/mcp` form edits."""
 
 import os
+import warnings
 from collections.abc import Mapping
 from string import Template
 from typing import Annotated, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from fastmcp.client.auth import OAuth
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, HttpUrl, TypeAdapter, model_validator
 
-ServerName = Annotated[str, Field(pattern=r'^[A-Za-z][A-Za-z0-9]*$')]
+ServerName = Annotated[str, Field(pattern=r'^[A-Za-z][A-Za-z0-9-]{0,63}$')]
 """Underscores are reserved for the `server_tool` separator, so two pairs cannot produce one name."""
+
+ServerType = Literal['stdio', 'http', 'sse']
+OAUTH_TIMEOUT = 330.0
+"""Seconds to allow for the initialize handshake when it includes a browser sign-in."""
+
+# Tokens stay in memory on purpose; FastMCP warns about that whenever a transport is built.
+warnings.filterwarnings('ignore', message=r'Using in-memory token storage .*', category=UserWarning)
 
 
 class ServerSettings(BaseModel):
@@ -17,29 +26,71 @@ class ServerSettings(BaseModel):
 
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
     enabled: bool = True
+    timeout: float | None = Field(default=None, gt=0)
+    """Seconds allowed for the initialize handshake; core's default when unset."""
 
 
 class StdioServer(ServerSettings):
     """A local program, launched without a shell by the MCP client."""
 
-    transport: Literal['stdio']
+    type: Literal['stdio']
     command: str = Field(min_length=1)
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] | None = None
     cwd: str | None = None
 
 
-class HTTPServer(ServerSettings):
-    """A Streamable HTTP MCP endpoint."""
+class RemoteServer(ServerSettings):
+    """An MCP endpoint reached over the network."""
 
-    transport: Literal['http']
     url: HttpUrl
     headers: dict[str, str] | None = None
     auth: Literal['oauth'] | None = None
-    """`oauth` lets FastMCP run the browser sign-in; tokens stay in memory."""
+    """`oauth` lets FastMCP run discovery, PKCE, and a browser sign-in on connect; tokens stay in memory."""
+
+    @model_validator(mode='after')
+    def _oauth_rules(self) -> 'RemoteServer':
+        if self.auth is None:
+            return self
+        if any(key.lower() == 'authorization' for key in self.headers or {}):
+            raise ValueError('OAuth sets the Authorization header itself; remove it from headers')
+        loopback = self.url.host in ('localhost', '127.0.0.1', '[::1]')
+        if self.url.scheme != 'https' and not loopback:
+            raise ValueError('OAuth needs an https URL, except for a loopback server')
+        if self.url.username or self.url.password:
+            raise ValueError('OAuth URLs cannot carry credentials')
+        return self
+
+    def init_timeout(self) -> float | None:
+        """The configured timeout, or enough time for a browser sign-in when using OAuth."""
+        return self.timeout or (OAUTH_TIMEOUT if self.auth else None)
 
 
-Server = Annotated[StdioServer | HTTPServer, Field(discriminator='transport')]
+class HTTPServer(RemoteServer):
+    """A Streamable HTTP MCP endpoint."""
+
+    type: Literal['http']
+
+
+class SSEServer(RemoteServer):
+    """A Server-Sent Events MCP endpoint, the transport older servers use."""
+
+    type: Literal['sse']
+
+
+def _legacy_key(value: object) -> object:
+    """Plugin settings written before `/mcp install` named the discriminator `transport`."""
+    if isinstance(value, dict):
+        raw = _RAW.validate_python(value)
+        if 'transport' in raw and 'type' not in raw:
+            raw['type'] = raw.pop('transport')
+        return raw
+    return value
+
+
+_RAW: TypeAdapter[dict[str, object]] = TypeAdapter(dict[str, object])
+
+Server = Annotated[StdioServer | HTTPServer | SSEServer, Field(discriminator='type'), BeforeValidator(_legacy_key)]
 Servers = dict[ServerName, Server]
 
 
@@ -47,7 +98,7 @@ class MCPSettings(BaseModel):
     """Plugin settings. Server names also prefix tool names to avoid cross-server collisions."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
-    servers: Servers = Field(default_factory=dict[str, StdioServer | HTTPServer])
+    servers: Servers = Field(default_factory=dict[str, StdioServer | HTTPServer | SSEServer])
 
 
 def http_client(
@@ -64,6 +115,11 @@ def http_client(
     return httpx.AsyncClient(
         headers=headers, timeout=timeout or httpx.Timeout(30, read=300), auth=auth, follow_redirects=False
     )
+
+
+def oauth(server: RemoteServer) -> OAuth | None:
+    """A sign-in handler built without contacting the server; FastMCP starts the flow on connect."""
+    return OAuth(client_name='CLAI', callback_host='127.0.0.1') if server.auth else None
 
 
 def references(server: Server) -> list[str]:

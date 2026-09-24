@@ -26,35 +26,56 @@ separately.
 
 ```text
 /mcp                                  status dashboard (also /mcp list, /mcp status)
-/mcp install                          browse the catalog, or add a custom server
-/mcp install sqlite db_path=./app.db  install a catalog server, answering its questions
-/mcp install custom docs https://example.com/mcp
-/mcp install custom local uvx my-mcp-server --flag
-/mcp search database                  search the catalog
+/mcp install                          add a server in the form below
 /mcp start NAME | stop NAME | restart NAME | start-all | stop-all
 /mcp status NAME                      target, env references, tools, last error
 /mcp tools NAME                       connect and list the tools the agent sees
 /mcp logs NAME [LINES]                server stderr and lifecycle events
-/mcp edit NAME                        edit a saved server in a form
+/mcp edit NAME                        the same form, prefilled
 /mcp remove NAME
 /mcp trust [status|accept|revoke]     load this repository's .clai/mcp_servers.json
 /mcp help
 ```
 
+`/mcp install` opens Code Puppy's custom server form:
+
+```text
+ Add Custom MCP Server
+ Server Name: docs              | Name   docs
+ Server Type: http              | Type   http - Streamable HTTP endpoint ...
+ OAuth sign-in: on              |
+ JSON Configuration (valid)     | {"type": "http", "url": "https://...", "auth": "oauth", "timeout": 330}
+ Load example for http          |
+ Save & Install                 | Configuration is valid
+ Cancel                         |
+```
+
+- **Server Type** switches between `stdio` (a local program), `http` (Streamable
+  HTTP), and `sse` (Server-Sent Events, used by older servers). An untouched
+  example follows the type; a configuration you have edited is kept.
+- **JSON Configuration** opens `$VISUAL` or `$EDITOR` (default `vi`) on the
+  server's JSON, with a one-line input as a fallback when no editor runs. The
+  preview says whether it is valid and why not.
+- **OAuth sign-in** appears for `http` and `sse` servers. Switching it on sets
+  `"auth": "oauth"`, allows 330 seconds for the handshake so there is time to
+  sign in, and drops any `Authorization` header. FastMCP runs discovery, dynamic
+  client registration, PKCE, and a browser sign-in through a loopback callback
+  when the server connects. Tokens stay in memory, so restarting CLAI can mean
+  signing in again. OAuth needs `https`, except for loopback servers.
+
 The dashboard shows each server as `running` (connected by `/mcp start`),
 `ready` (enabled; connects when a prompt runs), `stopped`, or `error` (a failed
-start, or a referenced environment variable that is not set). Installed and
-enabled servers are available to the agent from the next prompt; `/mcp start`
-is not required. It keeps one connection open between prompts instead of
-starting the server for each prompt, and records the server's tools.
-`/mcp stop` disconnects the server and disables it until `/mcp start`.
-The model sees tools prefixed by server name, for example `local_search`.
+start, or a referenced environment variable that is not set). Saved and enabled
+servers are available to the agent from the next prompt; `/mcp start` is not
+required. It keeps one connection open between prompts instead of starting the
+server for each prompt, and records the server's tools. `/mcp stop` disconnects
+the server and disables it until `/mcp start`. The model sees tools prefixed by
+server name, for example `local_search`.
 
 Only install servers you trust. Stdio servers run programs with your user
-permissions, launched as an executable plus arguments without a shell. HTTP
+permissions, launched as an executable plus arguments without a shell. Remote
 servers receive tool arguments and can return untrusted content. HTTP redirects
-are rejected; configure the final endpoint URL. Set `auth` to `oauth` in
-`/mcp edit` to let FastMCP run a browser sign-in on connect; tokens stay in memory.
+are rejected; configure the final endpoint URL.
 
 ### Where servers are stored
 
@@ -62,19 +83,20 @@ are rejected; configure the final endpoint URL. Set `auth` to `oauth` in
 (`~/.config/pydantic-clai2/`, or under `$XDG_CONFIG_HOME`). The file is created
 readable only by you. Do not put secrets in it: write `$VAR` or `${VAR}` in an
 `env` or `headers` value and CLAI fills it from its own environment when it
-connects, so the file holds only the reference. Catalog servers that need a
-token, such as `github`, are saved this way and report the missing variable
-until you set it. Stdio server stderr goes to `mcp_logs/NAME.log` next to
+connects, so the file holds only the reference; a server whose variable is
+unset shows as `error` until you set it. Stdio server stderr goes to `mcp_logs/NAME.log` next to
 `mcp.json`, which `/mcp logs` reads. The file shape is:
 
 ```json
-{"servers": {"local": {"transport": "stdio", "command": "uvx", "args": ["my-mcp-server"], "env": {"TOKEN": "$MY_TOKEN"}},
-             "remote": {"transport": "http", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer $API_KEY"}}}}
+{"servers": {"local": {"type": "stdio", "command": "uvx", "args": ["my-mcp-server"], "env": {"TOKEN": "$MY_TOKEN"}},
+             "remote": {"type": "http", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer $API_KEY"}}}}
 ```
 
-Stdio servers also accept `cwd`; every server accepts `enabled: false`. Names
-start with a letter and contain only letters and digits. Underscores are
-reserved for the separator so server/tool name pairs cannot produce the same name.
+Stdio servers also accept `cwd`; `http` and `sse` servers accept `auth: "oauth"`;
+every server accepts `timeout` (seconds for the initialize handshake) and
+`enabled: false`. Names start with a letter and contain letters, digits, and
+hyphens. Underscores are reserved for the separator so server/tool name pairs
+cannot produce the same name.
 
 ### Project servers and trust
 
@@ -92,14 +114,14 @@ both places, your own server wins.
 Servers configured the older way, as plugin settings
 (`/plugins add mcp pydantic_clai2.mcp '{"servers": {...}}'`), still load and show
 up in `/mcp` with source `plugin`; change or remove them through `/plugins`.
+The older `"transport"` key is still read as `"type"`.
 `/plugins disable mcp` removes both the tools and the command.
 
 Compared with Code Puppy, CLAI has one agent, so there are no per-agent server
 bindings and no `silence-warning` command: every enabled server is offered to
-the agent. The catalog lists fewer servers, chosen from ones whose packages or
-endpoints are published by their maintainers. The plugin adds no telemetry
-beyond core's tool spans, and does not enable MCP sampling or native
-provider-side MCP.
+the agent. There is no built-in server catalog, so there is no `/mcp search`.
+The plugin adds no telemetry beyond core's tool spans, and does not enable MCP
+sampling or native provider-side MCP.
 
 ## On-demand authoring help
 

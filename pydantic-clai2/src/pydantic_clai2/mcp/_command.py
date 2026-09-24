@@ -5,26 +5,19 @@ from dataclasses import dataclass
 
 from ..field_menu import TERMINAL, Runners
 from ..menu_worker import run_worker
-from ._catalog import CATALOG, find, search
-from ._menus import check_name, custom_server, edit_menu, install, install_menu, installed_message
+from ._form import Editor, edit_form, edit_in_editor, install_form
 from ._runtime import MCPServers, ServerEntry, State, not_owned
 from ._settings import references, target
 
 _GLYPHS: dict[State, str] = {'running': '+', 'ready': 'o', 'stopped': '-', 'error': '!'}
 SERVER_SUBCOMMANDS = ('start', 'stop', 'restart', 'status', 'logs', 'edit', 'remove', 'tools')
-SUBCOMMANDS = ('list', 'install', 'search', 'start-all', 'stop-all', 'trust', 'help', *SERVER_SUBCOMMANDS)
+SUBCOMMANDS = ('list', 'install', 'start-all', 'stop-all', 'trust', 'help', *SERVER_SUBCOMMANDS)
 
 HELP = """MCP server management
 
-Registry
-  /mcp search [QUERY]            Search the catalog
-  /mcp install                   Browse the catalog, or add a custom server
-  /mcp install ID [NAME] [K=V]   Install a catalog server; K=V answers its questions
-  /mcp install custom NAME CMD|URL [ARGS...]
-                                 Add a program (run without a shell) or a Streamable HTTP URL
-
 Servers
   /mcp                           Status dashboard (also /mcp list, /mcp status)
+  /mcp install                   Add a server: name, type (stdio, http, sse), JSON config, OAuth
   /mcp start NAME                Enable and connect now
   /mcp stop NAME                 Disconnect and disable
   /mcp restart NAME              Reconnect, picking up config and environment changes
@@ -32,7 +25,7 @@ Servers
   /mcp status NAME               Details: target, env references, tools, last error
   /mcp tools NAME                Connect and list the tools the agent sees
   /mcp logs NAME [LINES]         Server stderr and lifecycle events (default 20 lines)
-  /mcp edit NAME                 Edit a saved server
+  /mcp edit NAME                 Edit a saved server in the same form
   /mcp remove NAME               Stop and forget a saved server
   /mcp trust [status|accept|revoke]
                                  Load this repository's .clai/mcp_servers.json
@@ -40,10 +33,10 @@ Servers
 States:  + running (connected)  o ready (connects on your next prompt)  - stopped  ! error
 
 Examples
-  /mcp search database
-  /mcp install sqlite db_path=./app.db
-  /mcp install custom docs https://example.com/mcp
-  /mcp start sqlite"""
+  /mcp install             # opens the add-server form
+  /mcp start filesystem    # connect now instead of on the next prompt
+  /mcp logs filesystem 50  # the server's stderr
+  /mcp edit filesystem     # change its JSON, type, or OAuth"""
 
 
 def _uptime(seconds: float | None) -> str:
@@ -60,6 +53,7 @@ class MCPCommand:
 
     servers: MCPServers
     runners: Runners = TERMINAL
+    editor: Editor = edit_in_editor
 
     async def __call__(self, args: list[str]) -> str:
         """Bare `/mcp` shows the dashboard, like Code Puppy."""
@@ -69,7 +63,6 @@ class MCPCommand:
         action, rest = args[0].lower(), args[1:]
         simple: dict[str, Callable[[list[str]], Awaitable[str]]] = {
             'install': self._install,
-            'search': self._search,
             'start-all': self._start_all,
             'stop-all': self._stop_all,
             'trust': self._trust,
@@ -85,7 +78,7 @@ class MCPCommand:
         raise ValueError(f'Unknown MCP subcommand: {action}. Type /mcp help for available commands.')
 
     def complete(self, args: list[str]) -> Iterable[str]:
-        """Subcommands, then server names, catalog ids, or trust actions."""
+        """Subcommands, then server names or trust actions."""
         if len(args) <= 1:
             return SUBCOMMANDS
         if len(args) == 2 and args[0] in SERVER_SUBCOMMANDS:
@@ -93,8 +86,6 @@ class MCPCommand:
                 return [entry.name for entry in self.servers.entries()]
             except ValueError:
                 return ()
-        if len(args) == 2 and args[0] == 'install':
-            return ('custom', *(entry.id for entry in CATALOG))
         if len(args) == 2 and args[0] == 'trust':
             return ('status', 'accept', 'revoke')
         return ()
@@ -104,18 +95,14 @@ class MCPCommand:
         entries = self.servers.entries()
         trust = self._trust_notice()
         if not entries:
-            lines = [
-                'No MCP servers yet.',
-                '  /mcp install              browse the catalog',
-                '  /mcp install custom NAME COMMAND|URL   add your own',
-            ]
+            lines = ['No MCP servers yet. /mcp install adds a stdio, http, or sse server; /mcp help lists commands.']
             return '\n'.join([*lines, *([trust] if trust else [])])
         width = max(len(entry.name) for entry in entries)
         lines = ['MCP servers', f'  {"NAME":<{width}}  TYPE   STATE    SOURCE   UPTIME   STATUS']
         for entry in entries:
             state = self.servers.state(entry)
             lines.append(
-                f'{_GLYPHS[state]} {entry.name:<{width}}  {entry.server.transport:<5}  {state:<7}  '
+                f'{_GLYPHS[state]} {entry.name:<{width}}  {entry.server.type:<5}  {state:<7}  '
                 f'{entry.source:<7}  {_uptime(self.servers.uptime(entry)):<7}  {self._summary(entry, state)}'
             )
         running = sum(self.servers.state(entry) == 'running' for entry in entries)
@@ -135,7 +122,7 @@ class MCPCommand:
             [
                 f'{_GLYPHS[state]} {entry.name}',
                 f'  state    {state}' + (f' for {_uptime(self.servers.uptime(entry))}' if state == 'running' else ''),
-                f'  type     {entry.server.transport}',
+                f'  type     {entry.server.type}',
                 f'  target   {target(entry.server)}',
                 f'  source   {entry.source} ({source})',
                 f'  env      {", ".join(variables) if variables else "none referenced"}',
@@ -179,9 +166,13 @@ class MCPCommand:
             reason = not_owned(entry, self.servers.store)
             if reason:
                 raise ValueError(reason)
-            messages = await run_worker(lambda: edit_menu(self.servers.store, name, self.runners))
-            restarted = [await self.servers.restart(name)] if self.servers.state(entry) == 'running' else []
-            return '\n'.join([*messages, *restarted]) or 'No changes.'
+            running = self.servers.state(entry) == 'running'
+            saved = await run_worker(lambda: edit_form(self.servers.store, name, self.runners, self.editor))
+            if saved is None:
+                return 'No changes.'
+            await self.servers.sync()
+            renamed = name not in {entry.name for entry in self.servers.entries()}
+            return saved if renamed or not running else f'{saved}\n{await self.servers.restart(name)}'
         methods = {'start': self.servers.start, 'stop': self.servers.stop, 'restart': self.servers.restart}
         return await methods[action](name)
 
@@ -196,39 +187,9 @@ class MCPCommand:
         return '\n'.join([f'{path} (last {min(limit, len(lines))} of {len(lines)} lines)', *lines[-limit:]])
 
     async def _install(self, args: list[str]) -> str:
-        store = self.servers.store
-        if not args:
-            return await run_worker(lambda: install_menu(store, self.runners))
-        if args[0] == 'custom':
-            if len(args) < 3:
-                raise ValueError('Usage: /mcp install custom NAME COMMAND|URL [ARGS...]')
-            server = custom_server(args[2], args[3:])
-            store.put(check_name(store, args[1]), server)
-            return installed_message(args[1], server)
-        entry = find(args[0])
-        if entry is None:
-            matches = search(args[0])
-            if len(matches) != 1:
-                ids = ', '.join(match.id for match in matches[:8])
-                hint = f' Matches: {ids}.' if ids else ' Try /mcp search.'
-                raise ValueError(f'No catalog server with id {args[0]!r}.{hint}')
-            entry = matches[0]
-        values = dict(word.split('=', 1) for word in args[1:] if '=' in word)
-        names = [word for word in args[1:] if '=' not in word]
-        return install(store, entry, names[0] if names else entry.id, values)
-
-    async def _search(self, args: list[str]) -> str:
-        installed = {entry.name for entry in self.servers.entries()}
-        results = search(' '.join(args))
-        if not results:
-            return f'No catalog servers match {" ".join(args)!r}. /mcp install custom adds any server.'
-        width = max(len(entry.id) for entry in results)
-        lines = [
-            f'{"*" if entry.popular else " "} {entry.id:<{width}}  {entry.description}'
-            + (' (installed)' if entry.id in installed else '')
-            for entry in results
-        ]
-        return '\n'.join([*lines, '', '* popular. Install with /mcp install ID.'])
+        if args:
+            raise ValueError('Usage: /mcp install (opens the add-server form)')
+        return await run_worker(lambda: install_form(self.servers.store, self.runners, self.editor))
 
     async def _start_all(self, _: list[str]) -> str:
         entries = self.servers.entries()

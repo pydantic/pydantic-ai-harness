@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from ..project_settings import find_project_file
 from ..settings_store import config_dir
-from ._settings import HTTPServer, Server, Servers, StdioServer
+from ._settings import HTTPServer, Server, Servers, SSEServer, StdioServer
 
 PROJECT_MCP_FILE = Path('.clai') / 'mcp_servers.json'
 TrustState = Literal['trusted', 'changed', 'untrusted']
@@ -25,7 +25,7 @@ class UserFile(BaseModel):
     """The user's `mcp.json`: servers and accepted project files."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
-    servers: Servers = Field(default_factory=dict[str, StdioServer | HTTPServer])
+    servers: Servers = Field(default_factory=dict[str, StdioServer | HTTPServer | SSEServer])
     trusted_projects: dict[str, str] = Field(default_factory=dict[str, str])
     """Resolved project file path to the SHA-256 accepted by `/mcp trust`."""
 
@@ -34,7 +34,7 @@ class ProjectFile(BaseModel):
     """A repository's `.clai/mcp_servers.json`."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, hide_input_in_errors=True)
-    servers: Servers = Field(default_factory=dict[str, StdioServer | HTTPServer])
+    servers: Servers = Field(default_factory=dict[str, StdioServer | HTTPServer | SSEServer])
 
 
 class MCPStore:

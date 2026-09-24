@@ -11,7 +11,7 @@ from pathlib import Path
 import anyio
 import httpx
 import pytest
-from pydantic import JsonValue, ValidationError
+from pydantic import HttpUrl, JsonValue, ValidationError
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
 from rich.console import Console
@@ -19,7 +19,16 @@ from rich.console import Console
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
-from pydantic_clai2.mcp import MCPServers, MCPStore, StdioServer, activate, http_client
+from pydantic_clai2.mcp import (
+    HTTPServer,
+    MCPServers,
+    MCPSettings,
+    MCPStore,
+    SSEServer,
+    StdioServer,
+    activate,
+    http_client,
+)
 from pydantic_clai2.plugin_loader import PluginLoader
 from pydantic_clai2.plugins import PluginHost, SessionEnd, SessionStart
 from pydantic_clai2.settings_store import SettingsStore
@@ -90,13 +99,13 @@ def test_store_round_trip_is_private_and_fails_loudly(tmp_path: Path) -> None:
     store = MCPStore(tmp_path / 'config')
     assert store.load().servers == {}
     assert not store.delete('ghost')
-    store.put('local', StdioServer(transport='stdio', command='python'))
+    store.put('local', StdioServer(type='stdio', command='python'))
     assert list(MCPStore(tmp_path / 'config').load().servers) == ['local']
     if sys.platform != 'win32':
         assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
     assert '"enabled"' not in store.path.read_text(), 'defaults are not written'
     assert store.delete('local')
-    store.path.write_text('{"servers": {"bad-name": {"transport": "stdio", "command": "x"}}}')
+    store.path.write_text('{"servers": {"bad_name": {"type": "stdio", "command": "x"}}}')
     with pytest.raises(ValueError, match='mcp.json'):
         store.load()
 
@@ -108,12 +117,16 @@ def test_default_store_uses_the_clai_config_folder(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     'server',
     [
-        {'transport': 'stdio', 'command': ''},
-        {'transport': 'stdio', 'command': 'python', 'typo': True},
-        {'transport': 'http', 'url': 'file:///tmp/server'},
-        {'transport': 'http'},
-        {'transport': 'http', 'url': 'https://example.com', 'auth': 'basic'},
-        {'transport': 'sse', 'url': 'https://example.com'},
+        {'type': 'stdio', 'command': ''},
+        {'type': 'stdio', 'command': 'python', 'typo': True},
+        {'type': 'http', 'url': 'file:///tmp/server'},
+        {'type': 'http'},
+        {'type': 'http', 'url': 'https://example.com', 'auth': 'basic'},
+        {'type': 'http', 'url': 'http://example.com/mcp', 'auth': 'oauth'},
+        {'type': 'sse', 'url': 'https://example.com', 'auth': 'oauth', 'headers': {'authorization': 'x'}},
+        {'type': 'http', 'url': 'https://u:p@example.com', 'auth': 'oauth'},
+        {'type': 'stdio', 'command': 'x', 'timeout': 0},
+        {'type': 'websocket', 'url': 'https://example.com'},
     ],
 )
 def test_invalid_configuration(server: JsonValue) -> None:
@@ -121,10 +134,10 @@ def test_invalid_configuration(server: JsonValue) -> None:
         make_host({'servers': {'test': server}})
 
 
-@pytest.mark.parametrize('name', ['bad-name', 'a_b', '0server'])
+@pytest.mark.parametrize('name', ['bad_name', 'a b', '0server', 'x' * 65])
 def test_invalid_name(name: str) -> None:
     with pytest.raises(ValidationError):
-        make_host({'servers': {name: {'transport': 'stdio', 'command': 'python'}}})
+        make_host({'servers': {name: {'type': 'stdio', 'command': 'python'}}})
 
 
 async def test_plugin_settings_servers_still_load_read_only(tmp_path: Path) -> None:
@@ -193,7 +206,7 @@ async def test_start_stop_restart_logs_and_agent_use(tmp_path: Path) -> None:
     store = MCPStore(tmp_path / 'config', workspace=tmp_path)
     host = make_host({}, store)
     run = host.commands.execute_async
-    assert 'Installed local' in await run(f'/mcp install custom local {sys.executable} {script}')
+    store.put('local', StdioServer(type='stdio', command=sys.executable, args=[str(script)]))
     assert 'o local' in await run('/mcp'), 'installed servers are ready without a start'
 
     result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
@@ -234,16 +247,18 @@ async def test_start_stop_restart_logs_and_agent_use(tmp_path: Path) -> None:
 
 async def test_tools_without_start_and_empty_server(tmp_path: Path) -> None:
     script, pid_file = write_server(tmp_path, with_tool=False)
-    host = make_host({}, MCPStore(tmp_path / 'config', workspace=tmp_path))
-    await host.commands.execute_async(f'/mcp install custom local {sys.executable} {script}')
+    store = MCPStore(tmp_path / 'config', workspace=tmp_path)
+    host = make_host({}, store)
+    store.put('local', StdioServer(type='stdio', command=sys.executable, args=[str(script)]))
     assert await host.commands.execute_async('/mcp tools local') == 'No tools provided by local.'
     assert_exited(pid_file)
 
 
 async def test_failed_start_is_reported_and_logged(tmp_path: Path) -> None:
-    host = make_host({}, MCPStore(tmp_path / 'config', workspace=tmp_path))
+    store = MCPStore(tmp_path / 'config', workspace=tmp_path)
+    host = make_host({}, store)
     run = host.commands.execute_async
-    await run(f'/mcp install custom broken {sys.executable} -c "raise SystemExit(3)"')
+    store.put('broken', StdioServer(type='stdio', command=sys.executable, args=['-c', 'raise SystemExit(3)']))
     message = await run('/mcp start broken')
     assert message.startswith('Could not start broken') and '/mcp logs broken' in message
     assert '! broken' in await run('/mcp')
@@ -256,8 +271,12 @@ async def test_env_references_resolve_at_connect_time(tmp_path: Path, monkeypatc
     monkeypatch.delenv('GITHUB_TOKEN', raising=False)
     store = MCPStore(tmp_path / 'config', workspace=tmp_path)
     host = make_host({}, store)
-    installed = await host.commands.execute_async('/mcp install github')
-    assert 'Set GITHUB_TOKEN' in installed
+    store.put(
+        'github',
+        HTTPServer(
+            type='http', url=HttpUrl('https://api.example.com/mcp'), headers={'Authorization': 'Bearer $GITHUB_TOKEN'}
+        ),
+    )
     assert '$GITHUB_TOKEN' in store.path.read_text(), 'the saved file holds the reference, not a value'
     assert 'set GITHUB_TOKEN in your environment' in await host.commands.execute_async('/mcp')
     assert 'cannot connect' in await host.commands.execute_async('/mcp start github')
@@ -271,13 +290,13 @@ async def test_reconfiguring_or_removing_releases_the_connection(tmp_path: Path)
     script, pid_file = write_server(tmp_path)
     store = MCPStore(tmp_path / 'config', workspace=tmp_path)
     servers = MCPServers(store)
-    store.put('local', StdioServer(transport='stdio', command=sys.executable, args=[str(script)]))
+    store.put('local', StdioServer(type='stdio', command=sys.executable, args=[str(script)]))
     assert 'Started' in await servers.start('local')
     first = pid_file.read_text()
-    store.put('local', StdioServer(transport='stdio', command=sys.executable, args=[str(script), '--x']))
+    store.put('local', StdioServer(type='stdio', command=sys.executable, args=[str(script), '--x']))
     assert 'Started' in await servers.start('local'), 'a changed server reconnects instead of reusing'
     assert pid_file.read_text() != first
-    store.put('local', StdioServer(transport='stdio', command=sys.executable, args=[str(script), '--y']))
+    store.put('local', StdioServer(type='stdio', command=sys.executable, args=[str(script), '--y']))
     await servers.sync()
     assert_exited(pid_file)
     assert servers.state(servers.get('local')) == 'ready'
@@ -288,22 +307,27 @@ async def test_reconfiguring_or_removing_releases_the_connection(tmp_path: Path)
         servers.get('local')
 
 
-async def test_real_streamable_http_server(tmp_path: Path) -> None:
+@pytest.mark.parametrize(('kind', 'path'), [('http', 'mcp'), ('sse', 'sse')])
+async def test_real_remote_server(tmp_path: Path, kind: str, path: str) -> None:
     with socket.socket() as probe:
         probe.bind(('127.0.0.1', 0))
         port = probe.getsockname()[1]
-    script = tmp_path / 'http_server.py'
+    script = tmp_path / 'remote_server.py'
     script.write_text(
         'from mcp.server.fastmcp import FastMCP\n'
         f'server = FastMCP("web", host="127.0.0.1", port={port}, log_level="WARNING")\n'
         '@server.tool()\ndef ping() -> str:\n    return "pong"\n'
-        'server.run(transport="streamable-http")\n'
+        f'server.run(transport={"streamable-http" if kind == "http" else "sse"!r})\n'
     )
     process = subprocess.Popen([sys.executable, str(script)], stderr=subprocess.DEVNULL)
     try:
-        host = make_host({}, MCPStore(tmp_path / 'config', workspace=tmp_path))
+        store = MCPStore(tmp_path / 'config', workspace=tmp_path)
+        host = make_host({}, store)
         run = host.commands.execute_async
-        await run(f'/mcp install custom web http://127.0.0.1:{port}/mcp')
+        url = HttpUrl(f'http://127.0.0.1:{port}/{path}')
+        store.put(
+            'web', HTTPServer(type='http', url=url) if kind == 'http' else SSEServer(type='sse', url=url, timeout=10)
+        )
         message = ''
         for _ in range(100):
             message = await run('/mcp restart web')
@@ -317,3 +341,21 @@ async def test_real_streamable_http_server(tmp_path: Path) -> None:
     finally:
         process.terminate()
         process.wait()
+
+
+def test_remote_options_build_the_right_transport(tmp_path: Path) -> None:
+    store = MCPStore(tmp_path / 'config', workspace=tmp_path)
+    store.put('old', SSEServer(type='sse', url=HttpUrl('https://example.com/sse'), timeout=12))
+    store.put('signin', HTTPServer(type='http', url=HttpUrl('https://example.com/mcp'), auth='oauth'))
+    store.put('plain', HTTPServer(type='http', url=HttpUrl('http://localhost:9/mcp'), auth='oauth', timeout=5))
+    servers = MCPServers(store, {'legacy': StdioServer(type='stdio', command='x', timeout=7)})
+    signin = servers.get('signin').server
+    assert isinstance(signin, HTTPServer) and signin.init_timeout() == 330
+    assert servers.get('plain').server.model_dump()['timeout'] == 5
+    assert [entry.server.type for entry in servers.entries()] == ['sse', 'http', 'http', 'stdio']
+
+
+def test_plugin_settings_accept_the_old_transport_key() -> None:
+    assert MCPSettings(servers={'x': StdioServer(type='stdio', command='x')}).servers['x'].type == 'stdio'
+    host = make_host({'servers': {'old': {'transport': 'stdio', 'command': 'x'}}})
+    assert len(host.capabilities) == 1
