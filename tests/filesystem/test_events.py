@@ -20,7 +20,6 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
-from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.filesystem import (
     MAX_DIFF_SOURCE_CHARS,
@@ -38,7 +37,9 @@ from pydantic_ai_harness.filesystem import (
     SearchKind,
 )
 
-WS = LocalWorkspaceBackend('/')
+from .._workspace import local_workspace
+
+WS = local_workspace('/')
 """The workspace for direct calls; the toolsets here all have absolute roots, so its working directory is moot."""
 
 pytestmark = pytest.mark.anyio

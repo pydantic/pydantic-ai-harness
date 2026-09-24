@@ -16,7 +16,6 @@ from anyio.to_thread import run_sync
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.shell import (
     MAX_FOREGROUND_WAIT,
@@ -29,6 +28,7 @@ from pydantic_ai_harness.shell import (
 )
 
 from .._tool_calls import call_tool, call_tools
+from .._workspace import local_workspace
 
 pytestmark = [pytest.mark.anyio, pytest.mark.skipif(os.name == 'nt', reason='POSIX shell commands and process groups')]
 
@@ -64,7 +64,7 @@ async def shell(
     **settings: object,
 ) -> str:
     capability = Shell[None](cwd=cwd, denied_commands=[], allow_interactive=True, tools=['shell'], **settings)  # pyright: ignore[reportArgumentType]
-    return await call_tool([capability, *capabilities], 'shell', arguments, workspace=LocalWorkspaceBackend(cwd))
+    return await call_tool([capability, *capabilities], 'shell', arguments, workspace=local_workspace(cwd))
 
 
 class Recorder(AbstractCapability[None]):
@@ -191,16 +191,14 @@ class TestShellTool:
         moved, listed = await call_tools(
             [capability],
             [('run_command', {'command': 'cd child && pwd'}), ('shell', {'command': 'pwd'})],
-            workspace=LocalWorkspaceBackend(tmp_path),
+            workspace=local_workspace(tmp_path),
         )
         assert moved.strip().endswith('child')
         assert listed.splitlines()[0] == str(tmp_path.resolve())
 
     async def test_missing_working_directory(self, tmp_path: Path) -> None:
         capability = Shell[None](cwd=tmp_path / 'absent', tools=['shell'])
-        result = await call_tool(
-            [capability], 'shell', {'command': 'echo hi'}, workspace=LocalWorkspaceBackend(tmp_path)
-        )
+        result = await call_tool([capability], 'shell', {'command': 'echo hi'}, workspace=local_workspace(tmp_path))
         assert 'no longer exists' in result
 
     async def test_supervisor_killed_mid_command_returns_stale_status(

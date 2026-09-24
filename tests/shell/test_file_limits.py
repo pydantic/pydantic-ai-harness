@@ -15,9 +15,11 @@ from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCall
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
-from pydantic_ai.workspaces import LocalWorkspaceBackend, Workspace
+from pydantic_ai.workspaces import Workspace
 
 from pydantic_ai_harness.shell import Shell
+
+from .._workspace import HOST_ENV, local_workspace
 
 
 def _ctx() -> RunContext[None]:
@@ -28,7 +30,7 @@ def _ctx() -> RunContext[None]:
         prompt=None,
         messages=[],
         run_step=0,
-        workspace=Workspace(LocalWorkspaceBackend('/')),
+        workspace=Workspace(local_workspace('/')),
     )
 
 
@@ -121,7 +123,7 @@ class TestShellFileLimits:
 
         agent = Agent(
             FunctionModel(model),
-            capabilities=[Shell(cwd=tmp_path, max_file_bytes=1024), LocalWorkspace(tmp_path)],
+            capabilities=[Shell(cwd=tmp_path, max_file_bytes=1024), LocalWorkspace(tmp_path, env=HOST_ENV)],
         )
         result = await agent.run('Write a file')
         assert result.output == 'done'

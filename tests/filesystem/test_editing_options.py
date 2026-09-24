@@ -6,13 +6,13 @@ from pathlib import Path
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.filesystem import FILE_SYSTEM_TOOL_NAMES, FileSystem, FileSystemToolset, Replacement
 
 from .._tool_calls import call_tool
+from .._workspace import local_workspace
 
-WS = LocalWorkspaceBackend('/')
+WS = local_workspace('/')
 """The workspace for direct calls; the toolsets here all have absolute roots, so its working directory is moot."""
 
 pytestmark = pytest.mark.anyio

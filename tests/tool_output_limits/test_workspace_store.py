@@ -32,6 +32,8 @@ from pydantic_ai_harness.tool_output_limits import (
     WorkspaceStore,
 )
 
+from .._workspace import HOST_ENV, local_workspace
+
 pytestmark = pytest.mark.anyio
 
 
@@ -53,7 +55,7 @@ class _FilesystemOnly:
     """A workspace backend with file operations but no command execution, like a mounted bucket."""
 
     def __init__(self, working_dir: Path) -> None:
-        self._local = LocalWorkspaceBackend(working_dir)
+        self._local = local_workspace(working_dir)
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -132,7 +134,7 @@ class TestDefaultStore:
 
         agent = Agent(
             FunctionModel(respond),
-            capabilities=[ToolOutputLimits(bands=[Band(over=100, action=Spill())]), LocalWorkspace(work)],
+            capabilities=[ToolOutputLimits(bands=[Band(over=100, action=Spill())]), LocalWorkspace(work, env=HOST_ENV)],
         )
 
         @agent.tool_plain
@@ -220,7 +222,7 @@ class TestDefaultStore:
 
 class TestWorkspaceStore:
     async def test_directory_relative_to_working_dir(self, tmp_path: Path):
-        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
+        workspace = Workspace(local_workspace(tmp_path))
         store = WorkspaceStore(directory='spills')
         handle = await store.write(workspace, 'run-1/../call 1.0', b'payload')
         assert handle == f'{tmp_path.resolve()}/spills/run-1/_/call_1.0'
@@ -231,12 +233,12 @@ class TestWorkspaceStore:
     @pytest.mark.parametrize('handle', ['../secret.txt', '/etc/passwd', '.'])
     async def test_read_outside_directory_is_refused(self, tmp_path: Path, handle: str):
         (tmp_path / 'secret.txt').write_text('secret')
-        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
+        workspace = Workspace(local_workspace(tmp_path))
         with pytest.raises(PermissionError, match='outside the store directory'):
             await WorkspaceStore(directory='spills').read(workspace, handle)
 
     async def test_missing_handle_raises_file_not_found(self, tmp_path: Path):
-        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
+        workspace = Workspace(local_workspace(tmp_path))
         with pytest.raises(FileNotFoundError):
             await WorkspaceStore(directory='spills').read(workspace, 'run/missing.0')
 

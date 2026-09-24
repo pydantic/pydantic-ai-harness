@@ -47,8 +47,9 @@ from pydantic_ai_harness.filesystem._toolset import (
 )
 
 from .._tool_calls import call_tool
+from .._workspace import local_workspace
 
-WS = LocalWorkspaceBackend('/')
+WS = local_workspace('/')
 """The workspace for direct calls; the toolsets here all have absolute roots, so its working directory is moot."""
 
 
@@ -98,7 +99,7 @@ class FilesystemOnlyWorkspace:
     """
 
     def __init__(self, working_dir: Path) -> None:
-        self._local = LocalWorkspaceBackend(working_dir)
+        self._local = local_workspace(working_dir)
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -1633,9 +1634,7 @@ class TestFileSystemCapability:
             pytest.skip('Agent.run requires asyncio event loop')
         (tmp_path / 'notes.txt').write_text('needle\n')
         workspace: WorkspaceBackend = (
-            ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path)))
-            if read_only
-            else FilesystemOnlyWorkspace(tmp_path)
+            ReadOnlyWorkspace(Workspace(local_workspace(tmp_path))) if read_only else FilesystemOnlyWorkspace(tmp_path)
         )
         capability = FileSystem[None](root_dir=tmp_path, tools=FILE_SYSTEM_TOOL_NAMES)
         model = TestModel(call_tools=[])
@@ -1666,9 +1665,7 @@ class TestFileSystemCapability:
         toolset = capability.get_toolset()
         assert isinstance(toolset, FileSystemToolset)
         with pytest.raises(ToolFailed) as exc_info:
-            await toolset.write_file(
-                'new.txt', 'x', workspace=ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path)))
-            )
+            await toolset.write_file('new.txt', 'x', workspace=ReadOnlyWorkspace(Workspace(local_workspace(tmp_path))))
         assert exc_info.value.message == READ_ONLY_FAILURE
         assert list(tmp_path.iterdir()) == []
 

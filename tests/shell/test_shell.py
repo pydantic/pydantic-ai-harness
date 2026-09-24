@@ -45,6 +45,7 @@ from pydantic_ai_harness.shell._policy import is_interactive_command
 from pydantic_ai_harness.shell._toolset import ShellToolset
 
 from .._tool_calls import call_tool
+from .._workspace import local_workspace
 
 
 def _env_toolset(
@@ -109,7 +110,7 @@ def _run_context(workspace: Workspace | None = None) -> RunContext[None]:
         prompt=None,
         messages=[],
         run_step=0,
-        workspace=workspace if workspace is not None else Workspace(LocalWorkspaceBackend('/')),
+        workspace=workspace if workspace is not None else Workspace(local_workspace('/')),
     )
 
 
@@ -1866,7 +1867,7 @@ class TestReadOnlyWorkspace:
 
     async def test_get_tools_is_empty(self, tmp_path: Path) -> None:
         ts = _shell_toolset(tmp_path)
-        read_only = _run_context(ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path))))
+        read_only = _run_context(ReadOnlyWorkspace(Workspace(local_workspace(tmp_path))))
         assert await ts.get_tools(read_only) == {}
         assert set(await ts.get_tools(_ctx())) == {'run_command', 'start_command', 'check_command', 'stop_command'}
 
@@ -1874,7 +1875,7 @@ class TestReadOnlyWorkspace:
         ts = _shell_toolset(tmp_path)
         writable = _ctx()
         tools = await ts.get_tools(writable)
-        read_only = _run_context(ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path))))
+        read_only = _run_context(ReadOnlyWorkspace(Workspace(local_workspace(tmp_path))))
         with pytest.raises(ToolFailed) as exc_info:
             await ts.call_tool('run_command', {'command': 'echo hi'}, read_only, tools['run_command'])
         assert exc_info.value.message == READ_ONLY_FAILURE
@@ -1910,7 +1911,7 @@ class TestDetachedJobRoundTrip:
             [shell],
             'shell',
             {'command': 'exec sleep 300', 'mode': 'background'},
-            workspace=LocalWorkspaceBackend(tmp_path),
+            workspace=local_workspace(tmp_path),
         )
         pid = int(output.split('PID: ')[1].split()[0])
         stop = output.split('use `')[1].split('`')[0]
@@ -1924,7 +1925,7 @@ class TestDetachedJobRoundTrip:
                 [Shell[None](cwd=tmp_path, tools=['run_command'], denied_commands=[])],
                 'run_command',
                 {'command': wait, 'timeout_seconds': 10},
-                workspace=LocalWorkspaceBackend(tmp_path),
+                workspace=local_workspace(tmp_path),
             )
             assert 'exit code' not in result and 'timed out' not in result
             assert json.loads(status.read_text()) == {'pid': pid, 'exit_code': 143}
