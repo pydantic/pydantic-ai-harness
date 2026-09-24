@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -10,7 +10,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -18,10 +18,15 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError('Install Slack support with: uv add "pydantic-ai-harness[slack]"') from exc
 
 
+_ID = 'slack'
+
+
 @dataclass(kw_only=True)
 class Slack(AbstractCapability[AgentDepsT]):
     """Give an agent Slack's hosted tools, acting as the connected user."""
 
+    id: str | None = _ID
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Slack` on one agent its own."""
     description: str | None = 'Use Slack messages, channels, and canvases.'
     auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
     """A Slack user token or a function of the run context that returns one.
@@ -39,9 +44,14 @@ class Slack(AbstractCapability[AgentDepsT]):
         if self.client is not None and self.auth is not None:
             raise UserError('`client` owns the connection, so it cannot be combined with `auth`.')
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `Slack`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the Slack connection and optional read-only selection."""
-        id = self.id or 'slack'
+        id = self.id or _ID
         if self.client is not None:
             toolset: AbstractToolset[AgentDepsT] = MCPToolset(
                 self.client, id=id, include_instructions=self.include_instructions
@@ -65,7 +75,7 @@ class Slack(AbstractCapability[AgentDepsT]):
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.slack.com/mcp',
-            id=self.id or 'slack',
+            id=self.id or _ID,
             auth=credential(auth, env='SLACK_USER_TOKEN', service='Slack'),
             headers=None,
             include_instructions=self.include_instructions,

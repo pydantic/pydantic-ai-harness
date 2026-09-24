@@ -91,7 +91,7 @@ def slack(ctx: RunContext[Deps]) -> Slack[Deps] | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[DynamicCapability(slack, id='slack')])
 ```
 
-With durable execution such as Temporal, read the token from the run's deps rather than from a global, since the function may run in another process. To add more than one `Slack` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
+With durable execution such as Temporal, read the token from the run's deps rather than from a global, since the function may run in another process. The capability's `id` defaults to `slack`, so `defer_loading=True` works without one. To add more than one `Slack` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same; two that share an `id` but differ raise an error.
 
 ## Provider settings
 

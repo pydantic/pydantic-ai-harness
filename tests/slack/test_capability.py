@@ -113,6 +113,13 @@ class TestSlack:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Slack(client='https://example.com/mcp', **settings)
 
+    def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
+        Agent(TestModel(), capabilities=[Slack(client=server, defer_loading=True)])
+
+    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Two `Slack` capabilities share the id 'slack'"):
+            Agent(TestModel(), capabilities=[Slack(auth='a'), Slack(auth='b', read_only=True)])
+
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Slack(auth='secret-token'))
 
