@@ -9,7 +9,7 @@
 >
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-Build a sub-agent for each prompt from a fixed allowlist, with [Jev](https://typesafe.ai) choosing its model, thinking effort, and capabilities, and hand it the turn.
+Let [Jev](https://typesafe.ai) pick the model, thinking effort, and capabilities of each run, from a menu and an allowlist you define.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/jev/)
 
@@ -19,13 +19,15 @@ A general-purpose agent carries every tool and runs on one model for every reque
 
 ## The solution
 
-`JevCapabilityComposer` asks [Jev](https://pydantic.dev/docs/ai/models/typesafe/) once, before the first model request of a run. Jev is a classifier rather than a language model: it answers typed questions with a confidence, in a few hundred milliseconds. One request asks three things:
+`JevCapabilityComposer` asks [Jev](https://pydantic.dev/docs/ai/models/typesafe/) once, before a run starts. Jev is a classifier rather than a language model: it answers typed questions with a confidence, in a few hundred milliseconds. One request asks three things:
 
 - **model**: which entry of your `models` menu should handle the request
 - **thinking**: `low`, `medium`, or `high` reasoning effort
 - **capabilities**: for each entry of the catalog, whether the request needs it
 
-The composer builds that sub-agent from an `AgentSpec`, runs it on the prompt, and returns its answer as the turn's response. The main model is not called. When Jev's confidence in the model pick is below `confidence_threshold`, the sub-agent still gets the capabilities Jev picked, but runs on `unsure_model`: the last entry of `models` unless you name one, so order the menu from cheapest to strongest. An unsure pick then costs a stronger model rather than a wrong one, or the tools. When Jev picks no capabilities, the composer does nothing and the main agent handles the prompt as usual. The default threshold of 0.4 comes from a hand-labelled check of the example menu below. The example sets `unsure_model='medium'` from the same check: Jev is rarely unsure of a clearly worded request, and mostly unsure of vague ones ("add a cache", "finish the TODOs"), which usually need a scoped change rather than the strongest model. On 40 vague prompts, falling back to `medium` ran 44 of 60 handed-off picks on the labelled tier against 25 for `max`, at the cost of 2 clearly worded prompts in 330 running a tier too low. `scripts/jev_eval.py` reruns the check; recalibrate against prompts of your own before relying on either setting.
+The run then goes ahead on the picked model and thinking effort, with the picked capabilities added. Everything else the agent was configured with still applies -- its instructions, output type, tools, guardrails, persistence, and limits -- because the picks join the run rather than replacing it. When Jev's confidence in the model pick is below `confidence_threshold`, the run keeps the capabilities Jev picked but uses `unsure_model`: the last entry of `models` unless you name one, so order the menu from cheapest to strongest. When Jev picks no capabilities, the run is left as the agent configured it.
+
+The default threshold of 0.4 comes from a hand-labelled check of the example menu below. The example sets `unsure_model='medium'` from the same check: Jev is rarely unsure of a clearly worded request, and mostly unsure of vague ones ("add a cache", "finish the TODOs"), which usually need a scoped change rather than the strongest model. On 40 vague prompts, falling back to `medium` put 44 of 60 picks on the labelled tier against 25 for `max`, at the cost of 2 clearly worded prompts in 330 running a tier too low. `scripts/jev_eval.py` reruns the check; recalibrate against prompts of your own before relying on either setting.
 
 ```python
 from pydantic_ai import Agent
@@ -50,7 +52,7 @@ result = agent.run_sync('commit this with a sensible message')
 print(result.output)
 ```
 
-Jev runs through Pydantic AI's `TypeSafeModel`. Install `pydantic-ai-harness[jev]`, which brings in `pydantic-ai-slim[typesafe]`, and set `TYPESAFE_API_KEY`; see [TypeSafe (Jev)](https://pydantic.dev/docs/ai/models/typesafe/). To use another picker, pass `jev_model=` any model that can fill a structured output. A picker that reports no confidence is trusted as given.
+Jev runs through Pydantic AI's `TypeSafeModel`. Install `pydantic-ai-harness[jev]`, which brings in `pydantic-ai-slim[typesafe]`, and set `TYPESAFE_API_KEY`; see [TypeSafe (Jev)](https://pydantic.dev/docs/ai/models/typesafe/). The models on the menu need their own providers: the example's `openai-codex:` models need the `openai` extra of `pydantic-ai-slim` and a `codex login`. To use another picker, pass `jev_model=` any model that can fill a structured output. A picker that reports no confidence is trusted as given.
 
 ## What Jev is asked
 
@@ -75,7 +77,7 @@ The descriptions are what Jev decides from. Give each `ModelOption` a `descripti
 
 ## The catalog is an allowlist
 
-`catalog` maps a key to a `ComposableCapability`: a spec-loadable capability class, the arguments to build it with, and a description Jev reads. Only catalog entries can end up on a sub-agent.
+`catalog` maps a key to a `ComposableCapability`: a capability class, the arguments to build it with (passed to its `from_spec`, as in an `AgentSpec` entry), and a description Jev reads. Only catalog entries can be added to a run, and each run that picks one gets a fresh instance.
 
 When no `catalog` is given, the composer calls `default_catalog()` as it is constructed. Every entry needs no third-party API key, and the ones that need configuration take a default:
 
@@ -87,20 +89,20 @@ When no `catalog` is given, the composer calls `default_catalog()` as it is cons
 | `repo_context` | [Repo Context](../repo_context/) | the working directory | always |
 | `pydantic_ai_docs` | [Pydantic AI Docs](../pydantic_ai_docs/) | defaults | always |
 | `web_search` | Pydantic AI's `WebSearch` | DuckDuckGo fallback when the `duckduckgo` extra is installed | always |
-| `skills` | [Skills](../skills/) | `SKILLS_DIRECTORY` (`.agents/skills`) | that directory exists |
+| `skills` | [Skills](../skills/) | `SKILLS_DIRECTORY` (`.agents/skills`) | that directory exists and the `skills` extra is installed |
 | `code_mode` | [Code Mode](../code_mode/) | defaults | the `code-mode` extra is installed |
 | `web_fetch` | Pydantic AI's `WebFetch` | local fetcher fallback | the `web-fetch` extra is installed |
 
-Both web entries use the model's native tool when it has one. `web_fetch` is only offered with its local fallback, because native URL fetching is missing on common models, OpenAI's among them. Without the `duckduckgo` extra, `web_search` is native only, and a sub-agent whose model has no native web search raises `UserError` when it runs. The `jev` extra installs both web extras.
+Both web entries use the model's native tool when it has one. `web_fetch` is only offered with its local fallback, because native URL fetching is missing on common models, OpenAI's among them. Without the `duckduckgo` extra, `web_search` is native only, and a run whose model has no native web search raises `UserError` when it picks it. The `jev` extra installs both web extras.
 
 Some capabilities are left out on purpose:
 
 - **Need a key or an external service**: `ExaSearch`, `YouSearch`, `ModalSandbox`, `BrowserUse`, `LocalStack`, `Macroscope`. They build without arguments, then call a paid service or need a CLI or container.
-- **No default could be right**: `Advisor` needs a model, `AskUser` an answerer, `ConversationSearch` a history source, and `Memory`'s persistent stores are objects, so a sub-agent built per prompt would get an empty in-memory store.
-- **Cannot be loaded from a spec**: `Coder` and `Researcher` are not dataclasses, and `SubAgents` has no serialization name.
-- **Shape the run, not the task**: compaction, spend limits, persistence, and guardrails belong on the main agent, not in a per-prompt pick.
+- **No default could be right**: `Advisor` needs a model, `AskUser` an answerer, `ConversationSearch` a history source, `SubAgents` its agents, and `Memory`'s persistent stores are objects, so a capability built per run would get an empty in-memory store.
+- **Bundles of entries already here**: `Coder` and `Researcher` combine `FileSystem`, `Shell`, and web search, so picking one next to those entries would register the same tools twice.
+- **Shape the run, not the task**: compaction, spend limits, persistence, and guardrails belong on the agent, where they cover every run whatever Jev picks.
 
-Add any of them yourself. `ComposableCapability.of` describes an entry from the first line of the capability's docstring unless you pass `description=`:
+Add any of them yourself. `ComposableCapability.of` describes an entry from the first line of the capability's docstring unless you pass `description=`. This one also needs the `exa` extra and an `EXA_API_KEY`:
 
 ```python
 from pydantic_ai_harness.exa import ExaSearch
@@ -119,15 +121,17 @@ A docstring says what a capability is. Jev decides better from what a request wo
 
 ## Models and thinking
 
-`models` takes the same entries as the [sub-agents](../subagents/) model menu: a model ID, a `Model`, or a `ModelOption`. The picked effort goes on the sub-agent as `ModelSettings(thinking=...)`, and a `ModelOption.settings` overrides it, so an entry that must always think hard can say so. A model whose profile does not support thinking ignores the setting.
+`models` takes the same entries as the [sub-agents](../subagents/) model menu: a model ID, a `Model`, or a `ModelOption`. The picked entry becomes the run's model, unless the run was given one with `Agent.run(model=...)`, which takes precedence. The picked effort goes on the run as `ModelSettings(thinking=...)`, and a `ModelOption.settings` overrides it, so an entry that must always think hard can say so. A model whose profile does not support thinking ignores the setting.
 
-## What the sub-agent sees
+## What changes and what doesn't
 
-- The current prompt, including non-text parts. Jev reads only the text parts; a prompt with no text is not composed.
-- The composer's `instructions`, not the main agent's.
-- The parent run's `deps` and usage, so the sub-agent's requests count against the run's usage limits.
+The picks apply to the whole run: every model request in it uses the picked model and has the picked capabilities. The agent's instructions, output type, message history, dependencies, tools, and other capabilities are unchanged. A picked entry whose class the agent already has is not added a second time, since both would register the same tools; capabilities passed to `Agent.run(capabilities=...)` are not checked.
 
-It does not see earlier messages in the conversation. The composer decides on the first model request of each run; later requests in the same run, after a fall-through, go to the main model.
+Jev's request counts toward the run's usage and its `usage_limits`. It is a separate request made through its own agent, so a [spend limits](../spend/) capability on your agent does not price it.
+
+Jev reads the text of the run's prompt, or of the latest user prompt in `message_history` when the run is given none, before any model request is made. A capability that redacts or rewrites model requests therefore does not cover what is sent to Jev: redact the prompt before calling `Agent.run` if it can hold data that must not leave your system.
+
+Each run asks Jev again, so a conversation's model and capabilities can change from one turn to the next. The composer is not built for durable execution: a worker that re-derives a run's capabilities would ask Jev again, and could get a different answer.
 
 ## Telemetry
 
@@ -137,10 +141,10 @@ Each decision is a `jev_capability_composer compose` span on the run's tracer, w
 |---|---|
 | `jev_composer.model`, `jev_composer.thinking`, `jev_composer.capabilities` | what Jev picked |
 | `jev_composer.confidence.<field>` | Jev's confidence per field |
-| `jev_composer.action` | `handoff`, `escalate` (unsure of the model, ran on `unsure_model`), or `fallthrough` (no capabilities picked) |
-| `jev_composer.handoff_model` | the `models` key the sub-agent ran on, unless it fell through |
+| `jev_composer.action` | `compose`, `escalate` (unsure of the model, so the run uses `unsure_model`), or `fallthrough` (no capabilities picked) |
+| `jev_composer.run_model` | the `models` key the run uses, unless it fell through |
 | `jev_composer.prompt` | the text Jev read, only when the run includes content in traces |
 
-Jev's request and the sub-agent's run appear as their own agent spans under it. On a handoff or an escalation the composer also emits a `CapabilitiesComposedEvent` into the run's event stream, before the sub-agent starts; its `escalated` field says which.
+Jev's request appears as its own agent span under it. When the picks are applied, the run emits a `CapabilitiesComposedEvent` into its event stream as it starts; its `escalated` field says whether `unsure_model` replaced Jev's pick.
 
-Watch the escalation and fall-through rates as well as the picks. A composer that escalates on most prompts is running everything on the strongest model and saving nothing, and one that falls through on most is costing a Jev request per run and changing nothing; tune `confidence_threshold` and the descriptions against labelled prompts of your own, then pin the Jev version you tuned against with `jev_model='typesafe:jev-1.13.0'`.
+Watch the escalation and fall-through rates as well as the picks. A composer that escalates on most prompts is running everything on `unsure_model`, and one that falls through on most is costing a Jev request per run and changing nothing; tune `confidence_threshold` and the descriptions against labelled prompts of your own, then pin the Jev version you tuned against with `jev_model='typesafe:jev-1.13.0'`.

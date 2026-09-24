@@ -1,10 +1,11 @@
-"""Jev capability composer: Jev picks a sub-agent's model, thinking effort, and capabilities, and the sub-agent takes the turn."""
+"""Jev capability composer: Jev picks each run's model, thinking effort, and capabilities."""
 
 from __future__ import annotations
 
 import importlib.util
 import inspect
 from collections.abc import Mapping, Sequence
+from copy import copy
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -12,11 +13,11 @@ from typing import TYPE_CHECKING, Annotated, Literal, TypeAlias
 
 from pydantic import BaseModel, Field, TypeAdapter
 from pydantic_ai import Agent, CapabilityEvent, Choices, UseEnumMemberDocstrings
-from pydantic_ai.agent.spec import AgentSpec, CapabilitySpec
-from pydantic_ai.capabilities import AbstractCapability, CapabilityOrdering, WebFetch, WebSearch
-from pydantic_ai.exceptions import SkipModelRequest, UserError
-from pydantic_ai.messages import ModelResponse, TextPart, UserContent
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WebFetch, WebSearch
+from pydantic_ai.exceptions import UserError
+from pydantic_ai.messages import ModelRequest, UserContent, UserPromptPart
 from pydantic_ai.models import KnownModelName, Model
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
 
 from pydantic_ai_harness.filesystem import FileSystem
@@ -30,7 +31,6 @@ from pydantic_ai_harness.subagents._models import as_option, model_label
 
 if TYPE_CHECKING:
     from opentelemetry.trace import Span
-    from pydantic_ai.models import ModelRequestContext
 
 _NAME = 'jev_capability_composer'
 
@@ -38,7 +38,7 @@ _NAME = 'jev_capability_composer'
 class Thinking(UseEnumMemberDocstrings, str, Enum):
     """How much reasoning effort a request needs."""
 
-    # Jev reads these docstrings as each option's meaning. `low` is the sub-agents capability's effort floor.
+    # Jev reads these docstrings as each option's meaning.
 
     low = 'low'
     """Routine or single-step work"""
@@ -48,27 +48,27 @@ class Thinking(UseEnumMemberDocstrings, str, Enum):
     """Hard problems: debugging, design, or large changes"""
 
 
-ComposeAction: TypeAlias = Literal['handoff', 'escalate', 'fallthrough']
+ComposeAction: TypeAlias = Literal['compose', 'escalate', 'fallthrough']
 """What the composer did with Jev's pick.
 
-- `handoff`: the composed sub-agent took the turn on the model Jev picked.
-- `escalate`: Jev was unsure of the model, so the sub-agent took the turn on `unsure_model`.
-- `fallthrough`: Jev picked no capabilities, so the main agent handled the turn.
+- `compose`: the run uses the model and capabilities Jev picked.
+- `escalate`: Jev was unsure of the model, so the run uses its capabilities on `unsure_model`.
+- `fallthrough`: Jev picked no capabilities, so the run is left as the agent configured it.
 """
 
 
 @dataclass(frozen=True, kw_only=True)
 class ComposableCapability:
-    """One catalog entry: a spec-loadable capability class, and when a sub-agent needs it."""
+    """One catalog entry: a capability class, what to build it with, and when a run needs it."""
 
     description: str
-    """What the capability lets the sub-agent do. Jev reads it to decide whether a request needs it."""
+    """What the capability is for. Jev reads it to decide whether a request needs it."""
 
     capability: type[AbstractCapability[object]]
-    """The capability class. It must have a spec serialization name (most harness capabilities do)."""
+    """The capability class, built fresh for each run that picks it."""
 
     arguments: Mapping[str, object] = field(default_factory=dict[str, object])
-    """Keyword arguments the capability is built with, as in an `AgentSpec` entry."""
+    """Arguments the capability is built with, passed to its `from_spec` as in an `AgentSpec` entry."""
 
     @classmethod
     def of(
@@ -101,8 +101,8 @@ def default_catalog() -> dict[str, ComposableCapability]:
 
     Every entry needs no third-party API key and gets its configuration from a default: the working
     directory for `RepoContext`, and `SKILLS_DIRECTORY` for `Skills`. An entry whose requirement is not
-    met here is left out instead of failing when a sub-agent is built: `skills` when the directory does
-    not exist, `code_mode` without the `code-mode` extra, and `web_fetch` without the `web-fetch` extra,
+    met here is left out instead of failing when a run picks it: `skills` when the directory does not
+    exist or the `skills` extra is missing, `code_mode` without the `code-mode` extra, and `web_fetch` without the `web-fetch` extra,
     whose local fetcher covers models with no native URL fetching. `web_search` falls back to DuckDuckGo
     when the `duckduckgo` extra is installed.
     """
@@ -142,7 +142,7 @@ def default_catalog() -> dict[str, ComposableCapability]:
         catalog['web_fetch'] = ComposableCapability(
             description='Fetch and read a specific web page or URL', capability=WebFetch, arguments={'local': True}
         )
-    if SKILLS_DIRECTORY.is_dir():
+    if SKILLS_DIRECTORY.is_dir() and importlib.util.find_spec('yaml') is not None:
         catalog['skills'] = ComposableCapability(
             # Scoped to named skills: a general description drew it onto most coding requests.
             description='Follow a skill from the project skill library, only when the request names one',
@@ -177,14 +177,15 @@ class Composition:
 
 @dataclass(kw_only=True)
 class CapabilitiesComposedEvent(CapabilityEvent, namespace='jev', name='capabilities_composed'):
-    """A composed sub-agent is about to take the turn."""
+    """Jev's picks were applied to this run, before its first model request."""
 
     model: str
-    """The `models` key the sub-agent runs on: Jev's pick, or `unsure_model` when `escalated`."""
+    """The `models` key the run uses: Jev's pick, or `unsure_model` when `escalated`."""
     thinking: Thinking
     capabilities: tuple[str, ...]
+    """The catalog keys added to the run. A pick the agent already has is not added twice, so it is not listed."""
     escalated: bool
-    """Whether Jev was unsure of the model, so the sub-agent runs on `unsure_model` instead of its pick."""
+    """Whether Jev was unsure of the model, so the run uses `unsure_model` instead of its pick."""
 
 
 class _Picks(BaseModel):
@@ -217,13 +218,13 @@ _CONFIDENCE = TypeAdapter(dict[str, float])
 
 @dataclass
 class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
-    """Compose a sub-agent for each prompt with [Jev](https://typesafe.ai) and hand it the turn.
+    """Let [Jev](https://typesafe.ai) pick each run's model, thinking effort, and capabilities.
 
-    One Jev request picks a model from `models`, a thinking effort, and the capabilities from `catalog`
-    the prompt needs. The composer builds that sub-agent from an `AgentSpec`, runs it on the prompt, and
-    returns its answer without calling the main model. When Jev is unsure of the model, the sub-agent runs on
-    `unsure_model`, the strongest entry by default. When it picks no capabilities, the main model handles the
-    prompt as usual.
+    Before a run starts, one Jev request picks a model from `models`, a thinking effort, and the
+    capabilities from `catalog` the prompt needs, and the run goes ahead with them. Everything else on the
+    agent -- its instructions, output type, guardrails, persistence, and limits -- applies as usual, because
+    the picks join the run rather than replacing it. When Jev is unsure of the model, the run uses
+    `unsure_model`, the strongest entry by default. When it picks no capabilities, the run is left as it was.
 
     ```python
     from pydantic_ai import Agent
@@ -248,21 +249,19 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
 
     models: Mapping[str, Model | KnownModelName | str | ModelOption]
     """The model menu Jev picks from. A `ModelOption.description` tells Jev what the entry is for, and
-    `ModelOption.settings` apply to the sub-agent, overriding the thinking effort Jev picked."""
+    `ModelOption.settings` apply to the run, overriding the thinking effort Jev picked. A `model` passed to
+    `Agent.run` takes precedence over the pick."""
 
     catalog: Mapping[str, ComposableCapability] = field(default_factory=default_catalog)
     """The capabilities Jev picks from. Defaults to `default_catalog()`, an allowlist that needs no API keys."""
 
-    instructions: str | None = None
-    """Instructions for the composed sub-agent. The main agent's instructions are not passed on."""
-
     confidence_threshold: float = 0.4
-    """Minimum Jev confidence in the model pick to use it; below it the sub-agent runs on `unsure_model`.
+    """Minimum Jev confidence in the model pick to use it; below it the run uses `unsure_model`.
 
     A picker that reports no confidence is trusted."""
 
     unsure_model: str | None = None
-    """The `models` key to run on when Jev is unsure of the model pick. Defaults to the last entry, so order
+    """The `models` key to use when Jev is unsure of the model pick. Defaults to the last entry, so order
     the menu from cheapest to strongest: an unsure pick then costs a stronger model rather than a wrong one."""
 
     jev_model: Model | str = 'typesafe:jev-latest'
@@ -271,6 +270,9 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
     _options: dict[str, ModelOption] = field(init=False, repr=False, compare=False)
     _unsure: str = field(init=False, repr=False, compare=False)
     _picker: Agent[None, _Picks] = field(init=False, repr=False, compare=False)
+    _run_model: Model | KnownModelName | str | None = field(default=None, init=False, repr=False, compare=False)
+    _run_settings: ModelSettings | None = field(default=None, init=False, repr=False, compare=False)
+    _run_event: CapabilitiesComposedEvent | None = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.models:
@@ -279,9 +281,6 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
             raise UserError('JevCapabilityComposer needs at least one entry in `catalog`.')
         if not 0.0 <= self.confidence_threshold <= 1.0:
             raise UserError(f'confidence_threshold must be between 0 and 1, got {self.confidence_threshold}.')
-        for key, entry in self.catalog.items():
-            if entry.capability.get_serialization_name() is None:
-                raise UserError(f'Catalog entry {key!r}: {entry.capability.__name__} cannot be loaded from a spec.')
         if self.unsure_model is not None and self.unsure_model not in self.models:
             raise UserError(f'unsure_model {self.unsure_model!r} is not a key of `models`.')
         self._options = {key: as_option(value) for key, value in self.models.items()}
@@ -301,49 +300,39 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
         """Not spec-serializable: the catalog holds classes and the model menu may hold `Model` instances."""
         return None
 
-    def get_ordering(self) -> CapabilityOrdering:
-        """Sit innermost so prompt-rewriting capabilities run first and Jev reads the final prompt."""
-        return CapabilityOrdering(position='innermost')
-
-    async def before_model_request(
-        self,
-        ctx: RunContext[AgentDepsT],
-        request_context: ModelRequestContext,
-    ) -> ModelRequestContext:
-        """On the first request, compose a sub-agent and hand it the turn, or fall through."""
-        if ctx.run_step != 1:
-            return request_context
-        # `Agent.run` sets `prompt` from the latest user prompt, including one in `message_history`.
-        prompt = ctx.prompt
+    async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractCapability[AgentDepsT]:
+        """Ask Jev about the run's prompt, and return its picks as this run's capabilities."""
+        prompt = _latest_prompt(ctx)
         text = _text_of(prompt) if prompt is not None else None
-        if prompt is None or text is None:
-            return request_context
+        # A copy from `capability_for` already holds a run's picks.
+        if text is None or self._run_event is not None:
+            return self
 
         with ctx.tracer.start_as_current_span(f'{_NAME} compose') as span:
             composition = await self.compose(text, usage_ctx=ctx)
             action = self._action(composition)
             _record(span, ctx, text, composition, action, self._unsure)
         if action == 'fallthrough':
-            return request_context
-        if action == 'escalate':
-            composition = replace(composition, model=self._unsure)
-
-        await ctx.emit(
-            CapabilitiesComposedEvent(
-                model=composition.model,
-                thinking=composition.thinking,
-                capabilities=composition.capabilities,
-                escalated=action == 'escalate',
-            )
-        )
-        result = await self.build_agent(composition).run(prompt, deps=ctx.deps, usage=ctx.usage)
-        raise SkipModelRequest(
-            ModelResponse(parts=[TextPart(content=result.output)], model_name=result.response.model_name)
+            return self
+        present = _classes_in(ctx.agent.root_capability if ctx.agent is not None else None)
+        return self.capability_for(
+            replace(
+                composition,
+                model=self._unsure if action == 'escalate' else composition.model,
+                capabilities=tuple(
+                    key for key in composition.capabilities if self.catalog[key].capability not in present
+                ),
+            ),
+            escalated=action == 'escalate',
         )
 
     async def compose(self, prompt: str, *, usage_ctx: RunContext[AgentDepsT] | None = None) -> Composition:
-        """Ask Jev what sub-agent `prompt` needs. Usage is added to `usage_ctx`'s run when given."""
-        result = await self._picker.run(prompt, usage=usage_ctx.usage if usage_ctx is not None else None)
+        """Ask Jev what `prompt` needs. Usage counts toward `usage_ctx`'s run and its limits when given."""
+        result = await self._picker.run(
+            prompt,
+            usage=usage_ctx.usage if usage_ctx is not None else None,
+            usage_limits=usage_ctx.usage_limits if usage_ctx is not None else None,
+        )
         picks = result.output
         details = result.response.provider_details or {}
         return Composition(
@@ -353,35 +342,61 @@ class JevCapabilityComposer(AbstractCapability[AgentDepsT]):
             confidence=_CONFIDENCE.validate_python(details.get('confidence', {})),
         )
 
-    def build_agent(self, composition: Composition) -> Agent[AgentDepsT, str]:
-        """Build the sub-agent `composition` describes, from an `AgentSpec`."""
+    def capability_for(self, composition: Composition, *, escalated: bool = False) -> AbstractCapability[AgentDepsT]:
+        """The capability that applies `composition` to a run: its catalog entries, model, and thinking effort."""
         option = self._options[composition.model]
-        entries = [self.catalog[key] for key in composition.capabilities]
-        spec = AgentSpec(
-            model=option.model if isinstance(option.model, str) else None,
-            instructions=self.instructions,
-            model_settings={'thinking': composition.thinking.value, **(option.settings or {})},
-            capabilities=[_spec_entry(entry) for entry in entries],
+        entries: list[AbstractCapability[AgentDepsT]] = [
+            self.catalog[key].capability.from_spec(**self.catalog[key].arguments) for key in composition.capabilities
+        ]
+        # A copy of the composer carries the picks, as `for_run` intends for per-run state.
+        picked = copy(self)
+        picked._run_model = option.model
+        picked._run_settings = {'thinking': composition.thinking.value, **(option.settings or {})}
+        picked._run_event = CapabilitiesComposedEvent(
+            model=composition.model,
+            thinking=composition.thinking,
+            capabilities=composition.capabilities,
+            escalated=escalated,
         )
-        return Agent.from_spec(
-            spec,
-            model=option.model if isinstance(option.model, Model) else None,
-            name=f'{_NAME}_sub_agent',
-            custom_capability_types=[entry.capability for entry in entries],
-        )
+        return CombinedCapability([*entries, picked])
+
+    def get_model(self) -> Model | KnownModelName | str | None:
+        return self._run_model
+
+    def get_model_settings(self) -> ModelSettings | None:
+        return self._run_settings
+
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        if self._run_event is not None:
+            await ctx.emit(self._run_event)
 
     def _action(self, composition: Composition) -> ComposeAction:
         if not composition.capabilities:
             return 'fallthrough'
         if composition.confidence.get('model', 1.0) < self.confidence_threshold:
             return 'escalate'
-        return 'handoff'
+        return 'compose'
 
 
-def _spec_entry(entry: ComposableCapability) -> CapabilitySpec:
-    name = entry.capability.get_serialization_name()
-    assert name is not None  # checked in `JevCapabilityComposer.__post_init__`
-    return CapabilitySpec(name=name, arguments=dict(entry.arguments) or None)
+def _classes_in(capability: AbstractCapability[AgentDepsT] | None) -> set[type[AbstractCapability[AgentDepsT]]]:
+    """The classes of `capability` and of every capability combined into it."""
+    if capability is None:
+        return set()
+    if isinstance(capability, CombinedCapability):
+        return {cls for inner in capability.capabilities for cls in _classes_in(inner)}
+    return {type(capability)}
+
+
+def _latest_prompt(ctx: RunContext[AgentDepsT]) -> str | Sequence[UserContent] | None:
+    """The run's prompt, or the latest user prompt in the history it continues when it was given none."""
+    if ctx.prompt is not None:
+        return ctx.prompt
+    pending = ctx.messages[-1] if ctx.messages else None
+    if isinstance(pending, ModelRequest):
+        prompts = [part.content for part in pending.parts if isinstance(part, UserPromptPart)]
+        if prompts:
+            return prompts[-1]
+    return None
 
 
 def _text_of(prompt: str | Sequence[UserContent]) -> str | None:
@@ -407,6 +422,6 @@ def _record(
         }
     )
     if action != 'fallthrough':
-        span.set_attribute('jev_composer.handoff_model', unsure if action == 'escalate' else composition.model)
+        span.set_attribute('jev_composer.run_model', unsure if action == 'escalate' else composition.model)
     if ctx.trace_include_content:
         span.set_attribute('jev_composer.prompt', prompt)

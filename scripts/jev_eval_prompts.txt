@@ -51,7 +51,7 @@ fast|shell|check if docker is running
 fast|shell|what version of ruff is installed?
 fast|repo_context|what are this repo's rules about commit messages?
 fast|repo_context|does this project want single or double quotes?
-fast|skills|use the changelog skill to add an entry for the login fix
+fast|filesystem,skills|use the changelog skill to add an entry for the login fix
 fast|skills|run the release-notes skill for 2.3.0
 fast|shell|format the whole repo with black
 fast|shell|how many lines is the biggest file in src?

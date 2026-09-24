@@ -94,14 +94,16 @@ def load(path: Path) -> list[Case]:
 
 
 async def ask(composer: JevCapabilityComposer, cases: list[Case], repeat: int, concurrency: int) -> list[Outcome]:
-    """Ask Jev about every case `repeat` times."""
-    limit = asyncio.Semaphore(concurrency)
+    """Ask Jev about every case `repeat` times, with at most `concurrency` requests in flight."""
+    queue = iter([case for case in cases for _ in range(repeat)])
+    outcomes: list[Outcome] = []
 
-    async def one(case: Case) -> Outcome:
-        async with limit:
-            return Outcome(case, await composer.compose(case.prompt))
+    async def worker() -> None:
+        for case in queue:
+            outcomes.append(Outcome(case, await composer.compose(case.prompt)))
 
-    return list(await asyncio.gather(*(one(case) for case in cases for _ in range(repeat))))
+    await asyncio.gather(*(worker() for _ in range(concurrency)))
+    return outcomes
 
 
 def landed(outcome: Outcome, threshold: float, fallback: str) -> str:
@@ -156,6 +158,8 @@ async def main() -> None:
     parser.add_argument('--concurrency', type=int, default=8)
     parser.add_argument('--section', help='only run this section')
     args = parser.parse_args()
+    if args.concurrency < 1 or args.repeat < 1:
+        parser.error('--concurrency and --repeat must be at least 1')
 
     cases = [case for case in load(PROMPTS) if args.section in (None, case.section)]
     composer = JevCapabilityComposer(models=MENU, catalog=default_catalog(), jev_model=args.jev_model)
