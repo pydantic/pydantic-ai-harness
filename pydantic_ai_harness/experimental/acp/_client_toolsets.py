@@ -32,22 +32,28 @@ from typing import Protocol
 import anyio
 from acp import Client, schema
 from pydantic_ai.capabilities import Toolset
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
-from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai.workspaces import LocalWorkspaceBackend, Workspace
 
 from pydantic_ai_harness.experimental.acp._session import AcpSession
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
 
 
 class _LocalFileWriter(Protocol):
-    """Something that can write a file on the local disk -- structurally satisfied by `_LocalDiskWriter`."""
+    """Something that can write a file for the agent -- structurally satisfied by `_LocalDiskWriter`."""
 
-    def write_file(self, path: str, content: str) -> Awaitable[str]: ...  # pragma: no cover - structural protocol
+    def write_file(
+        self, path: str, content: str, *, workspace: Workspace
+    ) -> Awaitable[str]: ...  # pragma: no cover - structural protocol
 
 
 class _LocalDiskWriter:
-    """Writes with the `FileSystem` toolset into a local workspace rooted at the session's `cwd`."""
+    """Writes with the `FileSystem` toolset, bounded by the session's `cwd`.
+
+    The write goes through the session's workspace (`AcpSessionConfig.workspace`) when one is
+    configured, and otherwise to a local workspace at `cwd`.
+    """
 
     def __init__(self, cwd: str) -> None:
         self._cwd = cwd
@@ -55,9 +61,10 @@ class _LocalDiskWriter:
         assert isinstance(toolset, FileSystemToolset)
         self._toolset = toolset
 
-    async def write_file(self, path: str, content: str) -> str:
+    async def write_file(self, path: str, content: str, *, workspace: Workspace) -> str:
         # Built per write: `LocalWorkspaceBackend` refuses non-POSIX platforms, and only this path needs it.
-        return await self._toolset.write_file(path, content, workspace=LocalWorkspaceBackend(self._cwd))
+        target = workspace if workspace.attached else LocalWorkspaceBackend(self._cwd)
+        return await self._toolset.write_file(path, content, workspace=target)
 
 
 class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
@@ -101,16 +108,17 @@ class AcpFileSystemToolset(FunctionToolset[AgentDepsT]):
         response = await self._client.read_text_file(path=self._absolute(path), session_id=self._session_id)
         return response.content
 
-    async def write_file(self, path: str, content: str) -> str:
+    async def write_file(self, ctx: RunContext[AgentDepsT], path: str, content: str) -> str:
         """Write a text file's full contents through the editor.
 
         Args:
+            ctx: The current agent run context.
             path: Path to the file; resolved against the session workspace when relative.
             content: The complete new contents of the file.
         """
         path = self._absolute(path)
         if self._local_writer is not None:
-            return await self._local_writer.write_file(path, content)
+            return await self._local_writer.write_file(path, content, workspace=ctx.workspace)
         await self._client.write_text_file(content=content, path=path, session_id=self._session_id)
         return f'Wrote {path} ({len(content)} characters).'
 
@@ -122,9 +130,10 @@ def acp_filesystem(session: AcpSession) -> Toolset[None] | None:
     client advertised `fs/read_text_file` during `initialize`:
 
     - read + write advertised: reads and writes both route through the editor.
-    - read only (no `fs/write_text_file`): reads route through the editor, while writes go to the
-      local [`FileSystem`][pydantic_ai_harness.FileSystem] rooted at `session.cwd`. This is coherent
-      only when the agent shares the workspace disk with the editor (same machine, or an agent
+    - read only (no `fs/write_text_file`): reads route through the editor, while writes go through
+      [`FileSystem`][pydantic_ai_harness.FileSystem] bounded by `session.cwd`, in the session's
+      workspace when `AcpSessionConfig.workspace` sets one and otherwise on this machine. This is
+      coherent only when that workspace shares its disk with the editor (same machine, or an agent
       running inside the editor's container) -- for a *remote* editor the writes land on the agent's
       disk, not the editor's.
 

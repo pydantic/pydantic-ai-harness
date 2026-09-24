@@ -2113,10 +2113,10 @@ class TestDefaultCodingPresenter:
     def test_handler_names_match_the_filesystem_and_shell_tools(self) -> None:
         # Recognition couples to tool names, so a rename in those capabilities would silently
         # degrade rich rendering to generic JSON. This fails loudly instead.
-        filesystem = FileSystem[None](root_dir='.').get_toolset()
+        filesystem = FileSystem[None]().get_toolset()
         assert isinstance(filesystem, FileSystemToolset)
         fs_tools = set(filesystem.tools)
-        shell_tools = set(Shell[None](cwd='.').get_toolset().tools)
+        shell_tools = set(Shell[None]().get_toolset().tools)
         assert set(_HANDLERS) <= fs_tools | shell_tools
 
     def test_edit_file_yields_edit_kind_location_and_diff(self) -> None:
