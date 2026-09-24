@@ -15,8 +15,9 @@ from termflow.tui.completion import (  # pyright: ignore[reportMissingTypeStubs]
     Document,
 )
 
-from .config import SETTING_FIELDS, PluginSettings
+from .config import SETTING_FIELDS, STRING_SETTINGS, PluginSettings
 from .settings_store import SettingsStore
+from .spinners import BUILTIN_SPINNERS
 from .theme import names as theme_names
 
 
@@ -46,6 +47,13 @@ class Command:
     description: str
     handler: Callable[[list[str]], str | Awaitable[str]]
     complete: Callable[[list[str]], Iterable[str]] = lambda _: ()
+    during_turn: bool = False
+    """Open the bare command's menu as soon as it is entered, even while a turn streams.
+
+    Only for menus whose changes the running turn cannot observe, such as settings that
+    take effect on the next turn. The run's output is held while the menu owns the screen.
+    With arguments the command still queues, keeping its order among queued follow-ups.
+    """
 
 
 class Commands(Completer):
@@ -87,6 +95,14 @@ class Commands(Completer):
         if command is None:
             raise ValueError(f'Unknown command /{name}. Use /help.')
         return command.handler(args)
+
+    def runs_during_turn(self, text: str) -> bool:
+        """Whether `text` is a bare command that opted into opening its menu mid-turn."""
+        words = text.split()
+        if len(words) != 1 or not is_command_input(text):
+            return False
+        command = self._commands.get(words[0][1:])
+        return command is not None and command.during_turn
 
     async def execute_async(self, text: str) -> str:
         """Await asynchronous plugin commands without blocking the event loop."""
@@ -152,7 +168,7 @@ def config_command(store: SettingsStore, args: list[str]) -> str:
         store.reset(args[1])
     elif len(args) == 3 and args[0] == 'set':
         adapter: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
-        value: JsonValue = args[2] if args[1] in ('model', 'display.theme') else adapter.validate_json(args[2])
+        value: JsonValue = args[2] if args[1] in STRING_SETTINGS else adapter.validate_json(args[2])
         store.set(args[1], value)
     else:
         raise ValueError('Usage: config show|get KEY|set KEY VALUE|reset KEY')
@@ -165,6 +181,8 @@ def set_completions(args: list[str]) -> Iterable[str]:
         return (*SETTING_FIELDS, 'api_key')
     if len(args) == 2 and args[0] == 'display.theme':
         return theme_names()
+    if len(args) == 2 and args[0] == 'display.spinner':
+        return tuple(BUILTIN_SPINNERS)
     if len(args) == 2 and args[0] == 'model':
         from .model_catalog import CODEX_MODELS  # noqa: PLC0415
 

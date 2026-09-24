@@ -27,6 +27,7 @@ from .prompt_resize import resize_notifications
 from .prompt_surface import PromptSurface
 from .prompt_transcript import TranscriptBuffer
 from .shell_passthrough import shell_command
+from .spinners import BUILTIN_SPINNERS, DEFAULT_SPINNER, Spinner
 from .tool_output import terminal_text
 
 
@@ -43,15 +44,19 @@ class LivePrompt:
         interrupts: Interrupts,
         toolbar: Callable[[], list[tuple[str, str]]],
         steer: Callable[[str], bool] | None = None,
+        run_now: Callable[[str], bool] | None = None,
         clock: Callable[[], float] = time.monotonic,
         transcript: TranscriptBuffer | None = None,
         chords: Mapping[str, Callable[[], str]] | None = None,
         pinned: Callable[[], str] = lambda: '',
+        spinner: Callable[[], Spinner] = lambda: BUILTIN_SPINNERS[DEFAULT_SPINNER],
     ) -> None:
         """Bind editing state, terminal ownership and per-session services.
 
         `chords` maps a two-key sequence such as `'ctrl-x ctrl-s'` to an action returning a
         footer notice. `pinned` returns an optional styled row painted above the footer.
+        `run_now` may take an accepted draft instead of queueing it, returning whether it did.
+        `spinner` returns the working animation; it is read on every frame, so a new choice shows at once.
         """
         self.console = console
         self.commands = commands
@@ -60,9 +65,11 @@ class LivePrompt:
         self.interrupts = interrupts
         self.toolbar = toolbar
         self.steer = steer
+        self.run_now = run_now
         self.clock = clock
         self.chords = dict(chords or {})
         self.pinned = pinned
+        self.spinner = spinner
         self.notice = ''
         self._chord_prefix = ''
         self.buffer = PromptBuffer(history=list(reversed(list(history.load_history_strings()))))
@@ -186,7 +193,9 @@ class LivePrompt:
             self.buffer.history.append(text)
             self.buffer.history_index = None
             self.buffer.replace('')
-            self.submit(expand_bare_command(text))
+            text = expand_bare_command(text)
+            if self.run_now is None or not self.run_now(text):
+                self.submit(text)
 
     def steer_queued(self) -> None:
         """Promote the oldest follow-up without bypassing commands, shell lines, or control signals."""
@@ -299,9 +308,10 @@ class LivePrompt:
             rows.append(muted + f'+{len(self.queued_messages) - queue_limit} more queued' + reset)
         title = ''
         if self.interrupts.active:
-            spinner = '⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'[int(self.clock() * 10) % 10]
-            title = truncate(f' Working {spinner} | Enter: queue | Alt+Enter: steer queued ', width)
-            title = title.replace(spinner, f'{theme.sgr(theme.ACCENT)}{spinner}{reset}{muted}')
+            head, glyph = ' Working ', self.spinner().frame(self.clock())
+            title = truncate(f'{head}{glyph} | Enter: queue | Alt+Enter: steer queued ', width)
+            if title.startswith(head + glyph):
+                title = f'{head}{theme.sgr(theme.ACCENT)}{glyph}{reset}{muted}{title[len(head + glyph) :]}'
         rows.append(muted + title + '─' * max(0, width - visible_length(title)) + reset)
         # The box has no side borders and no prompt marker: the draft and the
         # suggestions are plain rows between the top and bottom rules, so no
@@ -374,7 +384,8 @@ class LivePrompt:
         async def refresh() -> None:
             while True:
                 self.paint()
-                await anyio.sleep(0.1)
+                # A spinner faster than the status poll gets a repaint per frame, but only while it shows.
+                await anyio.sleep(min(0.1, self.spinner().interval) if self.interrupts.active else 0.1)
 
         loop = asyncio.get_running_loop()
 

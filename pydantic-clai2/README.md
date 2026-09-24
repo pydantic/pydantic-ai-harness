@@ -46,8 +46,10 @@ default. Plugin-provided rendering, including interactive questions, is unchange
 
 `clai2 --help` parses arguments without loading the agent or plugins. Interactive
 startup defers model menus and provider integrations until you open those menus,
-log in, or run a prompt. The first use can therefore take longer. Enabled plugins
-still load before the first prompt; their initialization contributes to startup time.
+log in, or run a prompt. Once the prompt is ready, a background thread imports
+them, so the first prompt usually finds them loaded; if it arrives sooner, it waits
+for the rest of those imports. Enabled plugins still load before the first prompt;
+their initialization contributes to startup time.
 `/login` offers both Codex and GitHub Copilot without loading their integrations for
 completion. Copilot requests use your saved login through the lazy provider resolver.
 
@@ -174,7 +176,8 @@ the number waiting. This is a read-only preview, not a queue editor. Control byt
 text are escaped in previews and prompt echoes; the submitted text is unchanged.
 
 Messages and slash commands run in submission order, after the current turn and its cleanup
-finish. They do not interrupt or steer the active turn. An unsubmitted draft stays
+finish. They do not interrupt or steer the active turn. Bare settings menus such as
+`/set` are the exception: they open during the turn (see "Settings and commands"). An unsubmitted draft stays
 in the editor as turns finish. Queued messages are not saved as conversation turns
 until execution starts, and are discarded on exit or `/reload`.
 
@@ -448,6 +451,13 @@ model get a picker (the model list is searchable, with "Type a value..." for
 anything not listed), everything else a typed input that validates as you go.
 An empty value resets. `R` resets the highlighted setting. Esc closes. Every
 edit saves and applies immediately, the same as `/set KEY VALUE`.
+
+While a turn is running, `/set`, `/model`, `/add_model`, `/model_settings`,
+`/theme`, and `/spinner` typed without arguments open their menu right away
+instead of queueing. The turn keeps running: its output is held while the menu is open
+and printed in order when the menu closes. A question from the agent waits for
+the menu to close. Model and run settings saved in the menu apply once the
+running turn ends. With arguments, these commands queue like any other.
 
 `run.tool_retries` sets the default retry budget per tool call, starting at `3`.
 Use a non-negative integer; `0` disables retries. Changes apply to the next turn.
@@ -969,6 +979,53 @@ is not modified.
 The early splash retains its brand colours. Code uses the terminal foreground
 and ANSI syntax colours; bundled palettes use Termflow's default diff colours. Theme selection adds no
 model requests or telemetry.
+
+### Spinners
+
+```text
+/spinner
+/spinner puppy
+/spinner zoomies 0.1
+/spinner init
+/set display.spinner dots
+```
+
+The spinner is the animation in the `Working` title above the prompt while a turn
+runs. `working`, the braille CLAI has always shown, is the default. The catalogue
+also carries every Code Puppy builtin: `puppy`, `bone`, `zoomies`, `paws`, `dots`,
+`dotsWide`, `dots8Bit`, `dotsCircle`, `sand`, `growVertical`, `growHorizontal`,
+`noise`, `binary`, `chevrons`, `bouncingBar`, `bouncingBall`, `pong`, `fistBump`,
+and `aesthetic`.
+
+`/spinner` opens a searchable picker with an animated preview. `-`/`+` (or
+Left/Right) make the highlighted spinner slower or faster in steps of 0.02 seconds;
+Enter applies it, Esc keeps your current choice. `/spinner NAME [SECONDS]` applies
+by name, ignoring case, and Tab completes the names. The choice is saved as
+`display.spinner` and shows on the next frame, with no restart.
+
+A changed speed, from the picker or `SECONDS`, is saved as that spinner's
+`interval` in `spinners.json` next to CLAI's settings
+(`~/.config/pydantic-clai2/spinners.json`). The file is also where you add your
+own; `/spinner init` writes a starter:
+
+```json
+{
+  "sniffer": {
+    "frames": ["( .    ) ", "(  .   ) ", "(   .  ) ", "(    . ) "],
+    "interval": 0.1,
+    "description": "a very minimalist puppy"
+  },
+  "zoomies": {"interval": 0.2}
+}
+```
+
+An entry with `frames` defines a spinner; one without `frames` that names an
+existing spinner changes only its `interval` or `description`. Entries in the file
+replace builtins and plugin spinners of the same name. Intervals are clamped to
+0.02-1 seconds and frames to 40 characters, padded to one width so the title does
+not shift. Edits apply on the next frame. `/spinner` lists any entry it skipped
+and why. A saved name that no longer exists, such as a removed plugin's, shows
+`working`. Plugins add spinners with `host.spinner` (see `PLUGINS.md`).
 
 ### Streaming
 
