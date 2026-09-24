@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import fields
 from os import environ
 from typing import Any, TypeVar
 
@@ -34,15 +35,26 @@ def is_read_only(tool: ToolDefinition) -> bool:
 
 
 def one_connection(capabilities: Sequence[CapabilityT]) -> CapabilityT:
-    """Resolve hosted MCP capabilities that share an `id`.
+    """Resolve hosted MCP capabilities that share an `id`, the way `SubAgents.combine` refuses what it cannot merge.
 
-    The same configuration stated twice is one connection. Different ones are an error: merging them
-    field by field could send one account's credential to another's server or drop `read_only`.
+    One capability is one connection to one account, and its settings are an access boundary, so this narrows
+    rather than unions (see "Deciding What Two Of It Mean" in `agent_docs/capability-authoring.md`): the same
+    configuration stated twice is that one connection; two that disagree raise, naming the fields but not their
+    values, since `auth` is a secret.
     """
     first = capabilities[0]
-    if all(capability == first for capability in capabilities[1:]):
-        return first
-    raise UserError(
-        f'Two `{type(first).__name__}` capabilities share the id {first.id!r}. Give each its own `id` and wrap '
-        'them in `PrefixTools`, since their tool names are the same.'
-    )
+    for other in capabilities[1:]:
+        disagree = [
+            field.name
+            for field in fields(first)
+            if field.compare and field.name != 'id' and getattr(first, field.name) != getattr(other, field.name)
+        ]
+        if disagree:
+            names = ', '.join(repr(name) for name in disagree)
+            raise UserError(
+                f'Capability id {first.id!r} is used by multiple {type(first).__name__} capabilities that disagree '
+                f"on {names}. Each is a connection to one account, so merging them could send one account's "
+                "credential to the other's server. Give them distinct `id`s and wrap them in `PrefixTools` to keep "
+                'both, or make them agree.'
+            )
+    return first

@@ -120,7 +120,10 @@ class TestLogfireMCP:
         Agent(TestModel(), capabilities=[LogfireMCP(client=server, defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `LogfireMCP` capabilities share the id 'logfire-mcp'"):
+        with pytest.raises(
+            UserError,
+            match="Capability id 'logfire-mcp' is used by multiple LogfireMCP capabilities that disagree on 'auth', 'url'",
+        ):
             Agent(TestModel(), capabilities=[LogfireMCP(auth='a'), LogfireMCP(auth='b', url=LOGFIRE_EU_MCP_URL)])
 
     def test_credential_is_not_in_repr(self) -> None:
