@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from os import environ
 
-from httpx import Auth
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import ToolDefinition
 
 
-def credential(auth: Auth | str | None, *, env: str | None, service: str) -> Auth | str:
+def credential(auth: str | None, *, env: str | None, service: str) -> str:
     """The credential to connect with: `auth`, else the `env` variable. An empty string counts as unset.
 
     Browser OAuth (`'oauth'`) is rejected: it opens a browser on the host and waits for a callback, which
@@ -22,7 +21,7 @@ def credential(auth: Auth | str | None, *, env: str | None, service: str) -> Aut
             f'Set `{env}` or pass `auth` to connect to {service}.' if env else f'Pass `auth` to connect to {service}.'
         )
     if auth == 'oauth':
-        raise UserError('Browser OAuth is not supported; pass an API key, a token, or an `httpx.Auth` as `auth`.')
+        raise UserError('Browser OAuth is not supported; pass an API key or a token as `auth`.')
     return auth
 
 
