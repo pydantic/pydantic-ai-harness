@@ -1,0 +1,253 @@
+# Labelled prompts for scripts/jev_eval.py.
+#
+# Each line is `tier|capabilities|prompt`:
+# - tier: `fast`, `medium`, or `max` from the docs' example menu, or `none` for prompts the main
+#   agent should keep (Jev picks no capabilities).
+# - capabilities: the default-catalog keys the prompt cannot be done without, comma separated.
+#   Extra picks are not counted as wrong.
+# `# section: <name>` starts a section that is reported on its own. The labels are one person's
+# judgement; the vague section's are the least certain.
+
+# section: clear
+fast|shell|what branch am I on?
+fast|shell|show me git status
+fast|shell|how many commits is this branch ahead of main?
+fast|filesystem|what does the `retry` decorator in utils.py do?
+fast|filesystem|where is the database url configured?
+fast|filesystem|which python version does this project require?
+fast|shell|run the linter
+fast|shell|run the unit tests for the auth module
+fast|filesystem|fix the typo in the first heading of CONTRIBUTING.md
+fast|filesystem|bump the version to 1.4.2 in pyproject.toml
+fast|filesystem|add `.DS_Store` to the gitignore
+fast|shell|stage everything and commit with the message "wip"
+fast|shell|push this branch
+fast|shell|create a new branch called feature/login
+fast|shell|what's the diff between this branch and main?
+fast|shell|who last changed the Makefile?
+fast|filesystem|list the TODO comments in src/
+fast|filesystem|what env vars does the app read?
+fast|web_search|what's the latest stable version of Node?
+fast|web_search|is there a CVE for log4j 2.17?
+fast|web_search|what's the current on-demand price of an H100 on AWS?
+fast|web_search|who won the champions league last season?
+fast|web_fetch|summarize https://peps.python.org/pep-0703/
+fast|web_fetch|what does this page say about rate limits: https://docs.github.com/en/rest/rate-limit
+fast|web_fetch|read https://example.com/changelog and tell me what changed in v3
+fast|pydantic_ai_docs|how do I add a tool to a pydantic ai agent?
+fast|pydantic_ai_docs|what's the difference between output_type and a tool in pydantic ai?
+fast|pydantic_ai_docs|how do I stream responses with pydantic ai?
+fast|pydantic_ai_docs|what hooks can a pydantic ai capability implement?
+fast|shell|how big is the node_modules folder?
+fast|shell|kill whatever is running on port 8000
+fast|shell|install requests into the venv
+fast|filesystem|rename notes.txt to NOTES.md
+fast|filesystem|delete the unused `import os` in cli.py
+fast|filesystem|change the default timeout constant from 30 to 60
+fast|filesystem|what license is this project under?
+fast|filesystem|what does the `--verbose` flag do in our CLI?
+fast|shell|show me the last 10 lines of the server log
+fast|shell|check if docker is running
+fast|shell|what version of ruff is installed?
+fast|repo_context|what are this repo's rules about commit messages?
+fast|repo_context|does this project want single or double quotes?
+fast|filesystem,skills|use the changelog skill to add an entry for the login fix
+fast|skills|run the release-notes skill for 2.3.0
+fast|shell|format the whole repo with black
+fast|shell|how many lines is the biggest file in src?
+fast|shell|tag this commit as v0.9.0
+fast|filesystem|add my name to the AUTHORS file
+fast|shell|what's using all the disk space in /tmp?
+fast|filesystem|is there a test for the `slugify` function?
+fast|web_search|what's the recommended way to pin github actions these days?
+fast|shell|open a draft PR for this branch
+fast|filesystem|what port does the dev server listen on?
+fast|shell|revert the last commit
+fast|web_fetch|fetch https://pypi.org/project/httpx/ and tell me the latest version
+medium|filesystem,shell|add a `--dry-run` flag to the deploy script
+medium|filesystem,shell|write unit tests for the `Money` class
+medium|filesystem,shell|the date parser fails on ISO strings with a Z suffix, fix it and add a test
+medium|filesystem,shell|add input validation to the signup endpoint
+medium|filesystem,shell|make the `export` command support CSV as well as JSON
+medium|filesystem,shell|add caching to the `get_exchange_rates` function
+medium|filesystem,shell|replace the hand-rolled argument parsing in cli.py with argparse
+medium|filesystem,shell|add a health check endpoint that returns the app version
+medium|filesystem,shell|convert the config loader from ini to toml
+medium|filesystem,shell|add type hints to the payments module and make pyright pass
+medium|filesystem,shell|the progress bar overflows on narrow terminals, fix it
+medium|filesystem,shell|add pagination to the search API
+medium|filesystem,shell|write a migration adding an `archived_at` column to projects
+medium|filesystem,shell|refactor `process_order` into smaller functions, it's 200 lines
+medium|filesystem,shell|add a rate limiter to the public API routes
+medium|filesystem,shell|log a warning when the cache hit rate drops below 50%
+medium|filesystem,shell|add a `--since` filter to the `history` command
+medium|filesystem,shell|fix the flaky assertion in test_scheduler.py that compares float timestamps exactly
+medium|filesystem,shell|add retries to the S3 upload helper
+medium|filesystem,shell|review my changes in the current diff for bugs
+medium|filesystem,shell|review PR #412 and leave comments on anything risky
+medium|filesystem,shell|add docstrings to every public function in utils/strings.py
+medium|filesystem,shell|make the CLI respect the NO_COLOR environment variable
+medium|filesystem,shell|write a GitHub Actions workflow that runs pytest on push
+medium|filesystem,shell|add a Dockerfile for the api service
+medium|filesystem,shell|the `/users/{id}` endpoint returns 500 for unknown ids, make it 404
+medium|filesystem,shell|add a `timeout` parameter to `fetch_json` and pass it through from the CLI
+medium|filesystem,shell|dedupe the two copies of `normalize_email` into one helper
+medium|filesystem,shell|add sorting by date to the admin table
+medium|filesystem,shell|upgrade the settings module from pydantic v1 to v2
+medium|filesystem,shell|add a dark mode toggle to the settings page
+medium|filesystem,shell|write an integration test for the login flow
+medium|filesystem,shell|replace print calls in the worker with structured logging
+medium|filesystem,shell,repo_context|add a new CLI command following this repo's conventions
+medium|filesystem,shell,repo_context|write the tests for the new parser the way this project writes tests
+medium|filesystem,shell,pydantic_ai_docs|add a pydantic ai tool that looks up a customer by email
+medium|filesystem,shell,pydantic_ai_docs|make our agent stream its output using pydantic ai's streaming API
+medium|filesystem,shell,pydantic_ai_docs|add a pydantic ai capability that logs every tool call
+medium|filesystem,shell,web_fetch|implement the webhook signature check described at https://stripe.com/docs/webhooks/signatures
+medium|filesystem,shell,web_search|replace our deprecated datetime.utcnow calls with whatever is recommended now
+medium|filesystem,shell|the CSV export drops rows with unicode names, fix it
+medium|filesystem,shell|add an index to speed up the orders-by-customer query
+medium|filesystem,shell|make the retry backoff configurable via an env var
+medium|filesystem,shell|add a `__repr__` to all the model classes in models.py
+medium|filesystem,shell|port the bash install script to python
+medium|filesystem,shell|add a pre-commit config with ruff and pyright
+medium|filesystem,shell|the app crashes when the config file is empty, handle it gracefully
+medium|filesystem,shell|add an `--output` flag so the report can be written to a file
+medium|filesystem,shell|add end-to-end tests for the checkout page with playwright
+medium|filesystem,shell|write a script that backfills the missing slugs in the database
+medium|filesystem,shell|fix the off-by-one in the pagination footer
+medium|filesystem,shell|split the 900-line views.py into a views package by resource
+medium|filesystem,shell|add optimistic locking to the document update endpoint
+medium|filesystem,shell,skills|use the add-capability skill to scaffold a new capability called Throttle
+medium|filesystem,shell|add request latency metrics using prometheus_client
+max|filesystem,shell|the integration tests pass locally but fail on CI about 1 in 5 runs, find out why
+max|filesystem,shell|we're seeing duplicate charges in production, figure out how it happens and fix it
+max|filesystem,shell|memory grows until the worker is OOM killed after a few hours, track it down
+max|filesystem,shell|migrate the whole app from Django 3.2 to Django 5
+max|filesystem,shell|design and implement multi-tenancy for the API
+max|filesystem,shell|rewrite the sync engine so it works offline and resolves conflicts
+max|filesystem,shell|p95 latency on the search endpoint tripled since last week, find the cause
+max|filesystem,shell|move the monolith's billing code into its own service
+max|filesystem,shell|replace our homegrown ORM with SQLAlchemy across the codebase
+max|filesystem,shell|there's a deadlock in the job queue under load, find it and fix it
+max|filesystem,shell|add end-to-end encryption to the messaging feature
+max|filesystem,shell|the build takes 25 minutes, get it under 5
+max|filesystem,shell|convert the codebase from javascript to typescript with strict mode
+max|filesystem,shell|design a plugin architecture and move the three built-in exporters onto it
+max|filesystem,shell|users randomly get logged out, investigate and fix
+max|filesystem,shell|audit the codebase for SQL injection and fix every instance
+max|filesystem,shell|implement a query planner that supports joins and subqueries
+max|filesystem,shell|make the app horizontally scalable, it currently keeps sessions in memory
+max|filesystem,shell|figure out why the revenue dashboard doesn't match the finance export
+max|filesystem,shell|port our Express backend to Go without changing the API
+max|filesystem,shell|redesign the permission system to support roles, groups, and per-resource grants
+max|filesystem,shell|the app is slow to start, profile it and cut startup time in half
+max|filesystem,shell|add support for Postgres alongside SQLite throughout the data layer
+max|filesystem,shell|implement undo/redo across the whole editor
+max|filesystem,shell|we have race conditions in the inventory reservation code, find and fix them
+max|filesystem,shell|rewrite the parser to be incremental so the editor stays responsive on large files
+max|filesystem,shell|upgrade React from 16 to 18 across all 40 packages in the monorepo
+max|filesystem,shell|set up a full CI/CD pipeline with staging and production environments
+max|filesystem,shell|the nightly ETL silently drops about 2% of records, find where
+max|filesystem,shell|introduce dependency injection throughout the service layer so it can be tested
+max|filesystem,shell|the mobile app drains battery in the background, figure out why
+max|filesystem,shell|restructure the repo into a monorepo with shared packages
+max|filesystem,shell|design an event-sourced audit log and migrate existing history into it
+max|filesystem,shell|implement real-time collaborative editing
+max|filesystem,shell,web_search|evaluate whether we should move from Celery to Temporal and prototype the migration
+max|filesystem,shell|our test coverage is 30%, get the core modules to 90% with meaningful tests
+max|filesystem,shell|find out why model accuracy dropped after the last data pipeline change
+max|filesystem,shell|refactor the god object `AppContext` out of the codebase
+max|filesystem,shell|the websocket server drops connections under load, investigate and fix
+max|filesystem,shell|add internationalization to the entire frontend
+max|filesystem,shell|replace the REST API with GraphQL while keeping the old endpoints working
+max|filesystem,shell|figure out why builds are not reproducible across machines
+max|filesystem,shell|design a caching layer for the whole read path and roll it out
+max|filesystem,shell|find and remove all dead code in the project
+max|filesystem,shell|the app corrupts its database if it's killed mid-write, make writes crash-safe
+max|filesystem,shell|rewrite the scheduler to support cron expressions, time zones, and DST
+max|filesystem,shell|migrate all third-party integrations from polling to webhooks
+max|filesystem,shell|reduce our AWS bill, the infra code is in terraform/
+max|filesystem,shell|understand this legacy codebase and write an architecture document for it
+max|filesystem,shell|make the whole test suite run in parallel without flakiness
+max|filesystem,shell|we get intermittent "connection reset by peer" from the payments provider, investigate
+max|filesystem,shell|design a public SDK for our API in python and typescript
+max|filesystem,shell,pydantic_ai_docs|build a multi-agent research system with pydantic ai: a planner, searchers, and a writer
+max|filesystem,shell|harden the file upload path against every attack you can think of
+max|filesystem,shell|the rust rewrite of our tokenizer gives different output on 0.1% of inputs, find why
+none||hi
+none||thanks!
+none||lol
+none||write a limerick about a cat who codes
+none||good morning
+none||what is a monad?
+none||explain big O notation simply
+none||what's the difference between a process and a thread?
+none||tell me a joke
+none||how are you?
+none||what's 17 times 23?
+none||translate "good night" into french
+none||give me a name for a pet hamster
+none||explain recursion like I'm five
+none||what does idempotent mean?
+none||write a short poem about mondays
+none||nice work
+none||ok
+none||what is the capital of australia?
+none||summarize the plot of hamlet in two sentences
+none||what's the difference between TCP and UDP?
+none||can you help me?
+none||what should I name my startup that sells socks?
+none||explain what a closure is in python
+none||yes
+none||never mind
+none||what's a good book about distributed systems?
+none||brainstorm five blog post titles about testing
+none||is tabs or spaces better?
+none||describe the SOLID principles briefly
+none||who are you?
+none||write a regex that matches an email address
+none||what's the time complexity of quicksort?
+none||convert 72 fahrenheit to celsius
+none||what's the difference between let and const in javascript?
+
+# section: vague
+medium|filesystem,shell|fix the bug
+medium|filesystem,shell|make the tests pass
+max|filesystem,shell|make it faster
+medium|filesystem,shell|clean this up
+medium|filesystem,shell|add error handling
+max|filesystem,shell|it's broken again
+medium|filesystem,shell|update the dependencies
+max|filesystem,shell|make this production ready
+medium|filesystem,shell|add logging
+medium|filesystem,shell|improve the error messages
+max|filesystem,shell|why is this so slow?
+medium|filesystem,shell|add tests
+medium|filesystem,shell|refactor this
+max|filesystem,shell|the app keeps crashing
+medium|filesystem,shell|handle the edge cases
+fast|shell|ship it
+medium|filesystem,shell|finish the TODOs
+max|filesystem,shell|make it scale
+medium|filesystem,shell|fix the lint errors
+medium|filesystem,shell|fix CI
+max|filesystem,shell|figure out what's going on with the build
+medium|filesystem,shell|make the UI nicer
+max|filesystem,shell|modernize this codebase
+medium|filesystem,shell|add auth
+fast|filesystem|what does this do?
+fast|filesystem|where's the entry point?
+medium|filesystem,shell|make the types stricter
+medium|filesystem,shell|add a cache
+max|filesystem,shell|we lost data yesterday, find out how
+medium|filesystem,shell|the button doesn't work
+fast|shell|run it
+medium|filesystem,shell|support windows
+medium|filesystem,shell|update the docs to match the code
+max|filesystem,shell|something is leaking
+medium|filesystem,shell|add a config option for this
+max|filesystem,shell|make it secure
+medium|filesystem,shell|the output looks wrong
+medium|filesystem,shell|this is too complicated, simplify it
+max|filesystem,shell|nothing works after the upgrade
+medium|filesystem,shell|it should retry

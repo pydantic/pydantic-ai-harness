@@ -3496,6 +3496,9 @@ aws-lambda = [
 browser-use = [
     { name = "browser-use" },
 ]
+capability-composer = [
+    { name = "pydantic-ai-slim", extra = ["duckduckgo", "typesafe", "web-fetch"] },
+]
 cli = [
     { name = "pydantic-ai-slim", extra = ["cli"] },
 ]
@@ -3620,6 +3623,7 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["dbos"], marker = "extra == 'dbos'" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'code-mode'", specifier = ">=2.44.0" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", specifier = ">=2.44.0" },
+    { name = "pydantic-ai-slim", extras = ["duckduckgo", "typesafe", "web-fetch"], marker = "extra == 'capability-composer'", specifier = ">=2.46.0" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", specifier = ">=2.44.0" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'github'", specifier = ">=2.44.0" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'google-workspace'", specifier = ">=2.44.0" },
@@ -3641,7 +3645,7 @@ requires-dist = [
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
     { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.2,<4" },
 ]
-provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "coder", "dbos", "dynamic-workflow", "exa", "github", "google-workspace", "linear", "logfire", "logfire-mcp", "modal", "mongodb", "notion", "ordinal", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "slack", "stackone", "temporal", "youdotcom"]
+provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "capability-composer", "cli", "code-mode", "codemode", "coder", "dbos", "dynamic-workflow", "exa", "github", "google-workspace", "linear", "logfire", "logfire-mcp", "modal", "mongodb", "notion", "ordinal", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "slack", "stackone", "temporal", "youdotcom"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -3712,6 +3716,9 @@ spec = [
 ]
 temporal = [
     { name = "temporalio" },
+]
+typesafe = [
+    { name = "typesafe-sdk" },
 ]
 web-fetch = [
     { name = "markdownify" },
@@ -7952,6 +7959,22 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/4b/11/6ece999e91f2ccb848ab4420f3f4816e78ac0541f739e6864affdaaa5737/types_toml-0.10.8.20260518.tar.gz", hash = "sha256:80e10facd24fdeda9d5c672187d72be3ac284843788d67f5aae59e3e016db6fe", size = 9419, upload-time = "2026-05-18T06:02:16.719Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/91/25/489751806bf5c95e4007f8e17409199c54d31e49ffbea07c5729b1286c8e/types_toml-0.10.8.20260518-py3-none-any.whl", hash = "sha256:0e564ab05f6fde62a315b3b5a9b6624fda569399795d30a37e64705a70459303", size = 9669, upload-time = "2026-05-18T06:02:15.86Z" },
+]
+
+[[package]]
+name = "typesafe-sdk"
+version = "0.7.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx2" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "tenacity" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/d4/14d9a00c759c126c814f7cfc0b2a760768214cda0708a9af49577b321ee3/typesafe_sdk-0.7.1.tar.gz", hash = "sha256:495ce9d81733b4f95edcb156e95042a7ec4bfd59972a1150ffa8ce1e11f85a54", size = 23062, upload-time = "2026-09-21T15:57:53.579Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/75/72/7e57648d27e45260b04762dd2393a81604b516a282fc5efe94cdf90ab971/typesafe_sdk-0.7.1-py3-none-any.whl", hash = "sha256:9d04eee13b5f64bbbe6f8e96cf40e3f39ca4efc934a1f4f39490cb9a43e9d2ad", size = 36366, upload-time = "2026-09-21T15:57:52.314Z" },
 ]
 
 [[package]]

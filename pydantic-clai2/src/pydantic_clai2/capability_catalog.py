@@ -8,6 +8,7 @@ _FACTORIES = (
     ('aws_lambda', 'aws_lambda:AWSLambdaDurability'),
     ('background_tools', 'background_tools:BackgroundTools'),
     ('browser_use', 'browser_use:BrowserUse'),
+    ('capability_composer', 'capability_composer:CapabilityComposer'),
     ('capability_creation', 'capability_creation:CapabilityCreation'),
     ('code_mode', 'code_mode:CodeMode'),
     ('clamp_oversized_messages', 'compaction:ClampOversizedMessages'),
