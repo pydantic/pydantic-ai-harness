@@ -35,7 +35,7 @@ packages = ['src/pydantic_clai2']
 [tool.uv.sources]
 pydantic-ai-harness = { workspace = true }
 # Until device flow is released: https://github.com/pydantic/pydantic-ai/issues/8616.
-pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "94ce9d6392d38ea69c4c00462c4341b4ee1cef50" }
+pydantic-ai-slim = { git = "https://github.com/pydantic/pydantic-ai.git", subdirectory = "pydantic_ai_slim", rev = "e58a5f22da8ed8707e93fb292ad6f38369cd8d26" }
 
 [tool.ruff]
 extend = '../pyproject.toml'
