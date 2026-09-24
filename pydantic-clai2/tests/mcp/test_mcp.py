@@ -314,7 +314,10 @@ class TestMCPPlugin:
         assert 'stdio-token' in result.output
         assert_stopped(tmp_path)
 
-    async def test_task_cancel_cleans_up_and_next_turn_reconnects(self, harness: Harness, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('outer_scope', [False, True], ids=['task', 'outer-scope'])
+    async def test_cancel_cleans_up_and_next_turn_reconnects(
+        self, harness: Harness, tmp_path: Path, outer_scope: bool
+    ) -> None:
         ready = anyio.Event()
 
         async def receive(stream: SocketStream) -> None:
@@ -332,11 +335,24 @@ class TestMCPPlugin:
                 async with asyncio.TaskGroup() as group:
                     listening = group.create_task(listener.serve(receive))
                     agent = Agent(TestModel(call_tools=['local_wait']), deps_type=type(None))
-                    running = group.create_task(agent.run('Wait', capabilities=harness.loader.capabilities()))
-                    await ready.wait()
-                    running.cancel()  # CLAI's Esc/Ctrl-C path cancels the turn task.
-                    with pytest.raises(asyncio.CancelledError):
-                        await running
+
+                    async def wait() -> None:
+                        await agent.run('Wait', capabilities=harness.loader.capabilities())
+
+                    if outer_scope:
+                        # A cancelled enclosing scope also cancels every await during the toolset's cleanup.
+                        with anyio.CancelScope() as scope:
+                            async with anyio.create_task_group() as turn:
+                                turn.start_soon(wait)
+                                await ready.wait()
+                                scope.cancel()
+                        assert scope.cancelled_caught
+                    else:
+                        running = group.create_task(wait())
+                        await ready.wait()
+                        running.cancel()  # CLAI's Esc/Ctrl-C path cancels the turn task.
+                        with pytest.raises(asyncio.CancelledError):
+                            await running
                     assert_stopped(tmp_path)
                     listening.cancel()
         result = await Agent(TestModel(call_tools=['local_context']), deps_type=type(None)).run(

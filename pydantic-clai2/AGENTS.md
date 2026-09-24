@@ -155,8 +155,9 @@ actions, `.footer_hint` for the key legend, `markdown_style()` for colours.
 
 Use `await host.notify(text)` from a plugin-owned background task for terminal
 notices. It waits until turns and menus release output; it is not an OS alert.
-Do not await it in a turn hook or command that must finish before the notice can
-appear. Cancel and await the worker at `session_end`. Model events still use
+A command, turn hook, or `session_end` handler that awaits it directly prints at
+once (`Screen.foreground`); tasks it starts still wait. Cancel and await the
+worker at `session_end`. Model events still use
 `host.render`.
 
 ## Rendering

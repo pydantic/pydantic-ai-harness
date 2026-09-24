@@ -27,6 +27,7 @@ class Screen:
         self._owner = asyncio.Lock()
         self.editor: FullScreen | None = None
         self._busy = 0
+        self._foreground: set[object] = set()
         self._closed = False
         self._idle = asyncio.Event()
         self._idle.set()
@@ -55,9 +56,23 @@ class Screen:
             if not self._busy and not self._closed:
                 self._idle.set()
 
+    @contextmanager
+    def foreground(self) -> Generator[None]:
+        """Mark the current task as the work that owns output, such as a command or turn hook.
+
+        Its own notices print at once: waiting for idle would wait for itself. Tasks it starts
+        are background work and still wait. Not re-entrant within one task.
+        """
+        task = asyncio.current_task()
+        self._foreground.add(task)
+        try:
+            yield
+        finally:
+            self._foreground.discard(task)
+
     async def notify(self, message: str, *, console: Console) -> None:
         """Print only at an idle boundary, without taking input away from the editor."""
-        while self._busy or self._closed:
+        while (self._busy or self._closed) and asyncio.current_task() not in self._foreground:
             await self._idle.wait()
         console.print(message, style=theme.current().info, markup=False, highlight=False)
 

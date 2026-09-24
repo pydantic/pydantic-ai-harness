@@ -1,7 +1,7 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from functools import partial
@@ -138,7 +138,7 @@ async def chat(
                             await shell.loader.load_all(fresh=fresh)
                             _report_project_plugins(shell.loader, console)
                             if resume is not None:
-                                with shell.screen.busy():
+                                with shell.screen.busy(), shell.screen.foreground():
                                     console.print(
                                         await shell.sessions.command([resume] if resume else []), markup=False
                                     )
@@ -151,7 +151,8 @@ async def chat(
                         raise exc.exceptions[0] from None
                     raise
                 finally:
-                    await shell.loader.close(reason)
+                    with shell.screen.foreground():
+                        await shell.loader.close(reason)
             if not shell.reload_requested:
                 return
             shell.reload_requested = False
@@ -438,7 +439,9 @@ class _Shell(Generic[DepsT, OutputT]):
                 with self.screen.busy():
                     async with (self.editor.suspended if self.editor is not None else bare_screen)():
                         await self.interrupts.run(
-                            _execute_command(self.commands, text, console=self.console, status=self.status)
+                            self._foreground(
+                                _execute_command(self.commands, text, console=self.console, status=self.status)
+                            )
                         )
                 if text == '/exit' or self.interrupts.exit_requested or self.reload_requested:
                     return 'exit'
@@ -462,11 +465,17 @@ class _Shell(Generic[DepsT, OutputT]):
             nonlocal ended
             ended = await self._run_turn(start)
 
-        completed = await self.interrupts.run(run_turn())
+        completed = await self.interrupts.run(self._foreground(run_turn()))
         self.sessions.namer.submit(self.session.summary.id)
         _report_interrupt(completed, self.console)
-        await self.interrupts.run(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
+        await self.interrupts.run(
+            self._foreground(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
+        )
         return self.interrupts.exit_requested
+
+    async def _foreground(self, work: Awaitable[None]) -> None:
+        with self.screen.foreground():
+            await work
 
     async def _run_turn(self, start: TurnStart) -> TurnEnd:
         try:

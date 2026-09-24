@@ -200,8 +200,8 @@ saved session. Core hooks and capability tools work; a plugin registering
 `turn_start` or `turn_end` prevents startup rather than losing its guards.
 See [browser plugin compatibility](PLUGINS.md#browser-mode-compatibility).
 Browser disconnection during an MCP tool call is covered by a real HTTP and
-stdio cleanup test. It uses core's streaming runner, unlike the direct
-`Agent.run()` embedding path affected by the [outer-cancellation limitation](#mcp-servers).
+stdio cleanup test. Outer AnyIO cancellation of a direct `Agent.run()` embedding
+is covered separately; see [outer cancellation](#mcp-servers).
 
 Core's web adapter uses its default limit of 50 model requests per run. Explicit
 `--request-limit`, saved `run.request_limit`, and project `request_limit` overrides
@@ -911,12 +911,13 @@ Files are named `server-N.log` by configuration order and append across turns.
 Each load gets a new directory. Logs can contain sensitive server output; they
 remain after exit for diagnosis, so remove them when no longer needed.
 
-> **Outer cancellation limitation.** In Pydantic AI 2.44.0 and 2.46.0, cancelling
-> an outer AnyIO scope during an MCP tool call can leave the stdio subprocess alive
-> after the run unwinds. Reloading or disabling this plugin does not recover
-> from that leak. Embedded callers must not assume this cancellation path is safe.
-> The core-only regression is retained as a strict expected failure, tracked in
-> [pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548).
+> **Outer cancellation.** In Pydantic AI 2.44.0 and 2.46.0, cancelling an outer
+> AnyIO scope during an MCP tool call also cancels core's connection cleanup, which
+> can leave a stdio subprocess alive ([pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548)).
+> The `mcp` plugin runs that cleanup in a shielded scope for the servers it loads,
+> so the process stops on this path too; a test cancels an enclosing scope mid-call
+> and checks that the process has exited. `MCPToolset` instances created outside
+> the plugin are still affected; that core regression is kept as a strict expected failure.
 
 ### Trusted startup configuration
 

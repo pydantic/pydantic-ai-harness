@@ -3,11 +3,12 @@
 from pathlib import Path
 from tempfile import mkdtemp
 
+import anyio
 from fastmcp.client.transports import StdioTransport
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_ai.capabilities import Capability
 from pydantic_ai.mcp import MCPToolset, load_mcp_toolsets
-from pydantic_ai.toolsets import PrefixedToolset
+from pydantic_ai.toolsets import AbstractToolset, PrefixedToolset, WrapperToolset
 
 from .commands import Command
 from .plugins import DepsT, PluginHost, SessionStart
@@ -20,6 +21,20 @@ class MCPSettings(BaseModel):
     config_path: str | None = Field(
         default=None, description='Absolute path to a trusted MCP config, including its future edits.'
     )
+
+
+class ShieldedExit(WrapperToolset[DepsT]):
+    """Finish closing an MCP connection even when an enclosing AnyIO scope was cancelled.
+
+    A cancelled scope cancels every await inside it, including `StdioTransport.disconnect`, which
+    would otherwise leave the server process running after the turn. Tracked upstream in
+    https://github.com/pydantic/pydantic-ai/issues/8548.
+    """
+
+    async def __aexit__(self, *args: object) -> bool | None:
+        """Close the wrapped toolset without letting an outer cancellation interrupt the teardown."""
+        with anyio.CancelScope(shield=True):
+            return await self.wrapped.__aexit__(*args)
 
 
 def activate(host: PluginHost[DepsT]) -> None:
@@ -57,7 +72,7 @@ def activate(host: PluginHost[DepsT]) -> None:
                 'Cannot load MCP config. Check file access, JSON, mcpServers entries, and environment references. '
                 'Config values are hidden; previously loaded servers are unchanged.'
             )
-        capability.toolsets = tuple(toolsets)
+        capability.toolsets = tuple[AbstractToolset[DepsT], ...](ShieldedExit(toolset) for toolset in toolsets)
         loaded = True
         log_directory = logs
         notice = f'\nStdio logs: {logs}' if logs is not None else ''

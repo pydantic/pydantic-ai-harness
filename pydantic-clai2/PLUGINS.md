@@ -332,12 +332,13 @@ Files are named `server-N.log` by configuration order and append across turns.
 Each load gets a new directory. Logs can contain sensitive server output; they
 remain after exit for diagnosis, so remove them when no longer needed.
 
-> **Outer cancellation limitation.** In Pydantic AI 2.44.0 and 2.46.0, cancelling
-> an outer AnyIO scope during an MCP tool call can leave the stdio subprocess alive
-> after the run unwinds. Reloading or disabling this plugin does not recover
-> from that leak. Embedded callers must not assume this cancellation path is safe.
-> The core-only regression is retained as a strict expected failure, tracked in
-> [pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548).
+> **Outer cancellation.** In Pydantic AI 2.44.0 and 2.46.0, cancelling an outer
+> AnyIO scope during an MCP tool call also cancels core's connection cleanup, which
+> can leave a stdio subprocess alive ([pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548)).
+> The `mcp` plugin runs that cleanup in a shielded scope for the servers it loads,
+> so the process stops on this path too; a test cancels an enclosing scope mid-call
+> and checks that the process has exited. `MCPToolset` instances created outside
+> the plugin are still affected; that core regression is kept as a strict expected failure.
 
 ```text
 /plugins add mcp pydantic_clai2.mcp '{"config_path": "/absolute/path/to/.mcp.json"}'
@@ -443,8 +444,8 @@ saving and resume.
 Agent runs share one execution slot per server so browser tabs do not execute
 coding tools concurrently. A real HTTP/stdio regression covers browser
 disconnection during an MCP call: core's streaming runner closes the process.
-The separate [outer-cancellation limitation](#mcp-explicitly-approved-mcp-servers)
-affects direct `Agent.run()` embeddings.
+Outer AnyIO cancellation of direct `Agent.run()` embeddings is covered in
+[outer cancellation](#mcp-explicitly-approved-mcp-servers).
 
 Other enabled plugin import or activation failures abort startup. Project
 plugins still require approval, and store overrides retain their precedence.
@@ -741,9 +742,10 @@ asyncio.run(host.notify('A newer release is available.'))
 In the shell, `notify` waits until turns and menus release output, then prints
 literal text above the editor without changing its draft. This is terminal text,
 not a native OS notification. A standalone host prints immediately. Use it from a
-plugin-owned background task, not from a turn hook or command that must finish
-before the notice can appear. Cancel and await
-that task at `session_end`; cancellation discards a waiting notice. For model
+plugin-owned background task. A command, turn hook, or `session_end` handler that
+awaits `notify` directly prints at once, because it already owns output and
+waiting would wait for itself; tasks it starts still wait. Cancel and await
+background tasks at `session_end`; cancellation discards a waiting notice. For model
 events, continue to use `host.render` instead.
 
 ### Read your settings: `host.settings(Model)`

@@ -121,9 +121,9 @@ SQLite. Use environment variables or plugin-owned credential storage instead.
 
 For background terminal notices, use await host.notify(text) from a task your
 plugin owns. It waits until turns and menus finish, then prints above the editor
-without changing the draft. It is not a native OS notification. Do not await it
-inside a turn hook or command that must finish first; use host.render for model
-events. Cancel and await background tasks at session_end. The built-in updates
+without changing the draft. It is not a native OS notification. A command, turn
+hook, or session_end handler that awaits it directly prints at once, since it
+already owns output; use host.render for model events. Cancel and await background tasks at session_end. The built-in updates
 plugin follows this pattern and can be disabled with /plugins disable updates.
 
 Each plugin gets its own PluginHost. Keep mutable state inside activate, not in

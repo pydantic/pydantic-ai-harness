@@ -157,6 +157,36 @@ async def test_shell_defers_plugin_notice_until_command_returns(tmp_path: Path, 
     assert asyncio.all_tasks() == before
 
 
+async def test_foreground_handlers_print_their_own_notices(tmp_path: Path) -> None:
+    before = asyncio.all_tasks()
+    store = SettingsStore(tmp_path / 'config.db')
+    store.plugins_dir.mkdir()
+    (store.plugins_dir / 'notifier.py').write_text(
+        'from pydantic_clai2.commands import Command\n'
+        'def activate(host):\n'
+        '    async def command(args):\n'
+        "        await host.notify('command notice')\n"
+        "        return 'command complete'\n"
+        "    for event in ('turn_start', 'turn_end', 'session_end'):\n"
+        '        async def handler(event, name=event):\n'
+        "            await host.notify(f'{name} notice')\n"
+        '        host.on(event)(handler)\n'
+        "    host.commands.register(Command(name='notice', description='test', handler=command))\n"
+    )
+    text = io.StringIO()
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=DummyOutput()),
+        anyio.fail_after(READINESS_TIMEOUT),
+    ):
+        pipe.send_text('/notice\nhello\n/exit\n')
+        await chat(Agent(TestModel()), deps=None, store=store, console=Console(file=text, width=300))
+    output = text.getvalue()
+    order = ['command notice', 'command complete', 'turn_start notice', 'turn_end notice', 'session_end notice']
+    assert [output.index(line) for line in order] == sorted(output.index(line) for line in order)
+    assert asyncio.all_tasks() == before
+
+
 async def test_startup_resume_defers_update_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     started = anyio.Event()
     checked = anyio.Event()
