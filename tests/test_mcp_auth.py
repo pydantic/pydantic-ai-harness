@@ -55,5 +55,7 @@ def test_same_configuration_is_one_connection() -> None:
 
 
 def test_different_configurations_raise() -> None:
-    with pytest.raises(UserError, match="Two `Connection` capabilities share the id 'whoami'"):
+    with pytest.raises(
+        UserError, match="Capability id 'whoami' is used by multiple Connection capabilities that disagree on 'token'"
+    ):
         one_connection([Connection(token='a', id='whoami'), Connection(token='b', id='whoami')])

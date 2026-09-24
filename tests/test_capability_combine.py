@@ -142,12 +142,13 @@ class Combines:
 
 
 @dataclass
-class Refuses:
-    """A default `id`, but `combine` refuses two that differ: one configuration stated twice is one.
+class Narrows:
+    """A default `id` and a `combine` that narrows rather than unions: two that disagree raise.
 
-    For connections to a provider. Merging two field by field could send one account's credential to
-    another's server or drop `read_only`, so a differing pair raises and names the fix: a distinct `id`
-    each, and `PrefixTools`. The default `id` still lets `defer_loading=True` work without one.
+    The access-boundary case in "Deciding What Two Of It Mean" (`agent_docs/capability-authoring.md`),
+    for connections to a provider: merging two field by field could send one account's credential to
+    another's server or drop `read_only`. `make` takes the class, like `Collides`, because these live in
+    optional groups that a module-level import would break.
     """
 
     reason: str
@@ -155,7 +156,7 @@ class Refuses:
     """Builds two that differ, from the discovered class, without credentials or a network."""
 
 
-Policy = Anonymous | Collides | Combines | Refuses | Rejected
+Policy = Anonymous | Collides | Combines | Narrows | Rejected
 
 
 def _check_memory(merged: Any) -> None:
@@ -323,7 +324,7 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `aws_cli` and `localstack_health` under fixed names',
         lambda cls: (cls(), cls()),
     ),
-    'Composio': Refuses(
+    'Composio': Narrows(
         'one Composio session per id; two that differ need their own ids and PrefixTools',
         lambda cls: (cls(url='https://first.example.com/mcp'), cls(url='https://second.example.com/mcp')),
     ),
@@ -499,11 +500,11 @@ def test_capability_combine_policy_holds(name: str) -> None:
     assert declares_default_id(capability_type), (
         f'{name} is declared `{type(policy).__name__}` but its class declares no default id, so two never meet'
     )
-    if isinstance(policy, Refuses):
+    if isinstance(policy, Narrows):
         first, second = policy.make(capability_type)
         assert first.id is not None and first.id == second.id
         assert capability_type.combine([first, first]) is first
-        with pytest.raises(UserError, match='share the id'):
+        with pytest.raises(UserError, match='disagree on'):
             capability_type.combine([first, second])
         return
     first, second = policy.make()

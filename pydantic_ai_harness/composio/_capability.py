@@ -34,7 +34,12 @@ class Composio(AbstractCapability[AgentDepsT]):
     """
 
     id: str | None = _ID
-    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Composio` on one agent its own."""
+    """Stable capability and toolset ID, so `defer_loading=True` needs none.
+
+    One `Composio` is one connection to one Composio session, like `StackOne`'s linked account. Two sharing this
+    `id` are one connection stated twice when they agree, and an error when they differ; give each its own `id` to
+    keep both.
+    """
     url: str | None = None
     """The URL returned by `session.mcp.url`. Required unless `client` is supplied."""
     headers: Mapping[str, str | None] | None = field(default=None, repr=False)
@@ -53,7 +58,7 @@ class Composio(AbstractCapability[AgentDepsT]):
 
     @classmethod
     def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """Two `Composio`s under one `id` are the same session stated twice, or an error if they differ."""
+        """Two under one `id` are one connection stated twice; two that disagree raise rather than merge."""
         return one_connection(capabilities)
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:

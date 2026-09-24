@@ -80,7 +80,9 @@ class TestComposio:
         Agent(TestModel(), capabilities=[Composio(client=session_server('ada'), defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `Composio` capabilities share the id 'composio'"):
+        with pytest.raises(
+            UserError, match="Capability id 'composio' is used by multiple Composio capabilities that disagree on 'url'"
+        ):
             Agent(
                 TestModel(),
                 capabilities=[
