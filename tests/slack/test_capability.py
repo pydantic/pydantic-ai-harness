@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TypeVar
 
 import httpx
 import pytest
@@ -50,7 +51,10 @@ def server() -> FastMCP:
     return server
 
 
-def transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
+DepsT = TypeVar('DepsT')
+
+
+def transport(toolset: AbstractToolset[DepsT]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     result = toolset.client.transport
     assert isinstance(result, StreamableHttpTransport)
@@ -76,7 +80,7 @@ def per_user_token(ctx: RunContext[str | None]) -> str | None:
     return ctx.deps
 
 
-def bearer(toolset: AbstractToolset[Any]) -> str:
+def bearer(toolset: AbstractToolset[DepsT]) -> str:
     auth = transport(toolset).auth
     assert auth is not None
     request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
@@ -104,10 +108,12 @@ class TestSlack:
         assert isinstance(request, ModelRequest)
         assert ('Provider instructions.' in (request.instructions or '')) is include
 
-    @pytest.mark.parametrize('settings', [{'auth': 'token'}, {'auth': per_user_token}])
-    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+    @pytest.mark.parametrize('auth', ['token', per_user_token])
+    def test_client_cannot_be_combined_with_connection_settings(
+        self, auth: str | Callable[[RunContext[str | None]], str | None]
+    ) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
-            Slack(client='https://example.com/mcp', **settings)
+            Slack(client='https://example.com/mcp', auth=auth)
 
     def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
         Agent(TestModel(), capabilities=[Slack(client=server, defer_loading=True)])
@@ -120,15 +126,27 @@ class TestSlack:
             Agent(TestModel(), capabilities=[Slack(auth='a'), Slack(auth='b', read_only=True)])
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
+        'capability',
+        [
+            Slack[str | None](id='tenant-slack', auth='token'),
+            Slack[str | None](id='tenant-slack', auth=per_user_token),
+            Slack[str | None](id='tenant-slack', client='https://example.com/mcp'),
+        ],
+        ids=['token', 'function', 'client'],
     )
-    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
-        assert Slack(id='tenant-slack', **settings).get_toolset().id == 'tenant-slack'
+    def test_custom_id_is_forwarded(self, capability: Slack[str | None]) -> None:
+        assert capability.get_toolset().id == 'tenant-slack'
 
-    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
-    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+    @pytest.mark.parametrize(
+        ('capability', 'include'),
+        [(Slack[str | None](auth='token'), True), (Slack[str | None](auth='token', include_instructions=False), False)],
+        ids=['default', 'disabled'],
+    )
+    def test_hosted_connection_forwards_include_instructions(
+        self, capability: Slack[str | None], include: bool
+    ) -> None:
         # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
-        toolset = Slack(auth='token', **settings).get_toolset()
+        toolset = capability.get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is include
 

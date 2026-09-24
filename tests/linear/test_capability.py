@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TypeVar
 
 import httpx
 import pytest
@@ -51,7 +52,10 @@ def server() -> FastMCP:
     return server
 
 
-def transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
+DepsT = TypeVar('DepsT')
+
+
+def transport(toolset: AbstractToolset[DepsT]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     result = toolset.client.transport
     assert isinstance(result, StreamableHttpTransport)
@@ -81,7 +85,7 @@ def token_from_deps(ctx: RunContext[str | None]) -> str | None:
     return ctx.deps
 
 
-def bearer(toolset: AbstractToolset[Any]) -> str:
+def bearer(toolset: AbstractToolset[DepsT]) -> str:
     auth = transport(toolset).auth
     assert auth is not None
     request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
@@ -109,16 +113,24 @@ class TestLinear:
         assert isinstance(request, ModelRequest)
         assert ('Provider instructions.' in (request.instructions or '')) is include
 
-    @pytest.mark.parametrize('settings', [{'auth': 'key'}, {'auth': per_user_token}])
-    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+    @pytest.mark.parametrize('auth', ['key', per_user_token])
+    def test_client_cannot_be_combined_with_connection_settings(
+        self, auth: str | Callable[[RunContext[str | None]], str | None]
+    ) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
-            Linear(client='https://example.com/mcp', **settings)
+            Linear(client='https://example.com/mcp', auth=auth)
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'linear-token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
+        'capability',
+        [
+            Linear[str | None](id='tenant-linear', auth='linear-token'),
+            Linear[str | None](id='tenant-linear', auth=per_user_token),
+            Linear[str | None](id='tenant-linear', client='https://example.com/mcp'),
+        ],
+        ids=['token', 'function', 'client'],
     )
-    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
-        assert Linear(id='tenant-linear', **settings).get_toolset().id == 'tenant-linear'
+    def test_custom_id_is_forwarded(self, capability: Linear[str | None]) -> None:
+        assert capability.get_toolset().id == 'tenant-linear'
 
     def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
         Agent(TestModel(), capabilities=[Linear(client=server, defer_loading=True)])
@@ -130,10 +142,19 @@ class TestLinear:
         ):
             Agent(TestModel(), capabilities=[Linear(auth='a'), Linear(auth='b', read_only=True)])
 
-    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
-    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+    @pytest.mark.parametrize(
+        ('capability', 'include'),
+        [
+            (Linear[str | None](auth='token'), True),
+            (Linear[str | None](auth='token', include_instructions=False), False),
+        ],
+        ids=['default', 'disabled'],
+    )
+    def test_hosted_connection_forwards_include_instructions(
+        self, capability: Linear[str | None], include: bool
+    ) -> None:
         # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
-        toolset = Linear(auth='token', **settings).get_toolset()
+        toolset = capability.get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is include
 
@@ -146,7 +167,9 @@ class TestLinear:
 
     @pytest.mark.parametrize('auth', ['token', token_from_deps], ids=['fixed', 'per-run'])
     @pytest.mark.parametrize('read_only', [True, False])
-    async def test_native_read_only_endpoint(self, auth: Any, read_only: bool) -> None:
+    async def test_native_read_only_endpoint(
+        self, auth: str | Callable[[RunContext[str | None]], str | None], read_only: bool
+    ) -> None:
         suffix = '/readonly' if read_only else ''
         [toolset] = await connections_for(Linear[str | None](auth=auth, read_only=read_only), 'token')
         assert transport(toolset).url == 'https://mcp.linear.app/mcp' + suffix

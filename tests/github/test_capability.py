@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TypeVar
 
 import httpx
 import pytest
@@ -18,7 +19,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.github import GitHub
+from pydantic_ai_harness.github import GITHUB_MCP_URL, GitHub
 
 # MCP's test server leaves its lifespan annotation unresolved with pydantic-settings 2.15.
 pytestmark = pytest.mark.filterwarnings(
@@ -50,7 +51,10 @@ def server() -> FastMCP:
     return server
 
 
-def transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
+DepsT = TypeVar('DepsT')
+
+
+def transport(toolset: AbstractToolset[DepsT]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     result = toolset.client.transport
     assert isinstance(result, StreamableHttpTransport)
@@ -76,7 +80,7 @@ def per_user_token(ctx: RunContext[str | None]) -> str | None:
     return ctx.deps
 
 
-def bearer(connection: AbstractToolset[Any]) -> str:
+def bearer(connection: AbstractToolset[DepsT]) -> str:
     auth = transport(connection).auth
     assert auth is not None
     request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
@@ -105,18 +109,31 @@ class TestGitHub:
         assert ('Provider instructions.' in (request.instructions or '')) is include
 
     @pytest.mark.parametrize(
-        'settings',
-        [{'auth': 'token'}, {'auth': per_user_token}, {'url': 'https://example.com/mcp'}, {'toolsets': ['repos']}],
+        ('auth', 'url', 'toolsets'),
+        [
+            ('token', GITHUB_MCP_URL, None),
+            (per_user_token, GITHUB_MCP_URL, None),
+            (None, 'https://example.com/mcp', None),
+            (None, GITHUB_MCP_URL, ['repos']),
+        ],
     )
-    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+    def test_client_cannot_be_combined_with_connection_settings(
+        self, auth: str | Callable[[RunContext[str | None]], str | None] | None, url: str, toolsets: list[str] | None
+    ) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
-            GitHub(client='https://example.com/mcp', **settings)
+            GitHub(client='https://example.com/mcp', auth=auth, url=url, toolsets=toolsets)
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
+        'capability',
+        [
+            GitHub[str | None](id='work-github', auth='token'),
+            GitHub[str | None](id='work-github', auth=per_user_token),
+            GitHub[str | None](id='work-github', client='https://example.com/mcp'),
+        ],
+        ids=['token', 'function', 'client'],
     )
-    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
-        assert GitHub(id='work-github', **settings).get_toolset().id == 'work-github'
+    def test_custom_id_is_forwarded(self, capability: GitHub[str | None]) -> None:
+        assert capability.get_toolset().id == 'work-github'
 
     def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
         Agent(TestModel(), capabilities=[GitHub(client=server, defer_loading=True)])
@@ -128,10 +145,19 @@ class TestGitHub:
         ):
             Agent(TestModel(), capabilities=[GitHub(auth='a'), GitHub(auth='b', read_only=True)])
 
-    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
-    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+    @pytest.mark.parametrize(
+        ('capability', 'include'),
+        [
+            (GitHub[str | None](auth='token'), True),
+            (GitHub[str | None](auth='token', include_instructions=False), False),
+        ],
+        ids=['default', 'disabled'],
+    )
+    def test_hosted_connection_forwards_include_instructions(
+        self, capability: GitHub[str | None], include: bool
+    ) -> None:
         # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
-        toolset = GitHub(auth='token', **settings).get_toolset()
+        toolset = capability.get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is include
 
@@ -162,17 +188,18 @@ class TestGitHub:
             GitHub(auth='token', toolsets=['issues', group])
 
     @pytest.mark.parametrize(
-        ('settings', 'headers'),
+        ('capability', 'headers'),
         [
-            ({}, {}),
+            (GitHub[str | None](auth='token'), {}),
             (
-                {'read_only': True, 'toolsets': ['actions', 'notifications']},
+                GitHub[str | None](auth='token', read_only=True, toolsets=['actions', 'notifications']),
                 {'X-MCP-Readonly': 'true', 'X-MCP-Toolsets': 'actions,notifications'},
             ),
         ],
+        ids=['default', 'configured'],
     )
-    def test_server_settings_are_sent_as_headers(self, settings: dict[str, Any], headers: dict[str, str]) -> None:
-        assert transport(GitHub(auth='token', **settings).get_toolset()).headers == headers
+    def test_server_settings_are_sent_as_headers(self, capability: GitHub[str | None], headers: dict[str, str]) -> None:
+        assert transport(capability.get_toolset()).headers == headers
 
     def test_enterprise_endpoint(self) -> None:
         url = 'https://copilot-api.acme.ghe.com/mcp'

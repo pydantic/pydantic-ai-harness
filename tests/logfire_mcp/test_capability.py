@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import datetime, timezone
-from typing import Any
 
 import httpx
 import pytest
@@ -21,7 +21,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.logfire_mcp import LOGFIRE_EU_MCP_URL, LogfireMCP
+from pydantic_ai_harness.logfire_mcp import LOGFIRE_EU_MCP_URL, LOGFIRE_US_MCP_URL, LogfireMCP
 
 # MCP's test server leaves its lifespan annotation unresolved with pydantic-settings 2.15.
 pytestmark = pytest.mark.filterwarnings(
@@ -108,10 +108,15 @@ class TestLogfireMCP:
         assert isinstance(request, ModelRequest)
         assert ('Provider instructions.' in (request.instructions or '')) is include
 
-    @pytest.mark.parametrize('settings', [{'auth': 'key'}, {'auth': per_user_token}, {'url': LOGFIRE_EU_MCP_URL}])
-    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+    @pytest.mark.parametrize(
+        ('auth', 'url'),
+        [('key', LOGFIRE_US_MCP_URL), (per_user_token, LOGFIRE_US_MCP_URL), (None, LOGFIRE_EU_MCP_URL)],
+    )
+    def test_client_cannot_be_combined_with_connection_settings(
+        self, auth: str | Callable[[RunContext[str | None]], str | None] | None, url: str
+    ) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
-            LogfireMCP(client='https://example.com/mcp', **settings)
+            LogfireMCP(client='https://example.com/mcp', auth=auth, url=url)
 
     def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
         Agent(TestModel(), capabilities=[LogfireMCP(client=server, defer_loading=True)])
@@ -124,15 +129,30 @@ class TestLogfireMCP:
             Agent(TestModel(), capabilities=[LogfireMCP(auth='a'), LogfireMCP(auth='b', url=LOGFIRE_EU_MCP_URL)])
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
+        'capability',
+        [
+            LogfireMCP[str | None](id='tenant-logfire', auth='token'),
+            LogfireMCP[str | None](id='tenant-logfire', auth=per_user_token),
+            LogfireMCP[str | None](id='tenant-logfire', client='https://example.com/mcp'),
+        ],
+        ids=['token', 'function', 'client'],
     )
-    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
-        assert LogfireMCP(id='tenant-logfire', **settings).get_toolset().id == 'tenant-logfire'
+    def test_custom_id_is_forwarded(self, capability: LogfireMCP[str | None]) -> None:
+        assert capability.get_toolset().id == 'tenant-logfire'
 
-    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
-    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+    @pytest.mark.parametrize(
+        ('capability', 'include'),
+        [
+            (LogfireMCP[str | None](auth='token'), True),
+            (LogfireMCP[str | None](auth='token', include_instructions=False), False),
+        ],
+        ids=['default', 'disabled'],
+    )
+    def test_hosted_connection_forwards_include_instructions(
+        self, capability: LogfireMCP[str | None], include: bool
+    ) -> None:
         # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
-        toolset = LogfireMCP(auth='token', **settings).get_toolset()
+        toolset = capability.get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is include
 
@@ -144,15 +164,16 @@ class TestLogfireMCP:
         assert bearer(LogfireMCP()) == 'Bearer environment-token'
 
     @pytest.mark.parametrize(
-        ('settings', 'expected'),
+        ('capability', 'expected'),
         [
-            ({}, 'https://logfire-us.pydantic.dev/mcp'),
-            ({'url': LOGFIRE_EU_MCP_URL}, 'https://logfire-eu.pydantic.dev/mcp'),
-            ({'url': 'https://logfire.example/mcp'}, 'https://logfire.example/mcp'),
+            (LogfireMCP[None](auth='key'), 'https://logfire-us.pydantic.dev/mcp'),
+            (LogfireMCP[None](auth='key', url=LOGFIRE_EU_MCP_URL), 'https://logfire-eu.pydantic.dev/mcp'),
+            (LogfireMCP[None](auth='key', url='https://logfire.example/mcp'), 'https://logfire.example/mcp'),
         ],
+        ids=['us', 'eu', 'self-hosted'],
     )
-    def test_endpoint(self, settings: dict[str, Any], expected: str) -> None:
-        assert transport(LogfireMCP(auth='key', **settings)).url == expected
+    def test_endpoint(self, capability: LogfireMCP[None], expected: str) -> None:
+        assert transport(capability).url == expected
 
     def test_missing_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('LOGFIRE_API_KEY', raising=False)

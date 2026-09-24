@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
@@ -38,9 +38,16 @@ class TestStackOne:
             '45320',
         )
 
-    @pytest.mark.parametrize(('settings', 'toolset_id'), [({}, 'stackone-45320'), ({'id': 'hr'}, 'hr')])
-    def test_toolset_id(self, settings: dict[str, Any], toolset_id: str):
-        assert StackOne(account_id='45320', api_key='key', **settings).get_toolset().id == toolset_id
+    @pytest.mark.parametrize(
+        ('capability', 'toolset_id'),
+        [
+            (StackOne[None](account_id='45320', api_key='key'), 'stackone-45320'),
+            (StackOne[None](account_id='45320', api_key='key', id='hr'), 'hr'),
+        ],
+        ids=['derived', 'custom'],
+    )
+    def test_toolset_id(self, capability: StackOne[None], toolset_id: str):
+        assert capability.get_toolset().id == toolset_id
 
     def test_two_accounts_stay_two_capabilities(self):
         """One account is one provider connection, so the account is what names the capability.
@@ -53,10 +60,15 @@ class TestStackOne:
         assert (first.id, second.id) == ('stackone-45320', 'stackone-99811')
 
     @pytest.mark.parametrize(
-        'settings', [{'api_key': 'secret'}, {'api_key': 'key', 'client': 'https://user:secret@example.com/mcp'}]
+        'capability',
+        [
+            StackOne[None](account_id='45320', api_key='secret'),
+            StackOne[None](account_id='45320', api_key='key', client='https://user:secret@example.com/mcp'),
+        ],
+        ids=['api-key', 'client'],
     )
-    def test_secrets_are_hidden_from_repr(self, settings: dict[str, Any]):
-        assert 'secret' not in repr(StackOne(account_id='45320', **settings))
+    def test_secrets_are_hidden_from_repr(self, capability: StackOne[None]):
+        assert 'secret' not in repr(capability)
 
     def test_agent_spec_schema_excludes_runtime_client(self):
         schema = AgentSpec.model_json_schema_with_capabilities([StackOne])
@@ -98,15 +110,19 @@ class TestStackOne:
         assert [(tool.tool_def.metadata or {}).get('task') for tool in tools.values()] == ['hr', 'hr']
 
     @pytest.mark.parametrize(
-        ('settings', 'phrase'),
+        ('capability', 'phrase'),
         [
-            ({}, 'must never be guessed'),
-            ({'tool_mode': 'individual'}, '{connector}_{action}_{entity}'),
-            ({'actions': '*_list_*'}, '{connector}_{action}_{entity}'),
+            (StackOne[None](account_id='45320', api_key='key'), 'must never be guessed'),
+            (
+                StackOne[None](account_id='45320', api_key='key', tool_mode='individual'),
+                '{connector}_{action}_{entity}',
+            ),
+            (StackOne[None](account_id='45320', api_key='key', actions='*_list_*'), '{connector}_{action}_{entity}'),
         ],
+        ids=['default', 'individual', 'actions'],
     )
-    def test_instructions_follow_the_tool_mode(self, settings: dict[str, Any], phrase: str):
-        assert phrase in (StackOne(account_id='45320', api_key='key', **settings).get_instructions() or '')
+    def test_instructions_follow_the_tool_mode(self, capability: StackOne[None], phrase: str):
+        assert phrase in (capability.get_instructions() or '')
 
     def test_instructions_can_be_disabled(self):
         assert StackOne(account_id='45320', api_key='key', include_instructions=False).get_instructions() is None

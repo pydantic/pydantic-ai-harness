@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -39,39 +38,61 @@ class TestStackOneToolset:
         )
 
     @pytest.mark.parametrize(
-        ('settings', 'url'),
+        ('toolset', 'url'),
         [
-            ({'actions': ['*_list_*']}, 'https://api.stackone.com/mcp'),
-            ({'tool_mode': 'individual'}, 'https://api.stackone.com/mcp'),
             (
-                {'base_url': 'https://api.eu1.stackone.com/', 'tool_mode': 'individual'},
+                StackOneToolset[None](account_id='1', api_key='key', actions=['*_list_*']),
+                'https://api.stackone.com/mcp',
+            ),
+            (
+                StackOneToolset[None](account_id='1', api_key='key', tool_mode='individual'),
+                'https://api.stackone.com/mcp',
+            ),
+            (
+                StackOneToolset[None](
+                    account_id='1', api_key='key', base_url='https://api.eu1.stackone.com/', tool_mode='individual'
+                ),
                 'https://api.eu1.stackone.com/mcp',
             ),
-            ({'client': 'https://proxy.example/mcp'}, 'https://proxy.example/mcp?tool-mode=search_execute'),
-            ({'client': 'HTTPS://proxy.example/mcp'}, 'https://proxy.example/mcp?tool-mode=search_execute'),
             (
-                {'client': 'https://proxy.example/mcp?region=eu'},
+                StackOneToolset[None](account_id='1', api_key='key', client='https://proxy.example/mcp'),
+                'https://proxy.example/mcp?tool-mode=search_execute',
+            ),
+            (
+                StackOneToolset[None](account_id='1', api_key='key', client='HTTPS://proxy.example/mcp'),
+                'https://proxy.example/mcp?tool-mode=search_execute',
+            ),
+            (
+                StackOneToolset[None](account_id='1', api_key='key', client='https://proxy.example/mcp?region=eu'),
                 'https://proxy.example/mcp?region=eu&tool-mode=search_execute',
             ),
             (
-                {'client': AnyUrl('https://proxy.example/mcp?region=eu')},
+                StackOneToolset[None](
+                    account_id='1', api_key='key', client=AnyUrl('https://proxy.example/mcp?region=eu')
+                ),
                 'https://proxy.example/mcp?region=eu&tool-mode=search_execute',
             ),
             (
-                {'client': 'https://proxy.example/mcp?tool%2Dmode=search%5Fexecute&signature=a%2fb%20c&flag#fragment'},
+                StackOneToolset[None](
+                    account_id='1',
+                    api_key='key',
+                    client='https://proxy.example/mcp?tool%2Dmode=search%5Fexecute&signature=a%2fb%20c&flag#fragment',
+                ),
                 'https://proxy.example/mcp?tool%2Dmode=search%5Fexecute&signature=a%2fb%20c&flag#fragment',
             ),
             (
-                {
-                    'client': 'https://proxy.example/mcp?signature=a%2fb%20c&tool-mode=individual&flag#fragment',
-                    'tool_mode': 'individual',
-                },
+                StackOneToolset[None](
+                    account_id='1',
+                    api_key='key',
+                    client='https://proxy.example/mcp?signature=a%2fb%20c&tool-mode=individual&flag#fragment',
+                    tool_mode='individual',
+                ),
                 'https://proxy.example/mcp?signature=a%2fb%20c&tool-mode=individual&flag#fragment',
             ),
         ],
     )
-    def test_connection_url(self, settings: dict[str, Any], url: str):
-        assert http_transport(StackOneToolset(account_id='1', api_key='key', **settings)).url == url
+    def test_connection_url(self, toolset: StackOneToolset[None], url: str):
+        assert http_transport(toolset).url == url
 
     @pytest.mark.parametrize('base_url', ['ftp://api.stackone.com', 'localhost:9999', 'https://'])
     def test_rejects_invalid_base_url(self, base_url: str):

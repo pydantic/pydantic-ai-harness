@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TypeVar
 
 import httpx
 import pytest
@@ -51,7 +52,10 @@ def server() -> FastMCP:
     return server
 
 
-def transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
+DepsT = TypeVar('DepsT')
+
+
+def transport(toolset: AbstractToolset[DepsT]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     result = toolset.client.transport
     assert isinstance(result, StreamableHttpTransport)
@@ -77,7 +81,7 @@ def per_user_token(ctx: RunContext[str | None]) -> str | None:
     return ctx.deps
 
 
-def bearer(toolset: AbstractToolset[Any]) -> str:
+def bearer(toolset: AbstractToolset[DepsT]) -> str:
     auth = transport(toolset).auth
     assert auth is not None
     request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
@@ -105,16 +109,24 @@ class TestNotion:
         assert isinstance(request, ModelRequest)
         assert ('Provider instructions.' in (request.instructions or '')) is include
 
-    @pytest.mark.parametrize('settings', [{'auth': 'key'}, {'auth': per_user_token}])
-    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+    @pytest.mark.parametrize('auth', ['key', per_user_token])
+    def test_client_cannot_be_combined_with_connection_settings(
+        self, auth: str | Callable[[RunContext[str | None]], str | None]
+    ) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
-            Notion(client='https://example.com/mcp', **settings)
+            Notion(client='https://example.com/mcp', auth=auth)
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
+        'capability',
+        [
+            Notion[str | None](id='tenant-notion', auth='token'),
+            Notion[str | None](id='tenant-notion', auth=per_user_token),
+            Notion[str | None](id='tenant-notion', client='https://example.com/mcp'),
+        ],
+        ids=['token', 'function', 'client'],
     )
-    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
-        assert Notion(id='tenant-notion', **settings).get_toolset().id == 'tenant-notion'
+    def test_custom_id_is_forwarded(self, capability: Notion[str | None]) -> None:
+        assert capability.get_toolset().id == 'tenant-notion'
 
     def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
         Agent(TestModel(), capabilities=[Notion(client=server, defer_loading=True)])
@@ -126,10 +138,19 @@ class TestNotion:
         ):
             Agent(TestModel(), capabilities=[Notion(auth='a'), Notion(auth='b', read_only=True)])
 
-    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
-    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+    @pytest.mark.parametrize(
+        ('capability', 'include'),
+        [
+            (Notion[str | None](auth='token'), True),
+            (Notion[str | None](auth='token', include_instructions=False), False),
+        ],
+        ids=['default', 'disabled'],
+    )
+    def test_hosted_connection_forwards_include_instructions(
+        self, capability: Notion[str | None], include: bool
+    ) -> None:
         # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
-        toolset = Notion(auth='token', **settings).get_toolset()
+        toolset = capability.get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is include
 
