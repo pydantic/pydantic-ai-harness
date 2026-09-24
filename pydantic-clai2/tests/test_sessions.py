@@ -300,3 +300,24 @@ async def test_restore_interrupted_frontier_preserves_existing_results(tmp_path:
     assert len(returns) == 2
     assert returns[0].content == 'already completed'
     assert {part.tool_call_id for part in returns} == {'a', 'b'}
+
+
+async def test_resume_from_another_directory_runs_in_this_session_directory(tmp_path: Path) -> None:
+    working_dirs: list[str] = []
+
+    class RecordWorkingDir(AbstractCapability[None]):
+        async def before_run(self, ctx: RunContext[None]) -> None:
+            working_dirs.append(await ctx.workspace.working_dir())
+
+    agent = Agent(TestModel(custom_output_text='answer'), deps_type=type(None), capabilities=[RecordWorkingDir()])
+    conversations = SqliteConversationStore(database=tmp_path / 'sessions.db')
+    original, elsewhere = tmp_path / 'original', tmp_path / 'elsewhere'
+    original.mkdir()
+    elsewhere.mkdir()
+    first = Session(agent, deps=None, conversations=conversations, workspace=original)
+    await first.prompt('first')
+    second = Session(agent, deps=None, conversations=conversations, workspace=elsewhere)
+    await second.resume(first.summary.id, allow_other_workspace=True)
+    await second.prompt('second')
+    await second.prompt('third')
+    assert working_dirs == [str(original.resolve()), str(elsewhere.resolve()), str(elsewhere.resolve())]

@@ -18,6 +18,7 @@ from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, Mode
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
+from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS
 from pydantic_ai_harness.step_persistence import SqliteStepStore, StepStore
 from pydantic_ai_harness.step_persistence.conversations import (
@@ -45,6 +46,17 @@ def _command_env() -> dict[str, str]:
         for name, value in os.environ.items()
         if not any(fnmatchcase(name, pattern) for pattern in LLM_API_KEY_ENV_PATTERNS)
     }
+
+
+def _stale_local_workspace(messages: Sequence[ModelMessage], workspace: str) -> bool:
+    """Whether the history's latest response names a local directory other than `workspace`.
+
+    `LocalWorkspace` declines such a reference, so continuing from it would leave the run without a
+    workspace. A sandbox plugin's reference is not stale here: it continues in that sandbox.
+    """
+    response = next((message for message in reversed(messages) if isinstance(message, ModelResponse)), None)
+    ref = response.workspace_ref if response is not None else None
+    return ref is not None and ref.provider == 'local' and ref != WorkspaceRef(provider='local', id=workspace)
 
 
 class Session(Generic[DepsT, OutputT]):
@@ -203,9 +215,13 @@ class Session(Generic[DepsT, OutputT]):
                 try:
                     model = await self.resolved_model()
                     capabilities = list(self.plugins)
+                    workspace: Literal['new'] | None = None
                     if _supports_local_workspace():
                         # Last, so a sandbox plugin earlier in the list supplies the workspace instead.
                         capabilities.append(LocalWorkspace[DepsT](self.workspace, env=_command_env()))
+                        if _stale_local_workspace(previous, self.workspace):
+                            # A conversation resumed from another directory: work in this session's.
+                            workspace = 'new'
                     result = await self.agent.run(
                         content,
                         deps=self.deps,
@@ -216,6 +232,7 @@ class Session(Generic[DepsT, OutputT]):
                         conversation_id=self.summary.id,
                         run_id=run_id,
                         capabilities=capabilities,
+                        workspace=workspace,
                         usage_limits=self.usage_limits,
                         event_stream_handler=self._stream,
                     )
