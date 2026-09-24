@@ -9,7 +9,8 @@ Provider contract, verified 2026-09-24:
 - The server's protected-resource metadata names `https://o.auth.usepylon.com` as its authorization server, which
   supports dynamic client registration, PKCE (S256), and refresh tokens (`offline_access`).
 - Only Member and Admin users with the `MCP Access` role can sign in; Viewer and Integration users cannot.
-- Tool annotations could not be inspected without a Pylon account, so there is no `read_only` option.
+- The server has tools that change issues and accounts. `read_only` keeps only the tools the server marks read-only;
+  its annotations could not be inspected without a Pylon account.
 
 Sources: https://docs.usepylon.com/pylon-docs/integrations/pylon-mcp,
 https://support.usepylon.com/articles/2407390554-connecting-to-the-pylon-mcp-server
@@ -28,7 +29,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, one_connection
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -75,6 +76,9 @@ class Pylon(AbstractCapability[AgentDepsT]):
     Unset, it uses `PYLON_ACCESS_TOKEN`. A function never does: if it returns `None` or `''`, that run has no Pylon tools.
     """
 
+    read_only: bool = False
+    """Expose only tools the server marks read-only; unmarked tools are omitted."""
+
     include_instructions: bool = True
     """Pass the server's own instructions to the agent."""
 
@@ -94,10 +98,16 @@ class Pylon(AbstractCapability[AgentDepsT]):
         """Return the Pylon MCP tools."""
         id = self.id or _ID
         if self.client is not None:
-            return MCPToolset(self.client, id=id, include_instructions=self.include_instructions)
-        if callable(self.auth):
-            return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
-        return self._connect(self.auth)
+            toolset: AbstractToolset[AgentDepsT] = MCPToolset(
+                self.client, id=id, include_instructions=self.include_instructions
+            )
+        elif callable(self.auth):
+            toolset = DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
+        else:
+            toolset = self._connect(self.auth)
+        if self.read_only:
+            return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
+        return toolset
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth

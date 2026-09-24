@@ -9,6 +9,7 @@ import pytest
 from fastmcp.client.auth import OAuth
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp.server import FastMCP, Settings
+from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
@@ -59,17 +60,27 @@ def no_credential(ctx: RunContext[object]) -> None:
 
 class TestPylon:
     @pytest.mark.anyio
-    async def test_agent_runs_with_pylon_tools(self) -> None:
+    @pytest.mark.parametrize(
+        ('read_only', 'expected'),
+        [(False, '{"read":"read","write":"written","unmarked":"unmarked"}'), (True, '{"read":"read"}')],
+    )
+    async def test_read_only_keeps_only_read_only_tools(self, read_only: bool, expected: str) -> None:
         server = FastMCP('pylon-fake')
 
-        @server.tool()
-        def search_issues() -> dict[str, str]:
-            """Search Pylon issues."""
-            return {'title': 'Login fails for Acme'}
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=True))
+        def read() -> str:
+            return 'read'
 
-        agent = Agent(TestModel(call_tools=['search_issues']), capabilities=[Pylon(client=server)])
-        result = await agent.run('Summarize my open issues')
-        assert 'Login fails for Acme' in result.output
+        @server.tool(annotations=ToolAnnotations(readOnlyHint=False))
+        def write() -> str:
+            return 'written'
+
+        @server.tool()
+        def unmarked() -> str:
+            return 'unmarked'
+
+        agent = Agent(TestModel(), capabilities=[Pylon(client=server, read_only=read_only)])
+        assert (await agent.run('Use the tools')).output == expected
 
     @pytest.mark.anyio
     @pytest.mark.parametrize('include', [True, False])
@@ -117,9 +128,10 @@ class TestPylon:
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
         with pytest.raises(
-            UserError, match="Capability id 'pylon' is used by multiple Pylon capabilities that disagree on 'auth'"
+            UserError,
+            match="Capability id 'pylon' is used by multiple Pylon capabilities that disagree on 'auth', 'read_only'",
         ):
-            Agent(TestModel(), capabilities=[Pylon(auth='a'), Pylon(auth='b')])
+            Agent(TestModel(), capabilities=[Pylon(auth='a'), Pylon(auth='b', read_only=True)])
 
 
 class TestPerRunAuth:
