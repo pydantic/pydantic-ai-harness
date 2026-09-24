@@ -19,46 +19,87 @@ completion. Copilot requests use your saved login through the lazy provider reso
 
 ## Connect MCP servers
 
-The enabled built-in `mcp` plugin provides `/mcp`. CLAI includes the MCP client;
-there is no extra client package to install. Local server programs and their
-runtimes still need to be installed separately. No servers are configured by
-default, and loading the plugin does not start programs or contact endpoints.
-
-Only configure servers you trust. Stdio servers run programs with your user
-permissions. HTTP servers receive tool arguments and can return untrusted content.
-Plugin settings are stored as plain JSON, not in the credential store. Prefer
-inherited environment variables for local credentials; do not paste secrets into
-slash commands, project files, or saved `headers`/`env` settings.
-
-Configure a local server using an executable and an argument list, not a shell command:
+`/mcp` is the front door for MCP servers, modelled on Code Puppy's `/mcp`. The
+built-in `mcp` plugin provides it and includes the MCP client; local server
+programs and their runtimes (`npx`, `uvx`, ...) still need to be installed
+separately.
 
 ```text
-/plugins add mcp pydantic_clai2.mcp '{"servers":{"local":{"transport":"stdio","command":"python","args":["/absolute/path/to/server.py"]}}}'
-/mcp
-/mcp tools local
+/mcp                                  status dashboard (also /mcp list, /mcp status)
+/mcp install                          browse the catalog, or add a custom server
+/mcp install sqlite db_path=./app.db  install a catalog server, answering its questions
+/mcp install custom docs https://example.com/mcp
+/mcp install custom local uvx my-mcp-server --flag
+/mcp search database                  search the catalog
+/mcp start NAME | stop NAME | restart NAME | start-all | stop-all
+/mcp status NAME                      target, env references, tools, last error
+/mcp tools NAME                       connect and list the tools the agent sees
+/mcp logs NAME [LINES]                server stderr and lifecycle events
+/mcp edit NAME                        edit a saved server in a form
+/mcp remove NAME
+/mcp trust [status|accept|revoke]     load this repository's .clai/mcp_servers.json
+/mcp help
 ```
 
-For Streamable HTTP, use `{"servers":{"remote":{"transport":"http","url":"https://example.com/mcp"}}}`
-as the JSON argument instead. Replace the example endpoint with your server.
-Stdio settings also accept `cwd` and `env`; HTTP settings accept `headers`.
-HTTP redirects are rejected; configure the final MCP endpoint URL.
-Each server accepts `enabled: false` to keep its configuration without using it.
-Names start with a letter and contain only letters and digits. Underscores are
-reserved for the separator so server/tool name pairs cannot produce the same name.
+The dashboard shows each server as `running` (connected by `/mcp start`),
+`ready` (enabled; connects when a prompt runs), `stopped`, or `error` (a failed
+start, or a referenced environment variable that is not set). Installed and
+enabled servers are available to the agent from the next prompt; `/mcp start`
+is not required. It keeps one connection open between prompts instead of
+starting the server for each prompt, and records the server's tools.
+`/mcp stop` disconnects the server and disables it until `/mcp start`.
 The model sees tools prefixed by server name, for example `local_search`.
 
-`/mcp` and `/mcp list` show names, transports, and enabled state, not connection
-health or credentials. `/mcp tools NAME` connects to one enabled server, lists
-its prefixed tool names, then closes that connection. Connection errors are
-reported by the shell. During agent runs, core's `MCPToolset` owns connection
-startup, tool execution, and cleanup. The plugin adds no telemetry beyond core's
-tool spans. It does not enable MCP sampling or native provider-side MCP.
+Only install servers you trust. Stdio servers run programs with your user
+permissions, launched as an executable plus arguments without a shell. HTTP
+servers receive tool arguments and can return untrusted content. HTTP redirects
+are rejected; configure the final endpoint URL. Set `auth` to `oauth` in
+`/mcp edit` to let FastMCP run a browser sign-in on connect; tokens stay in memory.
 
-`/plugins disable mcp` removes both the tools and command; `/plugins enable mcp`
-restores them. To replace saved configuration, `/plugins remove mcp` first, then
-run `/plugins add` again. Removing the saved override restores the empty built-in.
-Repository declarations in `.clai/settings.json` stay disabled until explicitly
-approved through `/plugins enable mcp`, like other project plugins.
+### Where servers are stored
+
+`/mcp install` and `/mcp edit` write `mcp.json` in the CLAI config folder
+(`~/.config/pydantic-clai2/`, or under `$XDG_CONFIG_HOME`). The file is created
+readable only by you. Do not put secrets in it: write `$VAR` or `${VAR}` in an
+`env` or `headers` value and CLAI fills it from its own environment when it
+connects, so the file holds only the reference. Catalog servers that need a
+token, such as `github`, are saved this way and report the missing variable
+until you set it. Stdio server stderr goes to `mcp_logs/NAME.log` next to
+`mcp.json`, which `/mcp logs` reads. The file shape is:
+
+```json
+{"servers": {"local": {"transport": "stdio", "command": "uvx", "args": ["my-mcp-server"], "env": {"TOKEN": "$MY_TOKEN"}},
+             "remote": {"transport": "http", "url": "https://example.com/mcp", "headers": {"Authorization": "Bearer $API_KEY"}}}}
+```
+
+Stdio servers also accept `cwd`; every server accepts `enabled: false`. Names
+start with a letter and contain only letters and digits. Underscores are
+reserved for the separator so server/tool name pairs cannot produce the same name.
+
+### Project servers and trust
+
+A repository can commit `.clai/mcp_servers.json` (same `servers` shape, found
+between the working directory and the git root). Because a stdio server runs a
+program, its servers do not load until you run `/mcp trust accept`. Trust is
+stored in your `mcp.json`, keyed by the file's path and a SHA-256 of its
+contents: any change to the file unloads its servers until you accept again, and
+a repository cannot trust itself. `/mcp stop` on a project server lasts for the
+session; edit the project file to change it permanently. When a name exists in
+both places, your own server wins.
+
+### Plugin settings and gaps
+
+Servers configured the older way, as plugin settings
+(`/plugins add mcp pydantic_clai2.mcp '{"servers": {...}}'`), still load and show
+up in `/mcp` with source `plugin`; change or remove them through `/plugins`.
+`/plugins disable mcp` removes both the tools and the command.
+
+Compared with Code Puppy, CLAI has one agent, so there are no per-agent server
+bindings and no `silence-warning` command: every enabled server is offered to
+the agent. The catalog lists fewer servers, chosen from ones whose packages or
+endpoints are published by their maintainers. The plugin adds no telemetry
+beyond core's tool spans, and does not enable MCP sampling or native
+provider-side MCP.
 
 ## On-demand authoring help
 

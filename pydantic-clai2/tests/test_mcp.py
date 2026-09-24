@@ -1,10 +1,14 @@
-"""MCP plugin configuration, discovery, and core-managed tool execution."""
+"""MCP configuration, storage, lifecycle, and core-managed tool execution."""
 
 import io
 import os
+import socket
+import stat
+import subprocess
 import sys
 from pathlib import Path
 
+import anyio
 import httpx
 import pytest
 from pydantic import JsonValue, ValidationError
@@ -15,21 +19,37 @@ from rich.console import Console
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
-from pydantic_clai2.mcp import activate, http_client
+from pydantic_clai2.mcp import MCPServers, MCPStore, StdioServer, activate, http_client
 from pydantic_clai2.plugin_loader import PluginLoader
-from pydantic_clai2.plugins import PluginHost, SessionStart
+from pydantic_clai2.plugins import PluginHost, SessionEnd, SessionStart
 from pydantic_clai2.settings_store import SettingsStore
 
 
-@pytest.fixture
-def anyio_backend() -> str:
-    return 'asyncio'
-
-
-def make_host(settings: dict[str, JsonValue]) -> PluginHost[None]:
+def make_host(settings: dict[str, JsonValue], store: MCPStore | None = None) -> PluginHost[None]:
     host: PluginHost[None] = PluginHost(name='mcp', console=Console(file=io.StringIO()), settings=settings)
-    activate(host)
+    activate(host, store=store)
     return host
+
+
+def write_server(tmp_path: Path, *, with_tool: bool = True) -> tuple[Path, Path]:
+    script = tmp_path / 'server.py'
+    pid_file = tmp_path / 'server.pid'
+    script.write_text(
+        'import os, sys\nfrom pathlib import Path\n'
+        f'Path({str(pid_file)!r}).write_text(str(os.getpid()))\n'
+        'print("server booted", file=sys.stderr, flush=True)\n'
+        'from mcp.server.fastmcp import FastMCP\n'
+        'server = FastMCP("test")\n'
+        + ('@server.tool()\ndef ping() -> str:\n    return "pong"\n' if with_tool else '')
+        + 'server.run()\n'
+    )
+    return script, pid_file
+
+
+def assert_exited(pid_file: Path) -> None:
+    if sys.platform != 'win32':
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
 
 
 async def test_http_client_rejects_redirects(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -49,38 +69,40 @@ async def test_http_client_rejects_redirects(monkeypatch: pytest.MonkeyPatch) ->
     async with http_client(timeout=httpx.Timeout(5), auth=httpx.BasicAuth('user', 'password')) as client:
         assert client.timeout.read == 5
         assert isinstance(client.auth, httpx.BasicAuth)
+    async with http_client(follow_redirects=True) as client:
+        assert not client.follow_redirects, 'FastMCP asks for redirects; the endpoint stays fixed'
 
 
-async def test_empty_builtin() -> None:
+async def test_builtin_is_enabled_and_the_dashboard_is_the_front_door() -> None:
     declaration = next(plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'mcp')
     assert declaration.enabled
     assert declaration.factory == 'pydantic_clai2.mcp'
     host = make_host({})
-    assert not host.capabilities
-    assert 'No MCP servers configured' in await host.commands.execute_async('/mcp')
-    assert 'Usage:' in await host.commands.execute_async('/mcp nope')
-    assert 'Unknown or disabled' in await host.commands.execute_async('/mcp tools missing')
-    command = next(iter(host.commands))
-    assert tuple(command.complete([])) == ('list', 'tools')
-    assert tuple(command.complete(['tools', ''])) == ()
+    assert len(host.capabilities) == 1
+    dashboard = await host.commands.execute_async('/mcp')
+    assert 'No MCP servers yet' in dashboard
+    assert '/mcp install' in dashboard
+    assert '/plugins' not in dashboard
+    await host.handlers[0](SessionEnd(reason='exit'))
 
 
-async def test_configuration_is_lazy_and_listing_redacts_secrets() -> None:
-    host = make_host(
-        {
-            'servers': {
-                'remote': {'transport': 'http', 'url': 'https://example.com/mcp?secret=value'},
-                'local': {'transport': 'stdio', 'command': 'not-a-real-program', 'env': {'TOKEN': 'secret'}},
-                'off': {'transport': 'stdio', 'command': 'not-a-real-program', 'enabled': False},
-            }
-        }
-    )
-    assert len(host.capabilities) == 2
-    assert await host.commands.execute_async('/mcp list') == (
-        'remote: http, enabled\nlocal: stdio, enabled\noff: stdio, disabled'
-    )
-    assert 'Unknown or disabled' in await host.commands.execute_async('/mcp tools off')
-    assert tuple(next(iter(host.commands)).complete(['tools', ''])) == ('remote', 'local')
+def test_store_round_trip_is_private_and_fails_loudly(tmp_path: Path) -> None:
+    store = MCPStore(tmp_path / 'config')
+    assert store.load().servers == {}
+    assert not store.delete('ghost')
+    store.put('local', StdioServer(transport='stdio', command='python'))
+    assert list(MCPStore(tmp_path / 'config').load().servers) == ['local']
+    if sys.platform != 'win32':
+        assert stat.S_IMODE(store.path.stat().st_mode) == 0o600
+    assert '"enabled"' not in store.path.read_text(), 'defaults are not written'
+    assert store.delete('local')
+    store.path.write_text('{"servers": {"bad-name": {"transport": "stdio", "command": "x"}}}')
+    with pytest.raises(ValueError, match='mcp.json'):
+        store.load()
+
+
+def test_default_store_uses_the_clai_config_folder(tmp_path: Path) -> None:
+    assert MCPStore().path == tmp_path / 'config' / 'pydantic-clai2' / 'mcp.json'
 
 
 @pytest.mark.parametrize(
@@ -90,6 +112,7 @@ async def test_configuration_is_lazy_and_listing_redacts_secrets() -> None:
         {'transport': 'stdio', 'command': 'python', 'typo': True},
         {'transport': 'http', 'url': 'file:///tmp/server'},
         {'transport': 'http'},
+        {'transport': 'http', 'url': 'https://example.com', 'auth': 'basic'},
         {'transport': 'sse', 'url': 'https://example.com'},
     ],
 )
@@ -104,7 +127,30 @@ def test_invalid_name(name: str) -> None:
         make_host({'servers': {name: {'transport': 'stdio', 'command': 'python'}}})
 
 
-async def test_loader_persistence_disable_and_project_trust(tmp_path: Path) -> None:
+async def test_plugin_settings_servers_still_load_read_only(tmp_path: Path) -> None:
+    host = make_host(
+        {
+            'servers': {
+                'remote': {'transport': 'http', 'url': 'https://user:pw@example.com:8443/mcp?secret=value'},
+                'off': {'transport': 'stdio', 'command': 'not-a-real-program', 'enabled': False},
+            }
+        },
+        MCPStore(tmp_path / 'config', workspace=tmp_path),
+    )
+    dashboard = await host.commands.execute_async('/mcp list')
+    assert 'remote' in dashboard and 'plugin' in dashboard
+    assert 'secret' not in dashboard
+    status = await host.commands.execute_async('/mcp status remote')
+    assert 'https://example.com:8443/mcp' in status
+    assert 'pw' not in status and 'secret' not in status
+    with pytest.raises(ValueError, match='/plugins'):
+        await host.commands.execute_async('/mcp remove remote')
+    assert await host.commands.execute_async('/mcp logs remote') == 'No log entries for remote yet.'
+    assert 'Stopped off' in await host.commands.execute_async('/mcp stop off')
+    assert '- off' in await host.commands.execute_async('/mcp')
+
+
+async def test_loader_persistence_disable_and_project_plugin_trust(tmp_path: Path) -> None:
     store = SettingsStore(tmp_path / 'config.db')
     builtin = next(plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'mcp')
     project = PluginSettings(
@@ -129,8 +175,7 @@ async def test_loader_persistence_disable_and_project_trust(tmp_path: Path) -> N
         assert not list(commands)
         await loader.enable('mcp')
         assert len(loader.capabilities()) == 1
-        assert await commands.execute_async('/mcp') == 'local: stdio, enabled'
-        assert store.plugins()[0].settings == project.settings
+        assert 'local' in await commands.execute_async('/mcp')
         await loader.disable('mcp')
         assert not loader.capabilities()
         assert not list(commands)
@@ -141,35 +186,134 @@ async def test_loader_persistence_disable_and_project_trust(tmp_path: Path) -> N
     finally:
         await loader.close('exit')
     assert not list(commands)
-    assert SettingsStore(store.path).plugins()[0].settings == project.settings
 
 
-@pytest.mark.parametrize('with_tool', [True, False])
-async def test_real_stdio_discovery_and_agent_run(tmp_path: Path, with_tool: bool) -> None:
-    script = tmp_path / 'server.py'
-    pid_file = tmp_path / 'server.pid'
+async def test_start_stop_restart_logs_and_agent_use(tmp_path: Path) -> None:
+    script, pid_file = write_server(tmp_path)
+    store = MCPStore(tmp_path / 'config', workspace=tmp_path)
+    host = make_host({}, store)
+    run = host.commands.execute_async
+    assert 'Installed local' in await run(f'/mcp install custom local {sys.executable} {script}')
+    assert 'o local' in await run('/mcp'), 'installed servers are ready without a start'
+
+    result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
+    assert 'pong' in result.output
+    assert_exited(pid_file)
+
+    assert 'Started local with 1 tools' in await run('/mcp start local')
+    held = pid_file.read_text()
+    assert 'already running' in await run('/mcp start local')
+    dashboard = await run('/mcp')
+    assert '+ local' in dashboard and '1 tools' in dashboard and '1/1 running' in dashboard
+    assert 'local_ping' in await run('/mcp status local')
+    result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
+    assert 'pong' in result.output
+    assert pid_file.read_text() == held, 'a started server keeps one process across runs'
+
+    assert 'Started local' in await run('/mcp restart local')
+    assert pid_file.read_text() != held
+    assert 'Stopped local' in await run('/mcp stop local')
+    assert_exited(pid_file)
+    assert store.load().servers['local'].enabled is False, 'stop persists for user servers'
+    result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
+    assert result.output == 'success (no tool calls)'
+
+    logs = await run('/mcp logs local 50')
+    assert 'server booted' in logs and '[clai] started with 1 tools' in logs and '[clai] stopped' in logs
+    assert logs.count('\n') <= 51
+    assert len((await run('/mcp logs local 1')).splitlines()) == 2
+    with pytest.raises(ValueError, match='Usage'):
+        await run('/mcp logs local lots')
+
+    assert 'Started local' in await run('/mcp start-all')
+    assert 'local_ping' in await run('/mcp tools local')
+    await host.handlers[0](SessionEnd(reason='exit'))
+    assert_exited(pid_file)
+    assert 'Stopped local' in await run('/mcp stop-all')
+
+
+async def test_tools_without_start_and_empty_server(tmp_path: Path) -> None:
+    script, pid_file = write_server(tmp_path, with_tool=False)
+    host = make_host({}, MCPStore(tmp_path / 'config', workspace=tmp_path))
+    await host.commands.execute_async(f'/mcp install custom local {sys.executable} {script}')
+    assert await host.commands.execute_async('/mcp tools local') == 'No tools provided by local.'
+    assert_exited(pid_file)
+
+
+async def test_failed_start_is_reported_and_logged(tmp_path: Path) -> None:
+    host = make_host({}, MCPStore(tmp_path / 'config', workspace=tmp_path))
+    run = host.commands.execute_async
+    await run(f'/mcp install custom broken {sys.executable} -c "raise SystemExit(3)"')
+    message = await run('/mcp start broken')
+    assert message.startswith('Could not start broken') and '/mcp logs broken' in message
+    assert '! broken' in await run('/mcp')
+    assert 'start failed' in await run('/mcp logs broken')
+    result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
+    assert result.output == 'success (no tool calls)', 'a failed server is left out of runs'
+
+
+async def test_env_references_resolve_at_connect_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('GITHUB_TOKEN', raising=False)
+    store = MCPStore(tmp_path / 'config', workspace=tmp_path)
+    host = make_host({}, store)
+    installed = await host.commands.execute_async('/mcp install github')
+    assert 'Set GITHUB_TOKEN' in installed
+    assert '$GITHUB_TOKEN' in store.path.read_text(), 'the saved file holds the reference, not a value'
+    assert 'set GITHUB_TOKEN in your environment' in await host.commands.execute_async('/mcp')
+    assert 'cannot connect' in await host.commands.execute_async('/mcp start github')
+    monkeypatch.setenv('GITHUB_TOKEN', 'token-value')
+    assert 'o github' in await host.commands.execute_async('/mcp')
+    servers = MCPServers(store)
+    assert servers.state(servers.get('github')) == 'ready'
+
+
+async def test_reconfiguring_or_removing_releases_the_connection(tmp_path: Path) -> None:
+    script, pid_file = write_server(tmp_path)
+    store = MCPStore(tmp_path / 'config', workspace=tmp_path)
+    servers = MCPServers(store)
+    store.put('local', StdioServer(transport='stdio', command=sys.executable, args=[str(script)]))
+    assert 'Started' in await servers.start('local')
+    first = pid_file.read_text()
+    store.put('local', StdioServer(transport='stdio', command=sys.executable, args=[str(script), '--x']))
+    assert 'Started' in await servers.start('local'), 'a changed server reconnects instead of reusing'
+    assert pid_file.read_text() != first
+    store.put('local', StdioServer(transport='stdio', command=sys.executable, args=[str(script), '--y']))
+    await servers.sync()
+    assert_exited(pid_file)
+    assert servers.state(servers.get('local')) == 'ready'
+    assert 'Started' in await servers.start('local')
+    await servers.remove('local')
+    assert_exited(pid_file)
+    with pytest.raises(ValueError, match='Unknown MCP server: local'):
+        servers.get('local')
+
+
+async def test_real_streamable_http_server(tmp_path: Path) -> None:
+    with socket.socket() as probe:
+        probe.bind(('127.0.0.1', 0))
+        port = probe.getsockname()[1]
+    script = tmp_path / 'http_server.py'
     script.write_text(
-        'import os\nfrom pathlib import Path\n'
-        f'Path({str(pid_file)!r}).write_text(str(os.getpid()))\n'
         'from mcp.server.fastmcp import FastMCP\n'
-        'server = FastMCP("test")\n'
-        + ('@server.tool()\ndef ping() -> str:\n    return "pong"\n' if with_tool else '')
-        + 'server.run()\n'
+        f'server = FastMCP("web", host="127.0.0.1", port={port}, log_level="WARNING")\n'
+        '@server.tool()\ndef ping() -> str:\n    return "pong"\n'
+        'server.run(transport="streamable-http")\n'
     )
-    host = make_host({'servers': {'local': {'transport': 'stdio', 'command': sys.executable, 'args': [str(script)]}}})
-    expected = 'local_ping' if with_tool else 'No tools provided by local.'
-    assert await host.commands.execute_async('/mcp tools local') == expected
-    if sys.platform != 'win32':
-        with pytest.raises(ProcessLookupError):
-            os.kill(int(pid_file.read_text()), 0)
-    # A second connection exercises cleanup after the discovery context closes.
-    result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run(
-        'Use the available tools.'
-    )
-    if with_tool:
+    process = subprocess.Popen([sys.executable, str(script)], stderr=subprocess.DEVNULL)
+    try:
+        host = make_host({}, MCPStore(tmp_path / 'config', workspace=tmp_path))
+        run = host.commands.execute_async
+        await run(f'/mcp install custom web http://127.0.0.1:{port}/mcp')
+        message = ''
+        for _ in range(100):
+            message = await run('/mcp restart web')
+            if message.startswith('Started'):
+                break
+            await anyio.sleep(0.1)
+        assert message.startswith('Started web with 1 tools'), message
+        result = await Agent(TestModel(), deps_type=type(None), capabilities=host.capabilities).run('Use tools.')
         assert 'pong' in result.output
-    else:
-        assert result.output == 'success (no tool calls)'
-    if sys.platform != 'win32':
-        with pytest.raises(ProcessLookupError):
-            os.kill(int(pid_file.read_text()), 0)
+        await host.handlers[0](SessionEnd(reason='exit'))
+    finally:
+        process.terminate()
+        process.wait()
