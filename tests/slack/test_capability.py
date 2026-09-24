@@ -117,7 +117,10 @@ class TestSlack:
         Agent(TestModel(), capabilities=[Slack(client=server, defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `Slack` capabilities share the id 'slack'"):
+        with pytest.raises(
+            UserError,
+            match="Capability id 'slack' is used by multiple Slack capabilities that disagree on 'auth', 'read_only'",
+        ):
             Agent(TestModel(), capabilities=[Slack(auth='a'), Slack(auth='b', read_only=True)])
 
     def test_credential_is_not_in_repr(self) -> None:
