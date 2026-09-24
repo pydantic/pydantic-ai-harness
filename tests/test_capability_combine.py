@@ -75,6 +75,7 @@ from pydantic_ai_harness import (
     ToolOutputLimits,
 )
 from pydantic_ai_harness.ask_user import AskUserRequest, AskUserResponse
+from pydantic_ai_harness.skills import Skills
 from pydantic_ai_harness.system_reminders import Reminder
 
 pytestmark = pytest.mark.anyio
@@ -145,6 +146,10 @@ class Combines:
 Policy = Anonymous | Collides | Combines | Rejected
 
 
+def _check_skills(merged: Any) -> None:
+    assert [source.directories for source in merged._sources] == [('first',), ('second',)]
+
+
 def _check_memory(merged: Any) -> None:
     assert merged.heading == 'Second'
 
@@ -189,6 +194,11 @@ def _check_sub_agents(merged: Any) -> None:
 
 COMBINE_POLICY: dict[str, Policy] = {
     # -- One per agent: a default `id`, and `combine` says what two of them mean. --
+    'Skills': Combines(
+        'one catalog behind one `load_skill` tool; every library either names stays reachable',
+        lambda: (Skills[Any]('first'), Skills[Any]('second')),
+        _check_skills,
+    ),
     'Memory': Combines(
         'one memory configuration per agent; its toolset registers fixed tool names',
         lambda: (Memory[Any](heading='First'), Memory[Any](heading='Second')),
@@ -269,7 +279,6 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ManagedPrompt': Anonymous('one per prompt name'),
     'RepoContext': Anonymous('one per workspace root'),
     'ReportContextUsage': Anonymous('a passive observer; several callbacks compose'),
-    'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
     'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
