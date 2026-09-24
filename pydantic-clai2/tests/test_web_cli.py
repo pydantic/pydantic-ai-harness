@@ -28,6 +28,7 @@ def test_config_precedence(tmp_path: Path, source: str) -> None:
     store = SettingsStore(tmp_path / 'config.db')
     args = ['--database', str(store.path), '--web']
     env = dict(os.environ)
+    env.pop('CLAI_MODEL', None)
     (tmp_path / '.git').mkdir()
     expected = 'openai-codex:gpt-6-astra'
     if source != 'default':
