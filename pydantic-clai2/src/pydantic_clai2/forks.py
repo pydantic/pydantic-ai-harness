@@ -100,6 +100,7 @@ class Forks(Generic[DepsT, OutputT]):
         self._busy = 0
         self._idle = asyncio.Event()
         self._idle.set()
+        self._held: list[tuple[str, str]] = []
 
     @property
     def records(self) -> tuple[ForkRecord, ...]:
@@ -117,6 +118,20 @@ class Forks(Generic[DepsT, OutputT]):
             self._busy -= 1
             if not self._busy:
                 self._idle.set()
+                held, self._held = self._held, []
+                for text, style in held:
+                    self._print(text, style)
+
+    def _notify(self, text: str, style: str) -> None:
+        # One-line notices print now when idle; otherwise `busy()` prints them on release.
+        if self._busy:
+            self._held.append((text, style))
+        else:
+            self._print(text, style)
+
+    def _print(self, text: str, style: str) -> None:
+        self.console.print(text, style=theme.color(style), markup=False)
+        self.console.print()
 
     def fork_command(self, args: list[str]) -> str:
         """`/fork`: receives the unparsed argument text so prompts keep their quotes."""
@@ -170,22 +185,18 @@ class Forks(Generic[DepsT, OutputT]):
             result = await session.prompt(prompt)
         except asyncio.CancelledError:
             record = self._finish(fork_id, 'cancelled', session)
-            self.console.print(f'{record.tag} cancelled after {record.elapsed:.1f}s', style=theme.color(theme.MUTED))
+            self._notify(f'{record.tag} cancelled after {record.elapsed:.1f}s', theme.MUTED)
             raise
         except Exception as exc:  # noqa: BLE001 -- a failed fork reports and never reaches the shell.
             record = self._finish(fork_id, 'failed', session)
-            await self._idle.wait()
             first_line = (error_message(exc).strip().splitlines() or [''])[0]
-            self.console.print(
-                f'{record.tag} failed after {record.elapsed:.1f}s: {type(exc).__name__}: {first_line}',
-                style=theme.color(theme.ERROR),
-                markup=False,
+            self._notify(
+                f'{record.tag} failed after {record.elapsed:.1f}s: {type(exc).__name__}: {first_line}', theme.ERROR
             )
-            self.console.print()
             return
         record = self._finish(fork_id, 'done', session)
         await self._idle.wait()
-        await self._announce(record, str(result.output))
+        await self._announce(record, result.output)
 
     def _finish(self, fork_id: int, status: ForkStatus, session: Session[DepsT, OutputT]) -> ForkRecord:
         record = self._records[fork_id]
@@ -195,20 +206,24 @@ class Forks(Generic[DepsT, OutputT]):
             record.session_id = session.summary.id
         return record
 
-    async def _announce(self, record: ForkRecord, response: str) -> None:
+    async def _announce(self, record: ForkRecord, output: OutputT) -> None:
         header = Text(f' FORK #{record.fork_id} RESPONSE ', style=f'bold white on {theme.color(theme.THINKING)}')
         header.append(' ')
         header.append(record.model, style=f'bold {theme.color(theme.INFO)}')
         self.console.print()
         self.console.print(header)
-        renderer = StreamRenderer(self.console, stop_loading=lambda: None)
-        await renderer.on_stream_event(PartStartEvent(index=0, part=TextPart(content=response)))
-        await renderer.finish()
+        if isinstance(output, str):
+            renderer = StreamRenderer(self.console, stop_loading=lambda: None)
+            await renderer.on_stream_event(PartStartEvent(index=0, part=TextPart(content=output)))
+            await renderer.finish()
+        else:
+            # Structured output prints as-is, like a foreground turn, rather than as Markdown.
+            self.console.print(str(output), markup=False)
+            self.console.print()
         done = f'{record.tag} finished in {record.elapsed:.1f}s.'
         if record.session_id is not None:
             done += f' Continue it with /resume {record.session_id}'
-        self.console.print(done, style=theme.color(theme.SUCCESS), markup=False)
-        self.console.print()
+        self._print(done, theme.SUCCESS)
 
     def cancel(self, raw_id: str) -> str:
         """`/fork cancel ID`."""

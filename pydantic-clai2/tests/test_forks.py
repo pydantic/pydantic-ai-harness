@@ -11,6 +11,7 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelRequest, UserPromptPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.test import TestModel
 from rich.console import Console
 
 from pydantic_clai2 import chat
@@ -208,6 +209,40 @@ async def test_output_waits_while_busy(tmp_path: Path) -> None:
         assert forks.cancel_running() == 0
     await record.task
     assert 'FORK #1 RESPONSE' in output.getvalue()
+
+
+async def test_notices_wait_while_busy(tmp_path: Path) -> None:
+    model, output = Model(), io.StringIO()
+    shell = shell_for(tmp_path, model, output)
+    forks = shell.forks
+    with forks.busy():
+        forks.fork_command(['block'])
+        forks.fork_command(['explode'])
+        await model.started.wait()
+        first, second = forks.records
+        await asyncio.gather(second.task)
+        assert forks.cancel('1') == 'Cancelling fork #1...'
+        await asyncio.gather(first.task, return_exceptions=True)
+        assert (first.status, second.status) == ('cancelled', 'failed')
+        assert 'fork #' not in output.getvalue()
+    text = output.getvalue()
+    assert 'fork #2 failed after' in text
+    assert 'fork #1 cancelled after' in text
+
+
+async def test_structured_output_prints_as_is() -> None:
+    output = io.StringIO()
+    forks = Forks(
+        console=Console(file=output, width=200),
+        history=lambda: [],
+        spawn=lambda _, history: Session(Agent(TestModel(), output_type=list[int]), deps=None),
+    )
+    forks.fork_command(['numbers'])
+    (record,) = forks.records
+    await record.task
+    text = output.getvalue()
+    assert 'FORK #1 RESPONSE' in text
+    assert '\n[0]\n' in text
 
 
 def test_completion(tmp_path: Path) -> None:
