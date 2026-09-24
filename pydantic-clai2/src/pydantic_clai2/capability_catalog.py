@@ -52,6 +52,7 @@ _FACTORIES = (
     ('skills', 'skills:Skills'),
     ('slack', 'slack:Slack'),
     ('spend_limits', 'spend:SpendLimits'),
+    ('sprite_workspace', 'sprites:SpriteWorkspace'),
     ('stackone', 'stackone:StackOne'),
     ('step_persistence', 'step_persistence:StepPersistence'),
     ('subagents', 'subagents:SubAgents'),
