@@ -268,8 +268,9 @@ class TestWorkspaceMount:
             FileSystem[None](),
             FileSystem[None](protected_patterns=[], read_only=True),
             FileSystem[None](protected_patterns=[], tools=['read_file', 'list_files']),
+            FileSystem[None](protected_patterns=[], tools=['read_file', 'edit_file']),
         ],
-        ids=['protected', 'read_only', 'read_tools'],
+        ids=['protected', 'read_only', 'read_tools', 'no_write_file'],
     )
     def test_write_limits_mount_read_only(self, file_system: FileSystem[None]) -> None:
         mount = workspace_mount([file_system])
@@ -283,6 +284,8 @@ class TestWorkspaceMount:
         for granted in (
             [FileSystem[None](denied_patterns=['.env'])],
             [FileSystem[None](allowed_patterns=['src/*'])],
+            [FileSystem[None](protected_patterns=[], tools=['write_file'])],
+            [FileSystem[None](tools=['file_info', 'list_directory'])],
             [customization_guide()],
             [FileSystem[None](), FileSystem[None](root_dir=tmp_path)],
             [FileSystem[None](protected_patterns=[]), dynamic],

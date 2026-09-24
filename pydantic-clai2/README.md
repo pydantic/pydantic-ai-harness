@@ -1121,12 +1121,16 @@ The sandbox's `pathlib` only reaches what the file tools may reach. `pathlib`
 calls on a mount skip the `FileSystem` checks, so CLAI mounts the `FileSystem`
 working directory at its real path only when a mount can enforce the same limits:
 
-- **Read-write:** the built-in `coder` plugin's default, unrestricted file tools.
-- **Read-only:** `protected_patterns`, `read_only`, or only read tools
-  registered. Writes go through `write_file` and `edit_file`, which check them.
-- **Not mounted:** `allowed_patterns` or `denied_patterns`, no `FileSystem`, more
-  than one, or a plugin that adds a capability function or `DynamicCapability`
-  (which could supply one at run time). File access then goes through the file tools only.
+- **Read-write:** `read_file` and `write_file` registered, no patterns, and not
+  `read_only`. This is the built-in `coder` plugin's default. `pathlib` can also
+  delete and rename files there, which `write_file` cannot do but could already
+  replace the content of.
+- **Read-only:** `read_file` registered but `write_file` missing, `read_only`, or
+  `protected_patterns` set.
+- **Not mounted:** no `read_file`, `allowed_patterns` or `denied_patterns`, no
+  `FileSystem`, more than one, or a plugin that adds a capability function or
+  `DynamicCapability` (which could supply one at run time). File access then
+  goes through the file tools only.
 
 While the model writes:
 

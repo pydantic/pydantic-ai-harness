@@ -40,7 +40,7 @@ from pydantic_ai_harness.code_mode import (
     SpeculativeCallEvictedEvent,
     SpeculativeCallMissedEvent,
 )
-from pydantic_ai_harness.filesystem import READ_ONLY_TOOL_NAMES, FileSystem
+from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_monty import MountDir, OSAccess
 
 from .customization import CustomizationGuide, read_clai_customization_guide
@@ -143,8 +143,8 @@ WORKSPACE_GUIDANCE: Mapping[str | None, str] = {
   `pathlib.Path` to read, write, glob, and stat project files directly.""",
     'read-only': """\
 - The workspace is mounted read-only at its real absolute path: use
-  `pathlib.Path` to read, glob, and stat project files directly. Change files
-  with `write_file` and `edit_file`; `pathlib` writes to it fail.""",
+  `pathlib.Path` to read, glob, and stat project files directly; `pathlib`
+  writes to it fail.""",
     None: """\
 - No host directory is mounted: `pathlib.Path` only reaches in-memory scratch
   files. Use the file functions to read project files.""",
@@ -166,9 +166,10 @@ def workspace_mount(granted: Sequence[AgentCapability[AgentDepsT]]) -> MountDir 
 
     `pathlib` calls on a mount never pass through `FileSystem`'s checks, so an unconditional
     read-write mount of the working directory let sandboxed code read or overwrite files the
-    caller had restricted (Veria, #1078). The mount is its working directory, writable only when
-    it may write every file there: not `read_only`, no `protected_patterns`, and a writing tool
-    registered. A mount cannot express `allowed_patterns` or `denied_patterns`, so either one
+    caller had restricted (Veria, #1078). The mount is its working directory, and only when it
+    registers `read_file`, since `pathlib` reads any file's content. It is writable only when it
+    may also write every file there: `write_file` registered, not `read_only`, and no
+    `protected_patterns`. A mount cannot express `allowed_patterns` or `denied_patterns`, so either one
     leaves the sandbox unmounted, as do zero or several file systems and any capability function
     or `DynamicCapability`, which may only resolve to a file system at run time.
     """
@@ -181,13 +182,10 @@ def workspace_mount(granted: Sequence[AgentCapability[AgentDepsT]]) -> MountDir 
     if len(file_systems) != 1 or any(isinstance(leaf, DynamicCapability) for leaf in leaves):
         return None
     [file_system] = file_systems
-    if file_system.allowed_patterns or file_system.denied_patterns:
+    tools = set(file_system.tools)
+    if file_system.allowed_patterns or file_system.denied_patterns or 'read_file' not in tools:
         return None
-    writable = (
-        not file_system.read_only
-        and not file_system.protected_patterns
-        and not set(file_system.tools) <= READ_ONLY_TOOL_NAMES
-    )
+    writable = 'write_file' in tools and not file_system.read_only and not file_system.protected_patterns
     directory = str(Path(file_system.root_dir if file_system.cwd is None else file_system.cwd).resolve())
     return MountDir(virtual_path=directory, host_path=directory, mode='read-write' if writable else 'read-only')
 
