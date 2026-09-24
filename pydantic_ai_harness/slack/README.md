@@ -37,7 +37,7 @@ print(result.output)
 | --- | --- |
 | Not set, `None`, or `''` | `SLACK_USER_TOKEN`. If that is not set either, creating the agent raises an error. |
 | A token | That token, for every run. |
-| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no Slack tools. A function never uses `SLACK_USER_TOKEN`. |
+| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no Slack tools. A function never uses `SLACK_USER_TOKEN`, and must not return `'oauth'`. |
 
 A fixed token or `SLACK_USER_TOKEN` suits a script or an agent on your own machine, where every run is the same Slack user.
 

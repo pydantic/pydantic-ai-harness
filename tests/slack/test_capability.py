@@ -150,6 +150,11 @@ class TestPerRunAuth:
         result = await agent.run('Use the tools')
         assert result.output == 'success (no tool calls)'
 
+    async def test_provider_returning_oauth_raises(self) -> None:
+        capability = Slack[str | None](auth=lambda ctx: ctx.deps)
+        with pytest.raises(UserError, match="must return an API key or token, not 'oauth'"):
+            await connections_for(capability, 'oauth')
+
     async def test_read_only_applies_per_run(self) -> None:
         capability = Slack[str | None](auth=lambda ctx: ctx.deps, read_only=True)
         assert len(await connections_for(capability, 'xoxp-alice')) == 1
