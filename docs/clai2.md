@@ -539,7 +539,8 @@ Save `.mcp.json` in the directory where you launch CLAI:
 
 The `mcp` plugin is built in and enabled by default. CLAI includes the MCP
 runtime dependency; you do not need a drop-in plugin or an extra install.
-Startup and `/mcp status` do not read `.mcp.json` or contact its servers.
+Without a configured `config_path`, startup and `/mcp status` do not read
+`.mcp.json` or contact its servers.
 `/mcp load` names the path and explains the approval. After reviewing the file,
 `/mcp load --approve` loads it for subsequent turns. Tools have server-name
 prefixes, such as `calculator_add`. The launch directory is captured when the
