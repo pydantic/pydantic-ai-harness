@@ -1,0 +1,279 @@
+"""`/fork`: run a copy of the conversation in the background while you keep working.
+
+Adapted from Code Puppy's `fork` plugin. A fork is a true fork: the retained
+history is copied at the moment `/fork` runs, and the copy seeds a separate
+`Session` with its own saved conversation. Later foreground turns never reach
+the fork, and the fork never changes the foreground history. When there is no
+history yet, or the copy fails, the fork starts with a fresh context.
+
+Commands run between turns, so a `/fork` typed during a turn is queued like any
+other command. Completion output waits until no turn or command owns the
+terminal, then prints one fork banner, the Markdown response, and the saved
+session id that `/resume` continues. Cancelling a turn cancels running forks;
+exiting or reloading CLAI cancels them too.
+"""
+
+import asyncio
+import copy
+import time
+from collections.abc import Callable, Generator, Iterable, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Generic, Literal, TypeVar
+
+from pydantic_ai import PartStartEvent, TextPart
+from pydantic_ai.messages import ModelMessage
+from rich.console import Console
+from rich.table import Table
+from rich.text import Text
+
+from . import theme
+from ._rendering import StreamRenderer
+from ._session import Session
+from .errors import error_message
+
+DepsT = TypeVar('DepsT')
+OutputT = TypeVar('OutputT')
+
+ForkStatus = Literal['running', 'done', 'failed', 'cancelled']
+
+USAGE = (
+    'Usage: /fork [@agent] [@model] PROMPT   run a copy of this conversation in the background\n'
+    '       /fork cancel ID                  stop a running fork\n'
+    '       /forks                           list forks'
+)
+_STATUS_STYLES: dict[ForkStatus, str] = {
+    'running': theme.WARNING,
+    'done': theme.SUCCESS,
+    'failed': theme.ERROR,
+    'cancelled': theme.MUTED,
+}
+_PROMPT_PREVIEW = 60
+
+
+@dataclass(kw_only=True)
+class ForkRecord:
+    """Bookkeeping for one background run."""
+
+    fork_id: int
+    agent_name: str
+    prompt: str
+    started_at: float
+    task: 'asyncio.Task[None]'
+    status: ForkStatus = 'running'
+    elapsed: float | None = None
+    session_id: str | None = field(default=None)
+
+    @property
+    def tag(self) -> str:
+        """How messages name this fork."""
+        return f'fork #{self.fork_id} ({self.agent_name})'
+
+
+def parse_fork_args(text: str) -> tuple[str | None, str | None, str]:
+    """Split `@agent [@model] prompt` into its parts; no `@agent` means the current agent."""
+    if not text.startswith('@'):
+        return None, None, text
+    head, _, rest = text.partition(' ')
+    rest = rest.strip()
+    if rest.startswith('@'):
+        model, _, prompt = rest.partition(' ')
+        return head[1:], model[1:], prompt.strip()
+    return head[1:], None, rest
+
+
+class Forks(Generic[DepsT, OutputT]):
+    """One shell's forks. `spawn` builds a child session configured like the foreground one."""
+
+    def __init__(
+        self,
+        *,
+        console: Console,
+        agent_name: str,
+        history: Callable[[], Sequence[ModelMessage]],
+        spawn: Callable[[str | None, Sequence[ModelMessage]], Session[DepsT, OutputT]],
+        models: Callable[[], Iterable[str]] = lambda: (),
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """Bind the foreground history and child-session factory."""
+        self.console = console
+        self.agent_name = agent_name
+        self._history = history
+        self._spawn = spawn
+        self._models = models
+        self._clock = clock
+        self._records: dict[int, ForkRecord] = {}
+        self._busy = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    @property
+    def records(self) -> tuple[ForkRecord, ...]:
+        """Every fork started by this shell, oldest first."""
+        return tuple(self._records.values())
+
+    @contextmanager
+    def busy(self) -> Generator[None]:
+        """Hold fork output while a turn or command owns the terminal."""
+        self._busy += 1
+        self._idle.clear()
+        try:
+            yield
+        finally:
+            self._busy -= 1
+            if not self._busy:
+                self._idle.set()
+
+    def fork_command(self, args: list[str]) -> str:
+        """`/fork`: receives the unparsed argument text so prompts keep their quotes."""
+        text = args[0].strip() if args else ''
+        if not text:
+            return USAGE
+        head, _, rest = text.partition(' ')
+        if head == 'cancel':
+            return self.cancel(rest.strip())
+        agent, model, prompt = parse_fork_args(text)
+        if not prompt:
+            raise ValueError('Fork what, exactly? Usage: /fork [@agent] [@model] PROMPT')
+        if agent is not None and agent != self.agent_name:
+            raise ValueError(f"Unknown agent '@{agent}'. Available: {self.agent_name}")
+        return self.start(prompt, model=model or None)
+
+    def complete(self, args: list[str]) -> Iterable[str]:
+        """Suggest `cancel` and the agent first, then saved models after `@agent`."""
+        if len(args) <= 1:
+            return ('cancel', f'@{self.agent_name}')
+        if len(args) == 2 and args[0].startswith('@'):
+            return tuple(f'@{name}' for name in self._models())
+        return ()
+
+    def start(self, prompt: str, *, model: str | None = None) -> str:
+        """Copy the history now, then run the child without waiting for it."""
+        session = self._spawn(model, self._snapshot())
+        fork_id = len(self._records) + 1
+        record = ForkRecord(
+            fork_id=fork_id,
+            agent_name=self.agent_name,
+            prompt=prompt,
+            started_at=self._clock(),
+            task=asyncio.create_task(self._run(fork_id, session, prompt), name=f'fork-{fork_id}'),
+        )
+        self._records[fork_id] = record
+        return (
+            f'fork #{fork_id}: {self.agent_name} started in the background. '
+            'Results print when it finishes; /forks shows status.'
+        )
+
+    def _snapshot(self) -> list[ModelMessage]:
+        # Deep copy, so nothing the fork does to its messages can reach the foreground history.
+        try:
+            return copy.deepcopy(list(self._history()))
+        except Exception:  # noqa: BLE001 -- a failed copy must not block the fork.
+            self.console.print(
+                "/fork couldn't copy the current conversation. Forking with a fresh context.",
+                style=theme.color(theme.WARNING),
+            )
+            return []
+
+    async def _run(self, fork_id: int, session: Session[DepsT, OutputT], prompt: str) -> None:
+        try:
+            result = await session.prompt(prompt)
+        except asyncio.CancelledError:
+            record = self._finish(fork_id, 'cancelled', session)
+            self.console.print(f'{record.tag} cancelled after {record.elapsed:.1f}s', style=theme.color(theme.MUTED))
+            raise
+        except Exception as exc:  # noqa: BLE001 -- a failed fork reports and never reaches the shell.
+            record = self._finish(fork_id, 'failed', session)
+            await self._idle.wait()
+            first_line = (error_message(exc).strip().splitlines() or [''])[0]
+            self.console.print(
+                f'{record.tag} failed after {record.elapsed:.1f}s: {type(exc).__name__}: {first_line}',
+                style=theme.color(theme.ERROR),
+                markup=False,
+            )
+            self.console.print()
+            return
+        record = self._finish(fork_id, 'done', session)
+        await self._idle.wait()
+        await self._announce(record, str(result.output))
+
+    def _finish(self, fork_id: int, status: ForkStatus, session: Session[DepsT, OutputT]) -> ForkRecord:
+        record = self._records[fork_id]
+        record.status = status
+        record.elapsed = self._clock() - record.started_at
+        if session.conversations is not None and session.summary.revision:
+            record.session_id = session.summary.id
+        return record
+
+    async def _announce(self, record: ForkRecord, response: str) -> None:
+        header = Text(f' FORK #{record.fork_id} RESPONSE ', style=f'bold white on {theme.color(theme.THINKING)}')
+        header.append(' ')
+        header.append(record.agent_name, style=f'bold {theme.color(theme.INFO)}')
+        self.console.print()
+        self.console.print(header)
+        renderer = StreamRenderer(self.console, stop_loading=lambda: None)
+        await renderer.on_stream_event(PartStartEvent(index=0, part=TextPart(content=response)))
+        await renderer.finish()
+        done = f'{record.tag} finished in {record.elapsed:.1f}s.'
+        if record.session_id is not None:
+            done += f' Continue it with /resume {record.session_id}'
+        self.console.print(done, style=theme.color(theme.SUCCESS), markup=False)
+        self.console.print()
+
+    def cancel(self, raw_id: str) -> str:
+        """`/fork cancel ID`."""
+        try:
+            fork_id = int(raw_id)
+        except ValueError:
+            raise ValueError(f"Usage: /fork cancel ID. '{raw_id}' is not a fork id.") from None
+        record = self._records.get(fork_id)
+        if record is None:
+            raise ValueError(f'No fork #{fork_id}. Try /forks.')
+        if record.status != 'running':
+            return f'fork #{fork_id} already {record.status}.'
+        record.task.cancel()
+        return f'Cancelling {record.tag}...'
+
+    def cancel_running(self) -> int:
+        """Cancel every running fork, as a cancelled turn does. Returns how many were running."""
+        running = [record for record in self._records.values() if record.status == 'running']
+        for record in running:
+            record.task.cancel()
+        return len(running)
+
+    async def close(self) -> None:
+        """Cancel and join every fork task, including ones waiting to print."""
+        tasks = [record.task for record in self._records.values() if not record.task.done()]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    def status_command(self, args: list[str]) -> str:
+        """`/forks`: print the table and return the totals line."""
+        if args:
+            raise ValueError('Usage: /forks')
+        if not self._records:
+            return 'No forks yet. Start one with /fork [@agent] [@model] PROMPT.'
+        table = Table(title='Forks', header_style=theme.color(theme.ACCENT), border_style=theme.color(theme.MUTED))
+        table.add_column('ID', justify='right')
+        table.add_column('Agent', style=theme.color(theme.INFO))
+        table.add_column('Status')
+        table.add_column('Time', justify='right')
+        table.add_column('Session')
+        table.add_column('Prompt', overflow='ellipsis', no_wrap=True, max_width=_PROMPT_PREVIEW)
+        now = self._clock()
+        for record in self._records.values():
+            elapsed = record.elapsed if record.elapsed is not None else now - record.started_at
+            table.add_row(
+                str(record.fork_id),
+                Text(record.agent_name),
+                Text(record.status, style=theme.color(_STATUS_STYLES[record.status])),
+                f'{elapsed:.1f}s',
+                Text(record.session_id or ''),
+                Text(' '.join(record.prompt.split())),
+            )
+        self.console.print(table)
+        counts = {status: 0 for status in _STATUS_STYLES}
+        for record in self._records.values():
+            counts[record.status] += 1
+        return ', '.join(f'{count} {status}' for status, count in counts.items() if count)

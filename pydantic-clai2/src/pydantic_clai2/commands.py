@@ -41,6 +41,8 @@ class Command:
     description: str
     handler: Callable[[list[str]], str | Awaitable[str]]
     complete: Callable[[list[str]], Iterable[str]] = lambda _: ()
+    raw: bool = False
+    """Pass the argument text unparsed, as one element, so free-form prompts keep quotes and apostrophes."""
 
 
 class Commands(Completer):
@@ -74,14 +76,16 @@ class Commands(Completer):
 
     def execute(self, text: str) -> str | Awaitable[str]:
         """Parse shell-style arguments and dispatch without invoking a shell."""
-        words = shlex.split(text.removeprefix('/'))
-        if not words:
+        parts = text.removeprefix('/').split(maxsplit=1)
+        if not parts:
             return self.help([])
-        name, *args = words
+        name, rest = parts[0], parts[1] if len(parts) > 1 else ''
         command = self._commands.get(name)
         if command is None:
             raise ValueError(f'Unknown command /{name}. Use /help.')
-        return command.handler(args)
+        if command.raw:
+            return command.handler([rest] if rest else [])
+        return command.handler(shlex.split(rest))
 
     async def execute_async(self, text: str) -> str:
         """Await asynchronous plugin commands without blocking the event loop."""

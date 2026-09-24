@@ -696,6 +696,9 @@ host.commands.register(
 ```
 
 The handler gets the arguments as a list of strings and returns the text to show.
+Arguments are split like a shell command line, so quotes group words. Pass
+`raw=True` to receive the unsplit argument text as one string instead (an empty
+list when there is none); `/fork` does this so prompts keep their apostrophes.
 It may be `async`. Add `complete=` to offer Tab suggestions. The registry filters
 command names and returned candidates by case-sensitive substring, replacing the
 whole typed fragment when selected. Return full candidates, not just suffixes.
