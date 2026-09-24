@@ -45,6 +45,20 @@ def test_workspace_follows_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ' | /home/meow/app | ' in status.text()
 
 
+def test_workspace_control_characters_are_inert() -> None:
+    status = Status(model='m', workspace='/tmp/a\nb\x1b[31m\u00e9')
+    assert ' | /tmp/a\\x0ab\\x1b[31m\u00e9 | ' in status.text()
+    assert ' | /tmp/a\\x0ab\\x1b[31m\u00e9 | ' in ''.join(text for _, text in status.toolbar())
+
+
+def test_workspace_without_a_home_directory_is_shown_whole(monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_home() -> Path:
+        raise RuntimeError('Could not determine home directory.')
+
+    monkeypatch.setattr(Path, 'home', no_home)
+    assert ' | /srv/app | ' in Status(model='m', workspace='/srv/app').text()
+
+
 def test_toolbar_paints_the_context_figure_on_alert() -> None:
     status = Status(model='m', context_tokens=90, context_alert=True)
     assert status.toolbar() == [('', 'm | context: '), (WARNING, '90'), ('', ' tokens | ~0 streamed tokens | ready')]

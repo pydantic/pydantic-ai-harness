@@ -21,6 +21,7 @@ from pydantic_ai.messages import (
 from rich.console import Console
 
 from . import theme
+from .tool_output import terminal_text
 from .usage_report import format_cost
 
 StatusSegment = Callable[[], str]
@@ -73,7 +74,8 @@ class Status:
         if self.output_tokens is not None:
             output = f'{self.output_tokens:,} output tokens'
         cost = '' if self.cost is None else f' | {format_cost(self.cost)}'
-        workspace = f' | {_short_path(self.workspace)}' if self.workspace else ''
+        # A POSIX directory name may hold a newline or an escape sequence; keep it inert on every painter.
+        workspace = f' | {_short_path(terminal_text(self.workspace, keep=""))}' if self.workspace else ''
         head = f'{frame} {self.model}{workspace} | context: '.lstrip()
         return head, context, f' tokens | {output}{cost} | {self.activity}', self._plugin_text()
 
@@ -219,7 +221,8 @@ class StatusLine:
 
 def _short_path(path: str, limit: int = 40) -> str:
     """Abbreviate the home directory, then keep the path's tail, the part that tells worktrees apart."""
-    with contextlib.suppress(ValueError):
+    # `Path.home()` raises `RuntimeError` when the account has no resolvable home directory.
+    with contextlib.suppress(ValueError, RuntimeError):
         path = str(Path('~', Path(path).relative_to(Path.home())))
     return path if len(path) <= limit else '…' + path[-(limit - 1) :]
 

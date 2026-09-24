@@ -198,7 +198,9 @@ class ShowSandboxCalls(AbstractCapability[AgentDepsT]):
 
     A cold call reports its start and result as it runs. A speculative launch may never be used,
     so its call and result are held and reported under the claiming call's id only when the
-    snippet claims it; an evicted launch is dropped unseen.
+    snippet claims it; an evicted launch is dropped unseen. The result is always held by then:
+    harness `SpeculationCoordinator.adopt` awaits the launch, which runs this hook to completion,
+    before it emits `SpeculativeCallClaimedEvent`, even when the launch was not ready at the claim.
     """
 
     _launched: dict[str, tuple[ToolCallPart, ToolReturnPart | RetryPromptPart]] = field(
