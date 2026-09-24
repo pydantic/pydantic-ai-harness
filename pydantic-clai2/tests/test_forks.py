@@ -3,7 +3,7 @@
 import asyncio
 import io
 import signal
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -405,6 +405,25 @@ def test_editor_paints_fork_rows_above_the_rule(height: int, panel_rows: list[st
     assert len(plain) <= height - 2
     assert plain[: len(panel_rows)] == panel_rows
     assert plain[len(panel_rows)].startswith('\u2500')
+
+
+async def test_a_fork_that_cannot_start_closes_its_turn() -> None:
+    events: list[HostEvent] = []
+
+    async def fire(event: HostEvent) -> None:
+        events.append(event)
+
+    def spawn(model: str | None, history: Sequence[ModelMessage]) -> Session[None, str]:
+        raise ValueError(f'Unknown model {model}')
+
+    forks = Forks(console=Console(file=io.StringIO()), history=lambda: [], spawn=spawn, fire=fire)
+    with pytest.raises(ValueError, match='Unknown model nope'):
+        await forks.fork_command(['@nope hello'])
+    assert forks.records == ()
+    start, end = events
+    assert isinstance(start, TurnStart)
+    assert isinstance(end, TurnEnd)
+    assert (end.text, end.outcome, str(end.error)) == ('hello', 'failed', 'Unknown model nope')
 
 
 def test_completion(tmp_path: Path) -> None:

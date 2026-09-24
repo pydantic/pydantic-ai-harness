@@ -201,12 +201,11 @@ class Forks(Generic[DepsT, OutputT]):
             await self._fire(TurnEnd(text=begin.text, outcome='cancelled'))
             raise ValueError(f'Fork cancelled by a plugin: {begin.cancel_reason or "no reason given"}')
         prompt = begin.text
-        session = self._spawn(model, self._snapshot())
-        if session.conversations is not None and not self._store_ready:
-            # Concurrent first connections to a brand-new sessions.db can fail on the store's WAL switch.
-            # Open it here, while the command owns the shell and before any fork runs.
-            await session.conversations.listing(limit=1)
-            self._store_ready = True
+        try:
+            session = await self._prepare(model)
+        except Exception as exc:
+            await self._fire(TurnEnd(text=prompt, outcome='failed', error=exc))
+            raise
         fork_id = len(self._records) + 1
         progress = Status(activity='starting')
 
@@ -227,6 +226,15 @@ class Forks(Generic[DepsT, OutputT]):
             f'fork #{fork_id} ({record.model}) started in the background. '
             'Results print when it finishes; /forks shows status.'
         )
+
+    async def _prepare(self, model: str | None) -> Session[DepsT, OutputT]:
+        session = self._spawn(model, self._snapshot())
+        if session.conversations is not None and not self._store_ready:
+            # Concurrent first connections to a brand-new sessions.db can fail on the store's WAL switch.
+            # Open it here, while the command owns the shell and before any fork runs.
+            await session.conversations.listing(limit=1)
+            self._store_ready = True
+        return session
 
     def _snapshot(self) -> list[ModelMessage]:
         # Deep copy, so nothing the fork does to its messages can reach the foreground history.
