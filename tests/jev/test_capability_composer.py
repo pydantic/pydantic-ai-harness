@@ -8,7 +8,6 @@ from importlib.machinery import ModuleSpec
 from pathlib import Path
 
 import pytest
-from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UnexpectedModelBehavior, UserError
 from pydantic_ai.models.test import TestModel
@@ -40,20 +39,20 @@ class Undocumented(AbstractCapability[object]):
 class TestConfiguration:
     def test_requires_models(self):
         with pytest.raises(UserError, match='`models`'):
-            JevCapabilityComposer(models={}, catalog=CATALOG)
+            JevCapabilityComposer[object](models={}, catalog=CATALOG)
 
     def test_requires_a_catalog(self):
         with pytest.raises(UserError, match='`catalog`'):
-            JevCapabilityComposer(models={'fast': 'test'}, catalog={})
+            JevCapabilityComposer[object](models={'fast': 'test'}, catalog={})
 
     @pytest.mark.parametrize('threshold', [-0.1, 1.1])
     def test_rejects_threshold_outside_unit_interval(self, threshold: float):
         with pytest.raises(UserError, match='between 0 and 1'):
-            JevCapabilityComposer(models={'fast': 'test'}, catalog=CATALOG, confidence_threshold=threshold)
+            JevCapabilityComposer[object](models={'fast': 'test'}, catalog=CATALOG, confidence_threshold=threshold)
 
     def test_rejects_an_unsure_model_off_the_menu(self):
         with pytest.raises(UserError, match="unsure_model 'nope' is not a key"):
-            JevCapabilityComposer(models={'fast': 'test'}, catalog=CATALOG, unsure_model='nope')
+            JevCapabilityComposer[object](models={'fast': 'test'}, catalog=CATALOG, unsure_model='nope')
 
     def test_not_spec_serializable(self):
         assert JevCapabilityComposer.get_serialization_name() is None
@@ -107,11 +106,11 @@ class TestDefaultCatalog:
         monkeypatch.chdir(tmp_path)
         (tmp_path / SKILLS_DIRECTORY).mkdir(parents=True)
         local = tuple(key for key in default_catalog() if key not in ('web_search', 'web_fetch'))
-        picks = JevCapabilityComposer(models={'fast': TestModel(call_tools=[])}).capability_for(
-            Composition(model='fast', thinking=Thinking.low, capabilities=local, confidence={})
+        sub_agent = JevCapabilityComposer[object](models={'fast': TestModel(call_tools=[])}).build_agent(
+            Composition(model='fast', thinking=Thinking.low, capabilities=local, confidence={}), deps_type=type(None)
         )
 
-        result = await Agent('test', capabilities=[picks]).run('hi')
+        result = await sub_agent.run('hi')
 
         assert result.output == 'success (no tool calls)'
 
@@ -155,7 +154,6 @@ class TestSchema:
                             'anyOf': [
                                 {'const': 'notes', 'description': 'Keep notes'},
                                 {'const': 'clock', 'description': 'Tell the time'},
-                                {'const': 'dial', 'description': 'Make a call'},
                             ],
                             'type': 'string',
                         },
@@ -170,7 +168,9 @@ class TestSchema:
 
     async def test_a_model_without_a_description_is_described_by_its_name(self):
         jev = Jev(model='fast')
-        await JevCapabilityComposer(models={'fast': 'test'}, catalog=CATALOG, jev_model=jev.model_).compose('hi')
+        await JevCapabilityComposer[object](models={'fast': 'test'}, catalog=CATALOG, jev_model=jev.model_).compose(
+            'hi'
+        )
 
         properties = jev.schemas[0]['properties']
         assert isinstance(properties, dict)

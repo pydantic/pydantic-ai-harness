@@ -15,10 +15,9 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from pydantic_ai import AgentStreamEvent
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, UserPromptPart
-from pydantic_ai.models import ModelRequestContext
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.tools import RunContext, Tool
-from pydantic_ai.toolsets import FunctionToolset, ToolsetFunc
+from pydantic_ai.toolsets import FunctionToolset
 
 from pydantic_ai_harness.jev import CapabilitiesComposedEvent, ComposableCapability, JevCapabilityComposer
 from pydantic_ai_harness.subagents import ModelOption
@@ -29,11 +28,10 @@ class Notes(AbstractCapability[object]):
     """A catalog capability with one tool, named from its argument so catalog arguments are observable."""
 
     prefix: str = 'notes'
-    reply: str = 'noted'
 
     def get_toolset(self) -> FunctionToolset[object]:
         def take_note() -> str:
-            return self.reply
+            return 'noted'
 
         return FunctionToolset([Tool(take_note, name=f'{self.prefix}_take')])
 
@@ -49,24 +47,9 @@ class Clock(AbstractCapability[object]):
         return FunctionToolset([Tool(now, name='clock_now')])
 
 
-@dataclass
-class Dial(AbstractCapability[object]):
-    """A catalog capability whose toolset is built per run step, from a function."""
-
-    def get_toolset(self) -> ToolsetFunc[object]:
-        def toolset(ctx: RunContext[object]) -> FunctionToolset[object]:
-            def dial() -> str:
-                return 'dialled'
-
-            return FunctionToolset([Tool(dial, name='dial')])
-
-        return toolset
-
-
 CATALOG = {
     'notes': ComposableCapability(description='Keep notes', capability=Notes, arguments={'prefix': 'memo'}),
     'clock': ComposableCapability(description='Tell the time', capability=Clock),
-    'dial': ComposableCapability(description='Make a call', capability=Dial),
 }
 
 
@@ -157,19 +140,6 @@ def composer(jev: Jev, seen: list[Seen], **kwargs: object) -> JevCapabilityCompo
         jev_model=jev.model_,
         **kwargs,  # pyright: ignore[reportArgumentType]
     )
-
-
-@dataclass
-class Guard(AbstractCapability[object]):
-    """An agent capability that records the model of every request it sees."""
-
-    models: list[str] = field(default_factory=list[str])
-
-    async def before_model_request(
-        self, ctx: RunContext[object], request_context: ModelRequestContext
-    ) -> ModelRequestContext:
-        self.models.append(request_context.model.model_name)
-        return request_context
 
 
 @dataclass

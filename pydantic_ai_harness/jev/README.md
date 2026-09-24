@@ -9,7 +9,7 @@
 >
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness#version-policy).
 
-Let [Jev](https://typesafe.ai) pick the model, thinking effort, and capabilities of each run, from a menu and an allowlist you define.
+Let [Jev](https://typesafe.ai) compose a sub-agent for each prompt -- its model, thinking effort, and capabilities, from a menu and an allowlist you define -- and hand it the turn.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/jev/)
 
@@ -19,13 +19,13 @@ A general-purpose agent carries every tool and runs on one model for every reque
 
 ## The solution
 
-`JevCapabilityComposer` asks [Jev](https://pydantic.dev/docs/ai/models/typesafe/) once, before a run starts. Jev is a classifier rather than a language model: it answers typed questions with a confidence, in a few hundred milliseconds. One request asks three things:
+`JevCapabilityComposer` asks [Jev](https://pydantic.dev/docs/ai/models/typesafe/) once, on a run's first model request. Jev is a classifier rather than a language model: it answers typed questions with a confidence, in a few hundred milliseconds. One request asks three things:
 
 - **model**: which entry of your `models` menu should handle the request
 - **thinking**: `low`, `medium`, or `high` reasoning effort
 - **capabilities**: for each entry of the catalog, whether the request needs it
 
-The run then goes ahead on the picked model and thinking effort, with the picked capabilities added. Everything else the agent was configured with still applies -- its instructions, output type, tools, guardrails, persistence, and limits -- because the picks join the run rather than replacing it. When Jev's confidence in the model pick is below `confidence_threshold`, the run keeps the capabilities Jev picked but uses `unsure_model`: the last entry of `models` unless you name one, so order the menu from cheapest to strongest. When Jev picks no capabilities, the run is left as the agent configured it.
+The composer builds a sub-agent on the picked model and thinking effort, with the picked capabilities, runs it on the conversation, and returns its answer as the model response: the agent's own model is not called for that turn. The sub-agent is an independent run, like a [sub-agent](../subagents/) delegation, so only what [the sub-agent gets](#what-the-sub-agent-gets) crosses over. When Jev's confidence in the model pick is below `confidence_threshold`, the sub-agent keeps the capabilities Jev picked but runs on `unsure_model`: the last entry of `models` unless you name one, so order the menu from cheapest to strongest. When Jev picks no capabilities, the agent's own model handles the turn as usual.
 
 The default threshold of 0.4 comes from a hand-labelled check of the example menu below. The example sets `unsure_model='medium'` from the same check: Jev is rarely unsure of a clearly worded request, and mostly unsure of vague ones ("add a cache", "finish the TODOs"), which usually need a scoped change rather than the strongest model. On 40 vague prompts, falling back to `medium` put 44 of 60 picks on the labelled tier against 25 for `max`, at the cost of 2 clearly worded prompts in 330 running a tier too low. `scripts/jev_eval.py` reruns the check; recalibrate against prompts of your own before relying on either setting.
 
@@ -44,6 +44,7 @@ agent = Agent(
                 'max': ModelOption('openai-codex:gpt-6-astra', description='Open-ended work: an unknown root cause, a design decision, or changes across many files'),
             },
             unsure_model='medium',
+            instructions='You are a coding agent working in this repository.',
         )
     ],
 )
@@ -77,7 +78,7 @@ The descriptions are what Jev decides from. Give each `ModelOption` a `descripti
 
 ## The catalog is an allowlist
 
-`catalog` maps a key to a `ComposableCapability`: a capability class, the arguments to build it with (passed to its `from_spec`, as in an `AgentSpec` entry), and a description Jev reads. Only catalog entries can be added to a run, and each run that picks one gets a fresh instance.
+`catalog` maps a key to a `ComposableCapability`: a capability class, the arguments to build it with (passed to its `from_spec`, as in an `AgentSpec` entry), and a description Jev reads. Only catalog entries and `shared_capabilities` can be on a sub-agent, and each sub-agent that picks an entry gets a fresh instance.
 
 When no `catalog` is given, the composer calls `default_catalog()` as it is constructed. Every entry needs no third-party API key, and the ones that need configuration take a default:
 
@@ -100,7 +101,7 @@ Some capabilities are left out on purpose:
 - **Need a key or an external service**: `ExaSearch`, `YouSearch`, `ModalSandbox`, `BrowserUse`, `LocalStack`, `Macroscope`. They build without arguments, then call a paid service or need a CLI or container.
 - **No default could be right**: `Advisor` needs a model, `AskUser` an answerer, `ConversationSearch` a history source, `SubAgents` its agents, and `Memory`'s persistent stores are objects, so a capability built per run would get an empty in-memory store.
 - **Bundles of entries already here**: `Coder` and `Researcher` combine `FileSystem`, `Shell`, and web search, so picking one next to those entries would register the same tools twice.
-- **Shape the run, not the task**: compaction, spend limits, persistence, and guardrails belong on the agent, where they cover every run whatever Jev picks.
+- **Shape the run, not the task**: compaction, spend limits, and guardrails belong in `shared_capabilities`, where they cover every sub-agent whatever Jev picks.
 
 Add any of them yourself. `ComposableCapability.of` describes an entry from the first line of the capability's docstring unless you pass `description=`. This one also needs the `exa` extra and an `EXA_API_KEY`:
 
@@ -121,17 +122,32 @@ A docstring says what a capability is. Jev decides better from what a request wo
 
 ## Models and thinking
 
-`models` takes the same entries as the [sub-agents](../subagents/) model menu: a model ID, a `Model`, or a `ModelOption`. The picked entry becomes the run's model, unless the run was given one with `Agent.run(model=...)`, which takes precedence. The picked effort goes on the run as `ModelSettings(thinking=...)`, and a `ModelOption.settings` overrides it, so an entry that must always think hard can say so. A model whose profile does not support thinking ignores the setting.
+`models` takes the same entries as the [sub-agents](../subagents/) model menu: a model ID, a `Model`, or a `ModelOption`. The picked entry becomes the sub-agent's model. The picked effort goes on it as `ModelSettings(thinking=...)`, and a `ModelOption.settings` overrides it, so an entry that must always think hard can say so. A model whose profile does not support thinking ignores the setting.
 
-## What changes and what doesn't
+## What the sub-agent gets
 
-The picks apply to the whole run: every model request in it uses the picked model and has the picked capabilities. The agent's instructions, output type, message history, dependencies, tools, and other capabilities are unchanged. A picked entry whose class the agent already has is not added a second time, since both would register the same tools, and the agent's configuration of it is the one that applies. When the run gets that class some other way -- passed to `Agent.run(capabilities=...)`, or picked by a second composer -- the pick's tools give way to it on each request: the run's own configuration still wins, so a pick cannot widen what the run was given.
+- **The conversation**: the messages the agent's model would have been sent, so it can follow up on earlier turns. The prompt is as the capabilities before the composer left it, attachments included.
+- **`deps`**, and the run's **usage and `usage_limits`**, so its requests count toward the run.
+- **`instructions`**: the composer's, not the agent's. `system_prompt` parts already in the conversation stay in it.
+- **`shared_capabilities`**: put guardrails, approval guards, and anything else every sub-agent needs here. A pick of the same class as one of them is left out, so they keep their configuration. Each is set up for the sub-agent's run as for any run, so one that keeps per-run state, such as [spend limits](../spend/), counts within that sub-agent run.
+- **`event_stream_handler`**: receives the sub-agent's events, such as its tool calls, which the agent's own event stream does not carry.
 
-Jev's request counts toward the run's usage and its `usage_limits`. It is a separate request made through its own agent, so a [spend limits](../spend/) capability on your agent does not price it.
+It gets nothing else of the agent's: not its tools, capabilities, or output type. The agent's history records one request and the sub-agent's answer, under the sub-agent's model name, so later turns see what earlier sub-agents said rather than the tool calls they made.
 
-Jev reads the text of the run's prompt, or of the latest user prompt in `message_history` when the run is given none, before any model request is made. The agent's [input guardrails](../guardrails/) screen that text first: when one blocks the prompt, Jev is not asked and the guardrail blocks the run as usual, and when one redacts it, Jev reads the redacted text. Their guards therefore run twice per run, once before Jev and once on the first model request, which matters for a slow or paid guard. Only guardrails on the agent are seen; put an `InputGuardrail` on the agent rather than passing it to `Agent.run` if it must cover Jev. Other capabilities that rewrite model requests do not cover what is sent to Jev.
+Some runs are not composed:
 
-Each run asks Jev again, so a conversation's model and capabilities can change from one turn to the next. The composer is not built for durable execution: a worker that re-derives a run's capabilities would ask Jev again, and could get a different answer.
+- **Structured output**: the sub-agent answers in text, so when the run's output type cannot take text (`int`, a model, `PromptedOutput` or `NativeOutput`), the agent's own model handles it and Jev is not asked. An output type that includes `str` is composed.
+- **After the first request**: only a run's first model request is composed. A prompt with no text, or a run resumed from a tool result, is left to the agent.
+
+Approval inside the sub-agent has to happen while it runs, with an async `ToolGuardrail` guard in `shared_capabilities` that asks the user (see [human in the loop](../guardrails/#human-in-the-loop)). Deferred approval (`GuardrailResult.approve()`, `requires_approval=True`) ends a run with `DeferredToolRequests`, which the sub-agent's text output cannot carry back.
+
+Jev's request and the sub-agent's count toward the run's usage and `usage_limits`. Core also counts the agent's own request step that the answer stands in for, so a composed turn counts one request more than the models served. A spend limits capability on the agent prices neither, since they are separate runs; add one to `shared_capabilities` for the sub-agent.
+
+## Guardrails and other request capabilities
+
+The composer sits innermost in the model request, inside every [`InputGuardrail`](../guardrails/) -- including one passed to `Agent.run(capabilities=...)` -- and after capabilities that rewrite the request. A prompt a guardrail blocks never reaches Jev, and one it redacts reaches Jev and the sub-agent redacted. An `InputGuardrail` with `parallel=True` runs its guard alongside the model request, which here means alongside Jev and the sub-agent, so they may read the prompt before the guard decides, as the agent's model would; a block still cancels them.
+
+Each run asks Jev again, so a conversation's model and capabilities can change from one turn to the next. The composer is not built for durable execution: a worker replaying a run would ask Jev again, and could get a different answer.
 
 ## Telemetry
 
@@ -141,10 +157,10 @@ Each decision is a `jev_capability_composer compose` span on the run's tracer, w
 |---|---|
 | `jev_composer.model`, `jev_composer.thinking`, `jev_composer.capabilities` | what Jev picked |
 | `jev_composer.confidence.<field>` | Jev's confidence per field |
-| `jev_composer.action` | `compose`, `escalate` (unsure of the model, so the run uses `unsure_model`), `fallthrough` (no capabilities picked), or `blocked` (an input guardrail blocked the prompt, so Jev was not asked) |
-| `jev_composer.run_model` | the `models` key the run uses, when the picks were applied |
-| `jev_composer.prompt` | the text Jev read, after any redaction, only when the run includes content in traces; never recorded for a blocked prompt |
+| `jev_composer.action` | `compose`, `escalate` (unsure of the model, so the sub-agent runs on `unsure_model`), or `fallthrough` (no capabilities picked, so the agent's model handles the turn) |
+| `jev_composer.run_model` | the `models` key the sub-agent runs on, unless it fell through |
+| `jev_composer.prompt` | the text Jev read, only when the run includes content in traces |
 
-Jev's request appears as its own agent span under it. When the picks are applied, the run emits a `CapabilitiesComposedEvent` into its event stream as it starts; its `escalated` field says whether `unsure_model` replaced Jev's pick.
+Jev's request and the sub-agent's run appear as their own agent spans under the run's model request. When a sub-agent is composed, a `CapabilitiesComposedEvent` goes into the agent's event stream before it starts; its `escalated` field says whether `unsure_model` replaced Jev's pick. A run that is not composed (structured output, no prompt text) has no span.
 
 Watch the escalation and fall-through rates as well as the picks. A composer that escalates on most prompts is running everything on `unsure_model`, and one that falls through on most is costing a Jev request per run and changing nothing; tune `confidence_threshold` and the descriptions against labelled prompts of your own, then pin the Jev version you tuned against with `jev_model='typesafe:jev-1.13.0'`.

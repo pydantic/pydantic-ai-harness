@@ -93,7 +93,9 @@ def load(path: Path) -> list[Case]:
     return cases
 
 
-async def ask(composer: JevCapabilityComposer, cases: list[Case], repeat: int, concurrency: int) -> list[Outcome]:
+async def ask(
+    composer: JevCapabilityComposer[object], cases: list[Case], repeat: int, concurrency: int
+) -> list[Outcome]:
     """Ask Jev about every case `repeat` times, with at most `concurrency` requests in flight."""
     queue = iter([case for case in cases for _ in range(repeat)])
     outcomes: list[Outcome] = []
@@ -162,7 +164,7 @@ async def main() -> None:
         parser.error('--concurrency and --repeat must be at least 1')
 
     cases = [case for case in load(PROMPTS) if args.section in (None, case.section)]
-    composer = JevCapabilityComposer(models=MENU, catalog=default_catalog(), jev_model=args.jev_model)
+    composer = JevCapabilityComposer[object](models=MENU, catalog=default_catalog(), jev_model=args.jev_model)
     outcomes = await ask(composer, cases, args.repeat, args.concurrency)
     for section in dict.fromkeys(case.section for case in cases):
         report(section, [o for o in outcomes if o.case.section == section])
