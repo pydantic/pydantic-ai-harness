@@ -327,8 +327,6 @@ class LivePrompt:
                     for style, text in self.toolbar()
                 )
             )
-            if not notice and not self.interrupts.active:
-                footer += ' | Enter: submit'
             if self.queued_messages:
                 footer += f' | queued: {len(self.queued_messages)}'
         rows.append(muted + truncate(footer, width) + reset)

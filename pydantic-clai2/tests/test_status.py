@@ -4,6 +4,7 @@ import asyncio
 import io
 import re
 from decimal import Decimal
+from pathlib import Path
 from typing import cast
 
 import pytest
@@ -31,6 +32,17 @@ def test_estimate_includes_tool_argument_deltas() -> None:
     status.output_tokens = 20
     assert 'context: 1,000 tokens' in status.text()
     assert '20 output tokens' in status.text()
+
+
+def test_workspace_follows_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, 'home', lambda: Path('/home/me'))
+    status = Status(model='m', workspace='/home/me/code/app')
+    assert status.text().startswith('m | ~/code/app | context: ')
+    status.workspace = '/home/me/' + 'deep/' * 10 + 'app'
+    shown = status.text().split(' | ')[1]
+    assert shown.startswith('\u2026') and shown.endswith('/deep/app') and len(shown) == 40
+    status.workspace = '/home/meow/app'
+    assert ' | /home/meow/app | ' in status.text()
 
 
 def test_toolbar_paints_the_context_figure_on_alert() -> None:

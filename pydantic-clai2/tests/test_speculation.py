@@ -119,7 +119,7 @@ class TestRow:
     def test_matches_code_puppy_layout(self) -> None:
         counters = SpeculationCounters(hits=29, misses=1, wasted=0, speculative_ms=520, eager_ms=6_549)
         assert plain(counters.row()) == (
-            'Speculative Execution  29 hits \u00b7 1 miss \u00b7 0 wasted    saved \u2265 7.0s   spec 0.5s \u00b7 eager 6.5s'
+            'Speculative Execution  29 hits \u00b7 1 miss \u00b7 0 wasted    saved \u2265 7.0s'
         )
 
     def test_counts_light_up_only_when_nonzero(self) -> None:

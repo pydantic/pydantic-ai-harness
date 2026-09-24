@@ -1075,19 +1075,18 @@ launch for a branch the snippet never took does not appear.
 A pinned row above the footer shows the session's totals while the switch is on:
 
 ```text
-Speculative Execution  29 hits · 0 misses · 0 wasted    saved ≥ 7.0s   spec 0.5s · eager 6.5s
+Speculative Execution  29 hits · 0 misses · 0 wasted    saved ≥ 7.0s
 ```
 
 - **hits:** sandbox calls that adopted a speculative launch.
 - **misses:** speculation-eligible calls that ran without a matching launch.
 - **wasted:** launches discarded without being used.
-- **spec:** summed durations of calls that had finished before the snippet asked
-  for them. Calls still running when claimed count as hits but add no time.
-- **eager:** summed time sandbox calls spent running while the `run_code`
-  arguments were still streaming, counted when the snippet completes. Snippets
-  that are restarted, rejected, or cancelled add nothing.
-- **saved ≥:** spec plus eager. Both are lower bounds on hidden tool latency,
-  not wall-clock speedup, since concurrent calls can overlap.
+- **saved ≥:** the summed durations of speculative calls that had finished
+  before the snippet asked for them, plus the time sandbox calls spent running
+  while the `run_code` arguments were still streaming. Calls still running when
+  claimed count as hits but add no time; restarted, rejected, or cancelled
+  snippets add nothing. It is a lower bound on hidden tool latency, not
+  wall-clock speedup, since concurrent calls can overlap.
 
 Counts are coloured only when non-zero, using `/theme` colours. Switching off
 hides the row; switching back on shows the same session totals. Headless runs

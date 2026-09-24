@@ -56,8 +56,7 @@ class SpeculationCounters:
         )
         total = _seconds(self.speculative_ms + self.eager_ms)
         saved = _lit(total != '0.0', f'saved \u2265 {total}s', theme.SUCCESS)
-        breakdown = f'{muted}spec {_seconds(self.speculative_ms)}s \u00b7 eager {_seconds(self.eager_ms)}s{reset}'
-        return f'{theme.sgr(theme.ACCENT)}Speculative Execution{reset}  {counts}    {saved}   {breakdown}'
+        return f'{theme.sgr(theme.ACCENT)}Speculative Execution{reset}  {counts}    {saved}'
 
 
 @dataclass(kw_only=True)
