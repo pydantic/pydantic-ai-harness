@@ -119,8 +119,13 @@ async def test_callable_auth_object_is_fixed(server_url: str) -> None:
 
 async def test_auth_function_cannot_return_oauth(server_url: str) -> None:
     agent = Agent(TestModel(), deps_type=User, toolsets=[per_run_auth(token, connect(server_url), id='whoami')])
-    with pytest.raises(UserError, match="cannot return 'oauth'"):
+    with pytest.raises(UserError, match='Browser OAuth is not supported'):
         await agent.run('Who am I?', deps=User('oauth'))
+
+
+def test_fixed_oauth_is_rejected() -> None:
+    with pytest.raises(UserError, match='Browser OAuth is not supported'):
+        per_run_auth('oauth', connect('https://example.com/mcp'), id='whoami')
 
 
 def client_toolset(client: MCPToolsetClient) -> AbstractToolset[User]:

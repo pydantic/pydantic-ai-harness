@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 import httpx
 import pytest
-from fastmcp.client.auth import OAuth
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp.server import FastMCP, Settings
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
@@ -57,11 +56,8 @@ def bearer(connection: MCPToolset[str | None]) -> str:
 
 class TestOrdinal:
     def test_agent_accepts_capability(self) -> None:
-        capability = Ordinal()
-
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            agent = Agent(TestModel(), capabilities=[capability])
+        capability = Ordinal(auth='ordinal-token')
+        agent = Agent(TestModel(), capabilities=[capability])
 
         assert capability in agent.root_capability.capabilities
 
@@ -90,25 +86,24 @@ class TestOrdinal:
     def test_serialization_name(self) -> None:
         assert Ordinal.get_serialization_name() == 'Ordinal'
 
-    def test_hosted_url_uses_oauth_and_forwards_instructions(self) -> None:
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            toolset = Ordinal().get_toolset()
+    def test_hosted_url_and_forwards_instructions(self) -> None:
+        toolset = Ordinal(auth='ordinal-token').get_toolset()
         assert isinstance(toolset, MCPToolset)
         transport = _http_transport(toolset)
 
         assert transport.url == 'https://app.tryordinal.com/mcp'
-        assert isinstance(transport.auth, OAuth)
         assert toolset.include_instructions is True
         assert toolset.id == 'ordinal'
 
     def test_custom_id_is_forwarded(self) -> None:
-        with warnings.catch_warnings():
-            warnings.simplefilter('ignore', UserWarning)
-            toolset = Ordinal(id='tenant-ordinal').get_toolset()
+        toolset = Ordinal(auth='ordinal-token', id='tenant-ordinal').get_toolset()
 
         assert isinstance(toolset, MCPToolset)
         assert toolset.id == 'tenant-ordinal'
+
+    def test_missing_auth_raises(self) -> None:
+        with pytest.raises(UserError, match='Pass `auth` an Ordinal access token'):
+            Ordinal().get_toolset()
 
     def test_fixed_token_is_sent_as_bearer(self) -> None:
         toolset = Ordinal(auth='ordinal-token').get_toolset()
@@ -133,7 +128,7 @@ class TestPerRunAuth:
         assert bearer(connection) == 'Bearer alice-token'
 
     @pytest.mark.anyio
-    async def test_provider_returning_none_does_not_fall_back_to_oauth(self) -> None:
+    async def test_provider_returning_none_omits_tools(self) -> None:
         capability = Ordinal[str | None](auth=lambda ctx: ctx.deps)
         assert await connections_for(capability, None) == []
         agent = Agent(TestModel(), capabilities=[Ordinal[object](auth=no_credential)])

@@ -11,8 +11,8 @@ user's workspaces.
 ## Before you start
 
 Ordinal MCP needs the Pro plan or higher, the same as the REST API. You need an
-Ordinal account with access to at least one workspace. You sign in with OAuth;
-there is no API key to copy.
+Ordinal account with access to at least one workspace. Ordinal MCP takes an
+OAuth access token; there is no API key to copy.
 
 If you set up the old server at `https://app.tryordinal.com/api/mcp` with a
 workspace API key, remove it. Do not use the old and new servers together,
@@ -38,19 +38,21 @@ model, install that provider's extra instead.
 ## Connect
 
 ```python
+import os
+
 from pydantic_ai import Agent
 from pydantic_ai_harness import Ordinal
 
-agent = Agent('openai:gpt-5.6-sol', capabilities=[Ordinal()])
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Ordinal(auth=os.environ['ORDINAL_ACCESS_TOKEN'])])
 result = agent.run_sync('List my Ordinal workspaces')
 print(result.output)
 ```
 
-Without `auth`, the agent opens a browser the first time it connects to Ordinal.
-Sign in and approve access. To serve several users from one agent, pass each
-user's token instead (see [Per-user credentials](#per-user-credentials)). Then
-start by listing workspaces. Every other Ordinal tool needs a `workspaceSlug`
-from `ordinal_get_workspace_context`.
+Pass `auth=` an Ordinal access token or an `httpx.Auth`. To serve several users
+from one agent, pass a function instead (see
+[Per-user credentials](#per-user-credentials)). Then start by listing
+workspaces. Every other Ordinal tool needs a `workspaceSlug` from
+`ordinal_get_workspace_context`.
 
 `Ordinal` has no settings for custom clients, tool filtering, or approval. For
 those, use Pydantic AI's generic
@@ -59,9 +61,7 @@ those, use Pydantic AI's generic
 
 ## Per-user credentials
 
-Browser login and a fixed `auth` token both connect every run as the same
-account. Browser login also opens the browser on the machine running the agent,
-so it only suits local use.
+A fixed `auth` token connects every run as the same account.
 
 When one agent serves several users, pass a function as `auth` that returns the
 current user's Ordinal access token:
@@ -87,13 +87,11 @@ agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Ordinal(auth=o
 
 The function is called at the start of each run, so each run connects as its own
 user. It can be async, and it can return a token or an `httpx.Auth`. If it
-returns `None`, that run has no Ordinal tools; it never falls back to browser
-login.
+returns `None`, that run has no Ordinal tools.
 
 Your application is responsible for getting each user's token, storing it, and
-refreshing it, for example with a "Connect Ordinal" OAuth flow in your web app.
-The function only reads the current token. Returning `'oauth'` from it raises an
-error, because browser login would open on the server rather than for the user.
+refreshing it, for example with a "Connect Ordinal" button in your web app. The
+function only reads the current token.
 
 With durable execution such as Temporal, read the token from the run's deps
 rather than from a global, since the function may run in another process. To add
@@ -107,7 +105,8 @@ their tool names are the same.
 # agent.yaml
 model: openai:gpt-5
 capabilities:
-  - Ordinal: {}
+  - Ordinal:
+      auth: your-ordinal-access-token
 ```
 
 ```python
