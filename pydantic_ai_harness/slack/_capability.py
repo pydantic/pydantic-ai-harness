@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -23,10 +24,9 @@ class Slack(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Use Slack messages, channels, and canvases.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """User token, HTTP authentication, or a callable that returns one for each run.
+    """A Slack user token, an `httpx.Auth`, or a function of the run context that returns one.
 
-    Unset, it defaults to `SLACK_USER_TOKEN`. A callable receives the run context, so each run can
-    connect with its own user's token from `ctx.deps`; returning `None` omits the tools.
+    Unset, it uses `SLACK_USER_TOKEN`. If the function returns `None`, that run has no Slack tools.
     """
     read_only: bool = False
     """Expose only tools the server marks read-only; unmarked tools are omitted."""
@@ -53,10 +53,14 @@ class Slack(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'slack', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+        if auth is None:
+            auth = environ.get('SLACK_USER_TOKEN')
+        if auth is None:
+            raise UserError('Set `SLACK_USER_TOKEN` or pass `auth` to connect to Slack.')
         return MCPToolset(
             'https://mcp.slack.com/mcp',
             id=self.id or 'slack',
-            auth=auth if auth is not None else environ.get('SLACK_USER_TOKEN'),
+            auth=auth,
             headers=None,
             include_instructions=self.include_instructions,
         )

@@ -23,7 +23,7 @@ print(result.output)
 
 ## Per-user credentials
 
-A fixed `auth` and `SLACK_USER_TOKEN` both connect every run as the same Slack user. When one agent serves several users, pass a function that returns the current user's token instead:
+A token or `SLACK_USER_TOKEN` connects every run as the same Slack user. When one agent serves several users, pass a function that returns the current user's token instead:
 
 ```python
 from dataclasses import dataclass
@@ -46,7 +46,7 @@ agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Slack(auth=sla
 
 The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Slack tools; it never falls back to `SLACK_USER_TOKEN`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Slack" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Slack" button in your web app. The function only reads the current token.
 
 `client` also accepts a function that returns a client or transport for each run.
 
@@ -54,7 +54,7 @@ With durable execution such as Temporal, read the token from the run's deps rath
 
 ## Provider settings
 
-Slack's hosted MCP server takes user tokens (`xoxp-`), not bot tokens (`xoxb-`). Register a Slack app and grant its user-token scopes as Slack's MCP documentation describes. Slack does not support automatic OAuth client registration, so to use OAuth, pass a client set up with your registered OAuth app through `client`.
+Slack's hosted MCP server takes user tokens (`xoxp-`), not bot tokens (`xoxb-`). Register a Slack app and grant its user-token scopes as Slack's MCP documentation describes.
 
 The tools act as the token's user, so messages the agent posts and canvases it edits appear as that user. This capability gives an agent Slack tools; it does not receive Slack messages or start runs from them.
 
@@ -81,7 +81,7 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` and `include_instructions` still apply. `include_instructions=False` stops the server's own instructions from reaching the agent.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` and `include_instructions` still apply. `include_instructions=False` stops the server's own instructions from reaching the agent.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 

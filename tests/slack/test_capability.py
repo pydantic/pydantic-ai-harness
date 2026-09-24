@@ -8,6 +8,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
@@ -118,6 +119,11 @@ class TestSlack:
         assert isinstance(auth, httpx.Auth)
         request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
         assert request.headers['Authorization'] == 'Bearer environment-token'
+
+    def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv('SLACK_USER_TOKEN', raising=False)
+        with pytest.raises(UserError, match='Set `SLACK_USER_TOKEN`'):
+            Slack().get_toolset()
 
     def test_hosted_endpoint(self) -> None:
         assert transport(Slack(auth='token')).url == 'https://mcp.slack.com/mcp'
