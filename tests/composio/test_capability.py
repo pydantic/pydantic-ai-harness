@@ -4,12 +4,11 @@ import pytest
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from pydantic_ai import Agent
-from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
+from pydantic_ai.capabilities import DynamicCapability
+from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
-from pydantic_ai.toolsets import AbstractToolset
-from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.composio import Composio
 
@@ -17,27 +16,6 @@ from pydantic_ai_harness.composio import Composio
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Field 'lifespan' has an incomplete definition:UserWarning:pydantic_settings.sources.utils"
 )
-
-
-async def connections_for(capability: Composio[str | None], deps: str | None) -> list[MCPToolset[str | None]]:
-    """The MCP connections a run with `deps` would open."""
-    ctx = RunContext[str | None](deps=deps, model=TestModel(), usage=RunUsage())
-    toolset = await capability.get_toolset().for_run(ctx)
-    connections: list[MCPToolset[str | None]] = []
-
-    def collect(leaf: AbstractToolset[str | None]) -> None:
-        if isinstance(leaf, MCPToolset):
-            connections.append(leaf)
-
-    toolset.apply(collect)
-    return connections
-
-
-def session_transport(ctx: RunContext[str | None]) -> StreamableHttpTransport | None:
-    """Connect to the user's session, as an application restoring it from `ctx.deps` would."""
-    if ctx.deps is None:
-        return None
-    return StreamableHttpTransport(f'https://example.com/{ctx.deps}/mcp', headers={'x-api-key': f'{ctx.deps}-key'})
 
 
 def session_server(user: str) -> FastMCP:
@@ -48,16 +26,6 @@ def session_server(user: str) -> FastMCP:
         return user
 
     return server
-
-
-def no_session(ctx: RunContext[object]) -> None:
-    return None
-
-
-def connection(toolset: MCPToolset[str | None]) -> tuple[str, dict[str, str]]:
-    transport = toolset.client.transport
-    assert isinstance(transport, StreamableHttpTransport)
-    return transport.url, transport.headers
 
 
 class TestComposio:
@@ -92,35 +60,38 @@ class TestComposio:
         with pytest.raises(ValueError, match='session URL or a configured client'):
             Composio().get_toolset()
 
+    def test_custom_client_owns_the_connection(self) -> None:
+        client = StreamableHttpTransport('https://example.com/mcp')
+        toolset = Composio(client=client, url='https://example.com/ignored/mcp').get_toolset()
+        assert isinstance(toolset, MCPToolset)
+        assert toolset.client.transport is client
 
-class TestPerRunClient:
-    async def test_each_run_connects_to_its_own_session(self) -> None:
-        capability = Composio[str | None](client=session_transport, url='https://example.com/ignored/mcp')
-        [alice] = await connections_for(capability, 'alice')
-        [bob] = await connections_for(capability, 'bob')
-        assert connection(alice) == ('https://example.com/alice/mcp', {'x-api-key': 'alice-key'})
-        assert connection(bob) == ('https://example.com/bob/mcp', {'x-api-key': 'bob-key'})
 
-    async def test_async_function(self) -> None:
-        async def client(ctx: RunContext[str | None]) -> MCPToolsetClient | None:
-            return session_transport(ctx)
+class TestDynamicCapability:
+    """A dynamic capability builds each user's own `Composio` session, as the docs show."""
 
-        [alice] = await connections_for(Composio[str | None](client=client), 'alice')
-        assert connection(alice) == ('https://example.com/alice/mcp', {'x-api-key': 'alice-key'})
-
-    async def test_function_returning_none_omits_tools(self) -> None:
-        assert await connections_for(Composio[str | None](client=session_transport), None) == []
-        agent = Agent(TestModel(), capabilities=[Composio[object](client=no_session)])
-        result = await agent.run('Find email tools')
-        assert result.output == 'success (no tool calls)'
-
-    async def test_agent_uses_the_run_users_session(self) -> None:
+    async def test_each_run_uses_its_own_users_session(self) -> None:
         sessions = {user: session_server(user) for user in ('alice', 'bob')}
 
-        def client(ctx: RunContext[str]) -> MCPToolsetClient:
-            return sessions[ctx.deps]
+        def composio_session(ctx: RunContext[str]) -> Composio[str]:
+            return Composio(client=sessions[ctx.deps])
 
-        agent = Agent(TestModel(), deps_type=str, capabilities=[Composio[str](client=client)])
+        agent = Agent(TestModel(), deps_type=str, capabilities=[DynamicCapability(composio_session, id='composio')])
         alice = await agent.run('Who am I?', deps='alice')
         bob = await agent.run('Who am I?', deps='bob')
         assert (alice.output, bob.output) == ('{"whoami":"alice"}', '{"whoami":"bob"}')
+
+    async def test_async_factory_returning_none_omits_tools(self) -> None:
+        async def composio_session(ctx: RunContext[str]) -> Composio[str]:
+            return Composio(client=session_server(ctx.deps))
+
+        agent = Agent(TestModel(), deps_type=str, capabilities=[DynamicCapability(composio_session, id='composio')])
+        alice = await agent.run('Who am I?', deps='alice')
+        assert alice.output == '{"whoami":"alice"}'
+
+        def no_session(ctx: RunContext[object]) -> None:
+            return None
+
+        agent = Agent(TestModel(), capabilities=[DynamicCapability(no_session, id='composio')])
+        nobody = await agent.run('Who am I?')
+        assert nobody.output == 'success (no tool calls)'

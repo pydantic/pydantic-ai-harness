@@ -14,8 +14,6 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPClientFunc, per_run
-
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as exc:  # pragma: no cover
@@ -36,17 +34,16 @@ class Composio(AbstractCapability[AgentDepsT]):
     description: str | None = 'Discover and use connected applications through Composio.'
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
-    client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Your own MCP client or transport, or a function that returns one for each run.
+    client: MCPToolsetClient | None = field(default=None, repr=False)
+    """Your own MCP client or transport, which then owns the URL and headers.
 
-    `url` and `headers` are ignored when it is set. A function can pick the current user's session
-    from `ctx.deps`; returning `None` gives that run no Composio tools.
+    `url` and `headers` are ignored when it is set.
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the session connection using Pydantic AI's MCP lifecycle."""
         if self.client is not None:
-            return per_run(self.client, self._from_client, id=self.id or 'composio')
+            return MCPToolset(self.client, id=self.id or 'composio', include_instructions=self.include_instructions)
         if self.url is None:
             raise ValueError('Provide the Composio session URL or a configured client.')
         return MCPToolset(
@@ -55,6 +52,3 @@ class Composio(AbstractCapability[AgentDepsT]):
             id=self.id or 'composio',
             include_instructions=self.include_instructions,
         )
-
-    def _from_client(self, client: MCPToolsetClient) -> MCPToolset[AgentDepsT]:
-        return MCPToolset(client, id=self.id or 'composio', include_instructions=self.include_instructions)
