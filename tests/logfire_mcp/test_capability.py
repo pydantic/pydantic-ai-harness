@@ -161,10 +161,13 @@ class TestPerRunAuth:
         [bob] = await connections_for(capability, 'bob-token')
         assert (bearer(alice), bearer(bob)) == ('Bearer alice-token', 'Bearer bob-token')
 
-    async def test_provider_returning_none_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize('missing', [None, ''])
+    async def test_provider_returning_none_does_not_fall_back(
+        self, missing: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv('LOGFIRE_API_KEY', 'deployment-token')
         capability = LogfireMCP[str | None](auth=lambda ctx: ctx.deps)
-        assert await connections_for(capability, None) == []
+        assert await connections_for(capability, missing) == []
         agent = Agent(TestModel(), capabilities=[LogfireMCP[object](auth=no_credential)])
         result = await agent.run('Use the tools')
         assert result.output == 'success (no tool calls)'

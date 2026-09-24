@@ -23,7 +23,15 @@ print(result.output)
 
 ## Per-user credentials
 
-An API key or `LOGFIRE_API_KEY` connects every run as the same account. That suits a script or an agent on your own machine.
+`auth` decides which Logfire account each run uses:
+
+| `auth` | Account used |
+| --- | --- |
+| Not set, `None`, or `''` | `LOGFIRE_API_KEY`. If that is not set either, creating the agent raises an error. |
+| An API key | That key, for every run. |
+| A function | Called at the start of each run. The key it returns is used for that run. If it returns `None` or `''`, that run has no Logfire tools. A function never uses `LOGFIRE_API_KEY`. |
+
+A fixed key or `LOGFIRE_API_KEY` suits a script or an agent on your own machine, where every run is the same account.
 
 In an app where each user connects their own Logfire account, one agent serves all of them, so the credential cannot be fixed when the agent is created. Pass a function that reads the current user's credential from the run's deps:
 
@@ -46,7 +54,7 @@ def logfire_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[LogfireMCP(auth=logfire_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Logfire tools; it never falls back to `LOGFIRE_API_KEY`.
+Each run connects as its own user, so concurrent runs never share an account.
 
 Your app gets each user's credential, stores it, and refreshes it. For example, a settings page where each user pastes their own API key, or a "Connect Logfire" button that signs them in with OAuth and saves the token to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
