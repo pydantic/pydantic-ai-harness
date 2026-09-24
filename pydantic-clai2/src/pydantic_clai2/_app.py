@@ -3,8 +3,9 @@
 import asyncio
 import sys
 from collections.abc import AsyncGenerator, Callable, Sequence
-from contextlib import asynccontextmanager, nullcontext
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from threading import Thread
 from typing import TYPE_CHECKING, Generic, TypeVar
 
@@ -42,6 +43,7 @@ from .commands import (
 from .config import PluginSettings, Settings
 from .customization import customization_guide
 from .errors import error_message
+from .forks import Forks
 from .image_input import ImageInput
 from .input_history import input_history
 from .interrupts import Interrupts
@@ -60,6 +62,8 @@ from .session_settings import SessionSettings
 from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
+from .shell_passthrough import HELP as SHELL_HELP
+from .shell_passthrough import run_shell_command, shell_command
 from .speculation import Speculation
 from .spinner_picker import spinner_command, spinner_completions
 from .spinners import Spinner, Spinners
@@ -358,7 +362,9 @@ def create_shell(
             during_turn=True,
         )
     )
-    commands.register(Command(name='help', description='Show commands', handler=commands.help))
+    commands.register(
+        Command(name='help', description='Show commands', handler=lambda args: f'{commands.help(args)}\n{SHELL_HELP}')
+    )
 
     new_command = Command(
         name='new',
@@ -466,6 +472,16 @@ def create_shell(
     commands.register(
         Command(name='reload', description='Reload CLAI2 code without restarting', handler=shell.request_reload)
     )
+    commands.register(
+        Command(
+            name='fork',
+            description='Run a copy of this conversation in the background: /fork [@model] PROMPT',
+            handler=shell.forks.fork_command,
+            complete=shell.forks.complete,
+            raw=True,
+        )
+    )
+    commands.register(Command(name='forks', description='Show background forks', handler=shell.forks.status_command))
     return shell
 
 
@@ -493,7 +509,42 @@ class _Shell(Generic[DepsT, OutputT]):
     images: ImageInput = field(default_factory=ImageInput)
     reload_requested: bool = False
     editor: LivePrompt | None = None
+    forks: Forks[DepsT, OutputT] = field(init=False)
     _mid_turn: TaskGroup | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.forks = Forks(
+            console=self.console,
+            history=lambda: self.session.messages,
+            spawn=self.fork_session,
+            fire=self.loader.fire,
+            models=self.context.store.models,
+        )
+
+    def run_plugins(self) -> tuple[AgentCapability[DepsT], ...]:
+        """Capabilities bound to the next run: supplied, plugin-registered, then speculation.
+
+        Speculation sees the others, so its sandbox mount stays within their `FileSystem`.
+        """
+        granted = (*self.plugins, *self.loader.capabilities())
+        return (*granted, *self.speculation.capabilities(granted))
+
+    def fork_session(self, model: str | None, history: Sequence[ModelMessage]) -> Session[DepsT, OutputT]:
+        """A separately saved session configured like the foreground one, seeded with `history`."""
+        child = Session(
+            self.agent,
+            deps=self.session.deps,
+            plugins=self.run_plugins(),
+            message_history=history,
+            usage_limits=self.session.usage_limits,
+            conversations=self.session.conversations,
+            workspace=Path(self.session.workspace),
+        )
+        child.model = model or self.session.model
+        child.tool_retries = self.session.tool_retries
+        child.resolve_model = self.session.resolve_model
+        child.model_settings = self.context.model_settings(child.model or _model_label(self.agent))
+        return child
 
     def request_reload(self, args: list[str]) -> str:
         if args:
@@ -502,6 +553,12 @@ class _Shell(Generic[DepsT, OutputT]):
         return 'Reloading CLAI2...'
 
     async def run(self) -> SessionEndReason:
+        try:
+            return await self._run()
+        finally:
+            await self.forks.close()
+
+    async def _run(self) -> SessionEndReason:
         if self.console.is_terminal:
             self.editor = LivePrompt(
                 console=self.console,
@@ -516,6 +573,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 chords={'ctrl-x ctrl-s': self.speculation.toggle},
                 pinned=self.speculation.row,
                 spinner=self.spinners.active,
+                panel=self.forks.rows,
             )
             self.screen.editor = self.editor.suspended
             try:
@@ -537,6 +595,10 @@ class _Shell(Generic[DepsT, OutputT]):
             return False
         self.images.notice = f'Steering sent: {text}'
         return True
+
+    def _released(self) -> AbstractAsyncContextManager[None]:
+        """Hand the terminal to a command or shell, restoring the editor afterwards."""
+        return (self.editor.suspended if self.editor is not None else bare_screen)()
 
     def run_now(self, text: str) -> bool:
         """Open a bare `during_turn` command's menu over a streaming turn instead of queueing it."""
@@ -581,8 +643,14 @@ class _Shell(Generic[DepsT, OutputT]):
             if self.editor is not None:
                 self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
             self.console.print()
+            if (command := shell_command(text)) is not None:
+                async with self.forks.busy(), self._released():
+                    await run_shell_command(command, console=self.console, interrupts=self.interrupts)
+                if self.interrupts.exit_requested:
+                    return 'exit'
+                continue
             if is_command_input(text):
-                async with (self.editor.suspended if self.editor is not None else bare_screen)():
+                async with self.forks.busy(), self._released():
                     await self.interrupts.run(
                         _execute_command(self.commands, text, console=self.console, status=self.status)
                     )
@@ -594,8 +662,9 @@ class _Shell(Generic[DepsT, OutputT]):
                 self.console.print('Choose a model first: /set model <Tab>', style=theme.color(theme.WARNING))
                 continue
             try:
-                if await self._turn(text):
-                    return 'exit'
+                async with self.forks.busy():
+                    if await self._turn(text):
+                        return 'exit'
             finally:
                 if self.editor is not None:
                     await self.editor.output.drain()
@@ -618,6 +687,12 @@ class _Shell(Generic[DepsT, OutputT]):
         if self.editor is not None:
             await self.editor.output.drain()
         _report_interrupt(completed, self.console)
+        if not completed and (cancelled := self.forks.cancel_running()):
+            self.console.print(
+                f'Cancelled {cancelled} running fork(s) with the turn.',
+                style=theme.color(theme.MUTED),
+            )
+            self.console.print()
         await self.interrupts.run(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
         return self.interrupts.exit_requested
 
@@ -638,8 +713,7 @@ class _Shell(Generic[DepsT, OutputT]):
             )
             self.console.print()
             return TurnEnd(text=start.text, outcome='cancelled')
-        granted = (*self.plugins, *self.loader.capabilities())
-        self.session.plugins = (*granted, *self.speculation.capabilities(granted))
+        self.session.plugins = self.run_plugins()
         model = self.session.model or _model_label(self.agent)
         try:
             self.session.model_settings = self.context.model_settings(model)

@@ -112,6 +112,32 @@ interrupted turns are closed out by core on the next prompt, without replaying
 those tools. External application cancellation still propagates, and completed
 tool side effects cannot be undone.
 
+## Shell commands with `!`
+
+A line that starts with `!`, after trimming surrounding whitespace, runs in the
+system shell instead of starting an agent turn:
+
+```text
+> !git status
+$ git status
+Shell passthrough, not sent to the agent
+...
+Done (0.1s)
+```
+
+The command runs through the system shell (`/bin/sh -c` on POSIX, `cmd.exe` on
+Windows), not your login shell, so zsh or fish syntax and shell aliases are not
+available. It runs in CLAI's working directory, with the terminal's input and output, so interactive programs and pagers work. CLAI
+reports `Done` or the exit code with the elapsed time. Ctrl-C interrupts the
+command and returns to the prompt. The command shares CLAI's process group, so
+every process it started receives the Ctrl-C from the terminal. If the shell
+itself has not exited 0.25 seconds later it is killed, as `subprocess.run`
+does. A program started by a compound command (`a; b`) that ignores Ctrl-C can
+outlive that shell. As at other times, a second Ctrl-C within two seconds exits
+CLAI. Neither the command nor its output is added to the conversation, and a
+bare `!` is sent to the agent as an ordinary prompt. Queued `!` lines run in
+order with other queued input. `/help` lists the syntax.
+
 ## Prompt area
 
 ```text
@@ -645,7 +671,7 @@ every later session; `/plugins enable repo_context` brings it back. See
 [PLUGINS.md](PLUGINS.md#the-built-in-plugins) for its settings.
 
 Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/add_model`, `/model_settings`, `/help`, `/new`, `/clear`, `/resume`, `/exit`, `/config`,
-`/plugins`, `/reload`, `/usage`, `/cost`, and `/compact` from the built-in `compaction` plugin.
+`/plugins`, `/reload`, `/usage`, `/cost`, `/fork`, `/forks`, and `/compact` from the built-in `compaction` plugin.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Suggestions match any substring, case-sensitively. For paths,
 matching applies to the filename within the typed directory. Path completion inserts
@@ -668,8 +694,8 @@ To steer instead, first queue the message with Enter, then press Alt+Enter
 (Option+Enter). This sends the oldest queued follow-up to the active run at its
 next opportunity without cancelling in-flight tools or changing your draft.
 Each Alt+Enter sends one message. If the run is no longer accepting steering,
-the message stays queued. Slash commands and exit signals are not steered or
-skipped over. With no queued message, Alt+Enter does nothing.
+the message stays queued. Slash commands, `!` shell commands, and exit signals
+are not steered or skipped over. With no queued message, Alt+Enter does nothing.
 While running, the input box shows both shortcuts.
 Shift-Enter inserts a newline. CLAI requests modified
 key reporting while the editor is active and releases it for menus and on exit.
@@ -712,6 +738,44 @@ loaded dynamically rather than declared by module-scope imports. `/reload` does 
 rerun the CLI or recursively reload third-party packages. Import-time side effects
 still cannot be undone. Use `/plugins reload NAME` when you only want to reload one
 plugin.
+
+## Background forks: `/fork`
+
+`/fork` runs a copy of the current conversation in the background, so you can
+keep working while it answers. It follows Code Puppy's `/fork`.
+
+```text
+/fork write tests for the parser        fork with the current model
+/fork @openai:gpt-5 review this         fork with another model
+/fork cancel 2                          stop fork #2
+/forks                                  list this session's forks
+```
+
+The fork copies the retained history at the moment `/fork` runs and continues
+from that copy as its own saved session. Later turns in the foreground do not
+reach it, and it does not change the foreground history. With no history yet, or
+if the copy fails, the fork starts with a fresh context and says so. It uses the
+current model, plugins, and model settings unless `@model` names another model.
+CLAI has one agent, so unlike Code Puppy there is no `@agent` argument.
+
+While forks run, the editor shows one row per fork above the prompt, like Code
+Puppy's sub-agent panel: the fork number, its model, your `/spinner`, the elapsed
+time, and what it is doing (`thinking`, `tool: NAME`, `responding`). A fork that
+finished while a turn or command was running shows as done until its output prints.
+
+When a fork finishes, CLAI prints a `FORK #N RESPONSE` banner with the model, the response as
+Markdown, the elapsed time, and the saved session id. `/resume SESSION-ID`
+switches the foreground to that fork's conversation. Output waits while a turn or
+command is running, then prints before the next prompt. Commands run between
+turns, so a `/fork` typed during a turn is queued like any other command.
+
+Cancelling a turn with Esc or Ctrl-C also cancels running forks. `/exit` and
+`/reload` cancel them too.
+
+A fork is a turn for plugins: `turn_start` runs before it starts and can rewrite
+or cancel its prompt, which refuses the fork, and `turn_end` reports its outcome
+when it finishes. Forks share the foreground's plugin instances, so a tool that
+asks you a question can open its picker from a fork.
 
 ## Saved sessions and `/resume`
 
