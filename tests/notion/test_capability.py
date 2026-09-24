@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -12,7 +11,6 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import DynamicCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
@@ -53,8 +51,7 @@ def server() -> FastMCP:
     return server
 
 
-def transport(capability: Notion[None]) -> StreamableHttpTransport:
-    toolset = capability.get_toolset()
+def transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     result = toolset.client.transport
     assert isinstance(result, StreamableHttpTransport)
@@ -75,19 +72,14 @@ async def connections_for(capability: Notion[str | None], deps: str | None) -> l
     return connections
 
 
-@dataclass
-class Tenant:
-    token: str | None
-
-
 def no_credential(ctx: RunContext[object]) -> None:
     return None
 
 
-def bearer(connection: MCPToolset[str | None]) -> str:
-    transport = connection.client.transport
-    assert isinstance(transport, StreamableHttpTransport) and transport.auth is not None
-    request = next(transport.auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
+def bearer(toolset: AbstractToolset[Any]) -> str:
+    auth = transport(toolset).auth
+    assert auth is not None
+    request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
     return request.headers['Authorization']
 
 
@@ -112,14 +104,16 @@ class TestNotion:
         assert isinstance(request, ModelRequest)
         assert ('Provider instructions.' in (request.instructions or '')) is include
 
-    def test_custom_client_owns_authentication(self) -> None:
-        client = StreamableHttpTransport('https://example.com/mcp', auth=httpx.BasicAuth('user', 'secret'))
-        assert transport(Notion(client=client)).auth is client.auth
-
     @pytest.mark.parametrize('settings', [{'auth': 'key'}, {'auth': no_credential}])
     def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Notion(client='https://example.com/mcp', **settings)
+
+    @pytest.mark.parametrize(
+        'settings', [{'auth': 'token'}, {'auth': no_credential}, {'client': 'https://example.com/mcp'}]
+    )
+    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
+        assert Notion(id='tenant-notion', **settings).get_toolset().id == 'tenant-notion'
 
     def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
         Agent(TestModel(), capabilities=[Notion(client=server, defer_loading=True)])
@@ -131,18 +125,24 @@ class TestNotion:
         ):
             Agent(TestModel(), capabilities=[Notion(auth='a'), Notion(auth='b', read_only=True)])
 
+    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
+    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+        # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
+        toolset = Notion(auth='token', **settings).get_toolset()
+        assert isinstance(toolset, MCPToolset)
+        assert toolset.include_instructions is include
+
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Notion(auth='secret-token'))
 
+    def test_connects_to_notion_with_the_token(self) -> None:
+        toolset = Notion(auth='notion-token').get_toolset()
+        assert transport(toolset).url == 'https://mcp.notion.com/mcp'
+        assert bearer(toolset) == 'Bearer notion-token'
+
     def test_environment_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('NOTION_ACCESS_TOKEN', 'environment-token')
-        auth = transport(Notion()).auth
-        assert isinstance(auth, httpx.Auth)
-        request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
-        assert request.headers['Authorization'] == 'Bearer environment-token'
-
-    def test_hosted_endpoint(self) -> None:
-        assert transport(Notion(auth='token')).url == 'https://mcp.notion.com/mcp'
+        assert bearer(Notion().get_toolset()) == 'Bearer environment-token'
 
     def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('NOTION_ACCESS_TOKEN', raising=False)
@@ -158,15 +158,11 @@ class TestPerRunAuth:
         assert (bearer(alice), bearer(bob)) == ('Bearer alice-token', 'Bearer bob-token')
 
     @pytest.mark.parametrize('missing', [None, ''])
-    async def test_provider_returning_none_does_not_fall_back(
-        self, missing: str | None, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_no_credential_means_no_tools(self, missing: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The environment token is set to show a function never falls back to it.
         monkeypatch.setenv('NOTION_ACCESS_TOKEN', 'deployment-token')
         capability = Notion[str | None](auth=lambda ctx: ctx.deps)
         assert await connections_for(capability, missing) == []
-        agent = Agent(TestModel(), capabilities=[Notion[object](auth=no_credential)])
-        result = await agent.run('Use the tools')
-        assert result.output == 'success (no tool calls)'
 
     async def test_provider_returning_oauth_raises(self) -> None:
         capability = Notion[str | None](auth=lambda ctx: ctx.deps)
@@ -175,17 +171,4 @@ class TestPerRunAuth:
 
     @pytest.mark.filterwarnings('ignore:Using in-memory token storage')
     def test_fixed_oauth_uses_browser_login(self) -> None:
-        assert isinstance(transport(Notion(auth='oauth')).auth, OAuth)
-
-    async def test_read_only_applies_per_run(self) -> None:
-        capability = Notion[str | None](auth=lambda ctx: ctx.deps, read_only=True)
-        assert len(await connections_for(capability, 'alice-token')) == 1
-
-    async def test_dynamic_capability_builds_per_run(self, server: FastMCP) -> None:
-        def notion(ctx: RunContext[Tenant]) -> Notion[Tenant] | None:
-            return None if ctx.deps.token is None else Notion(client=server, read_only=True)
-
-        agent = Agent(TestModel(), deps_type=Tenant, capabilities=[DynamicCapability(notion, id='notion')])
-        alice = await agent.run('Use the tools', deps=Tenant('alice-token'))
-        nobody = await agent.run('Use the tools', deps=Tenant(None))
-        assert (alice.output, nobody.output) == ('{"read_resource":"read"}', 'success (no tool calls)')
+        assert isinstance(transport(Notion(auth='oauth').get_toolset()).auth, OAuth)

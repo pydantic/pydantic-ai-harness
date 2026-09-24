@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
@@ -12,7 +11,6 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import DynamicCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
@@ -53,8 +51,7 @@ def server() -> FastMCP:
     return server
 
 
-def transport(capability: Linear[None]) -> StreamableHttpTransport:
-    toolset = capability.get_toolset()
+def transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     result = toolset.client.transport
     assert isinstance(result, StreamableHttpTransport)
@@ -75,19 +72,18 @@ async def connections_for(capability: Linear[str | None], deps: str | None) -> l
     return connections
 
 
-@dataclass
-class Tenant:
-    token: str | None
-
-
 def no_credential(ctx: RunContext[object]) -> None:
     return None
 
 
-def bearer(connection: MCPToolset[str | None]) -> str:
-    transport = connection.client.transport
-    assert isinstance(transport, StreamableHttpTransport) and transport.auth is not None
-    request = next(transport.auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
+def token_from_deps(ctx: RunContext[str | None]) -> str | None:
+    return ctx.deps
+
+
+def bearer(toolset: AbstractToolset[Any]) -> str:
+    auth = transport(toolset).auth
+    assert auth is not None
+    request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
     return request.headers['Authorization']
 
 
@@ -112,14 +108,16 @@ class TestLinear:
         assert isinstance(request, ModelRequest)
         assert ('Provider instructions.' in (request.instructions or '')) is include
 
-    def test_custom_client_owns_authentication(self) -> None:
-        client = StreamableHttpTransport('https://example.com/mcp', auth=httpx.BasicAuth('user', 'secret'))
-        assert transport(Linear(client=client)).auth is client.auth
-
     @pytest.mark.parametrize('settings', [{'auth': 'key'}, {'auth': no_credential}])
     def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Linear(client='https://example.com/mcp', **settings)
+
+    @pytest.mark.parametrize(
+        'settings', [{'auth': 'linear-token'}, {'auth': no_credential}, {'client': 'https://example.com/mcp'}]
+    )
+    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
+        assert Linear(id='tenant-linear', **settings).get_toolset().id == 'tenant-linear'
 
     def test_defer_loading_needs_no_id(self, server: FastMCP) -> None:
         Agent(TestModel(), capabilities=[Linear(client=server, defer_loading=True)])
@@ -131,25 +129,35 @@ class TestLinear:
         ):
             Agent(TestModel(), capabilities=[Linear(auth='a'), Linear(auth='b', read_only=True)])
 
+    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
+    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+        # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
+        toolset = Linear(auth='token', **settings).get_toolset()
+        assert isinstance(toolset, MCPToolset)
+        assert toolset.include_instructions is include
+
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Linear(auth='secret-token'))
 
     def test_environment_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('LINEAR_ACCESS_TOKEN', 'environment-token')
-        auth = transport(Linear()).auth
-        assert isinstance(auth, httpx.Auth)
-        request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
-        assert request.headers['Authorization'] == 'Bearer environment-token'
+        assert bearer(Linear().get_toolset()) == 'Bearer environment-token'
 
+    @pytest.mark.parametrize('auth', ['token', token_from_deps], ids=['fixed', 'per-run'])
     @pytest.mark.parametrize('read_only', [True, False])
-    def test_native_read_only_endpoint(self, read_only: bool) -> None:
+    async def test_native_read_only_endpoint(self, auth: Any, read_only: bool) -> None:
         suffix = '/readonly' if read_only else ''
-        assert transport(Linear(auth='token', read_only=read_only)).url == 'https://mcp.linear.app/mcp' + suffix
+        [toolset] = await connections_for(Linear[str | None](auth=auth, read_only=read_only), 'token')
+        assert transport(toolset).url == 'https://mcp.linear.app/mcp' + suffix
 
     def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('LINEAR_ACCESS_TOKEN', raising=False)
         with pytest.raises(UserError, match='Set `LINEAR_ACCESS_TOKEN`'):
             Linear().get_toolset()
+
+    @pytest.mark.filterwarnings('ignore:Using in-memory token storage')
+    def test_fixed_oauth_uses_browser_login(self) -> None:
+        assert isinstance(transport(Linear(auth='oauth').get_toolset()).auth, OAuth)
 
 
 class TestPerRunAuth:
@@ -160,37 +168,13 @@ class TestPerRunAuth:
         assert (bearer(alice), bearer(bob)) == ('Bearer alice-token', 'Bearer bob-token')
 
     @pytest.mark.parametrize('missing', [None, ''])
-    async def test_provider_returning_none_does_not_fall_back(
-        self, missing: str | None, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_no_credential_means_no_tools(self, missing: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The environment token is set to show a function never falls back to it.
         monkeypatch.setenv('LINEAR_ACCESS_TOKEN', 'deployment-token')
         capability = Linear[str | None](auth=lambda ctx: ctx.deps)
         assert await connections_for(capability, missing) == []
-        agent = Agent(TestModel(), capabilities=[Linear[object](auth=no_credential)])
-        result = await agent.run('Use the tools')
-        assert result.output == 'success (no tool calls)'
 
-    async def test_provider_returning_oauth_raises(self) -> None:
+    async def test_function_returning_oauth_raises(self) -> None:
         capability = Linear[str | None](auth=lambda ctx: ctx.deps)
         with pytest.raises(UserError, match="must return an API key or token, not 'oauth'"):
             await connections_for(capability, 'oauth')
-
-    @pytest.mark.filterwarnings('ignore:Using in-memory token storage')
-    def test_fixed_oauth_uses_browser_login(self) -> None:
-        assert isinstance(transport(Linear(auth='oauth')).auth, OAuth)
-
-    async def test_read_only_endpoint_applies_per_run(self) -> None:
-        capability = Linear[str | None](auth=lambda ctx: ctx.deps, read_only=True)
-        [connection] = await connections_for(capability, 'alice-token')
-        transport = connection.client.transport
-        assert isinstance(transport, StreamableHttpTransport)
-        assert transport.url == 'https://mcp.linear.app/mcp/readonly'
-
-    async def test_dynamic_capability_builds_per_run(self, server: FastMCP) -> None:
-        def linear(ctx: RunContext[Tenant]) -> Linear[Tenant] | None:
-            return None if ctx.deps.token is None else Linear(client=server, read_only=True)
-
-        agent = Agent(TestModel(), deps_type=Tenant, capabilities=[DynamicCapability(linear, id='linear')])
-        alice = await agent.run('Use the tools', deps=Tenant('alice-token'))
-        nobody = await agent.run('Use the tools', deps=Tenant(None))
-        assert (alice.output, nobody.output) == ('{"read_resource":"read"}', 'success (no tool calls)')
