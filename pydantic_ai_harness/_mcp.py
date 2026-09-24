@@ -61,7 +61,8 @@ def per_run_auth(
     omits the tools instead, so a run without a credential cannot fall back to the deployment's token or to
     browser OAuth, and a function returning `'oauth'` is rejected because it would open a browser on the host.
     """
-    if not callable(auth):
+    # An `httpx.Auth` subclass may define `__call__`; it is still a fixed credential.
+    if isinstance(auth, Auth) or not callable(auth):
         return build(auth)
     func = auth
 
