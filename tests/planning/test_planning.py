@@ -317,6 +317,16 @@ class TestWritePlan:
         assert result.startswith('Plan updated: 2 step(s).')
         assert '2. [ ] [b] B' in result
 
+    async def test_empty_plan_clears_existing_items(self) -> None:
+        store = InMemoryPlanStore()
+        ts = _toolset(store=store)
+        await ts.write_plan(_ctx(), [PlanItem(id='a', content='A')])
+
+        result = await ts.write_plan(_ctx(), [])
+
+        assert result == 'Plan updated: 0 step(s).\n\nNo plan yet.'
+        assert await store.get_items() == []
+
     async def test_multi_in_progress_note(self) -> None:
         ts = _toolset()
         result = await ts.write_plan(
