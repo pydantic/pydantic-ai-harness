@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.workspaces import Workspace
 
 from pydantic_ai_harness._workspace import workspace_path
 
@@ -47,10 +48,13 @@ class PydanticAIDocsToolset(FunctionToolset[AgentDepsT]):
         self,
         *,
         local_docs_path: Path | None,
+        workspace: Workspace | None = None,
         cache: dict[PydanticAIDocsTopic, str] | None,
     ) -> None:
         super().__init__()
         self._local_docs_path = local_docs_path
+        # Where the checkout lives when not in the run's workspace.
+        self._workspace = workspace
         # Shared with the run-scoped capability; `None` disables caching entirely.
         self._cache = cache
         self.add_function(self.read_pyai_docs, name='read_pyai_docs')
@@ -81,7 +85,7 @@ class PydanticAIDocsToolset(FunctionToolset[AgentDepsT]):
         """Return the local checkout's markdown for `topic`, or `None` to fall back to remote."""
         if self._local_docs_path is None:
             return None
-        workspace = ctx.workspace
+        workspace = self._workspace or ctx.workspace
         local_path = self._local_docs_path / f'{topic.value}.md'
         path = await workspace.resolve(workspace_path(local_path))
         try:

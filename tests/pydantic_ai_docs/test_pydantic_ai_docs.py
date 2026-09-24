@@ -241,16 +241,30 @@ class TestThroughAgent:
         ]
         assert returns == ['# Capabilities doc']
 
-    async def test_local_path_without_workspace_raises(self, tmp_path: Path) -> None:
-        (tmp_path / 'capabilities.md').write_text('# Host capabilities', encoding='utf-8')
+    async def test_local_path_without_workspace_fails_the_run(self, tmp_path: Path) -> None:
+        agent = Agent(TestModel(call_tools=[]), capabilities=[PydanticAIDocs(local_docs_path=tmp_path)])
+
+        with pytest.raises(UserError, match='`PydanticAIDocs` needs a workspace'):
+            await agent.run('go')
+
+    async def test_own_workspace_holds_the_checkout(self, tmp_path: Path) -> None:
+        (tmp_path / 'capabilities.md').write_text('# Checkout capabilities', encoding='utf-8')
 
         def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            return ModelResponse(parts=[ToolCallPart('read_pyai_docs', {'topic': 'capabilities'})])
+            if len(messages) == 1:
+                return ModelResponse(parts=[ToolCallPart('read_pyai_docs', {'topic': 'capabilities'})])
+            return ModelResponse(parts=[TextPart('done')])
 
-        agent = Agent(FunctionModel(call_then_finish), capabilities=[PydanticAIDocs(local_docs_path=tmp_path)])
+        docs = PydanticAIDocs(local_docs_path=Path('.'), workspace=LocalWorkspaceBackend(tmp_path))
+        result = await Agent(FunctionModel(call_then_finish), capabilities=[docs]).run('go')
 
-        with pytest.raises(UserError, match='No workspace is attached'):
-            await agent.run('go')
+        returns = [
+            part.content
+            for message in result.all_messages()
+            for part in message.parts
+            if isinstance(part, ToolReturnPart)
+        ]
+        assert returns == ['# Checkout capabilities']
 
     async def test_cache_is_isolated_between_run_workspaces(self, tmp_path: Path) -> None:
         first_root = tmp_path / 'first'
