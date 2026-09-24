@@ -1113,10 +1113,22 @@ function inside one harness `CodeMode` `run_code` tool, `shell` included. Other
 tools that run a program passed as a string, such as a workflow plugin, stay
 native as `CodeMode` keeps them by default.
 
-`run_code` is a persistent Python sandbox with the working directory mounted
-read-write at its real path, isolated environment variables, the host clock
-(through `datetime`), and no network. The model writes one snippet that calls many tools, and CLAI runs it while the model
-is still writing:
+`run_code` is a persistent Python sandbox with isolated environment variables,
+the host clock (through `datetime`), and no network. The model writes one snippet that calls many tools, and CLAI runs it while the model
+is still writing.
+
+The sandbox's `pathlib` only reaches what the file tools may reach. `pathlib`
+calls on a mount skip the `FileSystem` checks, so CLAI mounts the `FileSystem`
+working directory at its real path only when a mount can enforce the same limits:
+
+- **Read-write:** the built-in `coder` plugin's default, unrestricted file tools.
+- **Read-only:** `protected_patterns`, `read_only`, or only read tools
+  registered. Writes go through `write_file` and `edit_file`, which check them.
+- **Not mounted:** `allowed_patterns` or `denied_patterns`, no `FileSystem`, more
+  than one, or a plugin that adds a capability function or `DynamicCapability`
+  (which could supply one at run time). File access then goes through the file tools only.
+
+While the model writes:
 
 - **Eager execution** runs each complete statement as soon as it has streamed,
   so a slow `shell` build or test starts before the snippet is finished.

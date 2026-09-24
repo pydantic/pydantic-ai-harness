@@ -638,7 +638,8 @@ class _Shell(Generic[DepsT, OutputT]):
             )
             self.console.print()
             return TurnEnd(text=start.text, outcome='cancelled')
-        self.session.plugins = (*self.plugins, *self.loader.capabilities(), *self.speculation.capabilities())
+        granted = (*self.plugins, *self.loader.capabilities())
+        self.session.plugins = (*granted, *self.speculation.capabilities(granted))
         model = self.session.model or _model_label(self.agent)
         try:
             self.session.model_settings = self.context.model_settings(model)
