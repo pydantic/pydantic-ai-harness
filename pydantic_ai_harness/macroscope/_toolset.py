@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 from pydantic_ai import RunContext
@@ -12,7 +11,7 @@ from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset, ToolsetTool
 from pydantic_ai.workspaces import WorkspaceError, WorkspaceTimeoutError
 
-from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands, workspace_path
+from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands
 
 _INSTALL_HINT = (
     'The `macroscope` CLI was not found on PATH in the workspace. Install it with:\n'
@@ -124,16 +123,14 @@ class MacroscopeToolset(FunctionToolset[AgentDepsT]):
     """Exposes a single tool that runs `macroscope codereview` and returns findings.
 
     The tool runs the `macroscope` binary installed in the run's workspace (`ctx.workspace`),
-    so the review sees the repository where the agent works, local or in a sandbox. It
+    in its working directory, so the review sees the repository where the agent works, local or in a sandbox. It
     collects the streamed findings and returns them as a `MacroscopeReview`; validating and
     fixing the findings is left to the agent's other tools.
     """
 
-    def __init__(self, *, command: str, cwd: Path, base: str | None, timeout: float) -> None:
+    def __init__(self, *, command: str, base: str | None, timeout: float) -> None:
         super().__init__()
         self._command = command
-        # A workspace path, resolved against the workspace's working directory at call time.
-        self._cwd = workspace_path(cwd)
         self._base = base
         self._timeout = timeout
         self.add_function(self.run_macroscope_review, name='run_macroscope_review')
@@ -186,11 +183,7 @@ class MacroscopeToolset(FunctionToolset[AgentDepsT]):
         The workspace enforces `timeout` and stops the command when it expires.
         """
         try:
-            result = await ctx.workspace.run(
-                ['sh', '-c', _LAUNCHER, 'sh', *args],
-                cwd=await ctx.workspace.resolve(self._cwd),
-                timeout=self._timeout,
-            )
+            result = await ctx.workspace.run(['sh', '-c', _LAUNCHER, 'sh', *args], timeout=self._timeout)
         # Before `WorkspaceError`: a timeout is retryable, other workspace failures are not.
         except WorkspaceTimeoutError:
             raise ModelRetry(f'The Macroscope review timed out after {self._timeout}s.') from None
