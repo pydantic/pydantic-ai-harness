@@ -54,8 +54,9 @@ async def connections_for(capability: PostHog[str | None], deps: str | None) -> 
     return connections
 
 
-def no_credential(ctx: RunContext[object]) -> None:
-    return None
+def per_user_token(ctx: RunContext[str | None]) -> str | None:
+    """Read the run's token from its deps, as an app serving many users would."""
+    return ctx.deps
 
 
 class TestPostHog:
@@ -109,13 +110,13 @@ class TestPostHog:
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-key' not in repr(PostHog(auth='secret-key'))
 
-    @pytest.mark.parametrize('settings', [{'auth': 'posthog-key'}, {'auth': no_credential}, {'features': ['flags']}])
+    @pytest.mark.parametrize('settings', [{'auth': 'posthog-key'}, {'auth': per_user_token}, {'features': ['flags']}])
     def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
             PostHog(client='https://example.com/mcp', **settings)
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'posthog-key'}, {'auth': no_credential}, {'client': 'https://example.com/mcp'}]
+        'settings', [{'auth': 'posthog-key'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
     )
     def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
         assert PostHog(id='tenant-posthog', **settings).get_toolset().id == 'tenant-posthog'
@@ -133,7 +134,7 @@ class TestPostHog:
 class TestPerRunAuth:
     @pytest.mark.anyio
     async def test_each_run_connects_with_its_own_credential(self) -> None:
-        capability = PostHog[str | None](auth=lambda ctx: ctx.deps)
+        capability = PostHog[str | None](auth=per_user_token)
         [alice] = await connections_for(capability, 'alice-key')
         [bob] = await connections_for(capability, 'bob-key')
         assert (bearer(alice), bearer(bob)) == ('Bearer alice-key', 'Bearer bob-key')
@@ -143,12 +144,12 @@ class TestPerRunAuth:
     async def test_no_credential_means_no_tools(self, missing: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
         # The environment token is set to show a function never falls back to it.
         monkeypatch.setenv('POSTHOG_PERSONAL_API_KEY', 'deployment-key')
-        capability = PostHog[str | None](auth=lambda ctx: ctx.deps)
+        capability = PostHog[str | None](auth=per_user_token)
         assert await connections_for(capability, missing) == []
 
     @pytest.mark.anyio
     async def test_function_returning_oauth_raises(self) -> None:
-        capability = PostHog[str | None](auth=lambda ctx: ctx.deps)
+        capability = PostHog[str | None](auth=per_user_token)
         with pytest.raises(UserError, match="must return an API key or token, not 'oauth'"):
             await connections_for(capability, 'oauth')
 
