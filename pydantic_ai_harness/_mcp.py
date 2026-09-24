@@ -18,7 +18,7 @@ T = TypeVar('T')
 DepsT = TypeVar('DepsT')
 
 MCPAuth: TypeAlias = Auth | str
-"""A bearer token or API key, `'oauth'` for FastMCP's browser flow, or an `httpx.Auth`."""
+"""A bearer token or API key, or an `httpx.Auth`."""
 
 MCPAuthFunc: TypeAlias = Callable[[RunContext[AgentDepsT]], 'MCPAuth | None | Awaitable[MCPAuth | None]']
 """Returns the credential for the current run, usually from `ctx.deps`, or `None` when the run has none."""
@@ -57,23 +57,28 @@ def per_run_auth(
     """Build a hosted MCP toolset with a fixed credential, or with the credential an `auth` function returns per run.
 
     A fixed or unset `auth` is built immediately, so every run shares one connection and one identity; `build`
-    receives `None` only when `auth` is unset, to apply its environment or OAuth fallback. A function's `None`
-    omits the tools instead, so a run without a credential cannot fall back to the deployment's token or to
-    browser OAuth, and a function returning `'oauth'` is rejected because it would open a browser on the host.
+    receives `None` only when `auth` is unset, to apply its environment fallback. A function's `None` omits the
+    tools instead, so a run without a credential cannot fall back to the deployment's token.
+
+    `'oauth'` is rejected in either form: Pydantic AI's `MCPToolset` reads it as FastMCP's browser login, which
+    would open a browser on the host and wait for a callback that a server never receives.
     """
     # An `httpx.Auth` subclass may define `__call__`; it is still a fixed credential.
     if isinstance(auth, Auth) or not callable(auth):
-        return build(auth)
+        return build(_no_browser_login(auth))
     func = auth
 
     async def credential(ctx: RunContext[DepsT]) -> MCPAuth | None:
         result = func(ctx)
-        credential = await result if inspect.isawaitable(result) else result
-        if credential == 'oauth':
-            raise UserError("An `auth` function cannot return 'oauth'; return the user's token instead.")
-        return credential
+        return _no_browser_login(await result if inspect.isawaitable(result) else result)
 
     return per_run(credential, build, id=id)
+
+
+def _no_browser_login(auth: MCPAuth | None) -> MCPAuth | None:
+    if auth == 'oauth':
+        raise UserError('Browser OAuth is not supported; pass an API key, a token, or an `httpx.Auth` as `auth`.')
+    return auth
 
 
 def per_run_client(
