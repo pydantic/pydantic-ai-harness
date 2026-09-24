@@ -32,6 +32,7 @@ _FACTORIES = (
     ('macroscope', 'macroscope:Macroscope'),
     ('memory', 'memory:Memory'),
     ('modal_sandbox', 'modal_sandbox:ModalSandbox'),
+    ('ordinal', 'ordinal:Ordinal'),
     ('planning', 'planning:Planning'),
     ('playwright', 'playwright:PlaywrightBrowser'),
     ('prompt_injection_defender', 'prompt_injection_defender:PromptInjectionDefender'),
