@@ -4,8 +4,6 @@ on:
   pull_request:
     paths:
       - 'pydantic-clai2/**'
-      - 'pyproject.toml'
-      - 'uv.lock'
       - '.github/workflows/clai-image-input.yml'
   workflow_dispatch: {}
 

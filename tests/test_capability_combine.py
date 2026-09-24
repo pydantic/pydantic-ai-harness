@@ -17,7 +17,7 @@ The three answers, and what picks between them:
 
 Declaring a default `id` is the whole policy: there is no `combine` to write unless the merge needs
 something the field-by-field default cannot express, such as a budget that should take the *smaller*
-value. None of this package's capabilities needs one.
+value.
 
 The core half of this lives in `pydantic-ai`'s `tests/test_capability_combine.py`.
 
@@ -141,7 +141,22 @@ class Combines:
     check: Callable[[Any], None]
 
 
-Policy = Anonymous | Collides | Combines | Rejected
+@dataclass
+class Narrows:
+    """A default `id` and a `combine` that narrows rather than unions: two that disagree raise.
+
+    The access-boundary case in "Deciding What Two Of It Mean" (`agent_docs/capability-authoring.md`),
+    for connections to a provider: merging two field by field could send one account's credential to
+    another's server or drop `read_only`. `make` takes the class, like `Collides`, because these live in
+    optional groups that a module-level import would break.
+    """
+
+    reason: str
+    make: Callable[[type[Any]], tuple[AbstractCapability[Any], AbstractCapability[Any]]]
+    """Builds two that differ, from the discovered class, without credentials or a network."""
+
+
+Policy = Anonymous | Collides | Combines | Narrows | Rejected
 
 
 def _check_memory(merged: Any) -> None:
@@ -265,10 +280,15 @@ COMBINE_POLICY: dict[str, Policy] = {
     'PromptInjectionDefender': Anonymous('one per `tool_filter`; several scopes compose'),
     'ToolGuardrail': Anonymous('several guards is the design'),
     'ManagedPrompt': Anonymous('one per prompt name'),
+    'LogfireMCP': Narrows(
+        'one Logfire connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'RepoContext': Anonymous('one per workspace root'),
     'ReportContextUsage': Anonymous('a passive observer; several callbacks compose'),
     'Skills': Anonymous('a factory: one deferred capability per skill, each named after the skill'),
     'SlidingWindowCompaction': Anonymous('composes as a tier under `TieredCompaction`'),
+    'GoogleWorkspace': Anonymous('one per set of products, and `services` is what names it'),
     'StackOne': Anonymous('one per linked account, and `account_id` is what names it'),
     'TieredCompaction': Anonymous('drives other strategies; one per tier list'),
     'WarnNearLimits': Anonymous('a passive observer; several thresholds compose'),
@@ -300,6 +320,10 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `read_pyai_docs` under a fixed name',
         lambda cls: (cls(), cls()),
     ),
+    'Notion': Narrows(
+        'one Notion connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'PyaiDocs': Collides('deprecated alias of `PydanticAIDocs`, and collides the same way'),
     'Macroscope': Collides(
         'its toolset registers `run_macroscope_review` under a fixed name',
@@ -309,6 +333,14 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `aws_cli` and `localstack_health` under fixed names',
         lambda cls: (cls(), cls()),
     ),
+    'Linear': Narrows(
+        'one Linear connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
+    'Ordinal': Narrows(
+        'one Ordinal connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'CodeMode': Collides('`run_code` is reserved, so a second one is rejected by name'),
     'BrowserUse': Collides('its toolset registers its browser tools under fixed names'),
     'PlaywrightBrowser': Collides('its toolset registers `click` and friends under fixed names'),
@@ -316,8 +348,16 @@ COMBINE_POLICY: dict[str, Policy] = {
     'ConversationSearch': Collides('its toolset registers `search_conversation_history` under a fixed name'),
     'ExaAgent': Collides('its toolset registers `web_search` and friends under fixed names'),
     'ExaSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'GitHub': Narrows(
+        'one GitHub connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'YouResearch': Collides('its toolset registers `research` and friends under fixed names'),
     'YouSearch': Collides('its toolset registers `web_search` and friends under fixed names'),
+    'Slack': Narrows(
+        'one Slack connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
 }
 
 
@@ -479,8 +519,15 @@ def test_capability_combine_policy_holds(name: str) -> None:
         return
 
     assert declares_default_id(capability_type), (
-        f'{name} is declared `Combines` but its class declares no default id, so two never meet'
+        f'{name} is declared `{type(policy).__name__}` but its class declares no default id, so two never meet'
     )
+    if isinstance(policy, Narrows):
+        first, second = policy.make(capability_type)
+        assert first.id is not None and first.id == second.id
+        assert capability_type.combine([first, first]) is first
+        with pytest.raises(UserError, match='disagree on'):
+            capability_type.combine([first, second])
+        return
     first, second = policy.make()
     assert first.id is not None and first.id == second.id, (
         f'{name} is declared `Combines` but two instances do not share an id'

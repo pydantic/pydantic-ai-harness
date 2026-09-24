@@ -20,12 +20,24 @@ class Settings(BaseModel):
     tool_retries: int = Field(
         default=3, ge=0, description='Default retries per tool call. Explicit tool retry limits take precedence.'
     )
+    speculative_code_mode: bool = Field(
+        default=False,
+        description=(
+            'Fold tools into a sandboxed run_code that executes and speculates while the model writes. '
+            'Ctrl+X Ctrl+S toggles it.'
+        ),
+    )
     session_namer: bool = Field(default=True, description='Name saved sessions in the background using a model.')
     session_namer_model: str | None = Field(
         default=None, description='Naming model override; null uses the current model.'
     )
     theme: str = Field(
         default='default', description='Keep CLAI colours, or select a bundled Termflow palette with /theme.'
+    )
+    spinner: str = Field(
+        default='working',
+        min_length=1,
+        description='Working animation; /spinner previews the choices. An unknown name shows working.',
     )
     thinking: bool = Field(default=True, description="Show the model's thinking as it streams.")
     splash: bool = Field(default=True, description='Animate the startup splash. Takes effect next start.')
@@ -60,15 +72,20 @@ SETTING_FIELDS = {
     'run.request_limit': 'request_limit',
     'display.thinking': 'thinking',
     'display.theme': 'theme',
+    'display.spinner': 'spinner',
     'display.splash': 'splash',
     'display.tool_output': 'tool_output',
     'display.shell_lines': 'shell_lines',
     'display.grep_lines': 'grep_lines',
     'display.smooth_seconds': 'smooth_seconds',
     'run.tool_retries': 'tool_retries',
+    'run.speculative_code_mode': 'speculative_code_mode',
     'sessions.naming': 'session_namer',
     'sessions.naming_model': 'session_namer_model',
 }
+
+STRING_SETTINGS = frozenset({'model', 'display.theme', 'display.spinner'})
+"""Keys whose typed value is taken as text rather than parsed as JSON."""
 
 
 def resolve_settings(overrides: dict[str, JsonValue]) -> Settings:

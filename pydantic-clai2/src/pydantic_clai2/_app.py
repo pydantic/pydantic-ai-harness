@@ -1,12 +1,16 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Sequence
-from contextlib import asynccontextmanager
+import sys
+from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
+from pathlib import Path
+from threading import Thread
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from anyio import create_task_group
+from anyio.abc import TaskGroup
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import History
@@ -20,22 +24,32 @@ from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness.step_persistence.conversations import ConversationSummary, SqliteConversationStore
 from rich.console import Console
 
-from . import theme
+from . import theme, warm_imports
 from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
 from ._session import Session
 from .capability_catalog import HARNESS_PLUGINS
 from .command_context import CommandContext, CommandProvider
-from .commands import Command, Commands, config_command, config_completions, is_command_input, set_completions
+from .commands import (
+    Command,
+    Commands,
+    config_command,
+    config_completions,
+    expand_bare_command,
+    is_command_input,
+    set_completions,
+)
 from .config import PluginSettings, Settings
 from .customization import customization_guide
 from .errors import error_message
+from .forks import Forks
 from .image_input import ImageInput
 from .input_history import input_history
 from .interrupts import Interrupts
 from .key_menu import keys_command
 from .live_prompt import LivePrompt
+from .menu_worker import holding_output
 from .model_picker import model_command, model_completions
 from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
@@ -44,13 +58,22 @@ from .project_settings import ProjectSettings
 from .prompt_transcript import TranscriptBuffer
 from .reloading import reload_clai
 from .screen import Screen
+from .session_settings import SessionSettings
 from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
+from .shell_passthrough import HELP as SHELL_HELP
+from .shell_passthrough import run_shell_command, shell_command
+from .speculation import Speculation
+from .spinner_picker import spinner_command, spinner_completions
+from .spinners import Spinner, Spinners
 from .status import Status, StatusLine
 from .theme_picker import theme_command
 from .tool_output import terminal_text
 from .usage_report import cost_line, session_usage
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
 
 if TYPE_CHECKING:
     from .auth import CodexAuth
@@ -130,6 +153,7 @@ async def chat(
             transcript=transcript,
         )
     fresh = False
+    warming: Thread | None = None
     async with agent:
         while True:
             reason: SessionEndReason = 'error'
@@ -146,6 +170,7 @@ async def chat(
                                         await shell.sessions.command([resume] if resume else []), markup=False
                                     )
                                     resume = None
+                            warming = warming or warm_imports.start()
                             reason = await shell.run()
                         finally:
                             workers.cancel_scope.cancel()
@@ -159,6 +184,8 @@ async def chat(
             if not shell.reload_requested:
                 return
             shell.reload_requested = False
+            if warming is not None:  # pragma: no branch -- a reload follows a run, which started warming
+                warming.join()
             try:
                 shell = reload_clai(
                     lambda shell=shell: create_shell(
@@ -260,22 +287,10 @@ def create_shell(
     if session.model is None and agent.model is None:
         console.print('Add a model with /add_model.', style=theme.color(theme.INFO))
 
-    previous_theme = settings.theme
-
-    def apply_setting(key: str, updated: Settings) -> None:
-        nonlocal previous_theme
-        if key == 'model':
-            session.model = updated.model
-        elif key == 'run.tool_retries':
-            session.tool_retries = updated.tool_retries
-        elif key == 'run.request_limit':
-            session.usage_limits = replace(session.usage_limits or UsageLimits(), request_limit=updated.request_limit)
-        elif key == 'display.theme' and console.is_terminal and previous_theme != updated.theme:
-            theme.apply(updated.theme, output=console.file)
-        previous_theme = updated.theme
+    session_settings = SessionSettings(session=session, console=console, settings=settings)
 
     context = CommandContext(
-        settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting, project=project
+        settings=settings, store=store, clear_history=session.clear, apply_setting=session_settings, project=project
     )
 
     async def add_model(args: list[str]) -> str:
@@ -308,6 +323,7 @@ def create_shell(
             description='Change settings; no arguments opens the menu',
             handler=lambda args: set_command(context, args),
             complete=set_completions,
+            during_turn=True,
         )
     )
     commands.register(
@@ -316,6 +332,7 @@ def create_shell(
             description='Select a Termflow palette; no arguments opens the picker',
             handler=lambda args: theme_command(context, args),
             complete=lambda args: theme.names() if len(args) <= 1 else (),
+            during_turn=True,
         )
     )
     commands.register(
@@ -324,6 +341,7 @@ def create_shell(
             description='Select an added model; no arguments opens the picker',
             handler=lambda args: model_command(context, args),
             complete=lambda args: model_completions(context, args),
+            during_turn=True,
         )
     )
     commands.register(
@@ -332,6 +350,7 @@ def create_shell(
             description='Add and use a model, or browse providers and model settings',
             handler=add_model,
             complete=lambda args: set_completions(['model', *args]) if len(args) <= 1 else (),
+            during_turn=True,
         )
     )
     commands.register(
@@ -340,16 +359,20 @@ def create_shell(
             description='Choose an added model to configure, or edit a named model',
             handler=model_settings,
             complete=lambda args: model_completions(context, args),
+            during_turn=True,
         )
     )
-    commands.register(Command(name='help', description='Show commands', handler=commands.help))
     commands.register(
-        Command(
-            name='new',
-            description='Start a new session; preserve the previous session',
-            handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
-        )
+        Command(name='help', description='Show commands', handler=lambda args: f'{commands.help(args)}\n{SHELL_HELP}')
     )
+
+    new_command = Command(
+        name='new',
+        description='Start a new session; preserve the previous session',
+        handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
+    )
+    commands.register(new_command)
+    commands.register(replace(new_command, name='clear', description='Alias of /new'))
     commands.register(
         Command(
             name='usage',
@@ -385,6 +408,16 @@ def create_shell(
         project=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in project.plugins),
         conversation=session,
         status=status,
+    )
+    spinners = Spinners(selected=lambda: context.settings.spinner, registered=loader.spinners)
+    commands.register(
+        Command(
+            name='spinner',
+            description='Select the working animation; no arguments opens the picker',
+            handler=lambda args: spinner_command(context, spinners, args),
+            complete=lambda args: spinner_completions(spinners, args),
+            during_turn=True,
+        )
     )
     commands.register(
         Command(
@@ -430,12 +463,25 @@ def create_shell(
         interrupts=Interrupts(),
         screen=screen,
         sessions=sessions,
+        speculation=Speculation(context=context, console=console),
+        session_settings=session_settings,
+        spinners=spinners,
     )
     if prompt is not None:
         prompt.key_bindings = images.bindings()
     commands.register(
         Command(name='reload', description='Reload CLAI2 code without restarting', handler=shell.request_reload)
     )
+    commands.register(
+        Command(
+            name='fork',
+            description='Run a copy of this conversation in the background: /fork [@model] PROMPT',
+            handler=shell.forks.fork_command,
+            complete=shell.forks.complete,
+            raw=True,
+        )
+    )
+    commands.register(Command(name='forks', description='Show background forks', handler=shell.forks.status_command))
     return shell
 
 
@@ -456,10 +502,49 @@ class _Shell(Generic[DepsT, OutputT]):
     interrupts: Interrupts
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
+    speculation: Speculation
+    session_settings: SessionSettings[DepsT, OutputT]
+    spinners: Spinners
     transcript: TranscriptBuffer = field(default_factory=TranscriptBuffer)
     images: ImageInput = field(default_factory=ImageInput)
     reload_requested: bool = False
     editor: LivePrompt | None = None
+    forks: Forks[DepsT, OutputT] = field(init=False)
+    _mid_turn: TaskGroup | None = field(default=None, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self.forks = Forks(
+            console=self.console,
+            history=lambda: self.session.messages,
+            spawn=self.fork_session,
+            fire=self.loader.fire,
+            models=self.context.store.models,
+        )
+
+    def run_plugins(self) -> tuple[AgentCapability[DepsT], ...]:
+        """Capabilities bound to the next run: supplied, plugin-registered, then speculation.
+
+        Speculation sees the others, so its sandbox mount stays within their `FileSystem`.
+        """
+        granted = (*self.plugins, *self.loader.capabilities())
+        return (*granted, *self.speculation.capabilities(granted))
+
+    def fork_session(self, model: str | None, history: Sequence[ModelMessage]) -> Session[DepsT, OutputT]:
+        """A separately saved session configured like the foreground one, seeded with `history`."""
+        child = Session(
+            self.agent,
+            deps=self.session.deps,
+            plugins=self.run_plugins(),
+            message_history=history,
+            usage_limits=self.session.usage_limits,
+            conversations=self.session.conversations,
+            workspace=Path(self.session.workspace),
+        )
+        child.model = model or self.session.model
+        child.tool_retries = self.session.tool_retries
+        child.resolve_model = self.session.resolve_model
+        child.model_settings = self.context.model_settings(child.model or _model_label(self.agent))
+        return child
 
     def request_reload(self, args: list[str]) -> str:
         if args:
@@ -468,6 +553,12 @@ class _Shell(Generic[DepsT, OutputT]):
         return 'Reloading CLAI2...'
 
     async def run(self) -> SessionEndReason:
+        try:
+            return await self._run()
+        finally:
+            await self.forks.close()
+
+    async def _run(self) -> SessionEndReason:
         if self.console.is_terminal:
             self.editor = LivePrompt(
                 console=self.console,
@@ -477,7 +568,12 @@ class _Shell(Generic[DepsT, OutputT]):
                 interrupts=self.interrupts,
                 toolbar=self.status.toolbar,
                 steer=self.steer,
+                run_now=self.run_now,
                 transcript=self.transcript,
+                chords={'ctrl-x ctrl-s': self.speculation.toggle},
+                pinned=self.speculation.row,
+                spinner=self.spinners.active,
+                panel=self.forks.rows,
             )
             self.screen.editor = self.editor.suspended
             try:
@@ -500,6 +596,24 @@ class _Shell(Generic[DepsT, OutputT]):
         self.images.notice = f'Steering sent: {text}'
         return True
 
+    def _released(self) -> AbstractAsyncContextManager[None]:
+        """Hand the terminal to a command or shell, restoring the editor afterwards."""
+        return (self.editor.suspended if self.editor is not None else bare_screen)()
+
+    def run_now(self, text: str) -> bool:
+        """Open a bare `during_turn` command's menu over a streaming turn instead of queueing it."""
+        if self._mid_turn is None or not self.commands.runs_during_turn(text):
+            return False
+        self._mid_turn.start_soon(self._run_mid_turn, text)
+        return True
+
+    async def _run_mid_turn(self, text: str) -> None:
+        async with self.screen.overlay():
+            self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
+            self.console.print()
+            with holding_output(self.editor.output.held if self.editor is not None else nullcontext):
+                await _execute_command(self.commands, text, console=self.console, status=self.status)
+
     async def _read_loop(self) -> SessionEndReason:
         while True:
             self.images.retain(
@@ -507,12 +621,13 @@ class _Shell(Generic[DepsT, OutputT]):
             )
             try:
                 self.status.model = self.session.model or _model_label(self.agent)
+                self.status.workspace = self.session.workspace
                 self.status.status_segments = tuple(self.loader.status_segments())
                 if self.editor is not None:
                     text = await self.editor.read()
                 else:
                     assert self.prompt is not None
-                    text = (await self.prompt.prompt_async('> ')).strip()
+                    text = expand_bare_command((await self.prompt.prompt_async('> ')).strip())
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
@@ -528,8 +643,14 @@ class _Shell(Generic[DepsT, OutputT]):
             if self.editor is not None:
                 self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
             self.console.print()
+            if (command := shell_command(text)) is not None:
+                async with self.forks.busy(), self._released():
+                    await run_shell_command(command, console=self.console, interrupts=self.interrupts)
+                if self.interrupts.exit_requested:
+                    return 'exit'
+                continue
             if is_command_input(text):
-                async with (self.editor.suspended if self.editor is not None else bare_screen)():
+                async with self.forks.busy(), self._released():
                     await self.interrupts.run(
                         _execute_command(self.commands, text, console=self.console, status=self.status)
                     )
@@ -541,8 +662,9 @@ class _Shell(Generic[DepsT, OutputT]):
                 self.console.print('Choose a model first: /set model <Tab>', style=theme.color(theme.WARNING))
                 continue
             try:
-                if await self._turn(text):
-                    return 'exit'
+                async with self.forks.busy():
+                    if await self._turn(text):
+                        return 'exit'
             finally:
                 if self.editor is not None:
                     await self.editor.output.drain()
@@ -565,6 +687,12 @@ class _Shell(Generic[DepsT, OutputT]):
         if self.editor is not None:
             await self.editor.output.drain()
         _report_interrupt(completed, self.console)
+        if not completed and (cancelled := self.forks.cancel_running()):
+            self.console.print(
+                f'Cancelled {cancelled} running fork(s) with the turn.',
+                style=theme.color(theme.MUTED),
+            )
+            self.console.print()
         await self.interrupts.run(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
         return self.interrupts.exit_requested
 
@@ -585,7 +713,7 @@ class _Shell(Generic[DepsT, OutputT]):
             )
             self.console.print()
             return TurnEnd(text=start.text, outcome='cancelled')
-        self.session.plugins = (*self.plugins, *self.loader.capabilities())
+        self.session.plugins = self.run_plugins()
         model = self.session.model or _model_label(self.agent)
         try:
             self.session.model_settings = self.context.model_settings(model)
@@ -606,16 +734,27 @@ class _Shell(Generic[DepsT, OutputT]):
             except Exception as exc:  # noqa: BLE001 -- report a failed headless turn to the CLI.
                 return TurnEnd(text=start.text, outcome='failed', error=exc)
             return TurnEnd(text=start.text, outcome='completed', result=result)
-        return await _run_prompt(
-            self.session,
-            start.text,
-            images=images,
-            console=self.console,
-            settings=self.context.settings,
-            status=self.status,
-            renderers=self.loader.renderers(),
-            screen=self.screen,
-        )
+        # Menus open mid-turn only after this turn has captured its settings; session changes
+        # they save apply once it ends. A menu still open when it ends delays the next prompt.
+        ended = TurnEnd(text=start.text, outcome='cancelled')
+        with self.session_settings.turn():
+            async with create_task_group() as mid_turn:
+                self._mid_turn = mid_turn
+                try:
+                    ended = await _run_prompt(
+                        self.session,
+                        start.text,
+                        images=images,
+                        console=self.console,
+                        settings=self.context.settings,
+                        status=self.status,
+                        renderers=self.loader.renderers(),
+                        screen=self.screen,
+                        spinner=self.spinners.active,
+                    )
+                finally:
+                    self._mid_turn = None
+        return ended
 
 
 def _report_project(project: ProjectSettings, console: Console) -> None:
@@ -651,7 +790,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
 
 
 def _reset_status(command: str, status: Status) -> None:
-    if command.split(maxsplit=1)[0] in ('/new', '/resume'):
+    if command.split(maxsplit=1)[0] in ('/new', '/clear', '/resume'):
         status.context_tokens = None
         status.context_alert = False
         status.output_tokens = None
@@ -675,6 +814,7 @@ async def _run_prompt(
     status: Status,
     renderers: Sequence[Renderer[AgentStreamEvent]],
     screen: Screen,
+    spinner: Callable[[], Spinner],
     images: Sequence[BinaryContent] = (),
 ) -> TurnEnd:
     renderer = StreamRenderer(
@@ -700,7 +840,7 @@ async def _run_prompt(
 
     session.on_context_usage = context_usage
     session.on_stream_event = observe
-    status_line = StatusLine(console, status, enabled=screen.editor is None)
+    status_line = StatusLine(console, status, enabled=screen.editor is None, spinner=spinner)
 
     @asynccontextmanager
     async def take_screen() -> AsyncGenerator[None]:

@@ -90,6 +90,7 @@ def _make_ctx(
         tool_call_id: str | None = 'call-1'
         model: Any = dataclasses.field(default_factory=_FakeModel)
         deps: None = None
+        conversation_id: str | None = None
 
     ctx = _FakeCtx(usage=RunUsage(), run_id=run_id, retry=retry, usage_limits=usage_limits)
     if model is not None:
@@ -152,6 +153,13 @@ class TestPayloadHelpers:
     def test_to_text_variants(self):
         assert to_text('hi') == 'hi'
         assert to_text({'a': 1}) == '{"a":1}'
+
+    def test_values_without_json_form_render_as_repr(self):
+        """A `type` leaf must not abort the after-hook, which would lose the tool's output."""
+        value = {'kind': int, 'nested': [ValueError]}
+        expected = '{"kind":"<class \'int\'>","nested":["<class \'ValueError\'>"]}'
+        assert to_text(value) == expected
+        assert to_bytes(value) == expected.encode('utf-8')
 
     def test_indented_json(self):
         assert indented_json({'a': 1}) == '{\n  "a": 1\n}'
@@ -742,6 +750,25 @@ class TestSummarize:
         await agent.run('call the tool')
 
         assert 'tool_output_limits' in agent_run_names(capfire)
+
+    async def test_summarizer_run_belongs_to_the_tool_caller_conversation(self):
+        summary_conversations: set[str | None] = set()
+
+        def summarize(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            summary_conversations.update(m.conversation_id for m in messages)
+            return ModelResponse(parts=[TextPart(content='THE SUMMARY')])
+
+        def large_output() -> str:
+            return 'x' * 100
+
+        agent = Agent(
+            TestModel(call_tools='all'),
+            capabilities=[ToolOutputLimits(bands=[Band(over=5, action=Summarize(model=FunctionModel(summarize)))])],
+            toolsets=[FunctionToolset(tools=[large_output], id='large-output')],
+        )
+        await agent.run('call the tool', conversation_id='conversation-1')
+
+        assert summary_conversations == {'conversation-1'}
 
     async def test_model_summarizer_dispatches_as_durable_operation(self):
         def large_output() -> str:

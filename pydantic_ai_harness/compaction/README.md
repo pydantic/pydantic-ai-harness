@@ -241,6 +241,11 @@ A compaction that changes the history emits the same `compact_messages` span the
 so an instrumented application sees one shape however compaction was triggered. Pass `tracer=` to
 record it; without one the span goes to a no-op tracer.
 
+Pass `conversation_id=` with the id of the conversation being compacted. It is set on the throwaway
+context, so the summary run of `SummarizingCompaction` is recorded under that conversation (its
+messages and its `gen_ai.conversation.id` span attribute) rather than under a fresh id of its own.
+Inside a run, the summary run takes the parent run's `conversation_id` without this.
+
 ## `FallbackCompaction`: recover when a strategy fails
 
 `TieredCompaction` advances when a successful tier does not reclaim enough. `FallbackCompaction`
@@ -394,7 +399,8 @@ from the edit point onward -- the next request pays a cache-write. Use `ClearToo
 running agent's model. Its nested summary run inherits the parent usage limits and reserves one request from a
 finite request limit for the pending parent request. Pass `model_settings` to give the dedicated summary call
 settings that differ from defaults carried by that model; the supplied settings merge over the model defaults
-without mutating the model or the settings dictionary.
+without mutating the model or the settings dictionary. Pass `summarization_capabilities` to attach
+capabilities to the summary agent; capabilities on the outer agent do not run on the summary call.
 
 The summary request is non-streaming unless `event_stream_handler` is set. Supply a handler to watch
 the summary as it is written, or pass `drain_summary_events` to take the streaming request path
@@ -442,6 +448,8 @@ itself -- is folded into the run's `ctx.usage`. This is deliberate: it keeps cos
 request count consistent (a model request that didn't count as one would be the surprise), and lets a
 `UsageLimits` request limit catch a runaway compaction. The nested run receives the other parent limits unchanged;
 the finite request limit is reduced by one so it cannot spend the slot already approved for the parent request.
+The summary run is filed under the parent run's `conversation_id`, so its requests, spans, and cost
+group with the conversation it compacts.
 A run-request / iteration limiter will therefore see compaction calls among its requests.
 
 With a durable-execution capability attached, the summary call runs as a contributed durable

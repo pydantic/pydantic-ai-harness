@@ -188,6 +188,7 @@ bundled palettes use Termflow defaults.
 | `_app.py` | the prompt loop and built-in `/commands` |
 | `_session.py` | conversation state, revision-checked saves, restore-only resume, per-run plugins |
 | `sessions.py` | resume command and background namer ownership; built-in step capture |
+| `forks.py` | `/fork` and `/forks`: history snapshot, background child sessions, deferred fork output |
 | `session_browser.py` | project/session browser using Termflow layout and terminal primitives |
 | `_rendering.py` | streaming Markdown and thinking |
 | `plugins.py` | `PluginHost`, hook names, event dataclasses |
@@ -217,8 +218,15 @@ bundled palettes use Termflow defaults.
 | `settings_store.py` | the SQLite store under `$XDG_CONFIG_HOME/pydantic-clai2/` |
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |
 | `repo_context.py` | the built-in `repo_context` plugin over harness `RepoContext` |
+| `speculation.py` | the `run.speculative_code_mode` switch, `Ctrl+X Ctrl+S` toggle, session counters and pinned row |
+| `speculative_mode.py` | harness `CodeMode` wiring (native writes, read-only speculation allowlist, guidance), imported only while on |
+| `eager_timing.py` | eager `run_code` latency measurement and the nested-call id pattern |
+| `sandbox_calls.py` | events and ordering that render calls from inside `run_code` like direct calls; no harness imports |
 | `theme.py` | Existing brand roles, opt-in Termflow palette scope, `color()`, `sgr()` |
 | `theme_picker.py` | `/theme` picker over Termflow's bundled palettes |
+| `spinners.py` | the working-animation catalogue: builtins, plugin `host.spinner`, the user's `spinners.json`, `Spinners` |
+| `spinner_frames.py` | frame data for the Code Puppy cli-spinners pack |
+| `spinner_picker.py` | `/spinner`: animated picker, by-name selection with speed, `init` |
 
 Keep files concise - we don't need any 10,000 line files. Single responsibility.
 

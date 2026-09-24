@@ -46,12 +46,12 @@ cli = [
 ]
 code-mode = [
     "pydantic-ai-slim[duckduckgo]>=2.44.0",
-    "pydantic-monty>=0.0.23",
+    "pydantic-monty>=0.0.23,<1",
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 codemode = [
     "pydantic-ai-slim[duckduckgo]>=2.44.0",
-    "pydantic-monty>=0.0.23",
+    "pydantic-monty>=0.0.23,<1",
 ]
 researcher = [
     "pydantic-ai-slim[duckduckgo,web-fetch]>=2.44.0",
@@ -70,7 +70,7 @@ modal = [
     "modal>=1.5.0",
 ]
 dynamic-workflow = [
-    "pydantic-monty>=0.0.23",
+    "pydantic-monty>=0.0.23,<1",
 ]
 acp = [
     # The SDK breaks across minors, so cap per minor.
@@ -103,14 +103,35 @@ stackone = [
     "fastmcp>=3.4.5,<4",
     "pydantic-ai-slim[mcp]>=2.18.0",
 ]
+ordinal = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
 prompt-injection-defender = [
     "stackone-defender>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
 prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
+github = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
+slack = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
 coder = [
     "ripgrep==14.1.0 ; sys_platform != 'android'",
+]
+logfire-mcp = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
+linear = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
+notion = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
+google-workspace = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
 ]
 
 [project.urls]
@@ -202,7 +223,7 @@ extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251', 'PLC0415']
 # tell those from an accidental function-scoped import, so it is off for the package
 # and enforced in tests, where every occurrence was accidental.
 'pydantic_ai_harness/**/*.py' = ['PLC0415']
-# `mcp` and `fastmcp` ship only with the `stackone` extra, so slim CI cannot import
+# `mcp` and `fastmcp` ship only with optional extras, so slim CI cannot import
 # them at module scope; these tests defer the import on purpose.
 'tests/stackone/**/*.py' = ['PLC0415']
 
@@ -221,22 +242,19 @@ docstring-code-format = false
 quote-style = 'single'
 
 [tool.pyright]
-# Shared library stubs need CLAI's Python version; Harness source keeps its own target below.
-pythonVersion = '3.11'
+pythonVersion = '3.10'
 typeCheckingMode = 'strict'
 exclude = ['template', '**/.venv*', 'local-notes', 'mutants', '.agents', '.claude']
 # `reportUnusedFunction` is disabled for tests because fixtures and `@agent.tool_plain`
 # helpers are registered via decorators and never referenced by name (matches pydantic-ai).
 executionEnvironments = [
     { root = 'pydantic-clai2', extraPaths = ['pydantic-clai2/src'] },
-    { root = '.venv', pythonVersion = '3.11' },
-    { root = 'tests', pythonVersion = '3.10', reportPrivateUsage = false, reportUnusedFunction = false },
+    { root = 'tests', reportPrivateUsage = false, reportUnusedFunction = false },
     # `redis.asyncio.Redis` ships `py.typed` but leaves most of its command surface
     # partially unknown (`from_url`, `ping`, `scan_iter`, `ttl`). Only the live-Redis
     # tests touch the client directly -- `RedisSpendStore` itself goes through the
     # `RedisClient` protocol and stays fully checked.
-    { root = 'integration_tests/redis', pythonVersion = '3.10', reportUnknownMemberType = false, reportUnknownVariableType = false, reportUnknownArgumentType = false },
-    { root = '.', pythonVersion = '3.10' },
+    { root = 'integration_tests/redis', reportUnknownMemberType = false, reportUnknownVariableType = false, reportUnknownArgumentType = false },
 ]
 
 [tool.pytest.ini_options]
