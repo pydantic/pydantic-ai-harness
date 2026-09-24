@@ -80,6 +80,8 @@ With durable execution such as Temporal, read the token from the run's deps rath
 
 ## Tool selection and approval
 
+`read_only=True` keeps only the tools the server marks as read-only. If the server does not mark its read tools, this can leave none. The token is still what controls access.
+
 To filter tools or require approval in your application, wrap the toolset with the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this asks for approval before every tool call, so you decide which meeting data reaches the model:
 
 ```python
@@ -99,9 +101,13 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 
 ## Connection customization
 
-Use `auth` in almost every case. Pass `client` only when you need control of the connection itself: your own FastMCP client or transport, for example one with a proxy or MCP handlers. The client then owns the URL and authentication, so passing `client` together with `auth` raises an error. `include_instructions=False` stops the server's own instructions from reaching the agent.
+Use `auth` in almost every case. Pass `client` only when you need control of the connection itself: your own FastMCP client or transport, for example one with a proxy or MCP handlers. The client then owns the URL and authentication, so passing `client` together with `auth` raises an error. `read_only` and `include_instructions` still apply. `include_instructions=False` stops the server's own instructions from reaching the agent.
 
 A `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately.
+
+## Telemetry
+
+`Grain` emits no spans of its own. Core's [instrumentation](/ai/capabilities/instrumentation/) already records each Grain tool call as a tool span, and connecting makes no decision worth a span of its own.
 
 ## Define the agent in YAML or JSON
 

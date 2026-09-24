@@ -7,11 +7,12 @@ Provider contract, verified 2026-09-24:
   token answers 401 `invalid_token`.
 - Authentication is a Grain OAuth access token, sent as a bearer token. The protected-resource metadata names
   `https://api.grain.com` as the authorization server, which supports PKCE and dynamic client registration.
-- The server's tools only read meetings, transcripts, notes, people, companies, deals, and coaching feedback, so
-  there is no `read_only` option.
+- The server has tools that change data: Grain's 2026-05-13 release added creating clips and tagging meetings.
+  `read_only` keeps only the tools the server marks read-only.
 
 Sources: https://grain.com/release-note/06-18-2025, https://developers.grain.com/mcp/claude-setup.html,
-https://developers.grain.com/mcp/tools-and-usage.html, and https://grain.com/.well-known/oauth-protected-resource.
+https://developers.grain.com/mcp/tools-and-usage.html,
+https://grain.com/release-note/grain-mcp-and-api-updates, and https://grain.com/.well-known/oauth-protected-resource.
 Re-check by sending an unauthenticated POST to the endpoint.
 """
 
@@ -25,7 +26,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential, one_connection
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -70,6 +71,9 @@ class Grain(AbstractCapability[AgentDepsT]):
     Unset, it uses `GRAIN_ACCESS_TOKEN`. A function never does: if it returns `None` or `''`, that run has no Grain tools.
     """
 
+    read_only: bool = False
+    """Expose only tools the server marks read-only; unmarked tools are omitted."""
+
     include_instructions: bool = True
     """Pass the server's own instructions to the agent."""
 
@@ -89,10 +93,16 @@ class Grain(AbstractCapability[AgentDepsT]):
         """Return the Grain MCP tools."""
         id = self.id or _ID
         if self.client is not None:
-            return MCPToolset(self.client, id=id, include_instructions=self.include_instructions)
-        if callable(self.auth):
-            return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
-        return self._connect(self.auth)
+            toolset: AbstractToolset[AgentDepsT] = MCPToolset(
+                self.client, id=id, include_instructions=self.include_instructions
+            )
+        elif callable(self.auth):
+            toolset = DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
+        else:
+            toolset = self._connect(self.auth)
+        if self.read_only:
+            return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
+        return toolset
 
     def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
         auth = self.auth(ctx) if callable(self.auth) else self.auth
