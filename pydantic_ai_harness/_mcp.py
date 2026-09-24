@@ -48,9 +48,9 @@ def credential(auth: MCPAuth | None, *, env: str | None, service: str) -> MCPAut
     Browser OAuth (`'oauth'`) is rejected: it opens a browser on the host and waits for a callback, which
     hangs an agent running on a server.
     """
-    if not auth and env is not None:
-        auth = environ.get(env)
-    if not auth:
+    if auth is None and env is not None:
+        auth = environ.get(env) or None
+    if auth is None or auth == '':
         raise UserError(
             f'Set `{env}` or pass `auth` to connect to {service}.' if env else f'Pass `auth` to connect to {service}.'
         )
