@@ -97,7 +97,9 @@ error, because browser login would open on the server rather than for the user.
 
 With durable execution such as Temporal, read the token from the run's deps
 rather than from a global, since the function may run in another process. To add
-more than one `Ordinal` to an agent, give each a distinct `id`.
+more than one `Ordinal` to an agent, give each a distinct `id` and wrap them in
+[PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since
+their tool names are the same.
 
 ## Define the agent in YAML or JSON
 

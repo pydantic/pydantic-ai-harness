@@ -6,13 +6,14 @@ import importlib.util
 
 import pytest
 
-# `mcp` is gated on the `ordinal` extra, so slim CI runs (no extras) can't import
+# `mcp` and `fastmcp` are gated on the `ordinal` extra, so slim CI runs (no extras) can't import
 # these modules. Ignore them at collection; `test_packaging.py` stays collected
 # because it checks package metadata, which holds on base installs too.
 # A conditional expression rather than an `if` statement: branch coverage traces
 # statement arcs, and no single environment can take both arms of an
 # install-dependent branch.
-collect_ignore = ['test_ordinal.py'] if importlib.util.find_spec('mcp') is None else []
+_REQUIRED = ('mcp', 'fastmcp', 'pydantic_ai.mcp')
+collect_ignore = ['test_ordinal.py'] if any(importlib.util.find_spec(name) is None for name in _REQUIRED) else []
 
 
 @pytest.fixture
