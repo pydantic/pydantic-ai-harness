@@ -100,6 +100,20 @@ their tool names are the same.
 
 ## Define the agent in YAML or JSON
 
+Loading a YAML file also needs the `spec` extra.
+
+uv:
+
+```bash
+uv add "pydantic-ai-slim[spec]"
+```
+
+pip:
+
+```bash
+pip install "pydantic-ai-slim[spec]"
+```
+
 ```yaml
 # agent.yaml
 model: openai:gpt-5.6-sol
