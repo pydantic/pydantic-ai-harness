@@ -17,7 +17,7 @@ from termflow.tui.completion import CompleteEvent, Completion, Document  # pyrig
 from termflow.tui.layout import truncate  # pyright: ignore[reportMissingTypeStubs]
 
 from . import theme
-from .commands import Commands, is_command_input
+from .commands import Commands, expand_bare_command, is_command_input
 from .image_input import ImageInput, clipboard_images, pasted_paths, read_images
 from .interrupts import Interrupts
 from .prompt_buffer import PromptBuffer
@@ -188,6 +188,7 @@ class LivePrompt:
             self.buffer.history.append(text)
             self.buffer.history_index = None
             self.buffer.replace('')
+            text = expand_bare_command(text)
             if self.run_now is None or not self.run_now(text):
                 self.submit(text)
 
