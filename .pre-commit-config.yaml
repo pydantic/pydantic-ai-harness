@@ -33,7 +33,7 @@ repos:
     rev: v0.21.0
     hooks:
       - id: yamlfmt
-        exclude: ^tests/.*/cassettes/.*$
+        exclude: ^(tests/.*/cassettes/|pydantic-clai2/tests/cassettes/)
 
   - repo: https://github.com/zizmorcore/zizmor-pre-commit
     rev: v1.23.1

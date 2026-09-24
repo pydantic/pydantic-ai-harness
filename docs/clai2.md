@@ -54,6 +54,97 @@ pyramid, with CLAI lettering. The persistent `CLAI 2.0` banner uses `ansi_shadow
 The splash is disabled for redirected output, CLI arguments, small terminals,
 Windows, `NO_COLOR`, or `CLAI_NO_SPLASH=1`.
 
+## Update notices
+
+```text
+/plugins disable updates
+/plugins enable updates
+```
+
+The built-in `updates` plugin is on by default. It checks public PyPI once when
+loaded, without waiting before showing the prompt. A newer stable release with
+an unyanked file compatible with your Python produces a notice with the installed
+and available versions, plus update guidance. Notices wait until turns and menus
+finish. CLAI does not run an installer or change your installation.
+
+Disabling the plugin persists across launches and cancels its pending check or
+notice. Exit, `/reload`, and `/plugins reload updates` also drain the old worker;
+reloading or enabling starts a new check. The request has a five-second deadline
+and a 1 MiB response limit, without retries. Offline errors, 404s, malformed
+metadata, and missing local version metadata produce no notice. An unpublished
+package therefore produces no notice. Pre-release, development, local, empty,
+and fully yanked remote releases are ignored. Versions use PEP 440 ordering.
+
+The notice recognizes source/direct installs, `uv tool` receipts, `pipx`
+environments, and pip's installer metadata. It does not guess whether another
+uv environment is a project or a temporary `uvx` run. Use the method that created
+your installation, from its original environment or project:
+
+| Installation | Update yourself |
+|---|---|
+| `uv tool` | `uv tool upgrade pydantic-clai2` |
+| `uvx` | `uvx --upgrade --from pydantic-clai2 clai2` |
+| `pipx` | `pipx upgrade pydantic-clai2`; use your suffixed environment name if applicable |
+| pip | `python -m pip install --upgrade pydantic-clai2`; the notice names the running interpreter |
+| uv project | `uv lock --upgrade-package pydantic-clai2 && uv sync`, subject to your project constraints |
+| `uv pip` | `uv pip install --upgrade pydantic-clai2` in the original environment |
+| Editable, VCS, direct URL, or injected package | Follow your original source or injection workflow |
+
+The check sends no prompts, credentials, or installed version to PyPI. It does
+not use custom indexes or proxy environment settings. It makes no model calls
+and adds no capability telemetry spans because this is terminal maintenance,
+not an agent operation.
+
+## Browser chat
+
+```bash
+pip/uv-add 'pydantic-clai2[web]'
+```
+
+```bash
+py-cli clai2 --web
+```
+
+From this source checkout, use `uv run --project pydantic-clai2 --extra web clai2 --web`.
+Open <http://127.0.0.1:7932>. Use `--port 8765` for another local port;
+Ctrl-C stops the server after active requests finish. Agent runs share one
+execution slot per server, so browser tabs do not run coding tools concurrently.
+The ASGI lifespan closes plugins and model resources before signal handling exits.
+
+This serves Pydantic AI's existing [`Agent.to_web()` UI](/ai/web/), not a second
+agent runtime. It streams responses and tool calls using your enabled coding
+capabilities. Core fetches and caches the UI HTML; its browser assets load from
+a CDN, so this is not an offline UI.
+
+`--model` overrides `CLAI_MODEL`, project settings, then saved settings, as in the
+terminal. Saved model settings and tool retries apply. OpenRouter, vllm, and Codex
+use the same credential and endpoint resolution as the terminal. Complete any
+interactive login in the terminal before starting the server.
+
+Browser mode omits the terminal `ask_user`, `persistence`, `notifications`, and
+`updates` plugins without changing their saved preferences. It does not provide
+CLAI slash commands, terminal renderers, settings menus, the status line, or
+SQLite conversation saving and `--resume`. Browser chat history is not a CLAI
+saved session. Core hooks and capability tools work; a plugin registering
+`turn_start` or `turn_end` prevents startup rather than losing its guards.
+See [browser plugin compatibility](https://github.com/pydantic/pydantic-ai-harness/blob/main/pydantic-clai2/PLUGINS.md#browser-mode-compatibility).
+Browser disconnection during an MCP tool call is covered by a real HTTP and
+stdio cleanup test. Outer AnyIO cancellation of a direct `Agent.run()` embedding
+is covered separately; see [outer cancellation](#mcp-servers).
+
+Core's web adapter uses its default limit of 50 model requests per run. Explicit
+`--request-limit`, saved `run.request_limit`, and project `request_limit` overrides
+are rejected, even when set to 50. Reset the saved override with
+`clai2 config reset run.request_limit` and remove any project override, or use the
+terminal. `--web` cannot be combined with `--resume`, `config`, or `plugins`.
+
+!!! warning "Local access is not a sandbox"
+    The server binds only to `127.0.0.1`; there is no remote host option or
+    authentication. Core retains its Host validation, JSON-only chat endpoint,
+    and cross-origin restrictions. Do not expose it through a proxy or tunnel
+    to untrusted clients. Coding tools still run with your user permissions.
+    Browser mode adds no telemetry beyond core and plugin spans.
+
 ## Codex authentication
 
 `/login openai-codex` opens the browser and uses core's `OpenAICodexOAuthFlow`:
@@ -479,13 +570,14 @@ Files are named `server-N.log` by configuration order and append across turns.
 Each load gets a new directory. Logs can contain sensitive server output; they
 remain after exit for diagnosis, so remove them when no longer needed.
 
-!!! warning "Outer cancellation limitation"
+!!! note "Outer cancellation"
     In Pydantic AI 2.44.0 and 2.46.0, cancelling an outer AnyIO scope during an MCP
-    tool call can leave the stdio subprocess alive after the run unwinds. Reloading
-    or disabling this plugin does not recover from that leak. Embedded
-    callers must not assume this cancellation path is safe. The core-only
-    regression is retained as a strict expected failure, tracked in
-    [pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548).
+    tool call also cancels core's connection cleanup, which can leave a stdio
+    subprocess alive ([pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548)).
+    The `mcp` plugin runs that cleanup in a shielded scope for the servers it loads,
+    so the process stops on this path too; a test cancels an enclosing scope mid-call
+    and checks that the process has exited. `MCPToolset` instances created outside
+    the plugin are still affected; that core regression is kept as a strict expected failure.
 
 ### Trusted startup configuration
 

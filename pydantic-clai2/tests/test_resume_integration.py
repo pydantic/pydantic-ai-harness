@@ -24,7 +24,7 @@ from rich.console import Console
 from pydantic_clai2 import DEFAULT_PLUGINS, chat
 from pydantic_clai2._session import Session
 from pydantic_clai2.command_context import CommandContext
-from pydantic_clai2.config import Settings
+from pydantic_clai2.config import PluginSettings, Settings
 from pydantic_clai2.session_browser import SessionBrowser
 from pydantic_clai2.sessions import Sessions
 from pydantic_clai2.settings_store import SettingsStore
@@ -152,6 +152,9 @@ async def test_empty_startup_browser_and_invalid_restore(tmp_path: Path, monkeyp
 
 @pytest.mark.parametrize('args', [['--resume', 'missing'], ['--resume=missing', 'config']])
 def test_resume_cli_errors_are_normal_parser_errors(tmp_path: Path, args: list[str]) -> None:
+    SettingsStore(tmp_path / 'settings.db').save_plugin(
+        PluginSettings(id='updates', factory='pydantic_clai2.updates', enabled=False)
+    )
     result = subprocess.run(
         [sys.executable, '-m', 'pydantic_clai2', '--database', str(tmp_path / 'settings.db'), *args],
         input='/exit\n',

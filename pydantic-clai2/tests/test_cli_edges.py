@@ -7,11 +7,15 @@ from pathlib import Path
 
 import pytest
 
+from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.settings_store import SettingsStore
 
 
 @pytest.mark.parametrize('args', [[], ['--model', 'test', '--request-limit', '12'], ['--request-limit', '0']])
 def test_cli_startup(tmp_path: Path, args: list[str]) -> None:
+    SettingsStore(tmp_path / 'config.db').save_plugin(
+        PluginSettings(id='updates', factory='pydantic_clai2.updates', enabled=False)
+    )
     env = dict(os.environ, CLAI_NO_SPLASH='1')
     env.pop('CLAI_MODEL', None)
     result = subprocess.run(
@@ -59,6 +63,7 @@ def test_startup_saved_splash(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, s
         path.write_text('not sqlite')
     else:
         store.set('display.splash', state == 'enabled')
+        store.save_plugin(PluginSettings(id='updates', factory='pydantic_clai2.updates', enabled=False))
     result = subprocess.run(
         [sys.executable, '-m', 'pydantic_clai2'],
         input='/exit\n',

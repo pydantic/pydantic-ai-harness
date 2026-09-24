@@ -76,7 +76,7 @@ Plugins load and unload while CLAI runs. The rules that make that safe:
   natural unit; nothing rebuilds the agent.
 - **Built-ins are declarations, not code paths.** `DEFAULT_PLUGINS` in
   `_app.py` lists what CLAI ships enabled (`coder`, `ask_user`, `repo_context`,
-  `compaction`, `persistence`, `notifications`, `mcp`). The loader treats them like
+  `compaction`, `persistence`, `notifications`, `mcp`, `updates`). The loader treats them like
   drop-ins with the lowest precedence: a store declaration with the same id replaces one, `disable`
   persists an override, `remove` resets it. Do not special-case `Coder`
   anywhere else; the agent from `create_agent()` has no coding tools of its
@@ -151,6 +151,15 @@ actions, `.footer_hint` for the key legend, `markdown_style()` for colours.
   declared once as `ModelSettingsForm` with descriptions and bounds. Extend the
   form, not the menu, to expose another setting.
 
+## Background notices
+
+Use `await host.notify(text)` from a plugin-owned background task for terminal
+notices. It waits until turns and menus release output; it is not an OS alert.
+A command, turn hook, or `session_end` handler that awaits it directly prints at
+once (`Screen.foreground`); tasks it starts still wait. Cancel and await the
+worker at `session_end`. Model events still use
+`host.render`.
+
 ## Rendering
 
 `StreamRenderer` owns text and thinking. It knows nothing about any specific
@@ -212,6 +221,8 @@ pydantic.dev's `pydantic-visual-identity` skill's `brand-identity.md`.
 | `project_settings.py` | `.clai/settings.json`: the walk-up to the git root, validation, `ProjectSettings` |
 | `repo_context.py` | the built-in `repo_context` plugin over harness `RepoContext` |
 | `notifications.py` | the built-in desktop notifications for turn outcomes and `AskUserRequestedEvent` |
+| `updates.py` | the built-in bounded update check and owned background worker |
+| `update_installation.py` | installation-aware manual update guidance |
 | `theme.py` | brand palette, scoped active roles, syntax theme names, `sgr()` |
 
 Keep files concise - we don't need any 10,000 line files. Single responsibility.
@@ -236,12 +247,17 @@ Run from the repository root. CLAI shares the root `uv.lock`, `.venv`, and
 Pyright configuration with Harness.
 
 ```bash
-uv sync --locked --all-packages --group lint
+uv sync --locked --all-packages --extra web --group lint --group clai-test
 uv run --no-sync ruff format --check .
 uv run --no-sync ruff check .
 PYRIGHT_PYTHON_IGNORE_WARNINGS=1 uv run --no-sync pyright pydantic-clai2/src pydantic-clai2/tests
 uv run --no-sync pytest -p no:cacheprovider -c pydantic-clai2/pyproject.toml pydantic-clai2/tests
 ```
+
+The `clai-test` group installs Cassetter for recorded `httpx2` traffic. CLAI's
+pytest config disables `pytest-recording`; Harness uses the opposite selection.
+Keep recording mode `none` in CI so missing interactions fail instead of using
+the network.
 
 ## Docs parity
 

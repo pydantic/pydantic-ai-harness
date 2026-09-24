@@ -1,9 +1,10 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Generic, TypeVar
 
 from anyio import create_task_group
@@ -17,12 +18,11 @@ from pydantic_ai import Agent, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability
 from pydantic_ai.messages import ModelMessage, ModelResponse
-from pydantic_ai.models import Model
 from pydantic_ai.usage import UsageLimits
 from pydantic_ai_harness.step_persistence.conversations import ConversationSummary, SqliteConversationStore
 from rich.console import Console
 
-from . import openrouter, theme, vllm
+from . import theme
 from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
@@ -39,6 +39,7 @@ from .key_menu import keys_command
 from .live_prompt import LivePrompt
 from .model_menu import open_add_model_menu
 from .model_picker import model_command, model_completions
+from .model_resolution import resolve_model
 from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
 from .plugins import Renderer, SessionEndReason, SessionStart, TurnEnd, TurnStart, bare_screen
@@ -69,6 +70,7 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='persistence', factory='pydantic_clai2.sessions'),
     PluginSettings(id='notifications', factory='pydantic_clai2.notifications'),
     PluginSettings(id='mcp', factory='pydantic_clai2.mcp'),
+    PluginSettings(id='updates', factory='pydantic_clai2.updates'),
     *HARNESS_PLUGINS,
 )
 """Built-in declarations, including opt-in harness capabilities. `remove` restores their defaults.
@@ -136,7 +138,10 @@ async def chat(
                             await shell.loader.load_all(fresh=fresh)
                             _report_project_plugins(shell.loader, console)
                             if resume is not None:
-                                console.print(await shell.sessions.command([resume] if resume else []), markup=False)
+                                with shell.screen.busy(), shell.screen.foreground():
+                                    console.print(
+                                        await shell.sessions.command([resume] if resume else []), markup=False
+                                    )
                                 resume = None
                             reason = await shell.run()
                         finally:
@@ -146,7 +151,8 @@ async def chat(
                         raise exc.exceptions[0] from None
                     raise
                 finally:
-                    await shell.loader.close(reason)
+                    with shell.screen.foreground():
+                        await shell.loader.close(reason)
             if not shell.reload_requested:
                 return
             shell.reload_requested = False
@@ -211,14 +217,7 @@ def _create_shell(
     session.tool_retries = settings.tool_retries
     auth = CodexAuth(console)
 
-    async def resolve_model(name: str) -> Model | str:
-        if name.startswith('openrouter:'):
-            return await asyncio.to_thread(openrouter.model, name)
-        if name.startswith('vllm:'):
-            return await asyncio.to_thread(vllm.model, name)
-        return auth.model(name) if name.startswith('openai-codex:') else name
-
-    session.resolve_model = resolve_model
+    session.resolve_model = partial(resolve_model, auth=auth)
     if session.model is None and agent.model is None:
         console.print('Add a model with /add_model.', style=theme.THEMES[settings.theme].info)
 
@@ -318,6 +317,7 @@ def _create_shell(
         session_start=lambda: SessionStart(agent=agent, settings=context.settings),
         builtin=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in builtin_plugins),
         full_screen=screen.full,
+        notify=lambda message: screen.notify(message, console=console),
         project=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in project.plugins),
         conversation=session,
         status=status,
@@ -405,11 +405,13 @@ class _Shell(Generic[DepsT, OutputT]):
             self.screen.editor = self.editor.suspended
             try:
                 async with self.editor.opened():
-                    return await self._read_loop(show_frame, prepare_prompt)
+                    with self.screen.session():
+                        return await self._read_loop(show_frame, prepare_prompt)
             finally:
                 self.screen.editor = None
                 self.editor = None
-        return await self._read_loop(show_frame, prepare_prompt)
+        with self.screen.session():
+            return await self._read_loop(show_frame, prepare_prompt)
 
     async def _read_loop(self, show_frame: Filter, prepare_prompt: Callable[[], None]) -> SessionEndReason:
         while True:
@@ -434,22 +436,26 @@ class _Shell(Generic[DepsT, OutputT]):
                 self.console.print(f'> {text}', markup=False, highlight=False)
             self.console.print()
             if text.startswith('/'):
-                async with (self.editor.suspended if self.editor is not None else bare_screen)():
-                    await self.interrupts.run(
-                        _execute_command(self.commands, text, console=self.console, status=self.status)
-                    )
+                with self.screen.busy():
+                    async with (self.editor.suspended if self.editor is not None else bare_screen)():
+                        await self.interrupts.run(
+                            self._foreground(
+                                _execute_command(self.commands, text, console=self.console, status=self.status)
+                            )
+                        )
                 if text == '/exit' or self.interrupts.exit_requested or self.reload_requested:
                     return 'exit'
                 continue
             if self.session.model is None and self.agent.model is None:
                 self.console.print('Choose a model first: /set model <Tab>', style=theme.current().warning)
                 continue
-            try:
-                if await self._turn(text):
-                    return 'exit'
-            finally:
-                if self.editor is not None:
-                    await self.editor.output.drain()
+            with self.screen.busy():
+                try:
+                    if await self._turn(text):
+                        return 'exit'
+                finally:
+                    if self.editor is not None:
+                        await self.editor.output.drain()
 
     async def _turn(self, text: str) -> bool:
         start = TurnStart(text=text)
@@ -459,11 +465,17 @@ class _Shell(Generic[DepsT, OutputT]):
             nonlocal ended
             ended = await self._run_turn(start)
 
-        completed = await self.interrupts.run(run_turn())
+        completed = await self.interrupts.run(self._foreground(run_turn()))
         self.sessions.namer.submit(self.session.summary.id)
         _report_interrupt(completed, self.console)
-        await self.interrupts.run(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
+        await self.interrupts.run(
+            self._foreground(self.loader.fire(ended or TurnEnd(text=start.text, outcome='cancelled')))
+        )
         return self.interrupts.exit_requested
+
+    async def _foreground(self, work: Awaitable[None]) -> None:
+        with self.screen.foreground():
+            await work
 
     async def _run_turn(self, start: TurnStart) -> TurnEnd:
         try:

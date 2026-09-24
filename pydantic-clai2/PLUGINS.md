@@ -138,8 +138,8 @@ Plugins are trusted code running as you. Only install what you trust.
 
 The coding tools are a plugin too, and so are asking you multiple-choice
 questions mid-run, reading the repository's instruction file, and keeping the
-conversation inside the context window. Native desktop notifications and MCP
-configuration are plugins too. These seven plugins are marked
+conversation inside the context window. Native notifications, MCP configuration,
+and update notices are plugins too. These plugins are marked
 `(built-in)` and enabled unless you say otherwise:
 
 | Id | Backed by | Settings | Does |
@@ -151,6 +151,36 @@ configuration are plugins too. These seven plugins are marked
 | `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
 | `notifications` | `pydantic_clai2.notifications` | `{}` | native desktop alerts for completed or failed turns and questions awaiting an answer |
 | `mcp` | `pydantic_clai2.mcp` | `{}` | `/mcp status` and explicit approval to load MCP servers; no servers connected by default |
+| `updates` | `pydantic_clai2.updates` | `{}` | background PyPI update notices, with manual update guidance |
+
+### `updates`: update notices
+
+```text
+/plugins disable updates
+/plugins enable updates
+```
+
+`updates` checks public PyPI once per activation in a background task. A newer
+stable release with an unyanked file compatible with your Python produces a
+notice containing both versions and installation-specific guidance. It never
+runs an installer. Source/direct installs keep their original workflow; uv tool
+receipts, pipx environments, and pip metadata select their own guidance. Other
+uv environments get conditional uvx advice rather than a guessed project/tool
+command. See [update methods](README.md#update-notices) for the full table.
+
+The request has a five-second deadline and a 1 MiB limit, without retries.
+Offline errors, 404s (including an unpublished package), malformed responses,
+and missing local version metadata are silent. PEP 440 comparison ignores
+remote pre-release, development, local, empty, and fully yanked releases.
+It does not use custom indexes or proxy environment settings. No prompts,
+credentials, or installed version are sent. No model calls or capability
+telemetry spans are added: this is terminal maintenance, not an agent operation.
+
+Startup does not await the check. The worker awaits `host.notify` if a turn or
+menu owns output. Disabling persists and cancels both a pending check and a
+pending notice. `session_end` cancels and awaits the task, including on exit or
+reload; enabling or reloading starts a new check. There is no process-global
+worker, recurring poll, or persistent cache.
 
 ### Optional harness capabilities
 
@@ -302,12 +332,13 @@ Files are named `server-N.log` by configuration order and append across turns.
 Each load gets a new directory. Logs can contain sensitive server output; they
 remain after exit for diagnosis, so remove them when no longer needed.
 
-> **Outer cancellation limitation.** In Pydantic AI 2.44.0 and 2.46.0, cancelling
-> an outer AnyIO scope during an MCP tool call can leave the stdio subprocess alive
-> after the run unwinds. Reloading or disabling this plugin does not recover
-> from that leak. Embedded callers must not assume this cancellation path is safe.
-> The core-only regression is retained as a strict expected failure, tracked in
-> [pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548).
+> **Outer cancellation.** In Pydantic AI 2.44.0 and 2.46.0, cancelling an outer
+> AnyIO scope during an MCP tool call also cancels core's connection cleanup, which
+> can leave a stdio subprocess alive ([pydantic-ai issue #8548](https://github.com/pydantic/pydantic-ai/issues/8548)).
+> The `mcp` plugin runs that cleanup in a shielded scope for the servers it loads,
+> so the process stops on this path too; a test cancels an enclosing scope mid-call
+> and checks that the process has exited. `MCPToolset` instances created outside
+> the plugin are still affected; that core regression is kept as a strict expected failure.
 
 ```text
 /plugins add mcp pydantic_clai2.mcp '{"config_path": "/absolute/path/to/.mcp.json"}'
@@ -374,6 +405,53 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+## Browser mode compatibility
+
+```python
+from pydantic_ai import ModelRequestContext, RunContext
+from pydantic_clai2.plugins import PluginHost
+
+
+def activate(host: PluginHost[None]) -> None:
+    @host.on('before_model_request')
+    async def observe(ctx: RunContext[None], request: ModelRequestContext) -> ModelRequestContext:
+        host.console.print(f'Model request {ctx.run_step}')
+        return request
+```
+
+This plugin works in both interfaces. Install the `pydantic-clai2[web]` extra
+and start `clai2 --web` to serve core's `Agent.to_web()` UI on
+<http://127.0.0.1:7932>. See [browser setup and limits](README.md#browser-chat).
+
+| Plugin surface | Browser behavior |
+| --- | --- |
+| `host.add(...)`, core hooks, typed core events | Contribute to core agent runs, including per-run capability factories. |
+| `session_start`, `session_end` | Run once per ASGI lifespan, not once per browser chat. Plugins close after requests drain, before the agent closes and signal handling exits. |
+| `turn_start`, `turn_end` | Registration raises and prevents startup. Use core run hooks for cross-interface guards. |
+| `host.full_screen()` | Raises when called; terminal widgets have no browser equivalent. |
+| Slash commands and `host.render(...)` | May register, but the browser does not dispatch or display them. Core renders its own stream. |
+| `host.console`, `host.notify(...)` | Write to the server's terminal, not the browser. No interactive terminal owns that output. |
+| `host.conversation`, `host.status` | Detached defaults, not the browser's history or status. Use core run context for run data. |
+
+The terminal `ask_user`, `persistence`, `notifications`, and `updates` modules
+are omitted even if enabled in the store. Preferences are not rewritten; the
+next terminal launch still uses them. Omission matches the shipped module,
+not just the plugin ID: replacing one with a custom plugin does not bypass
+compatibility checks. There is no browser answerer for `ask_user` or CLAI SQLite
+saving and resume.
+
+Agent runs share one execution slot per server so browser tabs do not execute
+coding tools concurrently. A real HTTP/stdio regression covers browser
+disconnection during an MCP call: core's streaming runner closes the process.
+Outer AnyIO cancellation of direct `Agent.run()` embeddings is covered in
+[outer cancellation](#mcp-explicitly-approved-mcp-servers).
+
+Other enabled plugin import or activation failures abort startup. Project
+plugins still require approval, and store overrides retain their precedence.
+Use the terminal to change plugin settings, then restart the server. Core owns
+the run loop, tool retries, model settings, and streaming; browser mode does not
+simulate shell turn hooks or add telemetry beyond core and plugin spans.
 
 ## Managing plugins
 
@@ -649,6 +727,26 @@ When no editor or stream is active, taking the screen is a no-op. It only settle
 the screen; drawing, and restoring the terminal afterwards, is the widget's job. One
 widget owns the screen at a time: a second `full_screen()` (from a parallel tool
 call, say) waits for the first block to exit. Do not nest it inside itself.
+
+### Background terminal notices: `await host.notify(message)`
+
+```python
+import asyncio
+from rich.console import Console
+from pydantic_clai2.plugins import PluginHost
+
+host = PluginHost(name='example', console=Console(), settings={})
+asyncio.run(host.notify('A newer release is available.'))
+```
+
+In the shell, `notify` waits until turns and menus release output, then prints
+literal text above the editor without changing its draft. This is terminal text,
+not a native OS notification. A standalone host prints immediately. Use it from a
+plugin-owned background task. A command, turn hook, or `session_end` handler that
+awaits `notify` directly prints at once, because it already owns output and
+waiting would wait for itself; tasks it starts still wait. Cancel and await
+background tasks at `session_end`; cancellation discards a waiting notice. For model
+events, continue to use `host.render` instead.
 
 ### Read your settings: `host.settings(Model)`
 
