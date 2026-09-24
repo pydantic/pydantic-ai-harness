@@ -107,6 +107,16 @@ async def test_fixed_credential_is_shared(server_url: str) -> None:
     assert result.output == '{"whoami":"Bearer deployment-token"}'
 
 
+async def test_callable_auth_object_is_fixed(server_url: str) -> None:
+    class CallableBearer(_Bearer):
+        def __call__(self, ctx: RunContext[User]) -> str:
+            raise AssertionError('a fixed `httpx.Auth` is never called with the run context')  # pragma: no cover
+
+    toolset = per_run_auth(CallableBearer('deployment-token'), connect(server_url), id='whoami')
+    result = await Agent(TestModel(), deps_type=User, toolsets=[toolset]).run('Who am I?', deps=User('ignored'))
+    assert result.output == '{"whoami":"Bearer deployment-token"}'
+
+
 async def test_auth_function_cannot_return_oauth(server_url: str) -> None:
     agent = Agent(TestModel(), deps_type=User, toolsets=[per_run_auth(token, connect(server_url), id='whoami')])
     with pytest.raises(UserError, match="cannot return 'oauth'"):

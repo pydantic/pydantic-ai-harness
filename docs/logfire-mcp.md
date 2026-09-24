@@ -52,9 +52,17 @@ Your application is responsible for getting each user's token, storing it, and r
 `client` also accepts a function, for when users differ in more than their credential, such as users whose data is in the EU region:
 
 ```python
+from dataclasses import dataclass
+
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai import RunContext
 from pydantic_ai_harness.logfire_mcp import LOGFIRE_EU_MCP_URL, LOGFIRE_US_MCP_URL, LogfireMCP
+
+
+@dataclass
+class Deps:
+    logfire_token: str | None
+    logfire_region: str = 'us'
 
 
 def logfire_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
@@ -67,7 +75,7 @@ def logfire_client(ctx: RunContext[Deps]) -> StreamableHttpTransport | None:
 capability = LogfireMCP(client=logfire_client)
 ```
 
-With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `LogfireMCP` to an agent, give each a distinct `id`.
+With durable execution such as Temporal, read the credential from the run's deps rather than from a global, since the function may run in another process. To add more than one `LogfireMCP` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Provider settings
 
