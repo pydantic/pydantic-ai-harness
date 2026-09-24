@@ -14,9 +14,10 @@ def test_explicit_credential_wins(monkeypatch: pytest.MonkeyPatch) -> None:
     assert credential('user-token', env='WHOAMI_TOKEN', service='whoami') == 'user-token'
 
 
-def test_environment_credential(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize('auth', [None, ''])
+def test_environment_credential(auth: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('WHOAMI_TOKEN', 'deployment-token')
-    assert credential(None, env='WHOAMI_TOKEN', service='whoami') == 'deployment-token'
+    assert credential(auth, env='WHOAMI_TOKEN', service='whoami') == 'deployment-token'
 
 
 @pytest.mark.parametrize('env', ['WHOAMI_TOKEN', None])
