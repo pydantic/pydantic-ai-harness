@@ -1,8 +1,8 @@
 """Exercise Composio's MCP wiring through an agent."""
 
 import pytest
-from fastmcp import FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
+from mcp.server.fastmcp import FastMCP
 from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 from pydantic_ai.messages import ModelRequest
