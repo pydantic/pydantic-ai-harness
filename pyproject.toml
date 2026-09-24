@@ -118,6 +118,9 @@ posthog = [
 pylon = [
     "pydantic-ai-slim[mcp]>=2.44.0",
 ]
+e2b = [
+    "e2b>=2.48.0",
+]
 prompt-injection-defender = [
     "stackone-defender>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
@@ -278,7 +281,10 @@ executionEnvironments = [
 addopts = '-p no:cassetter'
 testpaths = ['tests']
 xfail_strict = true
-markers = ['modal_live: runs against a real Modal control plane; needs credentials']
+markers = [
+    'modal_live: runs against a real Modal control plane; needs credentials',
+    'e2b_live: runs against a real E2B control plane; needs credentials',
+]
 filterwarnings = [
     'error',
     # DBOS's run_sync triggers this on Python 3.12+ — not our code.
@@ -294,7 +300,7 @@ anyio_mode = 'auto'
 [tool.coverage.run]
 branch = true
 source = ['pydantic_ai_harness', 'tests']
-omit = ['tests/**/test_modal_live.py']
+omit = ['tests/**/test_modal_live.py', 'tests/**/test_e2b_live.py']
 
 [tool.coverage.paths]
 source = ['.', '/home/runner/work/pydantic-ai-harness/pydantic-ai-harness']
