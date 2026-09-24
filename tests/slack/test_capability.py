@@ -154,13 +154,3 @@ class TestPerRunAuth:
     async def test_read_only_applies_per_run(self) -> None:
         capability = Slack[str | None](auth=lambda ctx: ctx.deps, read_only=True)
         assert len(await connections_for(capability, 'xoxp-alice')) == 1
-
-    async def test_client_provider(self, server: FastMCP) -> None:
-        def client(ctx: RunContext[str]) -> FastMCP | None:
-            return server if ctx.deps else None
-
-        agent = Agent(TestModel(), deps_type=str, capabilities=[Slack(client=client, read_only=True)])
-        result = await agent.run('Use the tools', deps='alice')
-        assert result.output == '{"read_resource":"read"}'
-        result = await agent.run('Use the tools', deps='')
-        assert result.output == 'success (no tool calls)'

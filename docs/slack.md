@@ -48,7 +48,30 @@ The function is called at the start of each run, so each run connects as its own
 
 Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Slack" button in your web app. The function only reads the current token.
 
-`client` also accepts a function that returns a client or transport for each run.
+When users differ in more than their credential, such as giving some users read-only access, build the whole capability for each run with a [dynamic capability](/ai/capabilities/custom/#dynamically-building-a-capability):
+
+```python
+from dataclasses import dataclass
+
+from pydantic_ai import Agent, RunContext
+from pydantic_ai.capabilities import DynamicCapability
+from pydantic_ai_harness.slack import Slack
+
+
+@dataclass
+class Deps:
+    slack_user_token: str | None
+    read_only: bool = False
+
+
+def slack(ctx: RunContext[Deps]) -> Slack[Deps] | None:
+    if ctx.deps.slack_user_token is None:
+        return None
+    return Slack(auth=ctx.deps.slack_user_token, read_only=ctx.deps.read_only)
+
+
+agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[DynamicCapability(slack, id='slack')])
+```
 
 With durable execution such as Temporal, read the token from the run's deps rather than from a global, since the function may run in another process. To add more than one `Slack` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same.
 
@@ -83,6 +106,6 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 
 Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` and `include_instructions` still apply. `include_instructions=False` stops the server's own instructions from reaching the agent.
 
-A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
+A `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](/ai/capabilities/prefix-tools/).
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/slack/)
