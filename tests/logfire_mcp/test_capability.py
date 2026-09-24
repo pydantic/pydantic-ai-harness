@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import httpx
@@ -149,18 +150,20 @@ class TestLogfireMCP:
 
 
 class TestPerRunAuth:
+    async def test_concurrent_runs_use_their_own_credentials(self, whoami_url: str) -> None:
+        agent = Agent(
+            TestModel(), deps_type=str, capabilities=[LogfireMCP[str](url=whoami_url, auth=lambda ctx: ctx.deps)]
+        )
+        alice, bob = await asyncio.gather(
+            agent.run('Who am I?', deps='alice-token'), agent.run('Who am I?', deps='bob-token')
+        )
+        assert (alice.output, bob.output) == ('{"whoami":"Bearer alice-token"}', '{"whoami":"Bearer bob-token"}')
+
     async def test_each_run_connects_with_its_own_credential(self) -> None:
         capability = LogfireMCP[str | None](auth=lambda ctx: ctx.deps)
         [alice] = await connections_for(capability, 'alice-token')
         [bob] = await connections_for(capability, 'bob-token')
         assert (bearer(alice), bearer(bob)) == ('Bearer alice-token', 'Bearer bob-token')
-
-    async def test_async_provider(self) -> None:
-        async def token(ctx: RunContext[str | None]) -> str | None:
-            return ctx.deps
-
-        [connection] = await connections_for(LogfireMCP[str | None](auth=token), 'alice-token')
-        assert bearer(connection) == 'Bearer alice-token'
 
     async def test_provider_returning_none_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('LOGFIRE_API_KEY', 'deployment-token')

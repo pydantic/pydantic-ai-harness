@@ -28,6 +28,8 @@ from mcp.server.fastmcp import FastMCP
 from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
 
 from pydantic_ai_harness.logfire_mcp import LogfireMCP
 
@@ -87,6 +89,34 @@ agent = Agent(
 )
 
 
+def _user_token(ctx: RunContext[str]) -> str:
+    return ctx.deps
+
+
+# The URL is set by the test, once the local server is up.
+per_user = LogfireMCP[str](auth=_user_token, include_instructions=False)
+per_user_agent = Agent(
+    TestModel(),
+    name='logfire_mcp_per_user_agent',
+    deps_type=str,
+    capabilities=[
+        per_user,
+        TemporalDurability[str](
+            activity_config=ActivityConfig(
+                start_to_close_timeout=timedelta(seconds=60), retry_policy=RetryPolicy(maximum_attempts=1)
+            )
+        ),
+    ],
+)
+
+
+@workflow.defn
+class PerUserWorkflow:
+    @workflow.run
+    async def run(self, token: str) -> str:
+        return (await per_user_agent.run('Who am I?', deps=token)).output
+
+
 @workflow.defn
 class LogfireWorkflow:
     @workflow.run
@@ -111,3 +141,23 @@ async def test_current_time_is_read_in_an_activity(client: Client) -> None:
         )
 
     assert 'Current UTC time is `' in output
+
+
+async def test_auth_function_runs_under_temporal(client: Client, whoami_url: str) -> None:
+    per_user.url = whoami_url
+    async with Worker(
+        client,
+        task_queue=TASK_QUEUE,
+        workflows=[PerUserWorkflow],
+        plugins=[AgentPlugin(per_user_agent)],
+        workflow_runner=SandboxedWorkflowRunner(restrictions=_SANDBOXED),
+    ):
+        output = await client.execute_workflow(
+            PerUserWorkflow.run,
+            'alice-token',
+            id='test_logfire_mcp_temporal_per_user',
+            task_queue=TASK_QUEUE,
+            execution_timeout=timedelta(seconds=25),
+        )
+
+    assert output == '{"whoami":"Bearer alice-token"}'
