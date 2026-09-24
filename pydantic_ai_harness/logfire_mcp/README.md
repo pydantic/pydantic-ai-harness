@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[logfire-mcp]" "pydantic-ai-slim[openai]"
 ```
 
-Set `LOGFIRE_API_KEY`, or pass `auth=` an API key. See the [provider setup](https://pydantic.dev/docs/logfire/guides/mcp-server/).
+Set `LOGFIRE_API_KEY`, or pass `auth=` an API key. On your own machine, `auth='oauth'` signs you in through the browser instead. See the [provider setup](https://pydantic.dev/docs/logfire/guides/mcp-server/).
 
 ```python
 from pydantic_ai import Agent
@@ -37,7 +37,8 @@ print(result.output)
 | --- | --- |
 | Not set, `None`, or `''` | `LOGFIRE_API_KEY`. If that is not set either, creating the agent raises an error. |
 | An API key | That key, for every run. |
-| A function | Called at the start of each run. The key it returns is used for that run. If it returns `None` or `''`, that run has no Logfire tools. A function never uses `LOGFIRE_API_KEY`. |
+| `'oauth'` | The account you sign in to through the browser. This only works on your own machine. |
+| A function | Called at the start of each run. The key it returns is used for that run. If it returns `None` or `''`, that run has no Logfire tools. A function never uses `LOGFIRE_API_KEY`, and must not return `'oauth'`. |
 
 A fixed key or `LOGFIRE_API_KEY` suits a script or an agent on your own machine, where every run is the same account.
 

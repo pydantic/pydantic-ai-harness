@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from fastmcp.client.auth import OAuth
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -177,6 +178,15 @@ class TestPerRunAuth:
         agent = Agent(TestModel(), capabilities=[LogfireMCP[object](auth=no_credential)])
         result = await agent.run('Use the tools')
         assert result.output == 'success (no tool calls)'
+
+    async def test_provider_returning_oauth_raises(self) -> None:
+        capability = LogfireMCP[str | None](auth=lambda ctx: ctx.deps)
+        with pytest.raises(UserError, match="must return an API key or token, not 'oauth'"):
+            await connections_for(capability, 'oauth')
+
+    @pytest.mark.filterwarnings('ignore:Using in-memory token storage')
+    def test_fixed_oauth_uses_browser_login(self) -> None:
+        assert isinstance(transport(LogfireMCP(auth='oauth')).auth, OAuth)
 
     async def test_read_only_applies_per_run(self) -> None:
         capability = LogfireMCP[str | None](auth=lambda ctx: ctx.deps, read_only=True)
