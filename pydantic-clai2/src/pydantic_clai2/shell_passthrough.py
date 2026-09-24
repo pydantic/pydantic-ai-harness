@@ -52,7 +52,7 @@ async def run_shell_command(command: str, *, console: Console, interrupts: Inter
     started = time.monotonic()
     try:
         completed = await interrupts.run(execute())
-    except OSError as exc:
+    except (OSError, ValueError) as exc:  # `ValueError`: the command text contains a NUL byte.
         console.print(f'Shell error: {exc}', style=theme.color(theme.ERROR), markup=False)
         console.print()
         return

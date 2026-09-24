@@ -96,6 +96,10 @@ class TestShellPassthrough:
         text = await shell_session(tmp_path, monkeypatch, ['!ls', '/exit'])
         assert 'Shell error: no shell' in text
 
+    async def test_nul_byte_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        text = await shell_session(tmp_path, monkeypatch, ['!echo a\x00b', '/exit'])
+        assert 'Shell error: embedded null byte' in text
+
     async def test_bare_bang_is_a_prompt(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         text = await shell_session(tmp_path, monkeypatch, ['!', '/exit'], agent_turns=1)
         assert 'agent reply' in text
