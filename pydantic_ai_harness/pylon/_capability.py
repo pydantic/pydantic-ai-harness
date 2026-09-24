@@ -77,7 +77,7 @@ class Pylon(AbstractCapability[AgentDepsT]):
     """
 
     read_only: bool = False
-    """Expose only tools the server marks read-only; unmarked tools are omitted."""
+    """Give the agent only the tools the server labels as read-only. A tool without that label is left out."""
 
     include_instructions: bool = True
     """Pass the server's own instructions to the agent."""

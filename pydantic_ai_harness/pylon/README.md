@@ -108,9 +108,10 @@ error.
 
 ## Tool selection and approval
 
-`read_only=True` keeps only the tools the server marks as read-only. If the
-server does not mark its read tools, this can leave none. The token is still
-what controls access.
+`read_only=True` gives the agent only the tools that Pylon's server labels as
+read-only, and leaves out all the others. If Pylon has not labeled its read
+tools, the agent gets no Pylon tools at all. The token's permissions still
+decide what the agent can reach.
 
 To filter tools or require approval in your application, wrap the toolset with
 the existing [toolset
