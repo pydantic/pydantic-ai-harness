@@ -41,7 +41,7 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     from pydantic_ai import Agent
     from pydantic_ai_harness import Ordinal
 
-    agent = Agent('openai:gpt-5', capabilities=[Ordinal()])
+    agent = Agent('openai:gpt-5.6-sol', capabilities=[Ordinal()])
     ```
     """
 
@@ -56,11 +56,7 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
-        """Build the Ordinal MCP connection.
-
-        This capability does not emit its own spans. It only constructs the
-        hosted connection; Pydantic AI's MCP toolset traces tool calls.
-        """
+        """Return the Ordinal MCP tools."""
         return per_run_auth(self.auth, self._connect, id=self.id if self.id is not None else 'ordinal')
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:

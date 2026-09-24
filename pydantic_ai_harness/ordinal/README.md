@@ -41,7 +41,7 @@ model, install that provider's extra instead.
 from pydantic_ai import Agent
 from pydantic_ai_harness import Ordinal
 
-agent = Agent('openai:gpt-5', capabilities=[Ordinal()])
+agent = Agent('openai:gpt-5.6-sol', capabilities=[Ordinal()])
 result = agent.run_sync('List my Ordinal workspaces')
 print(result.output)
 ```
@@ -82,7 +82,7 @@ def ordinal_token(ctx: RunContext[Deps]) -> str | None:
     return ctx.deps.ordinal_token
 
 
-agent = Agent('openai:gpt-5', deps_type=Deps, capabilities=[Ordinal(auth=ordinal_token)])
+agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Ordinal(auth=ordinal_token)])
 ```
 
 The function is called at the start of each run, so each run connects as its own
