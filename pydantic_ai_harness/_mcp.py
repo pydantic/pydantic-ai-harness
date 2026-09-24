@@ -9,19 +9,13 @@ from pydantic_ai.tools import ToolDefinition
 
 
 def credential(auth: str | None, *, env: str | None, service: str) -> str:
-    """The credential to connect with: `auth`, else the `env` variable. An empty string counts as unset.
-
-    Browser OAuth (`'oauth'`) is rejected: it opens a browser on the host and waits for a callback, which
-    hangs an agent running on a server.
-    """
+    """The API key or token to connect with: `auth`, else the `env` variable. An empty string counts as unset."""
     if not auth and env is not None:
         auth = environ.get(env)
     if not auth:
         raise UserError(
             f'Set `{env}` or pass `auth` to connect to {service}.' if env else f'Pass `auth` to connect to {service}.'
         )
-    if auth == 'oauth':
-        raise UserError('Browser OAuth is not supported; pass an API key or a token as `auth`.')
     return auth
 
 

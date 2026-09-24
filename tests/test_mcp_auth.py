@@ -28,14 +28,6 @@ def test_missing_credential_raises(auth: str | None, env: str | None, monkeypatc
         credential(auth, env=env, service='whoami')
 
 
-def test_oauth_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
-    with pytest.raises(UserError, match='Browser OAuth is not supported'):
-        credential('oauth', env=None, service='whoami')
-    monkeypatch.setenv('WHOAMI_TOKEN', 'oauth')
-    with pytest.raises(UserError, match='Browser OAuth is not supported'):
-        credential(None, env='WHOAMI_TOKEN', service='whoami')
-
-
 @pytest.mark.parametrize(
     ('metadata', 'expected'),
     [
