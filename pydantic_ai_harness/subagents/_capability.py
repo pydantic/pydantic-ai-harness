@@ -18,7 +18,6 @@ from pydantic_ai.settings import ModelSettings
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
 
-from pydantic_ai_harness._workspace import workspace_attached
 from pydantic_ai_harness.subagents._disk import (
     AgentOverride,
     DiskDefinition,
@@ -346,7 +345,7 @@ class SubAgents(AbstractCapability[AgentDepsT]):
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Read the project folder's definitions through `ctx.workspace` and rebuild this run's roster."""
-        if not self._per_run or not isinstance(self.agent_folders, str) or not workspace_attached(ctx.workspace):
+        if not self._per_run or not isinstance(self.agent_folders, str) or not ctx.workspace.attached:
             return
         project = await load_workspace_definitions(ctx.workspace, self.agent_folders)
         if not project:

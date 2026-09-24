@@ -17,7 +17,7 @@ from pydantic_ai.toolsets import AgentToolset
 from pydantic_ai.workspaces import WorkspaceError
 
 from pydantic_ai_harness._usage import reserved_usage_limits
-from pydantic_ai_harness._workspace import raise_tool_failure, workspace_attached
+from pydantic_ai_harness._workspace import raise_tool_failure
 from pydantic_ai_harness.tool_output_limits._bands import (
     Action,
     Band,
@@ -220,7 +220,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
 
     def _store_for(self, ctx: RunContext[AgentDepsT]) -> OverflowStore | WorkspaceStore:
         """The store for this run: the default spills to the host when the run has no workspace."""
-        if self._host_store is not None and not workspace_attached(ctx.workspace):
+        if self._host_store is not None and not ctx.workspace.attached:
             return self._host_store
         return self._store
 

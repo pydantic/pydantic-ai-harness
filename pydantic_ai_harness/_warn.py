@@ -3,8 +3,9 @@
 Used by the compatibility shims left behind by the capability naming pass: a renamed
 module keeps a shim package at its old path, and a renamed class keeps a module-level
 `__getattr__` alias, both emitting `HarnessDeprecationWarning` through these helpers.
-`warn_default_changed` covers the other breaking shape: an option whose default moved,
-where existing callers keep working but get different behavior.
+`warn_default_changed` covers an option whose default moved, where existing callers keep
+working but get different behavior, and `warn_argument_ignored` an argument that is still
+accepted but no longer does anything.
 """
 
 from __future__ import annotations
@@ -73,4 +74,18 @@ def warn_class_renamed(old: str, new: str, module: str) -> None:
         f'Update your imports; this deprecated alias will be removed in a future release.',
         category=HarnessDeprecationWarning,
         stacklevel=3,
+    )
+
+
+def warn_argument_ignored(owner: str, argument: str, fix: str, *, stacklevel: int = 4) -> None:
+    """Emit a `HarnessDeprecationWarning` that `<owner>(<argument>=...)` is deprecated and now has no effect.
+
+    For an argument whose job moved elsewhere: the value is accepted so existing code still
+    constructs, but it is ignored, so the warning has to say what to do instead. `fix` is that
+    instruction. `stacklevel` defaults to reporting the caller of a dataclass `__post_init__`.
+    """
+    warnings.warn(
+        f'`{owner}({argument}=...)` is deprecated and ignored: {fix}',
+        category=HarnessDeprecationWarning,
+        stacklevel=stacklevel,
     )

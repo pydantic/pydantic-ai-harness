@@ -14,9 +14,8 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
-from pydantic_ai.workspaces import LocalWorkspaceBackend, ReadOnlyWorkspace, UnavailableWorkspace, Workspace
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
-from pydantic_ai_harness._workspace import workspace_attached
 from pydantic_ai_harness.subagents import (
     MINIMUM_EFFORT_FLOOR,
     AgentOverride,
@@ -444,13 +443,3 @@ class TestWorkspaceDiscovery:
         instructions = seen[0][0]
         assert instructions is not None
         assert all(f'- {name}' in instructions for name in ('alpha', 'beta', 'worker'))
-
-
-class TestWorkspaceAttached:
-    def test_real_and_wrapped_workspaces_are_attached(self, tmp_path: Path) -> None:
-        workspace = Workspace(LocalWorkspaceBackend(tmp_path))
-        assert workspace_attached(workspace)
-        assert workspace_attached(ReadOnlyWorkspace(workspace))
-
-    def test_placeholder_is_not_attached(self) -> None:
-        assert not workspace_attached(Workspace(UnavailableWorkspace('none')))

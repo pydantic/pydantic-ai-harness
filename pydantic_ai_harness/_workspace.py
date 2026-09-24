@@ -1,12 +1,13 @@
 """Private helpers for capabilities adopting the run sandbox."""
 
+import posixpath
 from pathlib import Path
 from typing import NoReturn
 
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ToolFailed, UserError
 from pydantic_ai.workspaces import (
     SupportsCommands,
-    UnavailableWorkspace,
     Workspace,
     WorkspaceBackend,
     WorkspaceError,
@@ -52,12 +53,12 @@ def raise_tool_failure(error: WorkspaceError) -> NoReturn:
 
 
 def supports_commands(workspace: Workspace) -> bool:
-    """Whether `workspace.run` can succeed: the innermost backend executes commands and no policy refuses them.
+    """Whether `workspace.run` can succeed: a workspace is attached, its innermost backend executes commands, and no policy refuses them.
 
     Wrappers are unwrapped through `wrapped`, not `backend`: a durable workspace refuses
     `backend` in workflow code, where tool registration runs.
     """
-    if workspace.read_only:
+    if not workspace.attached or workspace.read_only:
         return False
     current: WorkspaceBackend = workspace
     while isinstance(current, Workspace):
@@ -65,13 +66,52 @@ def supports_commands(workspace: Workspace) -> bool:
     return isinstance(current, SupportsCommands)
 
 
-def workspace_attached(workspace: Workspace) -> bool:
-    """Whether the run has a real workspace, rather than core's placeholder for a run without one.
+def require_workspace(workspace: Workspace, owner: str) -> None:
+    """Raise `UserError` when the run has no workspace, naming `owner` and how to attach one.
 
-    Wrappers are unwrapped through `wrapped`, not `backend`: a durable workspace refuses `backend`
-    in workflow code.
+    Called from `before_run`, so a missing workspace fails the run at its start rather than on
+    the first tool call.
     """
-    current: WorkspaceBackend = workspace
-    while isinstance(current, Workspace):
-        current = current.wrapped if isinstance(current, WrapperWorkspace) else current.backend
-    return not isinstance(current, UnavailableWorkspace)
+    if not workspace.attached:
+        raise UserError(
+            f'`{owner}` needs a workspace, but none is attached to this run. '
+            "Add `LocalWorkspace('.')` (this machine) or a sandbox capability such as `ModalSandbox()` "
+            "to the agent's capabilities, or pass `workspace=` to the run. "
+            'See https://pydantic.dev/docs/ai/workspace/'
+        )
+
+
+def secondary_workspace(value: WorkspaceBackend | None, owner: str) -> Workspace | None:
+    """Validate a capability's own `workspace=` argument, for storage or resources kept outside the run's workspace.
+
+    It takes a backend (or a `Workspace` facade), never a workspace capability: the capability
+    supplies a run's workspace, not one to read from on the side.
+    """
+    if value is None:
+        return None
+    if isinstance(value, AbstractCapability):
+        raise TypeError(
+            f'`{owner}(workspace=...)` takes a workspace backend, not the `{type(value).__name__}` capability. '
+            "Pass a backend such as `LocalWorkspaceBackend('/app')`."
+        )
+    return value if isinstance(value, Workspace) else Workspace(value)
+
+
+METADATA_DIR = '.pydantic-ai-harness'
+"""The directory, below a workspace's working directory, that holds files harness capabilities keep for themselves."""
+
+
+async def metadata_dir(workspace: Workspace, name: str) -> str:
+    """Return `<working_dir>/.pydantic-ai-harness/<name>`, creating it.
+
+    The first time `.pydantic-ai-harness` is created it gets a `.gitignore` holding `*`, so none
+    of it shows up in `git status`. Only filesystem operations are used, so a workspace that
+    cannot run commands works too.
+    """
+    root = posixpath.join(await workspace.working_dir(), METADATA_DIR)
+    if not await workspace.exists(root):
+        await workspace.make_dir(root)
+        await workspace.write_text(posixpath.join(root, '.gitignore'), '*\n')
+    directory = posixpath.join(root, name)
+    await workspace.make_dir(directory)
+    return directory
