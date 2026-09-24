@@ -11,7 +11,7 @@ Source: https://docs.tryordinal.com/mcp/introduction
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
@@ -19,7 +19,7 @@ from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import credential
+from pydantic_ai_harness._mcp import credential, one_connection
 
 try:
     from pydantic_ai.mcp import MCPToolset
@@ -29,6 +29,7 @@ except ImportError as _import_error:  # pragma: no cover
     ) from _import_error
 
 _ORDINAL_MCP_URL = 'https://app.tryordinal.com/mcp'
+_ID = 'ordinal'
 _DEFAULT_DESCRIPTION = 'Work inside an Ordinal workspace: draft, schedule, and analyze social posts.'
 
 
@@ -47,6 +48,9 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     ```
     """
 
+    id: str | None = field(default=_ID, kw_only=True)
+    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Ordinal` on one agent its own."""
+
     description: str | None = _DEFAULT_DESCRIPTION
     """Routing description used when the capability is loaded on demand."""
 
@@ -56,9 +60,14 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     Unset, it uses `ORDINAL_ACCESS_TOKEN`. A function never does: if it returns `None` or `''`, that run has no Ordinal tools.
     """
 
+    @classmethod
+    def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
+        """Two `Ordinal`s under one `id` are the same connection stated twice, or an error if they differ."""
+        return one_connection(capabilities)
+
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Ordinal MCP tools."""
-        id = self.id if self.id is not None else 'ordinal'
+        id = self.id if self.id is not None else _ID
         if callable(self.auth):
             return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
         return self._connect(self.auth)
@@ -73,7 +82,7 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             _ORDINAL_MCP_URL,
-            id=self.id if self.id is not None else 'ordinal',
+            id=self.id if self.id is not None else _ID,
             auth=credential(auth, env='ORDINAL_ACCESS_TOKEN', service='Ordinal'),
             include_instructions=True,
         )

@@ -141,7 +141,21 @@ class Combines:
     check: Callable[[Any], None]
 
 
-Policy = Anonymous | Collides | Combines | Rejected
+@dataclass
+class Refuses:
+    """A default `id`, but `combine` refuses two that differ: one configuration stated twice is one.
+
+    For connections to a provider. Merging two field by field could send one account's credential to
+    another's server or drop `read_only`, so a differing pair raises and names the fix: a distinct `id`
+    each, and `PrefixTools`. The default `id` still lets `defer_loading=True` work without one.
+    """
+
+    reason: str
+    make: Callable[[type[Any]], tuple[AbstractCapability[Any], AbstractCapability[Any]]]
+    """Builds two that differ, from the discovered class, without credentials or a network."""
+
+
+Policy = Anonymous | Collides | Combines | Refuses | Rejected
 
 
 def _check_memory(merged: Any) -> None:
@@ -309,7 +323,10 @@ COMBINE_POLICY: dict[str, Policy] = {
         'its toolset registers `aws_cli` and `localstack_health` under fixed names',
         lambda cls: (cls(), cls()),
     ),
-    'Ordinal': Collides('its toolset registers the hosted Ordinal MCP tools under fixed names'),
+    'Ordinal': Refuses(
+        'one Ordinal connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'CodeMode': Collides('`run_code` is reserved, so a second one is rejected by name'),
     'BrowserUse': Collides('its toolset registers its browser tools under fixed names'),
     'PlaywrightBrowser': Collides('its toolset registers `click` and friends under fixed names'),
@@ -480,8 +497,15 @@ def test_capability_combine_policy_holds(name: str) -> None:
         return
 
     assert declares_default_id(capability_type), (
-        f'{name} is declared `Combines` but its class declares no default id, so two never meet'
+        f'{name} is declared `{type(policy).__name__}` but its class declares no default id, so two never meet'
     )
+    if isinstance(policy, Refuses):
+        first, second = policy.make(capability_type)
+        assert first.id is not None and first.id == second.id
+        assert capability_type.combine([first, first]) is first
+        with pytest.raises(UserError, match='share the id'):
+            capability_type.combine([first, second])
+        return
     first, second = policy.make()
     assert first.id is not None and first.id == second.id, (
         f'{name} is declared `Combines` but two instances do not share an id'

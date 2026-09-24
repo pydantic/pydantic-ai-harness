@@ -102,6 +102,13 @@ class TestOrdinal:
         assert isinstance(toolset, MCPToolset)
         assert toolset.id == 'tenant-ordinal'
 
+    def test_defer_loading_needs_no_id(self) -> None:
+        Agent(TestModel(), capabilities=[Ordinal(auth='ordinal-token', defer_loading=True)])
+
+    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Two `Ordinal` capabilities share the id 'ordinal'"):
+            Agent(TestModel(), capabilities=[Ordinal(auth='a'), Ordinal(auth='b')])
+
     def test_missing_auth_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('ORDINAL_ACCESS_TOKEN', raising=False)
         with pytest.raises(UserError, match='Set `ORDINAL_ACCESS_TOKEN`'):
