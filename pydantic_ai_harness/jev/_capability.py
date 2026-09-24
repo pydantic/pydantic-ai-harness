@@ -408,9 +408,9 @@ class _Pick(WrapperCapability[AgentDepsT]):
 
     def _unless_shadowed(self, ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> bool:
         leaves = _leaves(ctx.root_capability)
-        # A pick of a capability that bundles others is walked into, so what it wraps is not a rival.
-        inside = {id(inner) for leaf in leaves if isinstance(leaf, _Pick) for inner in _leaves(leaf.wrapped)}
-        rivals = [leaf for leaf in leaves if id(leaf) not in inside and isinstance(_unpicked(leaf), type(self.wrapped))]
+        # The run lists a picked capability next to its `_Pick` when it bundles others; it is the pick, not a rival.
+        picked = {id(leaf.wrapped) for leaf in leaves if isinstance(leaf, _Pick)}
+        rivals = [leaf for leaf in leaves if id(leaf) not in picked and isinstance(_unpicked(leaf), type(self.wrapped))]
         first = next((_unpicked(leaf) for leaf in rivals), self.wrapped)
         return first is self.wrapped and all(isinstance(leaf, _Pick) for leaf in rivals)
 

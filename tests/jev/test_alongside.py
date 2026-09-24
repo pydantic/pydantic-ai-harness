@@ -172,3 +172,19 @@ class TestOtherCapabilities:
         await Agent(main_model([]), capabilities=[picker]).run('what time is it?')
 
         assert [s.tools for s in seen] == [['clock_now']]
+
+    async def test_a_pick_gives_way_to_the_same_capability_inside_another_pick(self):
+        seen: list[Seen] = []
+        picker = JevCapabilityComposer(
+            models={'strong': composer(Jev(), seen).models['strong']},
+            catalog={
+                'kit': ComposableCapability(description='A kit', capability=Kit),
+                'clock': ComposableCapability(description='Tell the time', capability=Clock),
+            },
+            jev_model=Jev(capabilities=('kit', 'clock')).model_,
+        )
+
+        result = await Agent(main_model([]), capabilities=[picker]).run('what time is it?')
+
+        assert result.output == 'strong answered'
+        assert [s.tools for s in seen] == [['clock_now']]
