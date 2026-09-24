@@ -1056,8 +1056,9 @@ is still writing:
 
 - **Eager execution** runs each complete statement as soon as it has streamed,
   so a slow `shell` build or test starts before the snippet is finished.
-- **Speculation** starts `list_files`, `read_file`, and `grep` calls whose
-  arguments are all literals the moment their line has streamed. Only these
+- **Speculation** starts `list_files`, `read_file`, `grep`, and
+  `read_clai_customization_guide` calls whose arguments are all literals the
+  moment their line has streamed. Only these
   read-only tools speculate, because an early call may belong to a branch the
   snippet never takes. Writes and shell commands never start speculatively.
 

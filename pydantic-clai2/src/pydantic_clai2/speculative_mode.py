@@ -31,11 +31,15 @@ from pydantic_ai_harness.code_mode import (
 )
 from pydantic_monty import MountDir, OSAccess
 
+from .customization import read_clai_customization_guide
 from .eager_timing import EagerExecutionCompletedEvent, EagerTiming
 from .speculation import SpeculationCounters
 
-SPECULATIVE_TOOLS = ('list_files', 'read_file', 'grep')
-"""Pure with respect to the workspace, so safe to start early, re-run, or discard."""
+SPECULATIVE_TOOLS = ('list_files', 'read_file', 'grep', read_clai_customization_guide.__name__)
+"""Pure with respect to the workspace, so safe to start early, re-run, or discard.
+
+The customization guide reads a file shipped inside the package and takes no arguments.
+"""
 
 NATIVE_TOOLS = frozenset({'write_file', 'edit_file'})
 """CLAI's equivalents of Code Puppy's native `create_file` and `replace_in_file`."""

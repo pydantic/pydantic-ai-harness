@@ -31,6 +31,7 @@ from pydantic_clai2 import StreamRenderer, theme
 from pydantic_clai2.command_context import CommandContext
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import Settings, resolve_settings
+from pydantic_clai2.customization import customization_guide
 from pydantic_clai2.eager_timing import EagerExecutionCompletedEvent
 from pydantic_clai2.image_input import ImageInput
 from pydantic_clai2.interrupts import Interrupts
@@ -153,14 +154,14 @@ def fold_agent(model: FunctionModel, counters: SpeculationCounters) -> Agent[Non
 
 
 class TestFold:
-    async def test_coder_tool_names_match_the_allowlists(self) -> None:
+    async def test_shipped_tool_names_match_the_allowlists(self) -> None:
         seen: list[str] = []
 
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             seen.extend(tool.name for tool in info.function_tools)
             return ModelResponse(parts=[TextPart('done')])
 
-        agent = Agent(FunctionModel(respond), capabilities=[Coder(repo_context=False)])
+        agent = Agent(FunctionModel(respond), capabilities=[Coder(repo_context=False), customization_guide()])
         await agent.run('hi')
         assert {*SPECULATIVE_TOOLS, *NATIVE_TOOLS} <= set(seen)
 
