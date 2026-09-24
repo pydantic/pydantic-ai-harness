@@ -57,7 +57,7 @@ from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.tool_output_limits import Band, Spill, Summarize, Truncate
 
 agent = Agent(
-    'openai:gpt-4o',
+    'anthropic:claude-sonnet-5',
     capabilities=[
         ToolOutputLimits(
             bands=[
@@ -80,7 +80,7 @@ returns untouched.
 ### Fallbacks with `then`
 
 Every action takes an optional `then`, applied when the action cannot run: a `Spill` whose
-store errors (for example, no workspace is attached), a `Truncate` / `Summarize` on a binary
+store errors (for example, the workspace is read-only), a `Truncate` / `Summarize` on a binary
 payload, a `Summarize` whose model call raises. `then` chains, so
 `Summarize(then=Spill(then=Truncate()))` degrades summarize -> spill -> truncate.
 
@@ -95,7 +95,7 @@ from pydantic_ai_harness import ToolOutputLimits
 from pydantic_ai_harness.tool_output_limits import Band, Truncate, TruncationStrategy
 
 agent = Agent(
-    'openai:gpt-4o',
+    'anthropic:claude-sonnet-5',
     capabilities=[
         ToolOutputLimits(
             per_tool={
@@ -145,7 +145,7 @@ Keep Shell's native `max_output_chars` above the `ToolOutputLimits` thresholds. 
 `tail` truncation for moderate command output and `Spill` for large output:
 
 ```python
-from pathlib import Path
+import os
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
@@ -161,8 +161,9 @@ from pydantic_ai_harness.tool_output_limits import (
 
 tail = Truncate(max_chars=4_000, strategy=TruncationStrategy.tail)
 agent = Agent(
-    'openai:gpt-5.6-sol',
+    'anthropic:claude-sonnet-5',
     capabilities=[
+        LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
         Shell(allowed_commands=['git', 'rg', 'pytest'], max_output_chars=100_000),
         ToolOutputLimits(
             bands=[],
@@ -173,7 +174,6 @@ agent = Agent(
                 ],
             },
         ),
-        LocalWorkspace(working_dir=Path.cwd()),
     ],
 )
 ```
@@ -237,23 +237,33 @@ live in the sandbox, next to everything else the agent works on. The handle is t
 absolute workspace path, so a workspace file tool such as `FileSystem`'s `read_file` can open it
 too; `read_tool_result` only reads handles inside the store directory.
 
-Files go under `$TMPDIR/pydantic-ai-harness/tool-output` in the workspace (`/tmp` when `TMPDIR`
-is unset), created owner-only. A workspace that cannot run commands uses
-`.pydantic-ai-harness/tool-output` below its working directory. Pass `directory` to choose
-another location:
+Files go under `.pydantic-ai-harness/tool-output` in the workspace's working directory.
+`.pydantic-ai-harness/` gets a `.gitignore` holding `*`, so the files stay out of `git status`.
+Pass `directory` to choose another location in the workspace, or `workspace` to keep spills in a
+different workspace than the run's:
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness.tool_output_limits import ToolOutputLimits, WorkspaceStore
 
-agent = Agent('openai:gpt-4o', capabilities=[ToolOutputLimits(store=WorkspaceStore(directory='/data/spills'))])
+agent = Agent(
+    'anthropic:claude-sonnet-5',
+    capabilities=[LocalWorkspace('.'), ToolOutputLimits(store=WorkspaceStore(directory='/data/spills'))],
+)
+spills_elsewhere = ToolOutputLimits(store=WorkspaceStore(workspace=LocalWorkspaceBackend('/var/spills')))
 ```
+
+`workspace=` takes a workspace backend, not the `LocalWorkspace` capability. In this release it is
+used in-process only: a durable engine does not route it through its workflow.
 
 Spilled files are kept for the life of the workspace; they are not pruned by this capability.
 
-With no workspace attached, a spill warns and falls back to its `then` action (a bounded
-truncation by default). For runs without a workspace, use `LocalFileStore`, which writes to the
-host's temp directory:
+When a band can spill and the run has no workspace for the store to write to, the run fails at
+its start. For runs without a workspace, use `LocalFileStore`, which writes to the host's temp
+directory. A read-only workspace cannot take spills: the spill warns and falls back to its `then`
+action (a bounded truncation by default).:
 
 ```python
 from datetime import timedelta
@@ -262,7 +272,7 @@ from pydantic_ai import Agent
 from pydantic_ai_harness.tool_output_limits import LocalFileStore, ToolOutputLimits
 
 store = LocalFileStore(cleanup_after=timedelta(hours=6))  # default: None = keep forever
-agent = Agent('openai:gpt-4o', capabilities=[ToolOutputLimits(store=store)])
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[ToolOutputLimits(store=store)])
 ```
 
 `LocalFileStore` creates its root owner-only, rejects handles that resolve outside it, and with

@@ -39,10 +39,11 @@ authoring a hook means authoring a capability that overrides one lifecycle metho
 from pathlib import Path
 
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import CapabilityCreation
 
 creation = CapabilityCreation(directory=Path('.authored'))
-agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[creation])
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[LocalWorkspace('.'), creation])
 ```
 
 `CapabilityCreation` also contributes static, cache-stable system-prompt guidance
@@ -71,10 +72,11 @@ capability is live on the very next loop iteration -- no process restart.
 from pathlib import Path
 
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import CapabilityCreation
 
 creation = CapabilityCreation(directory=Path('.authored'))
-agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[creation])
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[LocalWorkspace('.'), creation])
 
 history = None
 done = False
@@ -97,6 +99,12 @@ Capability names must be lowercase letters, digits, and underscores, starting wi
 letter; reusing a name replaces the previous capability of that name.
 
 ## Trust boundary
+
+`CapabilityCreation` imports model-written Python into the agent's own process, on this
+machine. A run therefore refuses to start unless its
+[workspace](https://pydantic.dev/docs/ai/workspace/) is a writable `LocalWorkspace`: next to a
+sandbox the model's code would run outside the sandbox, and a read-only workspace promises the
+model that it changes nothing.
 
 Authoring executes arbitrary Python in-process at import, construction, and run time. That
 is the same trust boundary an agent that already runs shell commands and edits files

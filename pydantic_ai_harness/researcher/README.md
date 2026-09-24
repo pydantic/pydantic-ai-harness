@@ -41,7 +41,7 @@ It is literally these capabilities combined, in this order:
 - Core [`WebSearch(local=True)`](https://pydantic.dev/docs/ai/capabilities/web-search/): the provider's native web search when the model supports it, with a local DuckDuckGo fallback when it doesn't
 - Core [`WebFetch(local=True)`](https://pydantic.dev/docs/ai/capabilities/web-fetch/): read the pages behind the results, native where supported with a local fallback, so claims can be checked against their sources
 - [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/): delegation, with a focused web `researcher` sub-agent by default
-- [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/): bounds how much context any single tool result can consume
+- [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/): bounds how much context any single tool result can consume, spilling oversized results to this machine's temporary directory so no workspace is needed
 
 Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries.
 
@@ -53,6 +53,7 @@ Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import WebFetch, WebSearch
 from pydantic_ai_harness import SubAgent, SubAgents, ToolOutputLimits
+from pydantic_ai_harness.tool_output_limits import LocalFileStore
 
 instructions = """\
 Search broadly before drawing conclusions.
@@ -66,7 +67,7 @@ sub_researcher = SubAgent(
     Agent(
         name='researcher',
         description='Research a focused sub-question on the web and report back with findings and source links',
-        capabilities=[WebSearch(local=True), WebFetch(local=True), ToolOutputLimits()],
+        capabilities=[WebSearch(local=True), WebFetch(local=True), ToolOutputLimits(store=LocalFileStore())],
     )
 )
 
@@ -77,7 +78,7 @@ agent = Agent(
         WebSearch(local=True),  # native provider search, DuckDuckGo fallback on models without it
         WebFetch(local=True),  # read the pages behind the results, native or local
         SubAgents(agents=[sub_researcher], agent_folders=None),
-        ToolOutputLimits(),
+        ToolOutputLimits(store=LocalFileStore()),  # research needs no workspace; spills stay on this machine
     ],
 )
 ```

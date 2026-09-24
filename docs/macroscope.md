@@ -24,18 +24,30 @@ give a Pydantic AI agent the same review-and-fix loop from your own code.
 ## Usage
 
 ```python
+import os
+
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Macroscope
 
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[Macroscope()])
+agent = Agent(
+    'anthropic:claude-sonnet-5',
+    capabilities=[
+        LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
+        Macroscope(),
+    ],
+)
 
 result = agent.run_sync('Run a Macroscope review and fix any real findings.')
 print(result.output)
 ```
 
-The review runs in the run's workspace (`ctx.workspace`): your machine by
-default, or the sandbox when the run uses one. The `macroscope` CLI must be
-installed and authenticated there first:
+The review runs in the run's workspace (`ctx.workspace`), in its working
+directory, which should be the repository: your machine with `LocalWorkspace`,
+or the sandbox when the run uses one. A run without a workspace fails at its
+start. A local workspace inherits no environment, so give it `PATH` (to find
+`macroscope`) and `HOME` (where its sign-in lives), as above. The `macroscope`
+CLI must be installed and authenticated in the workspace first:
 
 1. Install: `curl -sSL https://raw.githubusercontent.com/prassoai/macroscope-local/main/install.sh | bash`
 2. Sign in and pick a Macroscope workspace by running `macroscope` once.
@@ -71,7 +83,6 @@ from pydantic_ai_harness import Macroscope
 Macroscope(
     base=None,             # git ref to diff against -- None lets the CLI auto-detect
     command='macroscope',  # binary name or path
-    cwd='.',               # repository directory, relative to the workspace's working directory
     timeout=600.0,         # max seconds to wait for a review
     guidance=None,         # None = default instructions, '' = none, str = custom
 )

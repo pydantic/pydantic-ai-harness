@@ -7,8 +7,8 @@ description: Give a Pydantic AI agent glob-filtered file access to the run's wor
 
 `FileSystem` gives an agent a fixed set of file tools -- read, write, edit, list,
 search, find, create, and inspect -- all scoped to a single `root_dir` in the
-run's workspace. Every path is resolved and containment-checked before any I/O,
-and access is filtered through allow / deny / protected glob patterns.
+run's workspace. Every path is resolved, symlinks included, and
+containment-checked before any I/O, and access is filtered through allow / deny / protected glob patterns.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/filesystem/)
 
@@ -25,40 +25,37 @@ toolset so you configure the boundary once and reuse it across agents.
 
 ## Usage
 
-Add `FileSystem` to your agent's `capabilities` with a `root_dir`. Everything
-the agent reads or writes is confined to that directory.
+Add `FileSystem` to your agent's `capabilities`, together with a workspace for
+the files to live in:
 
 ```python
-from pathlib import Path
-
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
-    capabilities=[FileSystem(root_dir='./workspace'), LocalWorkspace(Path.cwd())],
+    'anthropic:claude-sonnet-5',
+    capabilities=[LocalWorkspace('./workspace'), FileSystem()],
 )
 
 result = agent.run_sync('Read config.toml and tell me the package name.')
 print(result.output)
 ```
 
-`root_dir` defaults to the workspace's working directory (`.`), but passing an
-explicit path is the recommended practice -- the sandbox is only as tight as
-the root you give it.
+`root_dir` defaults to the workspace's working directory, so the agent above can
+reach `./workspace` and nothing outside it through the file tools.
 
 ## Where files live
 
 Every file operation goes through the run's workspace (`ctx.workspace`), not the
 agent process. Attach one to the run: `LocalWorkspace(...)` from
 `pydantic_ai.capabilities` for a local checkout, or a sandbox provider's
-workspace for an isolated environment. Without a workspace the first tool call
-ends the run with a `UserError` that says how to attach one. `root_dir` and
-`cwd` are paths inside the workspace; relative ones resolve against its working
-directory, which is also the default root. A read-only workspace
-(`LocalWorkspace(..., read_only=True)`, or any `ReadOnlyWorkspace`) narrows the
-tools to `READ_ONLY_TOOL_NAMES` for that run, as `read_only=True` does. A
+workspace for an isolated environment; see
+[Workspaces](https://pydantic.dev/docs/ai/workspace/). A run without a
+workspace fails at its start with an error that says how to attach one.
+Relative paths resolve from the workspace's working directory. A read-only
+workspace (`LocalWorkspace(..., read_only=True)`, or any `ReadOnlyWorkspace`)
+narrows the tools to `READ_ONLY_TOOL_NAMES` for that run, as `read_only=True` does. A
 workspace that cannot run commands -- a read-only one, or a filesystem-only
 backend -- does not offer `list_files` and `grep`, which run `rg` inside it;
 `search_files` and `find_files` work without commands.
@@ -67,16 +64,14 @@ Calling a `FileSystemToolset` method directly, outside a run, takes the
 workspace as a keyword argument:
 
 ```python
-from pathlib import Path
-
 from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
 
 
 async def main() -> None:
-    toolset = FileSystem(root_dir='.').get_toolset()
+    toolset = FileSystem().get_toolset()
     assert isinstance(toolset, FileSystemToolset)
-    print(await toolset.read_file('README.md', workspace=LocalWorkspaceBackend(Path.cwd())))
+    print(await toolset.read_file('README.md', workspace=LocalWorkspaceBackend('.')))
 ```
 
 ## Tools
@@ -101,13 +96,16 @@ async def main() -> None:
 `tools` names the tools to register, from `FILE_SYSTEM_TOOL_NAMES`. The default,
 `DEFAULT_TOOL_NAMES`, is the eight tools that need only the workspace's
 filesystem. `list_files` and `grep` run the `rg` executable inside the
-workspace, which must be on its `PATH` (the `coder` extra installs it for a
-local workspace), so they are opt-in by name:
+workspace, which must be on its `PATH`, so they are opt-in by name. The
+`coder` extra installs `rg` for a local workspace; since a local workspace
+inherits no environment, give it one with `PATH`, as in
+`LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})`.
+A missing `rg` comes back to the model as a retry that says so.
 
 ```python
 from pydantic_ai_harness import FileSystem
 
-FileSystem(root_dir='./workspace', tools=['read_file', 'edit_file', 'list_files', 'grep'])
+FileSystem(tools=['read_file', 'edit_file', 'list_files', 'grep'])
 ```
 
 Both respect ripgrep's defaults: `.gitignore` inside a git repository and
@@ -116,7 +114,7 @@ over those ignore files; unlike ripgrep, dotfiles and dot-directories stay
 hidden even then, as with the other walkers. Output is sorted by path, so a capped
 result is a deterministic prefix rather than a random subset. `grep` reports
 matches as `path:line:text` and context lines as `path-line-text`, paths relative
-to `cwd`; a pattern uses ripgrep's regex syntax unless `literal` is set. A
+to the working directory; a pattern uses ripgrep's regex syntax unless `literal` is set. A
 missing `rg` or a pattern ripgrep rejects comes back to the model as a retry, so
 it can correct the call or use `search_files`/`find_files` instead. Every path
 ripgrep prints goes through the same containment and pattern checks as the other
@@ -134,18 +132,21 @@ workspace that something else may also be editing; for a single-writer coding
 agent they only add tokens to every read and write. Events still carry
 `content_hash` either way.
 
-### Working directory
+### Working directory and root
 
-`cwd` is the directory relative paths resolve from; it defaults to `root_dir`
-and must lie inside it. Set it to hand the model a project directory while
-`root_dir` grants access to more, such as a parent directory or the filesystem
-root, without the model spelling out absolute paths.
+Relative paths resolve from the workspace's working directory, which is also
+the default `root_dir`. Set `root_dir` higher, such as a parent holding sibling
+projects, to let the model reach beyond the project directory without spelling
+out absolute paths. The working directory must be inside `root_dir`; a
+`root_dir` below it fails the run at its start. To work in a subdirectory, set
+it on the workspace instead (`LocalWorkspace('./repo')`).
 
 `list_directory`, `find_files`, `search_files`, `list_files`, and `grep` return
-paths relative to `cwd`, even when searching a subdirectory. These paths can be
-passed directly to read/write tools. Files outside `cwd` but inside `root_dir`
-use `..` components. Containment, access patterns, and event paths retain their
-`root_dir` basis, as does `search_files`'s `include_glob` filter.
+paths relative to the working directory, even when searching a subdirectory.
+These paths can be passed directly to read/write tools. Files outside the
+working directory but inside `root_dir` use `..` components. Containment,
+access patterns, and event paths retain their `root_dir` basis, as does
+`search_files`'s `include_glob` filter.
 
 ## Events
 
@@ -221,10 +222,11 @@ its entries are. A denied or failed operation emits no event, including a
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 from pydantic_ai_harness.filesystem import FileChangeRequestEvent
 
-agent = Agent('anthropic:claude-sonnet-4-6', capabilities=[FileSystem()])
+agent = Agent('anthropic:claude-sonnet-5', capabilities=[LocalWorkspace('.'), FileSystem()])
 
 @agent.on_event(FileChangeRequestEvent)
 async def hold_migrations(ctx, event):
@@ -260,16 +262,20 @@ applies the same rule to absolute symlink targets.
 
 ## Security model
 
-- **Containment.** Relative paths resolve from `cwd`; anything resolving
-  outside `root_dir` via `..` or an absolute path is rejected. The check
-  compares normalized workspace paths as text: there is no host `realpath`, so
-  a symlink inside the root is followed by the workspace backend wherever it
-  points. Patterns match the root-relative path as it is spelled, in direct
-  access and in directory walks (`list_directory`, `search_files`,
-  `find_files`, `list_files`, `grep`), so `protected_patterns` and
-  `denied_patterns` remain the guard for what the agent may write or see. The
-  workspace is the isolation boundary: use a sandboxed workspace when the tree
-  itself is untrusted.
+- **Containment.** Relative paths resolve from the working directory; anything
+  resolving outside `root_dir` via `..` or an absolute path is rejected. The
+  target is checked both as written and once the workspace has resolved its
+  symlinks, so a symlink inside the root that points outside it is rejected,
+  and walkers drop such entries. Patterns match the root-relative path, in
+  direct access and in directory walks (`list_directory`, `search_files`,
+  `find_files`, `list_files`, `grep`); `protected_patterns` and
+  `denied_patterns` also match a symlink's target, so a link to `.env` is
+  protected like `.env` itself. `root_dir='/'` turns the containment checks
+  off. This is a guardrail checked before each operation, not isolation: a
+  symlink swapped in between the check and the use is not caught, and `Shell`
+  commands are not bounded by `root_dir` at all. The workspace is the
+  isolation boundary: use a sandboxed workspace when the agent or the tree is
+  untrusted.
 - **Bounded walks.** The workspace follows symlinked directories and cannot say
   an entry is a symlink, so a link back to an ancestor is walked again under a
   longer path. `search_files` and `find_files` stop after listing 10,000
@@ -314,13 +320,14 @@ and `**/secrets*`. Pass an empty list to disable protection.
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[
+        LocalWorkspace('.'),
         FileSystem(
-            root_dir='./workspace',
             allowed_patterns=['*.py', '*.toml'],
             denied_patterns=['**/node_modules/*'],
         ),
@@ -362,8 +369,7 @@ reject them.
 from pydantic_ai_harness import FileSystem
 
 FileSystem(
-    root_dir='.',                  # str | Path -- root, as a path inside the workspace
-    cwd=None,                      # where relative paths resolve from (defaults to root_dir)
+    root_dir=None,                 # str | Path -- containment boundary (None = the working directory; '/' = no checks)
     allowed_patterns=[],           # allowlist globs (empty = allow all)
     denied_patterns=[],            # denylist globs
     protected_patterns=[...],      # read-only globs (defaults to secrets/.git)
@@ -389,10 +395,9 @@ dropped.
 [agent spec](/ai/core-concepts/agent-spec/):
 
 ```yaml
-model: anthropic:claude-sonnet-4-6
+model: anthropic:claude-sonnet-5
 capabilities:
   - FileSystem:
-      root_dir: ./workspace
       allowed_patterns: ['*.py', '*.toml']
 ```
 
@@ -404,7 +409,8 @@ agent = Agent.from_file('agent.yaml', custom_capability_types=[FileSystem])
 ```
 
 Pass `custom_capability_types` so the spec loader knows how to instantiate
-`FileSystem`.
+`FileSystem`, and attach a workspace to the run (`workspace=` on the run method,
+or a workspace capability in Python).
 
 ## Further reading
 

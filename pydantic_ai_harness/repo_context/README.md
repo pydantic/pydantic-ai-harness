@@ -14,37 +14,35 @@ idea the rest of the setup exists, so it can neither honor it nor translate it.
 
 ## The solution
 
-`RepoContext` bundles three strategies, each independently toggleable.
+`RepoContext` bundles three strategies, each independently toggleable. Construct it with `RepoContext(...)` in an `Agent`'s `capabilities`, with a workspace attached to the run:
 
 ```python
 from pathlib import Path
 
 from pydantic_ai import Agent
-from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import RepoContext
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
-    capabilities=[RepoContext(workspace_dir=Path.cwd(), home_dir=Path.home())],
+    'anthropic:claude-sonnet-5',
+    capabilities=[LocalWorkspace('.'), RepoContext(home_dir=Path.home())],
 )
-result = agent.run_sync('Summarize the coding-assistant setup in this repo.', workspace=LocalWorkspaceBackend(working_dir=Path.cwd()))
+
+result = agent.run_sync('Summarize the coding-assistant setup in this repo.')
+print(result.output)
 ```
 
-All configured paths and discovered files refer to the run workspace. Relative paths use its
-working directory, and `~` is not expanded -- use an absolute workspace path or one relative to
-the workspace working directory. The capability needs a workspace attached to the run; without one
-it raises an error that says how to attach one (`capabilities=[LocalWorkspace(...)]` from
-`pydantic_ai.capabilities` for the agent process's own filesystem).
+Everything is read through the run's [workspace](https://pydantic.dev/docs/ai/workspace/), anchored at its working directory: set the directory on the workspace (`LocalWorkspace('./repo')`), not on `RepoContext`. `home_dir` and `asset_roots` are workspace paths; relative ones resolve from the working directory, and `~` is not expanded. A run without a workspace fails at its start.
 
 ### 1. Walk-up instruction autoload (on by default)
 
-Loads `CLAUDE.md`/`AGENTS.md` from `workspace_dir` and every ancestor up to
+Loads `CLAUDE.md`/`AGENTS.md` from the working directory and every ancestor up to
 `home_dir` (inclusive). Precedence is ancestor-first, workspace-last: broadest
 context first, most specific last. Files are deduped by visited path and by content
 hash, so a symlinked `AGENTS.md -> CLAUDE.md` or two ancestors sharing identical
 content load once.
 
-When `home_dir` is `None` (the default), only `workspace_dir` is scanned -- no
+When `home_dir` is `None` (the default), only the working directory is scanned -- no
 walk-up. Pass the workspace home path explicitly to walk up to it.
 
 ### 2. Asset inventory (on by default)
@@ -57,7 +55,7 @@ does not parse them, leaving translation to the orchestrator.
 
 Rename the tool with `inventory_tool_name`, or scope which roots it scans with
 `asset_roots`.
-Relative asset roots are resolved from `workspace_dir`. Skill discovery visits up to eight nested directories to bound traversal through symlink cycles.
+Relative asset roots are resolved from the working directory. Skill discovery visits up to eight nested directories to bound traversal through symlink cycles.
 
 ### 3. Nested-on-traversal (off by default)
 
@@ -67,24 +65,22 @@ When the model lists or reads a directory, surface that directory's
 instead of inspecting raw tool arguments. It remains opt-in:
 
 ```python
-from pathlib import Path
-
 from pydantic_ai import Agent
-from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import FileSystem, RepoContext
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[
-        FileSystem(root_dir='.'),
+        LocalWorkspace('.'),
+        FileSystem(),
         RepoContext(
-            workspace_dir=Path('.'),
             nested_traversal=True,
             nested_inject='pointer',  # or 'contents'
-        )
+        ),
     ],
 )
-result = agent.run_sync('List the source directory.', workspace=LocalWorkspaceBackend(working_dir=Path.cwd()))
+result = agent.run_sync('List the source directory.')
 ```
 
 `nested_inject='pointer'` (default) enqueues a one-line note pointing at the
@@ -97,8 +93,8 @@ the same types by importing `FileReadEvent` and `DirectoryListedEvent` from
 `path` is relative to.
 
 The traversed location is `root_dir / path`, so a `FileSystem` rooted at a
-subdirectory of `workspace_dir` still surfaces the right directory. A
-traversal that resolves outside `workspace_dir` is ignored: it is not nested in
+subdirectory of the working directory still surfaces the right directory. A
+traversal that resolves outside the working directory is ignored: it is not nested in
 the workspace, so there is no nested context to surface.
 
 `traversal_tool_names` and `traversal_path_arg` are deprecated. Setting either
@@ -123,8 +119,7 @@ cache-relevant paths separate:
 
 ```python {test="skip"}
 RepoContext(
-    workspace_dir,                  # Path -- the deepest dir the agent works in (required)
-    home_dir=None,                  # Path | None -- shallowest dir to stop walk-up at, inclusive
+    home_dir=None,                  # str | Path | None -- shallowest workspace dir to stop walk-up at, inclusive
     filenames=('CLAUDE.md', 'AGENTS.md'),
     autoload_instructions=True,     # Strategy 1
     expose_inventory_tool=True,     # Strategy 2
@@ -136,6 +131,8 @@ RepoContext(
     asset_roots=('.claude', '.agents', '.codex', '.grok'),
 )
 ```
+
+`workspace_dir=` is deprecated and ignored: the working directory comes from the workspace.
 
 ## Scope
 

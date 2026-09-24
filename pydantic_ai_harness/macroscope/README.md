@@ -20,10 +20,19 @@ validates each finding and fixes the real ones with whatever tools it already ha
 (for example `FileSystem` or `Shell`).
 
 ```python
+import os
+
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Macroscope
 
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[Macroscope()])
+agent = Agent(
+    'anthropic:claude-sonnet-5',
+    capabilities=[
+        LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
+        Macroscope(),
+    ],
+)
 
 result = agent.run_sync('Run a Macroscope review and fix any real findings.')
 print(result.output)
@@ -32,9 +41,12 @@ print(result.output)
 ## Prerequisites: install and sign in
 
 The capability drives the `macroscope` binary installed in the run's workspace
-(`ctx.workspace`): your machine by default, or the sandbox when the run uses one.
-It cannot install or authenticate on your behalf, so do this once wherever the
-review runs:
+(`ctx.workspace`): your machine with `LocalWorkspace`, or the sandbox when the
+run uses one. A run without a workspace fails at its start. The review runs in
+the workspace's working directory, which should be the repository. A local
+workspace inherits no environment, so give it `PATH` (to find `macroscope`) and
+`HOME` (where its sign-in lives), as above. The capability cannot install or
+authenticate on your behalf, so do this once wherever the review runs:
 
 1. Install the CLI:
 
@@ -75,7 +87,6 @@ Each finding is a `MacroscopeIssue` with `issue_id`, `sequence`, `path`, `line`,
 |---|---|---|
 | `base` | `None` | Git ref to diff against. `None` omits `--base` so the CLI auto-detects the base branch itself (and creates its own review worktree). A per-call `base` argument, then this field, take precedence when set. |
 | `command` | `'macroscope'` | Binary name or path. Override for a non-default install location. |
-| `cwd` | `'.'` | Repository directory the review runs in, relative to the workspace's working directory. |
 | `timeout` | `600.0` | Maximum seconds to wait for a review. |
 | `guidance` | `None` | Custom review guidance for the system prompt. `None` contributes the default validate-then-fix guidance; `''` contributes none. |
 

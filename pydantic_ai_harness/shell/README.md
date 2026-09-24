@@ -14,22 +14,22 @@ is fiddly boilerplate that every agent reinvents.
 
 ## The solution
 
-`Shell` exposes command-execution tools rooted at a working directory, with
+`Shell` exposes command-execution tools that run in the agent's workspace, with
 configurable allow/deny lists and automatic cleanup of background processes
 when the agent run ends.
 
 ```python
-from pathlib import Path
+import os
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Shell
 
 agent = Agent(
-    'anthropic:claude-sonnet-4-6',
+    'anthropic:claude-sonnet-5',
     capabilities=[
-        Shell(cwd='./workspace', allowed_commands=['ls', 'cat', 'rg']),
-        LocalWorkspace(Path.cwd()),
+        LocalWorkspace('./workspace', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
+        Shell(allowed_commands=['ls', 'cat', 'rg']),
     ],
 )
 
@@ -43,9 +43,11 @@ Every command, output file, and signal goes through the run's workspace
 (`ctx.workspace`), not the agent process. Attach one to the run:
 `LocalWorkspace(...)` from `pydantic_ai.capabilities` runs commands as
 subprocesses on this machine in a local checkout, and a sandbox provider's
-workspace runs them in its environment. Without a workspace the first tool call
-ends the run with a `UserError` that says how to attach one. `cwd` is a path
-inside the workspace, relative to its working directory. A read-only workspace
+workspace runs them in its environment. A run without a workspace fails at its
+start with an error that says how to attach one. Commands start in the
+workspace's working directory; to run them in a subdirectory, set it on the
+workspace (`LocalWorkspace('./repo')`). See
+[Workspaces](https://pydantic.dev/docs/ai/workspace/). A read-only workspace
 (`LocalWorkspace(..., read_only=True)`, or any `ReadOnlyWorkspace`) refuses to
 run commands, so `Shell` offers no tools for that run.
 
@@ -137,11 +139,14 @@ tool-call result carries the failure and limit context.
 
 ## Environment control
 
-A command gets the workspace's environment, not the agent process's. The
-workspace decides that base: `LocalWorkspace` passes only `PATH`, `HOME`,
-`LANG`, and `TMPDIR` from the host, so provider API keys and other secrets in
-the agent's environment do not reach commands. A sandbox provider's workspace
-has whatever its provider configures. Two fields shape what `Shell` adds:
+A command gets the workspace's environment plus `Shell(env=...)`, minus names
+matching `denied_env_patterns`; nothing comes from the agent process.
+`LocalWorkspace` starts from an empty environment unless you give it `env=`,
+so pass the variables commands need, usually `PATH` and `HOME`:
+`LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})`.
+Without `PATH`, tools installed outside the system default path (Homebrew,
+`~/.local/bin`) are not found. A sandbox provider's workspace has whatever its
+provider configures. Two fields shape what `Shell` adds:
 
 | Field | Effect |
 |---|---|
@@ -159,10 +164,10 @@ import os
 from pydantic_ai_harness import LLM_API_KEY_ENV_PATTERNS, Shell
 
 # Pass the host environment to commands, minus provider credentials.
-Shell(cwd='./repo', env=dict(os.environ), denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
+Shell(env=dict(os.environ), denied_env_patterns=LLM_API_KEY_ENV_PATTERNS)
 
 # Or add just the variables the commands need.
-Shell(cwd='./repo', env={'PYTHONUNBUFFERED': '1'})
+Shell(env={'PYTHONUNBUFFERED': '1'})
 ```
 
 `LLM_API_KEY_ENV_PATTERNS` covers common provider prefixes (`ANTHROPIC_*`,
@@ -184,7 +189,8 @@ host files. Use a sandbox provider's workspace when commands are untrusted.
 `start_command` starts the command as a detached job inside the workspace and
 returns a short ID. A small `sh` wrapper, started in its own session (`setsid`
 where the workspace has it), writes stdout and stderr to log files in a private
-job directory under the workspace's `$TMPDIR` (or `/tmp`) and records the exit
+job directory under `.pydantic-ai-harness/shell` in the workspace's working
+directory (which gets a `.gitignore` of `*`) and records the exit
 code when the command ends. Use `check_command(command_id)` to poll and
 `stop_command(command_id)` to terminate and collect final output: the whole
 process group is signalled through the workspace -- `SIGTERM`, escalating to
@@ -204,7 +210,7 @@ The four tools above are run-scoped: their processes die with the run. Name
 ```python
 from pydantic_ai_harness import Shell
 
-Shell(cwd='./repo', tools=['shell'])
+Shell(tools=['shell'])
 ```
 
 `shell(command, mode='foreground', timeout=None)` hands the command to a small
@@ -231,13 +237,12 @@ when the command finishes; the model polls. A foreground call that is cancelled
 supervisor's process group and removes the log directory instead. A log
 directory that was handed back is never rotated or deleted: the caller owns
 cleaning it up, and a verbose command should bound its own output. A launch
-that fails in the workspace (no writable temporary directory, say) surfaces as
-a retry naming the shell's error.
+that fails in the workspace surfaces as a retry naming the shell's error.
 
 `allowed_commands`, `denied_commands`, `denied_operators`, `allow_interactive`,
 `env`, and `denied_env_patterns` apply to `shell` exactly as to `run_command`.
-`persist_cwd` does not: every `shell` command starts in the configured `cwd`,
-whatever `run_command` has tracked. Commands and logs live in the workspace; the
+`persist_cwd` does not: every `shell` command starts in the workspace's working
+directory, whatever `run_command` has tracked. Commands and logs live in the workspace; the
 workspace calls that start and poll them are not replay-safe.
 
 Each `shell` call emits progress events in the `shell` namespace, so a UI can
@@ -262,7 +267,8 @@ traces the tool call.
 
 ## Working directory
 
-By default each command runs in `cwd` and `cd` has no lasting effect. Set
+By default each command runs in the workspace's working directory and `cd` has
+no lasting effect. Set
 `persist_cwd=True` to make `cd` sticky across calls: each command is wrapped so
 that after it runs, its final working directory is recorded to a private file
 inside the workspace, and that directory is carried into subsequent calls. The path is only
@@ -273,7 +279,6 @@ to stdout) so command output can never spoof the tracked directory.
 
 ```python
 Shell(
-    cwd='.',                       # str | Path -- working directory inside the workspace
     allowed_commands=[],           # allowlist (mutually exclusive with denied)
     denied_commands=[...],         # denylist (defaults to destructive commands)
     denied_operators=[],           # blocked shell operators
@@ -298,10 +303,9 @@ greater than zero and at most 270 seconds; that is checked at construction.
 
 ```yaml
 # agent.yaml
-model: anthropic:claude-sonnet-4-6
+model: anthropic:claude-sonnet-5
 capabilities:
   - Shell:
-      cwd: ./workspace
       allowed_commands: ['ls', 'cat', 'rg', 'pytest']
 ```
 
@@ -313,7 +317,8 @@ agent = Agent.from_file('agent.yaml', custom_capability_types=[Shell])
 ```
 
 Pass `custom_capability_types` so the spec loader knows how to instantiate
-`Shell`.
+`Shell`, and attach a workspace to the run (`workspace=` on the run method, or a
+workspace capability in Python).
 
 ## Further reading
 
