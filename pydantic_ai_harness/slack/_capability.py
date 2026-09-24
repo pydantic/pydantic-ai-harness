@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
@@ -23,8 +22,8 @@ class Slack(AbstractCapability[AgentDepsT]):
     """Give an agent Slack's hosted tools, acting as the connected user."""
 
     description: str | None = 'Use Slack messages, channels, and canvases.'
-    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
-    """A Slack user token, an `httpx.Auth`, or a function of the run context that returns one.
+    auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
+    """A Slack user token or a function of the run context that returns one.
 
     Unset, it uses `SLACK_USER_TOKEN`. If the function returns `None`, that run has no Slack tools.
     """
@@ -55,7 +54,7 @@ class Slack(AbstractCapability[AgentDepsT]):
         auth = self.auth(ctx) if callable(self.auth) else self.auth
         return None if auth is None else self._connect(auth)
 
-    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
+    def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             'https://mcp.slack.com/mcp',
             id=self.id or 'slack',

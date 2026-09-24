@@ -10,7 +10,7 @@ Let an agent read and send Slack messages, browse channels, and work with canvas
 pip/uv-add "pydantic-ai-harness[slack]" "pydantic-ai-slim[openai]"
 ```
 
-Set `SLACK_USER_TOKEN` to a Slack user token, or pass `auth=` a token or an `httpx.Auth`. See the [provider setup](https://docs.slack.dev/ai/slack-mcp-server/).
+Set `SLACK_USER_TOKEN` to a Slack user token, or pass `auth=` a token. See the [provider setup](https://docs.slack.dev/ai/slack-mcp-server/).
 
 ```python
 from pydantic_ai import Agent
@@ -23,7 +23,9 @@ print(result.output)
 
 ## Per-user credentials
 
-A token or `SLACK_USER_TOKEN` connects every run as the same Slack user. When one agent serves several users, pass a function that returns the current user's token instead:
+A token or `SLACK_USER_TOKEN` connects every run as the same Slack user. That suits a script or an agent on your own machine.
+
+In an app where each user connects their own Slack account, one agent serves all of them, so the token cannot be fixed when the agent is created. Pass a function that reads the current user's token from the run's deps:
 
 ```python
 from dataclasses import dataclass
@@ -44,9 +46,9 @@ def slack_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Slack(auth=slack_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can return a token or an `httpx.Auth`. If it returns `None`, that run has no Slack tools; it never falls back to `SLACK_USER_TOKEN`.
+The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Slack tools; it never falls back to `SLACK_USER_TOKEN`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Slack" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
+Your app gets each user's token, stores it, and refreshes it. For example, a "Connect Slack" button that signs them in to your Slack app with OAuth and saves their user token (`xoxp-`) to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
 When users differ in more than their credential, such as giving some users read-only access, build the whole capability for each run with a [dynamic capability](/ai/capabilities/custom/#dynamically-building-a-capability):
 
