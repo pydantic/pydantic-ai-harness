@@ -6,7 +6,7 @@ import math
 from collections.abc import AsyncGenerator, Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Self, cast
+from typing import cast
 
 from pydantic_ai import AgentStreamEvent, FunctionToolCallEvent, FunctionToolResultEvent, PartDeltaEvent, PartStartEvent
 from pydantic_ai.messages import (
@@ -18,6 +18,7 @@ from pydantic_ai.messages import (
     ToolCallPartDelta,
 )
 from rich.console import Console
+from typing_extensions import Self
 
 from . import theme
 from .usage_report import format_cost
@@ -101,12 +102,6 @@ class Status:
         return [*painted, (theme.MUTED, plugins)] if plugins else painted
 
 
-def _interrupted() -> bool:
-    """Whether the current task was itself cancelled while it waited on the animation task."""
-    current = asyncio.current_task()
-    return current is not None and current.cancelling() > 0
-
-
 class StatusLine:
     """Keep the prompt frame and status visible below streamed output during a run."""
 
@@ -148,11 +143,11 @@ class StatusLine:
         if task is not None:
             task.cancel()
             try:
+                # `asyncio.wait` never forwards our cancellation to the animation, so a
+                # `CancelledError` here is ours and propagates: Ctrl-C must still abort.
+                await asyncio.wait({task})
                 with contextlib.suppress(asyncio.CancelledError):
-                    await task
-                if _interrupted():
-                    # The CancelledError was ours, not the animation's: Ctrl-C must still abort.
-                    raise asyncio.CancelledError
+                    task.result()  # Surface an animation failure; its cancellation was ours.
             finally:
                 self._clear()
                 self.console.show_cursor(True)
