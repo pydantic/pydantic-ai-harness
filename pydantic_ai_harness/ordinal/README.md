@@ -52,11 +52,10 @@ result = agent.run_sync('List my Ordinal workspaces')
 print(result.output)
 ```
 
-Set `ORDINAL_ACCESS_TOKEN` to an Ordinal access token, or pass `auth=` a token
-or an `httpx.Auth`. To serve several users from one agent, pass a function
-instead (see [Per-user credentials](#per-user-credentials)). Then start by
-listing workspaces. Every other Ordinal tool needs a `workspaceSlug` from
-`ordinal_get_workspace_context`.
+Set `ORDINAL_ACCESS_TOKEN` to an Ordinal access token, or pass `auth=` a token.
+To serve several users from one agent, pass a function instead (see [Per-user
+credentials](#per-user-credentials)). Then start by listing workspaces. Every
+other Ordinal tool needs a `workspaceSlug` from `ordinal_get_workspace_context`.
 
 `Ordinal` has no settings for custom clients, tool filtering, or approval. For
 those, use Pydantic AI's generic
@@ -66,9 +65,11 @@ those, use Pydantic AI's generic
 ## Per-user credentials
 
 A fixed token or `ORDINAL_ACCESS_TOKEN` connects every run as the same account.
+That suits a script or an agent on your own machine.
 
-When one agent serves several users, pass a function as `auth` that returns the
-current user's Ordinal access token:
+In an app where each user connects their own Ordinal account, one agent serves
+all of them, so the token cannot be fixed when the agent is created. Pass a
+function that reads the current user's token from the run's deps:
 
 ```python
 from dataclasses import dataclass
@@ -90,13 +91,13 @@ agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Ordinal(auth=o
 ```
 
 The function is called at the start of each run, so each run connects as its own
-user. It can return a token or an `httpx.Auth`. If it returns `None`, that run
-has no Ordinal tools; it never falls back to `ORDINAL_ACCESS_TOKEN`.
+user. If it returns `None`, that run has no Ordinal tools; it never falls back
+to `ORDINAL_ACCESS_TOKEN`.
 
-Your application is responsible for getting each user's token, storing it, and
-refreshing it, for example with a "Connect Ordinal" button in your web app. Look
-the token up before the run, for example with `await`, and put it in the deps;
-the function only reads it.
+Your app gets each user's token, stores it, and refreshes it. For example, a
+"Connect Ordinal" button that runs the OAuth flow from [Before you
+start](#before-you-start) and saves the token to their account. Before each run,
+load it (this can be async) and put it in the deps; the function only reads it.
 
 With durable execution such as Temporal, read the token from the run's deps
 rather than from a global, since the function may run in another process. To add
