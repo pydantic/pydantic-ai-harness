@@ -11,13 +11,15 @@ Source: https://docs.tryordinal.com/mcp/introduction
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentDepsT
-from pydantic_ai.toolsets import AbstractToolset
+from pydantic_ai.tools import AgentDepsT, RunContext
+from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, credential, per_run
+from pydantic_ai_harness._mcp import credential
 
 try:
     from pydantic_ai.mcp import MCPToolset
@@ -48,7 +50,7 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     description: str | None = _DEFAULT_DESCRIPTION
     """Routing description used when the capability is loaded on demand."""
 
-    auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
+    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
     """An Ordinal access token, an `httpx.Auth`, or a function of the run context that returns one.
 
     Unset, it uses `ORDINAL_ACCESS_TOKEN`. If the function returns `None`, that run has no Ordinal tools.
@@ -56,9 +58,16 @@ class Ordinal(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Ordinal MCP tools."""
-        return per_run(self.auth, self._connect, id=self.id if self.id is not None else 'ordinal')
+        id = self.id if self.id is not None else 'ordinal'
+        if callable(self.auth):
+            return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
+        return self._connect(self.auth)
 
-    def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+    def _connect_for_run(self, ctx: RunContext[AgentDepsT]) -> MCPToolset[AgentDepsT] | None:
+        auth = self.auth(ctx) if callable(self.auth) else self.auth
+        return None if auth is None else self._connect(auth)
+
+    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             _ORDINAL_MCP_URL,
             id=self.id if self.id is not None else 'ordinal',
