@@ -2,11 +2,12 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Sequence
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 from anyio import create_task_group
+from anyio.abc import TaskGroup
 from prompt_toolkit import PromptSession
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import History
@@ -36,6 +37,7 @@ from .input_history import input_history
 from .interrupts import Interrupts
 from .key_menu import keys_command
 from .live_prompt import LivePrompt
+from .menu_worker import holding_output
 from .model_picker import model_command, model_completions
 from .plugin_loader import PluginError, PluginLoader
 from .plugin_menu import open_plugins_menu
@@ -294,7 +296,7 @@ def create_shell(
     sessions = Sessions(session=session, store=conversations, context=context)
     commands = Commands()
     commands.register(Command(name='resume', description='Browse or restore a saved session', handler=sessions.command))
-    commands.register(Command(name='keys', description='Manage saved API keys', handler=keys_command))
+    commands.register(Command(name='keys', description='Manage saved API keys', handler=keys_command, during_turn=True))
     commands.register(
         Command(
             name='login',
@@ -309,6 +311,7 @@ def create_shell(
             description='Change settings; no arguments opens the menu',
             handler=lambda args: set_command(context, args),
             complete=set_completions,
+            during_turn=True,
         )
     )
     commands.register(
@@ -317,6 +320,7 @@ def create_shell(
             description='Select a Termflow palette; no arguments opens the picker',
             handler=lambda args: theme_command(context, args),
             complete=lambda args: theme.names() if len(args) <= 1 else (),
+            during_turn=True,
         )
     )
     commands.register(
@@ -325,6 +329,7 @@ def create_shell(
             description='Select an added model; no arguments opens the picker',
             handler=lambda args: model_command(context, args),
             complete=lambda args: model_completions(context, args),
+            during_turn=True,
         )
     )
     commands.register(
@@ -333,6 +338,7 @@ def create_shell(
             description='Add and use a model, or browse providers and model settings',
             handler=add_model,
             complete=lambda args: set_completions(['model', *args]) if len(args) <= 1 else (),
+            during_turn=True,
         )
     )
     commands.register(
@@ -341,6 +347,7 @@ def create_shell(
             description='Choose an added model to configure, or edit a named model',
             handler=model_settings,
             complete=lambda args: model_completions(context, args),
+            during_turn=True,
         )
     )
     commands.register(Command(name='help', description='Show commands', handler=commands.help))
@@ -463,6 +470,7 @@ class _Shell(Generic[DepsT, OutputT]):
     images: ImageInput = field(default_factory=ImageInput)
     reload_requested: bool = False
     editor: LivePrompt | None = None
+    _mid_turn: TaskGroup | None = field(default=None, init=False, repr=False)
 
     def request_reload(self, args: list[str]) -> str:
         if args:
@@ -480,6 +488,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 interrupts=self.interrupts,
                 toolbar=self.status.toolbar,
                 steer=self.steer,
+                run_now=self.run_now,
                 transcript=self.transcript,
                 chords={'ctrl-x ctrl-s': self.speculation.toggle},
                 pinned=self.speculation.row,
@@ -504,6 +513,20 @@ class _Shell(Generic[DepsT, OutputT]):
             return False
         self.images.notice = f'Steering sent: {text}'
         return True
+
+    def run_now(self, text: str) -> bool:
+        """Open a bare `during_turn` command's menu over a streaming turn instead of queueing it."""
+        if self._mid_turn is None or not self.commands.runs_during_turn(text):
+            return False
+        self._mid_turn.start_soon(self._run_mid_turn, text)
+        return True
+
+    async def _run_mid_turn(self, text: str) -> None:
+        async with self.screen.overlay():
+            self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
+            self.console.print()
+            with holding_output(self.editor.output.held if self.editor is not None else nullcontext):
+                await _execute_command(self.commands, text, console=self.console, status=self.status)
 
     async def _read_loop(self) -> SessionEndReason:
         while True:
@@ -566,7 +589,14 @@ class _Shell(Generic[DepsT, OutputT]):
             nonlocal ended
             ended = await self.run_turn(start, images=images)
 
-        completed = await self.interrupts.run(run_turn())
+        # A menu opened mid-turn outlives the turn: the next prompt waits until it closes.
+        completed = False
+        async with create_task_group() as mid_turn:
+            self._mid_turn = mid_turn
+            try:
+                completed = await self.interrupts.run(run_turn())
+            finally:
+                self._mid_turn = None
         self.sessions.namer.submit(self.session.summary.id)
         if self.editor is not None:
             await self.editor.output.drain()
