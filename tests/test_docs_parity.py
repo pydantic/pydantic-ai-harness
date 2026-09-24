@@ -164,6 +164,7 @@ _CAPABILITY_PAGE_META = {
     'linear.md': ('linear', 'Linear'),
     'notion.md': ('notion', 'Notion'),
     'ordinal.md': ('ordinal', 'Ordinal'),
+    'day-ai.md': ('day_ai', 'Day AI'),
     'stackone.md': ('stackone', 'StackOne'),
     'slack.md': ('slack', 'Slack'),
     'acp.md': ('experimental/acp', 'ACP (Agent Client Protocol)'),
