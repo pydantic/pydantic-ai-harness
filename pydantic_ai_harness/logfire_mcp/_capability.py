@@ -93,11 +93,9 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
         return [_INSTRUCTIONS, self._current_utc]
 
     def _current_utc(self, ctx: RunContext[AgentDepsT]) -> str | None:
-        # The run stamps each request as it is made, so this needs no clock read of its own, which
-        # Temporal's workflow sandbox would reject.
-        stamps = [
-            message.timestamp for message in ctx.messages if isinstance(message, ModelRequest) and message.timestamp
-        ]
-        if not stamps:
-            return None
-        return f'Current UTC time is `{max(stamps).isoformat(timespec="seconds")}`.'
+        # The run stamps the request it is about to send, which is the last one, so this needs no clock read
+        # of its own (Temporal's workflow sandbox rejects those). Older requests may come from saved history.
+        for message in reversed(ctx.messages):
+            if isinstance(message, ModelRequest) and message.timestamp:
+                return f'Current UTC time is `{message.timestamp.isoformat(timespec="seconds")}`.'
+        return None
