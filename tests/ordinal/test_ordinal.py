@@ -125,9 +125,13 @@ class TestPerRunAuth:
         assert (bearer(alice), bearer(bob)) == ('Bearer alice-token', 'Bearer bob-token')
 
     @pytest.mark.anyio
-    async def test_provider_returning_none_omits_tools(self) -> None:
+    @pytest.mark.parametrize('missing', [None, ''])
+    async def test_provider_returning_none_omits_tools(
+        self, missing: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv('ORDINAL_ACCESS_TOKEN', 'deployment-token')
         capability = Ordinal[str | None](auth=lambda ctx: ctx.deps)
-        assert await connections_for(capability, None) == []
+        assert await connections_for(capability, missing) == []
         agent = Agent(TestModel(), capabilities=[Ordinal[object](auth=no_credential)])
         result = await agent.run('List my workspaces')
         assert result.output == 'success (no tool calls)'

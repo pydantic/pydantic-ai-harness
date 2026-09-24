@@ -44,7 +44,15 @@ Set `ORDINAL_ACCESS_TOKEN` to an Ordinal access token, or pass `auth=` a token. 
 
 ## Per-user credentials
 
-A fixed token or `ORDINAL_ACCESS_TOKEN` connects every run as the same account. That suits a script or an agent on your own machine.
+`auth` decides which Ordinal account each run uses:
+
+| `auth` | Account used |
+| --- | --- |
+| Not set, `None`, or `''` | `ORDINAL_ACCESS_TOKEN`. If that is not set either, creating the agent raises an error. |
+| An access token | That token, for every run. |
+| A function | Called at the start of each run. The token it returns is used for that run. If it returns `None` or `''`, that run has no Ordinal tools. A function never uses `ORDINAL_ACCESS_TOKEN`. |
+
+A fixed token or `ORDINAL_ACCESS_TOKEN` suits a script or an agent on your own machine, where every run is the same account.
 
 In an app where each user connects their own Ordinal account, one agent serves all of them, so the token cannot be fixed when the agent is created. Pass a function that reads the current user's token from the run's deps:
 
@@ -67,7 +75,7 @@ def ordinal_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Ordinal(auth=ordinal_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Ordinal tools; it never falls back to `ORDINAL_ACCESS_TOKEN`.
+Each run connects as its own user, so concurrent runs never share an account.
 
 Your app gets each user's token, stores it, and refreshes it. For example, a "Connect Ordinal" button that runs the OAuth flow from [Before you start](#before-you-start) and saves the token to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
