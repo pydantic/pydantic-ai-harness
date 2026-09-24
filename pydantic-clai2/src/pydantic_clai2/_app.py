@@ -1,7 +1,8 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
-from collections.abc import AsyncGenerator, Sequence
+import sys
+from collections.abc import AsyncGenerator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -28,7 +29,15 @@ from ._rendering import StreamRenderer
 from ._session import Session
 from .capability_catalog import HARNESS_PLUGINS
 from .command_context import CommandContext, CommandProvider
-from .commands import Command, Commands, config_command, config_completions, is_command_input, set_completions
+from .commands import (
+    Command,
+    Commands,
+    config_command,
+    config_completions,
+    expand_bare_command,
+    is_command_input,
+    set_completions,
+)
 from .config import PluginSettings, Settings
 from .customization import customization_guide
 from .errors import error_message
@@ -50,10 +59,15 @@ from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
 from .speculation import Speculation
+from .spinner_picker import spinner_command, spinner_completions
+from .spinners import Spinner, Spinners
 from .status import Status, StatusLine
 from .theme_picker import theme_command
 from .tool_output import terminal_text
 from .usage_report import cost_line, session_usage
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
 
 if TYPE_CHECKING:
     from .auth import CodexAuth
@@ -346,13 +360,14 @@ def create_shell(
         )
     )
     commands.register(Command(name='help', description='Show commands', handler=commands.help))
-    commands.register(
-        Command(
-            name='new',
-            description='Start a new session; preserve the previous session',
-            handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
-        )
+
+    new_command = Command(
+        name='new',
+        description='Start a new session; preserve the previous session',
+        handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
     )
+    commands.register(new_command)
+    commands.register(replace(new_command, name='clear', description='Alias of /new'))
     commands.register(
         Command(
             name='usage',
@@ -388,6 +403,15 @@ def create_shell(
         project=tuple(PluginSettings.model_validate(plugin.model_dump()) for plugin in project.plugins),
         conversation=session,
         status=status,
+    )
+    spinners = Spinners(selected=lambda: context.settings.spinner, registered=loader.spinners)
+    commands.register(
+        Command(
+            name='spinner',
+            description='Select the working animation; no arguments opens the picker',
+            handler=lambda args: spinner_command(context, spinners, args),
+            complete=lambda args: spinner_completions(spinners, args),
+        )
     )
     commands.register(
         Command(
@@ -434,6 +458,7 @@ def create_shell(
         screen=screen,
         sessions=sessions,
         speculation=Speculation(context=context, console=console),
+        spinners=spinners,
     )
     if prompt is not None:
         prompt.key_bindings = images.bindings()
@@ -471,6 +496,7 @@ class _Shell(Generic[DepsT, OutputT]):
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
     speculation: Speculation
+    spinners: Spinners
     transcript: TranscriptBuffer = field(default_factory=TranscriptBuffer)
     images: ImageInput = field(default_factory=ImageInput)
     reload_requested: bool = False
@@ -532,6 +558,7 @@ class _Shell(Generic[DepsT, OutputT]):
                 transcript=self.transcript,
                 chords={'ctrl-x ctrl-s': self.speculation.toggle},
                 pinned=self.speculation.row,
+                spinner=self.spinners.active,
             )
             self.screen.editor = self.editor.suspended
             try:
@@ -567,7 +594,7 @@ class _Shell(Generic[DepsT, OutputT]):
                     text = await self.editor.read()
                 else:
                     assert self.prompt is not None
-                    text = (await self.prompt.prompt_async('> ')).strip()
+                    text = expand_bare_command((await self.prompt.prompt_async('> ')).strip())
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
@@ -678,6 +705,7 @@ class _Shell(Generic[DepsT, OutputT]):
             status=self.status,
             renderers=self.loader.renderers(),
             screen=self.screen,
+            spinner=self.spinners.active,
         )
 
 
@@ -714,7 +742,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
 
 
 def _reset_status(command: str, status: Status) -> None:
-    if command.split(maxsplit=1)[0] in ('/new', '/resume'):
+    if command.split(maxsplit=1)[0] in ('/new', '/clear', '/resume'):
         status.context_tokens = None
         status.context_alert = False
         status.output_tokens = None
@@ -738,6 +766,7 @@ async def _run_prompt(
     status: Status,
     renderers: Sequence[Renderer[AgentStreamEvent]],
     screen: Screen,
+    spinner: Callable[[], Spinner],
     images: Sequence[BinaryContent] = (),
 ) -> TurnEnd:
     renderer = StreamRenderer(
@@ -763,7 +792,7 @@ async def _run_prompt(
 
     session.on_context_usage = context_usage
     session.on_stream_event = observe
-    status_line = StatusLine(console, status, enabled=screen.editor is None)
+    status_line = StatusLine(console, status, enabled=screen.editor is None, spinner=spinner)
 
     @asynccontextmanager
     async def take_screen() -> AsyncGenerator[None]:
