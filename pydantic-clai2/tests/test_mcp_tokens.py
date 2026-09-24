@@ -7,7 +7,7 @@ import keyring
 import pytest
 from fastmcp.client.auth import OAuth
 from fastmcp.client.auth.oauth import TokenStorageAdapter
-from keyring.errors import PasswordDeleteError
+from keyring.errors import KeyringLocked, PasswordDeleteError
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from menu_script import Script, pick, typed
 from pydantic import AnyUrl, HttpUrl
@@ -134,3 +134,14 @@ async def test_rename_signs_out_the_old_name(tmp_path: Path, vault: Vault) -> No
     await TokenStore('docs').put('k', {'v': 1})
     assert (await command(['edit', 'docs'])).startswith('Updated renamed.')
     assert vault == {} and json.loads(store.path.read_text())['servers']['renamed']['auth'] == 'oauth'
+
+
+async def test_locked_keyring_does_not_break_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def locked(service: str, account: str) -> str | None:
+        raise KeyringLocked('locked')
+
+    monkeypatch.setattr(keyring, 'get_password', locked)
+    command, store = make(tmp_path)
+    store.put('docs', HTTPServer(type='http', url=HttpUrl(URL), auth='oauth'))
+    assert TokenStore('docs').signed_in() is None
+    assert 'oauth    unknown; the keyring could not be read' in await command(['status', 'docs'])

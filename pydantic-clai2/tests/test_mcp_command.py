@@ -250,6 +250,8 @@ def test_editor_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     assert edit_in_editor('{}') is None
     monkeypatch.setenv('VISUAL', str(tmp_path / 'no-such-editor'))
     assert edit_in_editor('{}') is None
+    monkeypatch.setenv('VISUAL', 'vim "unclosed')
+    assert edit_in_editor('{}') is None, 'an unparsable editor falls back to the one-line input'
 
 
 async def test_project_file_trust(tmp_path: Path) -> None:

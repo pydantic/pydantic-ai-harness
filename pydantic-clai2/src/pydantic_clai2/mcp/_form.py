@@ -371,17 +371,17 @@ def _json_problem(text: str) -> str | None:
 
 def edit_in_editor(initial: str) -> str | None:
     """Open `$VISUAL` or `$EDITOR` (default `vi`) on the JSON; `None` when it could not run."""
-    editor = shlex.split(os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi')
     handle, name = tempfile.mkstemp(suffix='.json', prefix='mcp_server_')
     path = Path(name)
     try:
+        editor = shlex.split(os.environ.get('VISUAL') or os.environ.get('EDITOR') or 'vi')
         with os.fdopen(handle, 'w') as file:
             file.write(initial)
         print('\x1b[2J\x1b[H', end='', flush=True, file=sys.__stdout__)
         if subprocess.call([*editor, name]) != 0:
             return None
         return path.read_text()
-    except OSError:
+    except (OSError, ValueError):  # ValueError: an unparsable $EDITOR; the one-line input takes over.
         return None
     finally:
         path.unlink(missing_ok=True)

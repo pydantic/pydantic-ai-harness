@@ -12,6 +12,7 @@ from typing import SupportsFloat
 
 from anyio import to_thread
 from fastmcp.client.auth import OAuth
+from keyring.errors import KeyringError
 from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 from pydantic_ai.exceptions import UserError
 
@@ -68,10 +69,14 @@ class TokenStore:
         """Entries are stored under the `mcp-NAME` credential account."""
         self.name = name
 
-    def signed_in(self) -> bool:
-        """Whether tokens are stored; they may still need a refresh."""
+    def signed_in(self) -> bool | None:
+        """Whether tokens are stored (they may still need a refresh); `None` when the keyring cannot be read."""
+        try:
+            bundle = _load(self.name)
+        except KeyringError:
+            return None
         now = time.time()
-        return any(slot.startswith(f'{_TOKENS}/') and entry.live(now) for slot, entry in _load(self.name).items())
+        return any(slot.startswith(f'{_TOKENS}/') and entry.live(now) for slot, entry in bundle.items())
 
     def forget(self) -> None:
         """Sign out: drop the tokens and the registered client."""

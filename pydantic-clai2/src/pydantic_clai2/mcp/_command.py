@@ -1,7 +1,9 @@
 """The `/mcp` command family, routed like Code Puppy's `MCPCommandHandler`."""
 
+from collections import deque
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
+from pathlib import Path
 
 from anyio import to_thread
 
@@ -49,6 +51,18 @@ def _uptime(seconds: float | None) -> str:
     minutes, secs = divmod(int(seconds), 60)
     hours, minutes = divmod(minutes, 60)
     return f'{hours}h {minutes}m' if hours else f'{minutes}m {secs}s' if minutes else f'{secs}s'
+
+
+def _tail(path: Path, limit: int) -> tuple[int, list[str]]:
+    """The line count and the last `limit` lines, streamed so a large log is never held in memory."""
+    if not path.exists():
+        return 0, []
+    total, lines = 0, deque[str](maxlen=limit)
+    with path.open(errors='replace') as file:
+        for line in file:
+            total += 1
+            lines.append(line.rstrip('\n'))
+    return total, list(lines)
 
 
 def _no_arguments(usage: str, args: list[str]) -> None:
@@ -147,7 +161,12 @@ class MCPCommand:
     def _oauth_line(self, entry: ServerEntry) -> list[str]:
         if not isinstance(entry.server, RemoteServer) or entry.server.auth is None:
             return []
-        status = 'signed in' if TokenStore(entry.name).signed_in() else 'not signed in; the browser opens on connect'
+        state = TokenStore(entry.name).signed_in()
+        status = {
+            True: 'signed in',
+            False: 'not signed in; the browser opens on connect',
+            None: 'unknown; the keyring could not be read',
+        }[state]
         return [f'  oauth    {status} (/mcp auth {entry.name} [logout])']
 
     def _summary(self, entry: ServerEntry, state: State) -> str:
@@ -176,7 +195,7 @@ class MCPCommand:
         if action == 'status':
             return self.details(entry)
         if action == 'logs':
-            return self._logs(name, extra)
+            return await self._logs(name, extra)
         if action == 'auth':
             return await self._auth(entry, extra)
         if action == 'tools':
@@ -210,15 +229,15 @@ class MCPCommand:
             return f'Signed out of {name}. Its next connection opens the browser to sign in.'
         return await self.servers.start(name)
 
-    def _logs(self, name: str, extra: list[str]) -> str:
+    async def _logs(self, name: str, extra: list[str]) -> str:
         if extra and not extra[0].isdigit():
             raise ValueError('Usage: /mcp logs NAME [LINES]')
         limit = int(extra[0]) if extra else 20
         path = self.servers.log_path(name)
-        lines = path.read_text(errors='replace').splitlines() if path.exists() else []
-        if not lines:
+        total, lines = await to_thread.run_sync(_tail, path, limit)
+        if not total:
             return f'No log entries for {name} yet.'
-        return '\n'.join([f'{path} (last {min(limit, len(lines))} of {len(lines)} lines)', *lines[-limit:]])
+        return '\n'.join([f'{path} (last {len(lines)} of {total} lines)', *lines])
 
     async def _install(self, args: list[str]) -> str:
         if args:

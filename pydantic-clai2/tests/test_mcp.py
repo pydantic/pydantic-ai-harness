@@ -234,6 +234,11 @@ async def test_start_stop_restart_logs_and_agent_use(tmp_path: Path) -> None:
     assert 'server booted' in logs and '[clai] started with 1 tools' in logs and '[clai] stopped' in logs
     assert logs.count('\n') <= 51
     assert len((await run('/mcp logs local 1')).splitlines()) == 2
+    assert (
+        (await run('/mcp logs local 1'))
+        .splitlines()[0]
+        .endswith(f'(last 1 of {logs.splitlines()[0].split()[-2]} lines)')
+    )
     with pytest.raises(ValueError, match='Usage'):
         await run('/mcp logs local lots')
 
