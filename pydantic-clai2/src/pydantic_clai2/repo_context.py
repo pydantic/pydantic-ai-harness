@@ -29,13 +29,12 @@ class RepoContextSettings(BaseModel):
 
 
 def activate(host: PluginHost[DepsT]) -> None:
-    """Bind `RepoContext` to the launch directory, the same workspace the `coder` plugin uses."""
+    """Add `RepoContext`, anchored at the run workspace's working directory like the `coder` plugin."""
     if not _supports_local_workspace():
         return
     settings = host.settings(RepoContextSettings)
     host.add(
         RepoContext[DepsT](
-            workspace_dir=Path.cwd(),
             home_dir=Path.home() if settings.walk_up else None,
             expose_inventory_tool=settings.inventory_tool,
             nested_traversal=settings.nested_traversal,

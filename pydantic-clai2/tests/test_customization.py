@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.capabilities import AgentCapability, LocalWorkspace
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.test import TestModel
@@ -26,15 +26,24 @@ from pydantic_clai2.repo_context import activate as activate_repo_context
 @pytest.mark.parametrize('supported', [True, False])
 async def test_workspace_defaults_follow_platform_support(supported: bool, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr('pydantic_clai2._session.sys.platform', 'linux' if supported else 'win32')
+    monkeypatch.setenv('OPENAI_API_KEY', 'held-back')
+    monkeypatch.setenv('CLAI_USER_VARIABLE', 'forwarded')
     agent = Agent(TestModel(custom_output_text='hello'), deps_type=type(None))
+    session = Session(agent, deps=None)
     with patch.object(agent, 'run', wraps=agent.run) as run:
-        await Session(agent, deps=None).prompt('hello')
+        await session.prompt('hello')
 
     call = run.call_args
     assert call is not None
-    assert ('workspace' in call.kwargs) is supported
-    if supported:
-        assert isinstance(call.kwargs['workspace'], LocalWorkspaceBackend)
+    capabilities = call.kwargs['capabilities']
+    # Last, so a sandbox plugin listed earlier supplies the workspace instead.
+    workspace = capabilities[-1] if capabilities else None
+    assert isinstance(workspace, LocalWorkspace) is supported
+    if isinstance(workspace, LocalWorkspace):
+        assert workspace.working_dir == session.workspace
+        assert workspace.env is not None
+        assert workspace.env['CLAI_USER_VARIABLE'] == 'forwarded'
+        assert 'OPENAI_API_KEY' not in workspace.env
 
     host = PluginHost[None](name='repo_context', console=Console(), settings={})
     activate_repo_context(host)
@@ -85,9 +94,9 @@ async def test_instruction_order_puts_the_hint_between_guidance_and_repository(t
     agent = create_agent()
     model = TestModel(call_tools=[], custom_output_text='hello')
     capabilities: list[AgentCapability[None]] = [
-        Coder(workspace=tmp_path, unrestricted_filesystem=True, repo_context=False),
+        Coder(unrestricted_filesystem=True, repo_context=False),
         AskUser(answerer=decline),
-        RepoContext(workspace_dir=tmp_path, expose_inventory_tool=False),
+        RepoContext(expose_inventory_tool=False),
     ]
     with agent.override(model=model):
         await agent.run('hello', capabilities=capabilities, workspace=LocalWorkspaceBackend(working_dir=tmp_path))
@@ -108,8 +117,8 @@ async def test_hint_still_follows_the_coding_guidance_without_ask_user(tmp_path:
     agent = create_agent()
     model = TestModel(call_tools=[], custom_output_text='hello')
     capabilities: list[AgentCapability[None]] = [
-        Coder(workspace=tmp_path, unrestricted_filesystem=True, repo_context=False),
-        RepoContext(workspace_dir=tmp_path, expose_inventory_tool=False),
+        Coder(unrestricted_filesystem=True, repo_context=False),
+        RepoContext(expose_inventory_tool=False),
     ]
     with agent.override(model=model):
         await agent.run('hello', capabilities=capabilities, workspace=LocalWorkspaceBackend(working_dir=tmp_path))

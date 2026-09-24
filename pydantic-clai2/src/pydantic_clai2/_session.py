@@ -5,19 +5,20 @@ import os
 import sys
 from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from dataclasses import replace
+from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Generic, Literal, NotRequired, TypedDict, TypeVar
+from typing import Generic, Literal, TypeVar
 from uuid import uuid4
 
 from anyio import get_cancelled_exc_class, move_on_after
 from pydantic_ai import AgentRunResult, AgentStreamEvent, RunContext, capture_run_messages
 from pydantic_ai.agent import AbstractAgent
-from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai.capabilities import AgentCapability, LocalWorkspace
 from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, UserContent, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
 from pydantic_ai.usage import UsageLimits
-from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai_harness.shell import LLM_API_KEY_ENV_PATTERNS
 from pydantic_ai_harness.step_persistence import SqliteStepStore, StepStore
 from pydantic_ai_harness.step_persistence.conversations import (
     ConversationSummary,
@@ -29,12 +30,21 @@ DepsT = TypeVar('DepsT')
 OutputT = TypeVar('OutputT')
 
 
-class _WorkspaceRunKwargs(TypedDict):
-    workspace: NotRequired[LocalWorkspaceBackend]
-
-
 def _supports_local_workspace() -> bool:
     return sys.platform != 'win32'
+
+
+def _command_env() -> dict[str, str]:
+    """The environment clai's commands get: this process's, minus LLM API keys.
+
+    clai is a local coding CLI, so the model's commands see the user's shell environment the way
+    the user's own commands would; only provider credentials are held back.
+    """
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if not any(fnmatchcase(name, pattern) for pattern in LLM_API_KEY_ENV_PATTERNS)
+    }
 
 
 class Session(Generic[DepsT, OutputT]):
@@ -192,9 +202,10 @@ class Session(Generic[DepsT, OutputT]):
             with capture_run_messages() as messages:
                 try:
                     model = await self.resolved_model()
-                    workspace_kwargs: _WorkspaceRunKwargs = {}
+                    capabilities = list(self.plugins)
                     if _supports_local_workspace():
-                        workspace_kwargs['workspace'] = LocalWorkspaceBackend(working_dir=self.workspace)
+                        # Last, so a sandbox plugin earlier in the list supplies the workspace instead.
+                        capabilities.append(LocalWorkspace[DepsT](self.workspace, env=_command_env()))
                     result = await self.agent.run(
                         content,
                         deps=self.deps,
@@ -204,10 +215,9 @@ class Session(Generic[DepsT, OutputT]):
                         message_history=previous,
                         conversation_id=self.summary.id,
                         run_id=run_id,
-                        capabilities=self.plugins,
+                        capabilities=capabilities,
                         usage_limits=self.usage_limits,
                         event_stream_handler=self._stream,
-                        **workspace_kwargs,
                     )
                     self._accepting_steering = False
                     self._messages = result.all_messages()
