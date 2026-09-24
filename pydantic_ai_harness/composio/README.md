@@ -45,6 +45,7 @@ A fixed `url` and `headers`, or a fixed `client`, connect every run to the same 
 
 ```python
 import asyncio
+import os
 from dataclasses import dataclass
 
 from composio import Composio as ComposioClient
@@ -52,38 +53,39 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import DynamicCapability
 from pydantic_ai_harness.composio import Composio
 
+COMPOSIO_API_KEY = os.environ['COMPOSIO_API_KEY']
 composio = ComposioClient()
+session_ids: dict[str, str] = {}  # Your database: each user's Composio session ID.
 
 
 @dataclass
 class Deps:
     composio_url: str | None
-    composio_headers: dict[str, str | None]
 
 
 def composio_session(ctx: RunContext[Deps]) -> Composio[Deps] | None:
     if ctx.deps.composio_url is None:
         return None
-    return Composio(url=ctx.deps.composio_url, headers=ctx.deps.composio_headers)
+    return Composio(url=ctx.deps.composio_url, headers={'x-api-key': COMPOSIO_API_KEY})
 
 
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[DynamicCapability(composio_session, id='composio')])
 
 
-async def run_for_user(prompt: str, user_id: str, session_id: str | None) -> str:
+async def run_for_user(prompt: str, user_id: str) -> str:
+    session_id = session_ids.get(user_id)
     if session_id is None:
         session = await asyncio.to_thread(composio.sessions.create, user_id=user_id, mcp=True)
-        # Store session.session_id for this user so later runs restore it.
+        session_ids[user_id] = session.session_id
     else:
         session = await asyncio.to_thread(composio.sessions.use, session_id, mcp=True)
-    deps = Deps(composio_url=session.mcp.url, composio_headers=dict(session.mcp.headers))
-    result = await agent.run(prompt, deps=deps)
+    result = await agent.run(prompt, deps=Deps(composio_url=session.mcp.url))
     return result.output
 ```
 
-Open the user's session before the run and put its URL and headers in the deps; the function only reads them, so each run connects to its own user's session. If it returns `None`, that run has no Composio tools. Composio's SDK is synchronous and calls Composio's API, so run it in a thread as above to keep the agent responsive.
+Open the user's session before the run, save its ID so later runs reuse it, and put its URL in the deps; the function only reads it, so each run connects to its own user's session. If it returns `None`, that run has no Composio tools. Composio's SDK is synchronous and calls Composio's API, so run it in a thread as above to keep the agent responsive.
 
-`session.mcp.headers` can contain unset values; `Composio` already drops them, so pass them through as returned. Your application is responsible for mapping each user to a Composio user ID and storing their session ID.
+The session's headers carry only your Composio API key, which is the same for every user, so the function adds it from your configuration instead of the deps. Deps can be stored, for example in a durable execution's history, and should not hold secrets that are not the user's own. Your application is responsible for mapping each user to a Composio user ID.
 
 With durable execution such as Temporal, the function may run again when a run is replayed, so it must not call Composio's API itself. Opening the session before the run, as above, keeps that call out of the replay. To add more than one `Composio` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
 
