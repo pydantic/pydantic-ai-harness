@@ -107,6 +107,10 @@ error.
 
 ## Tool selection and approval
 
+Day AI's server does not mark any tool as read-only, so there is no `read_only`
+option: the agent gets every tool your tier and role allow, including ones that
+change CRM records and send notifications.
+
 To filter tools or require approval in your application, wrap the toolset with
 the existing [toolset
 wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/). For example,
@@ -142,6 +146,13 @@ the agent.
 
 A `client` is one connection shared by every run; see [Per-user
 credentials](#per-user-credentials) to connect each user separately.
+
+## Telemetry
+
+`DayAI` emits no spans of its own. Core's
+[instrumentation](https://pydantic.dev/docs/ai/capabilities/instrumentation/)
+already records each Day AI tool call as a tool span, and connecting makes no
+decision worth a span of its own.
 
 ## Define the agent in YAML or JSON
 

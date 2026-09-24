@@ -80,6 +80,8 @@ With durable execution such as Temporal, read the token from the run's deps rath
 
 ## Tool selection and approval
 
+Day AI's server does not mark any tool as read-only, so there is no `read_only` option: the agent gets every tool your tier and role allow, including ones that change CRM records and send notifications.
+
 To filter tools or require approval in your application, wrap the toolset with the existing [toolset wrappers](/ai/tools-toolsets/toolsets/). For example, this asks for approval before every tool call, which suits tools that create or update CRM records and send notifications:
 
 ```python
@@ -102,6 +104,10 @@ Handle the approval requests with the [deferred tools workflow](/ai/tools-toolse
 Use `auth` in almost every case. Pass `client` only when you need control of the connection itself: your own FastMCP client or transport, for example one with a proxy or MCP handlers. The client then owns the URL and authentication, so passing `client` together with `auth` raises an error. `include_instructions=False` stops the server's own instructions from reaching the agent.
 
 A `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately.
+
+## Telemetry
+
+`DayAI` emits no spans of its own. Core's [instrumentation](/ai/capabilities/instrumentation/) already records each Day AI tool call as a tool span, and connecting makes no decision worth a span of its own.
 
 ## Define the agent in YAML or JSON
 
