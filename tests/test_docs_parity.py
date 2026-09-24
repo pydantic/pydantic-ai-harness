@@ -133,6 +133,7 @@ _CAPABILITY_PAGE_META = {
     'shell.md': ('shell', 'Shell'),
     'managed-prompt.md': ('logfire', 'Managed Prompt'),
     'memory.md': ('memory', 'Memory'),
+    'pixeltable.md': ('pixeltable', 'Pixeltable'),
     'modal-sandbox.md': ('modal_sandbox', 'Modal Sandbox'),
     'repo-context.md': ('repo_context', 'Repo Context'),
     'repair-tool-arguments.md': ('repair_tool_arguments', 'Repair Tool Arguments'),

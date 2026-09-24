@@ -38,6 +38,7 @@ _FACTORIES = (
     ('modal_sandbox', 'modal_sandbox:ModalSandbox'),
     ('notion', 'notion:Notion'),
     ('ordinal', 'ordinal:Ordinal'),
+    ('pixeltable', 'pixeltable:Pixeltable'),
     ('planning', 'planning:Planning'),
     ('playwright', 'playwright:PlaywrightBrowser'),
     ('prompt_injection_defender', 'prompt_injection_defender:PromptInjectionDefender'),

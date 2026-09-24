@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from .memory import Memory
     from .modal_sandbox import ModalSandbox
     from .ordinal import Ordinal
+    from .pixeltable import Pixeltable
     from .planning import Planning
     from .prompt_injection_defender import PromptInjectionDefender
     from .pydantic_ai_docs import PydanticAIDocs
@@ -95,6 +96,7 @@ __all__ = [
     'OutputBlocked',
     'OutputGuardrail',
     'OutputGuardrailFunc',
+    'Pixeltable',
     'Planning',
     'PromptInjectionDefender',
     'PydanticAIDocs',
@@ -145,6 +147,7 @@ _CAPABILITY_EXPORTS = {
     'Memory': 'memory',
     'ModalSandbox': 'modal_sandbox',
     'Ordinal': 'ordinal',
+    'Pixeltable': 'pixeltable',
     'Planning': 'planning',
     'PromptInjectionDefender': 'prompt_injection_defender',
     'PydanticAIDocs': 'pydantic_ai_docs',
