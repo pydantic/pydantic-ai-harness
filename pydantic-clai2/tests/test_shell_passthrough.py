@@ -83,6 +83,11 @@ class TestShellPassthrough:
         assert 'Interrupted (' in text
         assert (tmp_path / 'marker.txt').read_text() == 'after'
 
+    async def test_second_ctrl_c_exits(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        text = await shell_session(tmp_path, monkeypatch, [KeyboardInterrupt(), '!kill -INT $PPID; exec sleep 30'])
+        assert 'Input cleared' in text
+        assert 'Interrupted (' in text
+
     async def test_spawn_failure_is_reported(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         async def unavailable(command: str) -> None:
             raise FileNotFoundError('no shell')
