@@ -27,7 +27,15 @@ from ._rendering import StreamRenderer
 from ._session import Session
 from .capability_catalog import HARNESS_PLUGINS
 from .command_context import CommandContext, CommandProvider
-from .commands import Command, Commands, config_command, config_completions, is_command_input, set_completions
+from .commands import (
+    Command,
+    Commands,
+    config_command,
+    config_completions,
+    expand_bare_command,
+    is_command_input,
+    set_completions,
+)
 from .config import PluginSettings, Settings
 from .customization import customization_guide
 from .errors import error_message
@@ -519,7 +527,7 @@ class _Shell(Generic[DepsT, OutputT]):
                     text = await self.editor.read()
                 else:
                     assert self.prompt is not None
-                    text = (await self.prompt.prompt_async('> ')).strip()
+                    text = expand_bare_command((await self.prompt.prompt_async('> ')).strip())
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
@@ -535,8 +543,6 @@ class _Shell(Generic[DepsT, OutputT]):
             if self.editor is not None:
                 self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
             self.console.print()
-            if text.strip().lower() == 'clear':
-                text = '/clear'
             if is_command_input(text):
                 async with (self.editor.suspended if self.editor is not None else bare_screen)():
                     await self.interrupts.run(
