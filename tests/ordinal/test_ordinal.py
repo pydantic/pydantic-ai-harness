@@ -12,6 +12,7 @@ from mcp.server.fastmcp.server import FastMCP, Settings
 from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
+from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset
@@ -71,18 +72,29 @@ class TestOrdinal:
             """List Ordinal workspaces."""
             return {'slug': 'acme'}
 
-        class FakeOrdinal(Ordinal):
-            def get_toolset(self) -> MCPToolset[Any]:
-                return MCPToolset(server)
-
         agent = Agent(
             TestModel(call_tools=['ordinal_get_workspace_context']),
-            capabilities=[FakeOrdinal()],
+            capabilities=[Ordinal(client=server)],
         )
 
         result = await agent.run('List my workspaces')
 
         assert 'acme' in result.output
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize('include', [True, False])
+    async def test_server_instructions(self, include: bool) -> None:
+        server = FastMCP('ordinal-fake', instructions='Ordinal instructions.')
+        agent = Agent(TestModel(call_tools=[]), capabilities=[Ordinal(client=server, include_instructions=include)])
+        result = await agent.run('Hello')
+        request = result.all_messages()[0]
+        assert isinstance(request, ModelRequest)
+        assert ('Ordinal instructions.' in (request.instructions or '')) is include
+
+    @pytest.mark.parametrize('auth', ['ordinal-token', no_credential])
+    def test_client_cannot_be_combined_with_auth(self, auth: Any) -> None:
+        with pytest.raises(UserError, match='`client` owns the connection'):
+            Ordinal(client='https://example.com/mcp', auth=auth)
 
     def test_serialization_name(self) -> None:
         assert Ordinal.get_serialization_name() == 'Ordinal'

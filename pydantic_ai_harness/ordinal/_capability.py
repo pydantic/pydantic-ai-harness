@@ -22,7 +22,7 @@ from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
 from pydantic_ai_harness._mcp import credential, one_connection
 
 try:
-    from pydantic_ai.mcp import MCPToolset
+    from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
         'MCP support is required for the Ordinal capability. Install it with: uv add "pydantic-ai-harness[ordinal]"'
@@ -33,7 +33,7 @@ _ID = 'ordinal'
 _DEFAULT_DESCRIPTION = 'Work inside an Ordinal workspace: draft, schedule, and analyze social posts.'
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Ordinal(AbstractCapability[AgentDepsT]):
     """Let an agent draft, schedule, and analyze social posts in Ordinal.
 
@@ -48,7 +48,7 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     ```
     """
 
-    id: str | None = field(default=_ID, kw_only=True)
+    id: str | None = _ID
     """Stable capability and toolset ID, so `defer_loading=True` needs none.
 
     One `Ordinal` is one connection to one account, like `StackOne`'s linked account. Two sharing this `id` are
@@ -64,6 +64,16 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     Unset, it uses `ORDINAL_ACCESS_TOKEN`. A function never does: if it returns `None` or `''`, that run has no Ordinal tools.
     """
 
+    include_instructions: bool = True
+    """Pass the server's own instructions to the agent."""
+
+    client: MCPToolsetClient | None = field(default=None, repr=False)
+    """Your own MCP client or transport, for full control of the connection. It cannot be combined with `auth`."""
+
+    def __post_init__(self) -> None:
+        if self.client is not None and self.auth is not None:
+            raise UserError('`client` owns the connection, so it cannot be combined with `auth`.')
+
     @classmethod
     def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
         """Two under one `id` are one connection stated twice; two that disagree raise rather than merge."""
@@ -71,7 +81,9 @@ class Ordinal(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Return the Ordinal MCP tools."""
-        id = self.id if self.id is not None else _ID
+        id = self.id or _ID
+        if self.client is not None:
+            return MCPToolset(self.client, id=id, include_instructions=self.include_instructions)
         if callable(self.auth):
             return DynamicToolset(self._connect_for_run, per_run_step=False, id=id)
         return self._connect(self.auth)
@@ -86,7 +98,7 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             _ORDINAL_MCP_URL,
-            id=self.id if self.id is not None else _ID,
+            id=self.id or _ID,
             auth=credential(auth, env='ORDINAL_ACCESS_TOKEN', service='Ordinal'),
-            include_instructions=True,
+            include_instructions=self.include_instructions,
         )

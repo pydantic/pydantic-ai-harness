@@ -115,6 +115,18 @@ wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tool
 since their tool names are the same; two that share an `id` but differ raise an
 error.
 
+## Connection customization
+
+Use `auth` in almost every case. Pass `client` only when you need control of the
+connection itself: your own FastMCP client or transport, for example one with a
+proxy or MCP handlers. The client then owns the URL and authentication, so
+passing `client` together with `auth` raises an error.
+`include_instructions=False` stops the server's own instructions from reaching
+the agent.
+
+A `client` is one connection shared by every run; see [Per-user
+credentials](#per-user-credentials) to connect each user separately.
+
 ## Define the agent in YAML or JSON
 
 Loading a YAML file also needs the `spec` extra.

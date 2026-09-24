@@ -82,6 +82,12 @@ Your app gets each user's token, stores it, and refreshes it. For example, a "Co
 
 With durable execution such as Temporal, read the token from the run's deps rather than from a global, since the function may run in another process. The capability's `id` defaults to `ordinal`, so `defer_loading=True` works without one. To add more than one `Ordinal` to an agent, give each a distinct `id` and wrap them in [PrefixTools](/ai/capabilities/prefix-tools/), since their tool names are the same; two that share an `id` but differ raise an error.
 
+## Connection customization
+
+Use `auth` in almost every case. Pass `client` only when you need control of the connection itself: your own FastMCP client or transport, for example one with a proxy or MCP handlers. The client then owns the URL and authentication, so passing `client` together with `auth` raises an error. `include_instructions=False` stops the server's own instructions from reaching the agent.
+
+A `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately.
+
 ## Define the agent in YAML or JSON
 
 Loading a YAML file also needs the `spec` extra:
