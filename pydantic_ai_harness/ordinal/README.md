@@ -10,13 +10,13 @@ user's workspaces.
 
 ## Before you start
 
-Ordinal MCP is available on the Pro plan or higher, same as the REST API. You
-need an Ordinal account with access to at least one workspace. Sign-in is OAuth
--- there is no API key to copy.
+Ordinal MCP needs the Pro plan or higher, the same as the REST API. You need an
+Ordinal account with access to at least one workspace. You sign in with OAuth;
+there is no API key to copy.
 
-If you previously configured the old server at `https://app.tryordinal.com/api/mcp`
-with a workspace API key, remove it. The old and new servers cannot coexist:
-duplicate tool names confuse the agent.
+If you set up the old server at `https://app.tryordinal.com/api/mcp` with a
+workspace API key, remove it. Do not use the old and new servers together,
+because their duplicate tool names confuse the agent.
 
 ## Installation
 
@@ -32,8 +32,8 @@ pip:
 pip install "pydantic-ai-harness[ordinal]" "pydantic-ai-slim[openai]"
 ```
 
-The second package installs the OpenAI provider used by the example. For
-another model, install its matching provider extra instead.
+The second package installs the OpenAI provider the example uses. For another
+model, install that provider's extra instead.
 
 ## Connect
 
@@ -46,27 +46,25 @@ result = agent.run_sync('List my Ordinal workspaces')
 print(result.output)
 ```
 
-Without `auth`, the first Ordinal tool call opens a browser. Sign in and
-approve access. To serve several users from one agent, pass each user's token
-instead (see [Per-user credentials](#per-user-credentials)). After that, start by listing workspaces -- every other Ordinal tool needs a
-`workspaceSlug` from `ordinal_get_workspace_context`.
+Without `auth`, the agent opens a browser the first time it connects to Ordinal.
+Sign in and approve access. To serve several users from one agent, pass each
+user's token instead (see [Per-user credentials](#per-user-credentials)). Then
+start by listing workspaces. Every other Ordinal tool needs a `workspaceSlug`
+from `ordinal_get_workspace_context`.
 
-`Ordinal` only configures the connection. For custom clients, tool filtering,
-or approval policy, use Pydantic AI's generic
+`Ordinal` has no settings for custom clients, tool filtering, or approval. For
+those, use Pydantic AI's generic
 [`MCP`](https://pydantic.dev/docs/ai/capabilities/mcp/) capability or
 [`MCPToolset`](https://pydantic.dev/docs/ai/mcp/) directly.
 
 ## Per-user credentials
 
-Without `auth`, the capability uses browser OAuth: every run shares one
-connection and the identity of whoever signed in. A fixed `auth` token does the
-same with that token's identity. Use these for scripts, local tools, and
-single-user agents. Browser OAuth opens a browser on the machine running the
-agent and keeps tokens in memory, so it does not suit a server.
+Browser login and a fixed `auth` token both connect every run as the same
+account. Browser login also opens the browser on the machine running the agent,
+so it only suits local use.
 
-When one agent serves several users, pass a callable as `auth`. It receives the
-run context at the start of each run and returns that user's Ordinal access
-token, so each run opens its own connection:
+When one agent serves several users, pass a function as `auth` that returns the
+current user's Ordinal access token:
 
 ```python
 from dataclasses import dataclass
@@ -87,17 +85,19 @@ def ordinal_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5', deps_type=Deps, capabilities=[Ordinal(auth=ordinal_token)])
 ```
 
-The callable can be async and can return a token or an `httpx.Auth`. When it
-returns `None`, the run has no Ordinal tools; it does not fall back to browser
-OAuth. Returning `'oauth'` raises an error, because it would open a browser on
-the server. Your application owns obtaining, storing, and refreshing each user's
-token, for example through an OAuth flow in your web app, and the callable reads
-the current token from that store.
+The function is called at the start of each run, so each run connects as its own
+user. It can be async, and it can return a token or an `httpx.Auth`. If it
+returns `None`, that run has no Ordinal tools; it never falls back to browser
+login.
 
-Each run connects and lists tools when it starts, and disconnects when it ends.
-Under durable execution such as Temporal, the callable runs in the worker, so it
-should derive the credential from serializable deps. Give each `Ordinal` on one
-agent a distinct `id`.
+Your application is responsible for getting each user's token, storing it, and
+refreshing it, for example with a "Connect Ordinal" OAuth flow in your web app.
+The function only reads the current token. Returning `'oauth'` from it raises an
+error, because browser login would open on the server rather than for the user.
+
+With durable execution such as Temporal, read the token from the run's deps
+rather than from a global, since the function may run in another process. To add
+more than one `Ordinal` to an agent, give each a distinct `id`.
 
 ## Define the agent in YAML or JSON
 
@@ -115,4 +115,4 @@ from pydantic_ai_harness import Ordinal
 agent = Agent.from_file('agent.yaml', custom_capability_types=[Ordinal])
 ```
 
-Pass `custom_capability_types` so the spec loader knows how to instantiate `Ordinal`.
+Pass `custom_capability_types` so the loader can create `Ordinal` from the file.

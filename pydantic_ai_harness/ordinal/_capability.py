@@ -32,10 +32,10 @@ _DEFAULT_DESCRIPTION = 'Work inside an Ordinal workspace: draft, schedule, and a
 
 @dataclass
 class Ordinal(AbstractCapability[AgentDepsT]):
-    """Connect an agent to Ordinal's hosted MCP server.
+    """Let an agent draft, schedule, and analyze social posts in Ordinal.
 
-    Without `auth`, the first tool call opens a browser for OAuth. After
-    sign-in, the agent can reach every workspace the user belongs to.
+    Without `auth`, the agent opens a browser for sign-in the first time it connects. It can then
+    reach every workspace the user belongs to.
 
     ```python
     from pydantic_ai import Agent
@@ -49,11 +49,10 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     """Routing description used when the capability is loaded on demand."""
 
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """An Ordinal OAuth access token, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+    """An Ordinal access token, `'oauth'`, an `httpx.Auth`, or a function that returns one for each run.
 
-    Unset, it defaults to `'oauth'`, which opens a browser on the machine running the agent. A callable
-    receives the run context, so each run can connect with its own user's token from `ctx.deps`;
-    returning `None` omits the tools.
+    Unset, it means `'oauth'`, which opens a browser on the machine running the agent. A function can
+    return the current user's token from `ctx.deps`; returning `None` gives that run no Ordinal tools.
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
