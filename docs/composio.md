@@ -79,7 +79,7 @@ With durable execution such as Temporal, read the session from the run's deps ra
 
 Choose toolkits, connected accounts, and tool restrictions when you create the Composio session. By default, the session gives the agent tools to search for app actions and run them. Composio also has a preset that gives the agent a fixed set of actions instead. See [Composio's session guide](https://docs.composio.dev/docs/sessions-via-mcp) for settings and app authorization.
 
-The server's instructions reach the agent by default; `include_instructions=False` turns them off. To use your own transport, pass `client`. It then owns the connection settings, and `url` and `headers` are ignored. A `client` is one connection shared by every run; see [Per-user sessions](#per-user-sessions) to connect each user separately.
+The server's instructions reach the agent by default; `include_instructions=False` turns them off. To use your own transport, pass `client`. It then owns the connection, so passing `client` together with `url` or `headers` raises an error. A `client` is one connection shared by every run; see [Per-user sessions](#per-user-sessions) to connect each user separately.
 
 The agent can use every tool the session offers, including tools that make changes. Control access in Composio. To filter tools or require approval in your application, wrap `capability.get_toolset()` with Pydantic AI's [toolset wrappers](/ai/tools-toolsets/toolsets/).
 

@@ -1,10 +1,13 @@
 """Exercise Composio's MCP wiring through an agent."""
 
+from typing import Any
+
 import pytest
 from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import DynamicCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest
 from pydantic_ai.models.test import TestModel
@@ -57,14 +60,21 @@ class TestComposio:
         assert 'secret' not in repr(Composio(url='https://example.com/mcp', headers={'x-api-key': 'secret'}))
 
     def test_connection_is_required(self) -> None:
-        with pytest.raises(ValueError, match='session URL or a configured client'):
-            Composio().get_toolset()
+        with pytest.raises(UserError, match='Pass `url` from `session.mcp.url`, or your own `client`'):
+            Composio()
 
     def test_custom_client_owns_the_connection(self) -> None:
         client = StreamableHttpTransport('https://example.com/mcp')
-        toolset = Composio(client=client, url='https://example.com/ignored/mcp').get_toolset()
+        toolset = Composio(client=client).get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.client.transport is client
+
+    @pytest.mark.parametrize(
+        'settings', [{'url': 'https://example.com/session/mcp'}, {'headers': {'x-api-key': 'key'}}]
+    )
+    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+        with pytest.raises(UserError, match='`client` owns the connection'):
+            Composio(client='https://example.com/mcp', **settings)
 
 
 class TestDynamicCapability:

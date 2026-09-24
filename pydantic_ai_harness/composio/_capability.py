@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -35,17 +36,19 @@ class Composio(AbstractCapability[AgentDepsT]):
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | None = field(default=None, repr=False)
-    """Your own MCP client or transport, which then owns the URL and headers.
+    """Your own MCP client or transport, for full control of the connection. It cannot be combined with `url` or `headers`."""
 
-    `url` and `headers` are ignored when it is set.
-    """
+    def __post_init__(self) -> None:
+        if self.client is not None and (self.url is not None or self.headers is not None):
+            raise UserError('`client` owns the connection, so it cannot be combined with `url` or `headers`.')
+        if self.client is None and self.url is None:
+            raise UserError('Pass `url` from `session.mcp.url`, or your own `client`, to connect to Composio.')
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the session connection using Pydantic AI's MCP lifecycle."""
         if self.client is not None:
             return MCPToolset(self.client, id=self.id or 'composio', include_instructions=self.include_instructions)
-        if self.url is None:
-            raise ValueError('Provide the Composio session URL or a configured client.')
+        assert self.url is not None  # checked in `__post_init__`
         return MCPToolset(
             self.url,
             headers={key: value for key, value in (self.headers or {}).items() if value is not None},
