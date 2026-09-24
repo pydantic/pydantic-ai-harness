@@ -133,7 +133,7 @@ class TestCatalogue:
         write(
             spinners,
             {
-                'mine': {'frames': ['a', 'bb'], 'description': 'custom'},
+                'mine ': {'frames': ['a', 'bb'], 'description': 'custom'},
                 'zoomies': {'interval': 0.5},
                 'shared': {'description': 'retold'},
             },

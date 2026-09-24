@@ -153,13 +153,14 @@ def _parse_user_file(text: str, base: dict[str, Spinner]) -> tuple[dict[str, Spi
                 description = found.description if entry.description is None else entry.description
                 spinners[name] = replace(found, interval=interval, description=description, source='user')
             else:
-                spinners[name] = make_spinner(
+                spinner = make_spinner(
                     name,
                     entry.frames,
                     interval=_PACK_INTERVAL if entry.interval is None else entry.interval,
                     description=entry.description or '',
                     source='user',
                 )
+                spinners[spinner.name] = spinner
         except (ValidationError, ValueError) as exc:
             reason = exc.errors()[0]['msg'] if isinstance(exc, ValidationError) else str(exc)
             problems.append(f'spinners.json: skipped {name!r}: {reason}')
