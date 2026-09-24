@@ -53,8 +53,6 @@ def one_connection(capabilities: Sequence[CapabilityT]) -> CapabilityT:
             names = ', '.join(repr(name) for name in disagree)
             raise UserError(
                 f'Capability id {first.id!r} is used by multiple {type(first).__name__} capabilities that disagree '
-                f"on {names}. Each is a connection to one account, so merging them could send one account's "
-                "credential to the other's server. Give them distinct `id`s and wrap them in `PrefixTools` to keep "
-                'both, or make them agree.'
+                f'on {names}. Give each its own `id` and wrap them in `PrefixTools`, or make them agree.'
             )
     return first
