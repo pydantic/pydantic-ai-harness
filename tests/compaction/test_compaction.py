@@ -2443,6 +2443,19 @@ class TestClampOversizedMessages:
 # ---------------------------------------------------------------------------
 
 
+@dataclasses.dataclass
+class _RecordModels(AbstractCapability[None]):
+    """Capability recording the model name seen by every `after_model_request` hook call."""
+
+    models: list[str | None] = dataclasses.field(default_factory=list[str | None])
+
+    async def after_model_request(
+        self, ctx: RunContext[None], *, request_context: ModelRequestContext, response: ModelResponse
+    ) -> ModelResponse:
+        self.models.append(response.model_name)
+        return response
+
+
 class TestPublicPath:
     @pytest.fixture
     def anyio_backend(self) -> str:
@@ -2459,6 +2472,91 @@ class TestPublicPath:
         )
         result = await agent.run('hello')
         assert result.output is not None
+
+    @pytest.mark.anyio
+    async def test_summarization_capabilities_run_on_the_summary_run(self):
+        history = [message for _ in range(5) for message in (_user('q'), _assistant('a'))]
+        summary = _RecordModels()
+        outer = _RecordModels()
+
+        def summarizer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            return ModelResponse(parts=[TextPart(content='THE SUMMARY')])
+
+        agent = Agent(
+            TestModel(),
+            deps_type=type(None),
+            capabilities=[
+                outer,
+                SummarizingCompaction(
+                    FunctionModel(summarizer, model_name='summarizer'),
+                    max_messages=4,
+                    keep_messages=1,
+                    preserve_first_user_message=False,
+                    summarization_capabilities=[summary],
+                ),
+            ],
+        )
+        await agent.run('next', message_history=history)
+        # The summary run is a separate agent: the attached capability sees the summary model,
+        # the outer capability sees only the run model.
+        assert summary.models == ['summarizer']
+        assert outer.models == ['test']
+
+    @pytest.mark.anyio
+    async def test_summarization_capabilities_default_off(self):
+        outer = _RecordModels()
+        prompts: list[str] = []
+        history = [message for _ in range(5) for message in (_user('q'), _assistant('a'))]
+        agent = Agent(
+            TestModel(),
+            deps_type=type(None),
+            capabilities=[
+                outer,
+                SummarizingCompaction(
+                    _recording_summarizer(prompts, output='THE SUMMARY'),
+                    max_messages=4,
+                    keep_messages=1,
+                    preserve_first_user_message=False,
+                ),
+            ],
+        )
+        result = await agent.run('next', message_history=history)
+        # Without the field the summary request stays invisible to the outer hook, and nothing
+        # else about the run changes.
+        assert outer.models == ['test']
+        assert len(prompts) == 1
+        messages = result.all_messages()
+        assert len(messages) == 3
+        summary_part = messages[0].parts[0]
+        assert isinstance(summary_part, SystemPromptPart)
+        assert 'THE SUMMARY' in summary_part.content
+        assert result.usage.requests == 2
+
+    @pytest.mark.anyio
+    async def test_summarization_capabilities_run_on_streamed_summary(self):
+        prompts: list[str] = []
+        summary = _RecordModels()
+        outer = _RecordModels()
+        history = [message for _ in range(5) for message in (_user('q'), _assistant('a'))]
+        agent = Agent(
+            TestModel(),
+            deps_type=type(None),
+            capabilities=[
+                outer,
+                SummarizingCompaction(
+                    _recording_streaming_summarizer(prompts, model_name='summarizer'),
+                    max_messages=4,
+                    keep_messages=1,
+                    preserve_first_user_message=False,
+                    event_stream_handler=drain_summary_events,
+                    summarization_capabilities=[summary],
+                ),
+            ],
+        )
+        await agent.run('next', message_history=history)
+        # The streaming summary path shares the internal agent, so the attached hooks fire there too.
+        assert summary.models == ['summarizer']
+        assert outer.models == ['test']
 
     @pytest.mark.anyio
     async def test_clamp_oversized_wired_into_agent(self):
@@ -3819,7 +3917,7 @@ def _recording_summarizer(prompts: list[str], output: str = 'THE SUMMARY') -> Fu
     return FunctionModel(model_fn)
 
 
-def _recording_streaming_summarizer(prompts: list[str]) -> FunctionModel:
+def _recording_streaming_summarizer(prompts: list[str], model_name: str | None = None) -> FunctionModel:
     """A stream-only summarizer that records its prompt and yields the summary in chunks."""
 
     async def stream_fn(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str]:
@@ -3835,7 +3933,7 @@ def _recording_streaming_summarizer(prompts: list[str]) -> FunctionModel:
         yield 'STREAMED '
         yield 'SUMMARY'
 
-    return FunctionModel(stream_function=stream_fn)
+    return FunctionModel(stream_function=stream_fn, model_name=model_name)
 
 
 class TestStructuralFeaturesThroughAgent:
