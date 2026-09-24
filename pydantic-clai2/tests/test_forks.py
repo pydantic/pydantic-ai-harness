@@ -484,6 +484,42 @@ async def test_cancelled_turn_takes_forks_down(tmp_path: Path, monkeypatch: pyte
     assert 'fork #1 cancelled after' in text
 
 
+async def test_shell_passthrough_holds_fork_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    model, output = Model(), io.StringIO()
+
+    async def after_fork_started() -> str:
+        await model.started.wait()
+        return '!make test'
+
+    async def run_shell_command(command: str, *, console: Console, interrupts: object) -> None:
+        # The fork finishes while the command owns the terminal; its output must wait.
+        model.release.set()
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+        assert 'FORK #1' not in output.getvalue()
+        console.print(f'ran {command}')
+
+    monkeypatch.setattr('pydantic_clai2._app.run_shell_command', run_shell_command)
+
+    async def after_command() -> str:
+        # Idle again: the held banner prints before the next prompt returns.
+        for _ in range(20):
+            if 'FORK #1' in output.getvalue():
+                break
+            await asyncio.sleep(0.01)
+        return '/exit'
+
+    Script(['/fork block', after_fork_started, after_command]).install(monkeypatch)
+    await chat(
+        Agent(FunctionModel(stream_function=model.respond)),
+        deps=None,
+        console=Console(file=output, width=200),
+        store=SettingsStore(tmp_path / 'config.db'),
+    )
+    text = output.getvalue()
+    assert text.index('ran make test') < text.index('FORK #1 RESPONSE')
+
+
 async def test_exit_cancels_running_forks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     model, output = Model(), io.StringIO()
 
