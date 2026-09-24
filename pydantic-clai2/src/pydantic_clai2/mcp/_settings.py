@@ -2,13 +2,11 @@
 
 import logging
 import os
-import warnings
 from collections.abc import Mapping
 from string import Template
 from typing import Annotated, Literal
 
 import httpx
-from fastmcp.client.auth import OAuth
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, HttpUrl, TypeAdapter, model_validator
 
 ServerName = Annotated[str, Field(pattern=r'^[A-Za-z][A-Za-z0-9-]{0,63}$')]
@@ -22,8 +20,6 @@ OAUTH_TIMEOUT = 330.0
 # The browser opening is the signal; an explicit `FASTMCP_LOG_LEVEL` still wins for debugging.
 if 'FASTMCP_LOG_LEVEL' not in os.environ:  # pragma: no branch
     logging.getLogger('fastmcp').setLevel(logging.WARNING)
-# Tokens stay in memory on purpose; FastMCP warns about that whenever a transport is built.
-warnings.filterwarnings('ignore', message=r'Using in-memory token storage .*', category=UserWarning)
 
 
 class ServerSettings(BaseModel):
@@ -51,7 +47,7 @@ class RemoteServer(ServerSettings):
     url: HttpUrl
     headers: dict[str, str] | None = None
     auth: Literal['oauth'] | None = None
-    """`oauth` lets FastMCP run discovery, PKCE, and a browser sign-in on connect; tokens stay in memory."""
+    """`oauth` lets FastMCP run discovery, PKCE, and a browser sign-in on connect; tokens go to the keyring."""
 
     @model_validator(mode='after')
     def _oauth_rules(self) -> 'RemoteServer':
@@ -120,11 +116,6 @@ def http_client(
     return httpx.AsyncClient(
         headers=headers, timeout=timeout or httpx.Timeout(30, read=300), auth=auth, follow_redirects=False
     )
-
-
-def oauth(server: RemoteServer) -> OAuth | None:
-    """A sign-in handler built without contacting the server; FastMCP starts the flow on connect."""
-    return OAuth(client_name='CLAI', callback_host='127.0.0.1') if server.auth else None
 
 
 def references(server: Server) -> list[str]:

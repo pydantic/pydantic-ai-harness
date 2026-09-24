@@ -13,13 +13,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
+from anyio import to_thread
 from fastmcp.client.transports import SSETransport, StdioTransport, StreamableHttpTransport
 from pydantic_ai import RunContext
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.toolsets import AbstractToolset, CombinedToolset
 
-from ._settings import Server, Servers, SSEServer, StdioServer, http_client, missing, oauth, resolve
+from ._settings import Server, Servers, SSEServer, StdioServer, http_client, missing, resolve
 from ._store import MCPStore
+from ._tokens import TokenStore, oauth
 
 Source = Literal['user', 'plugin', 'project']
 State = Literal['running', 'ready', 'stopped', 'error']
@@ -149,19 +151,23 @@ class MCPServers:
     async def restart(self, name: str) -> str:
         """Reconnect, picking up configuration or environment changes."""
         self.get(name)
+        await self.disconnect(name)
+        return await self.start(name)
+
+    async def disconnect(self, name: str) -> None:
+        """Close and drop the connection without changing whether the server is enabled."""
         await self._release(name)
         self._connections.pop(name, None)
-        return await self.start(name)
 
     async def remove(self, name: str) -> None:
         """Forget a user server; project and plugin servers live in files `/mcp` does not own."""
         reason = not_owned(self.get(name), self.store)
         if reason:
             raise ValueError(reason)
-        await self._release(name)
-        self._connections.pop(name, None)
+        await self.disconnect(name)
         self._overrides.pop(name, None)
         self.store.delete(name)
+        await to_thread.run_sync(TokenStore(name).forget)
 
     async def sync(self) -> None:
         """Drop connections whose server was removed or reconfigured since they opened."""
@@ -241,7 +247,7 @@ class MCPServers:
             transport = SSETransport(
                 url=str(server.url),
                 headers=resolve(server.headers),
-                auth=oauth(server),
+                auth=oauth(entry.name, server),
                 httpx_client_factory=http_client,
             )
             timeout = server.init_timeout()
@@ -249,7 +255,7 @@ class MCPServers:
             transport = StreamableHttpTransport(
                 url=str(server.url),
                 headers=resolve(server.headers),
-                auth=oauth(server),
+                auth=oauth(entry.name, server),
                 httpx_client_factory=http_client,
             )
             timeout = server.init_timeout()

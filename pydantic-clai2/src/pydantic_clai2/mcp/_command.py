@@ -3,14 +3,17 @@
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 
+from anyio import to_thread
+
 from ..field_menu import TERMINAL, Runners
 from ..menu_worker import run_worker
 from ._form import Editor, edit_form, edit_in_editor, install_form
 from ._runtime import MCPServers, ServerEntry, State, not_owned
-from ._settings import references, target
+from ._settings import RemoteServer, references, target
+from ._tokens import TokenStore
 
 _GLYPHS: dict[State, str] = {'running': '+', 'ready': 'o', 'stopped': '-', 'error': '!'}
-SERVER_SUBCOMMANDS = ('start', 'stop', 'restart', 'status', 'logs', 'edit', 'remove', 'tools')
+SERVER_SUBCOMMANDS = ('start', 'stop', 'restart', 'status', 'logs', 'auth', 'edit', 'remove', 'tools')
 SUBCOMMANDS = ('list', 'install', 'start-all', 'stop-all', 'trust', 'help', *SERVER_SUBCOMMANDS)
 
 HELP = """MCP server management
@@ -25,6 +28,7 @@ Servers
   /mcp status NAME               Details: target, env references, tools, last error
   /mcp tools NAME                Connect and list the tools the agent sees
   /mcp logs NAME [LINES]         Server stderr and lifecycle events (default 20 lines)
+  /mcp auth NAME [logout]        Sign in to an OAuth server again, or sign out
   /mcp edit NAME                 Edit a saved server in the same form
   /mcp remove NAME               Stop and forget a saved server
   /mcp trust [status|accept|revoke]
@@ -78,7 +82,7 @@ class MCPCommand:
         raise ValueError(f'Unknown MCP subcommand: {action}. Type /mcp help for available commands.')
 
     def complete(self, args: list[str]) -> Iterable[str]:
-        """Subcommands, then server names or trust actions."""
+        """Subcommands, then server names, trust actions, or `logout`."""
         if len(args) <= 1:
             return SUBCOMMANDS
         if len(args) == 2 and args[0] in SERVER_SUBCOMMANDS:
@@ -88,6 +92,8 @@ class MCPCommand:
                 return ()
         if len(args) == 2 and args[0] == 'trust':
             return ('status', 'accept', 'revoke')
+        if len(args) == 3 and args[0] == 'auth':
+            return ('logout',)
         return ()
 
     def dashboard(self) -> str:
@@ -126,11 +132,18 @@ class MCPCommand:
                 f'  target   {target(entry.server)}',
                 f'  source   {entry.source} ({source})',
                 f'  env      {", ".join(variables) if variables else "none referenced"}',
+                *self._oauth_line(entry),
                 f'  tools    {", ".join(tools) if tools else "listed after /mcp start"}',
                 f'  error    {self.servers.problem(entry) or "none"}',
                 f'  log      {self.servers.log_path(entry.name)}',
             ]
         )
+
+    def _oauth_line(self, entry: ServerEntry) -> list[str]:
+        if not isinstance(entry.server, RemoteServer) or entry.server.auth is None:
+            return []
+        status = 'signed in' if TokenStore(entry.name).signed_in() else 'not signed in; the browser opens on connect'
+        return [f'  oauth    {status} (/mcp auth {entry.name} [logout])']
 
     def _summary(self, entry: ServerEntry, state: State) -> str:
         if state == 'running':
@@ -157,6 +170,8 @@ class MCPCommand:
             return self.details(entry)
         if action == 'logs':
             return self._logs(name, extra)
+        if action == 'auth':
+            return await self._auth(entry, extra)
         if action == 'tools':
             return '\n'.join(await self.servers.list_tools(name)) or f'No tools provided by {name}.'
         if action == 'remove':
@@ -175,6 +190,18 @@ class MCPCommand:
             return saved if renamed or not running else f'{saved}\n{await self.servers.restart(name)}'
         methods = {'start': self.servers.start, 'stop': self.servers.stop, 'restart': self.servers.restart}
         return await methods[action](name)
+
+    async def _auth(self, entry: ServerEntry, extra: list[str]) -> str:
+        server, name = entry.server, entry.name
+        if not isinstance(server, RemoteServer) or server.auth is None:
+            raise ValueError(f'{name} does not use OAuth. Turn on OAuth sign-in with /mcp edit {name}.')
+        if extra not in ([], ['logout']):
+            raise ValueError('Usage: /mcp auth NAME [logout]')
+        await self.servers.disconnect(name)
+        await to_thread.run_sync(TokenStore(name).forget)
+        if extra:
+            return f'Signed out of {name}. Its next connection opens the browser to sign in.'
+        return await self.servers.start(name)
 
     def _logs(self, name: str, extra: list[str]) -> str:
         if extra and not extra[0].isdigit():

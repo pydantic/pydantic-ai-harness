@@ -24,6 +24,7 @@ from ._settings import (
     http_client,
 )
 from ._store import PROJECT_MCP_FILE, MCPStore, UserFile
+from ._tokens import TokenStore, oauth
 
 __all__ = [
     'EXAMPLES',
@@ -42,12 +43,14 @@ __all__ = [
     'ServerSettings',
     'State',
     'StdioServer',
+    'TokenStore',
     'UserFile',
     'activate',
     'edit_form',
     'edit_in_editor',
     'http_client',
     'install_form',
+    'oauth',
     'run_form',
 ]
 

@@ -27,6 +27,7 @@ from ..field_menu import TERMINAL, Runners, first_error
 from ..menu_worker import menu_key
 from ._settings import OAUTH_TIMEOUT, Server, ServerName, ServerType, StdioServer, missing
 from ._store import MCPStore
+from ._tokens import TokenStore
 
 SERVER_TYPES: tuple[ServerType, ...] = get_args(ServerType)
 TYPE_DESCRIPTIONS: dict[ServerType, str] = {
@@ -182,6 +183,7 @@ class ServerForm:
         self.store.put(name, self.parse())
         if self.editing and self.original and name != self.original:
             self.store.delete(self.original)
+            TokenStore(self.original).forget()  # Tokens belong to the old name; the renamed server signs in again.
         self.name = name
         return True
 

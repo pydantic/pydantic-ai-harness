@@ -104,6 +104,21 @@ def save_codex_credentials(*, value: str, account: str = _ACCOUNT, fallback: Pat
     _fallback_file(account=account, fallback=fallback).unlink(missing_ok=True)
 
 
+def delete_credentials(*, account: str = _ACCOUNT, fallback: Path | None = None) -> None:
+    """Forget a login everywhere it may be: keyring entry, its chunks, and the fallback file."""
+    try:
+        value = keyring.get_password(_SERVICE, account)
+    except _NO_KEYRING:
+        value = None
+    if value is not None:
+        try:
+            services = _chunk_services(value=value, account=account)
+        except UserError:
+            services = []
+        _delete(services=[*services, _SERVICE], account=account)
+    _fallback_file(account=account, fallback=fallback).unlink(missing_ok=True)
+
+
 def _load_keyring(*, account: str = _ACCOUNT) -> str | None:
     """Read either a legacy single entry or a complete chunked token bundle."""
     value = keyring.get_password(_SERVICE, account)

@@ -31,6 +31,7 @@ separately.
 /mcp status NAME                      target, env references, tools, last error
 /mcp tools NAME                       connect and list the tools the agent sees
 /mcp logs NAME [LINES]                server stderr and lifecycle events
+/mcp auth NAME [logout]               sign in to an OAuth server again, or sign out
 /mcp edit NAME                        the same form, prefilled
 /mcp remove NAME
 /mcp trust [status|accept|revoke]     load this repository's .clai/mcp_servers.json
@@ -64,8 +65,12 @@ separately.
   `"auth": "oauth"`, allows 330 seconds for the handshake so there is time to
   sign in, and drops any `Authorization` header. FastMCP runs discovery, dynamic
   client registration, PKCE, and a browser sign-in through a loopback callback
-  when the server connects. Tokens stay in memory, so restarting CLAI can mean
-  signing in again. OAuth needs `https`, except for loopback servers.
+  when the server connects. The access and refresh tokens and the registered
+  client go to your OS keyring (the `mcp-NAME` entry under `pydantic-clai2`, or a
+  private `credentials-mcp-NAME.json` when no keyring exists), so restarting CLAI
+  reuses or refreshes them instead of signing in again. Tokens belong to the URL
+  they were issued for: changing the URL signs in again. OAuth needs `https`,
+  except for loopback servers.
 
 The dashboard shows each server as `running` (connected by `/mcp start`),
 `ready` (enabled; connects when a prompt runs), `stopped`, or `error` (a failed
