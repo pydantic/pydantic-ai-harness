@@ -16,11 +16,12 @@ exiting or reloading CLAI cancels them too.
 import asyncio
 import copy
 import time
-from collections.abc import AsyncGenerator, Callable, Iterable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Generic, Literal, TypeVar
 
+from anyio import move_on_after
 from pydantic_ai import PartStartEvent, TextPart
 from pydantic_ai.messages import ModelMessage
 from rich.console import Console
@@ -31,6 +32,7 @@ from . import theme
 from ._rendering import StreamRenderer
 from ._session import Session
 from .errors import error_message
+from .plugins import HostEvent, TurnEnd, TurnStart
 
 DepsT = TypeVar('DepsT')
 OutputT = TypeVar('OutputT')
@@ -70,12 +72,16 @@ class ForkRecord:
         return f'fork #{self.fork_id}'
 
 
+async def _ignore(event: HostEvent) -> None:
+    pass
+
+
 def parse_fork_args(text: str) -> tuple[str | None, str]:
     """Split `[@model] prompt`; no `@model` means the foreground model."""
     if not text.startswith('@'):
         return None, text
-    model, _, prompt = text.partition(' ')
-    return model[1:] or None, prompt.strip()
+    model, *rest = text.split(maxsplit=1)
+    return model[1:] or None, ''.join(rest).strip()
 
 
 class Forks(Generic[DepsT, OutputT]):
@@ -88,14 +94,20 @@ class Forks(Generic[DepsT, OutputT]):
         history: Callable[[], Sequence[ModelMessage]],
         spawn: Callable[[str | None, Sequence[ModelMessage]], Session[DepsT, OutputT]],
         models: Callable[[], Iterable[str]] = lambda: (),
+        fire: Callable[[HostEvent], Awaitable[None]] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """Bind the foreground history and child-session factory."""
+        """Bind the foreground history, child-session factory, and the shell's plugin hooks.
+
+        `fire` receives each fork's `TurnStart` and `TurnEnd`, like a foreground turn.
+        """
         self.console = console
         self._history = history
         self._spawn = spawn
         self._models = models
+        self._fire = fire or _ignore
         self._clock = clock
+        self._store_ready = False
         self._records: dict[int, ForkRecord] = {}
         self._busy = 0
         self._idle = asyncio.Event()
@@ -138,18 +150,18 @@ class Forks(Generic[DepsT, OutputT]):
         self.console.print(text, style=theme.color(style), markup=False)
         self.console.print()
 
-    def fork_command(self, args: list[str]) -> str:
+    async def fork_command(self, args: list[str]) -> str:
         """`/fork`: receives the unparsed argument text so prompts keep their quotes."""
         text = args[0].strip() if args else ''
         if not text:
             return USAGE
-        head, _, rest = text.partition(' ')
+        head, *rest = text.split(maxsplit=1)
         if head == 'cancel':
-            return self.cancel(rest.strip())
+            return self.cancel(''.join(rest).strip())
         model, prompt = parse_fork_args(text)
         if not prompt:
             raise ValueError('Fork what, exactly? Usage: /fork [@model] PROMPT')
-        return self.start(prompt, model=model)
+        return await self.start(prompt, model=model)
 
     def complete(self, args: list[str]) -> Iterable[str]:
         """Suggest `cancel` and saved models as `@model` for the first argument."""
@@ -157,9 +169,22 @@ class Forks(Generic[DepsT, OutputT]):
             return ('cancel', *(f'@{name}' for name in self._models()))
         return ()
 
-    def start(self, prompt: str, *, model: str | None = None) -> str:
-        """Copy the history now, then run the child without waiting for it."""
+    async def start(self, prompt: str, *, model: str | None = None) -> str:
+        """Apply `turn_start`, copy the history now, then run the child without waiting for it.
+
+        A plugin that cancels or rejects the prompt refuses the fork, as it would refuse a turn.
+        """
+        begin = TurnStart(text=prompt)
+        await self._fire(begin)
+        if begin.cancelled:
+            raise ValueError(f'Fork cancelled by a plugin: {begin.cancel_reason or "no reason given"}')
+        prompt = begin.text
         session = self._spawn(model, self._snapshot())
+        if session.conversations is not None and not self._store_ready:
+            # Concurrent first connections to a brand-new sessions.db can fail on the store's WAL switch.
+            # Open it here, while the command owns the shell and before any fork runs.
+            await session.conversations.listing(limit=1)
+            self._store_ready = True
         fork_id = len(self._records) + 1
         record = ForkRecord(
             fork_id=fork_id,
@@ -191,6 +216,8 @@ class Forks(Generic[DepsT, OutputT]):
         except asyncio.CancelledError:
             record = self._finish(fork_id, 'cancelled', session)
             self._notify(f'{record.tag} cancelled after {record.elapsed:.1f}s', theme.MUTED)
+            with move_on_after(5, shield=True):
+                await self._fire(TurnEnd(text=prompt, outcome='cancelled'))
             raise
         except Exception as exc:  # noqa: BLE001 -- a failed fork reports and never reaches the shell.
             record = self._finish(fork_id, 'failed', session)
@@ -198,8 +225,10 @@ class Forks(Generic[DepsT, OutputT]):
             self._notify(
                 f'{record.tag} failed after {record.elapsed:.1f}s: {type(exc).__name__}: {first_line}', theme.ERROR
             )
+            await self._fire(TurnEnd(text=prompt, outcome='failed', error=exc))
             return
         record = self._finish(fork_id, 'done', session)
+        await self._fire(TurnEnd(text=prompt, outcome='completed', result=result))
         while True:
             await self._idle.wait()
             async with self._terminal:

@@ -19,6 +19,7 @@ from pydantic_clai2._app import create_shell
 from pydantic_clai2._session import Session
 from pydantic_clai2.commands import Command, Commands
 from pydantic_clai2.forks import USAGE, Forks, parse_fork_args
+from pydantic_clai2.plugins import HostEvent, TurnEnd, TurnStart
 from pydantic_clai2.project_settings import ProjectSettings
 from pydantic_clai2.settings_store import SettingsStore
 
@@ -61,8 +62,8 @@ class Model:
         yield f'**answer** to {prompt}'
 
 
-async def shell_for(tmp_path: Path, model: Model, output: io.StringIO):
-    shell = create_shell(
+def shell_for(tmp_path: Path, model: Model, output: io.StringIO):
+    return create_shell(
         Agent(FunctionModel(stream_function=model.respond)),
         deps=None,
         plugins=(),
@@ -74,10 +75,6 @@ async def shell_for(tmp_path: Path, model: Model, output: io.StringIO):
         project=ProjectSettings(),
         headless=True,
     )
-    # Concurrent first connections to a brand-new sessions.db can race on the store's WAL switch.
-    assert shell.session.conversations is not None
-    await shell.session.conversations.listing()
-    return shell
 
 
 @pytest.mark.parametrize(
@@ -87,6 +84,8 @@ async def shell_for(tmp_path: Path, model: Model, output: io.StringIO):
         ('@openai:gpt-5  fix it ', ('openai:gpt-5', 'fix it')),
         ('@test', ('test', '')),
         ('@ fix it', (None, 'fix it')),
+        ('@test\tfix it', ('test', 'fix it')),
+        ('@test\nfix it\nand this', ('test', 'fix it\nand this')),
     ],
 )
 def test_parse_fork_args(text: str, expected: tuple[str | None, str]) -> None:
@@ -105,7 +104,7 @@ def test_raw_commands_keep_quotes() -> None:
 
 async def test_fork_copies_history_and_reports(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = await shell_for(tmp_path, model, output)
+    shell = shell_for(tmp_path, model, output)
     await shell.session.prompt('first')
     before = shell.session.messages
 
@@ -129,7 +128,7 @@ async def test_fork_copies_history_and_reports(tmp_path: Path) -> None:
 
 async def test_fork_without_history_starts_fresh_with_model_override(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = await shell_for(tmp_path, model, output)
+    shell = shell_for(tmp_path, model, output)
     await shell.commands.execute_async('/fork @test hello')
     (record,) = shell.forks.records
     await record.task
@@ -152,7 +151,7 @@ async def test_snapshot_failure_forks_fresh(tmp_path: Path) -> None:
             Agent(FunctionModel(stream_function=model.respond)), deps=None, message_history=history
         ),
     )
-    forks.fork_command(['hello'])
+    await forks.fork_command(['hello'])
     (record,) = forks.records
     await record.task
     assert "couldn't copy the current conversation" in output.getvalue()
@@ -163,7 +162,7 @@ async def test_snapshot_failure_forks_fresh(tmp_path: Path) -> None:
 
 async def test_cancel_status_and_failures(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = await shell_for(tmp_path, model, output)
+    shell = shell_for(tmp_path, model, output)
     execute = shell.commands.execute_async
 
     assert await execute('/forks') == 'No forks yet. Start one with /fork [@model] PROMPT.'
@@ -200,11 +199,11 @@ async def test_cancel_status_and_failures(tmp_path: Path) -> None:
 
 async def test_output_waits_while_busy(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = await shell_for(tmp_path, model, output)
+    shell = shell_for(tmp_path, model, output)
     forks = shell.forks
     async with forks.busy():
         async with forks.busy():
-            forks.fork_command(['hello'])
+            await forks.fork_command(['hello'])
             (record,) = forks.records
             while record.status == 'running':
                 await asyncio.sleep(0)
@@ -217,11 +216,11 @@ async def test_output_waits_while_busy(tmp_path: Path) -> None:
 
 async def test_notices_wait_while_busy(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = await shell_for(tmp_path, model, output)
+    shell = shell_for(tmp_path, model, output)
     forks = shell.forks
     async with forks.busy():
-        forks.fork_command(['block'])
-        forks.fork_command(['explode'])
+        await forks.fork_command(['block'])
+        await forks.fork_command(['explode'])
         await model.started.wait()
         first, second = forks.records
         await asyncio.gather(second.task)
@@ -236,11 +235,11 @@ async def test_notices_wait_while_busy(tmp_path: Path) -> None:
 
 async def test_announcements_own_the_terminal(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
-    shell = await shell_for(tmp_path, model, output)
+    shell = shell_for(tmp_path, model, output)
     forks = shell.forks
     async with forks.busy():
-        forks.fork_command(['one'])
-        forks.fork_command(['two'])
+        await forks.fork_command(['one'])
+        await forks.fork_command(['two'])
         first, second = forks.records
         while 'running' in (first.status, second.status):
             await asyncio.sleep(0)
@@ -263,12 +262,61 @@ async def test_structured_output_prints_as_is() -> None:
         history=lambda: [],
         spawn=lambda _, history: Session(Agent(TestModel(), output_type=list[int]), deps=None),
     )
-    forks.fork_command(['numbers'])
+    await forks.fork_command(['numbers'])
     (record,) = forks.records
     await record.task
     text = output.getvalue()
     assert 'FORK #1 RESPONSE' in text
     assert '\n[0]\n' in text
+
+
+async def test_first_forks_on_a_new_database_all_run(tmp_path: Path) -> None:
+    for attempt in range(25):
+        model, output = Model(), io.StringIO()
+        shell = shell_for(tmp_path / str(attempt), model, output)
+        for prompt in ('one', 'two', 'three'):
+            await shell.commands.execute_async(f'/fork {prompt}')
+        await asyncio.gather(*(record.task for record in shell.forks.records))
+        assert [record.status for record in shell.forks.records] == ['done', 'done', 'done'], output.getvalue()
+
+
+async def test_forks_fire_turn_hooks() -> None:
+    model, output = Model(), io.StringIO()
+    events: list[HostEvent] = []
+
+    async def fire(event: HostEvent) -> None:
+        events.append(event)
+        if isinstance(event, TurnStart) and event.text == 'forbidden':
+            event.cancel('policy says no')
+        elif isinstance(event, TurnStart) and event.text == 'draft':
+            event.text = 'rewritten'
+
+    forks = Forks(
+        console=Console(file=output, width=200),
+        history=lambda: [],
+        spawn=lambda _, history: Session(Agent(FunctionModel(stream_function=model.respond)), deps=None),
+        fire=fire,
+    )
+    with pytest.raises(ValueError, match='Fork cancelled by a plugin: policy says no'):
+        await forks.fork_command(['forbidden'])
+    assert forks.records == ()
+    await forks.fork_command(['draft'])
+    await forks.fork_command(['explode'])
+    await forks.fork_command(['block'])
+    await model.started.wait()
+    done, failed, blocked = forks.records
+    assert done.prompt == 'rewritten'
+    await asyncio.gather(done.task, failed.task)
+    forks.cancel('3')
+    await asyncio.gather(blocked.task, return_exceptions=True)
+    assert 'rewritten' in model.seen
+    ends = {event.text: event for event in events if isinstance(event, TurnEnd)}
+    assert ends['rewritten'].outcome == 'completed'
+    assert ends['rewritten'].result is not None
+    assert ends['explode'].outcome == 'failed'
+    assert isinstance(ends['explode'].error, RuntimeError)
+    assert ends['block'].outcome == 'cancelled'
+    assert 'forbidden' not in ends
 
 
 def test_completion(tmp_path: Path) -> None:

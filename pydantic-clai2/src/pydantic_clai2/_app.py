@@ -482,6 +482,7 @@ class _Shell(Generic[DepsT, OutputT]):
             console=self.console,
             history=lambda: self.session.messages,
             spawn=self.fork_session,
+            fire=self.loader.fire,
             models=self.context.store.models,
         )
 

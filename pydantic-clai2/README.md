@@ -729,9 +729,12 @@ command is running, then prints before the next prompt. Commands run between
 turns, so a `/fork` typed during a turn is queued like any other command.
 
 Cancelling a turn with Esc or Ctrl-C also cancels running forks. `/exit` and
-`/reload` cancel them too. Forks do not fire `turn_start` or `turn_end`, and they
-share the foreground's plugin instances, so a tool that asks you a question can
-open its picker from a fork.
+`/reload` cancel them too.
+
+A fork is a turn for plugins: `turn_start` runs before it starts and can rewrite
+or cancel its prompt, which refuses the fork, and `turn_end` reports its outcome
+when it finishes. Forks share the foreground's plugin instances, so a tool that
+asks you a question can open its picker from a fork.
 
 ## Saved sessions and `/resume`
 

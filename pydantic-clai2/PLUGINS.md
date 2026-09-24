@@ -638,6 +638,8 @@ tools for cleanup; it does not undo completed side effects or retry the run.
 Retained failed turns and restored interrupted sessions are marked interrupted so
 core can close unanswered tool calls on the next prompt without replaying them.
 A prompt cancelled by `turn_start` never starts an agent run and is not retained.
+`/fork` fires both hooks for its background run too: a `turn_start` that cancels
+the prompt refuses the fork, and `turn_end` arrives when the fork finishes.
 
 Codex token-refresh failures show `/login openai-codex` recovery advice, including
 when the SDK wraps them as connection errors. This changes only the terminal
