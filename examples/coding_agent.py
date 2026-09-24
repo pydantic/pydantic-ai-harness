@@ -4,23 +4,25 @@ import os
 from pathlib import Path
 
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai.models import Model
-from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.coder import Coder
 
 DEFAULT_MODEL = os.environ.get('PYDANTIC_AI_MODEL', 'anthropic:claude-fable-5')
 
+HOST_ENV = {name: os.environ[name] for name in ('PATH', 'HOME') if name in os.environ}
+"""Commands inherit nothing from this process; `PATH` and `HOME` let them find the user's tools."""
+
 
 def build_agent(model: Model | str = DEFAULT_MODEL, workspace: Path | None = None) -> Agent:
-    """Build the coding agent for the requested workspace."""
-    return Agent(model, name='coder', capabilities=[Coder(workspace or Path.cwd())])
+    """Build the coding agent for the requested workspace, by default the current directory."""
+    return Agent(model, name='coder', capabilities=[LocalWorkspace(workspace or '.', env=HOST_ENV), Coder()])
 
 
 def main() -> None:
     """Run the coding agent interactively in the current repository."""
-    workspace = Path.cwd()
-    build_agent(workspace=workspace).to_cli_sync(workspace=LocalWorkspaceBackend(working_dir=workspace))
+    build_agent().to_cli_sync()
 
 
 if __name__ == '__main__':

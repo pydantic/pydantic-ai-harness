@@ -374,7 +374,10 @@ def test_blown_out_example_matches_coder_defaults() -> None:
     assert "capabilities=[Coder('.')]" in block
     assert "name='coder'" in block
     example = (_ROOT / 'examples/coding_agent.py').read_text(encoding='utf-8')
-    assert "name='coder'" in example and 'capabilities=[Coder(workspace or Path.cwd())]' in example
+    assert (
+        "name='coder'" in example
+        and "capabilities=[LocalWorkspace(workspace or '.', env=HOST_ENV), Coder()]" in example
+    )
 
 
 @pytest.mark.parametrize('surface', ['README.md', 'docs/index.md'])

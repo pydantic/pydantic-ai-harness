@@ -56,6 +56,7 @@ from pydantic_ai.capabilities.abstract import (
 )
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 import pydantic_ai_harness
 from pydantic_ai_harness import (
@@ -252,6 +253,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     ),
     # -- Several of these is the normal case, so they stay anonymous. --
     'RepairToolArguments': Anonymous('repairing valid arguments again is a no-op'),
+    '_RequireWorkspace': Anonymous('the same run-start check; two check the same thing twice'),
     '_BoundToolOutputs': Anonymous('Coder-local truncation composes with standalone output policies'),
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
     'Researcher': Anonymous('a packaged harness; composing two is composing their members'),
@@ -281,7 +283,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     # -- No default `id`, but two never coexist anyway: their tool names collide. --
     'FileSystem': Collides(
         'its toolset registers `read_file` and friends under fixed names',
-        lambda cls: (cls(str(_TMP_A)), cls(str(_TMP_B))),
+        lambda cls: (cls(str(_TMP_A)), cls(str(_TMP_A.parent))),
     ),
     'AskUser': Collides(
         'its toolset registers `ask_user_question` under a fixed name, and two answerers is a conflict, '
@@ -290,7 +292,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     ),
     'Shell': Collides(
         'its toolset registers `run_command` and friends under fixed names',
-        lambda cls: (cls(cwd=str(_TMP_A)), cls(cwd=str(_TMP_B))),
+        lambda cls: (cls(default_timeout=10.0), cls(default_timeout=20.0)),
     ),
     'CapabilityCreation': Collides(
         'its toolset registers `author_capability` and friends under fixed names',
@@ -496,7 +498,7 @@ def test_capability_combine_policy_holds(name: str) -> None:
 async def test_two_of_a_colliding_capability_still_raise(name: str, anyio_backend: str) -> None:
     """A `Collides` entry states a fact about the capability, so the fact is checked.
 
-    Each pair here is built with *different* configuration -- two roots, two working directories --
+    Each pair here is built with *different* configuration -- two roots, two timeouts --
     because that is exactly the shape the reasons in this table used to claim was supported. It is
     not: the toolset's tool names are fixed, so the second registration conflicts with the first.
     """
@@ -509,7 +511,7 @@ async def test_two_of_a_colliding_capability_still_raise(name: str, anyio_backen
     first, second = policy.make(shipped[name])
     agent = Agent(TestModel(), capabilities=[first, second])
     with pytest.raises(UserError, match='conflicts with existing tool'):
-        await agent.run('hello')
+        await agent.run('hello', workspace=LocalWorkspaceBackend(_TMP_A))
 
 
 @pytest.mark.parametrize(

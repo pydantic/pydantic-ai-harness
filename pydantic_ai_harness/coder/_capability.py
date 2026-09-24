@@ -6,8 +6,10 @@ from dataclasses import replace
 from pathlib import Path
 
 from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCapability
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.tools import AgentDepsT, RunContext
 
+from pydantic_ai_harness._warn import warn_argument_ignored
+from pydantic_ai_harness._workspace import require_workspace
 from pydantic_ai_harness.coder._instructions import INSTRUCTIONS
 from pydantic_ai_harness.compaction import ClearToolResults, WarnNearLimits
 from pydantic_ai_harness.filesystem import FileSystem
@@ -18,6 +20,17 @@ from pydantic_ai_harness.tool_output_limits import Band, ToolOutputLimits, Trunc
 
 FILE_TOOL_NAMES: tuple[str, ...] = ('read_file', 'write_file', 'edit_file', 'list_files', 'grep')
 """The `FileSystem` tools `Coder` registers; `shell` covers directory creation, file metadata, and the rest."""
+
+
+class _RequireWorkspace(AbstractCapability[AgentDepsT]):
+    """Fails a run without a workspace before any bundled capability does, so the message names `Coder`.
+
+    A combined capability's hooks are flattened into the agent's, so this is a member rather than
+    an override of `Coder.before_run`, and it comes first.
+    """
+
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        require_workspace(ctx.workspace, 'Coder')
 
 
 class _BoundToolOutputs(ToolOutputLimits[AgentDepsT]):
@@ -35,10 +48,8 @@ MAX_OUTPUT_CHARS = 64000
 """Characters kept from any tool result."""
 
 
-def _file_system(workspace: Path, *, unrestricted: bool) -> FileSystem[AgentDepsT]:
-    file_system = FileSystem[AgentDepsT](
-        root_dir=workspace, content_hashes=False, max_read_chars=MAX_READ_CHARS, tools=FILE_TOOL_NAMES
-    )
+def _file_system(*, unrestricted: bool) -> FileSystem[AgentDepsT]:
+    file_system = FileSystem[AgentDepsT](content_hashes=False, max_read_chars=MAX_READ_CHARS, tools=FILE_TOOL_NAMES)
     if unrestricted:
         # Workspace paths are POSIX, so the filesystem root is `/` whatever the host platform.
         return replace(file_system, root_dir='/', protected_patterns=[])
@@ -48,29 +59,38 @@ def _file_system(workspace: Path, *, unrestricted: bool) -> FileSystem[AgentDeps
 class Coder(CombinedCapability[AgentDepsT]):
     """Autonomous coding with six tools and context management, in the run's workspace.
 
-    Files and commands go through `ctx.workspace`: attach `LocalWorkspace(...)`
-    for a local checkout, or a sandbox provider's capability for untrusted work.
-    `workspace` is the project directory inside that workspace, relative to its
-    working directory by default. Commands are unrestricted and can outlive
-    runs. Additional instructions supplement the default guidance.
+    Files and commands go through `ctx.workspace`, and the project directory is
+    its working directory: attach `LocalWorkspace('.')` for a local checkout, or
+    a sandbox provider's capability for untrusted work, alongside `Coder()`. A
+    run without a workspace fails at its start. Commands are unrestricted and
+    can outlive runs. Additional instructions supplement the default guidance.
+    `unrestricted_filesystem=True` lets the file tools reach the whole
+    workspace filesystem rather than only the working directory.
     `repo_context=False` leaves out the bundled `RepoContext`, for hosts that
     bind their own and would otherwise load the instruction files twice.
     """
 
     def __init__(
         self,
-        workspace: str | Path = '.',
+        workspace: str | Path | None = None,
         *,
         instructions: str | None = None,
         unrestricted_filesystem: bool = False,
         repo_context: bool = True,
     ) -> None:
-        root = Path(workspace)
+        if workspace is not None:
+            warn_argument_ignored(
+                'Coder',
+                'workspace',
+                "the project directory is the workspace's working directory; attach "
+                f'`LocalWorkspace({str(workspace)!r})` (or a sandbox) alongside `Coder()`.',
+                stacklevel=3,
+            )
         capabilities: list[AbstractCapability[AgentDepsT]] = [
+            _RequireWorkspace[AgentDepsT](),
             Capability[AgentDepsT](instructions=INSTRUCTIONS + ('\n' + instructions if instructions else '')),
-            _file_system(root, unrestricted=unrestricted_filesystem),
+            _file_system(unrestricted=unrestricted_filesystem),
             Shell[AgentDepsT](
-                cwd=root,
                 denied_commands=[],
                 default_timeout=MAX_FOREGROUND_WAIT,
                 allow_interactive=True,
@@ -79,7 +99,7 @@ class Coder(CombinedCapability[AgentDepsT]):
             ),
         ]
         if repo_context:
-            capabilities.append(RepoContext[AgentDepsT](workspace_dir=root, expose_inventory_tool=False))
+            capabilities.append(RepoContext[AgentDepsT](expose_inventory_tool=False))
         capabilities += [
             ClearToolResults[AgentDepsT](max_fraction=0.7),
             WarnNearLimits[AgentDepsT](max_context_fraction=0.9),

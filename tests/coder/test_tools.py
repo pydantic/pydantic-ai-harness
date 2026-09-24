@@ -26,7 +26,7 @@ async def call(
     capabilities: Sequence[AbstractCapability[None]] = (),
     unrestricted_filesystem: bool = False,
 ) -> str:
-    coder = Coder[None](tmp_path, unrestricted_filesystem=unrestricted_filesystem)
+    coder = Coder[None](unrestricted_filesystem=unrestricted_filesystem)
     return await call_tool([coder, *capabilities], name, arguments, workspace=local_workspace(working_dir=tmp_path))
 
 
@@ -35,8 +35,8 @@ class TestCoder:
     async def test_durable_binding(self, tmp_path: Path, extra_limits: bool) -> None:
         durability = RecordingDurability()
         capabilities: list[AbstractCapability[object]] = [
-            Coder(tmp_path),
             LocalWorkspace(tmp_path, env=HOST_ENV),
+            Coder(),
             durability,
         ]
         if extra_limits:
@@ -56,7 +56,7 @@ class TestCoder:
         (tmp_path / 'src').mkdir()
         target = tmp_path / 'src' / 'AGENTS.md'
         target.write_text('Project instructions')
-        coder = Coder[None](tmp_path, unrestricted_filesystem=unrestricted_filesystem, repo_context=False)
+        coder = Coder[None](unrestricted_filesystem=unrestricted_filesystem, repo_context=False)
         workspace = local_workspace(working_dir=tmp_path)
         path = await call_tool([coder], 'list_files', {'glob': '**/AGENTS.md'}, workspace=workspace)
         assert Path(path) == Path('src/AGENTS.md')
@@ -68,9 +68,7 @@ class TestCoder:
 
     async def test_schema(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=[])
-        await Agent(model, capabilities=[Coder(tmp_path)]).run(
-            'Inspect tools', workspace=local_workspace(working_dir=tmp_path)
-        )
+        await Agent(model, capabilities=[Coder()]).run('Inspect tools', workspace=local_workspace(working_dir=tmp_path))
         assert model.last_model_request_parameters is not None
         tools = {tool.name: tool for tool in model.last_model_request_parameters.function_tools}
         assert list(tools) == ['read_file', 'write_file', 'edit_file', 'list_files', 'grep', 'shell']
@@ -81,8 +79,8 @@ class TestCoder:
     @pytest.mark.parametrize('extra_instructions', [None, '', 'Keep new files under 400 lines.'])
     async def test_instructions(self, tmp_path: Path, extra_instructions: str | None) -> None:
         model = TestModel(call_tools=[])
-        await Agent(model, capabilities=[Coder(tmp_path, instructions=extra_instructions, repo_context=False)]).run(
-            'Inspect instructions'
+        await Agent(model, capabilities=[Coder(instructions=extra_instructions, repo_context=False)]).run(
+            'Inspect instructions', workspace=local_workspace(tmp_path)
         )
         assert model.last_model_request_parameters is not None
         parts = model.last_model_request_parameters.instruction_parts or []
@@ -97,7 +95,7 @@ class TestCoder:
     async def test_repo_context_is_optional(self, tmp_path: Path, repo_context: bool) -> None:
         (tmp_path / 'AGENTS.md').write_text('Always answer in haiku.\n')
         model = TestModel(call_tools=[])
-        await Agent(model, capabilities=[Coder(tmp_path, repo_context=repo_context)]).run(
+        await Agent(model, capabilities=[Coder(repo_context=repo_context)]).run(
             'Inspect instructions', workspace=local_workspace(working_dir=tmp_path)
         )
         assert model.last_model_request_parameters is not None

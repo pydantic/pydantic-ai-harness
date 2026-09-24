@@ -35,7 +35,7 @@ def model_for(respond: Callable[[list[ModelMessage], AgentInfo], ModelResponse])
 @pytest.fixture(params=['standalone', 'coder'])
 def capabilities(request: pytest.FixtureRequest, tmp_path: Path) -> list[AbstractCapability[object]]:
     if request.param == 'coder':
-        return [Coder(tmp_path)]
+        return [Coder()]
     return [RepairToolArguments(), FileSystem(root_dir=tmp_path, content_hashes=False)]
 
 

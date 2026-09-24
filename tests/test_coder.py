@@ -12,7 +12,6 @@ from pydantic_ai.workspaces import LocalWorkspaceBackend, ReadOnlyWorkspace, Wor
 import pydantic_ai_harness.coder
 from pydantic_ai_harness.coder import FILE_TOOL_NAMES, Coder, coder_agent
 from pydantic_ai_harness.filesystem import FileSystem
-from pydantic_ai_harness.repo_context import RepoContext
 from pydantic_ai_harness.shell import Shell
 
 pytestmark = pytest.mark.anyio
@@ -84,9 +83,10 @@ def test_coder_unknown_export() -> None:
         pydantic_ai_harness.coder.__getattr__('missing')
 
 
-def test_coder_members_and_parameters(tmp_path: Path) -> None:
-    coder = Coder(tmp_path, instructions='Custom instructions')
+def test_coder_members_and_parameters() -> None:
+    coder = Coder(instructions='Custom instructions')
     assert [type(capability).__name__ for capability in coder.capabilities] == [
+        '_RequireWorkspace',
         'Capability',
         'FileSystem',
         'Shell',
@@ -97,12 +97,10 @@ def test_coder_members_and_parameters(tmp_path: Path) -> None:
         'RepairToolArguments',
     ]
     files = next(item for item in coder.capabilities if isinstance(item, FileSystem))
-    assert (files.root_dir, files.cwd, files.content_hashes, files.tools) == (tmp_path, None, False, FILE_TOOL_NAMES)
+    assert (files.root_dir, files.content_hashes, files.tools) == (None, False, FILE_TOOL_NAMES)
     shell = next(item for item in coder.capabilities if isinstance(item, Shell))
-    assert (shell.cwd, shell.tools, shell.denied_commands, shell.allow_interactive) == (tmp_path, ['shell'], [], True)
+    assert (shell.tools, shell.denied_commands, shell.allow_interactive) == (['shell'], [], True)
     assert (shell.env, shell.denied_env_patterns) == (None, [])
-    context = next(item for item in coder.capabilities if isinstance(item, RepoContext))
-    assert context.workspace_dir == tmp_path
     guidance = next(item for item in coder.capabilities if isinstance(item, Capability))
     instructions = str(guidance.get_instructions())
     for text in ('Custom instructions', 'DRY', 'YAGNI', 'SOLID', 'Zen of Python'):
@@ -110,3 +108,8 @@ def test_coder_members_and_parameters(tmp_path: Path) -> None:
     limits = next(item for item in coder.capabilities if type(item).__name__ == '_BoundToolOutputs')
     assert limits.id == 'coder_tool_output_limits'
     assert isinstance(coder.for_agent(Agent(TestModel())), Coder)
+
+
+async def test_no_workspace_fails_the_run_naming_coder() -> None:
+    with pytest.raises(UserError, match='`Coder` needs a workspace'):
+        await Agent(TestModel(), capabilities=[Coder()]).run('go')
