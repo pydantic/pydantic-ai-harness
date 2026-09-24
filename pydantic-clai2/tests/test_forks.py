@@ -78,14 +78,13 @@ def shell_for(tmp_path: Path, model: Model, output: io.StringIO):
 @pytest.mark.parametrize(
     ('text', 'expected'),
     [
-        ('fix the bug', (None, None, 'fix the bug')),
-        ('@clai fix it', ('clai', None, 'fix it')),
-        ('@clai @openai:gpt-5  fix it ', ('clai', 'openai:gpt-5', 'fix it')),
-        ('@clai', ('clai', None, '')),
-        ('@clai @test', ('clai', 'test', '')),
+        ('fix the bug', (None, 'fix the bug')),
+        ('@openai:gpt-5  fix it ', ('openai:gpt-5', 'fix it')),
+        ('@test', ('test', '')),
+        ('@ fix it', (None, 'fix it')),
     ],
 )
-def test_parse_fork_args(text: str, expected: tuple[str | None, str | None, str]) -> None:
+def test_parse_fork_args(text: str, expected: tuple[str | None, str]) -> None:
     assert parse_fork_args(text) == expected
 
 
@@ -105,8 +104,8 @@ async def test_fork_copies_history_and_reports(tmp_path: Path) -> None:
     await shell.session.prompt('first')
     before = shell.session.messages
 
-    started = await shell.commands.execute_async("/fork @clai what's next")
-    assert started.startswith('fork #1: clai started in the background.')
+    started = await shell.commands.execute_async("/fork what's next")
+    assert started.startswith('fork #1 (agent default) started in the background.')
     (record,) = shell.forks.records
     await record.task
 
@@ -118,17 +117,19 @@ async def test_fork_copies_history_and_reports(tmp_path: Path) -> None:
     text = output.getvalue()
     assert 'FORK #1 RESPONSE' in text
     assert "\x1b[1manswer\x1b[22m to what's next" in text  # Rendered as Markdown, not raw asterisks.
-    assert 'fork #1 (clai) finished in' in text
+    assert 'FORK #1 RESPONSE  agent default' in text
+    assert 'fork #1 finished in' in text
     assert f'Continue it with /resume {record.session_id}' in text
 
 
 async def test_fork_without_history_starts_fresh_with_model_override(tmp_path: Path) -> None:
     model, output = Model(), io.StringIO()
     shell = shell_for(tmp_path, model, output)
-    await shell.commands.execute_async('/fork @clai @test hello')
+    await shell.commands.execute_async('/fork @test hello')
     (record,) = shell.forks.records
     await record.task
     assert model.seen == {}  # `@test` replaced the agent's FunctionModel.
+    assert record.model == 'test'
     assert 'success (no tool calls)' in output.getvalue()
 
 
@@ -141,7 +142,6 @@ async def test_snapshot_failure_forks_fresh(tmp_path: Path) -> None:
 
     forks = Forks(
         console=console,
-        agent_name='clai',
         history=broken,
         spawn=lambda _, history: Session(
             Agent(FunctionModel(stream_function=model.respond)), deps=None, message_history=history
@@ -161,12 +161,10 @@ async def test_cancel_status_and_failures(tmp_path: Path) -> None:
     shell = shell_for(tmp_path, model, output)
     execute = shell.commands.execute_async
 
-    assert await execute('/forks') == 'No forks yet. Start one with /fork [@agent] [@model] PROMPT.'
+    assert await execute('/forks') == 'No forks yet. Start one with /fork [@model] PROMPT.'
     assert await execute('/fork') == USAGE
     with pytest.raises(ValueError, match='Fork what'):
-        await execute('/fork @clai')
-    with pytest.raises(ValueError, match="Unknown agent '@nope'. Available: clai"):
-        await execute('/fork @nope hi')
+        await execute('/fork @test')
 
     await execute('/fork block')
     await execute('/fork explode')
@@ -174,7 +172,7 @@ async def test_cancel_status_and_failures(tmp_path: Path) -> None:
     first, second = shell.forks.records
     await asyncio.gather(second.task)
     assert second.status == 'failed'
-    assert 'fork #2 (clai) failed after' in output.getvalue()
+    assert 'fork #2 failed after' in output.getvalue()
     assert 'provider down' in output.getvalue()
     assert 'second line' not in output.getvalue()
 
@@ -187,10 +185,10 @@ async def test_cancel_status_and_failures(tmp_path: Path) -> None:
         await execute('/fork cancel x')
     with pytest.raises(ValueError, match='No fork #9'):
         await execute('/fork cancel 9')
-    assert await execute('/fork cancel 1') == 'Cancelling fork #1 (clai)...'
+    assert await execute('/fork cancel 1') == 'Cancelling fork #1...'
     await asyncio.gather(first.task, return_exceptions=True)
     assert first.status == 'cancelled'
-    assert 'fork #1 (clai) cancelled after' in output.getvalue()
+    assert 'fork #1 cancelled after' in output.getvalue()
     assert await execute('/fork cancel 1') == 'fork #1 already cancelled.'
     assert await execute('/forks') == '1 failed, 1 cancelled'
 
@@ -216,7 +214,7 @@ def test_completion(tmp_path: Path) -> None:
     store = SettingsStore(tmp_path / 'config.db')
     store.set('model', 'test')
     shell = create_shell(
-        Agent('test', name='puppy'),
+        Agent('test'),
         deps=None,
         plugins=(),
         usage_limits=None,
@@ -228,10 +226,8 @@ def test_completion(tmp_path: Path) -> None:
         headless=True,
     )
     forks = shell.forks
-    assert list(forks.complete([''])) == ['cancel', '@puppy']
-    assert list(forks.complete(['@puppy', ''])) == [f'@{name}' for name in store.models()]
-    assert list(forks.complete(['@puppy', '@test', ''])) == []
-    assert list(forks.complete(['cancel', ''])) == []
+    assert list(forks.complete([''])) == ['cancel', *(f'@{name}' for name in store.models())]
+    assert list(forks.complete(['@test', ''])) == []
 
 
 class Script:
@@ -269,7 +265,7 @@ async def test_cancelled_turn_takes_forks_down(tmp_path: Path, monkeypatch: pyte
     text = output.getvalue()
     assert 'Turn cancelled' in text
     assert 'Cancelled 1 running fork(s) with the turn.' in text
-    assert 'fork #1 (clai) cancelled after' in text
+    assert 'fork #1 cancelled after' in text
 
 
 async def test_exit_cancels_running_forks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -286,4 +282,4 @@ async def test_exit_cancels_running_forks(tmp_path: Path, monkeypatch: pytest.Mo
         console=Console(file=output, width=200),
         store=SettingsStore(tmp_path / 'config.db'),
     )
-    assert 'fork #1 (clai) cancelled after' in output.getvalue()
+    assert 'fork #1 cancelled after' in output.getvalue()

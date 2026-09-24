@@ -443,7 +443,7 @@ def create_shell(
     commands.register(
         Command(
             name='fork',
-            description='Run a copy of this conversation in the background: /fork [@agent] [@model] PROMPT',
+            description='Run a copy of this conversation in the background: /fork [@model] PROMPT',
             handler=shell.forks.fork_command,
             complete=shell.forks.complete,
             raw=True,
@@ -480,7 +480,6 @@ class _Shell(Generic[DepsT, OutputT]):
     def __post_init__(self) -> None:
         self.forks = Forks(
             console=self.console,
-            agent_name=self.agent.name or 'clai',
             history=lambda: self.session.messages,
             spawn=self.fork_session,
             models=self.context.store.models,

@@ -709,9 +709,8 @@ plugin.
 keep working while it answers. It follows Code Puppy's `/fork`.
 
 ```text
-/fork write tests for the parser        fork the current agent
-/fork @clai summarize the diff          name the agent
-/fork @clai @openai:gpt-5 review this   name the agent and a model
+/fork write tests for the parser        fork with the current model
+/fork @openai:gpt-5 review this         fork with another model
 /fork cancel 2                          stop fork #2
 /forks                                  list this session's forks
 ```
@@ -721,10 +720,9 @@ from that copy as its own saved session. Later turns in the foreground do not
 reach it, and it does not change the foreground history. With no history yet, or
 if the copy fails, the fork starts with a fresh context and says so. It uses the
 current model, plugins, and model settings unless `@model` names another model.
-CLAI has one agent, named by the agent's `name` or `clai`, so `@agent` accepts
-only that name today.
+CLAI has one agent, so unlike Code Puppy there is no `@agent` argument.
 
-When a fork finishes, CLAI prints a `FORK #N RESPONSE` banner, the response as
+When a fork finishes, CLAI prints a `FORK #N RESPONSE` banner with the model, the response as
 Markdown, the elapsed time, and the saved session id. `/resume SESSION-ID`
 switches the foreground to that fork's conversation. Output waits while a turn or
 command is running, then prints before the next prompt. Commands run between

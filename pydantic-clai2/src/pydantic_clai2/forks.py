@@ -38,9 +38,9 @@ OutputT = TypeVar('OutputT')
 ForkStatus = Literal['running', 'done', 'failed', 'cancelled']
 
 USAGE = (
-    'Usage: /fork [@agent] [@model] PROMPT   run a copy of this conversation in the background\n'
-    '       /fork cancel ID                  stop a running fork\n'
-    '       /forks                           list forks'
+    'Usage: /fork [@model] PROMPT   run a copy of this conversation in the background\n'
+    '       /fork cancel ID         stop a running fork\n'
+    '       /forks                  list forks'
 )
 _STATUS_STYLES: dict[ForkStatus, str] = {
     'running': theme.WARNING,
@@ -56,7 +56,7 @@ class ForkRecord:
     """Bookkeeping for one background run."""
 
     fork_id: int
-    agent_name: str
+    model: str
     prompt: str
     started_at: float
     task: 'asyncio.Task[None]'
@@ -67,19 +67,15 @@ class ForkRecord:
     @property
     def tag(self) -> str:
         """How messages name this fork."""
-        return f'fork #{self.fork_id} ({self.agent_name})'
+        return f'fork #{self.fork_id}'
 
 
-def parse_fork_args(text: str) -> tuple[str | None, str | None, str]:
-    """Split `@agent [@model] prompt` into its parts; no `@agent` means the current agent."""
+def parse_fork_args(text: str) -> tuple[str | None, str]:
+    """Split `[@model] prompt`; no `@model` means the foreground model."""
     if not text.startswith('@'):
-        return None, None, text
-    head, _, rest = text.partition(' ')
-    rest = rest.strip()
-    if rest.startswith('@'):
-        model, _, prompt = rest.partition(' ')
-        return head[1:], model[1:], prompt.strip()
-    return head[1:], None, rest
+        return None, text
+    model, _, prompt = text.partition(' ')
+    return model[1:] or None, prompt.strip()
 
 
 class Forks(Generic[DepsT, OutputT]):
@@ -89,7 +85,6 @@ class Forks(Generic[DepsT, OutputT]):
         self,
         *,
         console: Console,
-        agent_name: str,
         history: Callable[[], Sequence[ModelMessage]],
         spawn: Callable[[str | None, Sequence[ModelMessage]], Session[DepsT, OutputT]],
         models: Callable[[], Iterable[str]] = lambda: (),
@@ -97,7 +92,6 @@ class Forks(Generic[DepsT, OutputT]):
     ) -> None:
         """Bind the foreground history and child-session factory."""
         self.console = console
-        self.agent_name = agent_name
         self._history = history
         self._spawn = spawn
         self._models = models
@@ -132,19 +126,15 @@ class Forks(Generic[DepsT, OutputT]):
         head, _, rest = text.partition(' ')
         if head == 'cancel':
             return self.cancel(rest.strip())
-        agent, model, prompt = parse_fork_args(text)
+        model, prompt = parse_fork_args(text)
         if not prompt:
-            raise ValueError('Fork what, exactly? Usage: /fork [@agent] [@model] PROMPT')
-        if agent is not None and agent != self.agent_name:
-            raise ValueError(f"Unknown agent '@{agent}'. Available: {self.agent_name}")
-        return self.start(prompt, model=model or None)
+            raise ValueError('Fork what, exactly? Usage: /fork [@model] PROMPT')
+        return self.start(prompt, model=model)
 
     def complete(self, args: list[str]) -> Iterable[str]:
-        """Suggest `cancel` and the agent first, then saved models after `@agent`."""
+        """Suggest `cancel` and saved models as `@model` for the first argument."""
         if len(args) <= 1:
-            return ('cancel', f'@{self.agent_name}')
-        if len(args) == 2 and args[0].startswith('@'):
-            return tuple(f'@{name}' for name in self._models())
+            return ('cancel', *(f'@{name}' for name in self._models()))
         return ()
 
     def start(self, prompt: str, *, model: str | None = None) -> str:
@@ -153,14 +143,14 @@ class Forks(Generic[DepsT, OutputT]):
         fork_id = len(self._records) + 1
         record = ForkRecord(
             fork_id=fork_id,
-            agent_name=self.agent_name,
+            model=session.model or 'agent default',
             prompt=prompt,
             started_at=self._clock(),
             task=asyncio.create_task(self._run(fork_id, session, prompt), name=f'fork-{fork_id}'),
         )
         self._records[fork_id] = record
         return (
-            f'fork #{fork_id}: {self.agent_name} started in the background. '
+            f'fork #{fork_id} ({record.model}) started in the background. '
             'Results print when it finishes; /forks shows status.'
         )
 
@@ -208,7 +198,7 @@ class Forks(Generic[DepsT, OutputT]):
     async def _announce(self, record: ForkRecord, response: str) -> None:
         header = Text(f' FORK #{record.fork_id} RESPONSE ', style=f'bold white on {theme.color(theme.THINKING)}')
         header.append(' ')
-        header.append(record.agent_name, style=f'bold {theme.color(theme.INFO)}')
+        header.append(record.model, style=f'bold {theme.color(theme.INFO)}')
         self.console.print()
         self.console.print(header)
         renderer = StreamRenderer(self.console, stop_loading=lambda: None)
@@ -253,10 +243,10 @@ class Forks(Generic[DepsT, OutputT]):
         if args:
             raise ValueError('Usage: /forks')
         if not self._records:
-            return 'No forks yet. Start one with /fork [@agent] [@model] PROMPT.'
+            return 'No forks yet. Start one with /fork [@model] PROMPT.'
         table = Table(title='Forks', header_style=theme.color(theme.ACCENT), border_style=theme.color(theme.MUTED))
         table.add_column('ID', justify='right')
-        table.add_column('Agent', style=theme.color(theme.INFO))
+        table.add_column('Model', style=theme.color(theme.INFO))
         table.add_column('Status')
         table.add_column('Time', justify='right')
         table.add_column('Session')
@@ -266,7 +256,7 @@ class Forks(Generic[DepsT, OutputT]):
             elapsed = record.elapsed if record.elapsed is not None else now - record.started_at
             table.add_row(
                 str(record.fork_id),
-                Text(record.agent_name),
+                Text(record.model),
                 Text(record.status, style=theme.color(_STATUS_STYLES[record.status])),
                 f'{elapsed:.1f}s',
                 Text(record.session_id or ''),
