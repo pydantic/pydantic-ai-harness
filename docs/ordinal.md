@@ -15,6 +15,8 @@ description: Connect a Pydantic AI agent to Ordinal's hosted MCP server to draft
 
 Ordinal MCP needs the Pro plan or higher, the same as the REST API. You need an Ordinal account with access to at least one workspace. Ordinal MCP takes an OAuth access token; there is no API key to copy.
 
+Ordinal issues these tokens only through OAuth. Your application gets one by running the standard MCP authorization flow: the server names its authorization server and supports dynamic client registration, so any MCP OAuth client library can sign the user in. Store the token it returns and pass it as `auth` or `ORDINAL_ACCESS_TOKEN`.
+
 If you set up the old server at `https://app.tryordinal.com/api/mcp` with a workspace API key, remove it. Do not use the old and new servers together, because their duplicate tool names confuse the agent.
 
 ## Installation
