@@ -1,6 +1,7 @@
 """Interactive terminal shell around a capability-independent session."""
 
 import asyncio
+import sys
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass, field, replace
@@ -27,7 +28,15 @@ from ._rendering import StreamRenderer
 from ._session import Session
 from .capability_catalog import HARNESS_PLUGINS
 from .command_context import CommandContext, CommandProvider
-from .commands import Command, Commands, config_command, config_completions, is_command_input, set_completions
+from .commands import (
+    Command,
+    Commands,
+    config_command,
+    config_completions,
+    expand_bare_command,
+    is_command_input,
+    set_completions,
+)
 from .config import PluginSettings, Settings
 from .customization import customization_guide
 from .errors import error_message
@@ -54,6 +63,9 @@ from .status import Status, StatusLine
 from .theme_picker import theme_command
 from .tool_output import terminal_text
 from .usage_report import cost_line, session_usage
+
+if sys.version_info < (3, 11):
+    from exceptiongroup import BaseExceptionGroup
 
 if TYPE_CHECKING:
     from .auth import CodexAuth
@@ -348,13 +360,14 @@ def create_shell(
     commands.register(
         Command(name='help', description='Show commands', handler=lambda args: f'{commands.help(args)}\n{SHELL_HELP}')
     )
-    commands.register(
-        Command(
-            name='new',
-            description='Start a new session; preserve the previous session',
-            handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
-        )
+
+    new_command = Command(
+        name='new',
+        description='Start a new session; preserve the previous session',
+        handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
     )
+    commands.register(new_command)
+    commands.register(replace(new_command, name='clear', description='Alias of /new'))
     commands.register(
         Command(
             name='usage',
@@ -526,7 +539,7 @@ class _Shell(Generic[DepsT, OutputT]):
                     text = await self.editor.read()
                 else:
                     assert self.prompt is not None
-                    text = (await self.prompt.prompt_async('> ')).strip()
+                    text = expand_bare_command((await self.prompt.prompt_async('> ')).strip())
             except KeyboardInterrupt:
                 if self.interrupts.press():
                     return 'exit'
@@ -671,7 +684,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
 
 
 def _reset_status(command: str, status: Status) -> None:
-    if command.split(maxsplit=1)[0] in ('/new', '/resume'):
+    if command.split(maxsplit=1)[0] in ('/new', '/clear', '/resume'):
         status.context_tokens = None
         status.context_alert = False
         status.output_tokens = None

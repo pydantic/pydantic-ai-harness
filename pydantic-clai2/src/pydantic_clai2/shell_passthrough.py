@@ -42,7 +42,7 @@ async def run_shell_command(command: str, *, console: Console, interrupts: Inter
         try:
             exit_code = await process.wait()
         except asyncio.CancelledError:
-            with contextlib.suppress(TimeoutError):
+            with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(process.wait(), _INTERRUPT_GRACE)
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
