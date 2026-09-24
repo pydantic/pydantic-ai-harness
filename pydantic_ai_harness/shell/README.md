@@ -103,8 +103,9 @@ prompt; a workspace that is gone ends the run.
 > is a guardrail against accidents, not a security boundary. Validation checks
 > only the first token, and allowlisted commands such as `python`, `git`, `uv`,
 > and `make` can spawn arbitrary processes. A model that wants to work around
-> the allowlist can. For untrusted work, run the agent inside OS-level isolation
-> such as [`ModalSandbox`](https://pydantic.dev/docs/ai/harness/modal-sandbox/) or a container.
+> the allowlist can. For untrusted work, give the run an isolated workspace,
+> such as a [Modal sandbox](https://pydantic.dev/docs/ai/harness/modal-sandbox/)
+> or a container, so commands run there instead of on the agent's machine.
 
 ## Limit files written by commands
 
