@@ -22,7 +22,7 @@ from pydantic_ai_harness.shell import Shell
 from .._workspace import HOST_ENV, local_workspace
 
 
-def _ctx() -> RunContext[None]:
+def _ctx(working_dir: Path) -> RunContext[None]:
     return RunContext[None](
         deps=None,
         model=TestModel(),
@@ -30,7 +30,7 @@ def _ctx() -> RunContext[None]:
         prompt=None,
         messages=[],
         run_step=0,
-        workspace=Workspace(local_workspace('/')),
+        workspace=Workspace(local_workspace(working_dir)),
     )
 
 
@@ -65,47 +65,47 @@ class TestShellFileLimits:
     @pytest.mark.parametrize('size', [128, 8192])
     async def test_file_bound_and_recovery(self, tmp_path: Path, background: bool, size: int) -> None:
         parent_limits = resource.getrlimit(resource.RLIMIT_FSIZE)
-        toolset = Shell(cwd=tmp_path, max_file_bytes=1024, env={'CUSTOM': 'kept'}).get_toolset()
+        toolset = Shell(max_file_bytes=1024, env={'CUSTOM': 'kept'}).get_toolset()
         async with toolset:
             if background:
-                started = await toolset.start_command(_ctx(), writer(size))
+                started = await toolset.start_command(_ctx(tmp_path), writer(size))
                 command_id = started.rsplit('ID: ', 1)[1]
                 with anyio.fail_after(10):
                     while True:
-                        result = await toolset.check_command(_ctx(), command_id)
+                        result = await toolset.check_command(_ctx(tmp_path), command_id)
                         if '[exit code:' in result:
                             break
                         await anyio.sleep(0.01)
             else:
-                result = await toolset.run_command(_ctx(), writer(size))
+                result = await toolset.run_command(_ctx(tmp_path), writer(size))
             assert (tmp_path / 'output').stat().st_size == min(size, 1024)
             if size > 1024:
                 assert 'max_file_bytes=1024' in result
             else:
                 assert 'max_file_bytes' not in result
-            assert 'kept' in await toolset.run_command(_ctx(), 'printf "$CUSTOM"')
+            assert 'kept' in await toolset.run_command(_ctx(tmp_path), 'printf "$CUSTOM"')
         assert resource.getrlimit(resource.RLIMIT_FSIZE) == parent_limits
         (tmp_path / 'parent-output').write_bytes(b'x' * 8192)
 
     @pytest.mark.anyio
     async def test_default_unlimited(self, tmp_path: Path) -> None:
-        toolset = Shell(cwd=tmp_path).get_toolset()
-        assert 'exit code' not in await toolset.run_command(_ctx(), writer(8192))
+        toolset = Shell().get_toolset()
+        assert 'exit code' not in await toolset.run_command(_ctx(tmp_path), writer(8192))
         assert (tmp_path / 'output').stat().st_size == 8192
 
     @pytest.mark.anyio
     @pytest.mark.skipif(os.name != 'posix', reason='Requires POSIX resource limits')
     async def test_child_hard_limit(self, tmp_path: Path) -> None:
-        toolset = Shell(cwd=tmp_path, max_file_bytes=1024).get_toolset()
+        toolset = Shell(max_file_bytes=1024).get_toolset()
         code = 'import resource; print(resource.getrlimit(resource.RLIMIT_FSIZE))'
-        result = await toolset.run_command(_ctx(), f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}')
+        result = await toolset.run_command(_ctx(tmp_path), f'{shlex.quote(sys.executable)} -c {shlex.quote(code)}')
         assert '(1024, 1024)' in result
 
     @pytest.mark.anyio
     @pytest.mark.skipif(os.name != 'posix', reason='Requires POSIX resource limits')
     async def test_signal_diagnosis(self, tmp_path: Path) -> None:
-        toolset = Shell(cwd=tmp_path, max_file_bytes=1024).get_toolset()
-        result = await toolset.run_command(_ctx(), 'exec yes x > output')
+        toolset = Shell(max_file_bytes=1024).get_toolset()
+        result = await toolset.run_command(_ctx(tmp_path), 'exec yes x > output')
         assert 'File-size limit exceeded' in result
         assert (tmp_path / 'output').stat().st_size == 1024
 
@@ -123,7 +123,7 @@ class TestShellFileLimits:
 
         agent = Agent(
             FunctionModel(model),
-            capabilities=[Shell(cwd=tmp_path, max_file_bytes=1024), LocalWorkspace(tmp_path, env=HOST_ENV)],
+            capabilities=[Shell(max_file_bytes=1024), LocalWorkspace(tmp_path, env=HOST_ENV)],
         )
         result = await agent.run('Write a file')
         assert result.output == 'done'

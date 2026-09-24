@@ -5,8 +5,8 @@ wrapper shell in its own session (`setsid` when the workspace has it, else `nohu
 launcher's process group) and returns at once. The wrapper publishes `status.json` --
 `{"pid": <wrapper pid>, "exit_code": null}` -- before running the command, appends the
 command's output to log files next to it, and publishes the exit code when the command ends.
-Each job's files live in one directory below the workspace's `$TMPDIR` (or `/tmp`), never on
-the host unless the workspace is the host. Status and output are read, and the process group
+Each job's files live in one owner-only directory below `.pydantic-ai-harness/shell` in the
+workspace's working directory, never on the host unless the workspace is the host. Status and output are read, and the process group
 is signalled, through the same workspace.
 """
 
@@ -38,8 +38,6 @@ _KILL_GRACE_PERIOD = 2.0
 POLL_MIN = 0.05
 POLL_MAX = 1.0
 """Bounds of the backoff between polls of a job's status, so a remote workspace is not asked every 50 ms."""
-
-_JOBS_SUBDIR = 'pydantic-ai-harness/shell'
 
 _WRAPPER = f"""{LIMIT_FUNCTION}
 dir=$1
@@ -87,20 +85,6 @@ to signal when the workspace started the launcher as a group leader (the local w
 every command in a new session); otherwise the group may hold the workspace's own processes, so
 it is reported as `-` and only the wrapper's PID is signalled.
 """
-
-
-async def jobs_dir(workspace: Workspace, env: Mapping[str, str] | None) -> str:
-    """The directory, inside the workspace, that holds one subdirectory per job; created private."""
-    result = await workspace.run(
-        f'd="${{TMPDIR:-/tmp}}/{_JOBS_SUBDIR}" && (umask 077 && mkdir -p "$d") && printf %s "$d"',
-        shell=True,
-        env=env,
-        timeout=CONTROL_TIMEOUT,
-    )
-    directory = posixpath.normpath(result.stdout)
-    if result.exit_code != 0 or not posixpath.isabs(directory):
-        raise WorkspaceError(result.stderr.strip() or 'The workspace has no writable temporary directory for jobs.')
-    return directory
 
 
 @dataclass(kw_only=True)

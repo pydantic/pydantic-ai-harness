@@ -106,12 +106,18 @@ async def metadata_dir(workspace: Workspace, name: str) -> str:
 
     The first time `.pydantic-ai-harness` is created it gets a `.gitignore` holding `*`, so none
     of it shows up in `git status`. Only filesystem operations are used, so a workspace that
-    cannot run commands works too.
+    cannot run commands works too. A path in the way raises `WorkspaceError`: it is no tool
+    argument's fault, so a retry cannot fix it.
     """
     root = posixpath.join(await workspace.working_dir(), METADATA_DIR)
-    if not await workspace.exists(root):
-        await workspace.make_dir(root)
-        await workspace.write_text(posixpath.join(root, '.gitignore'), '*\n')
     directory = posixpath.join(root, name)
-    await workspace.make_dir(directory)
+    try:
+        if not await workspace.exists(root):
+            await workspace.make_dir(root)
+            await workspace.write_text(posixpath.join(root, '.gitignore'), '*\n')
+        await workspace.make_dir(directory)
+    except WorkspaceError:
+        raise
+    except OSError as error:
+        raise WorkspaceError(f'Cannot create `{METADATA_DIR}/{name}` in the workspace: {error.strerror}') from error
     return directory

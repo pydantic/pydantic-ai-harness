@@ -7,8 +7,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.tools import AgentDepsT
+from pydantic_ai.tools import AgentDepsT, RunContext
 
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
+from pydantic_ai_harness._workspace import require_workspace
 from pydantic_ai_harness.shell._toolset import RUN_SCOPED_TOOL_NAMES, ShellToolset
 
 _DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
@@ -38,8 +40,8 @@ LLM_API_KEY_ENV_PATTERNS: tuple[str, ...] = (
 
 Pass these to keep provider credentials in an explicit `env` from reaching commands.
 The patterns filter only `env`: the workspace decides the rest of a command's
-environment (the local workspace passes only `PATH`, `HOME`, `LANG`, and `TMPDIR`
-from the host). Covers provider prefixes only -- not other secrets, and the
+environment, and a local workspace inherits nothing from the host unless given its
+own `env`. Covers provider prefixes only -- not other secrets, and the
 prefixes are coarse (`GOOGLE_*` also strips `GOOGLE_APPLICATION_CREDENTIALS`), so
 treat it as a starting point. Not a default: opt in explicitly.
 """
@@ -49,14 +51,20 @@ treat it as a starting point. Not a default: opt in explicitly.
 class Shell(AbstractCapability[AgentDepsT]):
     """Shell command execution for agents.
 
-    Commands run in the run's workspace (`ctx.workspace`), starting in `cwd`. Attach a
-    workspace to the run, such as `LocalWorkspace(...)` for a local checkout or a sandbox
-    provider's capability. Use `allowed_commands` or `denied_commands` to control what the
-    agent can invoke.
+    Commands run in the run's workspace (`ctx.workspace`), starting in its working directory.
+    Attach a workspace to the run, such as `LocalWorkspace(...)` for a local checkout or a
+    sandbox provider's capability; a run without one fails at its start. Use
+    `allowed_commands` or `denied_commands` to control what the agent can invoke.
+
+    `Shell` is not a security boundary: a command reaches whatever the workspace lets it,
+    whatever `FileSystem`'s `root_dir` says. Isolate untrusted work with a sandbox workspace.
     """
 
-    cwd: str | Path = '.'
-    """Working directory for command execution: a workspace path, relative to the workspace's working directory."""
+    cwd: str | Path | None = None
+    """Deprecated and ignored: commands start in the workspace's working directory.
+
+    Set the working directory on the workspace instead, e.g. `LocalWorkspace('./repo')`.
+    """
 
     allowed_commands: Sequence[str] = field(default_factory=list[str])
     """If non-empty, only these command names may be executed (allowlist)."""
@@ -94,9 +102,9 @@ class Shell(AbstractCapability[AgentDepsT]):
     env: Mapping[str, str] | None = None
     """Variables added to every command's environment, on top of the workspace's own.
 
-    When `None` (default) commands get the workspace's environment unchanged. The
-    workspace decides that base: the local workspace passes only `PATH`, `HOME`,
-    `LANG`, and `TMPDIR` from the host process.
+    Commands get exactly the workspace's environment plus these, minus names matching
+    `denied_env_patterns`; nothing comes from the agent process. A local workspace has an
+    empty environment unless it is given its own `env`.
     """
 
     denied_env_patterns: Sequence[str] = field(default_factory=list[str])
@@ -119,18 +127,23 @@ class Shell(AbstractCapability[AgentDepsT]):
     outlive the run, a foreground call waits at most `default_timeout` seconds
     (capped at 270) before returning handles to the still-running process, and
     the model reads the returned log and status files with its other tools.
-    `persist_cwd` does not apply to `shell`; each command starts at `cwd`.
+    `persist_cwd` does not apply to `shell`; each command starts in the working directory.
     """
 
     def __post_init__(self) -> None:
         """Resolve the built-in denylist according to the selected policy."""
+        if self.cwd is not None:
+            warn_argument_ignored('Shell', 'cwd', WORKING_DIR_IS_THE_WORKSPACES)
         if self.denied_commands is _DEFAULT_DENIED_COMMANDS:
             self.denied_commands = [] if self.allowed_commands else list(_DEFAULT_DENIED_COMMANDS)
+
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Fail the run at its start when it has no workspace to run commands in."""
+        require_workspace(ctx.workspace, 'Shell')
 
     def get_toolset(self) -> ShellToolset[AgentDepsT]:
         """Build and return the shell toolset."""
         return ShellToolset[AgentDepsT](
-            cwd=Path(self.cwd),
             allowed_commands=self.allowed_commands,
             denied_commands=self.denied_commands,
             denied_operators=self.denied_operators,

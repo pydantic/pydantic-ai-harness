@@ -9,7 +9,6 @@ import posixpath
 import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 import anyio
@@ -20,8 +19,8 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
 from pydantic_ai.workspaces import WorkspaceTimeoutError
 
 from pydantic_ai_harness._output import truncate_tail
-from pydantic_ai_harness._workspace import workspace_path
-from pydantic_ai_harness.shell._jobs import CONTROL_TIMEOUT, Job, jobs_dir
+from pydantic_ai_harness._workspace import metadata_dir
+from pydantic_ai_harness.shell._jobs import CONTROL_TIMEOUT, Job
 from pydantic_ai_harness.shell._limits import file_limit_status, limited_script, validate_file_limit
 from pydantic_ai_harness.shell._persistent import MAX_FOREGROUND_WAIT, CommandMode, run_persistent_command
 from pydantic_ai_harness.shell._policy import is_interactive_command, recoverable
@@ -74,7 +73,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
-        cwd: Path,
         allowed_commands: Sequence[str],
         denied_commands: Sequence[str],
         denied_operators: Sequence[str],
@@ -88,11 +86,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         tools: Sequence[str] = RUN_SCOPED_TOOL_NAMES,
     ) -> None:
         super().__init__()
-        # The configured starting directory, as a workspace path, never mutated by persist_cwd,
-        # so `for_run` can hand each run a fresh instance rooted back here.
-        self._initial_cwd = cwd
-        self._cwd_spelling = workspace_path(cwd)
-        # The absolute workspace path `persist_cwd` last recorded; `None` means the configured one.
+        # The absolute workspace path `persist_cwd` last recorded; `None` means the working directory.
         self._cwd: str | None = None
         self._allowed_commands = list(allowed_commands)
         self._denied_commands = list(denied_commands)
@@ -148,7 +142,6 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         each other's background processes.
         """
         return ShellToolset(
-            cwd=self._initial_cwd,
             allowed_commands=self._allowed_commands,
             denied_commands=self._denied_commands,
             denied_operators=self._denied_operators,
@@ -191,9 +184,9 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     def _resolve_env(self) -> dict[str, str] | None:
         """The variables handed to the workspace for each command, on top of its own environment.
 
-        The workspace decides the base environment (the local workspace passes only `PATH`,
-        `HOME`, `LANG`, and `TMPDIR` from the host). `None` adds nothing. An explicit `env` is
-        added, minus names that match `denied_env_patterns` (glob, via `fnmatch`).
+        The workspace decides the base environment; nothing comes from the agent process.
+        `None` adds nothing. An explicit `env` is added, minus names that match
+        `denied_env_patterns` (glob, via `fnmatch`).
         """
         if self._env is None:
             return None
@@ -207,12 +200,12 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
 
     async def _cwd_for(self, ctx: RunContext[AgentDepsT]) -> str:
         """The absolute workspace directory the next run-scoped command starts in."""
-        return self._cwd if self._cwd is not None else await ctx.workspace.resolve(self._cwd_spelling)
+        return self._cwd if self._cwd is not None else await ctx.workspace.working_dir()
 
     async def _jobs_base(self, ctx: RunContext[AgentDepsT]) -> str:
         """The workspace directory holding this run's job and capture files, looked up once per run."""
         if self._jobs_dir is None:
-            self._jobs_dir = await jobs_dir(ctx.workspace, self._resolve_env())
+            self._jobs_dir = await metadata_dir(ctx.workspace, 'shell')
         return self._jobs_dir
 
     async def __aexit__(self, *args: Any) -> None:
@@ -398,7 +391,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             ctx,
             command,
             base=await self._jobs_base(ctx),
-            cwd=await ctx.workspace.resolve(self._cwd_spelling),
+            cwd=await ctx.workspace.working_dir(),
             env=self._resolve_env(),
             mode=mode,
             timeout=self._default_timeout if timeout is None else timeout,

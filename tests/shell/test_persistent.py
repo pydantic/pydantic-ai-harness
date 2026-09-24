@@ -63,7 +63,7 @@ async def shell(
     capabilities: Sequence[AbstractCapability[None]] = (),
     **settings: object,
 ) -> str:
-    capability = Shell[None](cwd=cwd, denied_commands=[], allow_interactive=True, tools=['shell'], **settings)  # pyright: ignore[reportArgumentType]
+    capability = Shell[None](denied_commands=[], allow_interactive=True, tools=['shell'], **settings)  # pyright: ignore[reportArgumentType]
     return await call_tool([capability, *capabilities], 'shell', arguments, workspace=local_workspace(cwd))
 
 
@@ -91,14 +91,16 @@ class Recorder(AbstractCapability[None]):
 class TestToolSelection:
     async def test_default_tools_are_run_scoped(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=[])
-        await Agent(model, capabilities=[Shell(cwd=tmp_path)]).run('Inspect tools')
+        await Agent(model, capabilities=[Shell()]).run('Inspect tools', workspace=local_workspace(tmp_path))
         assert model.last_model_request_parameters is not None
         names = [tool.name for tool in model.last_model_request_parameters.function_tools]
         assert names == list(RUN_SCOPED_TOOL_NAMES)
 
     async def test_selected_tools(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=[])
-        await Agent(model, capabilities=[Shell(cwd=tmp_path, tools=['shell', 'run_command'])]).run('Inspect tools')
+        await Agent(model, capabilities=[Shell(tools=['shell', 'run_command'])]).run(
+            'Inspect tools', workspace=local_workspace(tmp_path)
+        )
         assert model.last_model_request_parameters is not None
         names = [tool.name for tool in model.last_model_request_parameters.function_tools]
         assert names == ['run_command', 'shell']
@@ -106,25 +108,33 @@ class TestToolSelection:
 
     def test_unknown_tool_rejected(self, tmp_path: Path) -> None:
         with pytest.raises(ValueError, match='Unknown shell tools: bogus'):
-            Shell(cwd=tmp_path, tools=['bogus']).get_toolset()
+            Shell(tools=['bogus']).get_toolset()
 
     @pytest.mark.parametrize('default_timeout', [0, MAX_FOREGROUND_WAIT + 1])
     def test_default_timeout_bounded_for_shell(self, tmp_path: Path, default_timeout: float) -> None:
         with pytest.raises(ValueError, match='default_timeout must be greater than zero and at most 270'):
-            Shell(cwd=tmp_path, tools=['shell'], default_timeout=default_timeout).get_toolset()
-        Shell(cwd=tmp_path, default_timeout=default_timeout).get_toolset()
+            Shell(tools=['shell'], default_timeout=default_timeout).get_toolset()
+        Shell(default_timeout=default_timeout).get_toolset()
 
 
 class TestShellTool:
-    async def test_foreground(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv('OPENAI_API_KEY', 'do-not-expose')
+    async def test_foreground(self, tmp_path: Path) -> None:
         output = await shell(tmp_path, {'command': 'mkdir child; printf hello; exit 7'})
         assert 'hello' in output and '"exit_code": 7' in output
         assert (tmp_path / 'child').is_dir()
         output = await shell(
-            tmp_path, {'command': 'printf "${OPENAI_API_KEY-unset}"'}, denied_env_patterns=['OPENAI_*']
+            tmp_path,
+            {'command': 'printf "${OPENAI_API_KEY-unset}"'},
+            env={'OPENAI_API_KEY': 'do-not-expose'},
+            denied_env_patterns=['OPENAI_*'],
         )
         assert 'unset' in output and 'do-not-expose' not in output
+
+    async def test_job_files_live_in_the_git_ignored_metadata_directory(self, tmp_path: Path) -> None:
+        output = await shell(tmp_path, {'command': 'printf hello'})
+        metadata = tmp_path / '.pydantic-ai-harness'
+        assert f'Output: {metadata}/shell/' in output
+        assert (metadata / '.gitignore').read_text() == '*\n'
 
     async def test_events(self, tmp_path: Path) -> None:
         recorder = Recorder()
@@ -176,8 +186,10 @@ class TestShellTool:
 
     async def test_policy_applies(self, tmp_path: Path) -> None:
         assert 'NUL' in await shell(tmp_path, {'command': 'echo \0'})
-        capability = Shell[None](cwd=tmp_path, allowed_commands=['echo'], tools=['shell'])
-        assert 'not in the allowed list' in await call_tool([capability], 'shell', {'command': 'printf hi'})
+        capability = Shell[None](allowed_commands=['echo'], tools=['shell'])
+        assert 'not in the allowed list' in await call_tool(
+            [capability], 'shell', {'command': 'printf hi'}, workspace=local_workspace(tmp_path)
+        )
 
     async def test_handles_survive_output_cap(self, tmp_path: Path) -> None:
         output = await shell(tmp_path, {'command': 'yes | head -c 3000'}, max_output_chars=600)
@@ -187,7 +199,7 @@ class TestShellTool:
 
     async def test_starts_in_configured_cwd_despite_persist_cwd(self, tmp_path: Path) -> None:
         (tmp_path / 'child').mkdir()
-        capability = Shell[None](cwd=tmp_path, persist_cwd=True, tools=['run_command', 'shell'])
+        capability = Shell[None](persist_cwd=True, tools=['run_command', 'shell'])
         moved, listed = await call_tools(
             [capability],
             [('run_command', {'command': 'cd child && pwd'}), ('shell', {'command': 'pwd'})],
@@ -196,20 +208,9 @@ class TestShellTool:
         assert moved.strip().endswith('child')
         assert listed.splitlines()[0] == str(tmp_path.resolve())
 
-    async def test_missing_working_directory(self, tmp_path: Path) -> None:
-        capability = Shell[None](cwd=tmp_path / 'absent', tools=['shell'])
-        result = await call_tool([capability], 'shell', {'command': 'echo hi'}, workspace=local_workspace(tmp_path))
-        assert 'no longer exists' in result
-
-    async def test_supervisor_killed_mid_command_returns_stale_status(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_supervisor_killed_mid_command_returns_stale_status(self, tmp_path: Path) -> None:
         # The supervisor publishes its status before the command runs, so the test sequences the
         # steps itself: wait for the command's output and for that file, then kill the supervisor.
-        # The workspace's TMPDIR is this test's own, so the supervisor's files are unambiguous here.
-        supervisor_dir = tmp_path / 'supervisor'
-        supervisor_dir.mkdir()
-        monkeypatch.setenv('TMPDIR', str(supervisor_dir))
         recorder = Recorder()
         supervisors: list[int] = []
         running = anyio.Event()
@@ -255,12 +256,11 @@ class TestShellTool:
             # fails, so a failure does not leave the process behind.
             os.killpg(group_id, signal.SIGKILL)
 
-    async def test_supervisor_failure(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_supervisor_failure(self, tmp_path: Path) -> None:
         # The jobs directory exists but cannot hold a new job, so the launcher exits without one.
-        jobs = tmp_path / 'tmp' / 'pydantic-ai-harness' / 'shell'
+        jobs = tmp_path / '.pydantic-ai-harness' / 'shell'
         jobs.mkdir(parents=True)
         jobs.chmod(0o500)
-        monkeypatch.setenv('TMPDIR', str(tmp_path / 'tmp'))
         try:
             if os.access(jobs, os.W_OK):  # pragma: no cover - root writes regardless of mode bits
                 pytest.skip('mode bits do not bind this user')
@@ -268,22 +268,18 @@ class TestShellTool:
         finally:
             jobs.chmod(0o700)
 
-    async def test_no_jobs_directory(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A workspace without a usable temporary directory fails the call; retrying cannot help.
-        blocker = tmp_path / 'not-a-directory'
-        blocker.write_text('')
-        monkeypatch.setenv('TMPDIR', str(blocker))
+    async def test_no_jobs_directory(self, tmp_path: Path) -> None:
+        # A file where the jobs directory belongs fails the call; retrying cannot help.
+        (tmp_path / '.pydantic-ai-harness').write_text('')
         result = await shell(tmp_path, {'command': 'echo hi'})
-        assert 'Not a directory' in result
+        assert result == 'Cannot create `.pydantic-ai-harness/shell` in the workspace: Not a directory'
 
-    async def test_job_files_removed_while_waiting(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_job_files_removed_while_waiting(self, tmp_path: Path) -> None:
         # The model's command can delete the job directory; the call still returns its handles.
-        monkeypatch.setenv('TMPDIR', str(tmp_path / 'tmp'))
-        (tmp_path / 'tmp').mkdir()
         recorder = Recorder()
         output = await shell(
             tmp_path,
-            {'command': 'rm -rf "$TMPDIR/pydantic-ai-harness/shell/"*; sleep 0.3', 'timeout': 1},
+            {'command': 'rm -rf .pydantic-ai-harness/shell/*; sleep 0.3', 'timeout': 1},
             capabilities=[recorder],
         )
         assert output.startswith('PID: ')
