@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import keyword
+import math
 import re
 import warnings
 from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -1354,8 +1355,11 @@ def _model_safe_result(value: object) -> object:
     as `type` objects, `len` as a builtin function, a bare exception instance as itself.
     None of them serialize, so the tool return would abort the run in whichever layer
     renders it first (`ToolOutputLimits`, or pydantic-ai building the model request). The
-    `repr` is what the snippet's author would have seen in a Python REPL.
+    `repr` is what the snippet's author would have seen in a Python REPL. Non-finite floats
+    do serialize, but as `null`, which would hide the result, so they render as `repr` too.
     """
+    if isinstance(value, float) and not math.isfinite(value):
+        return repr(value)
     if isinstance(value, _MODEL_NATIVE_SCALARS) or is_multi_modal_content(value):
         return value
     if _is_mapping(value):

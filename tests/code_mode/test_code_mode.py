@@ -639,6 +639,7 @@ class TestCodeMode:
             pytest.param('len', '<built-in function len>', id='builtin'),
             pytest.param("ValueError('boom')", "ValueError('boom')", id='exception'),
             pytest.param('...', 'Ellipsis', id='ellipsis'),
+            pytest.param("[float('nan'), float('-inf'), 1.5]", ['nan', '-inf', 1.5], id='non-finite-float'),
             pytest.param(
                 "{'kind': type(1), 'rows': [1, (int, 'a')], 'ok': b'raw'}",
                 {'kind': "<class 'int'>", 'rows': [1, ("<class 'int'>", 'a')], 'ok': b'raw'},
