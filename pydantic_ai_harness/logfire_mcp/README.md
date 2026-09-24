@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[logfire-mcp]" "pydantic-ai-slim[openai]"
 ```
 
-Set `LOGFIRE_API_KEY`, or pass `auth=` an API key or an `httpx.Auth`. See the [provider setup](https://pydantic.dev/docs/logfire/guides/mcp-server/).
+Set `LOGFIRE_API_KEY`, or pass `auth=` an API key. See the [provider setup](https://pydantic.dev/docs/logfire/guides/mcp-server/).
 
 ```python
 from pydantic_ai import Agent
@@ -31,7 +31,9 @@ print(result.output)
 
 ## Per-user credentials
 
-An API key or `LOGFIRE_API_KEY` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+An API key or `LOGFIRE_API_KEY` connects every run as the same account. That suits a script or an agent on your own machine.
+
+In an app where each user connects their own Logfire account, one agent serves all of them, so the credential cannot be fixed when the agent is created. Pass a function that reads the current user's credential from the run's deps:
 
 ```python
 from dataclasses import dataclass
@@ -52,9 +54,9 @@ def logfire_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[LogfireMCP(auth=logfire_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can return a token or an `httpx.Auth`. If it returns `None`, that run has no Logfire tools; it never falls back to `LOGFIRE_API_KEY`.
+The function is called at the start of each run, so each run connects as its own user. If it returns `None`, that run has no Logfire tools; it never falls back to `LOGFIRE_API_KEY`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Logfire" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
+Your app gets each user's credential, stores it, and refreshes it. For example, a settings page where each user pastes their own API key, or a "Connect Logfire" button that signs them in with OAuth and saves the token to their account. Before each run, load it (this can be async) and put it in the deps; the function only reads it.
 
 When users differ in more than their credential, such as users whose data is in the EU region, build the whole capability for each run with a [dynamic capability](https://pydantic.dev/docs/ai/capabilities/custom/#dynamically-building-a-capability):
 

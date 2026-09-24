@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from httpx import Auth
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, DynamicToolset
@@ -36,8 +35,8 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
     """Query Logfire telemetry and manage observability resources through its hosted tools."""
 
     description: str | None = 'Query Logfire telemetry and manage observability resources.'
-    auth: str | Auth | Callable[[RunContext[AgentDepsT]], str | Auth | None] | None = field(default=None, repr=False)
-    """A Logfire API key, an `httpx.Auth`, or a function of the run context that returns one.
+    auth: str | Callable[[RunContext[AgentDepsT]], str | None] | None = field(default=None, repr=False)
+    """A Logfire API key or a function of the run context that returns one.
 
     Unset, it uses `LOGFIRE_API_KEY`. If the function returns `None`, that run has no Logfire tools.
     """
@@ -70,7 +69,7 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
         auth = self.auth(ctx) if callable(self.auth) else self.auth
         return None if auth is None else self._connect(auth)
 
-    def _connect(self, auth: str | Auth | None) -> MCPToolset[AgentDepsT]:
+    def _connect(self, auth: str | None) -> MCPToolset[AgentDepsT]:
         return MCPToolset(
             self.url,
             id=self.id or 'logfire-mcp',
