@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
-from typing import TYPE_CHECKING, TypeAlias, TypeVar
+from os import environ
+from typing import TYPE_CHECKING, TypeAlias, TypeVar, cast
 
 from httpx import Auth
 from pydantic_ai.exceptions import UserError
@@ -30,73 +31,44 @@ MCPClientFunc: TypeAlias = Callable[
 
 
 def per_run(
-    func: Callable[[RunContext[DepsT]], Awaitable[T | None]],
+    value: T | Callable[[RunContext[DepsT]], T | None | Awaitable[T | None]],
     build: Callable[[T], AbstractToolset[DepsT]],
     *,
     id: str,
 ) -> AbstractToolset[DepsT]:
-    """Build a toolset for each run from the value `func` returns for that run's context.
+    """Build a toolset now from a fixed value, or for each run from the value a function returns.
 
-    Each run gets its own toolset, so hosted connections do not share an identity across runs. When `func`
-    returns `None`, the run has no tools from this toolset.
+    A fixed value gives every run the same connection. A function is called at the start of each run, so
+    concurrent runs never share a connection or an identity; when it returns `None`, that run has no tools.
     """
+    # An `httpx.Auth` subclass may define `__call__`; it is still a fixed value.
+    if isinstance(value, Auth) or not callable(value):
+        return build(cast(T, value))
+    func = value
 
     async def toolset_for_run(ctx: RunContext[DepsT]) -> AbstractToolset[DepsT] | None:
-        value = await func(ctx)
-        return None if value is None else build(value)
+        result = func(ctx)
+        resolved = cast('T | None', await result if inspect.isawaitable(result) else result)
+        return None if resolved is None else build(resolved)
 
     return DynamicToolset(toolset_for_run, per_run_step=False, id=id)
 
 
-def per_run_auth(
-    auth: MCPAuth | MCPAuthFunc[DepsT] | None,
-    build: Callable[[MCPAuth | None], AbstractToolset[DepsT]],
-    *,
-    id: str,
-) -> AbstractToolset[DepsT]:
-    """Build a hosted MCP toolset with a fixed credential, or with the credential an `auth` function returns per run.
+def credential(auth: MCPAuth | None, *, env: str | None, service: str) -> MCPAuth:
+    """The credential to connect with: `auth`, else the `env` variable.
 
-    A fixed or unset `auth` is built immediately, so every run shares one connection and one identity; `build`
-    receives `None` only when `auth` is unset, to apply its environment fallback. A function's `None` omits the
-    tools instead, so a run without a credential cannot fall back to the deployment's token.
-
-    `'oauth'` is rejected in either form: Pydantic AI's `MCPToolset` reads it as FastMCP's browser login, which
-    would open a browser on the host and wait for a callback that a server never receives.
+    Browser OAuth (`'oauth'`) is rejected: it opens a browser on the host and waits for a callback, which
+    hangs an agent running on a server.
     """
-    # An `httpx.Auth` subclass may define `__call__`; it is still a fixed credential.
-    if isinstance(auth, Auth) or not callable(auth):
-        return build(_no_browser_login(auth))
-    func = auth
-
-    async def credential(ctx: RunContext[DepsT]) -> MCPAuth | None:
-        result = func(ctx)
-        return _no_browser_login(await result if inspect.isawaitable(result) else result)
-
-    return per_run(credential, build, id=id)
-
-
-def _no_browser_login(auth: MCPAuth | None) -> MCPAuth | None:
+    if auth is None and env is not None:
+        auth = environ.get(env)
+    if auth is None:
+        raise UserError(
+            f'Set `{env}` or pass `auth` to connect to {service}.' if env else f'Pass `auth` to connect to {service}.'
+        )
     if auth == 'oauth':
         raise UserError('Browser OAuth is not supported; pass an API key, a token, or an `httpx.Auth` as `auth`.')
     return auth
-
-
-def per_run_client(
-    client: MCPToolsetClient | MCPClientFunc[DepsT],
-    build: Callable[[MCPToolsetClient], AbstractToolset[DepsT]],
-    *,
-    id: str,
-) -> AbstractToolset[DepsT]:
-    """Build a toolset from a fixed MCP client now, or from the client a function returns for each run."""
-    if not callable(client):
-        return build(client)
-    func = client
-
-    async def client_for_run(ctx: RunContext[DepsT]) -> MCPToolsetClient | None:
-        result = func(ctx)
-        return await result if inspect.isawaitable(result) else result
-
-    return per_run(client_for_run, build, id=id)
 
 
 def is_read_only(tool: ToolDefinition) -> bool:

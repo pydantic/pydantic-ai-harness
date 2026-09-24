@@ -19,7 +19,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext, ToolDefinition
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, is_read_only, per_run_auth, per_run_client
+from pydantic_ai_harness._mcp import MCPAuth, credential, is_read_only, per_run
 
 
 @pytest.fixture
@@ -61,10 +61,10 @@ class User:
 
 
 def connect(url: str) -> Callable[[MCPAuth | None], AbstractToolset[User]]:
-    """Connect as the given credential, or as the deployment when there is none."""
+    """Connect as the given credential, or as `WHOAMI_TOKEN` when there is none."""
 
     def build(auth: MCPAuth | None) -> AbstractToolset[User]:
-        return MCPToolset(url, id='whoami', auth=auth or 'deployment-token')
+        return MCPToolset(url, id='whoami', auth=credential(auth, env='WHOAMI_TOKEN', service='whoami'))
 
     return build
 
@@ -77,7 +77,7 @@ async def test_concurrent_runs_use_their_own_credentials(server_url: str) -> Non
     agent = Agent(
         TestModel(),
         deps_type=User,
-        toolsets=[per_run_auth(token, connect(server_url), id='whoami')],
+        toolsets=[per_run(token, connect(server_url), id='whoami')],
     )
     alice, bob = await asyncio.gather(
         agent.run('Who am I?', deps=User('alice-token')), agent.run('Who am I?', deps=User('bob-token'))
@@ -86,7 +86,7 @@ async def test_concurrent_runs_use_their_own_credentials(server_url: str) -> Non
 
 
 async def test_missing_credential_omits_tools_instead_of_falling_back(server_url: str) -> None:
-    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run_auth(token, connect(server_url), id='whoami')])
+    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run(token, connect(server_url), id='whoami')])
     result = await agent.run('Who am I?', deps=User(None))
     assert result.output == 'success (no tool calls)'
 
@@ -95,13 +95,14 @@ async def test_async_provider(server_url: str) -> None:
     async def bearer(ctx: RunContext[User]) -> httpx.Auth | None:
         return None if ctx.deps.token is None else _Bearer(ctx.deps.token)
 
-    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run_auth(bearer, connect(server_url), id='whoami')])
+    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run(bearer, connect(server_url), id='whoami')])
     result = await agent.run('Who am I?', deps=User('alice-token'))
     assert result.output == '{"whoami":"Bearer alice-token"}'
 
 
-async def test_fixed_credential_is_shared(server_url: str) -> None:
-    toolset = per_run_auth(None, connect(server_url), id='whoami')
+async def test_environment_credential_is_shared(server_url: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('WHOAMI_TOKEN', 'deployment-token')
+    toolset = per_run(None, connect(server_url), id='whoami')
     assert isinstance(toolset, MCPToolset)
     result = await Agent(TestModel(), deps_type=User, toolsets=[toolset]).run('Who am I?', deps=User('ignored'))
     assert result.output == '{"whoami":"Bearer deployment-token"}'
@@ -112,20 +113,30 @@ async def test_callable_auth_object_is_fixed(server_url: str) -> None:
         def __call__(self, ctx: RunContext[User]) -> str:
             raise AssertionError('a fixed `httpx.Auth` is never called with the run context')  # pragma: no cover
 
-    toolset = per_run_auth(CallableBearer('deployment-token'), connect(server_url), id='whoami')
+    toolset = per_run(CallableBearer('deployment-token'), connect(server_url), id='whoami')
     result = await Agent(TestModel(), deps_type=User, toolsets=[toolset]).run('Who am I?', deps=User('ignored'))
     assert result.output == '{"whoami":"Bearer deployment-token"}'
 
 
 async def test_auth_function_cannot_return_oauth(server_url: str) -> None:
-    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run_auth(token, connect(server_url), id='whoami')])
+    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run(token, connect(server_url), id='whoami')])
     with pytest.raises(UserError, match='Browser OAuth is not supported'):
         await agent.run('Who am I?', deps=User('oauth'))
 
 
-def test_fixed_oauth_is_rejected() -> None:
+@pytest.mark.parametrize('env', ['WHOAMI_TOKEN', None])
+def test_missing_credential_raises(env: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('WHOAMI_TOKEN', raising=False)
+    with pytest.raises(UserError, match='to connect to whoami'):
+        credential(None, env=env, service='whoami')
+
+
+def test_oauth_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(UserError, match='Browser OAuth is not supported'):
-        per_run_auth('oauth', connect('https://example.com/mcp'), id='whoami')
+        per_run('oauth', connect('https://example.com/mcp'), id='whoami')
+    monkeypatch.setenv('WHOAMI_TOKEN', 'oauth')
+    with pytest.raises(UserError, match='Browser OAuth is not supported'):
+        credential(None, env='WHOAMI_TOKEN', service='whoami')
 
 
 def client_toolset(client: MCPToolsetClient) -> AbstractToolset[User]:
@@ -138,7 +149,7 @@ async def test_client_function_runs_per_run(server_url: str) -> None:
             return None
         return StreamableHttpTransport(server_url, headers={'Authorization': f'Bearer {ctx.deps.token}'})
 
-    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run_client(client, client_toolset, id='whoami')])
+    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run(client, client_toolset, id='whoami')])
     alice, bob, nobody = await asyncio.gather(
         agent.run('Who am I?', deps=User('alice-token')),
         agent.run('Who am I?', deps=User('bob-token')),
@@ -155,13 +166,13 @@ async def test_async_client_function(server_url: str) -> None:
     async def client(ctx: RunContext[User]) -> MCPToolsetClient | None:
         return StreamableHttpTransport(server_url, auth=_Bearer('alice-token'))
 
-    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run_client(client, client_toolset, id='whoami')])
+    agent = Agent(TestModel(), deps_type=User, toolsets=[per_run(client, client_toolset, id='whoami')])
     result = await agent.run('Who am I?', deps=User(None))
     assert result.output == '{"whoami":"Bearer alice-token"}'
 
 
 def test_fixed_client_is_built_once() -> None:
-    assert isinstance(per_run_client('https://example.com/mcp', client_toolset, id='whoami'), MCPToolset)
+    assert isinstance(per_run('https://example.com/mcp', client_toolset, id='whoami'), MCPToolset)
 
 
 class _Bearer(httpx.Auth):

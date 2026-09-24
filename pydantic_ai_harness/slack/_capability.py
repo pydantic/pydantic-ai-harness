@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, is_read_only, per_run_auth, per_run_client
+from pydantic_ai_harness._mcp import MCPAuth, MCPAuthFunc, MCPClientFunc, credential, is_read_only, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -42,9 +40,9 @@ class Slack(AbstractCapability[AgentDepsT]):
         """Build the Slack connection and optional read-only selection."""
         id = self.id or 'slack'
         if self.client is not None:
-            toolset: AbstractToolset[AgentDepsT] = per_run_client(self.client, self._from_client, id=id)
+            toolset: AbstractToolset[AgentDepsT] = per_run(self.client, self._from_client, id=id)
         else:
-            toolset = per_run_auth(self.auth, self._connect, id=id)
+            toolset = per_run(self.auth, self._connect, id=id)
         if self.read_only:
             return toolset.filtered(lambda _ctx, tool: is_read_only(tool))
         return toolset
@@ -53,14 +51,10 @@ class Slack(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'slack', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
-        if auth is None:
-            auth = environ.get('SLACK_USER_TOKEN')
-        if auth is None:
-            raise UserError('Set `SLACK_USER_TOKEN` or pass `auth` to connect to Slack.')
         return MCPToolset(
             'https://mcp.slack.com/mcp',
             id=self.id or 'slack',
-            auth=auth,
+            auth=credential(auth, env='SLACK_USER_TOKEN', service='Slack'),
             headers=None,
             include_instructions=self.include_instructions,
         )
