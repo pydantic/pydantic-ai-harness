@@ -54,8 +54,9 @@ async def connections_for(capability: Grain[str | None], deps: str | None) -> li
     return connections
 
 
-def no_credential(ctx: RunContext[object]) -> None:
-    return None
+def per_user_token(ctx: RunContext[str | None]) -> str | None:
+    """Read the run's token from its deps, as an app serving many users would."""
+    return ctx.deps
 
 
 class TestGrain:
@@ -119,13 +120,13 @@ class TestGrain:
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(Grain(auth='secret-token'))
 
-    @pytest.mark.parametrize('auth', ['grain-token', no_credential])
+    @pytest.mark.parametrize('auth', ['grain-token', per_user_token])
     def test_client_cannot_be_combined_with_auth(self, auth: Any) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Grain(client='https://example.com/mcp', auth=auth)
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'grain-token'}, {'auth': no_credential}, {'client': 'https://example.com/mcp'}]
+        'settings', [{'auth': 'grain-token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
     )
     def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
         assert Grain(id='tenant-grain', **settings).get_toolset().id == 'tenant-grain'
@@ -144,7 +145,7 @@ class TestGrain:
 class TestPerRunAuth:
     @pytest.mark.anyio
     async def test_each_run_connects_with_its_own_credential(self) -> None:
-        capability = Grain[str | None](auth=lambda ctx: ctx.deps)
+        capability = Grain[str | None](auth=per_user_token)
         [alice] = await connections_for(capability, 'alice-token')
         [bob] = await connections_for(capability, 'bob-token')
         assert (bearer(alice), bearer(bob)) == ('Bearer alice-token', 'Bearer bob-token')
@@ -154,11 +155,11 @@ class TestPerRunAuth:
     async def test_no_credential_means_no_tools(self, missing: str | None, monkeypatch: pytest.MonkeyPatch) -> None:
         # The environment token is set to show a function never falls back to it.
         monkeypatch.setenv('GRAIN_ACCESS_TOKEN', 'deployment-token')
-        capability = Grain[str | None](auth=lambda ctx: ctx.deps)
+        capability = Grain[str | None](auth=per_user_token)
         assert await connections_for(capability, missing) == []
 
     @pytest.mark.anyio
     async def test_function_returning_oauth_raises(self) -> None:
-        capability = Grain[str | None](auth=lambda ctx: ctx.deps)
+        capability = Grain[str | None](auth=per_user_token)
         with pytest.raises(UserError, match="must return an API key or token, not 'oauth'"):
             await connections_for(capability, 'oauth')
