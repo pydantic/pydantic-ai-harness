@@ -416,6 +416,7 @@ def create_shell(
             description='Select the working animation; no arguments opens the picker',
             handler=lambda args: spinner_command(context, spinners, args),
             complete=lambda args: spinner_completions(spinners, args),
+            during_turn=True,
         )
     )
     commands.register(
