@@ -1,6 +1,6 @@
 # Composio
 
-Give an agent access to connected applications through a Composio session. Composio handles tool discovery, app authorization, and execution; this capability connects the session to your agent.
+Let an agent use the applications a user has connected through Composio. `Composio` gives the agent the tools of one Composio session. Composio finds the right app actions, asks the user to authorize apps, and runs the actions.
 
 > While Pydantic AI Harness is on 0.x releases, the API may change between minor releases; when it does, deprecation warnings and release-note migration guidance tell you (or your agent) exactly how to upgrade. See the [version policy](https://github.com/pydantic/pydantic-ai-harness/blob/main/docs/index.md#version-policy).
 
@@ -18,9 +18,9 @@ pip:
 pip install "pydantic-ai-harness[composio]" "pydantic-ai-slim[openai]"
 ```
 
-The `composio` extra installs the Composio SDK and MCP support. The model provider is installed separately.
+The `composio` extra installs the Composio SDK. Install your model provider separately.
 
-Set `COMPOSIO_API_KEY` for Composio and `OPENAI_API_KEY` for the model. Create a session for a stable user ID from your application, and pass both connection values returned by Composio:
+Set `COMPOSIO_API_KEY` for Composio and `OPENAI_API_KEY` for the model. Create a session for a user ID that stays the same for that user, and pass the session's URL and headers:
 
 ```python
 from composio import Composio as ComposioClient
@@ -37,13 +37,11 @@ result = agent.run_sync('Find the applications I can connect to')
 print(result.output)
 ```
 
-For later turns, reuse the session. Store `session.session_id` and restore it with `composio.use(session_id, mcp=True)` when needed. Session creation and restoration belong to your application. For an agent that serves several users, do them in a `client` callable (see [Per-user sessions](#per-user-sessions)).
+Reuse the session for later turns: store `session.session_id` and restore it with `composio.sessions.use(session_id, mcp=True)`. Your application creates and restores sessions. For an agent that serves several users, do this in a `client` function (see [Per-user sessions](#per-user-sessions)).
 
 ## Per-user sessions
 
-A fixed `url` and `headers`, or a fixed `client`, give every run the same connection and the same Composio session, so every run acts as the user that session was created for. Use them for scripts, local tools, and single-user agents.
-
-When one agent serves several users, pass a callable as `client`. It receives the run context at the start of each run and returns a transport for that user's session, so each run opens its own connection:
+A fixed `url` and `headers`, or a fixed `client`, connect every run to the same Composio session, so every run acts as that session's user. When one agent serves several users, pass a function as `client` that returns a transport for the current user's session:
 
 ```python
 import asyncio
@@ -80,18 +78,20 @@ async def composio_session(ctx: RunContext[Deps]) -> StreamableHttpTransport:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Composio(client=composio_session)])
 ```
 
-The callable can be async and can return any MCP client or transport. Composio's SDK is synchronous and calls its API to create or restore a session, so run it in a thread as above to keep the event loop free. `session.mcp.headers` can contain unset values; drop them before building the transport, as the capability does for `headers`. When the callable returns `None`, the run has no Composio tools; it does not fall back to `url` and `headers`. Your application owns mapping each user to a Composio user ID and storing their session ID.
+The function is called at the start of each run, so each run connects to its own user's session. It can be async, and it can return any MCP client or transport. If it returns `None`, that run has no Composio tools; it never falls back to `url` and `headers`.
 
-Each run connects and lists tools when it starts, and disconnects when it ends. Under durable execution such as Temporal, the callable runs in the worker, so it should derive the session from serializable deps. Give each `Composio` on one agent a distinct `id`.
+Composio's SDK is synchronous and calls Composio's API, so run it in a thread as above to keep the agent responsive. `session.mcp.headers` can contain unset values; drop them before building the transport. Your application is responsible for mapping each user to a Composio user ID and storing their session ID.
+
+With durable execution such as Temporal, read the session from the run's deps rather than from a global, since the function may run in another process. To add more than one `Composio` to an agent, give each a distinct `id`.
 
 ## Session settings
 
-Choose toolkits, connected accounts, and tool restrictions when configuring the Composio session. By default, its discovery and execution tools let the agent find app actions as needed. Composio also offers a direct-tools preset when you want a fixed set of actions. Follow [Composio's session guide](https://docs.composio.dev/docs/sessions-via-mcp) for configuration and app authorization.
+Choose toolkits, connected accounts, and tool restrictions when you create the Composio session. By default, the session gives the agent tools to search for app actions and run them. Composio also has a preset that gives the agent a fixed set of actions instead. See [Composio's session guide](https://docs.composio.dev/docs/sessions-via-mcp) for settings and app authorization.
 
-The capability forwards server instructions by default; set `include_instructions=False` to omit them. For a custom transport, pass `client=...`; that client owns its connection settings and overrides `url` and `headers`. A fixed `client` is one connection shared by every run; see [Per-user sessions](#per-user-sessions) for per-run connections.
+The server's instructions reach the agent by default; `include_instructions=False` turns them off. To use your own transport, pass `client`. It then owns the connection settings, and `url` and `headers` are ignored. A fixed `client` is one connection shared by every run; see [Per-user sessions](#per-user-sessions) to connect each user separately.
 
-The agent can use every tool exposed by the session, including writes. Configure access in Composio. For application-level approval or filtering, use Pydantic AI's [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/) on `capability.get_toolset()`.
+The agent can use every tool the session offers, including tools that make changes. Control access in Composio. To filter tools or require approval in your application, wrap `capability.get_toolset()` with Pydantic AI's [toolset wrappers](https://pydantic.dev/docs/ai/tools-toolsets/toolsets/).
 
-Composio's hosted MCP endpoint does not run local SDK tool-call modifiers or expose in-process custom tools. Those features require Composio's native SDK execution path.
+Composio's tool-call modifiers and custom tools defined in your own code do not work through this capability. They need Composio's own SDK to run the tools.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/composio/)

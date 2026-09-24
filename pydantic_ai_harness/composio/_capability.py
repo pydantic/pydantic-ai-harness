@@ -24,10 +24,9 @@ except ImportError as exc:  # pragma: no cover
 
 @dataclass(kw_only=True)
 class Composio(AbstractCapability[AgentDepsT]):
-    """Use the hosted tools of a caller-configured Composio session.
+    """Give an agent the tools of a Composio session.
 
-    Create or restore a session with Composio's SDK, then pass its MCP URL and
-    headers. Composio owns connected accounts, tool selection, and session state.
+    Create or restore the session with Composio's SDK, then pass its MCP URL and headers.
     """
 
     url: str | None = None
@@ -38,12 +37,10 @@ class Composio(AbstractCapability[AgentDepsT]):
     include_instructions: bool = True
     """Forward the server's instructions to the agent."""
     client: MCPToolsetClient | MCPClientFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """Override the connection with a configured MCP client or transport, or a callable that returns one for each run.
+    """Your own MCP client or transport, or a function that returns one for each run.
 
-    The supplied client owns its URL and authentication; `url` and `headers`
-    are not applied to it. A callable receives the run context, so each run
-    can connect to its own user's session from `ctx.deps`; returning `None`
-    omits the tools.
+    `url` and `headers` are ignored when it is set. A function can pick the current user's session
+    from `ctx.deps`; returning `None` gives that run no Composio tools.
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
