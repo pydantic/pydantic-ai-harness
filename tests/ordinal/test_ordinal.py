@@ -106,7 +106,9 @@ class TestOrdinal:
         Agent(TestModel(), capabilities=[Ordinal(auth='ordinal-token', defer_loading=True)])
 
     def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
-        with pytest.raises(UserError, match="Two `Ordinal` capabilities share the id 'ordinal'"):
+        with pytest.raises(
+            UserError, match="Capability id 'ordinal' is used by multiple Ordinal capabilities that disagree on 'auth'"
+        ):
             Agent(TestModel(), capabilities=[Ordinal(auth='a'), Ordinal(auth='b')])
 
     def test_missing_auth_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:

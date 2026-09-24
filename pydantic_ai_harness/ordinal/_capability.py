@@ -49,7 +49,11 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     """
 
     id: str | None = field(default=_ID, kw_only=True)
-    """Names this capability in a run, so `defer_loading=True` needs no `id`. Give each `Ordinal` on one agent its own."""
+    """Stable capability and toolset ID, so `defer_loading=True` needs none.
+
+    One `Ordinal` is one connection to one account, like `StackOne`'s linked account. Two sharing this `id` are
+    one connection stated twice when they agree, and an error when they differ; give each its own `id` to keep both.
+    """
 
     description: str | None = _DEFAULT_DESCRIPTION
     """Routing description used when the capability is loaded on demand."""
@@ -62,7 +66,7 @@ class Ordinal(AbstractCapability[AgentDepsT]):
 
     @classmethod
     def combine(cls, capabilities: Sequence[AbstractCapability[AgentDepsT]]) -> AbstractCapability[AgentDepsT]:
-        """Two `Ordinal`s under one `id` are the same connection stated twice, or an error if they differ."""
+        """Two under one `id` are one connection stated twice; two that disagree raise rather than merge."""
         return one_connection(capabilities)
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
