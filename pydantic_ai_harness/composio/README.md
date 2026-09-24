@@ -82,7 +82,7 @@ The function is called at the start of each run, so each run connects to its own
 
 Composio's SDK is synchronous and calls Composio's API, so run it in a thread as above to keep the agent responsive. `session.mcp.headers` can contain unset values; drop them before building the transport. Your application is responsible for mapping each user to a Composio user ID and storing their session ID.
 
-With durable execution such as Temporal, read the session from the run's deps rather than from a global, since the function may run in another process. To add more than one `Composio` to an agent, give each a distinct `id`.
+With durable execution such as Temporal, read the session from the run's deps rather than from a global, since the function may run in another process. To add more than one `Composio` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
 
 ## Session settings
 

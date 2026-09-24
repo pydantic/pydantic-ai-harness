@@ -13,6 +13,11 @@ from pydantic_ai.usage import RunUsage
 
 from pydantic_ai_harness.composio import Composio
 
+# MCP's test server leaves its lifespan annotation unresolved with some pydantic-settings versions.
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Field 'lifespan' has an incomplete definition:UserWarning:pydantic_settings.sources.utils"
+)
+
 
 async def connections_for(capability: Composio[str | None], deps: str | None) -> list[MCPToolset[str | None]]:
     """The MCP connections a run with `deps` would open."""
