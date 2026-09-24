@@ -163,6 +163,13 @@ the agent.
 A `client` is one connection shared by every run; see [Per-user
 credentials](#per-user-credentials) to connect each user separately.
 
+## Telemetry
+
+`PostHog` emits no spans of its own. Core's
+[instrumentation](https://pydantic.dev/docs/ai/capabilities/instrumentation/)
+already records each PostHog tool call as a tool span, and connecting makes no
+decision worth a span of its own.
+
 ## Define the agent in YAML or JSON
 
 Loading a YAML file also needs the `spec` extra.
