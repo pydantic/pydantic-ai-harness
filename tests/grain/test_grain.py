@@ -96,6 +96,13 @@ class TestGrain:
         assert _http_transport(toolset).url == 'https://api.grain.com/_/mcp'
         assert bearer(toolset) == 'Bearer grain-token'
 
+    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
+    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+        # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
+        toolset = Grain(auth='grain-token', **settings).get_toolset()
+        assert isinstance(toolset, MCPToolset)
+        assert toolset.include_instructions is include
+
     def test_environment_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('GRAIN_ACCESS_TOKEN', 'environment-token')
         assert bearer(Grain().get_toolset()) == 'Bearer environment-token'
