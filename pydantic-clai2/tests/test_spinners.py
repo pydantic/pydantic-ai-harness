@@ -76,9 +76,6 @@ def catalogue(tmp_path: Path, *, selected: str = DEFAULT_SPINNER, registered: tu
 def write(spinners: Spinners, data: object) -> None:
     text = data if isinstance(data, str) else json.dumps(data)
     spinners.path.write_text(text)
-    # Two writes inside one timestamp tick would look unchanged; move the mtime on explicitly.
-    stamp = spinners.path.stat().st_mtime_ns + 1_000_000_000
-    os.utime(spinners.path, ns=(stamp, stamp))
 
 
 class TestCatalogue:
@@ -153,6 +150,11 @@ class TestCatalogue:
         assert found['shared'].frames == ('p',) and found['shared'].description == 'retold'
         write(spinners, {'mine': {'frames': ['z'], 'interval': 0.3}})
         assert spinners.active().frames == ('z',) and spinners.active().interval == 0.3
+        mtime = spinners.path.stat().st_mtime_ns
+        write(spinners, {'mine': {'frames': ['y'], 'interval': 0.3}})
+        os.utime(spinners.path, ns=(mtime, mtime))
+        # Same size and timestamp: only the contents tell the edit apart.
+        assert spinners.active().frames == ('y',)
         spinners.path.unlink()
         assert spinners.active().name == 'working'
 

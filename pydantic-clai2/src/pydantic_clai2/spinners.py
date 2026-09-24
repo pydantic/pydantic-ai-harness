@@ -189,28 +189,32 @@ class Spinners:
         self.selected = selected
         self.registered = registered
         self.path = path or user_spinners_path()
-        self._stamp: tuple[int, int] | None = None
-        self._text = ''
+        self._cached: tuple[tuple[Spinner, ...], str] | None = None
+        self._loaded: tuple[dict[str, Spinner], tuple[str, ...]] = ({}, ())
 
     def _user_text(self) -> str:
-        """The file's contents, re-read only when its modification time or size changes; empty when absent."""
+        """The file's contents; empty when absent."""
         try:
-            stat = self.path.stat()
-            stamp = (stat.st_mtime_ns, stat.st_size)
-            if stamp != self._stamp:
-                self._text, self._stamp = self.path.read_text(encoding='utf-8'), stamp
+            return self.path.read_text(encoding='utf-8')
         except FileNotFoundError:
-            self._text, self._stamp = '', None
-        return self._text
+            return ''
 
     def _load(self) -> tuple[dict[str, Spinner], tuple[str, ...]]:
-        catalogue = {**BUILTIN_SPINNERS, **{spinner.name: spinner for spinner in self.registered()}}
+        """Read the file on every call and parse it only when it or the plugin spinners change.
+
+        Comparing contents rather than the modification time also catches a same-size edit within
+        one timestamp tick; the file is small, so the read is cheap at the repaint rate.
+        """
+        registered = tuple(self.registered())
+        catalogue = {**BUILTIN_SPINNERS, **{spinner.name: spinner for spinner in registered}}
         try:
             text = self._user_text()
         except (OSError, UnicodeDecodeError) as exc:
             return catalogue, (f'spinners.json could not be read: {exc}',)
-        user, problems = _parse_user_file(text, catalogue) if text.strip() else ({}, ())
-        return {**catalogue, **user}, problems
+        if self._cached != (registered, text):
+            user, problems = _parse_user_file(text, catalogue) if text.strip() else ({}, ())
+            self._cached, self._loaded = (registered, text), ({**catalogue, **user}, problems)
+        return self._loaded
 
     def catalogue(self) -> dict[str, Spinner]:
         """Every selectable spinner, sorted by name without regard to case."""
