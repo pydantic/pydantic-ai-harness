@@ -11,6 +11,7 @@ The chosen name is the `display.spinner` setting. Painters call `Spinners.active
 tick, so a new choice, a plugin load, or an edit to `spinners.json` shows on the next frame.
 """
 
+import math
 import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
@@ -50,7 +51,13 @@ class Spinner:
 
 
 def clamp_interval(seconds: float) -> float:
-    """Keep a speed between `MIN_INTERVAL` and `MAX_INTERVAL`, rounded to centiseconds."""
+    """Keep a speed between `MIN_INTERVAL` and `MAX_INTERVAL`, rounded to centiseconds.
+
+    NaN and infinity raise instead: comparisons with NaN are all false, so it would pass the clamp
+    and fail later in `Spinner.frame`, on every repaint.
+    """
+    if not math.isfinite(seconds):
+        raise ValueError(f'A spinner interval must be a finite number of seconds, not {seconds}.')
     return round(min(max(seconds, MIN_INTERVAL), MAX_INTERVAL), 2)
 
 
@@ -142,7 +149,8 @@ def _parse_user_file(text: str, base: dict[str, Spinner]) -> tuple[dict[str, Spi
         return {}, ('spinners.json must be a JSON object of spinner entries.',)
     spinners: dict[str, Spinner] = {}
     problems: list[str] = []
-    for name, raw in entries.items():
+    for key, raw in entries.items():
+        name = key.strip()
         try:
             entry = _Entry.model_validate(raw)
             if entry.frames is None:
@@ -163,7 +171,7 @@ def _parse_user_file(text: str, base: dict[str, Spinner]) -> tuple[dict[str, Spi
                 spinners[spinner.name] = spinner
         except (ValidationError, ValueError) as exc:
             reason = exc.errors()[0]['msg'] if isinstance(exc, ValidationError) else str(exc)
-            problems.append(f'spinners.json: skipped {name!r}: {reason}')
+            problems.append(f'spinners.json: skipped {key!r}: {reason}')
     return spinners, tuple(problems)
 
 
@@ -228,15 +236,23 @@ class Spinners:
         """Record a speed in `spinners.json`, keeping the entry's other keys; the file is the only record."""
         text = self._user_text()
         entries = _FILE.validate_json(text) if text.strip() else {}
-        current = entries.get(name)
+        # Keys are matched as the catalogue matches them, so a padded key is updated rather than shadowed.
+        key = next((key for key in entries if key.strip() == name), name)
+        current = entries.get(key)
         entry = _FILE.validate_python(current) if isinstance(current, dict) else {}
         entry['interval'] = clamp_interval(seconds)
-        entries[name] = entry
+        entries[key] = entry
         write_private(path=self.path, value=_FILE.dump_json(entries, indent=2).decode() + '\n')
 
     def init(self) -> bool:
-        """Write the starter file; `False` when one already exists, which is left alone."""
-        if self.path.exists():
+        """Write the starter file; `False` when one already exists, which is left alone.
+
+        Exclusive creation, so a file another process writes meanwhile is never replaced.
+        """
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with self.path.open('x', encoding='utf-8') as file:
+                file.write(STARTER_FILE)
+        except FileExistsError:
             return False
-        write_private(path=self.path, value=STARTER_FILE)
         return True

@@ -118,6 +118,13 @@ class TestCatalogue:
         with pytest.raises(ValueError, match=error):
             make_spinner(name, frames)
 
+    @pytest.mark.parametrize('interval', [float('nan'), float('inf'), float('-inf')])
+    def test_non_finite_interval_is_rejected_before_it_reaches_a_painter(self, interval: float) -> None:
+        host = PluginHost[None](name='p', console=Console(file=io.StringIO()), settings={})
+        with pytest.raises(ValueError, match='finite number of seconds'):
+            host.spinner('broken', ['a'], interval=interval)
+        assert host.spinners == []
+
     def test_layers_and_lookup(self, tmp_path: Path) -> None:
         plugin = make_spinner('dots', ['o', 'O'], source='plugin')
         spinners = catalogue(tmp_path, selected='DOTSWIDE', registered=(plugin, make_spinner('extra', ['e'])))
@@ -172,6 +179,14 @@ class TestCatalogue:
         spinners.path.mkdir()
         assert 'could not be read' in spinners.problems()[0]
         assert len(spinners.catalogue()) == len(BUILTIN_SPINNERS)
+
+    def test_padded_keys_match_their_trimmed_name(self, tmp_path: Path) -> None:
+        spinners = catalogue(tmp_path, selected='mine')
+        write(spinners, {' zoomies': {'interval': 0.5}, 'mine ': {'frames': ['a'], 'interval': 0.3}})
+        assert spinners.catalogue()['zoomies'].interval == 0.5
+        spinners.save_interval('mine', 0.7)
+        assert json.loads(spinners.path.read_text())['mine '] == {'frames': ['a'], 'interval': 0.7}
+        assert spinners.active().interval == 0.7 and spinners.problems() == ()
 
     def test_save_interval_keeps_other_keys(self, tmp_path: Path) -> None:
         spinners = catalogue(tmp_path)
