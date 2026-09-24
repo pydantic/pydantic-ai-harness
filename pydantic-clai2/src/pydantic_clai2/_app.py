@@ -55,6 +55,7 @@ from .project_settings import ProjectSettings
 from .prompt_transcript import TranscriptBuffer
 from .reloading import reload_clai
 from .screen import Screen
+from .session_settings import SessionSettings
 from .sessions import Sessions
 from .set_menu import set_command
 from .settings_store import SettingsStore
@@ -277,22 +278,10 @@ def create_shell(
     if session.model is None and agent.model is None:
         console.print('Add a model with /add_model.', style=theme.color(theme.INFO))
 
-    previous_theme = settings.theme
-
-    def apply_setting(key: str, updated: Settings) -> None:
-        nonlocal previous_theme
-        if key == 'model':
-            session.model = updated.model
-        elif key == 'run.tool_retries':
-            session.tool_retries = updated.tool_retries
-        elif key == 'run.request_limit':
-            session.usage_limits = replace(session.usage_limits or UsageLimits(), request_limit=updated.request_limit)
-        elif key == 'display.theme' and console.is_terminal and previous_theme != updated.theme:
-            theme.apply(updated.theme, output=console.file)
-        previous_theme = updated.theme
+    session_settings = SessionSettings(session=session, console=console, settings=settings)
 
     context = CommandContext(
-        settings=settings, store=store, clear_history=session.clear, apply_setting=apply_setting, project=project
+        settings=settings, store=store, clear_history=session.clear, apply_setting=session_settings, project=project
     )
 
     async def add_model(args: list[str]) -> str:
@@ -310,7 +299,7 @@ def create_shell(
     sessions = Sessions(session=session, store=conversations, context=context)
     commands = Commands()
     commands.register(Command(name='resume', description='Browse or restore a saved session', handler=sessions.command))
-    commands.register(Command(name='keys', description='Manage saved API keys', handler=keys_command, during_turn=True))
+    commands.register(Command(name='keys', description='Manage saved API keys', handler=keys_command))
     commands.register(
         Command(
             name='login',
@@ -464,6 +453,7 @@ def create_shell(
         screen=screen,
         sessions=sessions,
         speculation=Speculation(context=context, console=console),
+        session_settings=session_settings,
         spinners=spinners,
     )
     if prompt is not None:
@@ -492,6 +482,7 @@ class _Shell(Generic[DepsT, OutputT]):
     screen: Screen
     sessions: Sessions[DepsT, OutputT]
     speculation: Speculation
+    session_settings: SessionSettings[DepsT, OutputT]
     spinners: Spinners
     transcript: TranscriptBuffer = field(default_factory=TranscriptBuffer)
     images: ImageInput = field(default_factory=ImageInput)
@@ -617,14 +608,7 @@ class _Shell(Generic[DepsT, OutputT]):
             nonlocal ended
             ended = await self.run_turn(start, images=images)
 
-        # A menu opened mid-turn outlives the turn: the next prompt waits until it closes.
-        completed = False
-        async with create_task_group() as mid_turn:
-            self._mid_turn = mid_turn
-            try:
-                completed = await self.interrupts.run(run_turn())
-            finally:
-                self._mid_turn = None
+        completed = await self.interrupts.run(run_turn())
         self.sessions.namer.submit(self.session.summary.id)
         if self.editor is not None:
             await self.editor.output.drain()
@@ -670,17 +654,27 @@ class _Shell(Generic[DepsT, OutputT]):
             except Exception as exc:  # noqa: BLE001 -- report a failed headless turn to the CLI.
                 return TurnEnd(text=start.text, outcome='failed', error=exc)
             return TurnEnd(text=start.text, outcome='completed', result=result)
-        return await _run_prompt(
-            self.session,
-            start.text,
-            images=images,
-            console=self.console,
-            settings=self.context.settings,
-            status=self.status,
-            renderers=self.loader.renderers(),
-            screen=self.screen,
-            spinner=self.spinners.active,
-        )
+        # Menus open mid-turn only after this turn has captured its settings; session changes
+        # they save apply once it ends. A menu still open when it ends delays the next prompt.
+        ended = TurnEnd(text=start.text, outcome='cancelled')
+        with self.session_settings.turn():
+            async with create_task_group() as mid_turn:
+                self._mid_turn = mid_turn
+                try:
+                    ended = await _run_prompt(
+                        self.session,
+                        start.text,
+                        images=images,
+                        console=self.console,
+                        settings=self.context.settings,
+                        status=self.status,
+                        renderers=self.loader.renderers(),
+                        screen=self.screen,
+                        spinner=self.spinners.active,
+                    )
+                finally:
+                    self._mid_turn = None
+        return ended
 
 
 def _report_project(project: ProjectSettings, console: Console) -> None:
