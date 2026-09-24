@@ -344,13 +344,14 @@ def create_shell(
         )
     )
     commands.register(Command(name='help', description='Show commands', handler=commands.help))
-    commands.register(
-        Command(
-            name='new',
-            description='Start a new session; preserve the previous session',
-            handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
-        )
+
+    new_command = Command(
+        name='new',
+        description='Start a new session; preserve the previous session',
+        handler=lambda _: session.clear() or 'New session started. Previous session remains saved.',
     )
+    commands.register(new_command)
+    commands.register(replace(new_command, name='clear', description='Alias of /new'))
     commands.register(
         Command(
             name='usage',
@@ -534,6 +535,8 @@ class _Shell(Generic[DepsT, OutputT]):
             if self.editor is not None:
                 self.console.print(f'> {terminal_text(text)}', markup=False, highlight=False)
             self.console.print()
+            if text.strip().lower() == 'clear':
+                text = '/clear'
             if is_command_input(text):
                 async with (self.editor.suspended if self.editor is not None else bare_screen)():
                     await self.interrupts.run(
@@ -657,7 +660,7 @@ async def _execute_command(commands: Commands, text: str, *, console: Console, s
 
 
 def _reset_status(command: str, status: Status) -> None:
-    if command.split(maxsplit=1)[0] in ('/new', '/resume'):
+    if command.split(maxsplit=1)[0] in ('/new', '/clear', '/resume'):
         status.context_tokens = None
         status.context_alert = False
         status.output_tokens = None
