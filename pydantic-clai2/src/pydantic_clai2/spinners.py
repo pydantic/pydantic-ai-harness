@@ -12,18 +12,24 @@ tick, so a new choice, a plugin load, or an edit to `spinners.json` shows on the
 """
 
 import math
+import os
+import sys
 import unicodedata
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Generator, Iterable
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 from rich.cells import cell_len
 
-from .credential_store import write_private
 from .settings_store import config_dir
 from .spinner_frames import EXTRA_SPECS
+
+if sys.platform != 'win32':  # pragma: no branch
+    import fcntl
 
 SpinnerSource = Literal['builtin', 'plugin', 'user']
 DEFAULT_SPINNER = 'working'
@@ -175,6 +181,26 @@ def _parse_user_file(text: str, base: dict[str, Spinner]) -> tuple[dict[str, Spi
     return spinners, tuple(problems)
 
 
+@contextmanager
+def _locked(path: Path) -> Generator[None]:
+    """Hold an exclusive lock on a sibling lock file; Windows has no `fcntl`, so there it is unlocked."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.with_name(f'.{path.name}.lock').open('a') as handle:
+        if sys.platform != 'win32':  # pragma: no branch
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def _replace(path: Path, text: str) -> None:
+    """Replace the file atomically through a staging file no other writer touches."""
+    staging = path.with_name(f'.{path.name}.{uuid4().hex}.tmp')
+    try:
+        staging.write_text(text, encoding='utf-8')
+        os.replace(staging, path)
+    finally:
+        staging.unlink(missing_ok=True)
+
+
 class Spinners:
     """The live catalogue: builtins, then plugin spinners, then the user file, read fresh when it changes."""
 
@@ -237,16 +263,20 @@ class Spinners:
         return self.find(self.selected()) or BUILTIN_SPINNERS[DEFAULT_SPINNER]
 
     def save_interval(self, name: str, seconds: float) -> None:
-        """Record a speed in `spinners.json`, keeping the entry's other keys; the file is the only record."""
-        text = self._user_text()
-        entries = _FILE.validate_json(text) if text.strip() else {}
-        # Keys are matched as the catalogue matches them, so a padded key is updated rather than shadowed.
-        key = next((key for key in entries if key.strip() == name), name)
-        current = entries.get(key)
-        entry = _FILE.validate_python(current) if isinstance(current, dict) else {}
-        entry['interval'] = clamp_interval(seconds)
-        entries[key] = entry
-        write_private(path=self.path, value=_FILE.dump_json(entries, indent=2).decode() + '\n')
+        """Record a speed in `spinners.json`, keeping the entry's other keys; the file is the only record.
+
+        The read-modify-write holds a lock, so two CLAI2 processes saving at once both keep their change.
+        """
+        with _locked(self.path):
+            text = self._user_text()
+            entries = _FILE.validate_json(text) if text.strip() else {}
+            # Keys are matched as the catalogue matches them, so a padded key is updated rather than shadowed.
+            key = next((key for key in entries if key.strip() == name), name)
+            current = entries.get(key)
+            entry = _FILE.validate_python(current) if isinstance(current, dict) else {}
+            entry['interval'] = clamp_interval(seconds)
+            entries[key] = entry
+            _replace(self.path, _FILE.dump_json(entries, indent=2).decode() + '\n')
 
     def init(self) -> bool:
         """Write the starter file; `False` when one already exists, which is left alone.

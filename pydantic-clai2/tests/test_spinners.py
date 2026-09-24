@@ -3,6 +3,7 @@
 import io
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Generic, TypeVar
 
@@ -199,6 +200,15 @@ class TestCatalogue:
             'puppy': {'interval': 0.33},
             'mine': {'frames': ['a'], 'description': 'd', 'interval': 1.0},
         }
+
+    def test_concurrent_saves_both_land(self, tmp_path: Path) -> None:
+        first, second = catalogue(tmp_path), catalogue(tmp_path)
+        jobs = [(first, 'puppy', 0.3), (second, 'bone', 0.4)] * 20
+        with ThreadPoolExecutor(8) as pool:
+            for future in [pool.submit(spinners.save_interval, name, seconds) for spinners, name, seconds in jobs]:
+                future.result()
+        assert json.loads(first.path.read_text()) == {'puppy': {'interval': 0.3}, 'bone': {'interval': 0.4}}
+        assert sorted(path.name for path in tmp_path.iterdir()) == ['.spinners.json.lock', 'spinners.json']
 
     def test_init_writes_once(self, tmp_path: Path) -> None:
         spinners = catalogue(tmp_path)
