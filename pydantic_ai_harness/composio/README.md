@@ -87,7 +87,7 @@ Open the user's session before the run, save its ID so later runs reuse it, and 
 
 The session's headers carry only your Composio API key, which is the same for every user, so the function adds it from your configuration instead of the deps. Deps can be stored, for example in a durable execution's history, and should not hold secrets that are not the user's own. Your application is responsible for mapping each user to a Composio user ID.
 
-With durable execution such as Temporal, the function may run again when a run is replayed, so it must not call Composio's API itself. Opening the session before the run, as above, keeps that call out of the replay. To add more than one `Composio` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same.
+With durable execution such as Temporal, the function may run again when a run is replayed, so it must not call Composio's API itself. Opening the session before the run, as above, keeps that call out of the replay. The capability's `id` defaults to `composio`, so `defer_loading=True` works without one. To add more than one `Composio` to an agent, give each a distinct `id` and wrap them in [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/), since their tool names are the same; two that share an `id` but differ raise an error.
 
 ## Session settings
 

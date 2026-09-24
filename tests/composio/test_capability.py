@@ -76,6 +76,19 @@ class TestComposio:
         with pytest.raises(UserError, match='`client` owns the connection'):
             Composio(client='https://example.com/mcp', **settings)
 
+    def test_defer_loading_needs_no_id(self) -> None:
+        Agent(TestModel(), capabilities=[Composio(client=session_server('ada'), defer_loading=True)])
+
+    def test_two_that_differ_raise_when_the_agent_is_built(self) -> None:
+        with pytest.raises(UserError, match="Two `Composio` capabilities share the id 'composio'"):
+            Agent(
+                TestModel(),
+                capabilities=[
+                    Composio(url='https://example.com/first/mcp'),
+                    Composio(url='https://example.com/second/mcp'),
+                ],
+            )
+
 
 class TestDynamicCapability:
     """A dynamic capability builds each user's own `Composio` session, as the docs show."""

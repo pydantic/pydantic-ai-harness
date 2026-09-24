@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
+from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import ToolDefinition
 
-from pydantic_ai_harness._mcp import credential, is_read_only
+from pydantic_ai_harness._mcp import credential, is_read_only, one_connection
 
 
 def test_explicit_credential_wins(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -39,3 +42,18 @@ def test_missing_credential_raises(auth: str | None, env: str | None, monkeypatc
 )
 def test_is_read_only_requires_an_explicit_hint(metadata: dict[str, object] | None, expected: bool) -> None:
     assert is_read_only(ToolDefinition(name='tool', metadata=metadata)) is expected
+
+
+@dataclass
+class Connection(AbstractCapability[None]):
+    token: str = ''
+
+
+def test_same_configuration_is_one_connection() -> None:
+    first = Connection(token='a', id='whoami')
+    assert one_connection([first, Connection(token='a', id='whoami')]) is first
+
+
+def test_different_configurations_raise() -> None:
+    with pytest.raises(UserError, match="Two `Connection` capabilities share the id 'whoami'"):
+        one_connection([Connection(token='a', id='whoami'), Connection(token='b', id='whoami')])
