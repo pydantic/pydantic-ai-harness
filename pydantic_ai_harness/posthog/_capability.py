@@ -80,8 +80,8 @@ class PostHog(AbstractCapability[AgentDepsT]):
     leaves no PostHog tools; send the `x-posthog-read-only: true` header from the client instead.
     """
 
-    features: list[str] | None = None
-    """PostHog feature groups to offer, such as `'flags'` or `'insights'`. `None` offers every group."""
+    features: str | Sequence[str] | None = None
+    """PostHog feature groups to offer, such as `'flags'` or `['flags', 'insights']`. `None` offers every group."""
 
     include_instructions: bool = True
     """Pass the server's own instructions to the agent."""
@@ -95,14 +95,16 @@ class PostHog(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         if self.client is not None and (self.auth is not None or self.features is not None):
             raise UserError('`client` owns the connection, so it cannot be combined with `auth` or `features`.')
+        if self.features is None:
+            return
+        # A snapshot, so the groups validated here are the groups sent, whatever happens to the caller's list.
+        self.features = (self.features,) if isinstance(self.features, str) else tuple(self.features)
         # PostHog reads an empty features list as every group, which includes write tools.
-        if self.features == []:
+        if not self.features:
             raise UserError('`features` must name at least one feature group; use `None` for every group.')
         # The server splits the query parameter on commas without trimming, so a comma would enable several groups and
         # padding would match none.
-        if self.features is not None and any(
-            not group or group != group.strip() or ',' in group for group in self.features
-        ):
+        if any(not group or group != group.strip() or ',' in group for group in self.features):
             raise UserError('Each `features` entry must name one feature group, such as `flags`.')
 
     @classmethod

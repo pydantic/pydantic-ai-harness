@@ -166,9 +166,18 @@ class TestServerSettings:
         agent = Agent(TestModel(), capabilities=[PostHog(client=server, read_only=True)])
         assert (await agent.run('Use the tools')).output == '{"insight_query":"queried"}'
 
-    def test_features_select_feature_groups(self) -> None:
-        toolset = PostHog(auth='posthog-key', features=['flags', 'error_tracking']).get_toolset()
-        assert _http_transport(toolset).url == 'https://mcp.posthog.com/mcp?features=flags%2Cerror_tracking'
+    @pytest.mark.parametrize(
+        ('features', 'query'), [('flags', 'flags'), (['flags', 'error_tracking'], 'flags%2Cerror_tracking')]
+    )
+    def test_features_select_feature_groups(self, features: str | list[str], query: str) -> None:
+        toolset = PostHog(auth='posthog-key', features=features).get_toolset()
+        assert _http_transport(toolset).url == f'https://mcp.posthog.com/mcp?features={query}'
+
+    def test_features_are_fixed_when_the_capability_is_built(self) -> None:
+        groups = ['flags']
+        capability = PostHog(auth='posthog-key', features=groups)
+        groups.clear()
+        assert _http_transport(capability.get_toolset()).url == 'https://mcp.posthog.com/mcp?features=flags'
 
     def test_empty_features_raise(self) -> None:
         with pytest.raises(UserError, match='at least one feature group'):
