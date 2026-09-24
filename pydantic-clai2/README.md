@@ -730,6 +730,11 @@ if the copy fails, the fork starts with a fresh context and says so. It uses the
 current model, plugins, and model settings unless `@model` names another model.
 CLAI has one agent, so unlike Code Puppy there is no `@agent` argument.
 
+While forks run, the editor shows one row per fork above the prompt, like Code
+Puppy's sub-agent panel: the fork number, its model, your `/spinner`, the elapsed
+time, and what it is doing (`thinking`, `tool: NAME`, `responding`). A fork that
+finished while a turn or command was running shows as done until its output prints.
+
 When a fork finishes, CLAI prints a `FORK #N RESPONSE` banner with the model, the response as
 Markdown, the elapsed time, and the saved session id. `/resume SESSION-ID`
 switches the foreground to that fork's conversation. Output waits while a turn or
