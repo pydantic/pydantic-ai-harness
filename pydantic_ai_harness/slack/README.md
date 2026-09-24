@@ -52,9 +52,9 @@ def slack_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[Slack(auth=slack_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Slack tools; it never falls back to `SLACK_USER_TOKEN`.
+The function is called at the start of each run, so each run connects as its own user. It can return a token or an `httpx.Auth`. If it returns `None`, that run has no Slack tools; it never falls back to `SLACK_USER_TOKEN`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Slack" button in your web app. The function only reads the current token.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Slack" button in your web app. Look the token up before the run, for example with `await`, and put it in the deps; the function only reads it.
 
 When users differ in more than their credential, such as giving some users read-only access, build the whole capability for each run with a [dynamic capability](https://pydantic.dev/docs/ai/capabilities/custom/#dynamically-building-a-capability):
 

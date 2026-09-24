@@ -136,13 +136,6 @@ class TestPerRunAuth:
         [bob] = await connections_for(capability, 'xoxp-bob')
         assert (bearer(alice), bearer(bob)) == ('Bearer xoxp-alice', 'Bearer xoxp-bob')
 
-    async def test_async_provider(self) -> None:
-        async def token(ctx: RunContext[str | None]) -> str | None:
-            return ctx.deps
-
-        [connection] = await connections_for(Slack[str | None](auth=token), 'xoxp-alice')
-        assert bearer(connection) == 'Bearer xoxp-alice'
-
     async def test_provider_returning_none_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-deployment')
         capability = Slack[str | None](auth=lambda ctx: ctx.deps)
