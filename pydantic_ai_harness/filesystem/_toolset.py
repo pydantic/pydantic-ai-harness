@@ -138,13 +138,18 @@ class _EventLocation(TypedDict):
 
 @dataclass(frozen=True)
 class _Scope:
-    """The workspace a call acts on, with the configured root and cwd resolved inside it."""
+    """The workspace a call acts on, with its containment boundary and working directory."""
 
     workspace: Workspace
     root: str
-    """Absolute, normalized workspace path of `root_dir`."""
+    """The boundary: the real (symlink-free) workspace path of `root_dir`."""
     cwd: str
-    """Absolute, normalized workspace path relative paths resolve from; inside `root`."""
+    """The workspace's working directory, which relative paths resolve from; inside `root`."""
+
+    @property
+    def checks_realpath(self) -> bool:
+        """Whether targets are resolved through symlinks before use; a boundary at `/` contains everything."""
+        return self.root != '/'
 
 
 def _contains(root: str, path: str) -> bool:
@@ -383,19 +388,21 @@ def _as_workspace(workspace: WorkspaceBackend) -> Workspace:
 class FileSystemToolset(FunctionToolset[AgentDepsT]):
     """Toolset providing filesystem operations inside the run's workspace, scoped to a root directory.
 
-    Every file operation goes through `ctx.workspace`. Security model:
-    - Relative paths resolved from `cwd` and checked for containment in `root_dir`
-      as text; symlinks inside the root are followed by the workspace backend,
-      which is the isolation boundary
+    Every file operation goes through `ctx.workspace`. Guardrails for the model's file tools:
+    - Relative paths resolve from the workspace's working directory. Each target must be inside
+      `root_dir` both as written and once the workspace has resolved its symlinks, checked
+      before each operation; a symlink swapped in between the check and the use is not caught.
     - Glob-based allow/deny filtering
-    - Protected path patterns (e.g. `.git/`, `.env`)
+    - Protected path patterns (e.g. `.git/`, `.env`), matched against both spellings
     - Binary file detection blocks text operations
+
+    These are guardrails, not isolation: the workspace is the isolation boundary.
     """
 
     def __init__(
         self,
         *,
-        root_dir: Path,
+        root_dir: Path | None = None,
         allowed_patterns: Sequence[str],
         denied_patterns: Sequence[str],
         protected_patterns: Sequence[str],
@@ -405,21 +412,15 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         max_search_results: int,
         max_find_results: int,
         id: str | None = None,
-        cwd: Path | None = None,
         content_hashes: bool = True,
         tools: Sequence[str] = DEFAULT_TOOL_NAMES,
     ) -> None:
         super().__init__(id=id)
-        # Workspace paths, absolute or relative to the workspace's working directory; each call
-        # resolves them against the workspace it acts on.
-        self._root_spelling = workspace_path(root_dir)
-        self._cwd_spelling = None if cwd is None else workspace_path(cwd)
-        if self._cwd_spelling is not None and posixpath.isabs(self._cwd_spelling) == posixpath.isabs(
-            self._root_spelling
-        ):
-            # Comparable without a workspace; a mixed pair is checked when a call resolves both.
-            if not _contains(posixpath.normpath(self._root_spelling), posixpath.normpath(self._cwd_spelling)):
-                raise ValueError(f'cwd {self._cwd_spelling!r} is outside root_dir {self._root_spelling!r}.')
+        # A workspace path, absolute or relative to the workspace's working directory, resolved
+        # against the workspace a call acts on; `None` bounds calls by the working directory itself.
+        self._root_spelling = None if root_dir is None else workspace_path(root_dir)
+        # The scope `prepare` resolved for this run's workspace, reused by every call against it.
+        self._prepared: _Scope | None = None
         self._allowed_patterns = list(allowed_patterns)
         self._denied_patterns = list(denied_patterns)
         self._protected_patterns = list(protected_patterns)
@@ -465,13 +466,32 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             tools = {name: tool for name, tool in tools.items() if name not in RIPGREP_TOOL_NAMES}
         return tools
 
+    async def prepare(self, workspace: Workspace) -> None:
+        """Resolve the boundary in the run's workspace once, for every call of the run to reuse.
+
+        Raises `UserError` when the working directory is outside `root_dir`.
+        """
+        self._prepared = await self._scope(workspace)
+
     async def _scope(self, workspace: WorkspaceBackend) -> _Scope:
-        """Resolve the configured root and cwd inside `workspace`."""
+        """Resolve the boundary and working directory inside `workspace`.
+
+        The working directory is canonical by the workspace contract, so it is not resolved again.
+        """
+        if self._prepared is not None and self._prepared.workspace is workspace:
+            return self._prepared
         facade = _as_workspace(workspace)
-        root = posixpath.normpath(await facade.resolve(self._root_spelling))
-        cwd = root if self._cwd_spelling is None else posixpath.normpath(await facade.resolve(self._cwd_spelling))
+        cwd = posixpath.normpath(await facade.working_dir())
+        if self._root_spelling is None:
+            return _Scope(workspace=facade, root=cwd, cwd=cwd)
+        root = await facade.resolve(self._root_spelling)
+        if root != '/':
+            root = await facade.realpath(root)
         if not _contains(root, cwd):
-            raise UserError(f'cwd {cwd!r} is outside root_dir {root!r}.')
+            raise UserError(
+                f'The working directory {cwd!r} is outside root_dir {root!r}. '
+                'Set `root_dir` to a directory that contains it, or leave it unset to use the working directory.'
+            )
         return _Scope(workspace=facade, root=root, cwd=cwd)
 
     def _matches(self, path: str, pattern: str) -> bool:
@@ -491,17 +511,26 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Return the first pattern that matches path, or None."""
         return next((p for p in patterns if self._matches(path, p)), None)
 
-    async def _resolve_path(self, scope: _Scope, path: str) -> str:
-        """Resolve path relative to `cwd`, rejecting traversal outside the root.
+    async def _resolve_path(self, scope: _Scope, path: str) -> tuple[str, str]:
+        """Resolve path from the working directory, rejecting any that leads outside the root.
 
-        Resolution is textual (`Workspace.resolve`): `.` and `..` segments are
-        collapsed before the containment check, but symlinks are not inspected;
-        the workspace backend follows them.
+        Returns the path as written (textually resolved) and the real path the workspace
+        reaches through symlinks; both must be inside the root. The operation then uses the
+        path as written, so a symlink swapped in after this check is not caught.
         """
         resolved = await scope.workspace.resolve(path, base=scope.cwd)
         if not _contains(scope.root, resolved):
             raise PermissionError(f'Path {path!r} resolves outside the root directory.')
-        return resolved
+        if not scope.checks_realpath:
+            return resolved, resolved
+        real = await scope.workspace.realpath(resolved)
+        if not _contains(scope.root, real):
+            raise PermissionError(f'Path {path!r} resolves outside the root directory.')
+        return resolved, real
+
+    async def _real_path_inside(self, scope: _Scope, path: str) -> bool:
+        """Whether a path a walk reached still leads inside the root once symlinks are resolved."""
+        return not scope.checks_realpath or _contains(scope.root, await scope.workspace.realpath(path))
 
     def _check_access(self, path: str, *, write: bool = False, check_allowed: bool = True) -> None:
         """Validate path against allow/deny/protected patterns.
@@ -556,6 +585,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             return None
         return relative
 
+    async def _readable_entry(self, scope: _Scope, path: str) -> bool:
+        """Whether a walked file's real path is inside the root and passes the read-level patterns."""
+        if not scope.checks_realpath:
+            return True
+        real = await scope.workspace.realpath(path)
+        return _contains(scope.root, real) and self._is_accessible(posixpath.relpath(real, scope.root))
+
     def _event_location(self, scope: _Scope, resolved: str) -> _EventLocation:
         """Path fields for an event about `resolved`.
 
@@ -571,10 +607,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Resolution happens first so the access check matches patterns against
         the canonical path relative to the root, collapsing `.`/`..`/`//`
         segments that would otherwise slip past a literal pattern (e.g.
-        `config/./secret.txt` evading a `config/secret.txt` deny rule).
+        `config/./secret.txt` evading a `config/secret.txt` deny rule). The
+        patterns are matched against the real path too, so a symlink to a
+        protected file (`envlink -> .env`) is protected as well.
         """
-        resolved = await self._resolve_path(scope, path)
-        self._check_access(posixpath.relpath(resolved, scope.root), write=write, check_allowed=check_allowed)
+        resolved, real = await self._resolve_path(scope, path)
+        for spelling in dict.fromkeys((resolved, real)):
+            self._check_access(posixpath.relpath(spelling, scope.root), write=write, check_allowed=check_allowed)
         return resolved
 
     async def _stat(self, scope: _Scope, resolved: str) -> WorkspaceFileEntry | None:
@@ -591,7 +630,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Hidden directories are not descended into, since everything under them
         is hidden, and a subdirectory that cannot be listed (removed mid-walk,
-        unreadable, a symlink loop the backend reports) is skipped. `max_depth`
+        unreadable, a symlink loop the backend reports) or that leads outside the
+        root through a symlink is skipped. `max_depth`
         bounds how many levels below `directory` are listed. The walk stops at
         `_MAX_WALK_DIRECTORIES` listings or `_MAX_WALK_ENTRIES` entries, the only
         guard against symlink loops the workspace API does not reveal.
@@ -604,6 +644,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 return entries[:_MAX_WALK_ENTRIES], True
             listed += 1
             current, depth = pending.pop()
+            if current != directory and not await self._real_path_inside(scope, current):
+                continue
             try:
                 children = await scope.workspace.list_dir(current)
             except WorkspaceError:
@@ -632,7 +674,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to `cwd`.
+            path: File path relative to the working directory.
             offset: Zero-based line offset to start reading from.
             limit: Maximum number of lines to return (default: 2000).
 
@@ -708,7 +750,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to `cwd`.
+            path: File path relative to the working directory.
             content: The text content to write.
             expected_hash: If provided, the write is rejected when the file exists
                 and its current hash doesn't match (optimistic concurrency).
@@ -723,7 +765,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to `cwd`.
+            path: File path relative to the working directory.
             content: The text content to write.
         """
         return await self._write_file(await self._scope(ctx.workspace), ctx, path, content)
@@ -876,7 +918,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to `cwd`.
+            path: File path relative to the working directory.
             old_text: The exact text to find (must appear exactly once).
             new_text: The replacement text.
             replacements: Replacements to apply in order, instead of a single pair.
@@ -907,7 +949,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File path relative to `cwd`.
+            path: File path relative to the working directory.
             old_text: The exact text to find (must appear exactly once).
             new_text: The replacement text.
             replacements: Replacements to apply in order, instead of a single pair.
@@ -968,10 +1010,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: Directory path relative to `cwd`.
+            path: Directory path relative to the working directory.
 
         Returns:
-            Paths relative to `cwd`, with type indicators and sizes.
+            Paths relative to the working directory, with type indicators and sizes.
         """
         return await self._list_directory(await self._scope(ctx.workspace), ctx, path)
 
@@ -1033,11 +1075,11 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Args:
             ctx: The current agent run context.
             pattern: Regex pattern to search for.
-            path: Directory to search in, relative to `cwd`.
+            path: Directory to search in, relative to the working directory.
             include_glob: If provided, match this glob against root-relative paths (e.g. '*.py').
 
         Returns:
-            str: Matching lines formatted as file:line_number:text, with paths relative to `cwd`.
+            str: Matching lines formatted as file:line_number:text, with paths relative to the working directory.
         """
         return await self._search_files(
             await self._scope(ctx.workspace), ctx, pattern, path=path, include_glob=include_glob
@@ -1078,6 +1120,9 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             if rel_str is None:
                 continue
             if include_glob and not fnmatch.fnmatch(rel_str, include_glob):
+                continue
+            # Contents are read, so a file that links outside the root, or to a denied file, is skipped.
+            if file_path != resolved and not await self._readable_entry(scope, file_path):
                 continue
             try:
                 raw = await scope.workspace.read_bytes(file_path)
@@ -1128,10 +1173,10 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             ctx: The current agent run context.
             pattern: Glob pattern to match, relative to `path` (e.g. '*.py',
                 '**/*.json'). Absolute patterns are rejected.
-            path: Directory to search in, relative to `cwd`.
+            path: Directory to search in, relative to the working directory.
 
         Returns:
-            Newline-separated list of matching file paths relative to `cwd`.
+            Newline-separated list of matching file paths relative to the working directory.
         """
         return await self._find_files(await self._scope(ctx.workspace), ctx, pattern, path=path)
 
@@ -1194,11 +1239,11 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: Directory to list, relative to `cwd`.
+            path: Directory to list, relative to the working directory.
             glob: If provided, only list files matching this glob (e.g. '*.py' or 'src/**').
 
         Returns:
-            One file path per line, relative to `cwd`.
+            One file path per line, relative to the working directory.
         """
         return await self._list_files(await self._scope(ctx.workspace), ctx, path, glob=glob)
 
@@ -1269,7 +1314,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         Args:
             ctx: The current agent run context.
             pattern: Regular expression (ripgrep syntax), or exact text when `literal` is set.
-            path: Directory or file to search, relative to `cwd`.
+            path: Directory or file to search, relative to the working directory.
             glob: If provided, only search files matching this glob (e.g. '*.py').
             file_type: If provided, only search this ripgrep file type (e.g. 'py', 'rust').
             ignore_case: Match case-insensitively.
@@ -1277,7 +1322,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             context: Lines of context to show around each match (0 to 20).
 
         Returns:
-            Matches as `file:line:text`; context lines as `file-line-text`. Paths are relative to `cwd`.
+            Matches as `file:line:text`; context lines as `file-line-text`. Paths are relative to the working directory.
         """
         return await self._grep(
             await self._scope(ctx.workspace),
@@ -1351,7 +1396,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         return '\n'.join(results) if results else 'No matches found.'
 
     def _ripgrep_entry(self, scope: _Scope, cwd: str, record: Record) -> str | None:
-        """Authorize a path `rg` printed and return it relative to the configured `cwd`, or `None` to drop it.
+        """Authorize a path `rg` printed and return it relative to the working directory, or `None` to drop it.
 
         A `glob` makes ripgrep surface hidden files it would otherwise skip;
         dropping dot-prefixed entries here keeps these walkers in step with the
@@ -1379,7 +1424,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: Directory path relative to `cwd`.
+            path: Directory path relative to the working directory.
 
         Returns:
             Confirmation message.
@@ -1442,7 +1487,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
         Args:
             ctx: The current agent run context.
-            path: File or directory path relative to `cwd`.
+            path: File or directory path relative to the working directory.
 
         Returns:
             Formatted metadata including size, type, and permissions.

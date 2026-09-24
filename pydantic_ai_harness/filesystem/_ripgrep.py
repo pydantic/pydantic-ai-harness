@@ -61,8 +61,8 @@ async def run_ripgrep(
 
     `accept` maps a record to what the caller keeps, or `None` to drop it; only
     kept records count towards `limit`. `listing` reads `--files` output, where
-    each record is a bare path. Raises `ModelRetry` when `rg` is not installed
-    in the workspace or reports an error (an invalid pattern, say), so the model
+    each record is a bare path. Raises `ModelRetry` when `rg` is not on the
+    workspace's PATH or reports an error (an invalid pattern, say), so the model
     can correct the call or use another tool.
     """
     command = shlex.join(['rg', '--null', '--color=never', *arguments])
@@ -76,7 +76,11 @@ async def run_ripgrep(
     detail = '\n'.join(stderr_lines[:-1]).strip()
     if result.exit_code == _MISSING or not status_line.startswith(_STATUS_PREFIX):
         if result.exit_code == _MISSING or 'not found' in result.stderr:
-            raise ModelRetry('ripgrep (rg) is not installed. Install it, or use the pure-Python search tools.')
+            raise ModelRetry(
+                "ripgrep (rg) was not found on the workspace's PATH. A local workspace inherits no environment, "
+                "so pass `env={'PATH': ...}` to `LocalWorkspace`; otherwise install rg, or use the pure-Python "
+                'search tools.'
+            )
         raise ModelRetry(f'ripgrep failed: {result.stderr.strip() or f"exit code {result.exit_code}"}')
     status = status_line.removeprefix(_STATUS_PREFIX)
 

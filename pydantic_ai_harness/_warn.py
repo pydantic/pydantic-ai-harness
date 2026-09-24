@@ -77,6 +77,13 @@ def warn_class_renamed(old: str, new: str, module: str) -> None:
     )
 
 
+WORKING_DIR_IS_THE_WORKSPACES = (
+    "commands/paths start in the workspace's working directory; set it on the workspace, e.g. "
+    "`LocalWorkspace('./repo')`."
+)
+"""The fix for a removed working-directory argument, for `warn_argument_ignored`."""
+
+
 def warn_argument_ignored(owner: str, argument: str, fix: str, *, stacklevel: int = 4) -> None:
     """Emit a `HarnessDeprecationWarning` that `<owner>(<argument>=...)` is deprecated and now has no effect.
 

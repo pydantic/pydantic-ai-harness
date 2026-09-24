@@ -49,9 +49,6 @@ from pydantic_ai_harness.filesystem._toolset import (
 from .._tool_calls import call_tool
 from .._workspace import local_workspace
 
-WS = local_workspace('/')
-"""The workspace for direct calls; the toolsets here all have absolute roots, so its working directory is moot."""
-
 
 class ReadOnlyMount(LocalWorkspaceBackend):
     """A workspace whose environment refuses writes without advertising `read_only`, like a read-only mount."""
@@ -66,7 +63,7 @@ class ReadOnlyMount(LocalWorkspaceBackend):
 class FailingWorkspace(LocalWorkspaceBackend):
     """A local workspace whose named operations raise a given error, on paths ending in `where`."""
 
-    def __init__(self, working_dir: str, failures: dict[str, Exception], *, where: str = '') -> None:
+    def __init__(self, working_dir: Path, failures: dict[str, Exception], *, where: str = '') -> None:
         super().__init__(working_dir)
         self.failures = failures
         self.where = where
@@ -215,6 +212,12 @@ def fs_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def ws(tmp_path: Path) -> LocalWorkspaceBackend:
+    """The workspace for direct calls, whose working directory is the root the toolsets here use."""
+    return local_workspace(tmp_path)
+
+
+@pytest.fixture
 def toolset(fs_root: Path) -> FileSystemToolset[None]:
     return FileSystemToolset(
         root_dir=fs_root,
@@ -228,34 +231,57 @@ def toolset(fs_root: Path) -> FileSystemToolset[None]:
     )
 
 
+@pytest.fixture
+def outside(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """A directory outside every root, holding `secret.txt`."""
+    directory = tmp_path_factory.mktemp('outside')
+    (directory / 'secret.txt').write_text('escaped!\n')
+    return directory
+
+
 class TestPathSecurity:
-    async def test_traversal_with_dotdot(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_traversal_with_dotdot(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(PermissionError, match='resolves outside'):
-            await toolset._resolve_path(await toolset._scope(WS), '../../../etc/passwd')
+            await toolset._resolve_path(await toolset._scope(ws), '../../../etc/passwd')
 
-    async def test_traversal_absolute_path(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_traversal_absolute_path(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(PermissionError, match='resolves outside'):
-            await toolset._resolve_path(await toolset._scope(WS), '/etc/passwd')
+            await toolset._resolve_path(await toolset._scope(ws), '/etc/passwd')
 
-    async def test_traversal_encoded(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_traversal_encoded(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(PermissionError, match='resolves outside'):
-            await toolset._resolve_path(await toolset._scope(WS), 'subdir/../../..')
+            await toolset._resolve_path(await toolset._scope(ws), 'subdir/../../..')
 
-    async def test_symlink_inside_root_is_followed_by_the_workspace(
-        self, toolset: FileSystemToolset[None], fs_root: Path
+    async def test_symlinked_directory_leading_outside_is_refused(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend, outside: Path
     ) -> None:
-        """Containment is textual: a link inside the root passes, and the workspace follows it."""
-        target = fs_root.parent / 'symlink-escape-target'
-        target.write_text('escaped!\n')
-        try:
-            (fs_root / 'escape_link').symlink_to(target)
-            assert await toolset._resolve_path(await toolset._scope(WS), 'escape_link') == str(fs_root / 'escape_link')
-            assert 'escaped!' in await toolset.read_file('escape_link', workspace=WS)
-        finally:
-            target.unlink(missing_ok=True)
+        (fs_root / 'escape').symlink_to(outside)
+        with pytest.raises(ModelRetry, match='resolves outside the root directory'):
+            await toolset.read_file('escape/secret.txt', workspace=ws)
+        with pytest.raises(ModelRetry, match='resolves outside the root directory'):
+            await toolset.write_file('escape/new.txt', 'x', workspace=ws)
+        assert not (outside / 'new.txt').exists()
 
-    async def test_valid_path_resolves(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        result = await toolset._resolve_path(await toolset._scope(WS), 'hello.txt')
+    async def test_symlink_to_a_protected_file_is_protected(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
+        (fs_root / 'envlink').symlink_to(fs_root / '.env')
+        with pytest.raises(ModelRetry, match="'.env' is protected"):
+            await toolset.write_file('envlink', 'HACKED=1\n', workspace=ws)
+
+    async def test_root_at_the_filesystem_root_follows_symlinks_anywhere(
+        self, fs_root: Path, ws: LocalWorkspaceBackend, outside: Path
+    ) -> None:
+        (fs_root / 'escape').symlink_to(outside)
+        toolset = FileSystem[None](root_dir='/').get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        assert 'escaped!' in await toolset.read_file('escape/secret.txt', workspace=ws)
+        assert await toolset.search_files('escaped', workspace=ws) == 'escape/secret.txt:1:escaped!'
+
+    async def test_valid_path_resolves(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
+        result = (await toolset._resolve_path(await toolset._scope(ws), 'hello.txt'))[0]
         assert result == str(fs_root / 'hello.txt')
 
     def test_first_matching_pattern_match(self, toolset: FileSystemToolset[None]) -> None:
@@ -270,9 +296,41 @@ class TestPathSecurity:
         result = toolset._first_matching_pattern('anything.py', [])
         assert result is None
 
-    async def test_nested_path_resolves(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset._resolve_path(await toolset._scope(WS), 'subdir/nested.py')
+    async def test_nested_path_resolves(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = (await toolset._resolve_path(await toolset._scope(ws), 'subdir/nested.py'))[0]
         assert result.endswith('/subdir/nested.py')
+
+
+class TestRootDir:
+    """`root_dir` is resolved once at run start, against the run's workspace."""
+
+    @pytest.fixture(autouse=True)
+    def asyncio_only(self, anyio_backend: object) -> None:
+        if str(anyio_backend) != 'asyncio':
+            pytest.skip('Agent.run requires asyncio event loop')
+
+    async def test_root_above_the_working_directory_reaches_a_sibling(self, tmp_path: Path) -> None:
+        (tmp_path / 'project').mkdir()
+        (tmp_path / 'shared').mkdir()
+        (tmp_path / 'shared' / 'notes.txt').write_text('shared notes\n')
+        result = await call_tool(
+            [FileSystem[None](root_dir='..')],
+            'read_file',
+            {'path': '../shared/notes.txt'},
+            workspace=local_workspace(tmp_path / 'project'),
+        )
+        assert 'shared notes' in result
+
+    async def test_root_below_the_working_directory_fails_the_run(self, tmp_path: Path) -> None:
+        (tmp_path / 'src').mkdir()
+        with pytest.raises(UserError, match=r"The working directory '.*' is outside root_dir '.*/src'"):
+            await call_tool(
+                [FileSystem[None](root_dir='src')], 'list_directory', {}, workspace=local_workspace(tmp_path)
+            )
+
+    async def test_no_workspace_fails_the_run(self) -> None:
+        with pytest.raises(UserError, match='`FileSystem` needs a workspace'):
+            await call_tool([FileSystem[None]()], 'list_directory', {})
 
 
 class TestAccessPatterns:
@@ -362,7 +420,7 @@ class TestAccessPatterns:
         # No denied, no protected, no allowed → should pass for any path
         ts._check_access('anything.txt', write=True)
 
-    async def test_no_patterns_allows_reads_and_writes(self, fs_root: Path) -> None:
+    async def test_no_patterns_allows_reads_and_writes(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         ts = FileSystemToolset(
             root_dir=fs_root,
             allowed_patterns=[],
@@ -373,10 +431,10 @@ class TestAccessPatterns:
             max_search_results=1000,
             max_find_results=1000,
         )
-        assert 'Hello, world!' in await ts.read_file('hello.txt', workspace=WS)
-        assert 'Wrote' in await ts.write_file('hello.txt', 'rewritten\n', workspace=WS)
+        assert 'Hello, world!' in await ts.read_file('hello.txt', workspace=ws)
+        assert 'Wrote' in await ts.write_file('hello.txt', 'rewritten\n', workspace=ws)
 
-    async def test_protected_path_reads_but_rejects_writes(self, fs_root: Path) -> None:
+    async def test_protected_path_reads_but_rejects_writes(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'keys.pem').write_text('PRIVATE\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -388,11 +446,11 @@ class TestAccessPatterns:
             max_search_results=1000,
             max_find_results=1000,
         )
-        assert 'PRIVATE' in await ts.read_file('keys.pem', workspace=WS)
+        assert 'PRIVATE' in await ts.read_file('keys.pem', workspace=ws)
         with pytest.raises(ModelRetry, match='protected'):
-            await ts.write_file('keys.pem', 'HACKED\n', workspace=WS)
+            await ts.write_file('keys.pem', 'HACKED\n', workspace=ws)
 
-    async def test_denied_pattern_rejects_reads(self, fs_root: Path) -> None:
+    async def test_denied_pattern_rejects_reads(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'creds.secret').write_text('hunter2\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -404,11 +462,11 @@ class TestAccessPatterns:
             max_search_results=1000,
             max_find_results=1000,
         )
-        assert 'Hello, world!' in await ts.read_file('hello.txt', workspace=WS)
+        assert 'Hello, world!' in await ts.read_file('hello.txt', workspace=ws)
         with pytest.raises(ModelRetry, match='denied by pattern'):
-            await ts.read_file('creds.secret', workspace=WS)
+            await ts.read_file('creds.secret', workspace=ws)
 
-    async def test_allowed_patterns_reject_non_matching_reads(self, fs_root: Path) -> None:
+    async def test_allowed_patterns_reject_non_matching_reads(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'main.py').write_text('print("hi")\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -420,142 +478,162 @@ class TestAccessPatterns:
             max_search_results=1000,
             max_find_results=1000,
         )
-        assert 'print' in await ts.read_file('main.py', workspace=WS)
+        assert 'print' in await ts.read_file('main.py', workspace=ws)
         with pytest.raises(ModelRetry, match='does not match any allowed'):
-            await ts.read_file('hello.txt', workspace=WS)
+            await ts.read_file('hello.txt', workspace=ws)
 
 
 class TestReadFile:
-    async def test_read_basic(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.read_file('hello.txt', workspace=WS)
+    async def test_read_basic(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.read_file('hello.txt', workspace=ws)
         assert 'Hello, world!' in result
         assert 'hash:' in result
         assert '1 lines' in result
 
-    async def test_read_with_offset(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.read_file('multi.txt', offset=2, workspace=WS)
+    async def test_read_with_offset(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.read_file('multi.txt', offset=2, workspace=ws)
         assert 'line3' in result
         assert 'line1' not in result
 
-    async def test_read_with_limit(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.read_file('multi.txt', limit=2, workspace=WS)
+    async def test_read_with_limit(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.read_file('multi.txt', limit=2, workspace=ws)
         assert 'line1' in result
         assert 'line2' in result
         assert '... (3 more lines' in result
 
-    async def test_read_directory_raises(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_read_directory_raises(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='is a directory'):
-            await toolset.read_file('subdir', workspace=WS)
+            await toolset.read_file('subdir', workspace=ws)
 
-    async def test_read_missing_raises(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_read_missing_raises(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='File not found'):
-            await toolset.read_file('nonexistent.txt', workspace=WS)
+            await toolset.read_file('nonexistent.txt', workspace=ws)
 
-    async def test_read_binary_file(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.read_file('binary.bin', workspace=WS)
+    async def test_read_binary_file(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.read_file('binary.bin', workspace=ws)
         assert 'Binary file' in result
         assert '4 bytes' in result
 
-    async def test_read_traversal_blocked(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_read_traversal_blocked(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry):
-            await toolset.read_file('../../../etc/passwd', workspace=WS)
+            await toolset.read_file('../../../etc/passwd', workspace=ws)
 
 
 class TestWriteFile:
-    async def test_write_new_file(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_write_new_file(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         content = 'h\N{LATIN SMALL LETTER E WITH ACUTE}llo\r\nnew content\n'
         control = fs_root / 'control.txt'
         control.write_text(content, encoding='utf-8')
 
-        result = await toolset.write_file('new.txt', content, workspace=WS)
+        result = await toolset.write_file('new.txt', content, workspace=ws)
         assert 'Wrote' in result
         target = fs_root / 'new.txt'
         assert target.read_bytes() == control.read_bytes()
         assert stat.S_IMODE(target.stat().st_mode) == stat.S_IMODE(control.stat().st_mode)
 
-    async def test_write_existing_directory_retries(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_write_existing_directory_retries(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match="Path 'subdir' exists and is not a regular file"):
-            await toolset.write_file('subdir', 'content', workspace=WS)
+            await toolset.write_file('subdir', 'content', workspace=ws)
 
-    async def test_write_nonexistent_parent_raises(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_write_nonexistent_parent_raises(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match="Parent directory 'deep/nested' does not exist"):
-            await toolset.write_file('deep/nested/file.txt', 'deep\n', workspace=WS)
+            await toolset.write_file('deep/nested/file.txt', 'deep\n', workspace=ws)
 
-    async def test_write_overwrite(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        await toolset.write_file('hello.txt', 'overwritten\n', workspace=WS)
+    async def test_write_overwrite(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
+        await toolset.write_file('hello.txt', 'overwritten\n', workspace=ws)
         assert (fs_root / 'hello.txt').read_text() == 'overwritten\n'
 
     @pytest.mark.skipif(os.name == 'nt', reason='POSIX mode bits are required.')
-    async def test_write_overwrite_preserves_permissions(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_write_overwrite_preserves_permissions(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         target = fs_root / 'hello.txt'
         target.chmod(0o640)
-        await toolset.write_file('hello.txt', 'overwritten\n', workspace=WS)
+        await toolset.write_file('hello.txt', 'overwritten\n', workspace=ws)
         assert stat.S_IMODE(target.stat().st_mode) == 0o640
 
-    async def test_write_through_internal_symlink(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_write_through_internal_symlink(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         link = fs_root / 'link.txt'
         link.symlink_to('hello.txt')
-        await toolset.write_file('link.txt', 'through link\n', workspace=WS)
+        await toolset.write_file('link.txt', 'through link\n', workspace=ws)
         assert link.is_symlink()
         assert (fs_root / 'hello.txt').read_text() == 'through link\n'
 
-    async def test_write_conflict_detection(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_write_conflict_detection(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         # Get current hash
         content = (fs_root / 'hello.txt').read_text()
         current_hash = _content_hash(content)
 
         # Write with correct hash succeeds
-        await toolset.write_file('hello.txt', 'updated\n', expected_hash=current_hash, workspace=WS)
+        await toolset.write_file('hello.txt', 'updated\n', expected_hash=current_hash, workspace=ws)
         assert (fs_root / 'hello.txt').read_text() == 'updated\n'
 
-    async def test_write_conflict_rejection(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_write_conflict_rejection(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match='Conflict'):
-            await toolset.write_file('hello.txt', 'bad\n', expected_hash='wrong_hash_x', workspace=WS)
+            await toolset.write_file('hello.txt', 'bad\n', expected_hash='wrong_hash_x', workspace=ws)
 
-    async def test_write_protected_blocked(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_write_protected_blocked(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='protected'):
-            await toolset.write_file('.env', 'HACKED=true\n', workspace=WS)
+            await toolset.write_file('.env', 'HACKED=true\n', workspace=ws)
 
-    async def test_write_returns_hash(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.write_file('hashed.txt', 'content\n', workspace=WS)
+    async def test_write_returns_hash(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.write_file('hashed.txt', 'content\n', workspace=ws)
         assert 'hash:' in result
 
 
 class TestEditFile:
-    async def test_edit_basic(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        result = await toolset.edit_file('hello.txt', 'Hello, world!', 'Hello, universe!', workspace=WS)
+    async def test_edit_basic(self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.edit_file('hello.txt', 'Hello, world!', 'Hello, universe!', workspace=ws)
         assert 'Edited' in result
         assert (fs_root / 'hello.txt').read_text() == 'Hello, universe!\n'
 
-    async def test_edit_not_found_text(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_edit_not_found_text(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='old_text not found'):
-            await toolset.edit_file('hello.txt', 'NONEXISTENT', 'replacement', workspace=WS)
+            await toolset.edit_file('hello.txt', 'NONEXISTENT', 'replacement', workspace=ws)
 
-    async def test_edit_ambiguous_match(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_edit_ambiguous_match(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         (fs_root / 'repeat.txt').write_text('foo bar foo\n')
         with pytest.raises(ModelRetry, match='found 2 times'):
-            await toolset.edit_file('repeat.txt', 'foo', 'baz', workspace=WS)
+            await toolset.edit_file('repeat.txt', 'foo', 'baz', workspace=ws)
 
-    async def test_edit_missing_file(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_edit_missing_file(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='File not found'):
-            await toolset.edit_file('ghost.txt', 'x', 'y', workspace=WS)
+            await toolset.edit_file('ghost.txt', 'x', 'y', workspace=ws)
 
-    async def test_edit_conflict_detection(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_edit_conflict_detection(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         content = (fs_root / 'hello.txt').read_text()
         current_hash = _content_hash(content)
-        result = await toolset.edit_file('hello.txt', 'Hello', 'Hi', expected_hash=current_hash, workspace=WS)
+        result = await toolset.edit_file('hello.txt', 'Hello', 'Hi', expected_hash=current_hash, workspace=ws)
         assert 'hash:' in result
 
-    async def test_edit_conflict_rejection(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_edit_conflict_rejection(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='Conflict'):
-            await toolset.edit_file('hello.txt', 'Hello', 'Hi', expected_hash='stale_hash_', workspace=WS)
+            await toolset.edit_file('hello.txt', 'Hello', 'Hi', expected_hash='stale_hash_', workspace=ws)
 
-    async def test_edit_protected_blocked(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_edit_protected_blocked(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='protected'):
-            await toolset.edit_file('.env', 'SECRET', 'HACKED', workspace=WS)
+            await toolset.edit_file('.env', 'SECRET', 'HACKED', workspace=ws)
 
-    async def test_edit_returns_new_hash(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.edit_file('hello.txt', 'Hello, world!', 'Goodbye!', workspace=WS)
+    async def test_edit_returns_new_hash(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.edit_file('hello.txt', 'Hello, world!', 'Goodbye!', workspace=ws)
         assert 'hash:' in result
 
 
@@ -570,106 +648,118 @@ class TestContentHashNewlineAgreement:
     """
 
     async def test_crlf_read_edit_round_trip_hashes_agree(
-        self, toolset: FileSystemToolset[None], fs_root: Path
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
     ) -> None:
         (fs_root / 'crlf.txt').write_bytes(b'line one\r\nline two\r\n')
-        read_hash = _reported_hash(await toolset.read_file('crlf.txt', workspace=WS))
+        read_hash = _reported_hash(await toolset.read_file('crlf.txt', workspace=ws))
 
-        edit_result = await toolset.edit_file('crlf.txt', 'line one', 'line ONE', expected_hash=read_hash, workspace=WS)
+        edit_result = await toolset.edit_file('crlf.txt', 'line one', 'line ONE', expected_hash=read_hash, workspace=ws)
         edit_hash = _reported_hash(edit_result)
 
-        assert _reported_hash(await toolset.read_file('crlf.txt', workspace=WS)) == edit_hash
+        assert _reported_hash(await toolset.read_file('crlf.txt', workspace=ws)) == edit_hash
         assert (fs_root / 'crlf.txt').read_bytes() == b'line ONE\r\nline two\r\n'
 
-    async def test_crlf_edit_preserves_carriage_returns(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_crlf_edit_preserves_carriage_returns(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """Editing a CRLF file keeps `\\r\\n` byte-for-byte instead of writing `\\r\\r\\n` on Windows."""
         (fs_root / 'crlf.txt').write_bytes(b'a\r\nb\r\n')
-        await toolset.edit_file('crlf.txt', 'a', 'A', workspace=WS)
+        await toolset.edit_file('crlf.txt', 'a', 'A', workspace=ws)
         assert (fs_root / 'crlf.txt').read_bytes() == b'A\r\nb\r\n'
 
     async def test_crlf_write_hash_matches_read_and_file_info(
-        self, toolset: FileSystemToolset[None], fs_root: Path
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
     ) -> None:
         content = 'alpha\r\nbeta\r\n'
-        write_hash = _reported_hash(await toolset.write_file('crlf-new.txt', content, workspace=WS))
+        write_hash = _reported_hash(await toolset.write_file('crlf-new.txt', content, workspace=ws))
         assert write_hash == _content_hash(content)
 
-        read_result = await toolset.read_file('crlf-new.txt', workspace=WS)
+        read_result = await toolset.read_file('crlf-new.txt', workspace=ws)
         assert _reported_hash(read_result) == write_hash
 
-        info = await toolset.file_info('crlf-new.txt', workspace=WS)
+        info = await toolset.file_info('crlf-new.txt', workspace=ws)
         assert f'hash: {write_hash}' in info
 
-    async def test_crlf_write_expected_hash_handshake(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_crlf_write_expected_hash_handshake(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """`write_file` accepts the hash `read_file` reports for a CRLF file."""
-        await toolset.write_file('crlf-cc.txt', 'alpha\r\nbeta\r\n', workspace=WS)
-        read_hash = _reported_hash(await toolset.read_file('crlf-cc.txt', workspace=WS))
+        await toolset.write_file('crlf-cc.txt', 'alpha\r\nbeta\r\n', workspace=ws)
+        read_hash = _reported_hash(await toolset.read_file('crlf-cc.txt', workspace=ws))
 
-        result = await toolset.write_file('crlf-cc.txt', 'gamma\r\ndelta\r\n', expected_hash=read_hash, workspace=WS)
+        result = await toolset.write_file('crlf-cc.txt', 'gamma\r\ndelta\r\n', expected_hash=read_hash, workspace=ws)
         assert _reported_hash(result) == _content_hash('gamma\r\ndelta\r\n')
         assert (fs_root / 'crlf-cc.txt').read_bytes() == b'gamma\r\ndelta\r\n'
 
-    async def test_lf_write_still_writes_plain_newlines(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_lf_write_still_writes_plain_newlines(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """LF content is untouched by the no-translation write path."""
         content = 'alpha\nbeta\n'
-        write_hash = _reported_hash(await toolset.write_file('lf-new.txt', content, workspace=WS))
+        write_hash = _reported_hash(await toolset.write_file('lf-new.txt', content, workspace=ws))
         assert write_hash == _content_hash(content)
         assert (fs_root / 'lf-new.txt').read_bytes() == b'alpha\nbeta\n'
-        assert _reported_hash(await toolset.read_file('lf-new.txt', workspace=WS)) == write_hash
+        assert _reported_hash(await toolset.read_file('lf-new.txt', workspace=ws)) == write_hash
 
 
 class TestListDirectory:
-    async def test_list_root(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.list_directory('.', workspace=WS)
+    async def test_list_root(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.list_directory('.', workspace=ws)
         assert 'hello.txt' in result
         assert 'subdir/' in result
 
-    async def test_list_subdir(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.list_directory('subdir', workspace=WS)
+    async def test_list_subdir(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.list_directory('subdir', workspace=ws)
         assert 'nested.py' in result
 
-    async def test_list_follows_symlink_inside_root(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_list_follows_symlink_inside_root(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """A link inside the root is listed with its target's size; the workspace follows it."""
         target = fs_root.parent / 'list-escape-target'
         target.write_text('escaped!\n')
         try:
             (fs_root / 'escape_link.txt').symlink_to(target)
-            assert 'escape_link.txt  (9 bytes)' in await toolset.list_directory('.', workspace=WS)
+            assert 'escape_link.txt  (9 bytes)' in await toolset.list_directory('.', workspace=ws)
         finally:
             target.unlink(missing_ok=True)
 
-    async def test_list_skips_dangling_symlink(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_list_skips_dangling_symlink(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """A link to a missing in-root target has no size to report, so it isn't listed."""
         (fs_root / 'dangling.txt').symlink_to(fs_root / 'gone.txt')
-        result = await toolset.list_directory('.', workspace=WS)
+        result = await toolset.list_directory('.', workspace=ws)
         assert 'dangling.txt' not in result
         assert 'hello.txt' in result
 
-    async def test_list_not_a_dir(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_list_not_a_dir(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry):
-            await toolset.list_directory('hello.txt', workspace=WS)
+            await toolset.list_directory('hello.txt', workspace=ws)
 
-    async def test_list_skips_hidden(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_list_skips_hidden(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         # Dotfiles/dot-directories are hidden, matching find_files/search_files.
-        result = await toolset.list_directory('.', workspace=WS)
+        result = await toolset.list_directory('.', workspace=ws)
         assert 'hello.txt' in result
         assert '.hidden' not in result
         assert '.git' not in result
 
-    async def test_list_shows_sizes(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.list_directory('.', workspace=WS)
+    async def test_list_shows_sizes(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.list_directory('.', workspace=ws)
         assert 'bytes' in result
 
-    async def test_list_shows_dir_indicator(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.list_directory('.', workspace=WS)
+    async def test_list_shows_dir_indicator(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.list_directory('.', workspace=ws)
         assert 'subdir/' in result
 
-    async def test_list_empty_directory(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_list_empty_directory(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         (fs_root / 'empty').mkdir()
-        result = await toolset.list_directory('empty', workspace=WS)
+        result = await toolset.list_directory('empty', workspace=ws)
         assert result == '(empty directory)'
 
-    async def test_list_shows_protected_entries(self, fs_root: Path) -> None:
+    async def test_list_shows_protected_entries(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'protected.txt').write_text('protected marker\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -682,9 +772,9 @@ class TestListDirectory:
             max_find_results=1000,
         )
 
-        assert 'protected.txt' in await ts.list_directory('.', workspace=WS)
+        assert 'protected.txt' in await ts.list_directory('.', workspace=ws)
 
-    async def test_list_root_allowed_patterns_filters_entries(self, fs_root: Path) -> None:
+    async def test_list_root_allowed_patterns_filters_entries(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         # A file-shaped allowed pattern must not make the root unlistable: '.'
         # is always listed, and entries are filtered against the pattern.
         (fs_root / 'keep.py').write_text('ok\n')
@@ -699,11 +789,11 @@ class TestListDirectory:
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.list_directory('.', workspace=WS)
+        result = await ts.list_directory('.', workspace=ws)
         assert 'keep.py' in result
         assert 'skip.md' not in result
 
-    async def test_list_hides_denied_entries(self, fs_root: Path) -> None:
+    async def test_list_hides_denied_entries(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'visible.txt').write_text('ok\n')
         (fs_root / 'creds.secret').write_text('hunter2\n')
         ts = FileSystemToolset(
@@ -716,11 +806,11 @@ class TestListDirectory:
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.list_directory('.', workspace=WS)
+        result = await ts.list_directory('.', workspace=ws)
         assert 'visible.txt' in result
         assert 'creds.secret' not in result
 
-    async def test_list_truncation(self, fs_root: Path) -> None:
+    async def test_list_truncation(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         for i in range(20):
             (fs_root / f'file{i}.dat').write_text(f'{i}\n')
         ts = FileSystemToolset(
@@ -733,12 +823,12 @@ class TestListDirectory:
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.list_directory('.', workspace=WS)
+        result = await ts.list_directory('.', workspace=ws)
         lines = result.splitlines()
         assert len(lines) == 6
         assert lines[-1] == '[... truncated at 5 entries]'
 
-    async def test_list_at_cap_is_not_marked_truncated(self, tmp_path: Path) -> None:
+    async def test_list_at_cap_is_not_marked_truncated(self, tmp_path: Path, ws: LocalWorkspaceBackend) -> None:
         for i in range(3):
             (tmp_path / f'cap{i}.dat').write_text('x\n')
         ts = FileSystemToolset(
@@ -751,48 +841,50 @@ class TestListDirectory:
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.list_directory('.', workspace=WS)
+        result = await ts.list_directory('.', workspace=ws)
         assert [line.split(' ')[0] for line in result.splitlines()] == ['cap0.dat', 'cap1.dat', 'cap2.dat']
 
 
 class TestSearchFiles:
-    async def test_search_basic(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files('Hello', workspace=WS)
+    async def test_search_basic(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.search_files('Hello', workspace=ws)
         assert 'hello.txt:1:Hello, world!' in result
 
-    async def test_search_regex(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files(r'line\d', workspace=WS)
+    async def test_search_regex(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.search_files(r'line\d', workspace=ws)
         assert 'multi.txt' in result
 
-    async def test_search_no_matches(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files('ZZZZNOTHERE', workspace=WS)
+    async def test_search_no_matches(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.search_files('ZZZZNOTHERE', workspace=ws)
         assert result == 'No matches found.'
 
-    async def test_search_skips_hidden(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files('secret', workspace=WS)
+    async def test_search_skips_hidden(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.search_files('secret', workspace=ws)
         assert '.hidden' not in result
 
-    async def test_search_skips_binary(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files('.', workspace=WS)
+    async def test_search_skips_binary(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.search_files('.', workspace=ws)
         assert 'binary.bin' not in result
 
-    async def test_search_invalid_regex(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_search_invalid_regex(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='Invalid regex'):
-            await toolset.search_files('[invalid', workspace=WS)
+            await toolset.search_files('[invalid', workspace=ws)
 
-    async def test_search_include_glob(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files('print', include_glob='*.py', workspace=WS)
+    async def test_search_include_glob(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.search_files('print', include_glob='*.py', workspace=ws)
         assert 'nested.py' in result
 
-    async def test_search_include_glob_excludes(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files('Hello', include_glob='*.py', workspace=WS)
+    async def test_search_include_glob_excludes(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.search_files('Hello', include_glob='*.py', workspace=ws)
         assert result == 'No matches found.'
 
-    async def test_search_in_specific_file(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files('line', path='multi.txt', workspace=WS)
+    async def test_search_in_specific_file(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.search_files('line', path='multi.txt', workspace=ws)
         assert 'multi.txt' in result
 
-    async def test_search_truncation(self, fs_root: Path) -> None:
+    async def test_search_truncation(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         # Create many matching files
         for i in range(20):
             (fs_root / f'match{i}.txt').write_text('findme\n' * 100)
@@ -806,10 +898,10 @@ class TestSearchFiles:
             max_search_results=50,
             max_find_results=1000,
         )
-        result = await ts.search_files('findme', workspace=WS)
+        result = await ts.search_files('findme', workspace=ws)
         assert 'truncated at 50 matches' in result
 
-    async def test_search_includes_protected_files(self, fs_root: Path) -> None:
+    async def test_search_includes_protected_files(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'protected.txt').write_text('protected marker\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -822,9 +914,9 @@ class TestSearchFiles:
             max_find_results=1000,
         )
 
-        assert 'protected.txt:1:protected marker' in await ts.search_files('protected marker', workspace=WS)
+        assert 'protected.txt:1:protected marker' in await ts.search_files('protected marker', workspace=ws)
 
-    async def test_search_skips_denied_files(self, fs_root: Path) -> None:
+    async def test_search_skips_denied_files(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'visible.txt').write_text('lookhere\n')
         (fs_root / 'creds.secret').write_text('lookhere\n')
         ts = FileSystemToolset(
@@ -837,11 +929,11 @@ class TestSearchFiles:
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.search_files('lookhere', workspace=WS)
+        result = await ts.search_files('lookhere', workspace=ws)
         assert 'visible.txt' in result
         assert 'creds.secret' not in result
 
-    async def test_search_only_matches_allowed_files(self, fs_root: Path) -> None:
+    async def test_search_only_matches_allowed_files(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         # The search root ('.') isn't required to match allowed_patterns; only
         # the matched files are filtered against it per-entry.
         (fs_root / 'keep.py').write_text('findme\n')
@@ -856,11 +948,11 @@ class TestSearchFiles:
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.search_files('findme', workspace=WS)
+        result = await ts.search_files('findme', workspace=ws)
         assert 'keep.py' in result
         assert 'skip.md' not in result
 
-    async def test_search_truncates_within_a_single_file(self, fs_root: Path) -> None:
+    async def test_search_truncates_within_a_single_file(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'many.txt').write_text('findme\n' * 100)
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -872,12 +964,12 @@ class TestSearchFiles:
             max_search_results=5,
             max_find_results=1000,
         )
-        result = await ts.search_files('findme', workspace=WS)
+        result = await ts.search_files('findme', workspace=ws)
         lines = result.splitlines()
         assert len(lines) == 6
         assert lines[-1] == '[... truncated at 5 matches]'
 
-    async def test_search_at_cap_is_not_marked_truncated(self, fs_root: Path) -> None:
+    async def test_search_at_cap_is_not_marked_truncated(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'exact.txt').write_text('capmarker\ncapmarker\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -889,10 +981,12 @@ class TestSearchFiles:
             max_search_results=2,
             max_find_results=1000,
         )
-        result = await ts.search_files('capmarker', workspace=WS)
+        result = await ts.search_files('capmarker', workspace=ws)
         assert result.splitlines() == ['exact.txt:1:capmarker', 'exact.txt:2:capmarker']
 
-    async def test_search_at_cap_across_files_is_not_marked_truncated(self, fs_root: Path) -> None:
+    async def test_search_at_cap_across_files_is_not_marked_truncated(
+        self, fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         (fs_root / 'one.txt').write_text('capmarker\n')
         (fs_root / 'two.txt').write_text('capmarker\n')
         ts = FileSystemToolset(
@@ -905,10 +999,10 @@ class TestSearchFiles:
             max_search_results=2,
             max_find_results=1000,
         )
-        result = await ts.search_files('capmarker', workspace=WS)
+        result = await ts.search_files('capmarker', workspace=ws)
         assert result.splitlines() == ['one.txt:1:capmarker', 'two.txt:1:capmarker']
 
-    async def test_search_with_zero_cap_returns_no_matches(self, fs_root: Path) -> None:
+    async def test_search_with_zero_cap_returns_no_matches(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         # FileSystemToolset is public, so it can be built without the capability's
         # positive-integer validation.
         ts = FileSystemToolset(
@@ -921,62 +1015,64 @@ class TestSearchFiles:
             max_search_results=0,
             max_find_results=1000,
         )
-        result = await ts.search_files('Hello', workspace=WS)
+        result = await ts.search_files('Hello', workspace=ws)
         assert result == '[... truncated at 0 matches]'
 
-    async def test_search_follows_symlink_inside_root(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        """A link inside the root is searched through, as `read_file` reads through it."""
-        target = fs_root.parent / 'search-escape-target'
-        target.write_text('escaped marker\n')
-        try:
-            (fs_root / 'escape_link.txt').symlink_to(target)
-            result = await toolset.search_files('escaped marker', workspace=WS)
-            assert result == 'escape_link.txt:1:escaped marker'
-        finally:
-            target.unlink(missing_ok=True)
+    async def test_search_skips_links_leading_outside_the_root(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend, outside: Path
+    ) -> None:
+        (fs_root / 'escape_link.txt').symlink_to(outside / 'secret.txt')
+        (fs_root / 'escape_dir').symlink_to(outside)
+        assert await toolset.search_files('escaped', workspace=ws) == 'No matches found.'
 
 
 class TestFindFiles:
-    async def test_find_glob(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.find_files('*.txt', workspace=WS)
+    async def test_find_glob(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.find_files('*.txt', workspace=ws)
         assert 'hello.txt' in result
         assert 'multi.txt' in result
 
-    async def test_find_recursive(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.find_files('**/*.py', workspace=WS)
+    async def test_find_recursive(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.find_files('**/*.py', workspace=ws)
         assert 'nested.py' in result
 
-    async def test_find_no_matches(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.find_files('*.xyz', workspace=WS)
+    async def test_find_no_matches(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.find_files('*.xyz', workspace=ws)
         assert result == 'No matches found.'
 
-    async def test_find_skips_hidden(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.find_files('*', workspace=WS)
+    async def test_find_skips_hidden(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.find_files('*', workspace=ws)
         assert '.hidden' not in result
         assert '.git' not in result
 
-    async def test_find_follows_symlink_inside_root(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_find_follows_symlink_inside_root(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         target = fs_root.parent / 'find-escape-target'
         target.write_text('escaped!\n')
         try:
             (fs_root / 'escape_link.txt').symlink_to(target)
-            result = await toolset.find_files('*.txt', workspace=WS)
+            result = await toolset.find_files('*.txt', workspace=ws)
             assert 'escape_link.txt' in result
             assert 'hello.txt' in result
         finally:
             target.unlink(missing_ok=True)
 
-    async def test_find_skips_dangling_symlink(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_find_skips_dangling_symlink(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         (fs_root / 'dangling.txt').symlink_to(fs_root / 'gone.txt')
-        result = await toolset.find_files('*.txt', workspace=WS)
+        result = await toolset.find_files('*.txt', workspace=ws)
         assert 'dangling.txt' not in result
         assert 'hello.txt' in result
 
-    async def test_find_absolute_pattern_rejected(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_find_absolute_pattern_rejected(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match='must be relative to the search path'):
-            await toolset.find_files('/etc/*', workspace=WS)
+            await toolset.find_files('/etc/*', workspace=ws)
 
-    async def test_find_at_cap_is_not_marked_truncated(self, fs_root: Path) -> None:
+    async def test_find_at_cap_is_not_marked_truncated(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         for i in range(3):
             (fs_root / f'cap{i}.dat').write_text('x\n')
         ts = FileSystemToolset(
@@ -989,22 +1085,22 @@ class TestFindFiles:
             max_search_results=1000,
             max_find_results=3,
         )
-        result = await ts.find_files('*.dat', workspace=WS)
+        result = await ts.find_files('*.dat', workspace=ws)
         assert result.splitlines() == ['cap0.dat', 'cap1.dat', 'cap2.dat']
 
-    async def test_find_not_a_dir(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_find_not_a_dir(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry):
-            await toolset.find_files('*.txt', path='hello.txt', workspace=WS)
+            await toolset.find_files('*.txt', path='hello.txt', workspace=ws)
 
-    async def test_find_in_subdir(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.find_files('*.py', path='subdir', workspace=WS)
+    async def test_find_in_subdir(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.find_files('*.py', path='subdir', workspace=ws)
         assert 'nested.py' in result
 
-    async def test_find_directories(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.find_files('sub*', workspace=WS)
+    async def test_find_directories(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.find_files('sub*', workspace=ws)
         assert 'subdir/' in result
 
-    async def test_find_truncation(self, fs_root: Path) -> None:
+    async def test_find_truncation(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         for i in range(20):
             (fs_root / f'file{i}.dat').write_text(f'{i}\n')
         ts = FileSystemToolset(
@@ -1017,10 +1113,10 @@ class TestFindFiles:
             max_search_results=1000,
             max_find_results=5,
         )
-        result = await ts.find_files('*.dat', workspace=WS)
+        result = await ts.find_files('*.dat', workspace=ws)
         assert 'truncated at 5 matches' in result
 
-    async def test_find_includes_protected_files(self, fs_root: Path) -> None:
+    async def test_find_includes_protected_files(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'protected.txt').write_text('protected marker\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -1033,9 +1129,9 @@ class TestFindFiles:
             max_find_results=1000,
         )
 
-        assert 'protected.txt' in await ts.find_files('*.txt', workspace=WS)
+        assert 'protected.txt' in await ts.find_files('*.txt', workspace=ws)
 
-    async def test_find_hides_denied_entries(self, fs_root: Path) -> None:
+    async def test_find_hides_denied_entries(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'visible.txt').write_text('ok\n')
         (fs_root / 'creds.secret').write_text('hunter2\n')
         ts = FileSystemToolset(
@@ -1048,11 +1144,11 @@ class TestFindFiles:
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.find_files('*', workspace=WS)
+        result = await ts.find_files('*', workspace=ws)
         assert 'visible.txt' in result
         assert 'creds.secret' not in result
 
-    async def test_find_only_shows_allowed_entries(self, fs_root: Path) -> None:
+    async def test_find_only_shows_allowed_entries(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         # The find root ('.') isn't required to match allowed_patterns; only
         # the matched entries are filtered against it per-entry.
         (fs_root / 'keep.py').write_text('ok\n')
@@ -1067,7 +1163,7 @@ class TestFindFiles:
             max_search_results=1000,
             max_find_results=1000,
         )
-        result = await ts.find_files('*', workspace=WS)
+        result = await ts.find_files('*', workspace=ws)
         assert 'keep.py' in result
         assert 'skip.md' not in result
 
@@ -1075,15 +1171,15 @@ class TestFindFiles:
 class TestResolveSymlinkLoop:
     @pytest.mark.parametrize('op', ['read_file', 'list_directory', 'search_files', 'find_files', 'file_info'])
     async def test_real_symlink_loop_is_reported(
-        self, toolset: FileSystemToolset[None], fs_root: Path, op: str
+        self, toolset: FileSystemToolset[None], fs_root: Path, op: str, ws: LocalWorkspaceBackend
     ) -> None:
         (fs_root / 'loop').symlink_to(fs_root / 'loop')
         calls = {
-            'read_file': lambda: toolset.read_file('loop', workspace=WS),
-            'list_directory': lambda: toolset.list_directory('loop', workspace=WS),
-            'search_files': lambda: toolset.search_files('text', path='loop', workspace=WS),
-            'find_files': lambda: toolset.find_files('*', path='loop', workspace=WS),
-            'file_info': lambda: toolset.file_info('loop', workspace=WS),
+            'read_file': lambda: toolset.read_file('loop', workspace=ws),
+            'list_directory': lambda: toolset.list_directory('loop', workspace=ws),
+            'search_files': lambda: toolset.search_files('text', path='loop', workspace=ws),
+            'find_files': lambda: toolset.find_files('*', path='loop', workspace=ws),
+            'file_info': lambda: toolset.file_info('loop', workspace=ws),
         }
 
         with pytest.raises(ModelRetry, match='resolves through a symlink loop'):
@@ -1095,53 +1191,67 @@ class TestReadSideOSErrors:
     # first, so the message differs by operation. What must hold
     # everywhere is that the run survives.
     @pytest.mark.parametrize('op', ['read_file', 'edit_file', 'list_directory', 'file_info'])
-    async def test_long_name_is_recoverable(self, toolset: FileSystemToolset[None], op: str) -> None:
+    async def test_long_name_is_recoverable(
+        self, toolset: FileSystemToolset[None], op: str, ws: LocalWorkspaceBackend
+    ) -> None:
         long = 'x' * 300
         calls = {
-            'read_file': lambda: toolset.read_file(long, workspace=WS),
-            'edit_file': lambda: toolset.edit_file(long, 'a', 'b', workspace=WS),
-            'list_directory': lambda: toolset.list_directory(long, workspace=WS),
-            'file_info': lambda: toolset.file_info(long, workspace=WS),
+            'read_file': lambda: toolset.read_file(long, workspace=ws),
+            'edit_file': lambda: toolset.edit_file(long, 'a', 'b', workspace=ws),
+            'list_directory': lambda: toolset.list_directory(long, workspace=ws),
+            'file_info': lambda: toolset.file_info(long, workspace=ws),
         }
         with pytest.raises(ModelRetry):
             await calls[op]()
 
-    async def test_walker_long_path_is_recoverable(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_walker_long_path_is_recoverable(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match='name is too long'):
-            await toolset.search_files('hello', path='x' * 300, workspace=WS)
+            await toolset.search_files('hello', path='x' * 300, workspace=ws)
 
 
 class TestWriteFileOSErrors:
-    async def test_write_name_too_long(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_write_name_too_long(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='name is too long'):
-            await toolset.write_file('x' * 300, 'content', workspace=WS)
+            await toolset.write_file('x' * 300, 'content', workspace=ws)
 
-    async def test_write_through_symlink_loop(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_write_through_symlink_loop(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         (fs_root / 'loop').symlink_to(fs_root / 'loop')
         # The workspace's `stat` reports ELOOP, which the errno table names.
         with pytest.raises(ModelRetry, match='symlink loop'):
-            await toolset.write_file('loop', 'content', workspace=WS)
+            await toolset.write_file('loop', 'content', workspace=ws)
 
-    async def test_write_non_recoverable_errno_propagates(self, toolset: FileSystemToolset[None]) -> None:
-        workspace = FailingWorkspace('/', {'write_bytes': OSError(errno.ENOSPC, 'No space left on device')})
+    async def test_write_non_recoverable_errno_propagates(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        workspace = FailingWorkspace(fs_root, {'write_bytes': OSError(errno.ENOSPC, 'No space left on device')})
         with pytest.raises(OSError, match='No space left on device'):
             await toolset.write_file('new.txt', 'content', workspace=workspace)
 
-    async def test_write_windows_invalid_name_is_recoverable(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_write_windows_invalid_name_is_recoverable(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
         class WindowsInvalidNameError(OSError):
             winerror = 123
 
         error = WindowsInvalidNameError(errno.EINVAL, 'The filename, directory name, or volume label is incorrect')
         with pytest.raises(ModelRetry, match='path name is invalid'):
-            await toolset.write_file('bad<name', 'content', workspace=FailingWorkspace('/', {'write_bytes': error}))
+            await toolset.write_file('bad<name', 'content', workspace=FailingWorkspace(fs_root, {'write_bytes': error}))
 
-    async def test_write_einval_without_windows_invalid_name_propagates(self, toolset: FileSystemToolset[None]) -> None:
-        workspace = FailingWorkspace('/', {'write_bytes': OSError(errno.EINVAL, 'Invalid argument')})
+    async def test_write_einval_without_windows_invalid_name_propagates(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        workspace = FailingWorkspace(fs_root, {'write_bytes': OSError(errno.EINVAL, 'Invalid argument')})
         with pytest.raises(OSError, match='Invalid argument'):
             await toolset.write_file('new.txt', 'content', workspace=workspace)
 
-    async def test_write_illegal_byte_sequence_is_recoverable(self, toolset: FileSystemToolset[None]) -> None:
-        workspace = FailingWorkspace('/', {'write_bytes': OSError(errno.EILSEQ, 'Illegal byte sequence')})
+    async def test_write_illegal_byte_sequence_is_recoverable(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        workspace = FailingWorkspace(fs_root, {'write_bytes': OSError(errno.EILSEQ, 'Illegal byte sequence')})
         with pytest.raises(ModelRetry, match='filesystem cannot represent'):
             await toolset.write_file('bad-name', 'content', workspace=workspace)
 
@@ -1149,12 +1259,8 @@ class TestWriteFileOSErrors:
 class TestWalkerEntryResolution:
     """Walkers authorize entries by their root-relative spelling, matching `read_file`."""
 
-    async def test_patterns_apply_to_the_spelling_used(self, fs_root: Path) -> None:
-        """Without host `realpath`, patterns match the root-relative name, not a link's target.
-
-        `protected_patterns` and `denied_patterns` guard the names a model uses;
-        a symlink the workspace already holds is followed by its backend.
-        """
+    async def test_patterns_apply_to_the_link_and_its_target(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
+        """A link to a denied file is denied for every tool that reads it; a listing still names it."""
         (fs_root / 'creds.secret').write_text('hunter2\n')
         (fs_root / 'alias.txt').symlink_to(fs_root / 'creds.secret')
         ts = FileSystemToolset(
@@ -1168,13 +1274,16 @@ class TestWalkerEntryResolution:
             max_find_results=1000,
         )
         with pytest.raises(ModelRetry, match='denied by pattern'):
-            await ts.read_file('creds.secret', workspace=WS)
-        assert 'hunter2' in await ts.read_file('alias.txt', workspace=WS)
-        listing = await ts.list_directory('.', workspace=WS)
+            await ts.read_file('creds.secret', workspace=ws)
+        with pytest.raises(ModelRetry, match='denied by pattern'):
+            await ts.read_file('alias.txt', workspace=ws)
+        listing = await ts.list_directory('.', workspace=ws)
         assert 'alias.txt' in listing and 'creds.secret' not in listing
-        assert await ts.search_files('hunter2', workspace=WS) == 'alias.txt:1:hunter2'
+        assert await ts.search_files('hunter2', workspace=ws) == 'No matches found.'
 
-    async def test_in_root_alias_to_allowed_target_stays_visible(self, fs_root: Path) -> None:
+    async def test_in_root_alias_to_allowed_target_stays_visible(
+        self, fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         (fs_root / 'alias.txt').symlink_to(fs_root / 'hello.txt')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -1186,98 +1295,110 @@ class TestWalkerEntryResolution:
             max_search_results=1000,
             max_find_results=1000,
         )
-        assert 'alias.txt' in await ts.list_directory('.', workspace=WS)
-        assert 'alias.txt' in await ts.find_files('*.txt', workspace=WS)
-        assert 'alias.txt:1:Hello, world!' in await ts.search_files('Hello', workspace=WS)
+        assert 'alias.txt' in await ts.list_directory('.', workspace=ws)
+        assert 'alias.txt' in await ts.find_files('*.txt', workspace=ws)
+        assert 'alias.txt:1:Hello, world!' in await ts.search_files('Hello', workspace=ws)
 
 
 class TestCreateDirectory:
-    async def test_create_basic(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        result = await toolset.create_directory('newdir', workspace=WS)
+    async def test_create_basic(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.create_directory('newdir', workspace=ws)
         assert 'Created directory' in result
         assert (fs_root / 'newdir').is_dir()
 
-    async def test_create_nested(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        await toolset.create_directory('a/b/c', workspace=WS)
+    async def test_create_nested(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
+        await toolset.create_directory('a/b/c', workspace=ws)
         assert (fs_root / 'a' / 'b' / 'c').is_dir()
 
-    async def test_create_existing_ok(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.create_directory('subdir', workspace=WS)
+    async def test_create_existing_ok(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.create_directory('subdir', workspace=ws)
         assert 'Created directory' in result
 
-    async def test_create_protected_blocked(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_create_protected_blocked(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='protected'):
-            await toolset.create_directory('.git/hooks', workspace=WS)
+            await toolset.create_directory('.git/hooks', workspace=ws)
 
-    async def test_create_name_too_long(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_create_name_too_long(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='name is too long'):
-            await toolset.create_directory('x' * 300, workspace=WS)
+            await toolset.create_directory('x' * 300, workspace=ws)
 
-    async def test_create_illegal_byte_sequence_is_recoverable(self, toolset: FileSystemToolset[None]) -> None:
-        workspace = FailingWorkspace('/', {'make_dir': OSError(errno.EILSEQ, 'Illegal byte sequence')})
+    async def test_create_illegal_byte_sequence_is_recoverable(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        workspace = FailingWorkspace(fs_root, {'make_dir': OSError(errno.EILSEQ, 'Illegal byte sequence')})
         with pytest.raises(ModelRetry, match='filesystem cannot represent'):
             await toolset.create_directory('bad-name', workspace=workspace)
 
-    async def test_create_non_recoverable_errno_propagates(self, toolset: FileSystemToolset[None]) -> None:
-        workspace = FailingWorkspace('/', {'make_dir': OSError(errno.EROFS, 'Read-only file system')})
+    async def test_create_non_recoverable_errno_propagates(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        workspace = FailingWorkspace(fs_root, {'make_dir': OSError(errno.EROFS, 'Read-only file system')})
         with pytest.raises(OSError, match='Read-only file system'):
             await toolset.create_directory('newdir', workspace=workspace)
 
-    async def test_create_over_existing_file(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_create_over_existing_file(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match="'hello.txt' exists and is not a directory"):
-            await toolset.create_directory('hello.txt', workspace=WS)
+            await toolset.create_directory('hello.txt', workspace=ws)
 
-    async def test_create_under_existing_file(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_create_under_existing_file(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match="'hello.txt/nested' has a parent that is not a directory"):
-            await toolset.create_directory('hello.txt/nested', workspace=WS)
+            await toolset.create_directory('hello.txt/nested', workspace=ws)
 
 
 class TestFileInfo:
-    async def test_info_file(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.file_info('hello.txt', workspace=WS)
+    async def test_info_file(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.file_info('hello.txt', workspace=ws)
         assert 'type: file' in result
         assert 'size:' in result
         assert 'lines:' in result
         assert 'hash:' in result
         assert 'binary: False' in result
 
-    async def test_info_directory(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.file_info('subdir', workspace=WS)
+    async def test_info_directory(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.file_info('subdir', workspace=ws)
         assert 'type: directory' in result
 
-    async def test_info_binary(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.file_info('binary.bin', workspace=WS)
+    async def test_info_binary(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.file_info('binary.bin', workspace=ws)
         assert 'binary: True' in result
         assert 'lines:' not in result
 
-    async def test_info_not_found(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_info_not_found(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='Path not found'):
-            await toolset.file_info('nonexistent', workspace=WS)
+            await toolset.file_info('nonexistent', workspace=ws)
 
-    async def test_info_symlink(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_info_symlink(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         # The link target is stored as an absolute path; the tool must report
         # it relative to the root, never as the absolute host path.
         link = fs_root / 'link.txt'
         link.symlink_to(fs_root / 'hello.txt')
-        result = await toolset.file_info('link.txt', workspace=WS)
+        result = await toolset.file_info('link.txt', workspace=ws)
         assert 'type: file' in result
         assert 'symlink_target: hello.txt' in result
         _assert_no_host_root(result, fs_root)
 
     async def test_info_symlink_through_a_wrapped_workspace(
-        self, toolset: FileSystemToolset[None], fs_root: Path
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
     ) -> None:
         # A facade over a facade still reaches the command-capable backend underneath.
         (fs_root / 'link.txt').symlink_to(fs_root / 'hello.txt')
-        result = await toolset.file_info('link.txt', workspace=Workspace(Workspace(WS)))
+        result = await toolset.file_info('link.txt', workspace=Workspace(Workspace(ws)))
         assert 'symlink_target: hello.txt' in result
 
     async def test_info_symlink_unreported_on_a_read_only_workspace(
-        self, toolset: FileSystemToolset[None], fs_root: Path
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
     ) -> None:
         # A read-only workspace refuses `run`, so there is no `readlink` to ask; the rest is reported.
         (fs_root / 'link.txt').symlink_to(fs_root / 'hello.txt')
-        result = await toolset.file_info('link.txt', workspace=ReadOnlyWorkspace(Workspace(WS)))
+        result = await toolset.file_info('link.txt', workspace=ReadOnlyWorkspace(Workspace(ws)))
         assert 'type: file' in result
         assert 'symlink_target' not in result
 
@@ -1331,23 +1452,29 @@ class TestMutationKillers:
         # Verify it's hex characters
         assert all(c in '0123456789abcdef' for c in h)
 
-    async def test_write_file_with_hash_on_new_file(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_write_file_with_hash_on_new_file(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """When a file doesn't exist, expected_hash should be ignored and the write should succeed."""
-        result = await toolset.write_file('brand_new.txt', 'new content\n', expected_hash='any_hash_val', workspace=WS)
+        result = await toolset.write_file('brand_new.txt', 'new content\n', expected_hash='any_hash_val', workspace=ws)
         assert 'Wrote' in result
         assert (fs_root / 'brand_new.txt').read_text() == 'new content\n'
 
-    async def test_edit_file_single_match_succeeds(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_edit_file_single_match_succeeds(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         (fs_root / 'unique.txt').write_text('unique text here\n')
-        result = await toolset.edit_file('unique.txt', 'unique text', 'replaced text', workspace=WS)
+        result = await toolset.edit_file('unique.txt', 'unique text', 'replaced text', workspace=ws)
         assert 'Edited' in result
         assert (fs_root / 'unique.txt').read_text() == 'replaced text here\n'
 
-    async def test_edit_file_zero_matches_raises(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_edit_file_zero_matches_raises(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match='old_text not found'):
-            await toolset.edit_file('hello.txt', 'DEFINITELY NOT IN FILE', 'x', workspace=WS)
+            await toolset.edit_file('hello.txt', 'DEFINITELY NOT IN FILE', 'x', workspace=ws)
 
-    async def test_search_truncation_stops_after_limit(self, fs_root: Path) -> None:
+    async def test_search_truncation_stops_after_limit(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         # Create many files with 1 match each so truncation is per-file
         for i in range(10):
             (fs_root / f'searchable{i}.txt').write_text(f'match_this_{i}\n')
@@ -1361,7 +1488,7 @@ class TestMutationKillers:
             max_search_results=5,
             max_find_results=1000,
         )
-        result = await ts.search_files('match_this', workspace=WS)
+        result = await ts.search_files('match_this', workspace=ws)
         lines = result.strip().split('\n')
         # Truncation check is after each file, so 5 matches + truncation msg
         # Ensure we don't get all 10 matches
@@ -1369,7 +1496,7 @@ class TestMutationKillers:
         assert len(match_lines) <= 5
         assert 'truncated at 5 matches' in lines[-1]
 
-    async def test_find_truncation_stops_after_limit(self, fs_root: Path) -> None:
+    async def test_find_truncation_stops_after_limit(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         for i in range(10):
             (fs_root / f'findme{i:02d}.dat').write_text(f'{i}\n')
         ts = FileSystemToolset(
@@ -1382,52 +1509,64 @@ class TestMutationKillers:
             max_search_results=1000,
             max_find_results=3,
         )
-        result = await ts.find_files('*.dat', workspace=WS)
+        result = await ts.find_files('*.dat', workspace=ws)
         lines = result.strip().split('\n')
         # Should have exactly 4 lines: 3 matches + 1 truncation message
         assert len(lines) == 4
         assert 'truncated at 3 matches' in lines[-1]
 
-    async def test_read_file_default_limit_used(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_read_file_default_limit_used(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         # Create file with more lines than we'd see with limit=0
         (fs_root / 'big.txt').write_text('\n'.join(f'line{i}' for i in range(100)) + '\n')
-        result = await toolset.read_file('big.txt', workspace=WS)
+        result = await toolset.read_file('big.txt', workspace=ws)
         # All 100 lines should be present since max_read_lines is 2000
         assert 'line99' in result
 
-    async def test_list_directory_with_files_not_empty(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.list_directory('subdir', workspace=WS)
+    async def test_list_directory_with_files_not_empty(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.list_directory('subdir', workspace=ws)
         assert result != '(empty directory)'
         assert 'nested.py' in result
 
-    async def test_search_in_file_returns_only_that_file(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_search_in_file_returns_only_that_file(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         # Both files contain 'Hello' / 'hello' but searching a specific file should only return from that file
         (fs_root / 'other.txt').write_text('Hello from other\n')
-        result = await toolset.search_files('Hello', path='hello.txt', workspace=WS)
+        result = await toolset.search_files('Hello', path='hello.txt', workspace=ws)
         assert 'hello.txt' in result
         assert 'other.txt' not in result
 
-    async def test_file_info_non_binary_shows_lines_and_hash(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.file_info('hello.txt', workspace=WS)
+    async def test_file_info_non_binary_shows_lines_and_hash(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.file_info('hello.txt', workspace=ws)
         assert 'lines: 1' in result
         assert 'hash:' in result
         assert 'binary: False' in result
 
-    async def test_file_info_binary_no_lines_no_hash(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.file_info('binary.bin', workspace=WS)
+    async def test_file_info_binary_no_lines_no_hash(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.file_info('binary.bin', workspace=ws)
         assert 'binary: True' in result
         assert 'lines:' not in result
         assert 'hash:' not in result
 
-    async def test_safe_resolve_passes_write_flag(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_safe_resolve_passes_write_flag(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         # Protected patterns block writes but allow reads
         (fs_root / '.env.local').write_text('SECRET=x\n')
         # Read should work (write=False internally)
-        result = await toolset.read_file('.env.local', workspace=WS)
+        result = await toolset.read_file('.env.local', workspace=ws)
         assert 'SECRET=x' in result
         # Write should be blocked (write=True internally)
         with pytest.raises(ModelRetry, match='protected'):
-            await toolset.write_file('.env.local', 'HACKED\n', workspace=WS)
+            await toolset.write_file('.env.local', 'HACKED\n', workspace=ws)
 
     async def test_format_lines_join_separator(self) -> None:
         """Verify the result doesn't contain garbage between lines."""
@@ -1443,26 +1582,32 @@ class TestMutationKillers:
         assert 'no newline' in result
         assert result.endswith('\n')
 
-    async def test_read_file_hash_is_real_hash(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.read_file('hello.txt', workspace=WS)
+    async def test_read_file_hash_is_real_hash(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.read_file('hello.txt', workspace=ws)
         # The actual hash should be a hex string, not 'None'
         assert 'hash:None' not in result
         # Verify the hash matches what we'd compute
         expected_hash = _content_hash('Hello, world!\n')
         assert f'hash:{expected_hash}' in result
 
-    async def test_read_file_non_ascii_content(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_read_file_non_ascii_content(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """With invalid UTF-8 bytes, the tool should not crash -- it should use replacement chars."""
         # Write raw bytes that are invalid UTF-8
         (fs_root / 'broken_utf8.txt').write_bytes(b'hello \xff\xfe world\n')
-        result = await toolset.read_file('broken_utf8.txt', workspace=WS)
+        result = await toolset.read_file('broken_utf8.txt', workspace=ws)
         # Should not crash, content should contain replacement characters
         assert 'hello' in result
         assert 'world' in result
 
-    async def test_read_file_default_offset_starts_at_first_line(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_read_file_default_offset_starts_at_first_line(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         """The first line must be included when no offset is specified."""
-        result = await toolset.read_file('multi.txt', workspace=WS)
+        result = await toolset.read_file('multi.txt', workspace=ws)
         # First line must be present (line1)
         assert '     1\tline1' in result
         # Verify line numbering starts at 1
@@ -1480,16 +1625,20 @@ class TestMutationKillers:
         assert 'create_directory' in tool_names
         assert 'file_info' in tool_names
 
-    async def test_write_file_output_format(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        result = await toolset.write_file('fmt.txt', 'ab\ncd\n', workspace=WS)
+    async def test_write_file_output_format(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.write_file('fmt.txt', 'ab\ncd\n', workspace=ws)
         # Verify specific format: chars, lines, path, hash
         assert 'Wrote 6 chars (2 lines) to fmt.txt.' in result
         assert 'hash:' in result
         # Verify hash is a real hex hash not None
         assert 'hash:None' not in result
 
-    async def test_edit_file_output_format(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
-        result = await toolset.edit_file('hello.txt', 'Hello, world!', 'Hi', workspace=WS)
+    async def test_edit_file_output_format(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.edit_file('hello.txt', 'Hello, world!', 'Hi', workspace=ws)
         assert result.startswith('Edited hello.txt.')
         assert 'hash:' in result
         assert 'hash:None' not in result
@@ -1501,10 +1650,12 @@ class TestMutationKillers:
         # Exact match: no trailing double newline
         assert result == '     1\thello\n'
 
-    async def test_safe_resolve_write_default_is_false(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_safe_resolve_write_default_is_false(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """Protected files should be readable via _safe_resolve's default (write=False)."""
         (fs_root / '.env.local').write_text('SECRET=x\n')
-        scope = await toolset._scope(WS)
+        scope = await toolset._scope(ws)
         # _safe_resolve without write= uses default write=False → read is allowed
         resolved = await toolset._safe_resolve(scope, '.env.local')
         assert resolved.endswith('/.env.local')
@@ -1514,69 +1665,89 @@ class TestMutationKillers:
         with pytest.raises(PermissionError, match='protected'):
             await toolset._safe_resolve(scope, '.env.local', write=True)
 
-    async def test_list_directory_exact_size(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.list_directory('.', workspace=WS)
+    async def test_list_directory_exact_size(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.list_directory('.', workspace=ws)
         # hello.txt has 'Hello, world!\n' = 14 bytes
         assert '14 bytes' in result
 
-    async def test_list_directory_no_garbage_separator(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.list_directory('.', workspace=WS)
+    async def test_list_directory_no_garbage_separator(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.list_directory('.', workspace=ws)
         assert 'XX' not in result
 
-    async def test_list_directory_error_message(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_list_directory_error_message(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match='Not a directory'):
-            await toolset.list_directory('hello.txt', workspace=WS)
+            await toolset.list_directory('hello.txt', workspace=ws)
 
-    async def test_find_files_error_message(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_find_files_error_message(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
         with pytest.raises(ModelRetry, match='Not a directory'):
-            await toolset.find_files('*.txt', path='hello.txt', workspace=WS)
+            await toolset.find_files('*.txt', path='hello.txt', workspace=ws)
 
     @pytest.mark.parametrize('pattern', ['.', '..', 'a/../b', '', '/'])
-    async def test_find_files_invalid_pattern(self, toolset: FileSystemToolset[None], pattern: str) -> None:
+    async def test_find_files_invalid_pattern(
+        self, toolset: FileSystemToolset[None], pattern: str, ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match='not a valid glob pattern|must be relative'):
-            await toolset.find_files(pattern, workspace=WS)
+            await toolset.find_files(pattern, workspace=ws)
 
-    async def test_find_files_no_suffix_on_files(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.find_files('*', workspace=WS)
+    async def test_find_files_no_suffix_on_files(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.find_files('*', workspace=ws)
         for line in result.splitlines():
             if not line.endswith('/'):
                 assert 'XXXX' not in line
 
-    async def test_find_files_no_garbage_separator(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.find_files('*.txt', workspace=WS)
+    async def test_find_files_no_garbage_separator(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.find_files('*.txt', workspace=ws)
         assert 'XX' not in result
 
-    async def test_search_files_no_garbage_separator(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.search_files(r'line\d', workspace=WS)
+    async def test_search_files_no_garbage_separator(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.search_files(r'line\d', workspace=ws)
         assert 'XX' not in result
 
-    async def test_file_info_exact_size(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.file_info('hello.txt', workspace=WS)
+    async def test_file_info_exact_size(self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend) -> None:
+        result = await toolset.file_info('hello.txt', workspace=ws)
         assert '14 bytes' in result
 
-    async def test_file_info_no_garbage_separator(self, toolset: FileSystemToolset[None]) -> None:
-        result = await toolset.file_info('hello.txt', workspace=WS)
+    async def test_file_info_no_garbage_separator(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        result = await toolset.file_info('hello.txt', workspace=ws)
         assert 'XX' not in result
 
-    async def test_search_with_invalid_utf8_file(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_search_with_invalid_utf8_file(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         """A file with invalid UTF-8 (but no null bytes = not binary) should be searchable."""
         # Write a file with invalid UTF-8 but no null bytes (not detected as binary)
         (fs_root / 'bad_encoding.txt').write_bytes(b'marker_text \xff\xfe end\n')
-        result = await toolset.search_files('marker_text', workspace=WS)
+        result = await toolset.search_files('marker_text', workspace=ws)
         # Should find the file even with broken encoding
         assert 'bad_encoding.txt' in result
 
-    async def test_search_binary_skip_does_not_stop_iteration(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_search_binary_skip_does_not_stop_iteration(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         """A binary file must be skipped, but subsequent text files must still be searched."""
         # binary.bin exists in the fixture and comes before 'hello.txt' alphabetically
-        result = await toolset.search_files('Hello', workspace=WS)
+        result = await toolset.search_files('Hello', workspace=ws)
         # hello.txt must still be found (binary.bin didn't break the loop)
         assert 'hello.txt' in result
 
-    async def test_find_hidden_skip_does_not_stop_iteration(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_find_hidden_skip_does_not_stop_iteration(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         """Hidden files must be skipped, but subsequent visible files must still appear."""
         # .hidden comes before hello.txt alphabetically -- skipping must not break the loop
-        result = await toolset.find_files('*', workspace=WS)
+        result = await toolset.find_files('*', workspace=ws)
         assert 'hello.txt' in result
         assert 'multi.txt' in result
 
@@ -1584,7 +1755,7 @@ class TestMutationKillers:
 class TestFileSystemCapability:
     def test_default_construction(self) -> None:
         fs = FileSystem()
-        assert fs.root_dir == '.'
+        assert fs.root_dir is None
         assert fs.max_read_lines == 2000
 
     def test_custom_construction(self, tmp_path: Path) -> None:
@@ -1603,7 +1774,13 @@ class TestFileSystemCapability:
 
     async def test_read_only_exposes_exactly_read_only_tools(self, tmp_path: Path) -> None:
         filesystem = FileSystem[None](root_dir=tmp_path, read_only=True)
-        context = RunContext(deps=None, model=TestModel(), usage=RunUsage(), run_id='test')
+        context = RunContext(
+            deps=None,
+            model=TestModel(),
+            usage=RunUsage(),
+            run_id='test',
+            workspace=Workspace(local_workspace(tmp_path)),
+        )
 
         tools = await filesystem.get_toolset().get_tools(context)
 
@@ -1678,7 +1855,7 @@ class TestFileSystemCapability:
             '<summary>Search file contents using a regular expression.</summary>\n'
             '<returns>\n'
             '<type>str</type>\n'
-            '<description>Matching lines formatted as file:line_number:text, with paths relative to `cwd`.</description>\n'
+            '<description>Matching lines formatted as file:line_number:text, with paths relative to the working directory.</description>\n'
             '</returns>'
         )
 
@@ -1712,13 +1889,13 @@ class TestFileSystemCapability:
             FileSystem(max_read_lines='1000')  # type: ignore[arg-type]
 
     @pytest.mark.anyio(backends=['asyncio'])
-    async def test_agent_integration(self, tmp_path: Path, anyio_backend: object) -> None:
+    async def test_agent_integration(self, tmp_path: Path, anyio_backend: object, ws: LocalWorkspaceBackend) -> None:
         if str(anyio_backend) != 'asyncio':
             pytest.skip('Agent.run requires asyncio event loop')
         (tmp_path / 'test.txt').write_text('hello agent\n')
         model = TestModel(custom_output_text='done', call_tools=[])
         agent: Agent[None, str] = Agent(model, capabilities=[FileSystem(root_dir=tmp_path)])
-        result = await agent.run('read test.txt', workspace=WS)
+        result = await agent.run('read test.txt', workspace=ws)
         assert result.output == 'done'
 
 
@@ -1726,7 +1903,7 @@ class TestPatternCanonicalization:
     """Sec#3: patterns match the canonical path, and a leading `**/` also
     covers the repository root."""
 
-    async def test_denied_pattern_not_bypassed_by_dot_segment(self, fs_root: Path) -> None:
+    async def test_denied_pattern_not_bypassed_by_dot_segment(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
         (fs_root / 'config').mkdir()
         (fs_root / 'config' / 'secret.txt').write_text('token\n')
         ts = FileSystemToolset(
@@ -1741,9 +1918,11 @@ class TestPatternCanonicalization:
         )
         # A './' segment must not slip the file past its deny rule.
         with pytest.raises(ModelRetry, match='denied'):
-            await ts.read_file('config/./secret.txt', workspace=WS)
+            await ts.read_file('config/./secret.txt', workspace=ws)
 
-    async def test_root_level_secrets_readable_but_protected_from_write(self, fs_root: Path) -> None:
+    async def test_root_level_secrets_readable_but_protected_from_write(
+        self, fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         (fs_root / 'secrets.yaml').write_text('api: PRIVATE KEY material\n')
         ts = FileSystemToolset(
             root_dir=fs_root,
@@ -1755,9 +1934,9 @@ class TestPatternCanonicalization:
             max_search_results=1000,
             max_find_results=1000,
         )
-        assert 'secrets.yaml:1:api: PRIVATE KEY material' in await ts.search_files('PRIVATE KEY', workspace=WS)
+        assert 'secrets.yaml:1:api: PRIVATE KEY material' in await ts.search_files('PRIVATE KEY', workspace=ws)
         with pytest.raises(ModelRetry, match='protected'):
-            await ts.write_file('secrets.yaml', 'changed\n', workspace=WS)
+            await ts.write_file('secrets.yaml', 'changed\n', workspace=ws)
 
 
 def _assert_no_host_root(message: str, root: Path) -> None:
@@ -1769,11 +1948,13 @@ def _assert_no_host_root(message: str, root: Path) -> None:
 class TestModelSafeRecoverableErrors:
     """OS-raised filesystem errors must not leak absolute host paths into `ModelRetry`."""
 
-    async def test_write_through_file_names_the_parent(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+    async def test_write_through_file_names_the_parent(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
         # The parent path 'hello.txt' exists as a file; the check names the
         # model's path, not the absolute host path the OS would report.
         with pytest.raises(ModelRetry, match="'hello.txt/nested' has a parent that is not a directory") as exc_info:
-            await toolset.write_file('hello.txt/nested', 'x', workspace=WS)
+            await toolset.write_file('hello.txt/nested', 'x', workspace=ws)
         _assert_no_host_root(str(exc_info.value), fs_root)
 
     def test_outside_root_path_is_redacted(self, fs_root: Path) -> None:
@@ -1836,33 +2017,35 @@ class TestWorkspaceBackends:
             'write_bytes': OSError(errno.ENOSPC, 'No space'),
             'make_dir': OSError(errno.EROFS, 'Read-only'),
         }
-        workspace = FailingWorkspace('/', failing, where='/elsewhere')
+        workspace = FailingWorkspace(fs_root, failing, where='/elsewhere')
         assert 'Wrote' in await toolset.write_file('passed.txt', 'ok\n', workspace=workspace)
         assert await toolset.create_directory('passed', workspace=workspace) == 'Created directory: passed'
         assert (fs_root / 'passed.txt').read_text() == 'ok\n' and (fs_root / 'passed').is_dir()
 
-    async def test_unlistable_subdirectory_is_skipped(self, toolset: FileSystemToolset[None]) -> None:
-        workspace = FailingWorkspace('/', {'list_dir': PermissionError(errno.EACCES, 'denied')}, where='/subdir')
+    async def test_unlistable_subdirectory_is_skipped(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        workspace = FailingWorkspace(fs_root, {'list_dir': PermissionError(errno.EACCES, 'denied')}, where='/subdir')
         assert 'hello.txt' in await toolset.search_files('Hello', workspace=workspace)
         assert await toolset.find_files('**/*.py', workspace=workspace) == 'No matches found.'
 
-    async def test_unlistable_search_root_is_recoverable(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_unlistable_search_root_is_recoverable(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
         workspace = FailingWorkspace(
-            '/', {'list_dir': PermissionError(errno.EACCES, 'Permission denied')}, where='/subdir'
+            fs_root, {'list_dir': PermissionError(errno.EACCES, 'Permission denied')}, where='/subdir'
         )
         with pytest.raises(ModelRetry, match='Permission denied'):
             await toolset.search_files('x', path='subdir', workspace=workspace)
 
-    async def test_unreadable_file_is_skipped_by_search(self, toolset: FileSystemToolset[None]) -> None:
-        workspace = FailingWorkspace('/', {'read_bytes': PermissionError(errno.EACCES, 'denied')}, where='hello.txt')
+    async def test_unreadable_file_is_skipped_by_search(self, toolset: FileSystemToolset[None], fs_root: Path) -> None:
+        workspace = FailingWorkspace(
+            fs_root, {'read_bytes': PermissionError(errno.EACCES, 'denied')}, where='hello.txt'
+        )
         assert await toolset.search_files('Hello', workspace=workspace) == 'No matches found.'
 
     @pytest.mark.parametrize('operation', ['list_dir', 'read_bytes'])
     async def test_workspace_failure_during_a_walk_fails_the_call(
-        self, toolset: FileSystemToolset[None], operation: str
+        self, toolset: FileSystemToolset[None], operation: str, fs_root: Path
     ) -> None:
         workspace = FailingWorkspace(
-            '/',
+            fs_root,
             {operation: WorkspaceError('backend refused')},
             where='nested.py' if operation == 'read_bytes' else '/subdir',
         )
@@ -1875,7 +2058,7 @@ class TestWorkspaceBackends:
         """`WorkspaceReadOnlyError` is a `PermissionError`; the announcement read must not treat it as one."""
         if str(anyio_backend) != 'asyncio':
             pytest.skip('Agent.run requires asyncio event loop')
-        workspace = FailingWorkspace('/', {'read_bytes': WorkspaceReadOnlyError('refused')}, where='hello.txt')
+        workspace = FailingWorkspace(fs_root, {'read_bytes': WorkspaceReadOnlyError('refused')}, where='hello.txt')
         result = await call_tool(
             [FileSystem[None](root_dir=fs_root)],
             'write_file',
@@ -1885,29 +2068,28 @@ class TestWorkspaceBackends:
         assert result == READ_ONLY_FAILURE
         assert (fs_root / 'hello.txt').read_text() == 'Hello, world!\n'
 
-    async def test_directory_that_appears_as_a_file_while_created(self, toolset: FileSystemToolset[None]) -> None:
-        workspace = FailingWorkspace('/', {'make_dir': FileExistsError(errno.EEXIST, 'File exists')})
+    async def test_directory_that_appears_as_a_file_while_created(
+        self, toolset: FileSystemToolset[None], fs_root: Path
+    ) -> None:
+        workspace = FailingWorkspace(fs_root, {'make_dir': FileExistsError(errno.EEXIST, 'File exists')})
         with pytest.raises(ModelRetry, match="'made' exists and is not a directory"):
             await toolset.create_directory('made', workspace=workspace)
 
-    async def test_write_below_a_file_names_the_parent(self, toolset: FileSystemToolset[None]) -> None:
+    async def test_write_below_a_file_names_the_parent(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
         with pytest.raises(ModelRetry, match="'hello.txt/a/b' has a parent that is not a directory"):
-            await toolset.write_file('hello.txt/a/b', 'x', workspace=WS)
+            await toolset.write_file('hello.txt/a/b', 'x', workspace=ws)
 
-    async def test_search_in_a_missing_path_finds_nothing(self, toolset: FileSystemToolset[None]) -> None:
-        assert await toolset.search_files('x', path='missing', workspace=WS) == 'No matches found.'
+    async def test_search_in_a_missing_path_finds_nothing(
+        self, toolset: FileSystemToolset[None], ws: LocalWorkspaceBackend
+    ) -> None:
+        assert await toolset.search_files('x', path='missing', workspace=ws) == 'No matches found.'
 
-    async def test_relative_cwd_outside_the_root_is_a_configuration_error(self, fs_root: Path) -> None:
-        # An absolute root and a relative cwd can only be compared once a workspace resolves them.
-        toolset = FileSystem[None](root_dir=fs_root, cwd='elsewhere').get_toolset()
-        assert isinstance(toolset, FileSystemToolset)
-        with pytest.raises(UserError, match='is outside root_dir'):
-            await toolset.read_file('hello.txt', workspace=WS)
-
-    async def test_file_info_tool(self, fs_root: Path, anyio_backend: object) -> None:
+    async def test_file_info_tool(self, fs_root: Path, anyio_backend: object, ws: LocalWorkspaceBackend) -> None:
         if str(anyio_backend) != 'asyncio':
             pytest.skip('Agent.run requires asyncio event loop')
-        result = await call_tool([FileSystem[None](root_dir=fs_root)], 'file_info', {'path': 'hello.txt'}, workspace=WS)
+        result = await call_tool([FileSystem[None](root_dir=fs_root)], 'file_info', {'path': 'hello.txt'}, workspace=ws)
         assert 'size: 14 bytes' in result
 
 
@@ -1923,36 +2105,38 @@ class TestWalkBounds:
 
     @pytest.mark.parametrize('cap', ['_MAX_WALK_DIRECTORIES', '_MAX_WALK_ENTRIES'])
     async def test_symlink_loop_walk_is_cut_short(
-        self, loop_root: Path, monkeypatch: pytest.MonkeyPatch, cap: str
+        self, loop_root: Path, monkeypatch: pytest.MonkeyPatch, cap: str, ws: LocalWorkspaceBackend
     ) -> None:
         monkeypatch.setattr(f'pydantic_ai_harness.filesystem._toolset.{cap}', 20)
         toolset = FileSystem[None](root_dir=loop_root).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
-        found = await toolset.find_files('**/*.txt', workspace=WS)
+        found = await toolset.find_files('**/*.txt', workspace=ws)
         assert found.splitlines()[0] == 'a.txt'
         assert found.splitlines()[-1].startswith('[... walk cut short after ')
-        searched = await toolset.search_files('needle', workspace=WS)
+        searched = await toolset.search_files('needle', workspace=ws)
         assert searched.splitlines()[0] == 'a.txt:1:needle'
         assert searched.splitlines()[-1].startswith('[... walk cut short after ')
 
-    async def test_default_caps_finish_a_symlink_loop(self, loop_root: Path) -> None:
+    async def test_default_caps_finish_a_symlink_loop(self, loop_root: Path, ws: LocalWorkspaceBackend) -> None:
         toolset = FileSystem[None](root_dir=loop_root).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
         with anyio.fail_after(30):
-            found = await toolset.find_files('**/*.txt', workspace=WS)
+            found = await toolset.find_files('**/*.txt', workspace=ws)
         assert 'walk cut short' in found.splitlines()[-1]
 
     async def test_cut_walk_with_no_matches_still_says_so(
-        self, loop_root: Path, monkeypatch: pytest.MonkeyPatch
+        self, loop_root: Path, monkeypatch: pytest.MonkeyPatch, ws: LocalWorkspaceBackend
     ) -> None:
         monkeypatch.setattr('pydantic_ai_harness.filesystem._toolset._MAX_WALK_DIRECTORIES', 5)
         toolset = FileSystem[None](root_dir=loop_root).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
-        result = await toolset.find_files('**/*.missing', workspace=WS)
+        result = await toolset.find_files('**/*.missing', workspace=ws)
         assert result.splitlines()[0] == 'No matches found.'
         assert result.splitlines()[1].startswith('[... walk cut short after ')
 
-    async def test_cut_walk_marks_the_event_truncated(self, loop_root: Path, anyio_backend: object) -> None:
+    async def test_cut_walk_marks_the_event_truncated(
+        self, loop_root: Path, anyio_backend: object, ws: LocalWorkspaceBackend
+    ) -> None:
         if str(anyio_backend) != 'asyncio':
             pytest.skip('Agent.run requires asyncio event loop')
         seen: list[FilesSearchedEvent] = []
@@ -1968,6 +2152,6 @@ class TestWalkBounds:
                 [FileSystem[None](root_dir=loop_root), Recorder()],
                 'search_files',
                 {'pattern': 'needle'},
-                workspace=WS,
+                workspace=ws,
             )
         assert [event.truncated for event in seen] == [True]

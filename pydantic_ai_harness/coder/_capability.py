@@ -41,7 +41,7 @@ def _file_system(workspace: Path, *, unrestricted: bool) -> FileSystem[AgentDeps
     )
     if unrestricted:
         # Workspace paths are POSIX, so the filesystem root is `/` whatever the host platform.
-        return replace(file_system, root_dir='/', cwd=workspace, protected_patterns=[])
+        return replace(file_system, root_dir='/', protected_patterns=[])
     return file_system
 
 

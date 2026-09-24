@@ -39,9 +39,6 @@ from pydantic_ai_harness.filesystem import (
 
 from .._workspace import local_workspace
 
-WS = local_workspace('/')
-"""The workspace for direct calls; the toolsets here all have absolute roots, so its working directory is moot."""
-
 pytestmark = pytest.mark.anyio
 
 # Mode bits do not bind root, and Windows has no write-only mode.
@@ -94,7 +91,7 @@ async def _run_and_collect(
         id='file_system',
     )
     agent = Agent(_tool_model(tool_name, json_args), deps_type=type(None), capabilities=[capability, *listeners])
-    await agent.run('go', event_stream_handler=handler, workspace=WS)
+    await agent.run('go', event_stream_handler=handler, workspace=local_workspace(root))
     return events
 
 
@@ -945,9 +942,9 @@ class TestFileChangeRequests:
         toolset = FileSystem[None](root_dir=tmp_path).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
 
-        await toolset.write_file('direct.txt', 'hi\n', workspace=WS)
-        await toolset.edit_file('direct.txt', 'hi', 'bye', workspace=WS)
-        await toolset.create_directory('made', workspace=WS)
+        await toolset.write_file('direct.txt', 'hi\n', workspace=local_workspace(tmp_path))
+        await toolset.edit_file('direct.txt', 'hi', 'bye', workspace=local_workspace(tmp_path))
+        await toolset.create_directory('made', workspace=local_workspace(tmp_path))
 
         assert (tmp_path / 'direct.txt').read_text() == 'bye\n'
         assert (tmp_path / 'made').is_dir()
