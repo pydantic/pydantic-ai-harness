@@ -56,7 +56,7 @@ class Deps:
 
 
 def composio_session(ctx: RunContext[Deps]) -> Composio[Deps] | None:
-    if ctx.deps.composio_url is None:
+    if not ctx.deps.composio_url:
         return None
     return Composio(url=ctx.deps.composio_url, headers={'x-api-key': COMPOSIO_API_KEY})
 
