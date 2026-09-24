@@ -407,7 +407,10 @@ class _Pick(WrapperCapability[AgentDepsT]):
         return toolset.filtered(self._unless_shadowed)  # pyright: ignore[reportUnknownMemberType,reportUnknownVariableType]
 
     def _unless_shadowed(self, ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> bool:
-        rivals = [leaf for leaf in _leaves(ctx.root_capability) if isinstance(_unpicked(leaf), type(self.wrapped))]
+        leaves = _leaves(ctx.root_capability)
+        # A pick of a capability that bundles others is walked into, so what it wraps is not a rival.
+        inside = {id(inner) for leaf in leaves if isinstance(leaf, _Pick) for inner in _leaves(leaf.wrapped)}
+        rivals = [leaf for leaf in leaves if id(leaf) not in inside and isinstance(_unpicked(leaf), type(self.wrapped))]
         first = next((_unpicked(leaf) for leaf in rivals), self.wrapped)
         return first is self.wrapped and all(isinstance(leaf, _Pick) for leaf in rivals)
 

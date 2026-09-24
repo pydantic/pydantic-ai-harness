@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 import pytest
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import AbstractCapability, CombinedCapability, WrapperCapability
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.instrumented import InstrumentationSettings
 
 from pydantic_ai_harness.guardrails import GuardrailResult, InputGuardrail
-from pydantic_ai_harness.jev import JevCapabilityComposer
+from pydantic_ai_harness.jev import ComposableCapability, JevCapabilityComposer
 
-from ._doubles import CATALOG, Events, Guard, Jev, Notes, Seen, compose_span, composer, main_model, recording_tracer
+from ._doubles import (
+    CATALOG,
+    Clock,
+    Events,
+    Guard,
+    Jev,
+    Notes,
+    Seen,
+    compose_span,
+    composer,
+    main_model,
+    recording_tracer,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -84,6 +99,13 @@ class TestInputGuardrails:
         assert dict(compose_span(exporter).attributes or {}) == {'jev_composer.action': 'blocked'}
 
 
+@dataclass
+class Kit(WrapperCapability[object]):
+    """A catalog capability that wraps a bundle of others, so the run's tree lists it and what it bundles."""
+
+    wrapped: AbstractCapability[object] = field(default_factory=lambda: CombinedCapability([Clock()]))
+
+
 def calls_then_answers(tool: str, returns: list[str], tools: list[list[str]]) -> FunctionModel:
     """A menu model that calls `tool` once, then answers; recording the tools it was offered and what came back."""
 
@@ -137,3 +159,16 @@ class TestOtherCapabilities:
 
         assert tools == [['dial'], ['dial']]
         assert returns == ['dialled']
+
+    async def test_an_entry_that_bundles_other_capabilities_keeps_its_tools(self):
+        """The run lists what a pick wraps when it bundles others; that must not count as a rival to the pick."""
+        seen: list[Seen] = []
+        picker = JevCapabilityComposer(
+            models={'strong': composer(Jev(), seen).models['strong']},
+            catalog={'kit': ComposableCapability(description='A kit', capability=Kit)},
+            jev_model=Jev(capabilities=('kit',)).model_,
+        )
+
+        await Agent(main_model([]), capabilities=[picker]).run('what time is it?')
+
+        assert [s.tools for s in seen] == [['clock_now']]
