@@ -95,7 +95,8 @@ A coding agent should read and write files in the workspace the editor opened, n
 ```python
 from pydantic_ai import Agent
 from pydantic_ai.workspaces import LocalWorkspaceBackend
-from pydantic_ai_harness import FileSystem, Shell
+from pydantic_ai_harness.filesystem import FileSystem
+from pydantic_ai_harness.shell import Shell
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, run_acp_stdio_sync
 
 agent = Agent('anthropic:claude-sonnet-4-6')
@@ -119,37 +120,31 @@ if __name__ == '__main__':
 
 The factory runs once per session with the client's `AcpSession` setup (its `cwd`, `mcp_servers`, and capabilities) and returns an `AcpSessionConfig` whose `deps`, `capabilities`, `toolsets`, and optional `workspace` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
 
+Use `capabilities` for session behavior so hooks, instructions, ordering constraints, and capability event ownership are preserved. Keep `toolsets` for bare toolsets such as MCP servers. Session capabilities and toolsets are added to the agent's own configuration.
+
 ## Editor-native filesystem and shell (optional)
 
 The local [`FileSystem`](filesystem.md) and [`Shell`](shell.md) above operate on the session's workspace -- with `LocalWorkspaceBackend`, the agent machine's own disk and subprocesses. An editor's source of truth is different: unsaved buffers, its own idea of the workspace layout, and -- for a remote or containerized editor -- the machine the code actually lives on. When the client advertises support, `acp_filesystem` and `acp_terminal` give the agent `read_file`/`write_file`/`run_command` tools that route through the client, so it acts where the user is:
 
 ```python
-from pydantic_ai.capabilities import AbstractCapability
-from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.workspaces import LocalWorkspaceBackend
-from pydantic_ai_harness import FileSystem, Shell
+from pydantic_ai_harness.filesystem import FileSystem
+from pydantic_ai_harness.shell import Shell
 from pydantic_ai_harness.experimental.acp import AcpSession, AcpSessionConfig, acp_filesystem, acp_terminal
 
 
 def session_config(session: AcpSession) -> AcpSessionConfig[None]:
-    capabilities: list[AbstractCapability[None]] = []
-    toolsets: list[AbstractToolset[None]] = []
-    fs = acp_filesystem(session)
-    if fs is None:
-        capabilities.append(FileSystem(root_dir=session.cwd))
-    else:
-        toolsets.append(fs)
-    shell = acp_terminal(session)
-    if shell is None:
-        capabilities.append(Shell(cwd=session.cwd))
-    else:
-        toolsets.append(shell)
-    return AcpSessionConfig(
-        deps=None, capabilities=capabilities, toolsets=toolsets, workspace=LocalWorkspaceBackend(session.cwd)
-    )
+    # Use the editor's filesystem/terminal when offered; otherwise fall back to local.
+    fs = acp_filesystem(session) or FileSystem[None](root_dir=session.cwd)
+    shell = acp_terminal(session) or Shell[None](cwd=session.cwd)
+    return AcpSessionConfig(deps=None, capabilities=[fs, shell], workspace=LocalWorkspaceBackend(session.cwd))
 ```
 
-Each helper returns `None` when the client did not advertise support. Add local fallbacks as capabilities so their hooks and events remain attached; add editor-native helpers as toolsets. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
+Each helper returns a core `Toolset` capability wrapping the client-backed toolset. Pass it in `capabilities`, not `toolsets`. To use a bare toolset directly, construct `AcpFileSystemToolset` or `AcpTerminalToolset` instead. These wrappers add no telemetry spans; core already traces their tool calls.
+
+Each helper returns `None` when the client did not advertise the capability, so the `or` falls back to local and the agent works either way. The tool names match the local `FileSystem`/`Shell`, so rich rendering stays identical.
+
+If a client advertises filesystem reads but not writes, `acp_filesystem` keeps editor-native reads and writes to the local workspace at `session.cwd`. Use this only when the agent shares the editor's workspace disk; for a remote editor, those writes land on the agent's disk.
 
 ## Tool approval
 

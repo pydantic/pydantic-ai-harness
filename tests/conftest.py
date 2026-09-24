@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +37,12 @@ __all__ = ('IsDatetime', 'IsInstance', 'IsNow', 'IsPartialDict', 'IsStr', 'agent
 
 # Prevent accidental real model requests during tests.
 pydantic_ai.models.ALLOW_MODEL_REQUESTS = False
+
+
+@pytest.fixture(autouse=True)
+def recording_plugin_in_subprocesses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep child pytest processes on the same recording plugin as this suite."""
+    monkeypatch.setenv('PYTEST_ADDOPTS', f'{os.getenv("PYTEST_ADDOPTS", "")} -p no:cassetter')
 
 
 @pytest.fixture

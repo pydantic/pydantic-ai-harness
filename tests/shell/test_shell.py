@@ -17,6 +17,7 @@ from typing import Any, NoReturn
 from unittest.mock import patch
 
 import anyio
+import anyio.to_thread
 import pytest
 import sniffio
 from pydantic_ai import Agent, RunContext
