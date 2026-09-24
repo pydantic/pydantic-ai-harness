@@ -132,10 +132,13 @@ class TestPerRunAuth:
         [bob] = await connections_for(capability, 'xoxp-bob')
         assert (bearer(alice), bearer(bob)) == ('Bearer xoxp-alice', 'Bearer xoxp-bob')
 
-    async def test_provider_returning_none_does_not_fall_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize('missing', [None, ''])
+    async def test_provider_returning_none_does_not_fall_back(
+        self, missing: str | None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         monkeypatch.setenv('SLACK_USER_TOKEN', 'xoxp-deployment')
         capability = Slack[str | None](auth=lambda ctx: ctx.deps)
-        assert await connections_for(capability, None) == []
+        assert await connections_for(capability, missing) == []
         agent = Agent(TestModel(), capabilities=[Slack[object](auth=no_credential)])
         result = await agent.run('Use the tools')
         assert result.output == 'success (no tool calls)'
