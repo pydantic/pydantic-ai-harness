@@ -12,6 +12,7 @@ Source: https://docs.tryordinal.com/mcp/introduction
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import UserError
@@ -35,16 +36,14 @@ _DEFAULT_DESCRIPTION = 'Work inside an Ordinal workspace: draft, schedule, and a
 class Ordinal(AbstractCapability[AgentDepsT]):
     """Let an agent draft, schedule, and analyze social posts in Ordinal.
 
-    Pass an Ordinal access token as `auth`. The agent can then reach every workspace the user
-    belongs to.
+    Set `ORDINAL_ACCESS_TOKEN` or pass an Ordinal access token as `auth`. The agent can then reach every
+    workspace the user belongs to.
 
     ```python
-    import os
-
     from pydantic_ai import Agent
     from pydantic_ai_harness import Ordinal
 
-    agent = Agent('openai:gpt-5.6-sol', capabilities=[Ordinal(auth=os.environ['ORDINAL_ACCESS_TOKEN'])])
+    agent = Agent('openai:gpt-5.6-sol', capabilities=[Ordinal()])
     ```
     """
 
@@ -54,7 +53,7 @@ class Ordinal(AbstractCapability[AgentDepsT]):
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
     """An Ordinal access token, an `httpx.Auth`, or a function of the run context that returns one.
 
-    It is required. If the function returns `None`, that run has no Ordinal tools.
+    Unset, it uses `ORDINAL_ACCESS_TOKEN`. If the function returns `None`, that run has no Ordinal tools.
     """
 
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
@@ -63,7 +62,9 @@ class Ordinal(AbstractCapability[AgentDepsT]):
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
         if auth is None:
-            raise UserError('Pass `auth` an Ordinal access token or an `httpx.Auth` to connect to Ordinal.')
+            auth = environ.get('ORDINAL_ACCESS_TOKEN')
+        if auth is None:
+            raise UserError('Set `ORDINAL_ACCESS_TOKEN` or pass `auth` to connect to Ordinal.')
         return MCPToolset(
             _ORDINAL_MCP_URL,
             id=self.id if self.id is not None else 'ordinal',

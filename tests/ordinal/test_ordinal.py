@@ -101,9 +101,14 @@ class TestOrdinal:
         assert isinstance(toolset, MCPToolset)
         assert toolset.id == 'tenant-ordinal'
 
-    def test_missing_auth_raises(self) -> None:
-        with pytest.raises(UserError, match='Pass `auth` an Ordinal access token'):
+    def test_missing_auth_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv('ORDINAL_ACCESS_TOKEN', raising=False)
+        with pytest.raises(UserError, match='Set `ORDINAL_ACCESS_TOKEN`'):
             Ordinal().get_toolset()
+
+    def test_environment_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv('ORDINAL_ACCESS_TOKEN', 'environment-token')
+        assert isinstance(Ordinal().get_toolset(), MCPToolset)
 
     def test_fixed_token_is_sent_as_bearer(self) -> None:
         toolset = Ordinal(auth='ordinal-token').get_toolset()
