@@ -18,7 +18,7 @@ pip:
 pip install "pydantic-ai-harness[logfire-mcp]" "pydantic-ai-slim[openai]"
 ```
 
-Set `LOGFIRE_API_KEY`, or pass `auth=` an API key or an `httpx.Auth`. With neither, the agent opens a browser so you can log in to Logfire, which only works when you run it on your own machine. See the [provider setup](https://pydantic.dev/docs/logfire/guides/mcp-server/).
+Set `LOGFIRE_API_KEY`, or pass `auth=` an API key or an `httpx.Auth`. See the [provider setup](https://pydantic.dev/docs/logfire/guides/mcp-server/).
 
 ```python
 from pydantic_ai import Agent
@@ -31,7 +31,7 @@ print(result.output)
 
 ## Per-user credentials
 
-An API key, `LOGFIRE_API_KEY`, and browser login all connect every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
+An API key or `LOGFIRE_API_KEY` connects every run as the same account. When one agent serves several users, pass a function that returns the current user's credential instead:
 
 ```python
 from dataclasses import dataclass
@@ -53,9 +53,9 @@ def logfire_token(ctx: RunContext[Deps]) -> str | None:
 agent = Agent('openai:gpt-5.6-sol', deps_type=Deps, capabilities=[LogfireMCP(auth=logfire_token)])
 ```
 
-The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Logfire tools; it never falls back to `LOGFIRE_API_KEY` or browser login.
+The function is called at the start of each run, so each run connects as its own user. It can be async, and it can return a token or an `httpx.Auth`. If it returns `None`, that run has no Logfire tools; it never falls back to `LOGFIRE_API_KEY`.
 
-Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Logfire" OAuth flow in your web app. The function only reads the current token. Returning `'oauth'` from it raises an error, because browser login would open on the server rather than for the user.
+Your application is responsible for getting each user's token, storing it, and refreshing it, for example with a "Connect Logfire" button in your web app. The function only reads the current token.
 
 `client` also accepts a function, for when users differ in more than their credential, such as users whose data is in the EU region:
 
@@ -115,7 +115,7 @@ Handle the approval requests with the [deferred tools workflow](https://pydantic
 
 ## Connection customization
 
-Pass `client` to use your own FastMCP client or transport, for example one with custom OAuth token storage. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` and `include_instructions` still apply.
+Pass `client` to use your own FastMCP client or transport, for example one with custom authentication or MCP handlers. The client then owns the URL, authentication, and server settings, so set those on it rather than on the capability. `read_only` and `include_instructions` still apply.
 
 A fixed `client` is one connection shared by every run; see [Per-user credentials](#per-user-credentials) to connect each user separately. To use two connections whose tool names overlap, give them distinct `id`s and add [PrefixTools](https://pydantic.dev/docs/ai/capabilities/prefix-tools/).
 

@@ -10,6 +10,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic_ai import Agent
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.messages import ModelRequest, UserPromptPart
 from pydantic_ai.models.test import TestModel
@@ -124,10 +125,10 @@ class TestLogfireMCP:
     def test_custom_endpoint(self) -> None:
         assert transport(LogfireMCP(auth='key', url='https://logfire.example/mcp')).url == 'https://logfire.example/mcp'
 
-    def test_oauth_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_missing_key_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('LOGFIRE_API_KEY', raising=False)
-        with pytest.warns(UserWarning, match='in-memory token storage'):
-            assert transport(LogfireMCP()).auth is not None
+        with pytest.raises(UserError, match='Set `LOGFIRE_API_KEY`'):
+            LogfireMCP().get_toolset()
 
     async def test_current_time_with_old_message_history(self, server: FastMCP) -> None:
         history = [

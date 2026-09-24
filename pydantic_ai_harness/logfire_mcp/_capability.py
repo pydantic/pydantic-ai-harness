@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from os import environ
 
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
@@ -36,10 +37,9 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
 
     description: str | None = 'Query Logfire telemetry and manage observability resources.'
     auth: MCPAuth | MCPAuthFunc[AgentDepsT] | None = field(default=None, repr=False)
-    """API key, `'oauth'`, HTTP authentication, or a callable that returns one for each run.
+    """A Logfire API key, an `httpx.Auth`, or a function of the run context that returns one.
 
-    Unset, it defaults to `LOGFIRE_API_KEY`, then OAuth. A callable receives the run context, so each
-    run can connect with its own user's credential from `ctx.deps`; returning `None` omits the tools.
+    Unset, it uses `LOGFIRE_API_KEY`. If the function returns `None`, that run has no Logfire tools.
     """
     read_only: bool = False
     """Expose only tools the server marks read-only; unmarked tools are omitted."""
@@ -68,10 +68,14 @@ class LogfireMCP(AbstractCapability[AgentDepsT]):
         return MCPToolset(client, id=self.id or 'logfire-mcp', include_instructions=self.include_instructions)
 
     def _connect(self, auth: MCPAuth | None) -> MCPToolset[AgentDepsT]:
+        if auth is None:
+            auth = environ.get('LOGFIRE_API_KEY')
+        if auth is None:
+            raise UserError('Set `LOGFIRE_API_KEY` or pass `auth` to connect to Logfire.')
         return MCPToolset(
             self.url,
             id=self.id or 'logfire-mcp',
-            auth=auth if auth is not None else environ.get('LOGFIRE_API_KEY', 'oauth'),
+            auth=auth,
             headers=None,
             include_instructions=self.include_instructions,
         )
