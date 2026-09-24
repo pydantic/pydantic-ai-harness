@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import TypeVar
 
 import httpx
 import pytest
@@ -24,15 +25,17 @@ from pydantic_ai_harness.day_ai import DayAI
 # combinations. Rebuild it before warnings are escalated by the test suite.
 Settings.model_rebuild()
 
+DepsT = TypeVar('DepsT')
 
-def _http_transport(toolset: AbstractToolset[Any]) -> StreamableHttpTransport:
+
+def _http_transport(toolset: AbstractToolset[DepsT]) -> StreamableHttpTransport:
     assert isinstance(toolset, MCPToolset)
     transport = toolset.client.transport
     assert isinstance(transport, StreamableHttpTransport)
     return transport
 
 
-def bearer(toolset: AbstractToolset[Any]) -> str:
+def bearer(toolset: AbstractToolset[DepsT]) -> str:
     auth = _http_transport(toolset).auth
     assert auth is not None
     request = next(auth.auth_flow(httpx.Request('POST', 'https://example.com/mcp')))
@@ -86,10 +89,17 @@ class TestDayAI:
         assert _http_transport(toolset).url == 'https://day.ai/api/mcp'
         assert bearer(toolset) == 'Bearer day-ai-token'
 
-    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
-    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+    @pytest.mark.parametrize(
+        ('capability', 'include'),
+        [
+            (DayAI[None](auth='day-ai-token'), True),
+            (DayAI[None](auth='day-ai-token', include_instructions=False), False),
+        ],
+        ids=['default', 'disabled'],
+    )
+    def test_hosted_connection_forwards_include_instructions(self, capability: DayAI[None], include: bool) -> None:
         # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
-        toolset = DayAI(auth='day-ai-token', **settings).get_toolset()
+        toolset = capability.get_toolset()
         assert isinstance(toolset, MCPToolset)
         assert toolset.include_instructions is include
 
@@ -109,16 +119,24 @@ class TestDayAI:
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(DayAI(auth='secret-token'))
 
-    @pytest.mark.parametrize('auth', ['day-ai-token', per_user_token])
-    def test_client_cannot_be_combined_with_auth(self, auth: Any) -> None:
+    @pytest.mark.parametrize('auth', ['day-ai-token', per_user_token], ids=['token', 'function'])
+    def test_client_cannot_be_combined_with_auth(
+        self, auth: str | Callable[[RunContext[str | None]], str | None]
+    ) -> None:
         with pytest.raises(UserError, match='`client` owns the connection'):
-            DayAI(client='https://example.com/mcp', auth=auth)
+            DayAI[str | None](client='https://example.com/mcp', auth=auth)
 
     @pytest.mark.parametrize(
-        'settings', [{'auth': 'day-ai-token'}, {'auth': per_user_token}, {'client': 'https://example.com/mcp'}]
+        'capability',
+        [
+            DayAI[str | None](id='tenant-day-ai', auth='day-ai-token'),
+            DayAI[str | None](id='tenant-day-ai', auth=per_user_token),
+            DayAI[str | None](id='tenant-day-ai', client='https://example.com/mcp'),
+        ],
+        ids=['token', 'function', 'client'],
     )
-    def test_custom_id_is_forwarded(self, settings: dict[str, Any]) -> None:
-        assert DayAI(id='tenant-day-ai', **settings).get_toolset().id == 'tenant-day-ai'
+    def test_custom_id_is_forwarded(self, capability: DayAI[str | None]) -> None:
+        assert capability.get_toolset().id == 'tenant-day-ai'
 
     def test_defer_loading_needs_no_id(self) -> None:
         Agent(TestModel(), capabilities=[DayAI(auth='day-ai-token', defer_loading=True)])
