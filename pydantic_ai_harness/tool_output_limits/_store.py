@@ -1,10 +1,10 @@
 """Storage backends for spilled tool outputs.
 
 `WorkspaceStore` is the default: it writes each payload to a file inside the run's workspace
-(`ctx.workspace`), so with a remote sandbox the spilled files live in the sandbox, next to the
-files the agent's other tools see. `OverflowStore` is the narrow protocol for any other backend
-(a blob store, a durable engine's storage): persist a payload under a key, read it back by
-handle. `LocalFileStore` implements it on the host filesystem for runs with no workspace.
+(`ctx.workspace`), or a workspace of its own, so with a remote sandbox the spilled files live in
+the sandbox, next to the files the agent's other tools see. `OverflowStore` is the narrow
+protocol for any other backend (a blob store, a durable engine's storage): persist a payload
+under a key, read it back by handle. `LocalFileStore` implements it on the host filesystem.
 """
 
 from __future__ import annotations
@@ -20,18 +20,9 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from pydantic_ai.workspaces import Workspace, WorkspaceError
+from pydantic_ai.workspaces import Workspace, WorkspaceBackend
 
-from pydantic_ai_harness._workspace import supports_commands
-
-_WORKSPACE_SUBDIR = 'pydantic-ai-harness/tool-output'
-"""Where spills go below the workspace's `$TMPDIR` (or `/tmp`); Shell keeps its jobs beside it."""
-
-_FILESYSTEM_ONLY_SUBDIR = '.pydantic-ai-harness/tool-output'
-"""Where spills go below the working directory of a workspace that cannot run commands."""
-
-_DIRECTORY_TIMEOUT = 30.0
-"""Deadline for the command that locates the spill directory; it returns at once in a healthy workspace."""
+from pydantic_ai_harness._workspace import metadata_dir, secondary_workspace
 
 
 @runtime_checkable
@@ -78,27 +69,45 @@ def _segments(key: str) -> list[str]:
 class WorkspaceStore:
     """The default store: each spilled payload is a file inside the run's workspace.
 
-    The handle is the file's absolute workspace path, so the model can also open it with any
-    workspace file tool (such as `FileSystem`'s `read_file`). Files live under
-    `$TMPDIR/pydantic-ai-harness/tool-output` in the workspace (`/tmp` when `TMPDIR` is unset),
-    created owner-only; a workspace that cannot run commands uses
-    `.pydantic-ai-harness/tool-output` below its working directory instead.
+    The handle is the file's absolute workspace path. Files live under
+    `.pydantic-ai-harness/tool-output` in the workspace's working directory, which holds a
+    `.gitignore` so they stay out of version control, and the model can open them with
+    `read_tool_result` or with `FileSystem`'s `read_file`, since they are inside the working
+    directory.
 
-    Files are not pruned: they go away with the sandbox, or with the host's temp-dir cleanup
-    for a local workspace. Set `directory` to place them elsewhere.
+    Files are not pruned: they go away with the sandbox, or when the directory is deleted for a
+    local workspace. Set `directory` to place them elsewhere, or `workspace` to keep them in a
+    workspace other than the run's.
     """
 
     directory: str | None = None
     """Workspace directory for spilled files, absolute or relative to the working directory."""
 
+    workspace: WorkspaceBackend | None = None
+    """A workspace to keep spills in instead of the run's, such as `LocalWorkspaceBackend('/var/spills')`.
+
+    A backend, not the `LocalWorkspace` capability. It is used in-process only in this release: a
+    durable engine does not route it through its workflow machinery.
+    """
+
+    _workspace: Workspace | None = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        self._workspace = secondary_workspace(self.workspace, 'WorkspaceStore')
+
     async def write(self, workspace: Workspace, key: str, data: bytes) -> str:
-        """Write `data` into `workspace` and return its absolute workspace path as the handle."""
+        """Write `data` and return its absolute workspace path as the handle.
+
+        `workspace` is the run's; the store's own `workspace`, when set, is used instead.
+        """
+        workspace = self._workspace or workspace
         path = posixpath.join(await self._directory(workspace), *_segments(key))
         await workspace.write_bytes(path, data)
         return path
 
     async def read(self, workspace: Workspace, handle: str) -> bytes:
         """Read a payload back; a handle outside the store directory raises `PermissionError`."""
+        workspace = self._workspace or workspace
         directory = await self._directory(workspace)
         path = posixpath.normpath(posixpath.join(directory, handle))
         if not path.startswith(directory.rstrip('/') + '/'):
@@ -108,25 +117,16 @@ class WorkspaceStore:
     async def _directory(self, workspace: Workspace) -> str:
         if self.directory is not None:
             return await workspace.resolve(self.directory)
-        if not supports_commands(workspace):
-            return await workspace.resolve(_FILESYSTEM_ONLY_SUBDIR)
-        result = await workspace.run(
-            f'd="${{TMPDIR:-/tmp}}/{_WORKSPACE_SUBDIR}" && (umask 077 && mkdir -p "$d") && printf %s "$d"',
-            shell=True,
-            timeout=_DIRECTORY_TIMEOUT,
-        )
-        directory = posixpath.normpath(result.stdout)
-        if result.exit_code != 0 or not posixpath.isabs(directory):
-            raise WorkspaceError(result.stderr.strip() or 'The workspace has no writable temporary directory.')
-        return directory
+        return await metadata_dir(workspace, 'tool-output')
 
 
 @dataclass
 class LocalFileStore:
     """`OverflowStore` that writes each payload to a file on the host running the agent.
 
-    Use it for runs with no workspace attached; with a workspace, the default `WorkspaceStore`
-    keeps spills where the agent's other tools can see them.
+    Pass it as `store=` to keep spills on this machine, for instance for a run with no workspace;
+    with a workspace, the default `WorkspaceStore` keeps spills where the agent's other tools can
+    see them.
 
     The handle equals the key: a relative `run_id/tool_call_id.retry` path under
     `base_dir`. The root is stable and shareable on purpose -- a later agent or run can

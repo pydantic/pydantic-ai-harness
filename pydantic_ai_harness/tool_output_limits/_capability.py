@@ -14,7 +14,7 @@ from pydantic_ai.messages import ToolCallPart, ToolReturn, ToolReturnContent, Us
 from pydantic_ai.models import AbstractModel, Model
 from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets import AgentToolset
-from pydantic_ai.workspaces import WorkspaceError
+from pydantic_ai.workspaces import WorkspaceError, WorkspaceReadOnlyError
 
 from pydantic_ai_harness._usage import reserved_usage_limits
 from pydantic_ai_harness._workspace import raise_tool_failure
@@ -36,7 +36,7 @@ from pydantic_ai_harness.tool_output_limits._payload import (
     to_text,
     truncate_text,
 )
-from pydantic_ai_harness.tool_output_limits._store import LocalFileStore, OverflowStore, WorkspaceStore
+from pydantic_ai_harness.tool_output_limits._store import OverflowStore, WorkspaceStore
 
 READ_TOOL_NAME = 'read_tool_result'
 """Name of the registered read-back tool. Its own returns are exempt from reduction."""
@@ -53,6 +53,15 @@ errors, and structure. Respond ONLY with the summary, no preamble.
 {output}
 </output>\
 """
+
+
+def _spills(action: Action | None) -> bool:
+    """Whether `action`, or a fallback it chains to, spills to the store."""
+    while action is not None:
+        if isinstance(action, Spill):
+            return True
+        action = None if isinstance(action, Passthrough) else action.then
+    return False
 
 
 def _default_bands() -> list[Band]:
@@ -142,8 +151,9 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     store: OverflowStore | WorkspaceStore | None = None
     """Backend for spilled payloads.
 
-    Defaults to a `WorkspaceStore` in the run's workspace, or a `LocalFileStore` on the host for a
-    run with no workspace attached.
+    Defaults to a `WorkspaceStore` in the run's workspace. When the bands can spill and no store
+    has a workspace to write to, the run fails at its start: attach a workspace, or pass
+    `store=LocalFileStore()` to keep spills on this machine.
     """
 
     strip_ansi: bool = False
@@ -165,14 +175,11 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
     id: str | None = 'tool_output_limits'
 
     _store: OverflowStore | WorkspaceStore = field(init=False, repr=False)
-    _host_store: LocalFileStore | None = field(init=False, repr=False)
     _bands: list[Band] = field(init=False, repr=False)
     _per_tool: dict[str, list[Band]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._store = self.store if self.store is not None else WorkspaceStore()
-        # Only the default falls back: an explicitly chosen store is used as given.
-        self._host_store = LocalFileStore() if self.store is None else None
         self._bands = self._prepare_bands(self.bands)
         self._per_tool = {name: self._prepare_bands(bands) for name, bands in self.per_tool.items()}
 
@@ -183,6 +190,21 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
             if band.over < 0:
                 raise ValueError('Band.over must be non-negative.')
         return sorted(bands, key=lambda b: b.over, reverse=True)
+
+    async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
+        """Fail the run at its start when a band can spill but no store has a workspace to write to."""
+        store = self._store
+        if (
+            isinstance(store, WorkspaceStore)
+            and store.workspace is None
+            and not ctx.workspace.attached
+            and any(_spills(band.action) for bands in (self._bands, *self._per_tool.values()) for band in bands)
+        ):
+            raise UserError(
+                "`ToolOutputLimits` spills oversized tool output to the run's workspace, but none is attached "
+                "to this run. Attach one, such as `LocalWorkspace('.')`, or pass `store=LocalFileStore()` "
+                'to keep spills on this machine.'
+            )
 
     # --- toolset ---
 
@@ -207,7 +229,7 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
                 from_end: Count `offset`/`limit` from the end of the result.
                 pattern: Optional literal substring; only lines containing it are returned.
             """
-            store = self._store_for(ctx)
+            store = self._store
 
             async def read(handle: str) -> bytes:
                 if isinstance(store, WorkspaceStore):
@@ -217,12 +239,6 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
             return await _read_slice(read, handle, offset, limit, from_end, pattern)
 
         return FunctionToolset([read_tool_result])
-
-    def _store_for(self, ctx: RunContext[AgentDepsT]) -> OverflowStore | WorkspaceStore:
-        """The store for this run: the default spills to the host when the run has no workspace."""
-        if self._host_store is not None and not ctx.workspace.attached:
-            return self._host_store
-        return self._store
 
     # --- reduction ---
 
@@ -425,14 +441,15 @@ class ToolOutputLimits(AbstractCapability[AgentDepsT]):
         unit: _Unit,
     ) -> tuple[str | None, str | None]:
         key = _handle_key(ctx, call, unit.suffix)
-        store = self._store_for(ctx)
+        store = self._store
         try:
             if isinstance(store, WorkspaceStore):
                 handle = await store.write(ctx.workspace, key, unit.data)
             else:
                 handle = await store.write(key, unit.data)
-        except UserError as error:
-            # Typically no workspace is attached to the run; say so rather than degrading quietly.
+        except (UserError, WorkspaceReadOnlyError) as error:
+            # A read-only workspace, or none at all (a deferred-loaded capability skips `before_run`):
+            # say so rather than degrading quietly.
             warnings.warn(f'ToolOutputLimits: could not spill a {call.tool_name!r} result: {error}', stacklevel=2)
             return await self._fallback(ctx, call, action.then, unit)
         except Exception:

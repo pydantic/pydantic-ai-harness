@@ -7,7 +7,7 @@ from pydantic_ai.capabilities import AbstractCapability, Capability, CombinedCap
 from pydantic_ai.tools import AgentDepsT
 
 from pydantic_ai_harness.subagents import SubAgent, SubAgents
-from pydantic_ai_harness.tool_output_limits import ToolOutputLimits
+from pydantic_ai_harness.tool_output_limits import LocalFileStore, ToolOutputLimits
 
 DEFAULT_RESEARCHER_INSTRUCTIONS = """\
 Search broadly before drawing conclusions.
@@ -19,6 +19,11 @@ Distinguish sourced facts from your own inference.
 """Default instructions for `Researcher`."""
 
 
+def _output_limits() -> ToolOutputLimits[AgentDepsT]:
+    # Research runs need no workspace, so spills stay on this machine.
+    return ToolOutputLimits[AgentDepsT](store=LocalFileStore())
+
+
 def _researcher() -> SubAgent[AgentDepsT]:
     agent = Agent[AgentDepsT](  # pyright: ignore[reportCallIssue, reportArgumentType]
         name='researcher',
@@ -26,7 +31,7 @@ def _researcher() -> SubAgent[AgentDepsT]:
         capabilities=[
             WebSearch[AgentDepsT](local=True),
             WebFetch[AgentDepsT](local=True),
-            ToolOutputLimits[AgentDepsT](),
+            _output_limits(),
         ],
     )
     return SubAgent(agent)
@@ -57,5 +62,5 @@ class Researcher(CombinedCapability[AgentDepsT]):
         )
         if delegates:
             capabilities.append(SubAgents[AgentDepsT](agents=delegates, agent_folders=None))
-        capabilities.append(ToolOutputLimits[AgentDepsT]())
+        capabilities.append(_output_limits())
         super().__init__(capabilities)

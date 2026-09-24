@@ -3,21 +3,18 @@
 from __future__ import annotations
 
 import dataclasses
-import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
-from pydantic_ai.exceptions import ToolFailed
+from pydantic_ai.exceptions import ToolFailed, UserError
 from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.workspaces import (
-    CommandResult,
     LocalWorkspaceBackend,
     Workspace,
-    WorkspaceCommand,
     WorkspaceError,
     WorkspaceFileEntry,
     WorkspaceRef,
@@ -26,6 +23,7 @@ from pydantic_ai.workspaces import (
 from pydantic_ai_harness.tool_output_limits import (
     READ_TOOL_NAME,
     Band,
+    LocalFileStore,
     Spill,
     ToolOutputLimits,
     Truncate,
@@ -77,37 +75,23 @@ class _FilesystemOnly:
         return await self._local.list_dir(path)  # pragma: no cover - not used by the store
 
     async def make_dir(self, path: str) -> None:
-        await self._local.make_dir(path)  # pragma: no cover - not used by the store
+        await self._local.make_dir(path)
 
     async def remove(self, path: str) -> None:
         await self._local.remove(path)  # pragma: no cover - not used by the store
 
     async def exists(self, path: str) -> bool:
-        return await self._local.exists(path)  # pragma: no cover - not used by the store
-
-
-class _TempDirCommand(LocalWorkspaceBackend):
-    """A local backend whose commands all return one fixed result."""
-
-    def __init__(self, working_dir: Path, result: CommandResult) -> None:
-        super().__init__(working_dir)
-        self.result = result
-
-    async def run(
-        self,
-        command: WorkspaceCommand,
-        *,
-        shell: bool = False,
-        cwd: str | None = None,
-        env: Mapping[str, str] | None = None,
-        timeout: float | None = None,
-    ) -> CommandResult:
-        return self.result
+        return await self._local.exists(path)
 
 
 class _FailingRead(LocalWorkspaceBackend):
     async def read_bytes(self, path: str) -> bytes:
         raise WorkspaceError('sandbox refused the read')
+
+
+def _call_big_tool(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    """Call `big_tool` once, then finish."""
+    return ModelResponse(parts=[TextPart('done') if _returns(messages, 'big_tool') else ToolCallPart('big_tool', {})])
 
 
 @dataclasses.dataclass
@@ -116,11 +100,9 @@ class _Ctx:
 
 
 class TestDefaultStore:
-    async def test_spill_and_read_back_through_the_workspace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    async def test_spill_and_read_back_through_the_workspace(self, tmp_path: Path):
         work = tmp_path / 'work'
         work.mkdir()
-        sandbox_tmp = tmp_path / 'sandbox-tmp'
-        monkeypatch.setenv('TMPDIR', str(sandbox_tmp))
         payload = '\n'.join(f'line {i}' for i in range(500))
 
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -146,13 +128,12 @@ class TestDefaultStore:
         [spilled] = _returns(result.all_messages(), 'big_tool')
         assert spilled.metadata is not None
         handle = spilled.metadata['overflow_handle']
-        assert handle.startswith(f'{sandbox_tmp}/pydantic-ai-harness/tool-output/')
+        assert handle.startswith(f'{work}/.pydantic-ai-harness/tool-output/')
         assert Path(handle).read_text() == payload
-        assert oct((sandbox_tmp / 'pydantic-ai-harness' / 'tool-output').stat().st_mode & 0o777) == '0o700'
+        assert (work / '.pydantic-ai-harness' / '.gitignore').read_text() == '*\n'
         assert result.output == f'[handle {handle!r}: 500 matching line(s); showing 2]\nline 0\nline 1'
 
-    async def test_no_workspace_spills_to_the_host(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setattr(tempfile, 'tempdir', str(tmp_path))
+    async def test_host_store_spills_without_a_workspace(self, tmp_path: Path):
         payload = '\n'.join(f'line {i}' for i in range(500))
 
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
@@ -164,7 +145,8 @@ class TestDefaultStore:
                 return ModelResponse(parts=[ToolCallPart(READ_TOOL_NAME, {'handle': handle, 'limit': 2})])
             return ModelResponse(parts=[ToolCallPart('big_tool', {})])
 
-        agent = Agent(FunctionModel(respond), capabilities=[ToolOutputLimits(bands=[Band(over=100, action=Spill())])])
+        limits = ToolOutputLimits(bands=[Band(over=100, action=Spill())], store=LocalFileStore(base_dir=tmp_path))
+        agent = Agent(FunctionModel(respond), capabilities=[limits])
 
         @agent.tool_plain
         def big_tool() -> str:
@@ -175,28 +157,42 @@ class TestDefaultStore:
         [spilled] = _returns(result.all_messages(), 'big_tool')
         assert spilled.metadata is not None
         handle = spilled.metadata['overflow_handle']
-        assert not handle.startswith('/')
+        assert (tmp_path / handle).read_text() == payload
         assert result.output == f'[handle {handle!r}: 500 matching line(s); showing 2]\nline 0\nline 1'
 
-    async def test_explicit_workspace_store_without_workspace_warns_and_falls_back(self):
-        agent = Agent(
-            FunctionModel(
-                lambda messages, info: ModelResponse(
-                    parts=[TextPart('done') if _returns(messages, 'big_tool') else ToolCallPart('big_tool', {})]
-                )
-            ),
-            capabilities=[
-                ToolOutputLimits(
-                    bands=[Band(over=100, action=Spill(then=Truncate(max_chars=150)))], store=WorkspaceStore()
-                )
-            ],
-        )
+    @pytest.mark.parametrize('store', [None, WorkspaceStore()], ids=['default', 'explicit'])
+    async def test_spilling_without_a_workspace_fails_the_run(self, store: WorkspaceStore | None):
+        agent = Agent(FunctionModel(_call_big_tool), capabilities=[ToolOutputLimits(store=store)])
+        with pytest.raises(UserError, match=r'none is attached to this run.*store=LocalFileStore\(\)'):
+            await agent.run('go')
+
+    async def test_store_with_its_own_workspace_needs_none_from_the_run(self, tmp_path: Path):
+        store = WorkspaceStore(workspace=local_workspace(tmp_path))
+        agent = Agent(FunctionModel(_call_big_tool), capabilities=[ToolOutputLimits(store=store)])
+
+        @agent.tool_plain
+        def big_tool() -> str:
+            return 'x' * 20_000
+
+        result = await agent.run('go')
+
+        [spilled] = _returns(result.all_messages(), 'big_tool')
+        assert spilled.metadata is not None
+        assert spilled.metadata['overflow_handle'].startswith(f'{tmp_path}/.pydantic-ai-harness/tool-output/')
+
+    def test_store_workspace_must_be_a_backend(self, tmp_path: Path):
+        with pytest.raises(TypeError, match=r'takes a workspace backend.*LocalWorkspaceBackend\('):
+            WorkspaceStore(workspace=LocalWorkspace(tmp_path))  # pyright: ignore[reportArgumentType]
+
+    async def test_read_only_workspace_warns_and_falls_back(self, tmp_path: Path):
+        limits = ToolOutputLimits(bands=[Band(over=100, action=Spill(then=Truncate(max_chars=150)))])
+        agent = Agent(FunctionModel(_call_big_tool), capabilities=[limits, LocalWorkspace(tmp_path, read_only=True)])
 
         @agent.tool_plain
         def big_tool() -> str:
             return 'x' * 1_000
 
-        with pytest.warns(UserWarning, match="could not spill a 'big_tool' result: No workspace is attached"):
+        with pytest.warns(UserWarning, match="could not spill a 'big_tool' result"):
             result = await agent.run('go')
 
         [part] = _returns(result.all_messages(), 'big_tool')
@@ -208,7 +204,8 @@ class TestDefaultStore:
                 return ModelResponse(parts=[TextPart(str(read[0].content))])
             return ModelResponse(parts=[ToolCallPart(READ_TOOL_NAME, {'handle': 'call-1'})])
 
-        result = await Agent(FunctionModel(respond), capabilities=[ToolOutputLimits()]).run('go')
+        limits = ToolOutputLimits(bands=[Band(over=100, action=Truncate())])
+        result = await Agent(FunctionModel(respond), capabilities=[limits]).run('go')
         assert result.output.startswith("[No stored tool result for handle 'call-1'.")
 
     async def test_workspace_failure_on_read_is_a_failed_tool_call(self, tmp_path: Path):
@@ -248,15 +245,3 @@ class TestWorkspaceStore:
         handle = await store.write(workspace, 'run/call.0', b'data')
         assert handle == f'{tmp_path.resolve()}/.pydantic-ai-harness/tool-output/run/call.0'
         assert await store.read(workspace, handle) == b'data'
-
-    @pytest.mark.parametrize(
-        ('result', 'message'),
-        [
-            (CommandResult(exit_code=1, stdout='', stderr='mkdir: denied\n'), 'mkdir: denied'),
-            (CommandResult(exit_code=0, stdout='relative/dir', stderr=''), 'no writable temporary directory'),
-        ],
-    )
-    async def test_unusable_temp_dir_raises(self, tmp_path: Path, result: CommandResult, message: str):
-        workspace = Workspace(_TempDirCommand(tmp_path, result))
-        with pytest.raises(WorkspaceError, match=message):
-            await WorkspaceStore().write(workspace, 'run/call.0', b'data')

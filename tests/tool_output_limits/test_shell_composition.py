@@ -28,7 +28,7 @@ def anyio_backend() -> str:
 
 
 @pytest.mark.parametrize('output_chars', [6_000, 25_000, 120_000], ids=['truncate', 'spill', 'native-cap-then-spill'])
-async def test_shell_stacking_recipe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output_chars: int):
+async def test_shell_stacking_recipe(tmp_path: Path, output_chars: int):
     executable = Path(sys.executable).as_posix()
     command = f'"{executable}" -c "import sys; sys.stdout.write(\'x\' * {output_chars}); sys.exit(7)"'
 
@@ -37,12 +37,11 @@ async def test_shell_stacking_recipe(tmp_path: Path, monkeypatch: pytest.MonkeyP
             return ModelResponse(parts=[TextPart('done')])
         return ModelResponse(parts=[ToolCallPart('run_command', {'command': command})])
 
-    monkeypatch.setenv('TMPDIR', str(tmp_path / 'sandbox-tmp'))
     tail = Truncate(max_chars=4_000, strategy=TruncationStrategy.tail)
     agent = Agent(
         FunctionModel(respond),
         capabilities=[
-            Shell(cwd=tmp_path, allowed_commands=[executable], max_output_chars=100_000),
+            Shell(allowed_commands=[executable], max_output_chars=100_000),
             ToolOutputLimits(
                 bands=[],
                 per_tool={
@@ -68,7 +67,7 @@ async def test_shell_stacking_recipe(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert 'read_tool_result' in part.content
         assert part.metadata is not None
         handle = part.metadata['overflow_handle']
-        assert handle.startswith(f'{tmp_path}/sandbox-tmp/pydantic-ai-harness/tool-output/')
+        assert handle.startswith(f'{tmp_path}/.pydantic-ai-harness/tool-output/')
         stored = Path(handle).read_text()
         original = f'[stdout]\n{"x" * output_chars}\n[exit code: 7]'
         if output_chars == 25_000:
