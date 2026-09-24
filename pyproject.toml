@@ -46,12 +46,12 @@ cli = [
 ]
 code-mode = [
     "pydantic-ai-slim[duckduckgo]>=2.44.0",
-    "pydantic-monty>=0.0.23",
+    "pydantic-monty>=0.0.23,<1",
 ]
 # Extras metadata has no native redirect syntax, so aliases are represented as duplicate extras.
 codemode = [
     "pydantic-ai-slim[duckduckgo]>=2.44.0",
-    "pydantic-monty>=0.0.23",
+    "pydantic-monty>=0.0.23,<1",
 ]
 researcher = [
     "pydantic-ai-slim[duckduckgo,web-fetch]>=2.44.0",
@@ -70,7 +70,7 @@ modal = [
     "modal>=1.5.0",
 ]
 dynamic-workflow = [
-    "pydantic-monty>=0.0.23",
+    "pydantic-monty>=0.0.23,<1",
 ]
 acp = [
     # The SDK breaks across minors, so cap per minor.
@@ -109,8 +109,26 @@ prompt-injection-defender = [
 prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
+github = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
+slack = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
 coder = [
     "ripgrep==14.1.0 ; sys_platform != 'android'",
+]
+logfire-mcp = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
+linear = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
+notion = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
+]
+google-workspace = [
+    "pydantic-ai-slim[mcp]>=2.44.0",
 ]
 composio = [
     "composio>=0.18.0,<1",
@@ -207,7 +225,7 @@ extend-select = ['Q', 'RUF100', 'C90', 'UP', 'I', 'D', 'TID251', 'PLC0415']
 # tell those from an accidental function-scoped import, so it is off for the package
 # and enforced in tests, where every occurrence was accidental.
 'pydantic_ai_harness/**/*.py' = ['PLC0415']
-# `mcp` and `fastmcp` ship only with the `stackone` extra, so slim CI cannot import
+# `mcp` and `fastmcp` ship only with optional extras, so slim CI cannot import
 # them at module scope; these tests defer the import on purpose.
 'tests/stackone/**/*.py' = ['PLC0415']
 

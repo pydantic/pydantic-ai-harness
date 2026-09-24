@@ -3570,15 +3570,30 @@ dynamic-workflow = [
 exa = [
     { name = "exa-py" },
 ]
+github = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
+]
+google-workspace = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
+]
+linear = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
+]
 logfire = [
     { name = "logfire" },
     { name = "pydantic-ai-slim", extra = ["spec"] },
+]
+logfire-mcp = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
 ]
 modal = [
     { name = "modal" },
 ]
 mongodb = [
     { name = "pymongo" },
+]
+notion = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
 ]
 playwright = [
     { name = "idna" },
@@ -3595,6 +3610,9 @@ researcher = [
 ]
 skills = [
     { name = "pyyaml" },
+]
+slack = [
+    { name = "pydantic-ai-slim", extra = ["mcp"] },
 ]
 stackone = [
     { name = "fastmcp" },
@@ -3654,12 +3672,18 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["duckduckgo"], marker = "extra == 'codemode'", specifier = ">=2.44.0" },
     { name = "pydantic-ai-slim", extras = ["duckduckgo", "web-fetch"], marker = "extra == 'researcher'", specifier = ">=2.44.0" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'composio'", specifier = ">=2.44.0" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'github'", specifier = ">=2.44.0" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'google-workspace'", specifier = ">=2.44.0" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'linear'", specifier = ">=2.44.0" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'logfire-mcp'", specifier = ">=2.44.0" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'notion'", specifier = ">=2.44.0" },
+    { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'slack'", specifier = ">=2.44.0" },
     { name = "pydantic-ai-slim", extras = ["mcp"], marker = "extra == 'stackone'", specifier = ">=2.18.0" },
     { name = "pydantic-ai-slim", extras = ["spec"], marker = "extra == 'logfire'", specifier = ">=2.18.0" },
     { name = "pydantic-ai-slim", extras = ["temporal"], marker = "extra == 'temporal'" },
-    { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.23" },
-    { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.23" },
-    { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.23" },
+    { name = "pydantic-monty", marker = "extra == 'code-mode'", specifier = ">=0.0.23,<1" },
+    { name = "pydantic-monty", marker = "extra == 'codemode'", specifier = ">=0.0.23,<1" },
+    { name = "pydantic-monty", marker = "extra == 'dynamic-workflow'", specifier = ">=0.0.23,<1" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.17.0" },
     { name = "pyyaml", marker = "extra == 'skills'", specifier = ">=6.0.2" },
     { name = "ripgrep", marker = "sys_platform != 'android' and extra == 'coder'", specifier = "==14.1.0" },
@@ -3667,7 +3691,7 @@ requires-dist = [
     { name = "stackone-defender", extras = ["onnx"], marker = "python_full_version >= '3.11' and extra == 'prompt-injection-defender-ml'", specifier = ">=0.7.3,<0.8" },
     { name = "youdotcom", marker = "extra == 'youdotcom'", specifier = ">=3.1.2,<4" },
 ]
-provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "coder", "composio", "dbos", "dynamic-workflow", "exa", "logfire", "modal", "mongodb", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "stackone", "temporal", "youdotcom"]
+provides-extras = ["acp", "anthropic", "aws-lambda", "browser-use", "cli", "code-mode", "codemode", "coder", "composio", "dbos", "dynamic-workflow", "exa", "github", "google-workspace", "linear", "logfire", "logfire-mcp", "modal", "mongodb", "notion", "playwright", "prompt-injection-defender", "prompt-injection-defender-ml", "researcher", "skills", "slack", "stackone", "temporal", "youdotcom"]
 
 [package.metadata.requires-dev]
 dev = [
