@@ -83,7 +83,7 @@ class Deps:
 
 
 def slack(ctx: RunContext[Deps]) -> Slack[Deps] | None:
-    if ctx.deps.slack_user_token is None:
+    if not ctx.deps.slack_user_token:
         return None
     return Slack(auth=ctx.deps.slack_user_token, read_only=ctx.deps.read_only)
 
