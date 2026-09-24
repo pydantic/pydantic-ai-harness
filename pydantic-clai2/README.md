@@ -114,8 +114,8 @@ tool side effects cannot be undone.
 
 ## Shell commands with `!`
 
-A line that starts with `!`, after trimming surrounding whitespace, runs in your
-shell instead of starting an agent turn:
+A line that starts with `!`, after trimming surrounding whitespace, runs in the
+system shell instead of starting an agent turn:
 
 ```text
 > !git status
@@ -125,8 +125,9 @@ Shell passthrough, not sent to the agent
 Done (0.1s)
 ```
 
-The command runs through the platform shell in CLAI's working directory, with
-the terminal's input and output, so interactive programs and pagers work. CLAI
+The command runs through the system shell (`/bin/sh -c` on POSIX, `cmd.exe` on
+Windows), not your login shell, so zsh or fish syntax and shell aliases are not
+available. It runs in CLAI's working directory, with the terminal's input and output, so interactive programs and pagers work. CLAI
 reports `Done` or the exit code with the elapsed time. Ctrl-C interrupts the
 command and returns to the prompt. The command shares CLAI's process group, so
 every process it started receives the Ctrl-C from the terminal. If the shell

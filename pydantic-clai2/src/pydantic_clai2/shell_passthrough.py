@@ -1,4 +1,4 @@
-"""Run `!command` input in the user's shell instead of starting an agent turn."""
+"""Run `!command` input in the system shell instead of starting an agent turn."""
 
 import asyncio
 import contextlib
@@ -10,7 +10,7 @@ from rich.text import Text
 from . import theme
 from .interrupts import Interrupts
 
-HELP = '!COMMAND: Run COMMAND in your shell; it is not sent to the agent'
+HELP = '!COMMAND: Run COMMAND with the system shell (/bin/sh, or cmd.exe on Windows); it is not sent to the agent'
 
 # Matches `subprocess.run`: a Ctrl-C'd child gets this long to exit on its own SIGINT before it is killed.
 _INTERRUPT_GRACE = 0.25

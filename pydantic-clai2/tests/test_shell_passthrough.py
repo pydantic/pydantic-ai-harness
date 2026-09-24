@@ -1,4 +1,4 @@
-"""`!command` input runs in the user's shell and never starts an agent turn."""
+"""`!command` input runs in the system shell and never starts an agent turn."""
 
 import io
 import time
@@ -106,4 +106,4 @@ class TestShellPassthrough:
 
     async def test_help_mentions_passthrough(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         text = await shell_session(tmp_path, monkeypatch, ['/help', '/exit'])
-        assert '!COMMAND: Run COMMAND in your shell' in text
+        assert '!COMMAND: Run COMMAND with the system shell' in text
