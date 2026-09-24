@@ -86,6 +86,13 @@ class TestPostHog:
         assert _http_transport(toolset).url == 'https://mcp.posthog.com/mcp'
         assert bearer(toolset) == 'Bearer posthog-key'
 
+    @pytest.mark.parametrize(('settings', 'include'), [({}, True), ({'include_instructions': False}, False)])
+    def test_hosted_connection_forwards_include_instructions(self, settings: dict[str, Any], include: bool) -> None:
+        # `MCPToolset` defaults to False, so this proves the capability passes its own setting on.
+        toolset = PostHog(auth='posthog-key', **settings).get_toolset()
+        assert isinstance(toolset, MCPToolset)
+        assert toolset.include_instructions is include
+
     def test_environment_token(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv('POSTHOG_PERSONAL_API_KEY', 'environment-key')
         assert bearer(PostHog().get_toolset()) == 'Bearer environment-key'
