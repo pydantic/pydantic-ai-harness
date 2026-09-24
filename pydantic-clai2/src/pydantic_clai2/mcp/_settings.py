@@ -1,5 +1,6 @@
 """Server configuration models, in the JSON shape Code Puppy's `/mcp` form edits."""
 
+import logging
 import os
 import warnings
 from collections.abc import Mapping
@@ -17,6 +18,10 @@ ServerType = Literal['stdio', 'http', 'sse']
 OAUTH_TIMEOUT = 330.0
 """Seconds to allow for the initialize handshake when it includes a browser sign-in."""
 
+# FastMCP logs the OAuth URL and callback server at INFO through its own handler, over the prompt.
+# The browser opening is the signal; an explicit `FASTMCP_LOG_LEVEL` still wins for debugging.
+if 'FASTMCP_LOG_LEVEL' not in os.environ:  # pragma: no branch
+    logging.getLogger('fastmcp').setLevel(logging.WARNING)
 # Tokens stay in memory on purpose; FastMCP warns about that whenever a transport is built.
 warnings.filterwarnings('ignore', message=r'Using in-memory token storage .*', category=UserWarning)
 

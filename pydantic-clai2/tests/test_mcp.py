@@ -1,6 +1,7 @@
 """MCP configuration, storage, lifecycle, and core-managed tool execution."""
 
 import io
+import logging
 import os
 import socket
 import stat
@@ -359,3 +360,7 @@ def test_plugin_settings_accept_the_old_transport_key() -> None:
     assert MCPSettings(servers={'x': StdioServer(type='stdio', command='x')}).servers['x'].type == 'stdio'
     host = make_host({'servers': {'old': {'transport': 'stdio', 'command': 'x'}}})
     assert len(host.capabilities) == 1
+
+
+def test_fastmcp_info_logging_stays_off_the_prompt() -> None:
+    assert logging.getLogger('fastmcp.client.auth.oauth').getEffectiveLevel() >= logging.WARNING
