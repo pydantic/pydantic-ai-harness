@@ -1590,6 +1590,55 @@ async def _wait_for_exit(pid: int) -> None:
             await anyio.sleep(0.01)  # pragma: lax no cover
 
 
+class _KillGroupOnExit(LocalWorkspaceBackend):
+    """A local backend that kills each command's process group the moment the command exits, as Sprites does."""
+
+    async def run(
+        self,
+        command: WorkspaceCommand,
+        *,
+        shell: bool = False,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
+        assert isinstance(command, str) and shell and cwd is not None
+        async with await anyio.open_process(
+            ['/bin/sh', '-c', command], cwd=cwd, env={**self._env, **(env or {})}, start_new_session=True
+        ) as process:
+            assert process.stdout is not None
+            stdout = b''.join([chunk async for chunk in process.stdout])
+            exit_code = await process.wait()
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        return CommandResult(exit_code=exit_code, stdout=stdout.decode(), stderr='')
+
+
+class TestLaunch:
+    async def test_the_job_survives_its_launcher_process_group_being_killed(self, tmp_path: Path) -> None:
+        # A `setsid` that detaches only after a delay: the launcher must wait for it before exiting.
+        bin_dir = tmp_path / 'bin'
+        bin_dir.mkdir()
+        slow_setsid = bin_dir / 'setsid'
+        slow_setsid.write_text(
+            f'#!{sys.executable}\n'
+            'import os, sys, time\n'
+            'time.sleep(0.5)\n'
+            'os.setsid()\n'
+            'os.execvp(sys.argv[1], sys.argv[1:])\n'
+        )
+        slow_setsid.chmod(0o755)
+        backend = _KillGroupOnExit(tmp_path, env={'PATH': f'{bin_dir}:{os.environ["PATH"]}'})
+        ts = _shell_toolset(tmp_path)
+        command_id = _parse_command_id(await ts.start_command(_run_context(Workspace(backend)), 'echo finished'))
+        job = ts._background[command_id].job
+        with anyio.fail_after(5):
+            while (status := await job.status())[0]:
+                await anyio.sleep(0.05)  # pragma: lax no cover
+        assert status == (False, 0)
+        assert Path(job.output_path).read_text() == 'finished\n'
+
+
 class TestReadBgOutputEdgeCases:
     async def test_missing_logs_read_as_empty(self, shell_dir: Path) -> None:
         """A log removed from the workspace reads as empty rather than failing the check."""
@@ -1862,7 +1911,7 @@ class TestDetachedJobRoundTrip:
         job_dir = Path(ts._background[command_id].job.directory)
         with anyio.fail_after(10):
             while 'started' not in (checked := await ts.check_command(_ctx(tmp_path), command_id)):
-                await anyio.sleep(0.05)
+                await anyio.sleep(0.05)  # pragma: lax no cover
         assert checked.endswith('[status: running]')
         assert '[stderr]\nwarn' in checked
         assert (tmp_path / 'made.txt').read_text() == 'made\n'

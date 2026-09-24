@@ -2,7 +2,7 @@
 
 `Job.launch` runs a short POSIX `sh` launcher through `workspace.run`. The launcher starts a
 wrapper shell in its own session (`setsid` when the workspace has it, else `nohup` in the
-launcher's process group) and returns at once. The wrapper publishes `status.json` --
+launcher's process group) and returns once the wrapper is running. The wrapper publishes `status.json` --
 `{"pid": <wrapper pid>, "exit_code": null}` -- before running the command, appends the
 command's output to log files next to it, and publishes the exit code when the command ends.
 Each job's files live in one owner-only directory below `.pydantic-ai-harness/shell` in the
@@ -71,14 +71,22 @@ else
   pid=$!; group=-
   if [ "$(ps -o pgid= -p $$ 2> /dev/null | tr -d ' ')" = "$$" ]; then group=$$; fi
 fi
+i=0
+while [ ! -e "$dir/status.json" ] && [ "$i" -lt 20 ]; do sleep 0.1 2> /dev/null || sleep 1; i=$((i + 1)); done
 printf '{"pid": %s, "exit_code": null}' "$pid" > "$dir/status.launch" && ln "$dir/status.launch" "$dir/status.json" 2> /dev/null
 rm -f "$dir/status.launch"
 echo "$pid $group"
 """
 """Start the wrapper detached and print `<pid> <process group or ->`.
 
+Before returning, the launcher waits (up to about two seconds) for the wrapper to publish its
+status, which it does only after `setsid` has detached it: some workspaces kill the launching
+command's whole process group as soon as it exits, which would take a wrapper that has not
+detached yet with it. `sleep 1` stands in where `sleep` takes only whole seconds.
+
 The launcher also publishes the running status, so the handles it returns name a status file
-that exists; `ln` refuses to replace one the wrapper already published, including a final one.
+that exists even when the wait runs out; `ln` refuses to replace one the wrapper already
+published, including a final one.
 
 Without `setsid`, the job stays in the launcher's process group. That group is only the job's
 to signal when the workspace started the launcher as a group leader (the local workspace starts
