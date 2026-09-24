@@ -14,7 +14,7 @@ from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset
 
-from pydantic_ai_harness._mcp import MCPClientFunc, per_run_client
+from pydantic_ai_harness._mcp import MCPClientFunc, per_run
 
 try:
     from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
@@ -46,7 +46,7 @@ class Composio(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> AbstractToolset[AgentDepsT]:
         """Build the session connection using Pydantic AI's MCP lifecycle."""
         if self.client is not None:
-            return per_run_client(self.client, self._from_client, id=self.id or 'composio')
+            return per_run(self.client, self._from_client, id=self.id or 'composio')
         if self.url is None:
             raise ValueError('Provide the Composio session URL or a configured client.')
         return MCPToolset(
