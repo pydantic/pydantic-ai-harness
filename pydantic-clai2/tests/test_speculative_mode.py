@@ -23,6 +23,7 @@ from pydantic_ai_harness.code_mode import (
     SpeculativeCallMissedEvent,
 )
 from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.filesystem import FileSystem
 from rich.console import Console
 
 from pydantic_clai2 import StreamRenderer
@@ -61,27 +62,11 @@ def streamed(respond: Callable[[list[ModelMessage], AgentInfo], ModelResponse]) 
     return FunctionModel(stream_function=stream)
 
 
-def fold_agent(model: FunctionModel, counters: SpeculationCounters) -> Agent[None, str]:
-    agent: Agent[None, str] = Agent(model, capabilities=speculative_capabilities(counters))
-
-    @agent.tool_plain
-    def read_file(path: str) -> str:
-        """Read."""
-        if path == 'missing.py':
-            raise FileNotFoundError(path)
-        return f'contents of {path}'
-
-    @agent.tool_plain
-    def write_file(path: str, content: str) -> str:
-        """Write."""
-        return 'written'  # pragma: no cover -- only the tool surface is inspected.
-
-    @agent.tool_plain
-    def edit_file(path: str) -> str:
-        """Edit."""
-        return 'edited'  # pragma: no cover -- only the tool surface is inspected.
-
-    return agent
+def fold_agent(model: FunctionModel, counters: SpeculationCounters, root: Path) -> Agent[None, str]:
+    """Coder's own `FileSystem` provides the read tools, as in CLAI, so they may speculate."""
+    for name in ('a.py', 'b.py'):
+        (root / name).write_text(f'contents of {name}\n')
+    return Agent(model, capabilities=[FileSystem(root_dir=root), *speculative_capabilities(counters)])
 
 
 def test_switch_supplies_the_sandbox_capabilities(tmp_path: Path) -> None:
@@ -138,23 +123,61 @@ class TestFold:
         assert sorted(tools) == ['edit_file', 'run_code', 'run_workflow', 'write_file']
         assert 'async def shell(' in (tools['run_code'].description or '')
 
-    async def test_writes_stay_native_and_guidance_rides_along(self) -> None:
+    async def test_writes_stay_native_and_guidance_rides_along(self, tmp_path: Path) -> None:
         seen: list[AgentInfo] = []
 
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             seen.append(info)
             return ModelResponse(parts=[TextPart('done')])
 
-        await fold_agent(streamed(respond), SpeculationCounters()).run('hi')
+        await fold_agent(streamed(respond), SpeculationCounters(), tmp_path).run('hi')
         [info] = seen
         assert sorted(tool.name for tool in info.function_tools) == ['edit_file', 'run_code', 'write_file']
         assert GUIDANCE.strip() in (info.instructions or '')
         assert (info.model_settings or {}).get('anthropic_eager_input_streaming') is True
 
+    @pytest.mark.parametrize(
+        'metadata',
+        [
+            pytest.param(None, id='lookalike-name'),
+            pytest.param({'read_only': True}, id='self-declared'),
+            pytest.param({'annotations': {'readOnlyHint': True}}, id='mcp-hint'),
+        ],
+    )
+    async def test_only_the_expected_capability_speculates(self, metadata: dict[str, object] | None) -> None:
+        counters = SpeculationCounters()
+        ran: list[str] = []
+        snippet = 'if False:\n    await read_file(path="a.py")\n'
+
+        async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
+            if len(messages) > 1:
+                yield 'done'
+                return
+            args = json.dumps({'code': snippet})
+            yield {0: DeltaToolCall(name='run_code')}
+            for offset in range(0, len(args), 8):
+                yield {0: DeltaToolCall(json_args=args[offset : offset + 8])}
+                await anyio.sleep(0)
+
+        def read_file(path: str) -> str:
+            """A plugin's side-effecting lookalike of Coder's `read_file`."""
+            ran.append(path)  # pragma: no cover -- the untaken branch must not launch it.
+            return path  # pragma: no cover
+
+        agent: Agent[None, str] = Agent(
+            FunctionModel(stream_function=stream),
+            tools=[Tool(read_file, metadata=metadata)],
+            capabilities=speculative_capabilities(counters),
+        )
+        with anyio.fail_after(10):
+            await agent.run('go')
+        assert ran == []
+        assert (counters.hits, counters.wasted) == (0, 0)
+
 
 class TestEagerTiming:
     @pytest.mark.parametrize('rekey', [False, True])
-    async def test_counts_speculative_hits_and_eager_overlap(self, rekey: bool) -> None:
+    async def test_counts_speculative_hits_and_eager_overlap(self, rekey: bool, tmp_path: Path) -> None:
         counters = SpeculationCounters()
         probe_started, stream_finished = anyio.Event(), anyio.Event()
         head = 'text = await read_file(path="a.py")\nwaited = await probe()\npad = 0\n'
@@ -177,7 +200,7 @@ class TestEagerTiming:
             yield {1: DeltaToolCall(json_args=args[split:])}
             stream_finished.set()
 
-        agent = fold_agent(FunctionModel(stream_function=stream), counters)
+        agent = fold_agent(FunctionModel(stream_function=stream), counters, tmp_path)
 
         @agent.tool_plain
         async def probe() -> str:
@@ -193,7 +216,7 @@ class TestEagerTiming:
         assert (counters.hits, counters.misses, counters.wasted) == (1, 0, 0)
         assert counters.eager_ms > 0
 
-    async def test_unstreamed_and_restarted_snippets_report_nothing(self) -> None:
+    async def test_unstreamed_and_restarted_snippets_report_nothing(self, tmp_path: Path) -> None:
         counters = SpeculationCounters()
         calls = iter(
             [
@@ -205,7 +228,7 @@ class TestEagerTiming:
         def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             return ModelResponse(parts=[next(calls, TextPart('done'))])
 
-        await fold_agent(streamed(respond), counters).run('go')
+        await fold_agent(streamed(respond), counters, tmp_path).run('go')
         assert counters.eager_ms == 0
         assert counters.misses == 1
 
@@ -262,7 +285,7 @@ except Exception:
 
 
 class TestSandboxCallDisplay:
-    async def test_calls_inside_run_code_render_like_direct_calls(self) -> None:
+    async def test_calls_inside_run_code_render_like_direct_calls(self, tmp_path: Path) -> None:
         counters = SpeculationCounters()
 
         async def stream(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[DeltaToolCalls | str]:
@@ -275,7 +298,7 @@ class TestSandboxCallDisplay:
                 yield {1: DeltaToolCall(json_args=args[offset : offset + 8])}
                 await anyio.sleep(0)
 
-        agent = fold_agent(FunctionModel(stream_function=stream), counters)
+        agent = fold_agent(FunctionModel(stream_function=stream), counters, tmp_path)
 
         @agent.tool_plain
         def flaky() -> str:

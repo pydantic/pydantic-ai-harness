@@ -7,8 +7,8 @@ tools marked with `code_arg_name` metadata native by default, so `SpeculativeExe
 that marker on `shell` only (`FOLDED_CODE_TOOLS`). Without it, a coding turn is all native `shell` calls
 and eager execution never starts a build or test while the model is still writing.
 
-Only the read-only tools in `SPECULATIVE_TOOLS` may launch speculatively. That allowlist is the
-safety contract: an early launch may run for a branch the snippet never takes, so it is reserved for
+Only the read-only tools in `SPECULATIVE_TOOLS`, provided by the capability listed there, may
+launch speculatively. That allowlist is the safety contract: an early launch may run for a branch the snippet never takes, so it is reserved for
 calls that are harmless to re-run or discard. Everything else waits for eager or normal
 execution.
 
@@ -18,6 +18,7 @@ the sandbox; anything remote goes through a wrapped tool such as `shell`.
 """
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 
 from pydantic_ai import RunContext
@@ -31,17 +32,25 @@ from pydantic_ai_harness.code_mode import (
     SpeculativeCallEvictedEvent,
     SpeculativeCallMissedEvent,
 )
+from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_monty import MountDir, OSAccess
 
-from .customization import read_clai_customization_guide
+from .customization import CustomizationGuide, read_clai_customization_guide
 from .eager_timing import NESTED_CALL, EagerExecutionCompletedEvent, EagerTiming
 from .sandbox_calls import SandboxCallFinishedEvent, SandboxCallStartedEvent
 from .speculation import SpeculationCounters
 
-SPECULATIVE_TOOLS = ('list_files', 'read_file', 'grep', read_clai_customization_guide.__name__)
-"""Pure with respect to the workspace, so safe to start early, re-run, or discard.
+SPECULATIVE_TOOLS: Mapping[str, type[object]] = {
+    'list_files': FileSystem,
+    'read_file': FileSystem,
+    'grep': FileSystem,
+    read_clai_customization_guide.__name__: CustomizationGuide,
+}
+"""Tools that are pure with respect to the workspace, so safe to start early, re-run, or discard,
+keyed to the capability that must provide them.
 
-The customization guide reads a file shipped inside the package and takes no arguments.
+A plugin or MCP tool can share one of these names when `Coder` is off, so the name alone does not
+vouch for it. The customization guide reads a file shipped inside the package and takes no arguments.
 """
 
 NATIVE_TOOLS = frozenset({'write_file', 'edit_file'})
@@ -125,6 +134,25 @@ def _sandboxed(ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> bool:
     return tool_def.name not in NATIVE_TOOLS
 
 
+def _declarations(ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> dict[str, object]:
+    """The tool's metadata as `CodeMode(speculate='declared')` should read it.
+
+    Only a `SPECULATIVE_TOOLS` entry from its expected capability is declared read-only; every
+    other tool's own `read_only` or MCP `readOnlyHint` claim is overridden, so the allowlist stays
+    Code Puppy's rather than whatever a plugin or MCP server says about itself.
+    """
+    metadata: dict[str, object] = dict(tool_def.metadata or {})
+    if tool_def.name in FOLDED_CODE_TOOLS:
+        metadata.pop('code_arg_name', None)
+    owner = SPECULATIVE_TOOLS.get(tool_def.name)
+    trusted = owner is not None and isinstance(ctx.capabilities.get(tool_def.capability_id or ''), owner)
+    metadata['read_only'] = trusted
+    annotations: Mapping[str, object] | None = tool_def.metadata and tool_def.metadata.get('annotations')
+    if annotations and not trusted:
+        metadata['annotations'] = {**annotations, 'readOnlyHint': False}
+    return metadata
+
+
 @dataclass
 class SpeculativeExecution(AbstractCapability[AgentDepsT]):
     """Fold code tools in, teach the snippet shape, stream tool arguments, and count outcomes."""
@@ -143,16 +171,11 @@ class SpeculativeExecution(AbstractCapability[AgentDepsT]):
         return {'anthropic_eager_input_streaming': True}
 
     async def prepare_tools(self, ctx: RunContext[AgentDepsT], tool_defs: list[ToolDefinition]) -> list[ToolDefinition]:
-        """Clear `code_arg_name` on `FOLDED_CODE_TOOLS` so `CodeMode` sandboxes them.
+        """Fold `FOLDED_CODE_TOOLS` in and declare which tools may launch speculatively.
 
         Core runs this inside every capability's wrapper toolset, so `CodeMode` sees the result.
         """
-        return [
-            replace(tool_def, metadata={k: v for k, v in tool_def.metadata.items() if k != 'code_arg_name'})
-            if tool_def.name in FOLDED_CODE_TOOLS and tool_def.metadata and 'code_arg_name' in tool_def.metadata
-            else tool_def
-            for tool_def in tool_defs
-        ]
+        return [replace(tool_def, metadata=_declarations(ctx, tool_def)) for tool_def in tool_defs]
 
     async def on_event(self, ctx: RunContext[AgentDepsT], *, event: AgentStreamEvent) -> None:
         """Consume telemetry without retaining generated code or rendering anything."""
@@ -249,7 +272,8 @@ def speculative_capabilities(counters: SpeculationCounters) -> 'list[AbstractCap
     return [
         CodeMode(
             tools=_sandboxed,
-            speculate=SPECULATIVE_TOOLS,
+            # `SpeculativeExecution.prepare_tools` writes the declarations from `SPECULATIVE_TOOLS`.
+            speculate='declared',
             # Eager runs each streamed statement as it closes; speculation launches the
             # read-only calls beyond that frontier, and the eager feed claims them.
             eager=True,

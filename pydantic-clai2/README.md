@@ -1063,7 +1063,9 @@ is still writing:
   `read_clai_customization_guide` calls whose arguments are all literals the
   moment their line has streamed. Only these
   read-only tools speculate, because an early call may belong to a branch the
-  snippet never takes. Writes and shell commands never start speculatively.
+  snippet never takes. They must come from CLAI's own file tools and guide: a
+  plugin or MCP tool with the same name, or one that declares itself read-only,
+  waits like any other call. Writes and shell commands never start speculatively.
 
 The model gets instructions for writing snippets that benefit. On Anthropic
 models CLAI also sets `anthropic_eager_input_streaming`, since Anthropic
