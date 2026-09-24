@@ -298,6 +298,11 @@ COMBINE_POLICY: dict[str, Policy] = {
         'a durability engine is one per agent; `from_agent` rejects a second when the engine looks '
         'itself up, before any id is consulted'
     ),
+    'RenderWorkflows': Rejected(
+        'a durability engine is one per agent; it runs the same `from_agent` lookup while binding, so '
+        'a second is rejected as the agent is constructed rather than when something first asks for '
+        'the bound capability'
+    ),
     # -- No default `id`, but two never coexist anyway: their tool names collide. --
     'FileSystem': Collides(
         'its toolset registers `read_file` and friends under fixed names',

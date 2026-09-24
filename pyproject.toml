@@ -112,6 +112,9 @@ prompt-injection-defender = [
 prompt-injection-defender-ml = [
     "stackone-defender[onnx]>=0.7.3,<0.8 ; python_full_version >= '3.11'",
 ]
+render = [
+    "render>=1.1.0",
+]
 github = [
     "pydantic-ai-slim[mcp]>=2.44.0",
 ]

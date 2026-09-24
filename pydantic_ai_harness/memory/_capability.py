@@ -6,6 +6,7 @@ import hashlib
 from collections.abc import Callable
 from copy import copy
 from dataclasses import KW_ONLY, dataclass, field, replace
+from functools import cached_property
 from typing import Literal
 
 from pydantic_ai.agent.abstract import AgentInstructions
@@ -117,6 +118,9 @@ class Memory(AbstractCapability[AgentDepsT]):
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> Memory[AgentDepsT]:
         """Return a clone with scope resolution isolated to this run."""
+        # The tools are static even though their memory scope is run-specific.
+        # Initialize the cache before copying so durable engines see the same leaf.
+        self.get_toolset()
         clone = copy(self)
         clone._resolved_scope = None
         clone._resolved_scope = clone._resolve_scope(ctx)
@@ -126,6 +130,19 @@ class Memory(AbstractCapability[AgentDepsT]):
         """Return the cached run scope, or resolve one for direct toolset use."""
         if self._resolved_scope is not None:
             return self._resolved_scope
+        # The stable toolset holds the construction-time capability. Recover the
+        # active clone's scope without caching tenant state on that shared object.
+        resolved: tuple[MemoryStore, str] | None = None
+
+        def select_scope(capability: AbstractCapability[AgentDepsT]) -> None:
+            nonlocal resolved
+            if isinstance(capability, Memory) and capability.get_toolset() is self.get_toolset():
+                resolved = capability._resolved_scope
+
+        if ctx.root_capability is not None:
+            ctx.root_capability.apply(select_scope)
+        if resolved is not None:
+            return resolved
         return self._resolve_scope(ctx)
 
     def _resolve_scope(self, ctx: RunContext[AgentDepsT]) -> tuple[MemoryStore, str]:
@@ -137,6 +154,10 @@ class Memory(AbstractCapability[AgentDepsT]):
 
     def get_toolset(self) -> AgentToolset[AgentDepsT] | None:
         """Provide the stable `memory` toolset."""
+        return self._toolset
+
+    @cached_property
+    def _toolset(self) -> MemoryToolset[AgentDepsT]:
         return MemoryToolset(self)
 
     def get_instructions(self) -> AgentInstructions[AgentDepsT] | None:

@@ -23,6 +23,7 @@ from pydantic_ai.messages import (
     TextContent,
     TextPart,
     ToolCallPart,
+    ToolReturnPart,
     UserContent,
     UserPromptPart,
 )
@@ -1152,6 +1153,41 @@ class TestInjection:
         assert calls == 1
         await agent.run('second run')
         assert calls == 2
+
+    async def test_shared_static_tools_keep_concurrent_run_scopes_isolated(self) -> None:
+        stores = {tenant: InMemoryStore({f'{tenant}/main/MEMORY.md': tenant}) for tenant in ('first', 'second')}
+        resolutions: list[str] = []
+        both_started = asyncio.Event()
+        model_calls = 0
+
+        def resolver(ctx: RunContext[str]) -> MemoryStore:
+            resolutions.append(ctx.deps)
+            return stores[ctx.deps]
+
+        async def model(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            nonlocal model_calls
+            del info
+            returned = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
+            if returned:
+                return ModelResponse(parts=[TextPart(str(returned[-1].content))])
+            model_calls += 1
+            if model_calls == 2:
+                both_started.set()
+            await both_started.wait()
+            return ModelResponse(parts=[ToolCallPart('read_memory', {'file': 'MEMORY.md'})])
+
+        memory = Memory[str](store_resolver=resolver, namespace=lambda ctx: ctx.deps)
+        agent = Agent(FunctionModel(model), deps_type=str, capabilities=[memory])
+        first, second = await asyncio.wait_for(
+            asyncio.gather(agent.run('read', deps='first'), agent.run('read', deps='second')), timeout=5
+        )
+
+        assert first.output == 'first'
+        assert second.output == 'second'
+        assert sorted(resolutions) == ['first', 'second']
+        # A later run must resolve again instead of retaining either prior tenant.
+        assert (await agent.run('read', deps='first')).output == 'first'
+        assert resolutions.count('first') == 2
 
     async def test_out_of_scope_listing_is_rejected(self) -> None:
         with pytest.raises(RuntimeError, match='outside the requested scope'):
