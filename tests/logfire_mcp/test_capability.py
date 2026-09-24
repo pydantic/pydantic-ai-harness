@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 import pytest
@@ -19,7 +20,7 @@ from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.usage import RunUsage
 
-from pydantic_ai_harness.logfire_mcp import LogfireMCP
+from pydantic_ai_harness.logfire_mcp import LOGFIRE_EU_MCP_URL, LogfireMCP
 
 # MCP's test server leaves its lifespan annotation unresolved with pydantic-settings 2.15.
 pytestmark = pytest.mark.filterwarnings(
@@ -107,7 +108,12 @@ class TestLogfireMCP:
 
     def test_custom_client_owns_authentication(self) -> None:
         client = StreamableHttpTransport('https://example.com/mcp', auth=httpx.BasicAuth('user', 'secret'))
-        assert transport(LogfireMCP(client=client, auth='ignored')).auth is client.auth
+        assert transport(LogfireMCP(client=client)).auth is client.auth
+
+    @pytest.mark.parametrize('settings', [{'auth': 'key'}, {'auth': no_credential}, {'url': LOGFIRE_EU_MCP_URL}])
+    def test_client_cannot_be_combined_with_connection_settings(self, settings: dict[str, Any]) -> None:
+        with pytest.raises(UserError, match='`client` owns the connection'):
+            LogfireMCP(client='https://example.com/mcp', **settings)
 
     def test_credential_is_not_in_repr(self) -> None:
         assert 'secret-token' not in repr(LogfireMCP(auth='secret-token'))
