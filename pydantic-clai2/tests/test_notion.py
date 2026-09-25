@@ -329,6 +329,7 @@ async def test_cancelling_configure_cancels_an_open_key_picker(tmp_path: Path, m
         try:
             await anyio.sleep_forever()
         finally:
+            await anyio.sleep(0.2)  # a widget that takes a while to give the screen back
             finished.append(label)
         return None  # pragma: no cover -- unreachable; keeps the signature honest
 
@@ -339,7 +340,7 @@ async def test_cancelling_configure_cancels_an_open_key_picker(tmp_path: Path, m
             tasks.start_soon(shell.loader.configure, 'notion')
             await opened.wait()
             tasks.cancel_scope.cancel()
-    assert finished == [LABEL]
+    assert finished == [LABEL], 'configure returns only after the picker has closed'
 
 
 async def test_logout_forgets_the_sign_in_and_the_choice(

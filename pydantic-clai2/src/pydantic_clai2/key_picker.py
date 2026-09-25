@@ -8,6 +8,7 @@ menu's own thread.
 
 import asyncio
 import concurrent.futures
+import threading
 from dataclasses import dataclass, field
 
 from pydantic import SecretStr
@@ -72,7 +73,15 @@ def pick_key(loop: asyncio.AbstractEventLoop, *, name: str, label: str, runners:
     Stopping the worker cancels only the questions. The save runs on this thread after the user has decided,
     so a cancelled menu never leaves a key written without the `KeyReference` the caller records for it.
     """
-    asking = asyncio.run_coroutine_threadsafe(ask_key(name=name, label=label, runners=runners), loop)
+    finished = threading.Event()
+
+    async def ask() -> KeyReference | NewKey | None:
+        try:
+            return await ask_key(name=name, label=label, runners=runners)
+        finally:
+            finished.set()
+
+    asking = asyncio.run_coroutine_threadsafe(ask(), loop)
     while not worker_stopping():
         try:
             decision = asking.result(timeout=0.05)
@@ -80,6 +89,8 @@ def pick_key(loop: asyncio.AbstractEventLoop, *, name: str, label: str, runners:
             continue
         return _save(name, decision)
     asking.cancel()
+    # A cancelled future reports done at once; wait until `ask_key` has closed its widgets and released the screen.
+    finished.wait()
     return None
 
 
