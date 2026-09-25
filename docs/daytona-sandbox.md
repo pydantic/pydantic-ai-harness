@@ -85,7 +85,7 @@ from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder()])
 
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
-ref = result.workspace.ref  # None if no tool used the sandbox
+ref = result.workspace.ref  # store this, e.g. in your database
 
 later = agent.run_sync('Which capability would you add next, and where would it live?', workspace=ref)
 ```
