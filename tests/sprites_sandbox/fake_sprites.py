@@ -1,25 +1,30 @@
 """Controllable fake for the Sprites SDK boundary.
 
-The Sprite handles, clients and exception classes are the real ones from the installed SDK; only
-the network calls are replaced. Commands run for real: an exec operation runs its argv in a local
-subprocess, in its `dir` (`SpriteTransport.root` by default) and this process's environment, so
-commands share one host directory and deadlines are real. A command that
-cannot start completes without an exit status and with the error on stderr, as `op.error` does, and
-`signal()` reaches only the command's own process.
+The Sprite handles, clients, exception classes and the exec WebSocket protocol handler
+(`sprites.websocket.WSCommand`) are the real ones from the installed SDK; only the network calls
+are replaced. `SpriteTransport.connect` stands in for the `websockets` `connect` that `WSCommand`
+calls, so the SDK builds the real exec URL, sends stdin EOF, and reads the real frames. Commands run
+for real: an exec socket runs the URL's `cmd` argv in a local subprocess, in its `dir`
+(`SpriteTransport.root` by default) and this process's environment, so commands share one host
+directory and deadlines are real. Output streams back as STDOUT and STDERR frames, then an EXIT
+frame. Closing the socket kills a command that is still running, as a positive
+`max_run_after_disconnect` makes the Sprite do (the fake does it at once instead of after that time).
 
 Deletion follows the SDK: `destroy_sprite` (and `AsyncSprite.delete()`) returns once the API accepts
-the request, after which `get_sprite` raises `NotFoundError` and a control connection to the
-deleted Sprite fails its WebSocket handshake with HTTP 404 (`websockets.exceptions.InvalidStatus`).
+the request, after which `get_sprite` raises `NotFoundError` and an exec handshake with the deleted
+Sprite fails with HTTP 404 (`websockets.exceptions.InvalidStatus`, which the SDK parses into an
+`APIError`).
 """
 
 from __future__ import annotations
 
 import asyncio
-import signal
+import os
 import subprocess
 import threading
 from pathlib import Path
-from typing import BinaryIO
+from typing import IO
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import anyio
 from sprites import AsyncSprite, AsyncSpritesClient
@@ -28,123 +33,95 @@ from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
 
-
-class FakeOperation:
-    def __init__(self, transport: SpriteTransport, cmd: list[str], dir: str | None) -> None:
-        self.transport = transport
-        self.closed = False
-        self.stdout = b''
-        self.stderr = b''
-        self.process: subprocess.Popen[bytes] | None = None
-        try:
-            self.process = subprocess.Popen(
-                cmd,
-                cwd=dir or transport.root,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-        except OSError as error:
-            self.stderr = f'Error: {error}\n'.encode()
-        self._task = asyncio.create_task(asyncio.to_thread(self._execute))
-
-    def _execute(self) -> int:
-        if (process := self.process) is None:
-            return -1
-        assert process.stdout is not None and process.stderr is not None
-        stdout = bytearray()
-        stderr = bytearray()
-
-        def read_stream(source: BinaryIO, target: bytearray, output: str) -> None:
-            while chunk := source.read(1):
-                target.extend(chunk)
-                setattr(self, output, bytes(target))
-            source.close()
-
-        readers = [
-            threading.Thread(target=read_stream, args=(process.stdout, stdout, 'stdout')),
-            threading.Thread(target=read_stream, args=(process.stderr, stderr, 'stderr')),
-        ]
-        for reader in readers:
-            reader.start()
-        code = process.wait(timeout=10)
-        for reader in readers:
-            reader.join()
-        self.stdout, self.stderr = bytes(stdout), bytes(stderr)
-        return code
-
-    async def wait(self) -> int:
-        code = await asyncio.shield(self._task)
-        self.closed = True
-        if self.transport.connection_dropped:
-            return -1
-        return self.transport.exit_override if self.transport.exit_override is not None else code
-
-    async def signal(self, sig: str) -> None:
-        self.transport.signals.append(sig)
-        if self.transport.signal_error is not None:
-            raise self.transport.signal_error
-        assert self.process is not None
-        self.process.send_signal(getattr(signal, f'SIG{sig}'))
-
-    def get_stdout(self) -> bytes:
-        return self.stdout
-
-    def get_stderr(self) -> bytes:
-        return self.stderr
+_STDOUT, _STDERR, _EXIT = 1, 2, 3
 
 
 class FakeSocketTransport:
-    def __init__(self, transport: SpriteTransport) -> None:
-        self.transport = transport
+    def __init__(self, sprites: SpriteTransport) -> None:
+        self.sprites = sprites
 
     def abort(self) -> None:
-        self.transport.aborted += 1
+        self.sprites.aborted += 1
 
 
-class FakeSocket:
-    def __init__(self, transport: SpriteTransport) -> None:
-        self.transport = FakeSocketTransport(transport)
+class FakeExecSocket:
+    """One exec WebSocket, from the handshake to the EXIT frame."""
 
+    def __init__(self, sprites: SpriteTransport, url: str) -> None:
+        self.sprites = sprites
+        self.query = parse_qs(urlsplit(url).query)
+        self.transport = FakeSocketTransport(sprites)
+        # Read by the SDK when the stream ends without an EXIT frame.
+        self.close_code: int | None = None
+        self.close_reason: str | None = None
+        self.sent: list[bytes] = []
+        self._frames: asyncio.Queue[bytes | None] = asyncio.Queue()
+        self._loop = asyncio.get_running_loop()
+        self.process = subprocess.Popen(
+            self.query['cmd'],
+            cwd=self.query.get('dir', [str(sprites.root)])[0],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.thread = threading.Thread(target=self._execute)
+        self.thread.start()
 
-class FakeControlConnection:
-    transport: SpriteTransport
+    def _execute(self) -> None:
+        process = self.process
+        assert process.stdout is not None and process.stderr is not None
+        readers = [
+            threading.Thread(target=self._pump, args=(process.stdout, _STDOUT)),
+            threading.Thread(target=self._pump, args=(process.stderr, _STDERR)),
+        ]
+        for reader in readers:
+            reader.start()
+        code = process.wait()
+        for reader in readers:
+            reader.join()
+        if self.sprites.connection_dropped:
+            self.close_code = 1006
+            self._send(None)
+        else:
+            exit_code = code if self.sprites.exit_override is None else self.sprites.exit_override
+            self._send(bytes([_EXIT, exit_code % 256]))
 
-    def __init__(self, sprite: AsyncSprite) -> None:
-        self.sprite = sprite
-        # The SDK's read loop stores the exception that ended the connection here.
-        self.close_error = self.transport.connection_lost
-        self.closed = self.transport.connection_dropped
-        self.ws: FakeSocket | None = None
+    def _pump(self, source: IO[bytes], stream: int) -> None:
+        while chunk := os.read(source.fileno(), 4096):
+            self._send(bytes([stream]) + chunk)
+        source.close()
 
-    async def connect(self) -> None:
-        if self.transport.connect_error is not None:
-            raise self.transport.connect_error
-        if self.sprite.name not in self.transport.names:
-            raise InvalidStatus(Response(404, 'Not Found', Headers()))
-        self.ws = FakeSocket(self.transport)
+    def _send(self, frame: bytes | None) -> None:
+        self._loop.call_soon_threadsafe(self._frames.put_nowait, frame)
 
-    async def start_op(self, op: str, *, cmd: list[str], dir: str | None, stdin: bool) -> FakeOperation:
-        assert op == 'exec'
-        assert stdin is False
-        operation = FakeOperation(self.transport, cmd, dir)
-        self.transport.operations.append(operation)
-        self.transport.exec_started.set()
-        return operation
+    def __aiter__(self) -> FakeExecSocket:
+        return self
+
+    async def __anext__(self) -> bytes:
+        frame = await self._frames.get()
+        if frame is None:
+            raise StopAsyncIteration
+        return frame
+
+    async def send(self, message: bytes) -> None:
+        self.sent.append(message)
 
     async def close(self) -> None:
-        self.transport.control_close_started.set()
-        if self.transport.release_control_close is not None:
-            await self.transport.release_control_close.wait()
-        if self.transport.control_close_hang:
+        sprites = self.sprites
+        sprites.exec_close_started.set()
+        if sprites.release_exec_close is not None:
+            await sprites.release_exec_close.wait()
+        if sprites.exec_close_hang:
             await anyio.sleep(1)
-        if self.transport.control_close_error is not None:
-            raise self.transport.control_close_error
-        self.closed = True
-        self.transport.control_closes += 1
+        if sprites.exec_close_error is not None:
+            raise sprites.exec_close_error
+        sprites.exec_closes += 1
+        if self.process.poll() is None:
+            self.process.kill()
+        self._frames.put_nowait(None)
 
 
 class SpriteTransport:
-    """SDK acquisition fake; exec operations run in local subprocesses."""
+    """SDK acquisition and exec WebSocket fake; exec commands run in local subprocesses."""
 
     def __init__(self, root: Path) -> None:
         self.root = root
@@ -154,7 +131,7 @@ class SpriteTransport:
         self.release_create: asyncio.Event | None = None
         self.release_get: asyncio.Event | None = None
         self.clients: list[AsyncSpritesClient] = []
-        self.operations: list[FakeOperation] = []
+        self.execs: list[FakeExecSocket] = []
         self.exec_started = asyncio.Event()
         self.get_error: Exception | None = None
         self.close_error: Exception | None = None
@@ -162,23 +139,32 @@ class SpriteTransport:
         self.close_started = asyncio.Event()
         self.release_close: asyncio.Event | None = None
         self.connect_error: Exception | None = None
-        self.control_close_error: Exception | None = None
-        self.connection_lost: Exception | None = None
-        # The connection closes before the command reports an exit status.
+        # The socket closes before the command reports an exit status.
         self.connection_dropped = False
-        self.control_close_hang = False
-        self.control_close_started = asyncio.Event()
-        self.release_control_close: asyncio.Event | None = None
-        self.control_closes = 0
+        self.exec_close_error: Exception | None = None
+        self.exec_close_hang = False
+        self.exec_close_started = asyncio.Event()
+        self.release_exec_close: asyncio.Event | None = None
+        self.exec_closes = 0
         self.aborted = 0
         self.exit_override: int | None = None
-        self.signals: list[str] = []
-        self.signal_error: Exception | None = None
 
     def client(self, token: str) -> AsyncSpritesClient:
         client = AsyncSpritesClient(token=token)
         self.clients.append(client)
         return client
+
+    async def connect(self, url: str, **kwargs: object) -> FakeExecSocket:
+        if self.connect_error is not None:
+            raise self.connect_error
+        # /v1/sprites/{name}/exec
+        name = unquote(urlsplit(url).path.split('/')[3])
+        if name not in self.names:
+            raise InvalidStatus(Response(404, 'Not Found', Headers()))
+        socket = FakeExecSocket(self, url)
+        self.execs.append(socket)
+        self.exec_started.set()
+        return socket
 
     async def get(self, client: AsyncSpritesClient, name: str) -> AsyncSprite:
         if self.get_error is not None:

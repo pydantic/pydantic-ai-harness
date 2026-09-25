@@ -3,8 +3,8 @@
 The fake-backed suites cover the harness-owned logic: deadline handling, cancellation, and
 exception mapping. This live tier admits only what a correctly written fake could not catch: real
 process execution in a Sprite, `env` layered on the Sprite's environment, output reaching the
-client before a command ends, SIGKILL reaching a timed-out command, and deletion as the Sprites
-control plane reports it.
+client before a command ends, a closed exec connection stopping a timed-out command, and deletion
+as the Sprites control plane reports it.
 
 Admission rule:
   A test belongs here only when its docstring can name the fake-encoded assumption it
@@ -73,7 +73,7 @@ async def _owned(client: AsyncSpritesClient) -> AsyncGenerator[SpritesSandboxBac
 
 
 async def test_creates_a_fresh_sprite_and_runs_a_command(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that the control exec reports real output and exit code."""
+    """Validates the fake-encoded assumption that the exec WebSocket reports real output and exit code."""
     async with _owned(client) as backend:
         result = await backend.run('echo out; echo err 1>&2; exit 3', shell=True, timeout=60)
 
@@ -132,11 +132,11 @@ async def test_env_is_layered_on_the_sprite_environment(client: AsyncSpritesClie
 
 async def test_a_timed_out_command_is_killed(client: AsyncSpritesClient) -> None:
     """Validates the fake-encoded assumptions that exec output streams before the command ends and
-    that `signal('KILL')` stops the command.
+    that closing the exec WebSocket, opened with `max_run_after_disconnect=1s`, stops the command.
 
     The deadline is enforced client-side, so the output printed before it expired must reach the
     `WorkspaceTimeoutError`. The command must be gone well within the 10 seconds a disconnected
-    non-TTY command may keep running, so it is the signal that stopped it.
+    non-TTY command keeps running by default, so it is that parameter that stopped it.
     """
     pid_file = f'/tmp/{_unique("timed-out")}.pid'
     async with _owned(client) as backend:
@@ -145,13 +145,13 @@ async def test_a_timed_out_command_is_killed(client: AsyncSpritesClient) -> None
 
         assert 'DIAGNOSTIC' in exc_info.value.stdout
         assert exc_info.value.timeout == 5
-        check = await backend.run(['sh', '-c', 'sleep 2; kill -0 "$(cat "$1")"', 'sh', pid_file], timeout=60)
+        check = await backend.run(['sh', '-c', 'sleep 3; kill -0 "$(cat "$1")"', 'sh', pid_file], timeout=60)
         assert check.exit_code != 0
 
 
 async def test_reattach_to_a_deleted_sprite_is_unavailable(client: AsyncSpritesClient) -> None:
     """Validates the fake-encoded assumption about deletion: once `delete()` returns, `get_sprite`
-    raises `NotFoundError` and a control connection to the Sprite fails its handshake with HTTP 404.
+    raises `NotFoundError` and an exec WebSocket to the Sprite fails its handshake with HTTP 404.
 
     If Sprites answers either differently, a deleted Sprite would surface as a retryable
     `WorkspaceError` or, worse, as a missing file.

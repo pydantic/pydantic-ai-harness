@@ -21,7 +21,7 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 from sprites import AsyncSprite
-from sprites.exceptions import AuthenticationError, NetworkError, NotFoundError, SpriteError
+from sprites.exceptions import APIError, AuthenticationError, NetworkError, NotFoundError, SpriteError
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
@@ -187,6 +187,7 @@ class TestSpritesSandbox:
             ('acquire', NetworkError('reset'), None),
             ('connect', _handshake(401), WorkspaceUnavailableError),
             ('connect', _handshake(404), WorkspaceUnavailableError),
+            ('connect', _handshake(429), None),
             ('connect', _handshake(500), None),
             ('connect', ConnectionResetError('reset'), None),
         ],
@@ -208,11 +209,15 @@ class TestSpritesSandbox:
         with pytest.raises(Exception) as caught:
             await backend.run(['true'])
 
-        if expected is None:
-            assert caught.value is error
-        else:
+        if expected is not None:
             assert type(caught.value) is expected
-            assert caught.value.__cause__ is error
+        cause = caught.value if expected is None else caught.value.__cause__
+        if isinstance(error, InvalidStatus):
+            # The SDK turns a failed exec handshake into an `APIError` with its status.
+            assert isinstance(cause, APIError)
+            assert cause.status_code == error.response.status_code
+        else:
+            assert cause is error
 
     async def test_missing_token(self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv('SPRITE_TOKEN')
@@ -234,7 +239,7 @@ class TestSpritesSandbox:
 
         assert not isinstance(caught.value, WorkspaceError)
         assert ('connection' if attach else 'creation') in str(caught.value)
-        assert transport.operations == []
+        assert transport.execs == []
 
     async def test_run_deadline_starts_once_the_sprite_is_acquired(self, transport: SpriteTransport) -> None:
         transport.names.add('remote')
@@ -316,17 +321,17 @@ class TestSpritesSandbox:
     async def test_cancelled_command_finishes_closing_its_connection(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
-        transport.release_control_close = asyncio.Event()
+        transport.release_exec_close = asyncio.Event()
         task = asyncio.create_task(backend.run(['true']))
-        await transport.control_close_started.wait()
+        await transport.exec_close_started.wait()
         task.cancel()
         await asyncio.sleep(0)
         assert not task.done()
-        transport.release_control_close.set()
+        transport.release_exec_close.set()
 
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert transport.control_closes == 1
+        assert transport.exec_closes == 1
 
     async def test_deleted_sprite_is_unavailable_to_attach_commands_and_files(self, transport: SpriteTransport) -> None:
         owner = SpritesSandboxBackend()
@@ -342,7 +347,7 @@ class TestSpritesSandbox:
             await Workspace(owner).read_bytes('/tmp/anything')
 
     @pytest.mark.parametrize('failure', ['error', 'hang'])
-    async def test_control_close_failure_after_exit_returns_the_result_and_aborts_the_socket(
+    async def test_close_failure_after_exit_returns_the_result_and_aborts_the_socket(
         self,
         transport: SpriteTransport,
         monkeypatch: pytest.MonkeyPatch,
@@ -352,43 +357,37 @@ class TestSpritesSandbox:
         backend = SpritesSandboxBackend()
         await backend.get_client()
         if failure == 'error':
-            transport.control_close_error = RuntimeError('close failed')
+            transport.exec_close_error = RuntimeError('close failed')
         else:
-            transport.control_close_hang = True
-            monkeypatch.setattr('pydantic_ai_harness.sprites_sandbox._backend._CONTROL_TIMEOUT', 0.01)
+            transport.exec_close_hang = True
+            monkeypatch.setattr('pydantic_ai_harness.sprites_sandbox._backend._CLOSE_TIMEOUT', 0.01)
 
         result = await backend.run(['echo', 'ok'])
 
         assert (result.exit_code, result.stdout) == (0, 'ok\n')
         assert transport.aborted == 1
-        assert 'Could not close a Sprite control connection' in caplog.text
+        assert 'Could not close a Sprite exec connection' in caplog.text
 
-    async def test_transport_loss_propagates_the_sdk_error(self, transport: SpriteTransport) -> None:
-        backend = SpritesSandboxBackend()
-        await backend.get_client()
-        error = ConnectionResetError('control connection lost')
-        transport.connection_dropped = True
-        transport.connection_lost = error
-        with pytest.raises(ConnectionResetError) as caught:
-            await backend.run(['true'])
-        assert caught.value is error
-
-    async def test_transport_loss_without_an_sdk_error_is_a_connection_error(self, transport: SpriteTransport) -> None:
-        backend = SpritesSandboxBackend()
-        await backend.get_client()
-        transport.connection_dropped = True
-        with pytest.raises(ConnectionError, match='before reporting an exit status. partial$'):
-            await backend.run(['sh', '-c', 'printf partial >&2'])
-
-    async def test_kill_failure_is_logged_and_the_timeout_still_raised(
-        self, transport: SpriteTransport, caplog: pytest.LogCaptureFixture
+    async def test_socket_closed_before_the_exit_status_propagates_the_sdk_error(
+        self, transport: SpriteTransport
     ) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
-        transport.signal_error = RuntimeError('WebSocket not connected')
-        with pytest.raises(WorkspaceTimeoutError):
-            await backend.run(['sleep', '0.2'], timeout=0.01)
-        assert 'Could not stop the remote Sprite command' in caplog.text
+        transport.connection_dropped = True
+        with pytest.raises(NetworkError, match='closed before receiving command exit status'):
+            await backend.run(['true'])
+
+    async def test_exec_socket_carries_the_command_and_asks_the_sprite_to_end_it_on_disconnect(
+        self, transport: SpriteTransport
+    ) -> None:
+        result = await SpritesSandboxBackend(working_dir=str(transport.root)).run(['echo', 'a b'])
+        assert (result.exit_code, result.stdout) == (0, 'a b\n')
+        [socket] = transport.execs
+        assert socket.query['cmd'] == ['echo', 'a b']
+        assert socket.query['dir'] == [str(transport.root)]
+        # Without it a non-TTY command outlives a closed socket by 10 seconds.
+        assert socket.query['max_run_after_disconnect'] == ['1s']
+        assert socket.sent == [b'\x04']
 
     async def test_argv_shell_environment_and_nonzero_exit(self, transport: SpriteTransport) -> None:
         backend = SpritesSandbox[None](env={'BASE': 'base', 'LAYERED': 'base'}).get_workspace(context(), ref=None)
@@ -425,7 +424,7 @@ class TestSpritesSandbox:
     ) -> None:
         with pytest.raises(ValueError):
             await SpritesSandboxBackend().run(command, env=env)
-        assert transport.operations == []
+        assert transport.execs == []
 
     async def test_canonical_working_directory_preserves_spaces(self, transport: SpriteTransport) -> None:
         target = transport.root / ' directory '
@@ -442,10 +441,6 @@ class TestSpritesSandbox:
         with pytest.raises(WorkspaceError, match='working directory'):
             await backend.working_dir()
 
-    async def test_command_that_cannot_start_is_a_workspace_error(self, transport: SpriteTransport) -> None:
-        with pytest.raises(WorkspaceError, match='^Could not run the command in the Sprite: Error: .*missing-program'):
-            await SpritesSandboxBackend().run(['missing-program'])
-
     async def test_filesystem_fallback_handles_directories_and_binary(self, transport: SpriteTransport) -> None:
         sandbox = Workspace(SpritesSandboxBackend())
         await sandbox.make_dir('folder')
@@ -456,27 +451,24 @@ class TestSpritesSandbox:
         await sandbox.remove('folder')
         assert not await sandbox.exists('folder')
 
-    async def test_deadline_kills_the_command_and_preserves_partial_output(self, transport: SpriteTransport) -> None:
+    async def test_deadline_closes_the_socket_and_preserves_partial_output(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
         with pytest.raises(WorkspaceTimeoutError, match='Command timed out after 0.3 seconds') as caught:
             await backend.run('printf ready; exec sleep 5', shell=True, timeout=0.3)
         assert caught.value.stdout == 'ready'
-        assert transport.signals == ['KILL']
-        [operation] = transport.operations
-        assert operation.process is not None
-        assert operation.process.wait(timeout=1) == -signal.SIGKILL
+        [socket] = transport.execs
+        assert socket.process.wait(timeout=1) == -signal.SIGKILL
 
-    async def test_cancellation_kills_the_command(self, transport: SpriteTransport) -> None:
+    async def test_cancellation_closes_the_socket(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
         await backend.get_client()
         async with anyio.create_task_group() as group:
             group.start_soon(backend.run, ['sleep', '5'])
             await transport.exec_started.wait()
             group.cancel_scope.cancel()
-        [operation] = transport.operations
-        assert operation.process is not None
-        assert operation.process.wait(timeout=1) == -signal.SIGKILL
+        [socket] = transport.execs
+        assert socket.process.wait(timeout=1) == -signal.SIGKILL
 
     @pytest.mark.parametrize('timeout', [0, -1, float('inf')])
     async def test_invalid_timeout(self, transport: SpriteTransport, timeout: float) -> None:

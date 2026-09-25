@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 from collections.abc import AsyncIterator
@@ -18,7 +19,7 @@ collect_ignore = (
 if TYPE_CHECKING or _HAS_SPRITES:  # pragma: no branch - installed and slim jobs take opposite branches
     from sprites import AsyncSprite, AsyncSpritesClient
 
-    from .fake_sprites import FakeControlConnection, SpriteTransport
+    from .fake_sprites import SpriteTransport
 
 
 @pytest.fixture
@@ -55,8 +56,8 @@ if _HAS_SPRITES:  # pragma: no branch - the fixture requires the SDK-backed fake
         transport = SpriteTransport(tmp_path)
         monkeypatch.setenv('SPRITE_TOKEN', 'test-token')
         monkeypatch.setattr('pydantic_ai_harness.sprites_sandbox._backend.AsyncSpritesClient', transport.client)
-        FakeControlConnection.transport = transport
-        monkeypatch.setattr('pydantic_ai_harness.sprites_sandbox._backend.ControlConnection', FakeControlConnection)
+        # `WSCommand` opens the exec WebSocket through the `connect` it imports from `websockets`.
+        monkeypatch.setattr('sprites.websocket.connect', transport.connect)
 
         async def get(client: AsyncSpritesClient, name: str) -> AsyncSprite:
             return await transport.get(client, name)
@@ -79,3 +80,6 @@ if _HAS_SPRITES:  # pragma: no branch - the fixture requires the SDK-backed fake
         yield transport
         for client in transport.clients:
             await client.aclose()
+        # Each exec's thread posts its last frame to this loop, so it must finish while the loop runs.
+        for socket in transport.execs:
+            await asyncio.to_thread(socket.thread.join, 10)

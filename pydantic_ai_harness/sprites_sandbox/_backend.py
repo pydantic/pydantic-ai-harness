@@ -4,28 +4,32 @@ External assumptions last verified 2026-09-25 against sprites-py 0.7.0 source, t
 docs, and (2026-09-15) a local WebSocket transport probe, with no live cloud calls:
 
 * `AsyncSpritesClient` requires its token as an argument and reads no environment variable; sprite
-  creation uses the SDK's fixed 120-second request timeout, while `aclose` closes the local async HTTP client and control pools:
+  creation uses the SDK's fixed 120-second request timeout, while `aclose` closes the local async
+  HTTP client and control pools:
   https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/async_client.py
 * `create_sprite` and `get_sprite` raise `AuthenticationError` (401), `NotFoundError` (404),
   `NetworkError` (transport), and a plain `SpriteError` for any other HTTP failure:
   https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/client.py
-* `ControlConnection` is asyncio-based and exposes `connect`, `start_op` (with `cmd` and `dir`),
-  `close`, `closed`, `close_error`, and its WebSocket as `ws`; an operation provides
-  `wait`, `get_stdout`, `get_stderr`, `closed`, and `signal`, and a failed handshake raises
-  `websockets.exceptions.InvalidStatus`. An `op.error` from the Sprite completes the operation
-  without an exit status and with `Error: <message>` in stderr, leaving the connection open:
+* Commands run over the documented exec WebSocket through the SDK's `WSCommand`, the SDK's own
+  default path. It sends stdin EOF when no stdin is given, reads the exit status from the binary
+  EXIT frame or the JSON `exit` message, raises `NetworkError` when the socket closes before either,
+  and turns a failed handshake into a parsed `APIError` carrying the HTTP status. The working
+  directory goes in the `dir` query parameter as the SDK sends it; the API page lists `dir` only
+  for the HTTP exec endpoint:
+  https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/websocket.py
+* The multiplexed control protocol (`sprites.control`, used only in the SDK's opt-in control mode)
+  is not used: in 0.7.0 its `op.complete` handler overwrites the exit status from the EXIT frame
+  with the message's own `exitCode`, which defaults to 0, so every command reported success
+  (observed against real Sprites on 2026-09-25):
   https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/control.py
-* `signal` takes a signal name without the `SIG` prefix (`KILL`), as the SDK docstring and the
-  Go SDK's list of valid names give it. Whether it reaches the command's process group is not
-  documented:
-  https://github.com/superfly/sprites-go/blob/main/exec.go
 * The exec API documents that a set `env` replaces the default environment, so the backend does
-  not pass `env` to `start_op`; it runs the command under the POSIX `env` utility instead, which
-  adds the variables to the Sprite's own environment:
+  not pass `env`; it runs the command under the POSIX `env` utility instead, which adds the
+  variables to the Sprite's own environment:
   https://sprites.dev/api/sprites/exec
-* A control WebSocket disconnect does not stop a non-TTY command at once; it may keep running for
-  `max_run_after_disconnect` (10 seconds by default), so a timeout or cancellation sends SIGKILL
-  before closing the connection:
+* A disconnect does not stop a non-TTY command at once; it keeps running for
+  `max_run_after_disconnect` (10 seconds by default; `0` means no limit, as the TTY default shows).
+  The backend asks for one second, so closing the socket on a timeout or cancellation ends the
+  command shortly after:
   https://sprites.dev/api/sprites/exec
 * Provider retention is separate from local client disconnect:
   https://docs.sprites.dev/concepts/lifecycle/
@@ -61,16 +65,15 @@ from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
 
 try:
     from sprites import AsyncSprite, AsyncSpritesClient
-    from sprites.control import ControlConnection, OpConn
-    from sprites.exceptions import AuthenticationError, NetworkError, NotFoundError, SpriteError
+    from sprites.exceptions import APIError, AuthenticationError, NetworkError, NotFoundError, SpriteError
     from sprites.exceptions import TimeoutError as SpriteTimeoutError
-    from websockets.exceptions import InvalidStatus
+    from sprites.websocket import WSCommand
 except ImportError as exc:  # pragma: no cover - exercised by the isolated missing-extra test
     raise ImportError('Install `pydantic-ai-harness[sprites]` to use SpritesSandbox.') from exc
 
 logger = logging.getLogger(__name__)
 _T = TypeVar('_T')
-_CONTROL_TIMEOUT = 6.0
+_CLOSE_TIMEOUT = 6.0
 # Above the SDK's fixed 120-second creation request timeout, so the SDK's own error wins when it fires.
 _ACQUIRE_TIMEOUT = 150.0
 _AUTH_MESSAGE = (
@@ -120,44 +123,47 @@ async def _run_to_completion(call: Callable[[], Awaitable[_T]]) -> _T:
     return task.result()
 
 
-async def _close_connection(connection: ControlConnection) -> None:
-    """Close a control connection; if that fails, abort its socket so nothing is left open.
+class _ExecCommand(WSCommand):
+    """The SDK's exec WebSocket command, asking the Sprite to end the command soon after a disconnect."""
+
+    def _build_websocket_url(self) -> str:
+        # A non-TTY command keeps running for 10 seconds after its socket closes unless told otherwise,
+        # and `0` means no limit. One second makes closing the socket on a timeout or cancellation
+        # stop the command. The SDK's URL always has a query string, as it ends with `stdin=true`.
+        return f'{super()._build_websocket_url()}&max_run_after_disconnect=1s'
+
+
+async def _close_command(command: WSCommand) -> None:
+    """Close an exec WebSocket; if that fails, abort its socket so nothing is left open.
 
     Finished even when the caller (a cancelled command) is cancelled meanwhile.
     """
-    error = await _run_to_completion(lambda: _cleanup_call(connection.close, timeout=_CONTROL_TIMEOUT))
+    error = await _run_to_completion(lambda: _cleanup_call(command.close, timeout=_CLOSE_TIMEOUT))
     if error is not None:
-        logger.warning('Could not close a Sprite control connection, aborting it: %r', error)
-        # `close` has nothing to fail on before `connect` opened the socket.
-        if connection.ws is not None:  # pragma: no branch
-            connection.ws.transport.abort()
-
-
-async def _kill(operation: OpConn) -> None:
-    """Send SIGKILL to a command still running in the Sprite, logging a failure instead of raising it.
-
-    The signal reaches the command the Sprite started; a child it put in the background may outlive it.
-    """
-    error = await _cleanup_call(lambda: operation.signal('KILL'), timeout=_CONTROL_TIMEOUT)
-    if error is not None:
-        logger.warning('Could not stop the remote Sprite command: %r', error)
+        logger.warning('Could not close a Sprite exec connection, aborting it: %r', error)
+        # `close` has nothing to fail on before `start` opened the socket.
+        if command.ws is not None:  # pragma: no branch
+            command.ws.transport.abort()
 
 
 def _map_error(error: Exception, name: str) -> WorkspaceError | None:
     """Translate a Sprites failure, or return `None` for one that propagates as is.
 
     Rejected credentials and a missing Sprite end the run; any other request the API refused is
-    a failed operation. Transport failures (`NetworkError`, a handshake that fails with another
-    status, a closed connection), rate limits, and anything unknown propagate unchanged, for durable
-    engines to retry.
+    a failed operation. Transport failures (`NetworkError`, a socket that closed before the exit
+    status), rate limits, server errors on the exec handshake, and anything unknown propagate
+    unchanged, for durable engines to retry.
     """
-    status = error.response.status_code if isinstance(error, InvalidStatus) else None
+    # The exec handshake reports its HTTP status as an `APIError`.
+    status = error.status_code if isinstance(error, APIError) else None
     if isinstance(error, AuthenticationError) or status == 401:
         return WorkspaceUnavailableError(_AUTH_MESSAGE)
     if isinstance(error, NotFoundError) or status == 404:
         return WorkspaceUnavailableError(f'Sprite {name!r} no longer exists.')
     # sprites-py reports a rate limit as a plain `SpriteError` naming the HTTP status.
     if isinstance(error, (NetworkError, SpriteTimeoutError)) or '(status 429)' in str(error):
+        return None
+    if status is not None and (status == 429 or status >= 500):
         return None
     if isinstance(error, SpriteError):
         return WorkspaceError(f'Sprites refused the request: {error}')
@@ -172,8 +178,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
     and closes it in `aclose()`.
     The backend does not delete the Sprite; that is the application's job, through the native
     handle. Commands run under `/bin/sh -c` with `shell=True`, in the Sprite's own environment
-    plus `env`. Every command gets its own asyncio control connection, which is closed before the
-    result is returned.
+    plus `env`. Every command gets its own exec WebSocket, which is closed before the result is
+    returned.
     """
 
     def __init__(
@@ -277,7 +283,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                 client = self._client
                 if client is None:
                     return
-                error = await _cleanup_call(client.aclose, timeout=_CONTROL_TIMEOUT)
+                error = await _cleanup_call(client.aclose, timeout=_CLOSE_TIMEOUT)
                 if error is not None:
                     # Kept, so a later `aclose()` tries again.
                     logger.warning('Could not close Sprites SDK client: %r', error)
@@ -313,45 +319,30 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
 
         # Acquiring the Sprite has its own bound; the deadline is the command's alone.
         sprite = await self.get_client()
-        connection = ControlConnection(sprite)
+        exec_command = _ExecCommand(sprite.command(*args, cwd=directory))
         deadline = anyio.CancelScope(deadline=math.inf if timeout is None else anyio.current_time() + timeout)
-        operation = None
         code = -1
         try:
             with deadline:
-                await connection.connect()
-                operation = await connection.start_op('exec', cmd=args, dir=directory, stdin=False)
-                code = await operation.wait()
-            stdout = operation.get_stdout() if operation is not None else b''
-            stderr = operation.get_stderr() if operation is not None else b''
+                await exec_command.start()
+                code = await exec_command.wait()
             if timeout is not None and deadline.cancelled_caught:
                 raise WorkspaceTimeoutError(
                     f'Command timed out after {timeout:g} seconds',
-                    stdout=_decode(stdout),
-                    stderr=_decode(stderr),
+                    stdout=_decode(exec_command.get_stdout()),
+                    stderr=_decode(exec_command.get_stderr()),
                     timeout=timeout,
                 )
-            if code == -1:
-                # The SDK keeps the transport failure that closed the connection; that is what propagates.
-                if connection.close_error is not None:
-                    raise connection.close_error
-                if not connection.closed:
-                    # The connection is still open, so the Sprite answered with an error (`op.error`)
-                    # instead of an exit status; the SDK puts its message in stderr.
-                    raise WorkspaceError(f'Could not run the command in the Sprite: {_decode(stderr).strip()}')
-                raise ConnectionError(
-                    f'Sprite command transport closed before reporting an exit status. {_decode(stderr).strip()}'.strip()
-                )
         except BaseException as error:
-            if operation is not None and not operation.closed:
-                # A timeout or a cancellation left the command running in the Sprite.
-                await _kill(operation)
-            await _close_connection(connection)
+            # On a timeout or a cancellation, closing the socket is what ends the command in the Sprite.
+            await _close_command(exec_command)
             if isinstance(error, Exception) and (mapped := _map_error(error, sprite.name)) is not None:
                 raise mapped from error
             raise
-        await _close_connection(connection)
-        return CommandResult(exit_code=code, stdout=_decode(stdout), stderr=_decode(stderr))
+        await _close_command(exec_command)
+        return CommandResult(
+            exit_code=code, stdout=_decode(exec_command.get_stdout()), stderr=_decode(exec_command.get_stderr())
+        )
 
 
 def _with_env(args: list[str], env: dict[str, str]) -> list[str]:
