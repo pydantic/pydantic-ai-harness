@@ -315,6 +315,18 @@ async def test_enter_rewrites_recalled_queued_prompt_in_place() -> None:
         live.feed('enter')
         assert live.queued_messages == ('a', 'b2', 'c')
         assert live.buffer.history[-1] == 'b2'
+        # The replaced draft stays in history; only the queued prompts' own copies are skipped.
+        walk = [live.feed('up') or live.buffer.text for _ in range(5)]
+        assert walk == ['c', 'b2', 'a', 'b', 'b']
+
+
+async def test_walk_skips_only_the_history_copy_of_each_queued_prompt() -> None:
+    async with editor() as (live, _, _):
+        live.buffer.history = ['deploy']
+        queue(live, 'deploy', 'clear')
+        walk = [live.feed('up') or (live.buffer.text, live.buffer.recall_offset) for _ in range(4)]
+        # The older `deploy` stays reachable, and raw `clear` is not shown beside its `/clear` expansion.
+        assert walk == [('/clear', -1), ('deploy', -2), ('deploy', -3), ('deploy', -3)]
 
 
 async def test_edited_queued_draft_survives_a_second_walk() -> None:

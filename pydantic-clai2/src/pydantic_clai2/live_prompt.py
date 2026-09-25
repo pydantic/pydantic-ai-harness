@@ -37,6 +37,8 @@ class _Queued:
     """A queued prompt compared by identity, so an edit finds it even after the queue shifts."""
 
     text: str
+    recorded: str = ''
+    """The raw draft `accept` saved to history for this prompt, before command expansion."""
 
 
 class LivePrompt:
@@ -119,7 +121,10 @@ class LivePrompt:
 
     def submit(self, value: str | KeyboardInterrupt | EOFError) -> None:
         """Publish a submission without ending or replacing the editor."""
-        self._submissions.append(_Queued(value) if isinstance(value, str) else value)
+        self._enqueue(_Queued(value) if isinstance(value, str) else value)
+
+    def _enqueue(self, value: _Queued | KeyboardInterrupt | EOFError) -> None:
+        self._submissions.append(value)
         self._submitted.set()
         self.paint()
 
@@ -239,9 +244,9 @@ class LivePrompt:
             if target is not None:
                 self._discard(target)
         elif target is not None:
-            target.text = command
+            target.text, target.recorded = command, text
         else:
-            self.submit(command)
+            self._enqueue(_Queued(command, recorded=text))
 
     def recall(self, *, backwards: bool) -> None:
         """Walk queued prompts, newest first, before command history.
@@ -253,7 +258,11 @@ class LivePrompt:
         if self.buffer.history_index is None:
             self._recall_queue = self._queued()
             self._recall_target = self._editing
-        self.buffer.vertical(backwards=backwards, queued=tuple(entry.text for entry in self._recall_queue))
+        self.buffer.vertical(
+            backwards=backwards,
+            queued=tuple(entry.text for entry in self._recall_queue),
+            recorded=tuple(entry.recorded for entry in self._recall_queue),
+        )
         offset = self.buffer.recall_offset
         if offset == 0:
             self._editing = self._recall_target

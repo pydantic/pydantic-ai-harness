@@ -1,5 +1,6 @@
 """Pure draft editing and history navigation for the pinned prompt."""
 
+from contextlib import suppress
 from dataclasses import dataclass, field
 
 from termflow.ansi.utils import visible_length  # pyright: ignore[reportMissingTypeStubs]
@@ -51,23 +52,27 @@ class PromptBuffer:
         """Steps back from the draft during a recall walk: 0 is the draft, -1 the newest entry."""
         return None if self.history_index is None else self.history_index - len(self._entries)
 
-    def recall(self, *, backwards: bool, queued: tuple[str, ...] = ()) -> None:
+    def recall(self, *, backwards: bool, queued: tuple[str, ...] = (), recorded: tuple[str, ...] = ()) -> None:
         """Walk chronological history, preserving the draft beyond its newest entry.
 
         `queued` prompts are newer than any history, so a walk that starts here visits them
-        between the draft and history. `accept` already recorded them in history, so those
-        duplicates are skipped rather than visited twice.
+        between the draft and history. `recorded` holds the raw history copies made when they
+        were queued; the newest match of each is skipped, so older identical history stays.
         """
         if self.history_index is None:
             self.saved_draft = self.text
-            self._entries = [entry for entry in self.history if entry not in queued] + list(queued)
+            newest_first = self.history[::-1]
+            for text in recorded:
+                with suppress(ValueError):
+                    newest_first.remove(text)
+            self._entries = newest_first[::-1] + list(queued)
             self.history_index = len(self._entries)
         self.history_index = min(len(self._entries), max(0, self.history_index + (-1 if backwards else 1)))
         self.replace(
             self.saved_draft if self.history_index == len(self._entries) else self._entries[self.history_index]
         )
 
-    def vertical(self, *, backwards: bool, queued: tuple[str, ...] = ()) -> None:
+    def vertical(self, *, backwards: bool, queued: tuple[str, ...] = (), recorded: tuple[str, ...] = ()) -> None:
         """Move within multiline text before falling back to history recall."""
         lines = self.text.split('\n')
         before = self.text[: self.cursor]
@@ -76,7 +81,7 @@ class PromptBuffer:
         if len(lines) > 1 and 0 <= target < len(lines):
             self.cursor = sum(len(line) + 1 for line in lines[:target]) + min(column, len(lines[target]))
         else:
-            self.recall(backwards=backwards, queued=queued)
+            self.recall(backwards=backwards, queued=queued, recorded=recorded)
 
     def search_key(self, key: str) -> None:
         """Search backwards without submitting the selected history entry."""
