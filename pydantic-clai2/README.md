@@ -11,8 +11,9 @@ Context management is the built-in `compaction` plugin,
 [described below](#compacting-the-conversation).
 Other harness capabilities are not listed in `/plugins`; add one on purpose with
 `/plugins add`, see [other harness capabilities](PLUGINS.md#other-harness-capabilities).
-`/plugins enable logfire_mcp` lets the agent query your Logfire telemetry, using
-a key from `/keys` (never plugin settings), `LOGFIRE_API_KEY`, or a browser sign-in; see
+`/plugins enable logfire_mcp` lets the agent query your Logfire telemetry and opens
+a settings menu (region, tools, and a key picked from `/keys`, never stored in plugin
+settings; browser sign-in otherwise). Reopen it with `/plugins configure logfire_mcp`; see
 [Logfire MCP](PLUGINS.md#logfire-mcp-query-your-telemetry).
 `/mcp` manages MCP servers the way Code Puppy's `/mcp` does. Bare `/mcp` shows a
 status dashboard. `/mcp install` opens a form where you name the server, pick

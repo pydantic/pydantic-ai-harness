@@ -318,29 +318,54 @@ to stock built-ins. See [telemetry](README.md#telemetry-and-references).
 
 The built-in `logfire_mcp` plugin (`pydantic_clai2.logfire_mcp`) gives the agent
 the tools of Logfire's hosted MCP server through harness
-[`LogfireMCP`](../docs/logfire-mcp.md). It starts disabled; turn it on with
-`/plugins enable logfire_mcp`.
+[`LogfireMCP`](../docs/logfire-mcp.md). It starts disabled.
+`/plugins enable logfire_mcp` loads it and opens its settings menu; reopen the
+menu any time with `/plugins configure logfire_mcp` or `C` in `/plugins`.
 
-Secrets are managed in [`/keys`](#saved-api-keys), not in plugin settings, which
-are stored as plaintext in SQLite. The plugin uses the first credential that is
-available:
+Every row saves as soon as you change it, and the plugin loads again with the new
+settings when the menu closes. Esc backs out of any picker or text field without
+changing anything; `R` resets the highlighted row to its default.
 
-1. The key chosen with `/logfire_mcp key`. It opens the same picker as
-   `/add_model`: choose any saved key, or enter a new one, which is saved in
-   `/keys` as `LOGFIRE_API_KEY` (CLAI asks before replacing an existing
-   `LOGFIRE_API_KEY`). Only the key's name is stored, in the credential store.
+| Row | Setting | Default | Does |
+|---|---|---|---|
+| API key | `key` | none | name of the `/keys` entry to connect with (see below) |
+| Destination | `url` | Logfire US | Logfire US, Logfire EU, or type the `https://` MCP URL of a self-hosted Logfire |
+| Tools | `read_only` | read-only | offer only the tools the server marks read-only; "read and write" also allows tools that change Logfire resources |
+| Server instructions | `include_instructions` | forwarded | whether the server's instructions, query guidance, and current UTC time reach the agent |
+| Browser sign-in | `oauth` | when there is no key | sign in through the browser when no key is chosen, set, or saved |
+
+### Keys live in `/keys`
+
+Plugin settings are stored as plaintext in SQLite, so they hold only the key's
+name, never its value. Enter on **API key** opens the same picker as
+`/add_model`:
+
+- **a saved key**: any entry in [`/keys`](#saved-api-keys). Several plugins and
+  connections can name one key, so one Logfire API key saved once serves them all.
+- **Enter a different API key**: a masked field. The value is saved in `/keys`
+  as `LOGFIRE_API_KEY`, the conventional label; CLAI asks before replacing an
+  existing `LOGFIRE_API_KEY`, since other plugins may use it.
+- **No API key**: clears the choice.
+
+The plugin uses the first credential that is available:
+
+1. The key chosen in the menu.
 2. `LOGFIRE_API_KEY` from the environment.
 3. A key saved in `/keys` as `LOGFIRE_API_KEY`, so saving one there is enough.
-4. OAuth: the first run opens your browser to sign in. Tokens are kept in the OS
-   keyring (or the private credential file) under the `mcp-logfire_mcp` account,
-   so restarting CLAI does not mean signing in again. The handshake allows 330
-   seconds for the sign-in.
+4. Browser sign-in (OAuth): the first run opens your browser. Tokens are kept in
+   the OS keyring (or the private credential file) under the `mcp-logfire_mcp`
+   account, so restarting CLAI does not mean signing in again. The handshake
+   allows 330 seconds for the sign-in. `/logfire_mcp logout` forgets them.
 
-A saved key's value is read at the start of each run, like a model connection's
-key. Replacing it in `/keys` applies from the next turn, and deleting it makes
-runs, and the next load, fail with its name. Like `vllm` and `openrouter`, a key
-chosen with `/logfire_mcp key` cannot be renamed while chosen. Several plugins
-and connections can share one named key.
+A saved key's value is read at the start of each run, like a model connection's.
+Replacing it in `/keys` applies from the next turn. Deleting or renaming it makes
+runs fail with its name until you pick a key again.
+
+When nothing could connect (a chosen key missing from `/keys`, browser sign-in
+off, or needed with no browser and no stored sign-in), the plugin still loads, so
+the menu stays reachable, prints what is wrong, and each run fails with that
+message instead of reaching Logfire. Saving `LOGFIRE_API_KEY` in `/keys` fixes
+the last two without a reload.
 
 The label is `LOGFIRE_API_KEY`, the variable `LogfireMCP` reads, and not
 `LOGFIRE_TOKEN`. `LOGFIRE_TOKEN` is the write token the
@@ -348,33 +373,16 @@ The label is `LOGFIRE_API_KEY`, the variable `LogfireMCP` reads, and not
 cannot query the MCP server. The `logfire` plugin keeps reading it from the
 environment or the Logfire SDK's credential file.
 
-| Command | Does |
-|---|---|
-| `/logfire_mcp key` | choose a saved key, or enter one to save as `LOGFIRE_API_KEY` |
-| `/logfire_mcp logout` | forget the chosen key and the OAuth sign-in; keys in `/keys` are kept |
-
-After either command, run `/plugins reload logfire_mcp` to connect with the new
-credential. Enabling fails with a message naming what to set, instead of adding a
-Logfire connection that cannot sign in: a chosen key that was deleted, no browser
-when OAuth is needed and no tokens are stored, or no credential with `oauth` off.
-The command is registered only while the plugin is loaded. If loading fails,
-save a key as `LOGFIRE_API_KEY` in `/keys` and run `/plugins enable logfire_mcp`
-again.
+The same settings can be given as JSON, which is validated the same way:
 
 ```text
-/plugins add logfire_mcp pydantic_clai2.logfire_mcp '{"region": "eu"}'
+/plugins add logfire_mcp pydantic_clai2.logfire_mcp '{"url": "https://logfire-eu.pydantic.dev/mcp"}'
 ```
 
-| Setting | Default | Does |
-|---|---|---|
-| `oauth` | `true` | sign in through the browser when no key is chosen, set, or saved as `LOGFIRE_API_KEY` |
-| `region` | `"us"` | `"us"` or `"eu"`, the Logfire region your data lives in |
-| `read_only` | `true` | offer only the tools the server marks read-only; `false` also allows tools that change Logfire resources |
-
-Settings accept no keys or key names. The credential's own scopes still decide
-which projects and actions are allowed. If you enabled `logfire_mcp` from the old
-harness catalog, that saved declaration still takes this plugin's place;
-`/plugins remove logfire_mcp` switches to this one.
+The key's own scopes still decide which projects and actions are allowed. If you
+enabled `logfire_mcp` from the old harness catalog, that saved declaration still
+takes this plugin's place; `/plugins remove logfire_mcp` switches to this one.
+The plugin emits no telemetry of its own; tool calls appear in core's spans.
 
 ## Where plugins live
 
@@ -582,13 +590,15 @@ for `/agent` and `/mcp`:
                                                      | adds    2 commands, 1 hook, 0 tools
                                                      | error   none
 
- Up/Down move - Space enable/disable - R reload - D remove - Enter/Q close
+ Up/Down move - Space enable/disable - C configure - R reload - D remove - Enter/Q close
 ```
 
 The left side lists every plugin with `[x]` for on and `[ ]` for off. The right
 side shows details for the highlighted one: where it came from, whether it
 loaded, what it registered, and the last error if loading failed. Every key
 acts immediately; there is no save step, so Enter, Q, Esc, and Ctrl-C all just close.
+`C` closes the list and opens the highlighted plugin's settings menu, if it has
+one; enabling such a plugin with Space shows a reminder to press it.
 Closing returns to the prompt without printing the plugin list. Use `/plugins list`
 to print it.
 Adding a plugin needs a name and a module, so that stays a typed command.
@@ -603,6 +613,7 @@ CLAI does the same thing:
 | `/plugins remove NAME` | forget an installed declaration; persistently disable a drop-in (delete its file yourself to remove it); reset a built-in or project-declared plugin to its declaration |
 | `/plugins enable NAME` / `disable NAME` | load or unload, remembered across restarts |
 | `/plugins reload NAME` | re-import the file and load it again (for editing a plugin while CLAI runs) |
+| `/plugins configure NAME` | open a loaded plugin's settings menu, if it registered one with `host.configure`; `enable` and `add` open it too |
 | `/reload` | reload CLAI's own Python modules for development and rebuild the shell without restarting the process |
 
 `/reload` takes no arguments. It uses `importlib.reload`, preserves the conversation,
@@ -952,6 +963,59 @@ CLAI ignores unknown names in its own saved settings and preserves their values 
 other versions or branches. This does not relax validation of plugin declarations
 or `host.settings(Model)`.
 
+### Keep secrets in `/keys`: `KeyReference`, `SavedKey`, `host.save_settings`
+
+Plugin settings are stored in plaintext SQLite, so a token, API key, or client
+secret must never be one of them. Keep the secret in the named API key store that
+`/keys` manages, and put only its name in your settings. Use the conventional
+uppercase variable name as the label, such as `GITHUB_TOKEN` or `SLACK_BOT_TOKEN`,
+so plugins that need the same credential share one key; replacing it in `/keys`
+reaches all of them. The label does not export or read an environment variable.
+
+```python
+from pydantic import BaseModel, ConfigDict, Field
+
+from pydantic_clai2.api_keys import KeyReference, SavedKey
+
+
+class MySettings(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    token: KeyReference = Field(default_factory=lambda: KeyReference(name='MY_SERVICE_TOKEN'))
+
+
+def activate(host):
+    settings = host.settings(MySettings)
+    host.add(MyService(auth=SavedKey(name=settings.token.name, setup='Add MY_SERVICE_TOKEN in /keys.')))
+```
+
+`SavedKey` is a capability `auth` function. It looks the key up on every run and
+raises with `setup` when the key is missing, so a deleted key fails closed rather
+than falling back to something else. To let the user choose a key, call `prompt_api_key(prompt=..., label=...)`: it
+returns a `KeyReference` to a saved key, a masked new value for you to
+`save_key(name=..., value=...)`, or `None` when cancelled. Then call
+`host.save_settings(settings)` with the new reference. It saves your plugin's
+declaration as `plugins add` would, and `host.settings(Model)` returns the new
+values from then on.
+
+### Offer a settings menu: `@host.configure`
+
+```python
+from pydantic_clai2.field_menu import FieldMenu, run_flow
+from pydantic_clai2.menu_worker import run_worker
+
+
+@host.configure
+async def configure() -> str:
+    return '\n'.join(await run_worker(lambda: run_flow(FieldMenu(MySource(host)))))
+```
+
+`/plugins configure NAME`, `C` in `/plugins`, and `/plugins enable` or `add`
+(when they load the plugin) open it. Build it on `FieldMenu` and a `FieldSource`
+so it looks and behaves like `/set`. Save each edit with `host.save_settings` as
+it is made, keep secrets in `/keys` as above, and return the lines to show. If the
+saved settings changed, the loader loads the plugin again after the menu closes,
+so `activate` builds from them. The built-in `logfire_mcp` plugin is a complete example.
+
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 
 `host.conversation` is the retained history: `messages` is a snapshot,
@@ -1072,7 +1136,7 @@ name asks before replacing it. Ctrl-C or Ctrl-D cancels without saving. Do not p
 the secret on the command line.
 
 When saved keys exist, vLLM's token prompt, OpenRouter's **Enter API key** flow,
-and `/logfire_mcp key` show a searchable list of names. Choose one, enter a different key privately, or
+and plugin settings menus such as `logfire_mcp`'s show a searchable list of names. Choose one, enter a different key privately, or
 choose **No API key** for vLLM. Esc closes the picker without connecting. Browser
 login flows are unchanged. Select keys only for endpoints you trust.
 
@@ -1083,8 +1147,9 @@ Key values never appear in the picker or confirmation. Names are labels, not
 exported environment variables. Selecting a saved key stores a reference, not a copy. Discovery and each new
 turn resolve its current value. Replacing a key updates connections that reference
 it. Deleting it makes those connections fail until you restore the same name or
-reconfigure them. Keys referenced by saved connections (vLLM, OpenRouter, and the
-key chosen with `/logfire_mcp key`) cannot be renamed. One named key can serve
+reconfigure them. Keys referenced by saved connections (vLLM and OpenRouter)
+cannot be renamed; a key named in plugin settings, such as `logfire_mcp`'s, can,
+and that plugin's runs then fail with the missing name until you pick it again. One named key can serve
 several connections and plugins, so built-in plugins look for conventional
 labels, such as `LOGFIRE_API_KEY`, that other tools can share. A cross-process lock
 serializes key changes and connection saves so concurrent CLAI sessions do not

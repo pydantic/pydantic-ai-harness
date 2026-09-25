@@ -6,10 +6,11 @@ import re
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from typing import Protocol
 
 from prompt_toolkit import PromptSession
-from pydantic import BaseModel, Field, SecretStr, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, TypeAdapter, ValidationError
 from pydantic_ai.exceptions import UserError
 from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.menu import Menu  # pyright: ignore[reportMissingTypeStubs]
@@ -21,6 +22,8 @@ from .menu_worker import menu_key, run_worker
 
 class KeyReference(BaseModel):
     """A name resolved from the credential store, not a cached secret."""
+
+    model_config = ConfigDict(extra='forbid')
 
     name: str = Field(min_length=1)
 
@@ -35,6 +38,25 @@ def resolve_key(*, token: SecretStr | KeyReference) -> str:
             f'Saved API key {token.name} is missing. Restore it in /keys or reconfigure through /add_model.'
         )
     return keys[token.name].get_secret_value()
+
+
+@dataclass(frozen=True, kw_only=True)
+class SavedKey:
+    """A capability's `auth` function: the named key's current value, looked up on every run.
+
+    Plugins keep only the name in their settings. Replacing the key in `/keys` reaches the next
+    run of every plugin that names it; deleting it fails that run closed with `setup` as the fix.
+    """
+
+    name: str
+    setup: str
+
+    def __call__(self, ctx: object, /) -> str:
+        """Resolve now, so a stale value is never reused."""
+        keys = load_keys()
+        if self.name not in keys:
+            raise UserError(f'Saved API key {self.name} is missing. {self.setup}')
+        return keys[self.name].get_secret_value()
 
 
 def save_key_connection(*, account: str, token: SecretStr | KeyReference, value: str) -> None:
@@ -112,10 +134,6 @@ def _save_keys(*, keys: dict[str, SecretStr]) -> None:
     )
 
 
-_KEY_USERS = {'vllm': '/add_model', 'openrouter': '/add_model', 'logfire_mcp': '/logfire_mcp key'}
-"""Credential accounts that may reference a saved key, and the command that reconfigures each."""
-
-
 class _Credential(BaseModel):
     token: SecretStr | KeyReference = Field(default_factory=lambda: SecretStr(''))
 
@@ -123,13 +141,13 @@ class _Credential(BaseModel):
 def key_users(*, name: str) -> list[str]:
     """Find saved provider references without exposing their inline credentials."""
     users: list[str] = []
-    for account, command in _KEY_USERS.items():
+    for account in ('vllm', 'openrouter'):
         raw = load_codex_credentials(account=account)
         if raw is not None:
             try:
                 credential = _Credential.model_validate_json(raw)
             except ValidationError:
-                raise UserError(f'Reconfigure the invalid {account} connection through {command} first.') from None
+                raise UserError(f'Reconfigure the invalid {account} connection through /add_model first.') from None
             if isinstance(credential.token, KeyReference) and credential.token.name == name:
                 users.append(account)
     return users
