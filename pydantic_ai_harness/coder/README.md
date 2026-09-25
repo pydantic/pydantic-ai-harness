@@ -42,17 +42,12 @@ agent.run_sync('Find out why tests/test_parser.py fails and fix the bug it caugh
 
 File paths resolve from the workspace's working directory, and commands start there. To work in an isolated cloud machine instead, swap `LocalWorkspace` for a sandbox capability (Modal, E2B, Daytona, or Sprites); nothing else changes. Commands run without an allowlist, and the file tools' path limits don't apply to them.
 
-With [Modal](https://pydantic.dev/docs/ai/harness/modal-sandbox/), for example, on an image that has the `git` and `ripgrep` Coder uses:
+With [Modal](https://pydantic.dev/docs/ai/harness/modal-sandbox/), for example:
 
 ```python
-import modal
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-image = modal.Image.debian_slim().apt_install('git', 'ripgrep')
-agent = Agent(
-    'anthropic:claude-opus-5-5',
-    capabilities=[ModalSandbox(image=image), Coder()],
-)
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder()])
 ```
 
 [`agent.to_cli_sync()`](https://pydantic.dev/docs/ai/cli/) and [`agent.to_web()`](https://pydantic.dev/docs/ai/web/) use the same workspace.

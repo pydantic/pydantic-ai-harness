@@ -46,7 +46,6 @@ if TYPE_CHECKING:
 
 __all__ = ('ModalSandboxBackend',)
 
-DEFAULT_IMAGE = 'python:3.12-slim'
 DEFAULT_APP_NAME = 'pydantic-ai-harness'
 # Modal's maximum sandbox lifetime (24 hours). The framework never terminates a sandbox, so a
 # conversation can continue in it for as long as Modal allows.
@@ -201,7 +200,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     Args:
         workspace: A live `modal.Sandbox` you already have. Whoever created it owns terminating it.
         ref: Identity of an existing sandbox to attach to on first use.
-        image: Registry tag, or a `modal.Image`, a newly created sandbox runs.
+        image: Registry tag, or a `modal.Image`, a newly created sandbox runs. `None` (the default)
+            is Debian slim with Python 3.12, `git`, and `ripgrep`.
         app_name: Modal app a newly created sandbox belongs to.
         create_app_if_missing: Create the Modal app when it does not exist yet.
         sandbox_timeout: Total lifetime of a newly created sandbox, in seconds (Modal's `timeout`).
@@ -218,7 +218,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         workspace: modal.Sandbox | None = None,
         *,
         ref: WorkspaceRef | None = None,
-        image: str | modal.Image = DEFAULT_IMAGE,
+        image: str | modal.Image | None = None,
         app_name: str = DEFAULT_APP_NAME,
         create_app_if_missing: bool = True,
         sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
@@ -339,11 +339,13 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             # after it fires is reaped at its `sandbox_timeout`.
             with anyio.CancelScope(shield=True), anyio.move_on_after(_CREATE_TIMEOUT):
                 app = await modal.App.lookup.aio(self._app_name, create_if_missing=self._create_app_if_missing)
-                built = (
-                    modal.Image.from_registry(self._image)  # pyright: ignore[reportUnknownMemberType]
-                    if isinstance(self._image, str)
-                    else self._image
-                )
+                if self._image is None:
+                    # Built on create, not at import: Modal caches it per workspace after the first build.
+                    built = modal.Image.debian_slim(python_version='3.12').apt_install('git', 'ripgrep')  # pyright: ignore[reportUnknownMemberType]
+                elif isinstance(self._image, str):
+                    built = modal.Image.from_registry(self._image)  # pyright: ignore[reportUnknownMemberType]
+                else:
+                    built = self._image
                 variables: dict[str, str | None] | None = dict(self._env) if self._env else None
                 sandbox = await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
                     app=app,

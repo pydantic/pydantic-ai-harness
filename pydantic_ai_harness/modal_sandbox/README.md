@@ -27,14 +27,11 @@ This saves your Modal credentials; in CI, set `MODAL_TOKEN_ID` and `MODAL_TOKEN_
 ## Quick start
 
 ```python {names="defined"}
-import modal
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-# The default image has no git, which the clone needs.
-image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
-agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(image=image), Coder()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder()])
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 ```
 
@@ -42,18 +39,14 @@ result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summa
 
 A new sandbox lives for up to 24 hours, Modal's maximum; pass `ModalSandbox(sandbox_timeout=3600)` to end it sooner. If Modal can't start the sandbox, for example because the image doesn't exist, the first tool call raises an error that says why.
 
-Search tools use ripgrep when the image has it (add `'ripgrep'` to `apt_install`) and fall back to a built-in search otherwise.
-
 ## Continue in the same sandbox
 
 ```python {names="defined"}
-import modal
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
-agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(image=image), Coder()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder()])
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 
 followup = agent.run_sync(
@@ -95,13 +88,11 @@ If only your own tools use the sandbox, pass `ModalSandbox(warn_if_no_tools=Fals
 To come back to the sandbox without the message history, store its ref and pass it back as `workspace=`:
 
 ```python {names="defined"}
-import modal
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
-agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(image=image), Coder()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Coder()])
 
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 ref = result.workspace.ref  # store this, e.g. in your database
@@ -135,7 +126,7 @@ async def terminate_sandbox(ref: WorkspaceRef) -> None:
 
 | Option | What it does |
 | --- | --- |
-| `image` | Image for a new sandbox: a registry tag or a `modal.Image`. Default: `'python:3.12-slim'`. |
+| `image` | Image for a new sandbox: a registry tag or a `modal.Image`. Default: Debian slim with Python 3.12, `git`, and `ripgrep`; the first sandbox in a Modal workspace takes a few extra seconds while it builds. |
 | `app_name` | Modal app a new sandbox belongs to. Default: `'pydantic-ai-harness'`. |
 | `create_app_if_missing` | Create that app if it doesn't exist. Default: `True`. |
 | `sandbox_timeout` | Seconds a new sandbox lives before Modal stops it. Default: `86_400` (24 hours, Modal's maximum). |
@@ -159,7 +150,7 @@ The previous `ModalSandbox` registered its own `run_command`, `read_file`, `writ
 
 | Previous API | Now |
 | --- | --- |
-| `image`, `app_name`, `create_app_if_missing`, `env` | Unchanged. `image` also takes a `modal.Image`. |
+| `image`, `app_name`, `create_app_if_missing`, `env` | Unchanged. `image` also takes a `modal.Image`, and its default now has `git` and `ripgrep`. |
 | `sandbox_timeout` | Unchanged name. The default is now `86_400` (24 hours) instead of `300`. |
 | `workdir` | Renamed `working_dir`. `workdir=` still works, with a deprecation warning. |
 | `sandbox_id` | Removed. Use `agent.run(..., workspace=WorkspaceRef(provider='modal', id=sandbox_id))`. |

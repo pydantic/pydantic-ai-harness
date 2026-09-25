@@ -135,6 +135,17 @@ class _FakeProcess:
         return self._returncode
 
 
+@dataclass(frozen=True)
+class FakeImage:
+    """A `modal.Image` built with `debian_slim(...).apt_install(...)`."""
+
+    python_version: str
+    apt_packages: tuple[str, ...] = ()
+
+    def apt_install(self, *packages: str) -> FakeImage:
+        return FakeImage(self.python_version, self.apt_packages + packages)
+
+
 class FakeModalError(Exception):
     """Stand-in for `modal.exception.Error`."""
 
@@ -547,8 +558,12 @@ class FakeModal:
         class App:
             lookup = _AioCallable(app_lookup)
 
+        def image_debian_slim(*, python_version: str) -> FakeImage:
+            return FakeImage(python_version)
+
         class Image:
             from_registry = staticmethod(image_from_registry)
+            debian_slim = staticmethod(image_debian_slim)
 
         class Sandbox:
             create = _GatedCreate(workspace_create, control)

@@ -17,7 +17,6 @@ from pydantic_ai_harness._warn import warn_argument_renamed
 from pydantic_ai_harness._workspace_provider import check_integer, check_working_dir
 from pydantic_ai_harness.modal_sandbox._backend import (
     DEFAULT_APP_NAME,
-    DEFAULT_IMAGE,
     DEFAULT_SANDBOX_TIMEOUT,
     ModalSandboxBackend,
 )
@@ -121,8 +120,8 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     that says how to express each one now.
     """
 
-    image: str | modal.Image = DEFAULT_IMAGE
-    """Image a newly created sandbox runs: a registry tag, or a `modal.Image`, such as one with packages added."""
+    image: str | modal.Image | None = None
+    """Image a newly created sandbox runs: a registry tag, or a `modal.Image`; `None` is Debian slim with Python 3.12, `git`, and `ripgrep`."""
 
     app_name: str = DEFAULT_APP_NAME
     """Modal app used when creating a sandbox."""
@@ -155,7 +154,7 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
         id: str | None = None,
         description: str | None = None,
         defer_loading: bool = False,
-        image: str | modal.Image = DEFAULT_IMAGE,
+        image: str | modal.Image | None = None,
         app_name: str = DEFAULT_APP_NAME,
         create_app_if_missing: bool = True,
         sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,

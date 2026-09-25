@@ -39,7 +39,6 @@ pytestmark = [pytest.mark.anyio(backends=['asyncio']), pytest.mark.modal_live]
 @asynccontextmanager
 async def owned_backend(**settings: Any) -> AsyncGenerator[ModalSandboxBackend, None]:
     defaults: dict[str, Any] = {
-        'image': 'python:3.12-slim',
         'sandbox_timeout': LIVE_SANDBOX_TIMEOUT,
         'idle_timeout': LIVE_IDLE_TIMEOUT,
     }
@@ -104,8 +103,6 @@ async def test_an_expired_sandbox_is_unavailable() -> None:
 
 async def test_coder_tools_run_in_the_sandbox_modal_sandbox_supplies() -> None:
     """`ModalSandbox` supplies the workspace, and `Coder`'s tools run in it."""
-    import modal  # noqa: PLC0415 - optional extra, absent on slim installs
-
     supplied: list[ModalSandboxBackend] = []
 
     class RecordingModalSandbox(ModalSandbox[None]):
@@ -115,12 +112,10 @@ async def test_coder_tools_run_in_the_sandbox_modal_sandbox_supplies() -> None:
             supplied.append(backend)
             return backend
 
-    image = modal.Image.debian_slim(python_version='3.12').apt_install('git', 'ripgrep')
     try:
         results = await call_tools(
             [
                 RecordingModalSandbox(
-                    image=image,
                     working_dir='/tmp',
                     sandbox_timeout=LIVE_SANDBOX_TIMEOUT,
                     idle_timeout=LIVE_IDLE_TIMEOUT,
@@ -146,14 +141,11 @@ async def test_coder_tools_run_in_the_sandbox_modal_sandbox_supplies() -> None:
 
 
 async def test_commands_get_a_usable_environment() -> None:
-    """With no `env`, a command sees `PATH` and `HOME` and finds git in the documented image; `env=` adds to them."""
-    import modal  # noqa: PLC0415 - optional extra, absent on slim installs
-
-    image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
-    async with owned_backend(image=image) as backend:
-        result = await backend.run('echo "$PATH"; echo "$HOME"; git --version', shell=True, timeout=60)
-        path, home, git = result.stdout.splitlines()
-        assert path and home and git.startswith('git version')
+    """With no `image` or `env`, a command sees `PATH` and `HOME` and finds git and ripgrep; `env=` adds to them."""
+    async with owned_backend() as backend:
+        result = await backend.run('echo "$PATH"; echo "$HOME"; git --version; rg --version', shell=True, timeout=60)
+        path, home, git, rg, *_ = result.stdout.splitlines()
+        assert path and home and git.startswith('git version') and rg.startswith('ripgrep')
 
         result = await backend.run('echo "$FOO"; echo "$PATH"', shell=True, env={'FOO': '1'}, timeout=30)
         assert result.stdout.splitlines() == ['1', path]

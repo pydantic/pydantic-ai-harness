@@ -19,7 +19,7 @@ from pydantic_ai.workspaces import (
 
 from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 
-from .fake_modal import FakeModal, FileInfo
+from .fake_modal import FakeImage, FakeModal, FileInfo
 
 pytestmark = pytest.mark.anyio(backends=['asyncio'])
 
@@ -337,10 +337,15 @@ class TestCreate:
         assert fake_modal.create_kwargs[-1]['image'] is image
         assert fake_modal.image_tags == []
 
-    async def test_default_app_and_image(self, fake_modal: FakeModal) -> None:
+    async def test_default_image_has_git_and_ripgrep(self, fake_modal: FakeModal) -> None:
+        await started()
+        image = fake_modal.create_kwargs[-1]['image']
+        assert isinstance(image, FakeImage)
+        assert {'git', 'ripgrep'} <= set(image.apt_packages)
+
+    async def test_default_app(self, fake_modal: FakeModal) -> None:
         await started()
         assert fake_modal.app_lookups[-1] == {'name': 'pydantic-ai-harness', 'create_if_missing': True}
-        assert fake_modal.image_tags[-1] == 'python:3.12-slim'
         assert fake_modal.create_kwargs[-1]['env'] is None
         # Modal's maximum lifetime, and no idle termination: Modal's idle termination is permanent,
         # so it would end a conversation that pauses for a while.
