@@ -517,21 +517,32 @@ and analyzes social posts through Ordinal's hosted MCP server. It starts disable
 If you had enabled or disabled the former `pydantic_ai_harness.ordinal:Ordinal`
 catalog entry, that choice carries over to this plugin.
 
-How it signs in:
+No token goes in plugin settings, which are plaintext SQLite. Each run
+authenticates with the first of:
 
-- **`ORDINAL_ACCESS_TOKEN` set**: that token, for every run.
-- **Otherwise**: the first run that uses Ordinal opens your browser to sign in.
-  CLAI keeps the tokens in the OS keyring (the private credential file when no
-  keyring exists), as `/mcp` does for OAuth servers, so later launches reuse them.
-  The browser sign-in only works on the machine you run CLAI on.
-- **No token, no saved sign-in, and no terminal** (headless runs from CI, say):
-  the plugin fails to load and names `ORDINAL_ACCESS_TOKEN`, rather than adding
-  tools that cannot connect.
+- **A named key from `/keys`**: enabling the plugin from a terminal with nothing
+  configured, or running `/ordinal key`, opens the shared key picker. Pick an
+  existing key or type a new one in a masked prompt; a new one is saved in `/keys`
+  as `ORDINAL_ACCESS_TOKEN`. CLAI keeps only the key's name and looks it up on
+  every run, so replacing the key in `/keys` applies to the next run, and deleting
+  it makes runs fail instead of connecting without it. `/keys` will not rename a
+  key while Ordinal uses it. Several plugins and providers can name the same key,
+  as GitHub and Copilot can both use `GITHUB_TOKEN`.
+- **The `ORDINAL_ACCESS_TOKEN` environment variable**, the one harness `Ordinal`
+  reads.
+- **A browser sign-in**: the first run that uses Ordinal opens your browser.
+  CLAI keeps the OAuth tokens in the OS keyring (the private credential file when
+  no keyring exists), as `/mcp` does for OAuth servers, so later launches reuse
+  them. The browser sign-in only works on the machine you run CLAI on.
+- **None of these and no terminal** (headless runs from CI, say): the plugin
+  fails to load and names `ORDINAL_ACCESS_TOKEN`, rather than adding tools that
+  cannot connect.
 
-`/ordinal` shows which of these applies. `/ordinal logout` forgets the saved
-sign-in and drops the one in use, so the next run opens the browser again; with
-`ORDINAL_ACCESS_TOKEN` set, runs keep using the token. Disabling the plugin does
-not sign you out.
+`/ordinal` shows which of these applies. In `/ordinal key`, "No API key" (or an
+empty entry) stops using a `/keys` entry. `/ordinal logout` forgets the saved
+browser sign-in and drops the one in use, so the next browser run signs in
+again; it does not touch a `/keys` entry or the environment variable. Disabling
+the plugin does not sign you out.
 
 ## Managing plugins
 
