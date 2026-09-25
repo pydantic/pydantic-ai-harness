@@ -288,7 +288,12 @@ workspace capability in Python).
 
 ## Durable execution
 
-`Coder`, `Shell` and `FileSystem` work under DBOS durable execution, but not yet under Temporal or Prefect.
+`Shell` works under DBOS, Temporal and Prefect durable execution, with these limits:
+
+- Under Temporal, the `shell` tool emits no command events: tools run in activities, which cannot
+  reach the run's event stream yet ([pydantic-ai#7971](https://github.com/pydantic/pydantic-ai/issues/7971)).
+- `persist_cwd=True` fails under Prefect, and under Temporal the directory a `cd` moved to carries
+  over to later runs on the same worker.
 
 ## Further reading
 
