@@ -314,6 +314,40 @@ wins while enabled; disabling it restores the supplied agent's own tracing
 behavior. Custom launchers must pass `builtin_plugins=DEFAULT_PLUGINS` to opt in
 to stock built-ins. See [telemetry](README.md#telemetry-and-references).
 
+## Logfire MCP: query your telemetry
+
+The built-in `logfire_mcp` plugin (`pydantic_clai2.logfire_mcp`) gives the agent
+the tools of Logfire's hosted MCP server through harness
+[`LogfireMCP`](../docs/logfire-mcp.md). It starts disabled; turn it on with
+`/plugins enable logfire_mcp`. It picks the first credential that is available:
+
+1. `key`: the name of a key saved with `/keys`. Like a model connection that
+   references a saved key, the value is read at the start of each run, and a
+   deleted key fails the run.
+2. `LOGFIRE_API_KEY` from the environment.
+3. OAuth: the first run opens your browser to sign in. Tokens are kept in the OS
+   keyring (or the private credential file) under the `mcp-logfire_mcp` account,
+   so restarting CLAI does not mean signing in again. The handshake allows 330
+   seconds for the sign-in.
+
+Enabling fails with a message naming what to set, instead of adding a Logfire
+connection that cannot sign in: a `key` that is not saved, no browser when OAuth
+is needed and no tokens are stored, or no credential with `oauth` off.
+
+```text
+/plugins add logfire_mcp pydantic_clai2.logfire_mcp '{"key": "LOGFIRE_API_KEY", "region": "eu"}'
+```
+
+| Key | Default | Does |
+|---|---|---|
+| `key` | none | name of a `/keys` entry to connect with |
+| `oauth` | `true` | sign in through the browser when there is no `key` and no `LOGFIRE_API_KEY` |
+| `region` | `"us"` | `"us"` or `"eu"`, the Logfire region your data lives in |
+| `read_only` | `true` | offer only the tools the server marks read-only; `false` also allows tools that change Logfire resources |
+
+Key values are not accepted in plugin settings. The credential's own scopes still
+decide which projects and actions are allowed.
+
 ## Where plugins live
 
 Plugins are trusted Python code. Drop-in files execute automatically at startup;
@@ -385,7 +419,8 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
+`Coder`, `AskUser`, and `RepoContext` use the integrated entries above, and
+`LogfireMCP` uses [`logfire_mcp`](#logfire-mcp-query-your-telemetry), instead of
 appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
