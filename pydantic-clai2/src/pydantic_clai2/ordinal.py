@@ -33,7 +33,7 @@ from pydantic_ai_harness.ordinal import Ordinal
 from termflow.tui import MenuBuilder, MenuItem, TextInputBuilder  # pyright: ignore[reportMissingTypeStubs]
 
 from ._rendering import markdown_style
-from .api_keys import KeyReference, load_keys, prompt_api_key, resolve_key, save_key, save_key_connection
+from .api_keys import KeyReference, add_key, load_keys, prompt_api_key, resolve_key, save_key, save_key_connection
 from .commands import Command
 from .credential_store import delete_credentials, load_codex_credentials
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
@@ -84,12 +84,33 @@ def saved_key() -> KeyReference | None:
         raise UserError(f'The saved Ordinal key choice is invalid. {SETUP}') from None
 
 
+def source(method: SignIn) -> KeyReference | Literal['environment', 'browser', 'none']:
+    """The credential a run with `method` uses; `'none'` only when `key` has nothing chosen.
+
+    Runs, `/ordinal`, and the no-terminal check all decide here, so they cannot disagree.
+    """
+    if method in ('auto', 'key'):
+        reference = saved_key()
+        if reference is not None:
+            return reference
+        if method == 'key':
+            return 'none'
+    if method == 'environment' or (method == 'auto' and os.environ.get(KEY_NAME)):
+        return 'environment'
+    return 'browser'
+
+
 def ready(method: SignIn, tokens: TokenStore) -> bool:
     """Whether a run can authenticate with `method` without asking anyone."""
-    key = method in ('auto', 'key') and saved_key() is not None
-    environment = method in ('auto', 'environment') and bool(os.environ.get(KEY_NAME))
-    browser = method in ('auto', 'browser') and bool(tokens.signed_in())
-    return key or environment or browser
+    match source(method):
+        case KeyReference():
+            return True
+        case 'environment':
+            return bool(os.environ.get(KEY_NAME))
+        case 'browser':
+            return bool(tokens.signed_in())
+        case 'none':  # pragma: no branch -- the cases cover every `source` result.
+            return False
 
 
 class OrdinalAuth(Generic[DepsT]):
@@ -107,18 +128,18 @@ class OrdinalAuth(Generic[DepsT]):
 
     async def __call__(self, ctx: RunContext[DepsT]) -> Ordinal[DepsT]:
         """The capability for this run; a missing chosen credential raises instead of connecting."""
-        method, instructions = self.settings.sign_in, self.settings.include_instructions
-        if method in ('auto', 'key'):
-            reference = await to_thread.run_sync(saved_key)
-            if reference is not None:
+        instructions = self.settings.include_instructions
+        match await to_thread.run_sync(source, self.settings.sign_in):
+            case KeyReference() as reference:
                 token = await to_thread.run_sync(partial(resolve_key, token=reference))
                 return Ordinal[DepsT](auth=token, include_instructions=instructions)
-            if method == 'key':
+            case 'environment':
+                # Harness reads the variable when it connects and fails closed when it is unset.
+                return Ordinal[DepsT](include_instructions=instructions)
+            case 'browser':
+                return self.browser
+            case 'none':  # pragma: no branch -- the cases cover every `source` result.
                 raise UserError(f'Ordinal has no /keys entry. {SETUP}')
-        if method == 'environment' or (method == 'auto' and os.environ.get(KEY_NAME)):
-            # Harness reads the variable when it connects and fails closed when it is unset.
-            return Ordinal[DepsT](include_instructions=instructions)
-        return self.browser
 
     def logout(self) -> None:
         """Forget the saved browser tokens and the in-memory ones, so the next browser run signs in again."""
@@ -163,20 +184,24 @@ def activate(host: PluginHost[DepsT]) -> None:
 
 
 def status(settings: OrdinalSettings, tokens: TokenStore) -> str:
-    """One line on which credential the next run uses."""
-    method = settings.sign_in
-    reference = saved_key() if method in ('auto', 'key') else None
-    if reference is not None:
-        return f'Ordinal uses {reference.name} from /keys.'
-    if method == 'key':
-        return f'Ordinal has no /keys entry. {SETUP}'
-    if method == 'environment' or (method == 'auto' and os.environ.get(KEY_NAME)):
-        return f'Ordinal uses `{KEY_NAME}` from the environment.'
-    return {
-        True: 'Ordinal: signed in through the browser. /ordinal logout signs out.',
-        False: 'Ordinal: not signed in; the browser opens on first use.',
-        None: 'Ordinal: sign-in unknown; the keyring could not be read.',
-    }[tokens.signed_in()]
+    """One line on which credential the next run uses, and whether that run will fail for want of it."""
+    match source(settings.sign_in):
+        case KeyReference(name=name) if name in load_keys():
+            return f'Ordinal uses {name} from /keys.'
+        case KeyReference(name=name):
+            return f'Ordinal uses {name}, which is missing from /keys, so runs fail. {SETUP}'
+        case 'none':
+            return f'Ordinal has no /keys entry, so runs fail. {SETUP}'
+        case 'environment' if os.environ.get(KEY_NAME):
+            return f'Ordinal uses `{KEY_NAME}` from the environment.'
+        case 'environment':
+            return f'Ordinal uses `{KEY_NAME}`, which is not set, so runs fail. {SETUP}'
+        case 'browser':  # pragma: no branch -- the cases cover every `source` result.
+            return {
+                True: 'Ordinal: signed in through the browser. /ordinal logout signs out.',
+                False: 'Ordinal: not signed in; the browser opens on first use.',
+                None: 'Ordinal: sign-in unknown; the keyring could not be read.',
+            }[tokens.signed_in()]
 
 
 SIGN_IN = FieldRow(
@@ -331,9 +356,11 @@ async def choose_key() -> KeyReference | None:
     value = choice.strip()
     if not value:
         return None
-    if KEY_NAME in await to_thread.run_sync(load_keys) and not await run_worker(confirm_replace):
-        return None
-    await to_thread.run_sync(partial(save_key, name=KEY_NAME, value=value))
+    # Checked and saved under one lock, so a key another process just saved is never replaced unasked.
+    if not await to_thread.run_sync(partial(add_key, name=KEY_NAME, value=value)):
+        if not await run_worker(confirm_replace):
+            return None
+        await to_thread.run_sync(partial(save_key, name=KEY_NAME, value=value))
     return KeyReference(name=KEY_NAME)
 
 

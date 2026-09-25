@@ -90,12 +90,32 @@ def _load_keys() -> dict[str, SecretStr]:
         raise UserError('Stored API keys are invalid. Repair the api-keys credential bundle.') from None
 
 
-def save_key(*, name: str, value: str) -> str:
-    """Save one key without touching unrelated credentials or SQLite."""
+def _entry(*, name: str, value: str) -> tuple[str, str]:
     name = normalize_name(name=name)
     value = value.strip()
     if not value:
         raise ValueError('An API key is required.')
+    return name, value
+
+
+def add_key(*, name: str, value: str) -> bool:
+    """Save a key only if no key has `name`, checked and written under one lock; `False` when one does.
+
+    A separate existence check would let another process's new key be replaced without asking.
+    """
+    name, value = _entry(name=name, value=value)
+    with key_transaction():
+        keys = _load_keys()
+        if name in keys:
+            return False
+        keys[name] = SecretStr(value)
+        _save_keys(keys=keys)
+    return True
+
+
+def save_key(*, name: str, value: str) -> str:
+    """Save one key without touching unrelated credentials or SQLite."""
+    name, value = _entry(name=name, value=value)
     with key_transaction():
         keys = _load_keys()
         keys[name] = SecretStr(value)

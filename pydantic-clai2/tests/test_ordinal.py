@@ -305,6 +305,23 @@ async def test_typed_token_needs_confirmation_to_replace_a_shared_key(
     assert load_keys()[KEY_NAME].get_secret_value() == 'wanted'
 
 
+async def test_a_key_saved_meanwhile_by_another_process_is_not_replaced_unasked(
+    vault: Vault, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shell = await enabled(tmp_path, monkeypatch)
+
+    async def prompt_api_key(*, prompt: object, label: str, optional: bool = False) -> Picked:
+        # The picker listed no keys; another CLAI process saves one before this token is.
+        save_key(name=KEY_NAME, value='theirs')
+        return 'mine'
+
+    monkeypatch.setattr('pydantic_clai2.ordinal.prompt_api_key', prompt_api_key)
+    shown = script(monkeypatch, lists=[pick('key')], choices=[pick(False)])
+    assert await shell.loader.configure('ordinal') == 'Ordinal settings unchanged.'
+    assert shown.opened == ['list', 'choice', 'list']
+    assert load_keys()[KEY_NAME].get_secret_value() == 'theirs'
+
+
 async def test_cancelled_or_blank_token_changes_nothing(
     vault: Vault, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -346,11 +363,10 @@ async def test_status_names_the_credential_in_use(vault: Vault, monkeypatch: pyt
         activate(plugin)
         return await run(plugin)
 
+    setup = 'Run /plugins configure ordinal to choose how it signs in.'
     assert await status() == 'Ordinal: not signed in; the browser opens on first use.'
-    assert (
-        await status(sign_in='key')
-        == 'Ordinal has no /keys entry. Run /plugins configure ordinal to choose how it signs in.'
-    )
+    assert await status(sign_in='key') == f'Ordinal has no /keys entry, so runs fail. {setup}'
+    assert await status(sign_in='environment') == f'Ordinal uses `{KEY_NAME}`, which is not set, so runs fail. {setup}'
     monkeypatch.setenv(KEY_NAME, 'token')
     assert await status() == f'Ordinal uses `{KEY_NAME}` from the environment.'
     assert await status(sign_in='browser') == 'Ordinal: not signed in; the browser opens on first use.'
@@ -358,6 +374,8 @@ async def test_status_names_the_credential_in_use(vault: Vault, monkeypatch: pyt
     choose_saved_key('MINE')
     assert await status() == 'Ordinal uses MINE from /keys.'
     assert await status(sign_in='environment') == f'Ordinal uses `{KEY_NAME}` from the environment.'
+    delete_key(name='MINE')
+    assert await status() == f'Ordinal uses MINE, which is missing from /keys, so runs fail. {setup}'
 
 
 async def test_logout_ends_the_browser_session(vault: Vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -438,6 +456,19 @@ async def test_no_credential_and_no_terminal_fails_to_enable(
     script(monkeypatch, lists=[])
     await shell.loader.enable('ordinal')
     assert (await shell.next_run()).auth == 'token'
+
+
+async def test_without_a_terminal_only_the_chosen_method_counts(vault: Vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    terminal(monkeypatch, attached=False)
+    monkeypatch.setenv(KEY_NAME, 'token')
+    with pytest.raises(UserError, match='sign-in `key`'):
+        activate(plugin_host({'sign_in': 'key'}))
+    plugin = plugin_host({'sign_in': 'environment'})
+    activate(plugin)
+    assert len(plugin.capabilities) == 1
+    monkeypatch.delenv(KEY_NAME)
+    with pytest.raises(UserError, match='sign-in `environment`'):
+        activate(plugin_host({'sign_in': 'environment'}))
 
 
 async def test_add_replacing_the_builtin_opens_the_menu(
