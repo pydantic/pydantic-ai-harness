@@ -62,7 +62,7 @@ commands, so `Shell` offers no tools for that run.
 
 ## Tools
 
-`Shell` contributes four run-scoped tools by default, plus the opt-in persistent `shell` tool:
+`Shell` contributes four tools by default, plus the opt-in persistent `shell` tool:
 
 | Tool | Purpose |
 |---|---|
@@ -70,7 +70,7 @@ commands, so `Shell` offers no tools for that run.
 | `start_command` | Launch a long-running command (server, watcher) in the background; returns an ID. |
 | `check_command` | Report the status and accumulated output of a background command. |
 | `stop_command` | Terminate a background command and return its final output. |
-| `shell` | Opt-in: run a command that outlives the run, in `foreground` (wait up to `timeout`, then hand back the still-running process) or `background` mode. Returns the PID and the paths of its output log and JSON status file. |
+| `shell` | Opt-in: run a command in `foreground` (wait up to `timeout`, then hand back the still-running process) or `background` mode. Returns the PID and the paths of its output log and JSON status file. |
 
 `run_command` accepts an optional `timeout_seconds` argument that overrides
 `default_timeout` for a single call. `check_command` and `stop_command` take the
@@ -190,15 +190,15 @@ your process's environment and your files. Use a sandbox for untrusted commands.
 ## Background processes
 
 `start_command` starts the command in the background inside the workspace and
-returns a short ID. Its output is logged under `.pydantic-ai-harness/shell/` in
+returns an ID. Its output is logged under `.pydantic-ai-harness/shell/` in
 the working directory, which is git-ignored. Use `check_command(command_id)` to
 poll and `stop_command(command_id)` to terminate and collect final output: the
 whole process group gets `SIGTERM`, then `SIGKILL` after a grace period. A
 command stopped by `SIGTERM` reports `[exit code: 143]`.
 
-When the run ends, successfully or not, every background process still running
-is stopped and its job directory deleted, so a forgotten `stop_command` doesn't
-leak processes.
+A background command is not tied to the run: a conversation spans several
+runs, so a later run on the same workspace can check or stop it by its ID. It
+keeps running until it exits, `stop_command` stops it, or the workspace ends.
 
 ```python
 from pydantic_ai import Agent
@@ -222,8 +222,8 @@ print(result.output)
 
 ## Persistent commands
 
-The four tools above are run-scoped: their processes die with the run. Name
-`shell` in `tools` to register the persistent tool instead:
+Name `shell` in `tools` to register the persistent tool instead of the four
+tools above:
 
 ```python
 from pydantic_ai_harness import Shell

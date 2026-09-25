@@ -121,7 +121,7 @@ Results are bounded by `FileSystem`'s caps (2,000 lines or 60,000 characters per
 tool-output limit; a truncation marker means more output was omitted, so narrow the search rather than
 assuming it was complete. A `read_file` window stays under the output limit, so paging by `offset` never skips lines. Use `shell` for `mkdir`, `find`, process inspection, and `kill`. File writes
 keep the standalone filesystem's read-only path rules (`.git`, `.env`, keys, and secrets); shell can bypass
-these rules. Coder does not include planning, delegation, or the run-scoped `run_command` family.
+these rules. Coder does not include planning, delegation, or the `run_command` family.
 
 ## Filesystem scope
 
