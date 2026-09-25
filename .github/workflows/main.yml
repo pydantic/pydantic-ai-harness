@@ -36,6 +36,7 @@ jobs:
       localstack: ${{ steps.detect.outputs.localstack }}
       mongodb: ${{ steps.detect-mongodb.outputs.mongodb }}
       redis: ${{ steps.detect-redis.outputs.redis }}
+      sandbox_live: ${{ steps.detect-sandbox-live.outputs.providers }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
@@ -118,6 +119,15 @@ jobs:
             fi
             echo 'redis=true' >> "$GITHUB_OUTPUT"
           fi
+
+      # The sandbox live tests start real, billed sandboxes, one provider at a time. The
+      # script names the providers this change can affect (their own code, their SDK in
+      # `uv.lock`, the shared workspace code, or the `pydantic-ai-slim` pin) as a JSON list.
+      - id: detect-sandbox-live
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: echo "providers=$(python3 scripts/sandbox_live_changes.py changed "$BASE_SHA" "$HEAD_SHA")" >> "$GITHUB_OUTPUT"
 
   clai-test:
     name: CLAI test (${{ matrix.python }})
@@ -537,6 +547,32 @@ jobs:
 
       - run: make integration-redis
 
+  sandbox-live:
+    needs: [changes]
+    # Same fork and Dependabot clause as `localstack-integration`: the provider tokens are
+    # repository secrets those pull requests cannot read. `sandbox-live-nightly.yml` covers
+    # them on demand. Tags run every provider and gate the release.
+    if: >-
+      ${{ always()
+          && (github.ref_type == 'tag' || (needs.changes.outputs.sandbox_live != '' && needs.changes.outputs.sandbox_live != '[]'))
+          && (github.event_name != 'pull_request'
+              || (github.event.pull_request.head.repo.full_name == github.repository
+                  && github.actor != 'dependabot[bot]')) }}
+    # A new push to a pull request cancels its running live tests; pushes to `main` and tags
+    # always finish.
+    concurrency:
+      group: sandbox-live-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    uses: ./.github/workflows/sandbox-live.yml
+    with:
+      providers: ${{ github.ref_type == 'tag' && 'all' || needs.changes.outputs.sandbox_live }}
+    secrets:
+      MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
+      MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
+      E2B_API_KEY: ${{ secrets.E2B_API_KEY }}
+      DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+      SPRITE_TOKEN: ${{ secrets.SPRITE_TOKEN }}
+
   coverage:
     needs: [test]
     runs-on: ubuntu-latest
@@ -562,7 +598,7 @@ jobs:
 
   check:
     if: always()
-    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, clai-test, clai-coverage, localstack-integration, mongodb-integration, redis-integration]
+    needs: [changes, lint, test, test-floor, test-latest, base-import, coverage, clai-test, clai-coverage, localstack-integration, mongodb-integration, redis-integration, sandbox-live]
     runs-on: ubuntu-latest
     steps:
       - uses: re-actors/alls-green@05ac9388f0aebcb5727afa17fcccfecd6f8ec5fe # v1.2.2
@@ -572,8 +608,10 @@ jobs:
           # (no secrets there), and `changes` is skipped on tag events.
           # mongodb-integration and redis-integration are skipped only on the path
           # filter -- neither needs a secret, so both run on fork pull requests too.
-          # All four still vote (block the merge) when they actually run and fail.
-          allowed-skips: changes, localstack-integration, mongodb-integration, redis-integration
+          # sandbox-live is skipped like localstack-integration: when no provider is
+          # affected and where secrets are unavailable.
+          # All five still vote (block the merge) when they actually run and fail.
+          allowed-skips: changes, localstack-integration, mongodb-integration, redis-integration, sandbox-live
           jobs: ${{ toJSON(needs) }}
 
   release:
