@@ -332,10 +332,11 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                 await exec_command.start()
                 code = await exec_command.wait()
             if timeout is not None and deadline.cancelled_caught:
+                partial = _split_output(exec_command.get_stdout(), exec_command.get_stderr(), marker)
                 raise WorkspaceTimeoutError(
                     f'Command timed out after {timeout:g} seconds',
-                    stdout=_until_marker(exec_command.get_stdout(), marker),
-                    stderr=_until_marker(exec_command.get_stderr(), marker),
+                    stdout=partial[0],
+                    stderr=partial[1],
                     timeout=timeout,
                 )
         except BaseException as error:
@@ -345,29 +346,35 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                 raise mapped from error
             raise
         await _close_command(exec_command)
-        return CommandResult(
-            exit_code=code,
-            stdout=_until_marker(exec_command.get_stdout(), marker),
-            stderr=_until_marker(exec_command.get_stderr(), marker),
-        )
+        stdout, stderr = _split_output(exec_command.get_stdout(), exec_command.get_stderr(), marker)
+        return CommandResult(exit_code=code, stdout=stdout, stderr=stderr)
 
 
 def _ending_with(marker: str, args: list[str]) -> list[str]:
-    """`args` run under a `sh` that ends stdout and stderr with a `marker` line and keeps the exit status.
+    """`args` run under a `sh` that reports their stdout, a `marker` line, then their stderr, all on stdout.
 
-    The live Sprite sends stderr a line at a time and delivers a last line without a newline on the
-    stdout stream, so `printf out; printf err >&2` came back as `outerr` on stdout (2026-09-25). The
-    marker line terminates whatever the command left unterminated; `_until_marker` removes it.
+    The live Sprite's stderr stream is not dependable: the same command's stderr arrived on the stderr
+    stream in one run and on the stdout stream in the next, whole lines included (2026-09-25), while
+    stdout arrived intact every time. So the command's stderr goes to a temporary file in the Sprite,
+    printed on stdout after the marker line, and `_split_output` separates the two again. The exit
+    status is the command's.
     """
-    script = f'"$@"; status=$?; printf "\\n%s\\n" {marker}; printf "\\n%s\\n" {marker} >&2; exit "$status"'
+    script = (
+        'err=$(mktemp) || exit 125; '
+        f'"$@" 2>"$err"; status=$?; printf "\\n%s\\n" {marker}; cat "$err"; rm -f "$err"; exit "$status"'
+    )
     return ['sh', '-c', script, 'sh', *args]
 
 
-def _until_marker(data: bytes, marker: str) -> str:
-    """The stream's output before the `marker` line; all of it when the command never reached the marker."""
-    output = _decode(data)
-    head, found, _ = output.rpartition(f'\n{marker}\n')
-    return head if found else output
+def _split_output(stdout: bytes, stderr: bytes, marker: str) -> tuple[str, str]:
+    """The command's stdout and stderr from what `_ending_with` printed.
+
+    Without the marker line (the command was stopped before it finished), stdout is all the output
+    there is, and the command's stderr stayed in the Sprite. Anything on the stderr stream itself came
+    from the wrapper and is kept.
+    """
+    head, found, tail = _decode(stdout).partition(f'\n{marker}\n')
+    return head, (tail + _decode(stderr)) if found else _decode(stderr)
 
 
 def _with_env(args: list[str], env: dict[str, str]) -> list[str]:

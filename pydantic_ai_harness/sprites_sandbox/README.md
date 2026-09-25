@@ -94,7 +94,7 @@ An explicit reference takes precedence over message history. Pass `workspace='ne
 
 A Sprite persists after the agent run ends, with its files and installed packages. It pauses when idle and resumes on the next command: compute is billed while it is active, storage until it is deleted. Pydantic AI never deletes a Sprite; deleting it through the SDK when you are done is the application's job, as shown below.
 
-- Pass a finite `timeout` to bound a command. On a timeout or a cancelled call, the backend closes the command's connection and the Sprite stops the command about a second later, and `WorkspaceTimeoutError` carries the output produced so far. Background processes the command started, such as a `server &` or a `Shell` background job, may outlive it.
+- Pass a finite `timeout` to bound a command. On a timeout or a cancelled call, the backend closes the command's connection and the Sprite stops the command about a second later, and `WorkspaceTimeoutError` carries the stdout produced so far; a timed-out command's stderr is not returned, because the backend collects stderr when the command finishes. Background processes the command started, such as a `server &` or a `Shell` background job, may outlive it.
 - A deleted Sprite and rejected credentials raise `WorkspaceUnavailableError`, which ends the run. Network and connection errors propagate unchanged, so a durable execution engine can retry them.
 - The `WorkspaceRef` carries no credentials, so every worker that reattaches needs its own `SPRITE_TOKEN` or `client=`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
 

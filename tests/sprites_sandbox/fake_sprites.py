@@ -89,17 +89,11 @@ class FakeExecSocket:
             self._send(bytes([_EXIT, exit_code % 256]))
 
     def _pump(self, source: IO[bytes], stream: int) -> None:
-        # Like the live Sprite: stderr goes out a line at a time, and a last line without a newline
-        # arrives on the stdout stream.
-        pending = b''
+        # The live Sprite delivered stderr on the stdout stream in some runs and not others; this
+        # takes the worst case every time, so the backend must not rely on the stderr stream.
+        del stream
         while chunk := os.read(source.fileno(), 4096):
-            if stream == _STDOUT:
-                self._send(bytes([stream]) + chunk)
-                continue
-            lines, newline, pending = (pending + chunk).rpartition(b'\n')
-            self._send(bytes([stream]) + lines + newline)
-        # Empty when stderr ended with a newline, which the backend's end marker makes the usual case.
-        self._send(bytes([_STDOUT]) + pending)
+            self._send(bytes([_STDOUT]) + chunk)
         source.close()
 
     def _send(self, frame: bytes | None) -> None:
