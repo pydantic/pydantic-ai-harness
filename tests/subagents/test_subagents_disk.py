@@ -16,6 +16,7 @@ from pydantic_ai.models.test import TestModel
 from pydantic_ai.tools import RunContext
 from pydantic_ai.toolsets import AgentToolset, FunctionToolset
 
+from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.subagents import (
     MINIMUM_EFFORT_FLOOR,
     AgentOverride,
@@ -170,12 +171,86 @@ class TestResolveFolders:
         assert resolve_folders([tmp_path / 'a', tmp_path / 'a'], tmp_path, tmp_path) == [tmp_path / 'a']
 
 
-class TestDiskLoading:
-    def test_auto_loads_from_convention_by_default(self) -> None:
-        # The isolation fixture points the home root at an empty dir; populate its
-        # conventional folder and the default `SubAgents()` picks it up with no config.
+class TestAgentFoldersDefault:
+    """`agent_folders` defaults to no disk loading, and says so only to callers it affects."""
+
+    def test_default_does_not_load_and_warns_when_a_definition_exists(self) -> None:
+        folder = Path.home() / '.agents' / 'agents'
+        _write_agent(folder, 'planner.md', '---\nname: planner\n---\nPlan.')
+        worker = Agent(TestModel(), name='worker')
+        with pytest.warns(HarnessDeprecationWarning, match='now defaults to `agent_folders=None`') as record:
+            cap: SubAgents[object] = SubAgents(agents=[SubAgent(worker)])
+        assert str(folder) in str(record[0].message)
+        assert "Pass `agent_folders='agents'` to restore" in str(record[0].message)
+        assert list(cap._by_name) == ['worker']
+        assert cap.agent_folders is None
+
+    def test_project_claude_folder_also_warns(self) -> None:
+        folder = Path.cwd() / '.claude' / 'agents'
+        _write_agent(folder, 'reviewer.md', 'Review.')
+        with pytest.warns(HarnessDeprecationWarning, match='agent_folders') as record:
+            cap: SubAgents[object] = SubAgents()
+        assert str(folder) in str(record[0].message)
+        assert cap.get_toolset() is None
+
+    def test_default_is_silent_without_definitions(self) -> None:
+        # A conventional folder that exists but holds no `*.md` file loaded nothing before either.
+        _write_agent(Path.home() / '.agents' / 'agents', 'notes.txt', 'not a definition')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            cap: SubAgents[object] = SubAgents()
+        assert cap._by_name == {}
+        assert cap.agent_folders is None
+
+    @pytest.mark.parametrize('agent_folders', [None, 'agents'])
+    def test_explicit_value_is_silent(self, agent_folders: str | None) -> None:
         _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
-        cap: SubAgents[object] = SubAgents()
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            cap: SubAgents[object] = SubAgents(agent_folders=agent_folders)
+        assert ('planner' in cap._by_name) is (agent_folders == 'agents')
+
+    async def test_unset_combines_with_explicit_none(self) -> None:
+        """Unset and `None` both mean no disk loading, so they are not a disagreement to refuse."""
+        alpha = Agent(TestModel(custom_output_text='alpha done'), name='alpha')
+        beta = Agent(TestModel(), name='beta')
+        parent: Agent[object, str] = Agent(
+            _delegate_then_finish('alpha'),
+            capabilities=[
+                SubAgents(agents=[SubAgent(alpha)]),
+                SubAgents(agents=[SubAgent(beta)], agent_folders=None),
+            ],
+        )
+        result = await parent.run('go')
+        assert _delegate_returns(result) == ['alpha done']
+
+        merged = SubAgents.combine(
+            [SubAgents(agents=[SubAgent(alpha)]), SubAgents(agents=[SubAgent(beta)], agent_folders=None)]
+        )
+        assert isinstance(merged, SubAgents)
+        assert list(merged._by_name) == ['alpha', 'beta']
+
+
+class TestInheritToolsDeprecation:
+    def test_true_warns(self) -> None:
+        worker = Agent(TestModel(), name='worker')
+        with pytest.warns(HarnessDeprecationWarning, match=r'inherit_tools=True\)` is deprecated.*include_self=True'):
+            cap: SubAgents[object] = SubAgents(agents=[SubAgent(worker)], inherit_tools=True)
+        assert cap.inherit_tools is True
+
+    def test_false_is_silent(self) -> None:
+        worker = Agent(TestModel(), name='worker')
+        with warnings.catch_warnings():
+            warnings.simplefilter('error')
+            SubAgents(agents=[SubAgent(worker)], inherit_tools=False)
+
+
+class TestDiskLoading:
+    def test_loads_from_convention_when_requested(self) -> None:
+        # The isolation fixture points the home root at an empty dir; populate its
+        # conventional folder and `agent_folders='agents'` picks it up.
+        _write_agent(Path.home() / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
+        cap: SubAgents[object] = SubAgents(agent_folders='agents')
         assert 'planner' in cap._by_name
 
     def test_cwd_equal_home_loads_once_without_shadow_warning(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,7 +266,7 @@ class TestDiskLoading:
         _write_agent(root / '.agents' / 'agents', 'planner.md', '---\nname: planner\n---\nPlan.')
         with warnings.catch_warnings():
             warnings.simplefilter('error')
-            cap: SubAgents[object] = SubAgents()
+            cap: SubAgents[object] = SubAgents(agent_folders='agents')
         assert 'planner' in cap._by_name
 
     def test_none_disables_loading(self) -> None:
