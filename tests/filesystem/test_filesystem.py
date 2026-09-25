@@ -72,13 +72,29 @@ class UntouchableWorkspace(WorkspaceBackend):
 
 
 class CountingWorkspace(LocalWorkspaceBackend):
-    """A local workspace that counts `working_dir` calls."""
+    """A local workspace that counts `working_dir` and `realpath` calls."""
 
     working_dir_calls = 0
+    realpath_calls = 0
 
     async def working_dir(self) -> str:
         self.working_dir_calls += 1
         return await super().working_dir()
+
+    async def realpath(self, path: str) -> str:
+        self.realpath_calls += 1
+        return await super().realpath(path)
+
+
+class SymlinkedWorkingDir(LocalWorkspaceBackend):
+    """A backend that reports its working directory through a symlink rather than canonically."""
+
+    def __init__(self, link: Path) -> None:
+        super().__init__(link)
+        self.link = link
+
+    async def working_dir(self) -> str:
+        return self.link.as_posix()
 
 
 class FailingWorkspace(LocalWorkspaceBackend):
@@ -299,6 +315,35 @@ class TestPathSecurity:
         assert 'escaped!' in await toolset.read_file('escape/secret.txt', workspace=ws)
         assert await toolset.search_files('escaped', workspace=ws) == 'escape/secret.txt:1:escaped!'
 
+    async def test_root_at_the_filesystem_root_still_matches_patterns_through_symlinks(
+        self, fs_root: Path, ws: LocalWorkspaceBackend
+    ) -> None:
+        (fs_root / 'token.secret').write_text('original\n')
+        (fs_root / 'alias.txt').symlink_to(fs_root / 'token.secret')
+        toolset = FileSystem[None](root_dir='/', denied_patterns=['**/*.secret']).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        with pytest.raises(ModelRetry, match="denied by pattern '\\*\\*/\\*.secret'"):
+            await toolset.write_file('alias.txt', 'overwritten\n', workspace=ws)
+        assert (fs_root / 'token.secret').read_text() == 'original\n'
+
+    async def test_root_at_the_filesystem_root_without_patterns_resolves_no_symlinks(self, fs_root: Path) -> None:
+        toolset = FileSystem[None](root_dir='/', protected_patterns=[]).get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        workspace = CountingWorkspace(fs_root)
+        await toolset.write_file('new.txt', 'x\n', workspace=workspace)
+        assert 'x' in await toolset.read_file('new.txt', workspace=workspace)
+        assert await toolset.search_files('^x$', workspace=workspace) == 'new.txt:1:x'
+        assert workspace.realpath_calls == 0
+
+    async def test_symlinked_working_directory_is_the_default_root(self, tmp_path: Path) -> None:
+        (tmp_path / 'real').mkdir()
+        (tmp_path / 'link').symlink_to(tmp_path / 'real')
+        toolset = FileSystem[None]().get_toolset()
+        assert isinstance(toolset, FileSystemToolset)
+        workspace = SymlinkedWorkingDir(tmp_path / 'link')
+        await toolset.write_file('a.txt', 'written\n', workspace=workspace)
+        assert (tmp_path / 'real' / 'a.txt').read_text() == 'written\n'
+
     async def test_valid_path_resolves(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
     ) -> None:
@@ -342,9 +387,21 @@ class TestRootDir:
         )
         assert 'shared notes' in result
 
-    async def test_root_below_the_working_directory_fails_the_first_file_operation(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize('root_dir', ['src', '../elsewhere'])
+    def test_relative_root_that_cannot_contain_the_working_directory_is_rejected(self, root_dir: str) -> None:
+        with pytest.raises(UserError, match='root_dir must contain the working directory.*attach the workspace'):
+            FileSystem[None](root_dir=root_dir)
+
+    async def test_relative_root_at_the_working_directory_is_the_default(self, fs_root: Path) -> None:
+        capabilities = [FileSystem[None](root_dir='src/..')]
+        read = await call_tool(capabilities, 'read_file', {'path': 'hello.txt'}, workspace=local_workspace(fs_root))
+        assert 'Hello' in read
+
+    async def test_absolute_root_below_the_working_directory_fails_the_first_file_operation(
+        self, tmp_path: Path
+    ) -> None:
         (tmp_path / 'src').mkdir()
-        capabilities = [FileSystem[None](root_dir='src')]
+        capabilities = [FileSystem[None](root_dir=tmp_path / 'src')]
         assert await call_tools(capabilities, [], workspace=local_workspace(tmp_path)) == []
         with pytest.raises(UserError, match=r"The working directory '.*' is outside root_dir '.*/src'"):
             await call_tool(capabilities, 'list_directory', {}, workspace=local_workspace(tmp_path))
@@ -743,17 +800,14 @@ class TestListDirectory:
         result = await toolset.list_directory('subdir', workspace=ws)
         assert 'nested.py' in result
 
-    async def test_list_follows_symlink_inside_root(
-        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    async def test_list_shows_a_link_leading_outside_but_refuses_reading_it(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend, outside: Path
     ) -> None:
-        """A link inside the root is listed with its target's size; the workspace follows it."""
-        target = fs_root.parent / 'list-escape-target'
-        target.write_text('escaped!\n')
-        try:
-            (fs_root / 'escape_link.txt').symlink_to(target)
-            assert 'escape_link.txt  (9 bytes)' in await toolset.list_directory('.', workspace=ws)
-        finally:
-            target.unlink(missing_ok=True)
+        """Entries are listed by name, with the size the workspace reports; access is checked on use."""
+        (fs_root / 'escape_link.txt').symlink_to(outside / 'secret.txt')
+        assert 'escape_link.txt  (9 bytes)' in await toolset.list_directory('.', workspace=ws)
+        with pytest.raises(ModelRetry, match='resolves outside the root directory'):
+            await toolset.read_file('escape_link.txt', workspace=ws)
 
     async def test_list_skips_dangling_symlink(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
@@ -1076,18 +1130,14 @@ class TestFindFiles:
         assert '.hidden' not in result
         assert '.git' not in result
 
-    async def test_find_follows_symlink_inside_root(
-        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend
+    async def test_find_shows_a_link_leading_outside_but_refuses_writing_it(
+        self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend, outside: Path
     ) -> None:
-        target = fs_root.parent / 'find-escape-target'
-        target.write_text('escaped!\n')
-        try:
-            (fs_root / 'escape_link.txt').symlink_to(target)
-            result = await toolset.find_files('*.txt', workspace=ws)
-            assert 'escape_link.txt' in result
-            assert 'hello.txt' in result
-        finally:
-            target.unlink(missing_ok=True)
+        (fs_root / 'escape_link.txt').symlink_to(outside / 'secret.txt')
+        assert 'escape_link.txt' in await toolset.find_files('*.txt', workspace=ws)
+        with pytest.raises(ModelRetry, match='resolves outside the root directory'):
+            await toolset.write_file('escape_link.txt', 'x', workspace=ws)
+        assert (outside / 'secret.txt').read_text() == 'escaped!\n'
 
     async def test_find_skips_dangling_symlink(
         self, toolset: FileSystemToolset[None], fs_root: Path, ws: LocalWorkspaceBackend

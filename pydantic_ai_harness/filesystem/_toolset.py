@@ -145,11 +145,11 @@ class _Scope:
     """The boundary: the real (symlink-free) workspace path of `root_dir`."""
     cwd: str
     """The workspace's working directory, which relative paths resolve from; inside `root`."""
+    checks_realpath: bool
+    """Whether targets are resolved through symlinks before use.
 
-    @property
-    def checks_realpath(self) -> bool:
-        """Whether targets are resolved through symlinks before use; a boundary at `/` contains everything."""
-        return self.root != '/'
+    A boundary at `/` contains everything, so only access patterns need the real path there.
+    """
 
 
 def _contains(root: str, path: str) -> bool:
@@ -381,6 +381,26 @@ def _with_walk_notice(lines: list[str], walk_cut: bool) -> str:
     return '\n'.join(lines) if lines else 'No matches found.'
 
 
+def root_spelling(root_dir: Path | None) -> str | None:
+    """The workspace spelling of `root_dir`, rejecting a relative one that cannot contain the working directory.
+
+    A relative root other than `.` or a chain of `..` names a directory below the working
+    directory, which fails every run, so it is refused up front. An absolute root is checked
+    against the workspace on the first file operation.
+    """
+    if root_dir is None:
+        return None
+    spelling = workspace_path(root_dir)
+    normalized = posixpath.normpath(spelling)
+    if not posixpath.isabs(normalized) and normalized != '.' and set(normalized.split('/')) != {'..'}:
+        raise UserError(
+            f'root_dir {spelling!r} is below the working directory, but root_dir must contain the working '
+            'directory. To scope the tools to a subfolder, attach the workspace there, '
+            "e.g. `LocalWorkspace('./src')`."
+        )
+    return spelling
+
+
 def _as_workspace(workspace: WorkspaceBackend) -> Workspace:
     return workspace if isinstance(workspace, Workspace) else Workspace(workspace)
 
@@ -418,7 +438,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         super().__init__(id=id)
         # A workspace path, absolute or relative to the workspace's working directory, resolved
         # against the workspace a call acts on; `None` bounds calls by the working directory itself.
-        self._root_spelling = None if root_dir is None else workspace_path(root_dir)
+        self._root_spelling = root_spelling(root_dir)
         # The scope the first call resolved, reused by every later call against the same workspace.
         self._resolved: _Scope | None = None
         self._allowed_patterns = list(allowed_patterns)
@@ -470,15 +490,18 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         """Resolve the boundary and working directory inside `workspace`, once per workspace.
 
         Resolution waits for the first file operation, so a run that never touches a file does no
-        workspace I/O. The working directory is canonical by the workspace contract, so it is not
-        resolved again. Raises `UserError` when the working directory is outside `root_dir`.
+        workspace I/O. A default boundary is the working directory with its symlinks resolved, and
+        relative paths then resolve from that same spelling, so targets and boundary compare alike
+        even on a backend whose working directory is a symlinked path. Raises `UserError` when the
+        working directory is outside `root_dir`.
         """
         if self._resolved is not None and self._resolved.workspace is workspace:
             return self._resolved
         facade = _as_workspace(workspace)
         cwd = posixpath.normpath(await facade.working_dir())
-        root = cwd
-        if self._root_spelling is not None:
+        if self._root_spelling is None:
+            root = cwd = cwd if cwd == '/' else await facade.realpath(cwd)
+        else:
             root = await facade.resolve(self._root_spelling)
             if root != '/':
                 root = await facade.realpath(root)
@@ -487,7 +510,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                     f'The working directory {cwd!r} is outside root_dir {root!r}. '
                     'Set `root_dir` to a directory that contains it, or leave it unset to use the working directory.'
                 )
-        self._resolved = _Scope(workspace=facade, root=root, cwd=cwd)
+        has_patterns = bool(self._allowed_patterns or self._denied_patterns or self._protected_patterns)
+        self._resolved = _Scope(workspace=facade, root=root, cwd=cwd, checks_realpath=root != '/' or has_patterns)
         return self._resolved
 
     def _matches(self, path: str, pattern: str) -> bool:

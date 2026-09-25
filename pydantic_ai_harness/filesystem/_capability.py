@@ -14,7 +14,12 @@ from pydantic_ai.toolsets import FilteredToolset
 
 from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
 from pydantic_ai_harness._workspace import require_workspace
-from pydantic_ai_harness.filesystem._toolset import DEFAULT_TOOL_NAMES, READ_ONLY_TOOL_NAMES, FileSystemToolset
+from pydantic_ai_harness.filesystem._toolset import (
+    DEFAULT_TOOL_NAMES,
+    READ_ONLY_TOOL_NAMES,
+    FileSystemToolset,
+    root_spelling,
+)
 
 _DEFAULT_PROTECTED: list[str] = [
     '.git/*',
@@ -40,7 +45,9 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     symlinks, and `protected_patterns` guard what may be written. This is a
     guardrail checked before each operation, not isolation: a symlink swapped in
     between the check and the use is not caught, and `Shell` commands are not
-    bounded at all. The workspace is the isolation boundary.
+    bounded at all. The workspace is the isolation boundary. Listings show
+    entries by name: a symlink whose target is outside `root_dir` is listed but
+    refused when read or written.
     """
 
     root_dir: str | Path | None = None
@@ -48,9 +55,11 @@ class FileSystem(AbstractCapability[AgentDepsT]):
 
     `None` (the default) is the workspace's working directory; a relative path
     resolves against it. Set it higher to let the model reach beyond the
-    working directory, e.g. a parent holding sibling projects; the working
-    directory must be inside it, or the run fails on its first file operation. `'/'` turns
-    the containment checks off.
+    working directory, e.g. a parent holding sibling projects. The working
+    directory must be inside it: a relative path below it (e.g. `'src'`) is
+    rejected here, and an absolute one that does not contain it fails the run on
+    its first file operation. `'/'` turns the containment checks off, while any
+    access patterns still match a symlink's target.
     """
 
     cwd: str | Path | None = None
@@ -124,6 +133,7 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     def __post_init__(self) -> None:
         if self.cwd is not None:
             warn_argument_ignored('FileSystem', 'cwd', WORKING_DIR_IS_THE_WORKSPACES)
+        root_spelling(None if self.root_dir is None else Path(self.root_dir))
         # Runtime validation: dataclass field annotations are advisory, not enforced.
         # A config-driven caller could pass a string that would otherwise propagate.
         values: dict[str, Any] = {

@@ -121,9 +121,11 @@ agent they only add tokens to every read and write. Events still carry
 Relative paths resolve from the workspace's working directory, which is also
 the default `root_dir`. Set `root_dir` higher, such as a parent holding sibling
 projects, to let the model reach beyond the project directory without spelling
-out absolute paths. The working directory must be inside `root_dir`; a
-`root_dir` below it fails the run on its first file operation. To work in a
-subdirectory, set it on the workspace instead (`LocalWorkspace('./repo')`).
+out absolute paths. The working directory must be inside `root_dir`: a
+relative `root_dir` such as `'src'` is rejected when `FileSystem` is built, and
+an absolute one that does not contain the working directory fails the run on
+its first file operation. To work in a subdirectory, set it on the workspace
+instead (`LocalWorkspace('./repo')`).
 
 `list_directory`, `find_files`, `search_files`, `list_files`, and `grep` return
 paths relative to the working directory, even when searching a subdirectory.
@@ -250,12 +252,15 @@ applies the same rule to absolute symlink targets.
   resolving outside `root_dir` via `..` or an absolute path is rejected. The
   target is checked both as written and once the workspace has resolved its
   symlinks, so a symlink inside the root that points outside it is rejected,
-  and walkers drop such entries. Patterns match the root-relative path, in
-  direct access and in directory walks (`list_directory`, `search_files`,
-  `find_files`, `list_files`, `grep`); `protected_patterns` and
-  `denied_patterns` also match a symlink's target, so a link to `.env` is
-  protected like `.env` itself. `root_dir='/'` turns the containment checks
-  off. This is a guardrail checked before each operation, not isolation: a
+  and `search_files` skips such files. Listings (`list_directory`,
+  `find_files`) show entries by name: a symlink whose target is outside
+  `root_dir` is listed but refused when read or written. Patterns match the
+  root-relative path, in direct access and in directory walks
+  (`list_directory`, `search_files`, `find_files`, `list_files`, `grep`);
+  `protected_patterns` and `denied_patterns` also match a symlink's target, so
+  a link to `.env` is protected like `.env` itself. `root_dir='/'` turns the
+  containment checks off, while any access patterns still match a symlink's
+  target. This is a guardrail checked before each operation, not isolation: a
   symlink swapped in between the check and the use is not caught, and `Shell`
   commands are not bounded by `root_dir` at all. The workspace is the
   isolation boundary: use a sandboxed workspace when the agent or the tree is
