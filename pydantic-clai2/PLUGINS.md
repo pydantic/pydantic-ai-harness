@@ -381,31 +381,29 @@ order plugin instructions, renderers, and status segments are consulted in.
 | `persistence` | `pydantic_clai2.sessions` | `{}` | Harness step checkpoints for interrupted session recovery |
 | `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
 
-### Optional harness capabilities
+### Other harness capabilities
 
-`/plugins` and `/plugins list` also include every other public harness capability,
-including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice, and `Pylon` uses the [`pylon` plugin](#pylon-support-issues-and-accounts-in-pylon). Deprecated aliases, toolsets, stores, and the ACP server adapter
-are not separate capabilities.
+`/plugins` lists only the built-ins above, plus plugins you or the repository
+declared. It does not list every public harness capability for Space-enable:
+hosted-MCP integrations such as Slack or GitHub, sandboxes, and guardrails need
+credentials, extras, or settings that a checkbox cannot supply, so they belong in
+CLAI plugins written for them, such as the [`pylon` plugin](#pylon-support-issues-and-accounts-in-pylon).
 
-Press Space to enable an entry. Its preview shows the import path and any load
-error. Listing disabled entries does not import their modules or require their
-optional packages. Some capabilities need an extra installed in CLAI's Python
-environment, credentials, or constructor settings before they can load. Supply
-JSON constructor settings by replacing the declaration under the same id:
+To run any other capability, declare it on purpose under an id of your choice,
+with JSON constructor settings if it takes them:
 
 ```text
 /plugins add sliding_window_compaction pydantic_ai_harness.compaction:SlidingWindowCompaction '{"max_messages": 40}'
 ```
 
-For callbacks, stores, or other Python objects, use a plugin module that builds
-the capability and calls `host.add(...)`, registered under that id. The menu does
-not construct these objects or install dependencies. Avoid enabling overlapping
-tool providers together, such as `filesystem` or `shell` alongside `coder`.
-Removing an optional built-in restores its disabled declaration; enable and
-disable choices persist between launches. Project, drop-in, and saved declarations
-retain their usual precedence over built-ins.
+For callbacks, stores, or other Python objects, write a plugin module that builds
+the capability and calls `host.add(...)`. CLAI does not install the capability's
+optional dependencies. Avoid enabling overlapping tool providers together, such
+as `filesystem` or `shell` alongside `coder`.
+
+Earlier releases listed every harness capability here, disabled. If you enabled
+one of those, it was saved as your own declaration, so it keeps loading and now
+shows as a saved plugin; `/plugins remove NAME` forgets it.
 
 `/plugins disable coder` gives you a chat-only CLAI (a writing or research setup
 with `ExaSearch` instead, say); `/plugins enable coder` brings the tools back;
@@ -516,24 +514,44 @@ updating accounts, and looking up contacts. It starts disabled;
 `/plugins enable pylon` turns it on. The agent acts as the Pylon user who signed
 in, so only Member and Admin users with Pylon's `MCP Access` role can use it.
 
-When `PYLON_ACCESS_TOKEN` is set, CLAI connects with that token. Otherwise the
-first run that uses Pylon opens the browser to sign in, as `/mcp` servers with
-OAuth do, and waits up to five minutes for you to finish. The tokens are kept in
-the keyring (account `mcp-plugin_pylon`, or a private `0600` file when there is no
-keyring) and refreshed as needed, so a restart does not sign in again. Pylon only
-accepts OAuth tokens, not its REST API keys.
+The token lives in [`/keys`](#saved-api-keys), not in plugin settings, which are
+plaintext SQLite. Enabling the plugin in a terminal opens the saved-key picker:
+choose an existing key, or choose **Enter a different API key** to type a masked
+token that CLAI saves in `/keys` as `PYLON_ACCESS_TOKEN`, the name harness
+`Pylon` documents. If that name already exists, CLAI asks before replacing it,
+since other connections may use it. `/pylon key` chooses again; bare `/pylon`
+names the key in use. The label is not an environment variable: CLAI does not
+read an exported `PYLON_ACCESS_TOKEN`.
+
+Only the key's name is saved, in the credential store beside the vLLM and
+OpenRouter connections. Each run looks up the key's current value, so replacing it
+in `/keys` takes effect on the next run, with no reload. A key Pylon references
+cannot be renamed in `/keys`, and deleting it makes Pylon runs fail with an error
+naming the key until you restore it or choose another. Until a key is chosen
+(outside a terminal, or after cancelling the picker), runs get no Pylon tools.
+Several connections and plugins can share one named key by pointing at the same
+name: for example, a GitHub plugin and Copilot tooling can both reference
+`GITHUB_TOKEN`, so replacing it once updates both.
+
+Pylon only accepts OAuth access tokens, not its REST API keys. To have CLAI sign
+in for you instead, set `"auth": "browser"`: the first run that uses Pylon opens
+the browser, as `/mcp` servers with OAuth do, and waits up to five minutes for you
+to finish. Those tokens stay in the keyring (account `mcp-plugin_pylon`, or a
+private `0600` file when there is no keyring), are refreshed as needed, and never
+touch `/keys` or plugin settings.
 
 | Key | Default | Does |
 |---|---|---|
-| `browser_sign_in` | `true` | sign in through the browser when `PYLON_ACCESS_TOKEN` is unset; with `false`, the plugin fails to load without the variable |
+| `auth` | `"key"` | `"key"` connects with the `/keys` entry chosen through `/pylon key`; `"browser"` signs in through the browser |
 | `read_only` | `false` | keep only the tools Pylon's server labels read-only |
 
 ```text
 /plugins add pylon pydantic_clai2.pylon '{"read_only": true}'
+/plugins add pylon pydantic_clai2.pylon '{"auth": "browser"}'
 ```
 
-Set `"browser_sign_in": false` where no browser can reach this machine, such as
-over SSH, so a missing token fails at load instead of at the first run.
+Neither setting is secret. The plugin rejects any other key, so a token cannot be
+put in its settings by mistake.
 
 ## Managing plugins
 
@@ -1038,8 +1056,9 @@ numbers, and underscores, starting with a letter or underscore. Saving an existi
 name asks before replacing it. Ctrl-C or Ctrl-D cancels without saving. Do not put
 the secret on the command line.
 
-When saved keys exist, vLLM's token prompt and OpenRouter's **Enter API key** flow
-show a searchable list of names. Choose one, enter a different key privately, or
+When saved keys exist, vLLM's token prompt, OpenRouter's **Enter API key** flow,
+and plugins such as [`pylon`](#pylon-support-issues-and-accounts-in-pylon) show a
+searchable list of names. Choose one, enter a different key privately, or
 choose **No API key** for vLLM. Esc closes the picker without connecting. Browser
 login flows are unchanged. Select keys only for endpoints you trust.
 
@@ -1050,7 +1069,7 @@ Key values never appear in the picker or confirmation. Names are labels, not
 exported environment variables. Selecting a saved key stores a reference, not a copy. Discovery and each new
 turn resolve its current value. Replacing a key updates connections that reference
 it. Deleting it makes those connections fail until you restore the same name or
-reconfigure them. Keys referenced by saved connections cannot be renamed. A cross-process lock
+reconfigure them. Keys referenced by saved connections or plugins cannot be renamed. A cross-process lock
 serializes key changes and connection saves so concurrent CLAI sessions do not
 overwrite each other's key edits. The lock file contains no credentials.
 
