@@ -12,8 +12,8 @@ from typing import overload
 from pydantic_ai._utils import replace_no_init  # pyright: ignore[reportPrivateUsage]
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.exceptions import ModelRetry
-from pydantic_ai.tools import AgentDepsT, RunContext
-from pydantic_ai.toolsets import AbstractToolset, FunctionToolset
+from pydantic_ai.tools import AgentDepsT, RunContext, ToolDefinition
+from pydantic_ai.toolsets import FunctionToolset
 from pydantic_ai.workspaces import Workspace, WorkspaceBackend
 
 from pydantic_ai_harness._workspace import require_workspace, secondary_workspace
@@ -79,8 +79,11 @@ class Skills(AbstractCapability[AgentDepsT]):
     _skills: tuple[SkillDefinition, ...] = field(default=(), init=False, repr=False, compare=False)
     """This run's selected skills, read in `before_run` on the per-run copy made by `for_run`."""
 
-    _toolset: FunctionToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
-    """This run's `load_skill` toolset, built once `before_run` has found skills."""
+    _toolset: FunctionToolset[AgentDepsT] = field(init=False, repr=False, compare=False)
+    """The `load_skill` toolset, built with the agent and shared by every run's copy.
+
+    Durable engines register toolsets when the agent is built, so a run can't bring its own.
+    """
 
     @overload
     def __init__(  # pragma: no cover - overload is enforced by static type checking
@@ -130,6 +133,7 @@ class Skills(AbstractCapability[AgentDepsT]):
         self.workspace = workspace
         own = secondary_workspace(workspace, 'Skills')
         self._sources = (_SkillSource(self.directories, self.include, self.exclude, own),)
+        self._toolset = self._make_toolset()
 
     def __repr__(self) -> str:
         """Show only the `Skills` configuration that callers control."""
@@ -175,6 +179,7 @@ class Skills(AbstractCapability[AgentDepsT]):
             sources.extend(source for source in capability._sources if source not in sources)
         merged = replace_no_init(first)
         merged._sources = tuple(sources)
+        merged._toolset = merged._make_toolset()
         return merged
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> Skills[AgentDepsT]:
@@ -189,8 +194,7 @@ class Skills(AbstractCapability[AgentDepsT]):
         if any(source.workspace is None for source in self._sources):
             require_workspace(ctx.workspace, 'Skills')
         self._skills = await self._load(ctx.workspace)
-        if self._skills:
-            self._toolset = self._make_toolset()
+        self._warn(self._skills)
 
     async def _load(self, run_workspace: Workspace) -> tuple[SkillDefinition, ...]:
         by_name: dict[str, tuple[Workspace, SkillDefinition]] = {}
@@ -202,7 +206,10 @@ class Skills(AbstractCapability[AgentDepsT]):
                 previous_workspace, previous = by_name.setdefault(skill.name, (workspace, skill))
                 if previous_workspace is not workspace or previous.path != skill.path:
                     raise ValueError(f'Duplicate skill name {skill.name!r}: {previous.path} and {skill.path}.')
-        definitions = tuple(skill for _, skill in by_name.values())
+        return tuple(skill for _, skill in by_name.values())
+
+    @staticmethod
+    def _warn(definitions: tuple[SkillDefinition, ...]) -> None:
         overlong_descriptions = [
             f'{skill.name} ({len(skill.description):,} characters)'
             for skill in definitions
@@ -226,7 +233,6 @@ class Skills(AbstractCapability[AgentDepsT]):
                 UserWarning,
                 stacklevel=3,
             )
-        return definitions
 
     def get_instructions(self) -> Callable[[RunContext[AgentDepsT]], str | None]:
         """The skill catalog, rendered after `before_run` has read the workspace.
@@ -242,24 +248,33 @@ class Skills(AbstractCapability[AgentDepsT]):
         entries = '\n'.join(f'- {skill.name}: ' + skill.description.replace('\n', '\n  ') for skill in self._skills)
         return f'{_CATALOG_PREFIX}\n{entries}'
 
-    def get_toolset(self) -> Callable[[RunContext[AgentDepsT]], AbstractToolset[AgentDepsT] | None]:
-        """The `load_skill` toolset `before_run` built, or `None` when the run has no skills."""
-        return lambda _ctx: self._toolset
+    def get_toolset(self) -> FunctionToolset[AgentDepsT]:
+        """The `load_skill` toolset, offered on runs that found skills."""
+        return self._toolset
 
     def _make_toolset(self) -> FunctionToolset[AgentDepsT]:
-        toolset = FunctionToolset[AgentDepsT]()
-        toolset.add_function(self._load_skill, takes_ctx=False, name=LOAD_SKILL_TOOL_NAME)
+        toolset = FunctionToolset[AgentDepsT](id='skills')
+        toolset.add_function(self._load_skill, name=LOAD_SKILL_TOOL_NAME, prepare=self._offer_load_skill)
         return toolset
 
-    def _load_skill(self, name: str) -> str:
+    async def _offer_load_skill(self, ctx: RunContext[AgentDepsT], tool_def: ToolDefinition) -> ToolDefinition | None:
+        """Offer `load_skill` when this run's copy found skills; the copy is registered with the run."""
+        runs = (run for run in ctx.capabilities.values() if isinstance(run, Skills) and run._toolset is self._toolset)
+        return tool_def if any(run._skills for run in runs) else None
+
+    async def _load_skill(self, ctx: RunContext[AgentDepsT], name: str) -> str:
         """Load a listed skill's instructions.
 
         Args:
+            ctx: The run context.
             name: The skill's name, as listed in the instructions.
         """
+        # Read again rather than kept from `before_run`: under a durable engine this runs in a worker
+        # that has the agent's configuration but not the run's copy.
+        skills = await self._load(ctx.workspace)
         normalized = unicodedata.normalize('NFKC', name)
-        skill = next((skill for skill in self._skills if skill.name == normalized), None)
+        skill = next((skill for skill in skills if skill.name == normalized), None)
         if skill is None:
-            available = ', '.join(skill.name for skill in self._skills)
+            available = ', '.join(skill.name for skill in skills)
             raise ModelRetry(f'Unknown skill {name!r}. Available skills: {available}.')
         return f'# Skill: {skill.name}\n\n{skill.body}' if skill.body else f'# Skill: {skill.name}'
