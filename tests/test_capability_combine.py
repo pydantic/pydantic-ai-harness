@@ -341,6 +341,10 @@ COMBINE_POLICY: dict[str, Policy] = {
         'one Ordinal connection per id; two that differ need their own ids and PrefixTools',
         lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
     ),
+    'Grain': Narrows(
+        'one Grain connection per id; two that differ need their own ids and PrefixTools',
+        lambda cls: (cls(auth='first-key'), cls(auth='second-key')),
+    ),
     'DayAI': Narrows(
         'one DayAI connection per id; two that differ need their own ids and PrefixTools',
         lambda cls: (cls(auth='first-key'), cls(auth='second-key')),

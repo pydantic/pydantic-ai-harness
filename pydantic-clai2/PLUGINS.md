@@ -12,8 +12,10 @@ what you want, you're done.
 
 `clai2 --help` parses arguments without loading the agent or plugins. Interactive
 startup defers model menus and provider integrations until you open those menus,
-log in, or run a prompt. The first use can therefore take longer. Enabled plugins
-still load before the first prompt; their initialization contributes to startup time.
+log in, or run a prompt. Once the prompt is ready, a background thread imports
+them, so the first prompt usually finds them loaded; if it arrives sooner, it waits
+for the rest of those imports. Enabled plugins still load before the first prompt;
+their initialization contributes to startup time.
 `/login` offers both Codex and GitHub Copilot without loading their integrations for
 completion. Copilot requests use your saved login through the lazy provider resolver.
 
@@ -638,6 +640,8 @@ tools for cleanup; it does not undo completed side effects or retry the run.
 Retained failed turns and restored interrupted sessions are marked interrupted so
 core can close unanswered tool calls on the next prompt without replaying them.
 A prompt cancelled by `turn_start` never starts an agent run and is not retained.
+`/fork` fires both hooks for its background run too: a `turn_start` that cancels
+the prompt refuses the fork, and `turn_end` arrives when the fork finishes.
 
 Codex token-refresh failures show `/login openai-codex` recovery advice, including
 when the SDK wraps them as connection errors. This changes only the terminal
@@ -696,6 +700,9 @@ host.commands.register(
 ```
 
 The handler gets the arguments as a list of strings and returns the text to show.
+Arguments are split like a shell command line, so quotes group words. Pass
+`raw=True` to receive the unsplit argument text as one string instead (an empty
+list when there is none); `/fork` does this so prompts keep their apostrophes.
 It may be `async`. Add `complete=` to offer Tab suggestions. The registry filters
 command names and returned candidates by case-sensitive substring, replacing the
 whole typed fragment when selected. Return full candidates, not just suffixes.
