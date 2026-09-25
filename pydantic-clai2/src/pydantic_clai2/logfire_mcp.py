@@ -7,7 +7,6 @@ non-secret options, all edited in the menu that `/plugins configure logfire_mcp`
 import asyncio
 import os
 import threading
-import webbrowser
 from dataclasses import replace
 from urllib.parse import urlsplit
 
@@ -22,14 +21,13 @@ from ._rendering import markdown_style
 from .api_keys import KeyReference, SavedKey, add_key, load_keys, prompt_api_key, save_key
 from .commands import Command
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
-from .mcp import HTTPServer, TokenStore, http_client, oauth
+from .logfire_oauth import SIGN_IN_TIMEOUT, Announce, DeviceAuth, SignInError, forget, status
+from .mcp import http_client
 from .menu_worker import menu_key, run_worker, worker_stopping
 from .plugins import PluginHost, SessionStart
 
 KEY_NAME = 'LOGFIRE_API_KEY'
 """The conventional `/keys` label, matching the variable `LogfireMCP` reads, so other tools can share one key."""
-TOKEN_ACCOUNT = 'logfire_mcp'
-"""`TokenStore` account for OAuth tokens (stored as `mcp-logfire_mcp`); `/mcp` server names cannot contain `_`."""
 SETUP = 'Run /plugins configure logfire_mcp to choose or enter a Logfire API key.'
 RUNNERS: Runners = TERMINAL
 """How the settings menu's widgets are shown; tests swap in scripted ones."""
@@ -41,7 +39,7 @@ class LogfireMCPSettings(BaseModel):
     model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)
     key: KeyReference | None = Field(default=None, description='The saved API key in /keys to connect with.')
     url: str = Field(default=LOGFIRE_US_MCP_URL, description='Hosted US, hosted EU, or self-hosted MCP endpoint.')
-    oauth: bool = Field(default=True, description='Sign in through the browser when there is no API key.')
+    oauth: bool = Field(default=True, description='Sign in, or sign up, through the browser when there is no API key.')
     read_only: bool = Field(default=True, description='Offer only the tools the server marks read-only.')
     include_instructions: bool = Field(default=True, description="Forward the server's instructions to the agent.")
 
@@ -58,6 +56,12 @@ def activate(host: PluginHost[None]) -> None:
     """Offer the settings menu now; connect at session start, off the event loop."""
     settings = host.settings(LogfireMCPSettings)
 
+    def announce(line: str) -> None:
+        host.console.print(line, markup=False, highlight=False)
+
+    async def command(args: list[str]) -> str:
+        return await _command(args, settings=settings, announce=announce)
+
     @host.configure
     async def configure() -> str:  # pyright: ignore[reportUnusedFunction]
         return await _configure(LogfireMCPSource(host))
@@ -65,7 +69,7 @@ def activate(host: PluginHost[None]) -> None:
     @host.on('session_start')
     async def connect(event: SessionStart) -> None:  # pyright: ignore[reportUnusedFunction]
         # A worker thread: `/keys` takes a lock another CLAI process can hold, and the keyring can block.
-        capability, missing = await asyncio.to_thread(_capability, settings=settings)
+        capability, missing = await asyncio.to_thread(_capability, settings=settings, announce=announce)
         host.add(capability)
         if missing is not None:
             # Loading anyway keeps the settings menu available; each run fails closed until the key is saved.
@@ -78,14 +82,14 @@ def activate(host: PluginHost[None]) -> None:
     host.commands.register(
         Command(
             name='logfire_mcp',
-            description='Forget the Logfire browser sign-in (/logfire_mcp logout).',
+            description='Sign in to Logfire through the browser, or forget that sign-in (/logfire_mcp login|logout).',
             handler=command,
-            complete=lambda _: ('logout',),
+            complete=lambda _: ('login', 'logout'),
         )
     )
 
 
-def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], str | None]:
+def _capability(*, settings: LogfireMCPSettings, announce: Announce) -> tuple[LogfireMCP[None], str | None]:
     """The first of: chosen key, `LOGFIRE_API_KEY` env, `/keys` `LOGFIRE_API_KEY`, then browser sign-in.
 
     Blocking; returns the name of the `/keys` entry the capability needs when it is missing.
@@ -106,34 +110,32 @@ def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], str 
         return build(), None
     saved = load_keys()
     if settings.key is None and KEY_NAME not in saved and settings.oauth:
-        if TokenStore(TOKEN_ACCOUNT).signed_in() or _has_browser():
-            return build(client=_oauth_client(url=settings.url)), None
+        return build(client=_oauth_client(settings=settings, announce=announce)), None
     # Resolved on every run, so saving the key in /keys connects without a reload.
     name = settings.key.name if settings.key is not None else KEY_NAME
     return build(auth=SavedKey(name=name, setup=SETUP)), None if name in saved else name
 
 
-def _has_browser() -> bool:
-    try:
-        webbrowser.get()
-    except webbrowser.Error:
-        return False
-    return True
+def _oauth_client(*, settings: LogfireMCPSettings, announce: Announce) -> Client[StreamableHttpTransport]:
+    """Device-flow sign-in, started by the first connection that has no usable token."""
+    auth = DeviceAuth(resource=settings.url, read_only=settings.read_only, announce=announce)
+    transport = StreamableHttpTransport(settings.url, auth=auth, httpx_client_factory=http_client)
+    return Client(transport, init_timeout=SIGN_IN_TIMEOUT)
 
 
-def _oauth_client(*, url: str) -> Client[StreamableHttpTransport]:
-    """Keyring-backed tokens and a sign-in timeout; harness `auth='oauth'` keeps tokens in memory and waits 5s."""
-    server = HTTPServer.model_validate({'type': 'http', 'url': url, 'auth': 'oauth'})
-    transport = StreamableHttpTransport(url, auth=oauth(TOKEN_ACCOUNT, server), httpx_client_factory=http_client)
-    return Client(transport, init_timeout=server.init_timeout())
-
-
-async def command(args: list[str]) -> str:
-    """`/logfire_mcp logout`."""
-    if args != ['logout']:
-        raise ValueError('Usage: /logfire_mcp logout (settings and keys: /plugins configure logfire_mcp)')
-    await asyncio.to_thread(TokenStore(TOKEN_ACCOUNT).forget)
-    return 'Forgot the Logfire browser sign-in. Keys in /keys are kept.'
+async def _command(args: list[str], *, settings: LogfireMCPSettings, announce: Announce) -> str:
+    """`/logfire_mcp login` signs in (or up) now; `/logfire_mcp logout` forgets every sign-in."""
+    if args == ['login']:
+        try:
+            await DeviceAuth(resource=settings.url, read_only=settings.read_only, announce=announce).sign_in()
+        except SignInError as exc:
+            raise ValueError(str(exc)) from None
+        return 'Logfire runs use this sign-in when no API key is chosen, set, or saved.'
+    if args == ['logout']:
+        if await asyncio.to_thread(forget):
+            return 'Forgot the Logfire browser sign-in. Keys in /keys are kept.'
+        return 'There was no Logfire browser sign-in to forget.'
+    raise ValueError('Usage: /logfire_mcp login|logout (settings and keys: /plugins configure logfire_mcp)')
 
 
 _KEY = FieldRow(
@@ -177,7 +179,11 @@ _ROWS = (
     FieldRow(
         key='oauth',
         label='Browser sign-in',
-        description='Sign in through the browser when no API key is chosen, set, or saved. Tokens stay in the OS keyring.',
+        description=(
+            'Sign in, or sign up, through the browser when no API key is chosen, set, or saved. The first run, or '
+            '/logfire_mcp login, shows a link and a code that also work from another device. Tokens stay in the '
+            'OS keyring.'
+        ),
         default='true',
         choices=('true', 'false'),
         choice_labels={'true': 'when there is no key', 'false': 'off'},
@@ -203,8 +209,13 @@ class LogfireMCPSource:
 
     def rows(self) -> list[FieldRow]:
         """Every option, with the key marked when it is gone from `/keys`."""
-        key = self.settings.key
-        return [replace(_KEY, note=_key_note(key)), *_ROWS[1:]]
+        settings = self.settings
+        signed = status(resource=settings.url, read_only=settings.read_only)
+        notes = {
+            'key': _key_note(settings.key),
+            'oauth': signed if signed == 'signed in' else f'{signed}: signs in on the next run',
+        }
+        return [replace(row, note=notes.get(row.key, '')) for row in _ROWS]
 
     def current(self, row: FieldRow) -> str:
         """The value as the user would type it."""

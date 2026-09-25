@@ -1,0 +1,362 @@
+"""Logfire browser sign-in (device flow) against a fake Logfire; no request leaves the process."""
+
+import json
+import time
+import webbrowser
+from urllib.parse import parse_qs
+
+import anyio
+import httpx
+import keyring
+import pytest
+from pydantic import JsonValue
+
+from pydantic_clai2 import logfire_oauth
+from pydantic_clai2.credential_store import save_codex_credentials
+from pydantic_clai2.logfire_oauth import DeviceAuth, SignInError, Tokens, forget, load, sign_in, status
+
+ORIGIN = 'https://logfire.test'
+RESOURCE = f'{ORIGIN}/mcp'
+LINK = f'{ORIGIN}/auth/oauth-device?code=ABCD-EFGH'
+OFFERED = ['project:read', 'project:write', 'organization:create_project']
+
+Reply = tuple[int, JsonValue]
+
+
+class Logfire:
+    """Just enough of Logfire's OAuth server and MCP endpoint, recording what CLAI sends."""
+
+    def __init__(self) -> None:
+        offered: list[JsonValue] = [*OFFERED]
+        self.resource: Reply = (200, {'authorization_servers': [ORIGIN], 'scopes_supported': offered})
+        self.metadata: JsonValue = {
+            'device_authorization_endpoint': f'{ORIGIN}/api/oauth/device/code',
+            'token_endpoint': f'{ORIGIN}/api/oauth/token',
+            'registration_endpoint': f'{ORIGIN}/api/oauth/register',
+        }
+        self.registration: Reply = (201, {'client_id': 'client-1'})
+        self.device: Reply = (
+            200,
+            {
+                'device_code': 'device',
+                'user_code': 'ABCD-EFGH',
+                'verification_uri': f'{ORIGIN}/auth/oauth-device',
+                'verification_uri_complete': LINK,
+                'expires_in': 600,
+                'interval': 0,
+            },
+        )
+        self.polls: list[Reply] = [(200, {'access_token': 'access-1', 'refresh_token': 'refresh-1'})]
+        self.refreshes: list[Reply] = []
+        self.valid = {'access-1'}
+        self.registered: list[JsonValue] = []
+        self.forms: list[dict[str, str]] = []
+        self.bearers: list[str] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == '/.well-known/oauth-protected-resource/mcp':
+            return httpx.Response(self.resource[0], json=self.resource[1])
+        if path == '/.well-known/oauth-authorization-server':
+            return httpx.Response(200, json=self.metadata)
+        if path == '/api/oauth/register':
+            self.registered.append(json.loads(request.content))
+            return httpx.Response(self.registration[0], json=self.registration[1])
+        if path == '/mcp':
+            bearer = request.headers['Authorization'].removeprefix('Bearer ')
+            self.bearers.append(bearer)
+            return httpx.Response(200 if bearer in self.valid else 401)
+        form = {key: value for key, [value] in parse_qs(request.content.decode()).items()}
+        self.forms.append(form)
+        if path == '/api/oauth/device/code':
+            return httpx.Response(self.device[0], json=self.device[1])
+        code, body = (self.refreshes if form['grant_type'] == 'refresh_token' else self.polls).pop(0)
+        return httpx.Response(code, json=body)
+
+    def client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=httpx.MockTransport(self.handle))
+
+
+def pending(error: str = 'authorization_pending') -> Reply:
+    return 400, {'error': error, 'error_description': error.replace('_', ' ')}
+
+
+@pytest.fixture(autouse=True)
+def opened(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the links CLAI opens instead of opening a browser."""
+    links: list[str] = []
+
+    def open_link(url: str) -> bool:
+        links.append(url)
+        return True
+
+    monkeypatch.setattr(webbrowser, 'open', open_link)
+    return links
+
+
+async def run_sign_in(logfire: Logfire, *, read_only: bool = True, sleeps: list[float] | None = None) -> list[str]:
+    lines: list[str] = []
+
+    async def sleep(seconds: float) -> None:
+        (sleeps if sleeps is not None else []).append(seconds)
+
+    async with logfire.client() as http:
+        await sign_in(resource=RESOURCE, read_only=read_only, announce=lines.append, http=http, sleep=sleep)
+    return lines
+
+
+def stored(*, expires_in: float = 3600, refresh: str | None = 'refresh-1', writable: bool = False) -> Tokens:
+    return Tokens(
+        client_id='client-1',
+        token_endpoint=f'{ORIGIN}/api/oauth/token',
+        access_token='access-1',
+        refresh_token=refresh,
+        expires_at=time.time() + expires_in,
+        writable=writable,
+    )
+
+
+def remember(tokens: Tokens) -> None:
+    logfire_oauth._save(RESOURCE, tokens)  # pyright: ignore[reportPrivateUsage]
+
+
+class TestSignIn:
+    async def test_announces_the_link_and_code_opens_the_browser_and_saves_tokens(self, opened: list[str]) -> None:
+        logfire = Logfire()
+        logfire.polls = [pending(), pending('slow_down'), *logfire.polls]
+        sleeps: list[float] = []
+        lines = await run_sign_in(logfire, sleeps=sleeps)
+        assert lines == [
+            f'Sign in to Logfire (new users can sign up there): open {LINK}',
+            'Enter code: ABCD-EFGH',
+            'Approve only the code shown here. You can open the link on another device.',
+            'Signed in to Logfire.',
+        ]
+        assert opened == [LINK]
+        assert sleeps == [0, 0, 5]
+        [registered] = logfire.registered
+        assert registered == {
+            'client_name': 'CLAI',
+            'client_uri': 'https://github.com/pydantic/pydantic-ai-harness',
+            'grant_types': ['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
+            'token_endpoint_auth_method': 'none',
+            'application_type': 'native',
+            'scope': 'project:read',
+        }
+        device, *polls = logfire.forms
+        assert (device['scope'], device['code_challenge_method']) == ('project:read', 'S256')
+        assert {poll['code_verifier'] for poll in polls} != {''}
+        tokens = load(RESOURCE)
+        assert tokens is not None
+        assert (tokens.access_token, tokens.refresh_token, tokens.writable) == ('access-1', 'refresh-1', False)
+        assert tokens.fresh()
+
+    async def test_write_access_asks_for_every_offered_scope_with_a_new_client(self) -> None:
+        remember(stored())
+        logfire = Logfire()
+        await run_sign_in(logfire, read_only=False)
+        assert logfire.forms[0]['scope'] == ' '.join(OFFERED)
+        assert len(logfire.registered) == 1
+        tokens = load(RESOURCE)
+        assert tokens is not None and tokens.writable
+
+    async def test_a_second_read_only_sign_in_reuses_the_registered_client(self) -> None:
+        remember(stored(expires_in=-10))
+        logfire = Logfire()
+        await run_sign_in(logfire)
+        assert logfire.registered == []
+        assert logfire.forms[0]['client_id'] == 'client-1'
+
+    async def test_a_client_the_server_forgot_is_registered_again(self) -> None:
+        remember(stored(expires_in=-10))
+        logfire = Logfire()
+        handle = logfire.handle
+
+        def forgot_client_1(request: httpx.Request) -> httpx.Response:
+            if request.url.path == '/api/oauth/device/code' and b'client_id=client-1' in request.content:
+                return httpx.Response(401, json={'error': 'invalid_client', 'error_description': 'Unknown client_id'})
+            return handle(request)
+
+        logfire.handle = forgot_client_1
+        logfire.registration = (201, {'client_id': 'client-2'})
+        await run_sign_in(logfire)
+        assert len(logfire.registered) == 1
+        tokens = load(RESOURCE)
+        assert tokens is not None and tokens.client_id == 'client-2'
+
+    async def test_the_link_is_shown_when_no_browser_opens(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def no_browser(url: str) -> bool:
+            raise webbrowser.Error('could not locate runnable browser')
+
+        monkeypatch.setattr(webbrowser, 'open', no_browser)
+        logfire = Logfire()
+        logfire.device = (200, {**json.loads(json.dumps(logfire.device[1])), 'verification_uri_complete': None})
+        lines = await run_sign_in(logfire)
+        assert lines[0] == f'Sign in to Logfire (new users can sign up there): open {ORIGIN}/auth/oauth-device'
+        assert 'No browser opened; open the link above yourself.' in lines
+
+    async def test_servers_without_resource_metadata_are_their_own_issuer(self) -> None:
+        logfire = Logfire()
+        logfire.resource = (404, None)
+        await run_sign_in(logfire, read_only=False)
+        assert logfire.forms[0]['scope'] == 'project:read'  # Nothing offered beyond what MCP requires.
+
+    @pytest.mark.parametrize(
+        ('change', 'message'),
+        [
+            ('denied', 'Logfire sign-in was denied. Run /logfire_mcp login to retry.'),
+            ('failed', 'Logfire sign-in failed: invalid grant. Run /logfire_mcp login to retry.'),
+            ('expired', 'The Logfire sign-in code expired before it was approved.'),
+            ('no-registration', 'This Logfire server does not let CLAI register for browser sign-in.'),
+            ('registration', 'Logfire refused to register CLAI: nope'),
+            ('device', 'Logfire refused browser sign-in: HTTP 503'),
+            ('nested', 'Logfire refused browser sign-in: PKCE is required'),
+            ('odd-error', 'Logfire refused browser sign-in: HTTP 400'),
+            ('unreachable', 'Logfire sign-in failed: ConnectError. Run /logfire_mcp login to retry.'),
+            ('malformed', 'Logfire sign-in failed: ValidationError.'),
+        ],
+    )
+    async def test_failures_explain_how_to_retry_and_save_nothing(self, change: str, message: str) -> None:
+        logfire = Logfire()
+        if change == 'denied':
+            logfire.polls = [pending('access_denied')]
+        elif change == 'failed':
+            logfire.polls = [pending('invalid_grant')]
+        elif change == 'expired':
+            logfire.device = (200, {**json.loads(json.dumps(logfire.device[1])), 'expires_in': 0})
+        elif change == 'no-registration':
+            logfire.metadata = {**json.loads(json.dumps(logfire.metadata)), 'registration_endpoint': None}
+        elif change == 'registration':
+            logfire.registration = (400, {'error': 'invalid_client_metadata', 'error_description': 'nope'})
+        elif change == 'device':
+            logfire.device = (503, 'unavailable')
+        elif change == 'nested':
+            logfire.device = (400, {'detail': {'error': 'invalid_client', 'error_description': 'PKCE is required'}})
+        elif change == 'odd-error':
+            logfire.device = (400, ['not', 'an', 'object'])
+        elif change == 'malformed':
+            logfire.polls = [(200, {'access_token': ''})]
+        if change == 'unreachable':
+
+            def refuse(request: httpx.Request) -> httpx.Response:
+                raise httpx.ConnectError('refused', request=request)
+
+            logfire.handle = refuse
+        with pytest.raises(SignInError, match=message.replace('(', r'\(').replace(')', r'\)')):
+            await run_sign_in(logfire)
+        assert load(RESOURCE) is None
+
+    async def test_non_json_errors_report_the_status(self) -> None:
+        logfire = Logfire()
+        handle = logfire.handle
+
+        def html_error(request: httpx.Request) -> httpx.Response:
+            if request.url.path == '/api/oauth/device/code':
+                return httpx.Response(502, text='<html>bad gateway</html>')
+            return handle(request)
+
+        logfire.handle = html_error
+        with pytest.raises(SignInError, match='Logfire refused browser sign-in: HTTP 502'):
+            await run_sign_in(logfire)
+
+
+class TestDeviceAuth:
+    async def mcp(self, logfire: Logfire, *, read_only: bool = True, lines: list[str] | None = None) -> int:
+        auth = DeviceAuth(
+            resource=RESOURCE,
+            read_only=read_only,
+            announce=(lines if lines is not None else []).append,
+            http=logfire.client,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(logfire.handle), auth=auth) as client:
+            return (await client.post(RESOURCE)).status_code
+
+    async def test_the_first_connection_signs_in_by_itself(self, opened: list[str]) -> None:
+        logfire = Logfire()
+        lines: list[str] = []
+        assert await self.mcp(logfire, lines=lines) == 200
+        assert opened == [LINK]
+        assert lines[-1] == 'Signed in to Logfire.'
+        assert logfire.bearers == ['access-1']
+
+    async def test_a_stored_sign_in_is_used_without_asking_again(self, opened: list[str]) -> None:
+        remember(stored())
+        logfire = Logfire()
+        assert await self.mcp(logfire) == 200
+        assert (opened, logfire.forms) == ([], [])
+
+    async def test_expired_or_rejected_tokens_are_refreshed(self) -> None:
+        remember(stored(expires_in=-10))
+        logfire = Logfire()
+        logfire.valid = {'access-2', 'access-3'}
+        logfire.refreshes = [(200, {'access_token': 'access-2'}), (200, {'access_token': 'access-3'})]
+        assert await self.mcp(logfire) == 200
+        tokens = load(RESOURCE)
+        assert tokens is not None
+        assert (tokens.access_token, tokens.refresh_token) == ('access-2', 'refresh-1')
+        logfire.valid = {'access-3'}  # The server revokes access-2 before it expires.
+        assert await self.mcp(logfire) == 200
+        assert logfire.bearers == ['access-2', 'access-2', 'access-3']
+        assert [form['refresh_token'] for form in logfire.forms] == ['refresh-1', 'refresh-1']
+
+    @pytest.mark.parametrize('refresh', [None, 'broken', 'unreachable', 'rejected'])
+    async def test_a_failed_refresh_signs_in_again(self, refresh: str | None, opened: list[str]) -> None:
+        remember(stored(expires_in=-10, refresh=None if refresh is None else 'refresh-1'))
+        logfire = Logfire()
+        if refresh == 'broken':
+            logfire.refreshes = [(200, {'no': 'token'})]
+        elif refresh == 'rejected':
+            logfire.refreshes = [pending('invalid_grant')]
+        elif refresh == 'unreachable':
+            handle = logfire.handle
+
+            def drop_refresh(request: httpx.Request) -> httpx.Response:
+                if b'grant_type=refresh_token' in request.content:
+                    raise httpx.ReadTimeout('slow', request=request)
+                return handle(request)
+
+            logfire.handle = drop_refresh
+        assert await self.mcp(logfire) == 200
+        assert opened == [LINK]
+
+    async def test_a_read_only_sign_in_is_replaced_for_write_access(self, opened: list[str]) -> None:
+        remember(stored())
+        logfire = Logfire()
+        assert await self.mcp(logfire, read_only=False) == 200
+        assert opened == [LINK]
+        assert logfire.forms[0]['scope'] == ' '.join(OFFERED)
+
+    async def test_concurrent_requests_sign_in_once(self, opened: list[str]) -> None:
+        logfire = Logfire()
+        auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=lambda line: None, http=logfire.client)
+        async with httpx.AsyncClient(transport=httpx.MockTransport(logfire.handle), auth=auth) as client:
+            async with anyio.create_task_group() as tasks:
+                for _ in range(3):
+                    tasks.start_soon(client.post, RESOURCE)
+        assert opened == [LINK]
+        assert logfire.bearers == ['access-1'] * 3
+
+    def test_sync_clients_are_refused(self) -> None:
+        auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=print)
+        with httpx.Client(transport=httpx.MockTransport(Logfire().handle), auth=auth) as client:
+            with pytest.raises(RuntimeError, match='Logfire sign-in needs an async client'):
+                client.post(RESOURCE)
+
+
+def test_status_forget_and_unreadable_storage(monkeypatch: pytest.MonkeyPatch) -> None:
+    def delete_password(service: str, account: str) -> None:
+        keyring.set_password(service, account, '')  # conftest's fake keyring has no delete; empty reads as unset.
+
+    monkeypatch.setattr(keyring, 'delete_password', delete_password)
+    assert status(resource=RESOURCE, read_only=True) == 'signed out'
+    remember(stored(writable=False))
+    assert status(resource=RESOURCE, read_only=True) == 'signed in'
+    assert status(resource=RESOURCE, read_only=False) == 'signed out'
+    remember(stored(expires_in=-10))
+    assert status(resource=RESOURCE, read_only=True) == 'signed in'  # It refreshes on the next run.
+    remember(stored(expires_in=-10, refresh=None))
+    assert status(resource=RESOURCE, read_only=True) == 'expired'
+    assert forget() is True
+    assert forget() is False
+    save_codex_credentials(value='not json', account=logfire_oauth.ACCOUNT)
+    assert load(RESOURCE) is None

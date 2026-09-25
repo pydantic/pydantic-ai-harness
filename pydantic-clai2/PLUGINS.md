@@ -332,7 +332,7 @@ changing anything; `R` resets the highlighted row to its default.
 | Destination | `url` | Logfire US | Logfire US, Logfire EU, or type the `https://` MCP URL of a self-hosted Logfire |
 | Tools | `read_only` | read-only | offer only the tools the server marks read-only; "read and write" also allows tools that change Logfire resources |
 | Server instructions | `include_instructions` | forwarded | whether the server's instructions, query guidance, and current UTC time reach the agent |
-| Browser sign-in | `oauth` | when there is no key | sign in through the browser when no key is chosen, set, or saved |
+| Browser sign-in | `oauth` | when there is no key | sign in, or sign up, through the browser when no key is chosen, set, or saved; the row shows whether you are signed in |
 
 ### Keys live in `/keys`
 
@@ -352,14 +352,43 @@ The plugin uses the first credential that is available:
 1. The key chosen in the menu.
 2. `LOGFIRE_API_KEY` from the environment.
 3. A key saved in `/keys` as `LOGFIRE_API_KEY`, so saving one there is enough.
-4. Browser sign-in (OAuth), when it is on and there is a browser or a stored
-   sign-in: the first run opens your browser. Tokens are kept in the OS keyring
-   (or the private credential file) under the `mcp-logfire_mcp` account, so
-   restarting CLAI does not mean signing in again. The handshake allows 330
-   seconds for the sign-in. `/logfire_mcp logout` forgets them.
+4. Browser sign-in, when it is on (the default). See below.
 
-With browser sign-in off or unavailable, the plugin looks `LOGFIRE_API_KEY` up in
-`/keys` on every run, so saving it there later connects without a reload.
+With browser sign-in off, the plugin looks `LOGFIRE_API_KEY` up in `/keys` on
+every run, so saving it there later connects without a reload.
+
+#### Browser sign-in
+
+Browser sign-in uses the OAuth device flow
+([RFC 8628](https://datatracker.ietf.org/doc/html/rfc8628)), as Code Puppy's
+Logfire plugin does. The first run with no usable token, or `/logfire_mcp login`
+at any time, prints a link and a code and opens the link:
+
+```text
+Sign in to Logfire (new users can sign up there): open https://logfire-us.pydantic.dev/auth/oauth-device?code=ABCD-EFGH
+Enter code: ABCD-EFGH
+Approve only the code shown here. You can open the link on another device.
+```
+
+On that Logfire page you sign in, or create an account if you have none, and
+approve the code. CLAI waits up to 660 seconds (Logfire's codes last 600). No
+local callback server is involved, so this also works over SSH: open the link on
+any device.
+
+- **Discovery:** the Logfire server is found from the Destination URL
+  ([RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) resource metadata),
+  so self-hosted Logfire works too. CLAI registers itself as a client
+  ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)) and uses PKCE. It
+  registers again if the server has forgotten the earlier registration.
+- **Scopes:** read-only tools ask only for `project:read`. With Tools set to read
+  and write, CLAI asks for every scope the MCP server lists (on Logfire's hosted
+  servers that includes `organization:create_project`). Switching Tools to read
+  and write signs in again for those scopes.
+- **Tokens:** kept per Destination URL in the OS keyring (or the private
+  credential file) under the `logfire-oauth` account, so restarting CLAI does
+  not mean signing in again. An expired or rejected token is refreshed; if that
+  fails, the next run signs in again. `/logfire_mcp logout` forgets every
+  Logfire sign-in and keeps keys in `/keys`.
 
 A saved key's value is read at the start of each run, like a model connection's.
 Replacing it in `/keys` applies from the next turn. `/keys` does not stop you

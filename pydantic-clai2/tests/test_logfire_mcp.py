@@ -3,6 +3,7 @@
 import io
 import threading
 import webbrowser
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 import anyio
@@ -24,8 +25,8 @@ from pydantic_clai2 import DEFAULT_PLUGINS, api_keys
 from pydantic_clai2.api_keys import KeyReference, SavedKey
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.field_menu import CUSTOM
-from pydantic_clai2.logfire_mcp import SETUP, TOKEN_ACCOUNT, LogfireMCPSource, activate, command
-from pydantic_clai2.mcp import TokenStore
+from pydantic_clai2.logfire_mcp import SETUP, LogfireMCPSource, activate
+from pydantic_clai2.logfire_oauth import SIGN_IN_TIMEOUT, DeviceAuth, SignInError, Tokens
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugin_menu import PluginMenu, open_plugins_menu
 from pydantic_clai2.plugins import PluginHost, SessionStart
@@ -89,19 +90,17 @@ def key_choice(monkeypatch: pytest.MonkeyPatch, choice: str | KeyReference | Non
     return calls
 
 
-def browser(monkeypatch: pytest.MonkeyPatch, *, found: bool) -> None:
-    def get() -> webbrowser.BaseBrowser:
-        if not found:
-            raise webbrowser.Error('could not locate runnable browser')
-        return webbrowser.GenericBrowser('true')
-
-    monkeypatch.setattr(webbrowser, 'get', get)
-
-
 @pytest.fixture(autouse=True)
-def headless(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No browser unless a test finds one, so results do not depend on the machine running them."""
-    browser(monkeypatch, found=False)
+def opened(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record sign-in links instead of opening a browser."""
+    links: list[str] = []
+
+    def open_link(url: str) -> bool:
+        links.append(url)
+        return True
+
+    monkeypatch.setattr(webbrowser, 'open', open_link)
+    return links
 
 
 def keyed(name: str) -> LogfireMCP[None]:
@@ -115,7 +114,6 @@ def test_declared_disabled_with_no_settings() -> None:
 async def test_enable_opens_the_menu_and_every_option_saves_immediately(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    browser(monkeypatch, found=True)
     calls = key_choice(monkeypatch, ' typed-secret ')
     shown = script(
         monkeypatch,
@@ -223,6 +221,8 @@ def test_menu_validates_resets_and_notes_where_the_key_comes_from(monkeypatch: p
 
     rows = {row.key: row for row in source.rows()}
     assert (source.current(rows['key']), note()) == ('(none)', 'browser sign-in, if on')
+    assert rows['oauth'].note == 'signed out: signs in on the next run'
+    assert (rows['url'].note, rows['read_only'].note) == ('', '')
     api_keys.save_key(name='LOGFIRE_API_KEY', value='saved')
     assert note() == 'LOGFIRE_API_KEY from /keys'
     monkeypatch.setenv('LOGFIRE_API_KEY', 'env')
@@ -269,9 +269,8 @@ async def test_environment_key_wins_over_the_conventional_saved_key(
 
 
 async def test_conventional_saved_key_beats_browser_sign_in_and_resolves_each_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    browser(monkeypatch, found=True)
     api_keys.save_key(name='LOGFIRE_API_KEY', value='first')
     shell = Shell(tmp_path)
     await shell.loader.enable('logfire_mcp')
@@ -285,24 +284,19 @@ async def test_conventional_saved_key_beats_browser_sign_in_and_resolves_each_ru
         capability.auth(None)
 
 
-async def test_oauth_uses_a_keyring_client_with_a_sign_in_timeout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    browser(monkeypatch, found=True)
+async def test_browser_sign_in_is_the_default_and_waits_long_enough_for_the_code(tmp_path: Path) -> None:
     shell = Shell(tmp_path, {'url': LOGFIRE_EU_MCP_URL})
     await shell.loader.enable('logfire_mcp')
+    assert shell.output.getvalue() == ''
     client = shell.capability().client
     assert isinstance(client, Client)
-    assert client._init_timeout == 330  # pyright: ignore[reportPrivateUsage]
+    assert client._init_timeout == SIGN_IN_TIMEOUT  # pyright: ignore[reportPrivateUsage]
     assert str(client.transport.url) == LOGFIRE_EU_MCP_URL  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType,reportUnknownArgumentType]
+    assert isinstance(client.transport.auth, DeviceAuth)  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType]
 
 
-@pytest.mark.parametrize('settings', [{}, {'oauth': False}], ids=['no-browser', 'oauth-off'])
-async def test_no_credential_still_loads_the_menu_and_fails_runs_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: dict[str, JsonValue]
-) -> None:
-    browser(monkeypatch, found=False)
-    shell = Shell(tmp_path, settings)
+async def test_with_sign_in_off_and_no_key_the_menu_still_loads_and_runs_fail_closed(tmp_path: Path) -> None:
+    shell = Shell(tmp_path, {'oauth': False})
     await shell.loader.enable('logfire_mcp')
     assert f'Logfire MCP has no credential: LOGFIRE_API_KEY is not in /keys. {SETUP}' in shell.output.getvalue()
     capability = shell.capability()
@@ -313,27 +307,55 @@ async def test_no_credential_still_loads_the_menu_and_fails_runs_closed(
         auth(None)
 
 
-async def test_stored_sign_in_needs_no_browser(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    browser(monkeypatch, found=False)
-    await TokenStore(TOKEN_ACCOUNT).put('token', {'access_token': 'x'}, collection='mcp-oauth-token')
-    shell = Shell(tmp_path)
-    await shell.loader.enable('logfire_mcp')
-    assert isinstance(shell.capability().client, Client)
-    assert shell.output.getvalue() == ''
+def logfire_command(
+    settings: dict[str, JsonValue] | None = None,
+) -> tuple[Callable[[list[str]], Awaitable[str]], io.StringIO]:
+    output = io.StringIO()
+    host = PluginHost[None](name='logfire_mcp', console=Console(file=output, width=200), settings=settings or {})
+    activate(host)
+    [command] = host.commands
+
+    async def run(args: list[str]) -> str:
+        result = command.handler(args)
+        return result if isinstance(result, str) else await result
+
+    return run, output
+
+
+async def test_login_signs_in_now_through_the_browser(monkeypatch: pytest.MonkeyPatch, opened: list[str]) -> None:
+    calls: list[tuple[str, bool]] = []
+
+    async def sign_in(auth: DeviceAuth) -> Tokens:
+        calls.append((auth._resource, auth._read_only))  # pyright: ignore[reportPrivateUsage]
+        auth._announce('Enter code: ABCD-EFGH')  # pyright: ignore[reportPrivateUsage]
+        return Tokens(client_id='c', token_endpoint='https://t', access_token='a', expires_at=0)
+
+    monkeypatch.setattr(DeviceAuth, 'sign_in', sign_in)
+    command, output = logfire_command({'url': LOGFIRE_EU_MCP_URL, 'read_only': False})
+    assert await command(['login']) == 'Logfire runs use this sign-in when no API key is chosen, set, or saved.'
+    assert calls == [(LOGFIRE_EU_MCP_URL, False)]
+    assert output.getvalue() == 'Enter code: ABCD-EFGH\n'
+
+
+async def test_login_failures_are_reported(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def sign_in(auth: DeviceAuth) -> Tokens:
+        raise SignInError('Logfire sign-in was denied. Run /logfire_mcp login to retry.')
+
+    monkeypatch.setattr(DeviceAuth, 'sign_in', sign_in)
+    command, _ = logfire_command()
+    with pytest.raises(ValueError, match='Logfire sign-in was denied'):
+        await command(['login'])
 
 
 async def test_logout_forgets_only_the_sign_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    forgotten: list[str] = []
-
-    def forget(store: TokenStore) -> None:
-        forgotten.append(store.name)
-
-    monkeypatch.setattr(TokenStore, 'forget', forget)
+    forgotten: list[bool] = [True, False]
+    monkeypatch.setattr('pydantic_clai2.logfire_mcp.forget', lambda: forgotten.pop(0))
     api_keys.save_key(name='LOGFIRE_API_KEY', value='kept')
+    command, _ = logfire_command()
     assert await command(['logout']) == 'Forgot the Logfire browser sign-in. Keys in /keys are kept.'
-    assert forgotten == [TOKEN_ACCOUNT]
+    assert await command(['logout']) == 'There was no Logfire browser sign-in to forget.'
     assert 'LOGFIRE_API_KEY' in api_keys.load_keys()
-    with pytest.raises(ValueError, match='Usage: /logfire_mcp logout'):
+    with pytest.raises(ValueError, match=r'Usage: /logfire_mcp login\|logout'):
         await command([])
 
 
@@ -451,4 +473,4 @@ async def test_keys_are_read_at_session_start_off_the_event_loop(
     await shell.loader.enable('logfire_mcp')
     assert len(threads) == 1
     assert threads[0] != threading.get_ident()
-    assert shell.capability().auth == SavedKey(name='LOGFIRE_API_KEY', setup=SETUP)
+    assert isinstance(shell.capability().client, Client)
