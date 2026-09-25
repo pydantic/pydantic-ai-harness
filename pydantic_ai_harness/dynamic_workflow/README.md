@@ -463,7 +463,8 @@ worth knowing where the edges are:
   `unicodedata`, `datetime`, `time`, `random`, `os`, and `pathlib`. Import what you use.
   Filesystem, environment, and clock operations are not configured for workflow scripts.
 - No clock or randomness: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`, and
-  unseeded `random` fail. `time.sleep` and `asyncio.sleep` return immediately.
+  unseeded `random` fail. `time.sleep` and `asyncio.sleep` really wait; with `max_duration_secs` set,
+  a script may sleep for at most that long in total.
 - `asyncio.gather(...)` runs sub-agents concurrently with positional awaitables but no keyword
   arguments, including `return_exceptions=True`. Other task creation and wait APIs are unavailable.
 

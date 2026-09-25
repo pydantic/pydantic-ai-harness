@@ -178,6 +178,11 @@ excluded. A snippet that hits the limit is stopped and its session is reset, so 
 imports, and definitions have to be recreated. The retry `run_code` returns says so and reports the
 nested calls the snippet already made.
 
+Sleeping is not execution time, so it has its own allowance of the same length: a snippet may sleep
+for at most `max_duration_secs` in total. A sleep that would go past it raises `TimeoutError` in the
+sandbox without waiting, and the session is kept. The allowance still applies inside a Temporal
+workflow, where the execution-time limit is off; only `resource_limits='unlimited'` removes it.
+
 Monty also limits cumulative suspensions with `max_suspensions` (default 1,000 per session).
 External calls, OS callbacks, name lookups and future resolutions each consume this budget, so
 it is not a tool-call count. Consecutive snippets share it. After exhaustion, further host
@@ -637,7 +642,7 @@ Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python 
 
 - No third-party imports. Allowed stdlib modules: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `unicodedata`, `datetime`, `time`, `random`, `os`, `pathlib` (each must be imported before use).
 - `asyncio.gather(...)` accepts positional awaitables but no keyword arguments. Other task creation and wait APIs are unavailable.
-- No clock or randomness by default: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`, and unseeded `random` fail. They become available when an `os_access` handler implements them (the built-in `OSAccess` does). `time.sleep` and `asyncio.sleep` return immediately.
+- No clock or randomness by default: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`, and unseeded `random` fail. They become available when an `os_access` handler implements them (the built-in `OSAccess` does). `time.sleep` and `asyncio.sleep` really wait, up to the allowance described under resource limits; inside a Temporal workflow a sleep is a durable timer.
 - No `import *`.
 - Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv` / `os.environ` need an `os_access` handler.
 - Tools requiring approval or with deferred (`CallDeferred`) execution are sandboxed like any other tool; without a `HandleDeferredToolCalls` (or equivalent) capability on the agent to resolve them inline, calling one from `run_code` raises an error that surfaces to the model as a retry.

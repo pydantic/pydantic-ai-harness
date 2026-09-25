@@ -72,7 +72,8 @@ class WorkflowResourceLimits(TypedDict, total=False):
     nor a concurrent `asyncio.gather` batch, because during that wait the script is suspended on
     the host, not running sandbox code. There is no default cap. Set one to bound a pure-CPU
     `while True` loop, which would otherwise burn a core and block the event loop -- the one
-    runaway the sub-agent budgets do not catch."""
+    runaway the sub-agent budgets do not catch. Sleeping is not execution time either, so when set,
+    the script may also sleep for up to this long in total."""
 
     max_memory: int
     """Maximum sandbox memory, in bytes."""
@@ -149,7 +150,7 @@ The sandbox uses Monty, a subset of Python. Key restrictions:
   of the script. Filesystem, environment, and clock operations are not configured for workflow
   scripts.
 - **No clock or randomness**: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`,
-  and unseeded `random` fail. `time.sleep` and `asyncio.sleep` return at once, so do not poll.
+  and unseeded `random` fail. `time.sleep` and `asyncio.sleep` really wait.
 
 Each sub-agent below is an async function. Await it and pass `task` by keyword:
 `result = await reviewer(task="...")`, not `reviewer("...")`; all parameters are keyword-only. A
@@ -748,9 +749,12 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             # which does not interleave with `call_tool`), so it is a stable name registry for
             # the whole script. Sub-agents always run concurrently (the executor's defaults);
             # durable ordering (global_sequential) lands with durability.
-            completed = await MontyExecutor(dispatch=dispatch, valid_names=self._by_name, portal=monty.portal).run(
-                partial(session.feed_start, code, print_callback=capture.callback)
-            )
+            completed = await MontyExecutor(
+                dispatch=dispatch,
+                valid_names=self._by_name,
+                portal=monty.portal,
+                max_sleep_secs=limits.get('max_feed_duration_secs'),
+            ).run(partial(session.feed_start, code, print_callback=capture.callback))
         except MontyTypingError as e:
             raise ModelRetry(f'Type error in workflow:\n{capture.prepend_to(e.display())}') from e
         except MontySyntaxError as e:  # pragma: no cover -- backstop; the type checker parses first

@@ -125,9 +125,9 @@ async def _release_monty(stack: AsyncExitStack) -> None:
 _REMOTE_TURN_SLACK_SECS = 10.0
 
 # Route the clock and unseeded randomness to the `os=` handler, as before Monty 1.0: without one they are
-# unavailable, which keeps sandbox code deterministic when a Temporal workflow replays it. Sleeps return
-# at once: a handler's sleep would block the run, and sleep time does not count toward duration limits.
-_OS_POLICY: OSPolicy = {'datetime': 'call_host', 'sleep': 'zero', 'random_start': 'call_host'}
+# unavailable, which keeps sandbox code deterministic when a Temporal workflow replays it. Sleeps come back to
+# `MontyExecutor`, which waits on the run's own event loop (a durable timer inside a Temporal workflow).
+_OS_POLICY: OSPolicy = {'datetime': 'call_host', 'sleep': 'call_host', 'random_start': 'call_host'}
 
 
 @dataclass
@@ -261,7 +261,13 @@ class MontyExecutor:
     global_sequential: bool = False
     # Set inside a Temporal workflow; see `call_monty`.
     portal: BlockingPortal | None = None
+    # Total seconds the code may sleep, or `None` for no cap. Sleep time does not count toward
+    # Monty's execution-time limit, so it gets the same allowance separately.
+    max_sleep_secs: float | None = None
+    # Replaced in tests, to observe sleeps without waiting.
+    sleep: Callable[[float], Coroutine[Any, Any, None]] = asyncio.sleep
 
+    _slept_secs: float = field(default=0.0, init=False)
     # Parallel calls deferred but not yet resolved, keyed by Monty call id.
     _pending: dict[int, PendingCall] = field(default_factory=dict[int, PendingCall], init=False)
     # Parallel results awaited early at a sequential barrier, before their FutureSnapshot is reached.
@@ -308,6 +314,8 @@ class MontyExecutor:
 
     async def _handle_function(self, snapshot: AsyncFunctionSnapshot) -> AsyncSnapshot:
         """Dispatch (or defer) a single external function call."""
+        if snapshot.is_os_function and snapshot.function_name in ('time.sleep', 'asyncio.sleep'):
+            return await self._sleep(snapshot)
         if snapshot.is_os_function:
             # OS calls (env, clock, filesystem) are answered from the feed's mounts and the
             # `os=` handler captured at `feed_start`, falling back to monty's unhandled default.
@@ -350,6 +358,32 @@ class MontyExecutor:
             # clean up and no further work is admitted.
             return await self._raise_in_sandbox(snapshot, exc)
         self._pending[snapshot.call_id] = call
+        return await call_monty(self.portal, snapshot.resume, ExternalFuture(future=...))
+
+    async def _sleep(self, snapshot: AsyncFunctionSnapshot) -> AsyncSnapshot:
+        """Wait for a sandbox sleep here rather than in Monty, charging it to `max_sleep_secs`.
+
+        Monty has already validated the duration: `args` is one non-negative float.
+        """
+        secs: float = snapshot.args[0]
+        if self.max_sleep_secs is not None and self._slept_secs + secs > self.max_sleep_secs:
+            remaining = self.max_sleep_secs - self._slept_secs
+            return await self._raise_in_sandbox(
+                snapshot,
+                TimeoutError(
+                    f'sleeping {secs:g}s would exceed the {self.max_sleep_secs:g}s this code may sleep '
+                    f'(max_duration_secs); {remaining:g}s left'
+                ),
+            )
+        self._slept_secs += secs
+        if snapshot.function_name == 'time.sleep':
+            await self.sleep(secs)
+            return await call_monty(self.portal, snapshot.resume, ExternalReturnValue(return_value=None))
+        # `asyncio.sleep` is awaitable, so defer it like a parallel call and gathered sleeps overlap.
+        sleep = self.sleep(secs)
+        parallel = not self.global_sequential
+        task = asyncio.ensure_future(sleep) if parallel else sleep
+        self._pending[snapshot.call_id] = PendingCall(task, otel_context.get_current())
         return await call_monty(self.portal, snapshot.resume, ExternalFuture(future=...))
 
     async def _raise_in_sandbox(self, snapshot: AsyncFunctionSnapshot, exc: Exception) -> AsyncSnapshot:

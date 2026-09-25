@@ -3829,8 +3829,8 @@ class TestCodeModeOSAccess:
         ],
     )
     async def test_sleep_is_not_routed_to_os_access(self, code: str) -> None:
-        """Sleeps return in the sandbox instead of reaching `os_access`, where `OSAccess` would sleep for real
-        with no duration limit to stop it."""
+        """The harness waits for sleeps itself, so they never reach `os_access`, where `OSAccess` would
+        sleep outside the `max_duration_secs` allowance."""
         seen: list[str] = []
 
         def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
@@ -3843,6 +3843,26 @@ class TestCodeModeOSAccess:
         result = await wrapper.call_tool('run_code', {'code': f'{code}\n"awake"'}, ctx, tools['run_code'])
         assert result.return_value == 'awake'
         assert seen == []
+
+    async def test_sleeps_are_charged_to_max_duration_secs(self) -> None:
+        """Sleep time is outside Monty's execution-time limit, so it gets the same allowance separately.
+
+        The over-long sleep fails before waiting, and the session survives it: it is an ordinary
+        exception in the sandbox, not Monty's time limit.
+        """
+        wrapper = CodeMode[object](resource_limits={'max_duration_secs': 1}).get_wrapper_toolset(
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        run_code = tools['run_code']
+
+        await wrapper.call_tool('run_code', {'code': 'x = 1'}, ctx, run_code)
+        with pytest.raises(ModelRetry, match=r'TimeoutError: sleeping 5s would exceed the 1s this code may sleep'):
+            await wrapper.call_tool('run_code', {'code': 'import time\ntime.sleep(5)'}, ctx, run_code)
+        result = await wrapper.call_tool('run_code', {'code': 'x'}, ctx, run_code)
+        assert result.return_value == 1
 
     async def test_os_access_answers_unseeded_random(self) -> None:
         wrapper = CodeMode[object](os_access=OSAccess()).get_wrapper_toolset(_build_function_toolset(add))

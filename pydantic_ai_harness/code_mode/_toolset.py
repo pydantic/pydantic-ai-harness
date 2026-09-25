@@ -292,7 +292,10 @@ class CodeModeResourceLimits(TypedDict, total=False):
     """Caps on the sandbox code executed by `run_code`."""
 
     max_duration_secs: float
-    """Sandbox execution time allowed to each `run_code` snippet; time awaiting tools does not count."""
+    """Sandbox execution time allowed to each `run_code` snippet; time awaiting tools does not count.
+
+    Sleeping is not execution time, so each snippet may also sleep for up to this long in total.
+    """
     max_memory: int
     max_suspensions: int
     """Cumulative host-interaction budget per session, not a per-snippet tool-call count.
@@ -416,18 +419,18 @@ _NO_OS_RESTRICTION = (
     '- **No filesystem, environment, or clock**: `pathlib.Path` I/O, `os.getenv`/`os.environ`, '
     '`datetime.datetime.now()`, `datetime.date.today()`, and `time.time()` are unavailable here '
     '(no filesystem mount or OS handler is configured). `os` and `pathlib` import successfully, but '
-    'their I/O operations are not supported in this configuration. `asyncio.sleep` returns at once.'
+    'their I/O operations are not supported in this configuration. `time.sleep` and `asyncio.sleep` really wait.'
 )
 _MOUNT_ONLY_NOTE = (
     '- **Mounted filesystem access**: `pathlib.Path` operations under the configured mount '
     'point(s) are routed to the host. `os.getenv`/`os.environ`, `datetime.datetime.now()`, '
-    '`datetime.date.today()`, and `time.time()` remain unavailable. `asyncio.sleep` returns at once.'
+    '`datetime.date.today()`, and `time.time()` remain unavailable. `time.sleep` and `asyncio.sleep` really wait.'
 )
 _OS_ENABLED_NOTE = (
     '- **Configured OS access**: `pathlib.Path` operations, `os.getenv`/`os.environ`, '
     '`datetime.datetime.now()`, `datetime.date.today()`, and `time.time()` are routed to the OS '
     'handler configured for this agent (availability depends on that configuration). '
-    '`asyncio.sleep` returns at once.'
+    '`time.sleep` and `asyncio.sleep` really wait.'
 )
 _MOUNT_LIFETIME_NOTE = (
     "- **Mount write lifetime**: writes through a `mode='overlay'` mount last only for the current "
@@ -1126,11 +1129,12 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
             return f'\n\n{_describe_started_calls(execution.nested_calls, execution.nested_returns)}'
 
         in_workflow = in_temporal_workflow(ctx)
+        limits = _resolve_resource_limits(self.resource_limits, in_temporal_workflow=in_workflow)
         try:
             session = await run_state.get_session(
                 type_check=type_check,
                 type_check_stubs=type_check_stubs,
-                limits=_resolve_resource_limits(self.resource_limits, in_temporal_workflow=in_workflow),
+                limits=limits,
                 in_temporal_workflow=in_workflow,
             )
             try:
@@ -1140,6 +1144,9 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                     sequential_names=sequential_tools,
                     global_sequential=global_sequential,
                     portal=run_state.portal,
+                    # The configured limit, kept inside a Temporal workflow too: Monty's elapsed-time
+                    # check is dropped there for replay, but sleeps are charged what they request.
+                    max_sleep_secs=_resolve_resource_limits(self.resource_limits).get('max_feed_duration_secs'),
                 ).run(
                     partial(
                         session.feed_start,

@@ -185,7 +185,7 @@ def _request_id_os(*, name: str, args: tuple[object, ...], kwargs: dict[str, obj
 
 
 def _remote_code_mode_model(messages: list[ModelRequest | ModelResponse], info: AgentInfo) -> ModelResponse:
-    """Model that adds with a tool and reads the workflow's contextvar through `os_access`."""
+    """Model that adds with a tool, sleeps, and reads the workflow's contextvar through `os_access`."""
     returns = [
         part
         for msg in messages
@@ -195,7 +195,12 @@ def _remote_code_mode_model(messages: list[ModelRequest | ModelResponse], info: 
     ]
     if returns:
         return ModelResponse(parts=[TextPart(content=f'done: {returns[-1].content}')])
-    code = 'import os\ntotal = await add(a=3, b=4)\nf\'{total} {os.getenv("REQUEST_ID")}\''
+    # The 31 s sleep is one second past the default allowance, so it is refused without waiting.
+    code = (
+        'import asyncio, os\ntotal = await add(a=3, b=4)\nawait asyncio.sleep(0.1)\n'
+        'try:\n    await asyncio.sleep(31)\n    capped = "uncapped"\nexcept TimeoutError:\n    capped = "capped"\n'
+        'f\'{total} {os.getenv("REQUEST_ID")} {capped}\''
+    )
     return ModelResponse(parts=[ToolCallPart(tool_name='run_code', args={'code': code}, tool_call_id='remote_tc_1')])
 
 
@@ -360,7 +365,9 @@ async def test_code_mode_runs_over_websocket_in_temporal_workflow(client: Client
     """Remote workers run and replay in a workflow like local ones do.
 
     Every Monty call inside a workflow goes through the blocking portal, so this covers that
-    path for both bindings, including `os_access` seeing the workflow's contextvars.
+    path for both bindings, including `os_access` seeing the workflow's contextvars, and a
+    sandbox sleep becoming a durable timer rather than blocking the workflow, still capped by the
+    `max_duration_secs` allowance even though the execution-time limit is off in a workflow.
     """
     workflow_id = 'test_code_mode_temporal_remote_1'
     async with Worker(
@@ -376,9 +383,10 @@ async def test_code_mode_runs_over_websocket_in_temporal_workflow(client: Client
             id=workflow_id,
             task_queue=TASK_QUEUE,
         )
-    assert output == 'done: 7 req-42'
+    assert output == 'done: 7 req-42 capped'
 
     history = await client.get_workflow_handle(workflow_id).fetch_history()
+    assert any(e.HasField('timer_started_event_attributes') for e in history.events)
     replay_result = await Replayer(
         workflows=[RemoteCodeModeWorkflow],
         plugins=[PydanticAIPlugin()],
