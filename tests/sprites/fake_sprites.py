@@ -119,11 +119,15 @@ class FakeControlConnection:
         return FakeOperation(self.transport, cmd)
 
     async def close(self) -> None:
+        self.transport.control_close_started.set()
+        if self.transport.release_control_close is not None:
+            await self.transport.release_control_close.wait()
         if self.transport.control_close_hang:
             await anyio.sleep(1)
         if self.transport.control_close_error is not None:
             raise self.transport.control_close_error
         self.closed = True
+        self.transport.control_closes += 1
 
 
 class SpriteTransport:
@@ -148,6 +152,9 @@ class SpriteTransport:
         self.control_close_error: Exception | None = None
         self.connection_lost: Exception | None = None
         self.control_close_hang = False
+        self.control_close_started = asyncio.Event()
+        self.release_control_close: asyncio.Event | None = None
+        self.control_closes = 0
         self.aborted = 0
         self.run_exit_override: int | None = None
         self.cancel_exit_override: int | None = None
@@ -179,8 +186,6 @@ class SpriteTransport:
         return AsyncSprite(name, client)
 
     async def destroy(self, client: AsyncSpritesClient, name: str) -> None:
-        if name not in self.names:
-            raise NotFoundError(name)
         self.names.discard(name)
 
     async def close(self, client: AsyncSpritesClient) -> None:

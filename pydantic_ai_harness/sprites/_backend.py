@@ -110,8 +110,11 @@ async def run_to_completion(call: Callable[[], Awaitable[_T]]) -> _T:
 
 
 async def _close_connection(connection: ControlConnection) -> None:
-    """Close a control connection; if that fails, abort its socket so nothing is left open."""
-    error = await cleanup_call(connection.close, timeout=_CONTROL_TIMEOUT)
+    """Close a control connection; if that fails, abort its socket so nothing is left open.
+
+    Finished even when the caller (a cancelled command) is cancelled meanwhile.
+    """
+    error = await run_to_completion(lambda: cleanup_call(connection.close, timeout=_CONTROL_TIMEOUT))
     if error is not None:
         logger.warning('Could not close a Sprite control connection, aborting it: %r', error)
         # `close` has nothing to fail on before `connect` opened the socket.
@@ -248,18 +251,22 @@ class SpriteWorkspaceBackend(WorkspaceBackend, SupportsCommands):
         calls this for the backend it supplied when each run ends. A close that fails or times out
         is logged, not raised, and the client is kept so the next `aclose()` tries again.
         """
-        client = self._client
-        if client is None or not self._owns_client:
+        if not self._owns_client:
             return
 
         async def close() -> None:
-            error = await cleanup_call(client.aclose, timeout=_CONTROL_TIMEOUT)
-            if error is not None:
-                # Kept, so a later `aclose()` tries again.
-                logger.warning('Could not close Sprites SDK client: %r', error)
-            else:
-                self._client = None
-                self._workspace = None
+            # Under the lock, so a Sprite still being created is recorded before its client closes.
+            async with self._lock:
+                client = self._client
+                if client is None:
+                    return
+                error = await cleanup_call(client.aclose, timeout=_CONTROL_TIMEOUT)
+                if error is not None:
+                    # Kept, so a later `aclose()` tries again.
+                    logger.warning('Could not close Sprites SDK client: %r', error)
+                else:
+                    self._client = None
+                    self._workspace = None
 
         # Finished even when the caller (a run being cancelled) is cancelled meanwhile.
         await run_to_completion(close)

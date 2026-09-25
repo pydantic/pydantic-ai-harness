@@ -302,6 +302,36 @@ class TestSpriteWorkspace:
         await owned.aclose()
         assert transport.close_calls == 1
 
+    async def test_aclose_waits_for_an_in_flight_creation(self, transport: SpriteTransport) -> None:
+        owned = SpriteWorkspaceBackend()
+        transport.release_create = asyncio.Event()
+        creating = asyncio.create_task(owned.get_client())
+        await transport.create_started.wait()
+        closing = asyncio.create_task(owned.aclose())
+        await asyncio.sleep(0)
+        assert transport.close_calls == 0
+        transport.release_create.set()
+        await creating
+        await closing
+
+        assert transport.close_calls == 1
+        assert (await owned.get_client()).client is transport.clients[1]
+
+    async def test_cancelled_command_finishes_closing_its_connection(self, transport: SpriteTransport) -> None:
+        backend = SpriteWorkspaceBackend()
+        await backend.get_client()
+        transport.release_control_close = asyncio.Event()
+        task = asyncio.create_task(backend.run(['true']))
+        await transport.control_close_started.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        transport.release_control_close.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert transport.control_closes == 1
+
     async def test_deleted_sprite_is_unavailable_to_attach_commands_and_files(self, transport: SpriteTransport) -> None:
         owner = SpriteWorkspaceBackend()
         native = await owner.get_client()
