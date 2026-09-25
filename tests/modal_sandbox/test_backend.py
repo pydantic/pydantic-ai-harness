@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -436,6 +437,24 @@ class TestFilesystem:
             ('a.py', '/srv/a.py', False, 7),
             ('pkg', '/srv/pkg', True, None),
         ]
+
+    async def test_symlinks_follow_relative_chained_dangling_and_looping_targets(
+        self, fake_modal: FakeModal, tmp_path: Path
+    ) -> None:
+        fake_modal.host_root = tmp_path
+        (tmp_path / 'data.txt').write_bytes(b'12345')
+        (tmp_path / 'relative').symlink_to('data.txt')
+        (tmp_path / 'chained').symlink_to('relative')
+        (tmp_path / 'dangling').symlink_to('missing')
+        (tmp_path / 'looping').symlink_to('looping')
+        entries = await ModalSandboxBackend().list_dir(str(tmp_path))
+        assert {entry.name: (entry.is_dir, entry.size, entry.is_symlink) for entry in entries} == {
+            'chained': (False, 5, True),
+            'dangling': (False, None, True),
+            'data.txt': (False, 5, False),
+            'looping': (False, None, True),
+            'relative': (False, 5, True),
+        }
 
     async def test_remove_is_recursive(self, fake_modal: FakeModal) -> None:
         # One call covers both halves of the protocol's `remove`: on a file `recursive`

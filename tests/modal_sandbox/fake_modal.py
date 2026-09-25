@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import posixpath
 import shutil
+import stat
 import subprocess
 import types
 from collections.abc import Callable, Generator
@@ -200,9 +201,13 @@ class FileInfo:
     name: str
     _is_dir: bool
     size: int = 0
+    symlink_target: str | None = None
 
     def is_dir(self) -> bool:
         return self._is_dir
+
+    def is_symlink(self) -> bool:
+        return self.symlink_target is not None
 
 
 class _FakeFilesystem:
@@ -328,12 +333,18 @@ class _HostFilesystem:
     def _list_files(self, remote_path: str) -> list[FileInfo]:
         with _host_errors(remote_path):
             children = sorted(Path(remote_path).iterdir())
-        return [FileInfo(child.name, child.is_dir(), child.stat().st_size) for child in children]
+        return [self._info(child) for child in children]
 
     def _stat(self, remote_path: str) -> FileInfo:
         with _host_errors(remote_path):
-            info = Path(remote_path).stat()
-        return FileInfo(posixpath.basename(remote_path), Path(remote_path).is_dir(), info.st_size)
+            return self._info(Path(remote_path))
+
+    @staticmethod
+    def _info(path: Path) -> FileInfo:
+        # Like Modal's, an entry describes a symlink itself, not the target it points to.
+        info = path.lstat()
+        target = os.readlink(path) if path.is_symlink() else None
+        return FileInfo(path.name, stat.S_ISDIR(info.st_mode), info.st_size, symlink_target=target)
 
     def _make_directory(self, remote_path: str, *, create_parents: bool = True) -> None:
         with _host_errors(remote_path):
@@ -568,7 +579,12 @@ if TYPE_CHECKING:
         @property
         def size(self) -> int: ...
 
+        @property
+        def symlink_target(self) -> str | None: ...
+
         def is_dir(self) -> bool: ...
+
+        def is_symlink(self) -> bool: ...
 
     _fake_file_info_conforms: _FileInfoSurface = FileInfo('name', False)
     _real_file_info_conforms: _FileInfoSurface = modal.types.FileInfo.__new__(modal.types.FileInfo)

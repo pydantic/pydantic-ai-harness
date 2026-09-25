@@ -146,11 +146,40 @@ def _unwrap_filesystem_error(error: Exception) -> Exception:
     return error
 
 
-def _file_entry(entry: modal.types.FileInfo, path: str) -> FileEntry:
-    is_dir = entry.is_dir()
+# Linux's limit on symlinks followed while resolving one path; a longer chain is a loop.
+_MAX_SYMLINK_HOPS = 40
+
+
+async def _file_entry(workspace: modal.Sandbox, entry: modal.types.FileInfo, path: str) -> FileEntry:
+    """The protocol entry for `entry` at `path`, with `is_dir` and `size` following a symlink.
+
+    Modal's `stat` and `list_files` describe a symlink itself, so a symlink entry is resolved by
+    stat-ing its target, hop by hop. A dangling or looping link is reported as a file with no size.
+    """
+    import modal
+
+    is_symlink = entry.is_symlink()
+    target: modal.types.FileInfo | None = entry
+    link, hops = path, 0
+    while target is not None and target.is_symlink():
+        hops += 1
+        if hops > _MAX_SYMLINK_HOPS or target.symlink_target is None:
+            target = None
+            continue
+        # A relative target is relative to the directory holding the link.
+        link = posixpath.join(posixpath.dirname(link), target.symlink_target)
+        try:
+            target = await workspace.filesystem.stat.aio(link)
+        except (
+            modal.exception.SandboxFilesystemNotFoundError,
+            modal.exception.SandboxFilesystemNotADirectoryError,
+        ):
+            target = None
+    is_dir = target is not None and target.is_dir()
     # A directory's reported size is an implementation detail of the underlying filesystem
     # rather than a content length, so report none for it, like the built-in backends.
-    return FileEntry(name=entry.name, path=path, is_dir=is_dir, size=None if is_dir else entry.size)
+    size = None if target is None or is_dir else target.size
+    return FileEntry(name=entry.name, path=path, is_dir=is_dir, size=size, is_symlink=is_symlink)
 
 
 class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
@@ -271,13 +300,13 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
     async def stat(self, path: str) -> FileEntry:
         workspace = await self.get_client()
         async with self._mapped_errors(f'Could not stat {path!r}', path):
-            return _file_entry(await workspace.filesystem.stat.aio(path), path)
+            return await _file_entry(workspace, await workspace.filesystem.stat.aio(path), path)
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
         workspace = await self.get_client()
         async with self._mapped_errors(f'Could not list {path!r}', path):
             entries = await workspace.filesystem.list_files.aio(path)
-        return [_file_entry(entry, posixpath.join(path, entry.name)) for entry in entries]
+            return [await _file_entry(workspace, entry, posixpath.join(path, entry.name)) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
         workspace = await self.get_client()
