@@ -201,7 +201,8 @@ Output-validation and HTTP transport retry budgets are unchanged.
 ## Credentials
 
 CLAI's `/login openai-codex`, `/login github-copilot`, and the vllm and openrouter connections store tokens
-in the configured keyring backend, not plugin settings. Large token bundles use
+in the configured keyring backend, not plugin settings. Plugins that need an API key, such as
+[`posthog`](#posthog-posthog-analytics-signed-in-for-clai), keep it in `/keys` and save only its name. Large token bundles use
 multiple entries to fit Windows Credential Manager's size limit. When no keyring
 backend exists, credentials go to a per-account `0600` file under the user's CLAI config
 directory instead. None of this changes plugin APIs. See
@@ -509,31 +510,45 @@ show a "waiting for you" state) registers `@host.on(EventClass)` or
 
 `posthog` (`pydantic_clai2.posthog`) connects the agent to PostHog's hosted MCP
 server through harness [`PostHog`](../docs/posthog.md). It starts disabled;
-`/plugins enable posthog` turns it on. It signs in with the first of:
+`/plugins enable posthog` turns it on.
 
-1. `POSTHOG_PERSONAL_API_KEY` in the environment,
-2. a key saved in `/keys` under the name `POSTHOG_PERSONAL_API_KEY`,
-3. a browser sign-in, opened by the first prompt that uses PostHog. Its tokens
-   go to the keyring (the `mcp-posthog_plugin` entry under `pydantic-clai2`), the
-   same storage `/mcp` uses for OAuth servers, so the sign-in lasts across turns
-   and launches.
+Secrets are managed in `/keys`, never in plugin settings (plugin settings are
+plaintext SQLite). Enabling the plugin in a terminal opens the same key picker
+`/add_model` uses: choose a saved key, or enter a new one in a masked prompt and
+it is saved in `/keys` as `POSTHOG_PERSONAL_API_KEY`, the name harness `PostHog`
+documents (a label only; CLAI does not read or export the environment variable).
+CLAI remembers only the key's name, in the credential store beside the vllm and
+openrouter connections. Create the key with PostHog's "MCP Server" preset.
 
-Create the key with PostHog's "MCP Server" preset. `/posthog` shows which
-credential is in use; `/posthog logout` forgets the browser sign-in. Settings:
+One named key can serve several plugins and connections: pick the same `/keys`
+entry for each, the way GitHub integrations can all use one `GITHUB_TOKEN`. The name
+is looked up on every run, so replacing the key in `/keys` reaches the next run of
+everything that names it. Deleting it fails the next PostHog run with an error
+instead of connecting without it, and `/keys` refuses to rename a key while
+PostHog uses it. Until a key is chosen, runs get no PostHog tools and enabling
+says so.
+
+`/posthog` shows the key in use; `/posthog key` chooses another. Settings, none
+of them secret:
 
 | Key | Default | Does |
 |---|---|---|
 | `read_only` | `true` | ask the server for read-only tools only; `false` also allows changes such as editing feature flags |
-| `auth` | unset | `"api_key"` requires the key and fails on enable without one; `"oauth"` always uses the browser sign-in |
+| `auth` | `"key"` | `"browser"` signs in through the browser instead of using a key |
 
 ```text
 /plugins add posthog pydantic_clai2.posthog '{"read_only": false}'
 ```
 
-The plugin builds the connection itself instead of passing `auth='oauth'` to
-`PostHog`, because harness `PostHog` connects once per run and would keep
-browser tokens only in memory, prompting on every turn. It does not offer
-`PostHog`'s `features` filter.
+With `"auth": "browser"`, the first prompt that uses PostHog opens the browser.
+The tokens go to the keyring (the `mcp-posthog_plugin` entry under
+`pydantic-clai2`), the same storage `/mcp` uses for OAuth servers, so the sign-in
+lasts across turns and launches. `/posthog` shows the sign-in state and
+`/posthog logout` forgets it. The plugin builds this connection itself instead of
+passing `auth='oauth'` to `PostHog`: harness `PostHog` connects once per run, so
+it would keep browser tokens only in memory, prompt on every turn, and give the
+browser a 5-second connect timeout. The plugin does not offer `PostHog`'s
+`features` filter.
 
 ## Managing plugins
 
