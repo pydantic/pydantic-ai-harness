@@ -26,6 +26,7 @@ Reply = tuple[int, JsonValue]
 
 
 METADATA: dict[str, JsonValue] = {
+    'issuer': ORIGIN,
     'device_authorization_endpoint': f'{ORIGIN}/api/oauth/device/code',
     'token_endpoint': f'{ORIGIN}/api/oauth/token',
     'registration_endpoint': f'{ORIGIN}/api/oauth/register',
@@ -65,7 +66,8 @@ class Logfire:
         if path.startswith('/.well-known/oauth-protected-resource'):
             self.discovered.append(path)
             return httpx.Response(self.resource[0], json=self.resource[1])
-        if path == '/.well-known/oauth-authorization-server':
+        if path.startswith('/.well-known/oauth-authorization-server'):
+            self.discovered.append(path)
             return httpx.Response(200, json=self.metadata)
         if path == '/api/oauth/register':
             self.registered.append(json.loads(request.content))
@@ -165,7 +167,10 @@ class TestSignIn:
         device, *polls = logfire.forms
         assert (device['scope'], device['code_challenge_method']) == ('project:read', 'S256')
         assert {form['resource'] for form in logfire.forms} == {RESOURCE}
-        assert logfire.discovered == ['/.well-known/oauth-protected-resource/mcp']
+        assert logfire.discovered == [
+            '/.well-known/oauth-protected-resource/mcp',
+            '/.well-known/oauth-authorization-server',
+        ]
         assert {poll['code_verifier'] for poll in polls} != {''}
         tokens = load(RESOURCE)
         assert tokens is not None
@@ -216,16 +221,15 @@ class TestSignIn:
         assert lines[0] == f'Sign in to Logfire (new users can sign up there): open {ORIGIN}/auth/oauth-device'
         assert 'No browser opened; open the link above yourself.' in lines
 
-    async def test_fewer_scopes_than_asked_are_not_treated_as_write_access(self) -> None:
+    async def test_fewer_scopes_than_asked_are_reported_once_not_asked_for_again(self) -> None:
         logfire = Logfire()
         logfire.polls = [granted('access-1', scope='project:read')]
-        await run_sign_in(logfire, read_only=False)
+        lines = await run_sign_in(logfire, read_only=False)
+        assert 'Logfire granted fewer scopes than asked; some write tools may be refused.' in lines
         tokens = load(RESOURCE)
-        assert tokens is not None and not tokens.writable
+        assert tokens is not None and tokens.serves(read_only=False)  # Asking again would loop on the same grant.
         logfire.polls = [granted('access-1', scope=' '.join(OFFERED))]
-        await run_sign_in(logfire, read_only=False)
-        tokens = load(RESOURCE)
-        assert tokens is not None and tokens.writable
+        assert not any('fewer scopes' in line for line in await run_sign_in(logfire, read_only=False))
 
     async def test_a_huge_interval_waits_no_longer_than_the_code_lasts(self) -> None:
         logfire = Logfire()
@@ -264,7 +268,7 @@ class TestSignIn:
         logfire.resource = (200, {'resource': resource, 'authorization_servers': [ORIGIN]})
         async with logfire.client() as http:
             await sign_in(resource=resource, read_only=True, announce=lambda line: None, http=http, sleep=anyio.sleep)
-        assert logfire.discovered == [metadata_path]
+        assert logfire.discovered == [metadata_path, '/.well-known/oauth-authorization-server']
         assert load(resource) is not None
 
     async def test_servers_without_resource_metadata_are_their_own_issuer(self) -> None:
@@ -272,6 +276,15 @@ class TestSignIn:
         logfire.resource = (404, None)
         await run_sign_in(logfire, read_only=False)
         assert logfire.forms[0]['scope'] == 'project:read'  # Nothing offered beyond what MCP requires.
+        tokens = load(RESOURCE)
+        assert tokens is not None and tokens.serves(read_only=False)  # So write tools do not sign in on every request.
+
+    async def test_a_path_issuer_is_discovered_the_rfc_8414_way(self) -> None:
+        logfire = Logfire()
+        logfire.resource = (200, {'resource': RESOURCE, 'authorization_servers': [f'{ORIGIN}/tenant/']})
+        logfire.metadata = {**METADATA, 'issuer': f'{ORIGIN}/tenant'}
+        await run_sign_in(logfire)
+        assert logfire.discovered[1] == '/.well-known/oauth-authorization-server/tenant'
 
     @pytest.mark.parametrize(
         ('broken', 'value', 'message'),
@@ -311,6 +324,11 @@ class TestSignIn:
                 (200, {'resource': 'https://logfire-us.pydantic.dev/mcp', 'authorization_servers': [ORIGIN]}),
                 f'{RESOURCE} described itself as https://logfire-us.pydantic.dev/mcp; not signing in.',
             ),
+            (
+                'metadata',
+                {**METADATA, 'issuer': 'https://elsewhere.test'},
+                f'{ORIGIN} described itself as https://elsewhere.test; not signing in.',
+            ),
             ('handle', refuse, 'Logfire sign-in failed: ConnectError. Run /logfire_mcp login to retry.'),
         ],
         ids=[
@@ -329,6 +347,7 @@ class TestSignIn:
             'registration',
             'plain-http-issuer',
             'other-resource',
+            'other-issuer',
             'unreachable',
         ],
     )

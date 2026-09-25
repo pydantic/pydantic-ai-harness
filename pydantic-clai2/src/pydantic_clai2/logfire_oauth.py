@@ -56,7 +56,7 @@ class Tokens(BaseModel):
     refresh_token: str | None = Field(default=None, repr=False)
     expires_at: float
     writable: bool = False
-    """Whether the sign-in asked for write scopes, so it can serve read-and-write tools."""
+    """Whether the sign-in asked for write access; asking again would get the same grant, so it serves write tools."""
 
     def serves(self, *, read_only: bool) -> bool:
         """Whether its scopes cover the tools in use."""
@@ -128,6 +128,7 @@ class _Resource(BaseModel):
 
 
 class _Server(BaseModel):
+    issuer: str
     device_authorization_endpoint: _Https
     token_endpoint: _Https
     registration_endpoint: _Https | None = None
@@ -195,12 +196,19 @@ async def _discover(http: httpx.AsyncClient, resource: str) -> tuple[_Server, li
         if described.resource != resource:
             # RFC 9728 section 3.3: metadata for another resource must not choose where the user signs in.
             raise SignInError(f'{resource} described itself as {described.resource}; not signing in.')
-        issuer, scopes = described.authorization_servers[0].rstrip('/'), described.scopes_supported
+        issuer, scopes = described.authorization_servers[0], described.scopes_supported
     else:
         issuer, scopes = origin, []
-    response = await http.get(f'{issuer}/.well-known/oauth-authorization-server')
+    # RFC 8414 section 3.1: the well-known segment goes between the host and any issuer path.
+    issuer_parts = urlsplit(issuer)
+    well_known = '/.well-known/oauth-authorization-server' + issuer_parts.path.rstrip('/')
+    response = await http.get(f'{issuer_parts.scheme}://{issuer_parts.netloc}{well_known}')
     response.raise_for_status()
-    return _Server.model_validate_json(response.content), scopes
+    server = _Server.model_validate_json(response.content)
+    if server.issuer.rstrip('/') != issuer.rstrip('/'):
+        # RFC 8414 section 3.3: metadata served for one issuer must not be used for another.
+        raise SignInError(f'{issuer} described itself as {server.issuer}; not signing in.')
+    return server, scopes
 
 
 async def _register(http: httpx.AsyncClient, server: _Server, scope: str) -> str:
@@ -241,8 +249,9 @@ async def sign_in(
     """Run the device flow now and save the result; raises `SignInError` when it is denied or expires."""
     try:
         server, offered = await _discover(http, resource)
-        writable = not read_only and bool(offered)
-        scope = ' '.join(offered) if writable else READ_SCOPE
+        writable = not read_only
+        # Without a published list, only the scope the MCP server needs is known.
+        scope = ' '.join(dict.fromkeys([READ_SCOPE, *offered])) if writable else READ_SCOPE
         previous = await to_thread.run_sync(load, resource)
         # A client registered for read-only sign-in may not be allowed the write scopes.
         reusable = previous is not None and previous.token_endpoint == server.token_endpoint and not writable
@@ -269,8 +278,9 @@ async def sign_in(
         )
         if not granted.covers(READ_SCOPE):
             raise SignInError(f'Logfire did not grant {READ_SCOPE}, which the MCP server needs.')
-        if writable and not granted.covers(scope):
-            writable = False  # Logfire granted less than asked; write tools will ask again.
+        if not granted.covers(scope):
+            # Asking again would get the same grant, so say so once rather than on every request.
+            announce('Logfire granted fewer scopes than asked; some write tools may be refused.')
     except (httpx.HTTPError, ValidationError) as exc:
         raise SignInError(f'Logfire sign-in failed: {type(exc).__name__}. Run /logfire_mcp login to retry.') from exc
     tokens = Tokens(

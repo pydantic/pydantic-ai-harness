@@ -377,19 +377,24 @@ any device.
 
 - **Discovery:** the Logfire server is found from the Destination URL
   ([RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) resource metadata),
-  so self-hosted Logfire works too. CLAI registers itself as a client
-  ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591)) and uses PKCE. It
-  registers again if the server has forgotten the earlier registration.
+  so self-hosted Logfire works too, including an issuer with a path
+  ([RFC 8414](https://datatracker.ietf.org/doc/html/rfc8414)). CLAI registers
+  itself as a client ([RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591))
+  and uses PKCE. It registers again if the server has forgotten the earlier
+  registration.
 - **Binding:** every request names the Destination URL as the token's resource
   ([RFC 8707](https://datatracker.ietf.org/doc/html/rfc8707)), and the
-  discovered metadata must describe that same URL. A token is only issued for
-  the MCP server you configured, so another endpoint that names Logfire as its
+  discovered metadata must describe that same URL (and the authorization
+  server's metadata its own issuer). A token is only issued for the MCP server
+  you configured, so another endpoint that names Logfire as its
   authorization server cannot receive one. Logfire rejects unknown resources
   with `invalid_target`.
 - **Scopes:** read-only tools ask only for `project:read`. With Tools set to read
   and write, CLAI asks for every scope the MCP server lists (on Logfire's hosted
   servers that includes `organization:create_project`). Switching Tools to read
-  and write signs in again for those scopes.
+  and write signs in again for those scopes. If Logfire grants fewer scopes, CLAI
+  says so once and keeps the sign-in, since asking again would get the same
+  grant; `/logfire_mcp login` asks again when you want to.
 - **Tokens:** kept per Destination URL in the OS keyring (or the private
   credential file) under the `logfire-oauth` account, so restarting CLAI does
   not mean signing in again. An expired or rejected token is refreshed; if that
@@ -398,6 +403,8 @@ any device.
   If the keyring or file refuses to save a sign-in, CLAI says so and keeps it in
   memory for the rest of the session (logout forgets it too); the next session
   asks you to sign in again.
+
+#### Saved keys
 
 A saved key's value is read at the start of each run, like a model connection's.
 Replacing it in `/keys` applies from the next turn. `/keys` does not stop you
