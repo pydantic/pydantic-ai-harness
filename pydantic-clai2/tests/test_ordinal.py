@@ -22,6 +22,7 @@ from rich.console import Console
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.capability_catalog import HARNESS_PLUGINS
 from pydantic_clai2.commands import Commands
+from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.mcp import TokenStore
 from pydantic_clai2.ordinal import TOKEN_ENV, TOKENS, URL, USAGE, activate
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
@@ -155,6 +156,36 @@ def test_command_usage_and_completion(vault: Vault, monkeypatch: pytest.MonkeyPa
     assert list(command.complete(['logout', ''])) == []
 
 
+def ordinal_loader(store: SettingsStore) -> PluginLoader[None]:
+    return PluginLoader[None](
+        store=store,
+        console=Console(file=io.StringIO()),
+        commands=Commands(),
+        session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=store.load()),
+        builtin=[plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'ordinal'],
+    )
+
+
+async def test_saved_catalog_toggle_becomes_the_built_in(
+    vault: Vault, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(TOKEN_ENV, 'token')
+    store = SettingsStore(tmp_path / 'settings.db')
+    store.save_plugin(PluginSettings(id='ordinal', factory='pydantic_ai_harness.ordinal:Ordinal', enabled=True))
+    loader = ordinal_loader(store)
+    [entry] = loader.entries()
+    assert entry.builtin and entry.declaration.enabled
+    assert entry.declaration.factory == 'pydantic_clai2.ordinal'
+    await loader.load_all()
+    [capability] = loader.capabilities()
+    assert isinstance(capability, Ordinal)
+
+    customized = PluginSettings(id='ordinal', factory='pydantic_ai_harness.ordinal:Ordinal', settings={'id': 'mine'})
+    store.save_plugin(customized)
+    [entry] = ordinal_loader(store).entries()
+    assert entry.declaration == customized and not entry.builtin
+
+
 async def test_no_token_and_no_terminal_fails_to_enable(
     vault: Vault, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -164,14 +195,7 @@ async def test_no_token_and_no_terminal_fails_to_enable(
         activate(plugin)
     assert plugin.capabilities == []
 
-    store = SettingsStore(tmp_path / 'settings.db')
-    loader = PluginLoader[None](
-        store=store,
-        console=Console(file=io.StringIO()),
-        commands=Commands(),
-        session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=store.load()),
-        builtin=[plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'ordinal'],
-    )
+    loader = ordinal_loader(SettingsStore(tmp_path / 'settings.db'))
     with pytest.raises(PluginError, match=TOKEN_ENV):
         await loader.enable('ordinal')
     assert loader.capabilities() == []

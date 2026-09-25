@@ -18,6 +18,7 @@ from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
 
 from . import theme
+from .capability_catalog import RETIRED_PLUGINS
 from .commands import Commands, plugins_command
 from .config import PluginSettings
 from .plugins import (
@@ -131,7 +132,7 @@ class PluginLoader(Generic[DepsT]):
     def entries(self) -> list[PluginEntry[DepsT]]:
         """Saved declarations plus drop-in files, keeping the loaded state of each."""
         folder = self._discover()
-        declared = {declaration.id: declaration for declaration in self._store.plugins()}
+        declared = {declaration.id: self._current(declaration) for declaration in self._store.plugins()}
         for name in folder.keys() - declared.keys():
             declared[name] = PluginSettings(id=name, factory=name, path=str(folder[name]))
         for shipped in (self._project, self._builtin):
@@ -154,6 +155,13 @@ class PluginLoader(Generic[DepsT]):
                 refreshed[name] = previous
         self._entries = refreshed
         return list(refreshed.values())
+
+    def _current(self, declaration: PluginSettings) -> PluginSettings:
+        """A saved toggle of a retired catalog row becomes the built-in that replaced it, keeping `enabled`."""
+        builtin = self._builtin.get(declaration.id)
+        if builtin is not None and any(_same_plugin(declaration, retired) for retired in RETIRED_PLUGINS):
+            return builtin.model_copy(update={'enabled': declaration.enabled})
+        return declaration
 
     def _registration_order(self) -> list[PluginEntry[DepsT]]:
         """Shipped plugins first, in declaration order, then everything else by name.

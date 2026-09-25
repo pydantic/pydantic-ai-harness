@@ -66,3 +66,12 @@ HARNESS_PLUGINS: tuple[PluginSettings, ...] = tuple(
     PluginSettings(id=name, factory=f'pydantic_ai_harness.{factory}', enabled=False) for name, factory in _FACTORIES
 )
 """Disabled built-ins. The loader imports a capability only when the user enables it."""
+
+RETIRED_PLUGINS: tuple[PluginSettings, ...] = (
+    PluginSettings(id='ordinal', factory='pydantic_ai_harness.ordinal:Ordinal', enabled=False),
+)
+"""Former catalog rows now served by an integrated built-in under the same id.
+
+The store keeps a toggled row as its own declaration, which would outrank the built-in forever, so the loader
+reads a saved copy of one of these as the built-in with the saved `enabled` state.
+"""
