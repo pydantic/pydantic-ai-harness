@@ -33,11 +33,14 @@ from pydantic_ai import Agent
 from pydantic_ai.messages import ModelMessage, ToolReturnPart
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, FunctionModel
 from pydantic_ai.workspaces import Workspace, WorkspaceTimeoutError, WorkspaceUnavailableError
+from pytest_examples import CodeExample
 from sprites import AsyncSpritesClient
 from sprites.exceptions import NotFoundError
 
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.sprites_sandbox import SpritesSandbox, SpritesSandboxBackend
+
+from .._docs_examples import documented_cleanup, python_blocks, run_block
 
 pytestmark = pytest.mark.sprites_live
 
@@ -190,3 +193,32 @@ async def test_coder_shell_and_file_tools_run_in_the_sprite(client: AsyncSprites
 
     assert 'git version' in result.output
     assert 'hello' in result.output
+
+
+async def test_commands_get_a_usable_environment(client: AsyncSpritesClient) -> None:
+    """Validates the fake-encoded assumption that a command sees the Sprite's `PATH` and `HOME`, and git,
+    and that a per-call `env` adds to them rather than replacing them."""
+    async with _owned(client) as backend:
+        result = await backend.run('echo "$PATH"; echo "$HOME"; git --version', shell=True, timeout=60)
+        path, home, git = result.stdout.splitlines()
+        assert path and home and git.startswith('git version')
+
+        result = await backend.run('echo "$FOO"; echo "$PATH"', shell=True, env={'FOO': '1'}, timeout=60)
+        assert result.stdout.splitlines() == ['1', path]
+
+
+# The README's Python blocks are the same as this page's.
+_DOCS_BLOCKS = python_blocks('docs/sprites-sandbox.md')
+
+
+@pytest.mark.parametrize('example', [pytest.param(block, id=f'line {block.start_line}') for block in _DOCS_BLOCKS])
+def test_docs_example(example: CodeExample, sprites_token: str) -> None:
+    """Every example on the docs page runs as written, and its agent's tools do their work in a real sandbox.
+
+    The fake stands in for Sprites, so only this shows the page's code, its default settings, and its
+    cleanup work against the real service. A follow-up run, from the message history or a stored ref,
+    works in the first run's sandbox.
+    """
+    _, runs = run_block(example, cleanup=documented_cleanup(_DOCS_BLOCKS, 'delete_sprite'))
+    assert all(run.used_sandbox for run in runs), runs
+    assert len({run.ref for run in runs}) <= 1, runs
