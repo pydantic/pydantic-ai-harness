@@ -25,10 +25,18 @@ def anyio_backend() -> str:
 class _FakeClient:
     """Stand-in for `httpx.AsyncClient` that returns a canned response or raises."""
 
-    def __init__(self, *, text: str = '', status: int = 200, error: httpx.HTTPError | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        text: str = '',
+        status: int = 200,
+        error: httpx.HTTPError | None = None,
+        requested: list[str],
+    ) -> None:
         self._text = text
         self._status = status
         self._error = error
+        self._requested = requested
 
     async def __aenter__(self) -> _FakeClient:
         return self
@@ -37,6 +45,7 @@ class _FakeClient:
         return False
 
     async def get(self, url: str) -> httpx.Response:
+        self._requested.append(url)
         if self._error is not None:
             raise self._error
         return httpx.Response(self._status, text=self._text, request=httpx.Request('GET', url))
@@ -48,13 +57,27 @@ def _install_fake_httpx(
     text: str = '',
     status: int = 200,
     error: httpx.HTTPError | None = None,
-) -> None:
-    """Replace `httpx.AsyncClient` with a factory yielding a `_FakeClient`."""
+) -> list[str]:
+    """Replace `httpx.AsyncClient` with a factory yielding a `_FakeClient`; return the URLs it is asked for."""
+    requested: list[str] = []
 
     def factory(*args: object, **kwargs: object) -> _FakeClient:
-        return _FakeClient(text=text, status=status, error=error)
+        return _FakeClient(text=text, status=status, error=error, requested=requested)
 
     monkeypatch.setattr(httpx, 'AsyncClient', factory)
+    return requested
+
+
+# Where each topic's page lives in `pydantic/pydantic-ai:main` `docs/`. pydantic/pydantic-ai#6621
+# moved the capabilities page into `capabilities/overview.md`.
+_UPSTREAM_DOCS_LAYOUT = {
+    PydanticAIDocsTopic.capabilities: 'capabilities/overview.md',
+    PydanticAIDocsTopic.hooks: 'hooks.md',
+    PydanticAIDocsTopic.tools: 'tools.md',
+    PydanticAIDocsTopic.tools_advanced: 'tools-advanced.md',
+    PydanticAIDocsTopic.toolsets: 'toolsets.md',
+    PydanticAIDocsTopic.agent: 'agent.md',
+}
 
 
 class TestPydanticAIDocsToolset:
@@ -112,6 +135,29 @@ class TestPydanticAIDocsToolset:
 
         assert await toolset.read_pyai_docs(PydanticAIDocsTopic.tools_advanced) == '# Tools advanced local'
 
+    @pytest.mark.parametrize('topic', list(PydanticAIDocsTopic))
+    async def test_reads_each_topic_from_upstream_docs_layout(self, topic: PydanticAIDocsTopic, tmp_path: Path) -> None:
+        for other, relative in _UPSTREAM_DOCS_LAYOUT.items():
+            page = tmp_path / relative
+            page.parent.mkdir(parents=True, exist_ok=True)
+            page.write_text(f'# {other.value} local', encoding='utf-8')
+        toolset = PydanticAIDocsToolset[object](local_docs_path=tmp_path, cache=None)
+
+        assert await toolset.read_pyai_docs(topic) == f'# {topic.value} local'
+
+    @pytest.mark.parametrize('topic', list(PydanticAIDocsTopic))
+    async def test_fetches_each_topic_from_upstream_docs_layout(
+        self, topic: PydanticAIDocsTopic, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requested = _install_fake_httpx(monkeypatch, text='# remote')
+        toolset = PydanticAIDocsToolset[object](local_docs_path=None, cache=None)
+
+        await toolset.read_pyai_docs(topic)
+
+        assert requested == [
+            f'https://raw.githubusercontent.com/pydantic/pydantic-ai/main/docs/{_UPSTREAM_DOCS_LAYOUT[topic]}'
+        ]
+
     async def test_local_path_expands_user(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         monkeypatch.setenv('HOME', str(tmp_path))
         (tmp_path / 'hooks.md').write_text('# Hooks home', encoding='utf-8')
@@ -155,7 +201,8 @@ class TestPydanticAIDocsCapability:
 
 class TestThroughAgent:
     async def test_tool_returns_local_doc(self, tmp_path: Path) -> None:
-        (tmp_path / 'capabilities.md').write_text('# Capabilities doc', encoding='utf-8')
+        (tmp_path / 'capabilities').mkdir()
+        (tmp_path / 'capabilities' / 'overview.md').write_text('# Capabilities doc', encoding='utf-8')
 
         def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             if len(messages) == 1:
