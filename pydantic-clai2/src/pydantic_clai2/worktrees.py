@@ -44,17 +44,33 @@ def create_worktree(*, name: str) -> Path:
     return path
 
 
-def offer_worktree_cleanup() -> None:
-    """Offer removal after interactive shutdown, keeping the branch and dirty files."""
+def offer_worktree_cleanup(created: Path | None = None) -> None:
+    """Clean up a linked worktree after interactive shutdown without discarding work.
+
+    A worktree created by this run (`created`) that is left without changes or new commits is removed
+    with its branch, without asking. Any other linked worktree is only removed on confirmation, and
+    its branch is kept.
+    """
     if not sys.stdin.isatty():
         return
     try:
         root = Path(_git('rev-parse', '--show-toplevel')).resolve()
         common = Path(_git('rev-parse', '--git-common-dir')).resolve()
-        git_dir = Path(_git('rev-parse', '--absolute-git-dir')).resolve()
+        if Path(_git('rev-parse', '--absolute-git-dir')).resolve() == common:
+            return
+        disposable = _disposable_branch(root, created)
     except (OSError, subprocess.CalledProcessError):
         return
-    if git_dir == common:
+    if disposable is not None:
+        if _remove(root, common):
+            try:
+                # `-D` because `_disposable_branch` proved every commit is reachable from another ref,
+                # while `-d` would also demand a merge into the main checkout's current branch.
+                _git('-C', str(common), 'branch', '-D', '--', disposable)
+            except (OSError, subprocess.CalledProcessError) as exc:
+                print(f'Removed worktree {root}. Branch {disposable} kept: {_detail(exc)}', file=sys.stderr)
+            else:
+                print(f'Removed unchanged worktree {root} and branch {disposable}.')
         return
     try:
         answer = input(f'Remove worktree {root}? The branch will be kept. [y/N] ')
@@ -63,7 +79,23 @@ def offer_worktree_cleanup() -> None:
         print()
     if answer.strip().lower() not in ('y', 'yes'):
         print(f'Worktree kept at {root}.')
-        return
+    elif _remove(root, common):
+        print(f'Removed worktree {root}. Branch kept.')
+
+
+def _disposable_branch(root: Path, created: Path | None) -> str | None:
+    """Return the branch of the worktree this run created if deleting it loses nothing, else `None`."""
+    if created is None or created.resolve() != root:
+        return None
+    branch = f'clai/{created.name}'
+    if _git('branch', '--show-current') != branch or _git('status', '--porcelain', '--untracked-files=all'):
+        return None
+    # Commits reachable from HEAD but from no other branch, tag, or remote would be lost with the branch.
+    unique = _git('rev-list', '-n1', 'HEAD', '--not', f'--exclude={branch}', '--branches', '--tags', '--remotes')
+    return None if unique else branch
+
+
+def _remove(root: Path, common: Path) -> bool:
     original = Path.cwd()
     try:
         # Run outside the checkout so successful removal leaves a valid working directory.
@@ -71,10 +103,13 @@ def offer_worktree_cleanup() -> None:
         _git('-C', str(common), 'worktree', 'remove', '--', str(root))
     except (OSError, subprocess.CalledProcessError) as exc:
         os.chdir(original)
-        detail = exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
-        print(f'Worktree kept at {root}: {detail}', file=sys.stderr)
-    else:
-        print(f'Removed worktree {root}. Branch kept.')
+        print(f'Worktree kept at {root}: {_detail(exc)}', file=sys.stderr)
+        return False
+    return True
+
+
+def _detail(exc: OSError | subprocess.CalledProcessError) -> str:
+    return exc.stderr.strip() if isinstance(exc, subprocess.CalledProcessError) else str(exc)
 
 
 def _git(*args: str) -> str:
