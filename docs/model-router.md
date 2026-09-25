@@ -49,11 +49,11 @@ This example needs the OpenAI provider group:
 pip/uv-add pydantic-ai-harness 'pydantic-ai-slim[openai]'
 ```
 
-The router creates an internal agent named `model_router`. Its `output_type` is a `Literal` built from the choice keys. Language models answer through structured output, while typed models can make the same choice without generating text. The router instructions contain each choice description.
+The router creates an internal agent named `model_router`. Its output has one `choice` field, whose options are the choice keys, and each option carries its description in the output schema. Language models answer through structured output, while typed models such as TypeSafe's decision models pick one option with the description of each in hand, without generating text.
 
 ## Routing input
 
-The routing input is the normalized message history serialized as JSON. On the first step it also carries the run's new prompt, which Pydantic AI's bootstrap `ModelSelectionContext` does not contain yet -- so a fresh run's very first step is routed from the user's own question rather than defaulting. A router on another provider therefore receives the conversation content used to make the decision.
+The router agent is given the run's message history as its own `message_history`, ending with the request being routed: the user's prompt on the first step, and tool results or a retry on later ones. A router on another provider therefore receives the conversation content used to make the decision, including any files in it. A router model that cannot take a part of that history raises `UserError`, as a decision model does for files, and the run fails rather than routing to `default`.
 
 That input is not bounded. In `'per_step'` mode each routing request grows with the conversation, so a long run eventually spends more on routing than the choice is worth, and a history that outgrows the router's context window fails the request and falls back to `default`. Pair `'per_step'` routing with [compaction](compaction.md) to bound it: the compacted history is what the router reads, which is usually what you wanted it to read anyway.
 
@@ -72,17 +72,15 @@ Routing reads that history one step behind compaction. Pydantic AI selects the s
 
 Pydantic AI calls model selectors once per logical step. Provider polling or continuation inside one step stays on the selected model.
 
-## Confidence and failure
+## Probability and failure
 
-Set `confidence_threshold` when constructing `ModelRouter` to reject a reported confidence below that cutoff. For example, with `confidence_threshold=0.8`, a reported value below `0.8` falls back. The threshold has no effect when the router reports no confidence.
+Set `probability_threshold` when constructing `ModelRouter` to reject a pick the router was unsure of. For example, with `probability_threshold=0.8`, a pick given a probability below `0.8` falls back to `default`.
 
-When the router response has `provider_details['confidence']`, a value below the threshold selects `default`. TypeSafe reports the confidence for a bare `Literal` under the `response` key. The capability also accepts a numeric confidence directly and uses the least numeric value when a provider reports a mapping without `response`. Reported confidence must be finite and between `0` and `1`; an invalid value selects `default` as a routing error.
+The probability is read from `provider_details['probabilities']['choice'][<pick>]`, which is what a decision model such as TypeSafe reports for a pick-one field. It is not the field's `provider_details['confidence']`, which measures something else. A router model that reports no probability for its pick keeps its pick, so ordinary language models route without provider-specific metadata, and the threshold has no effect on them.
 
-A router model that reports no confidence keeps its pick. This lets ordinary language models route without provider-specific metadata.
+If the router model raises at request time, returns invalid model behavior after its normal output retries, or returns an unknown key, `ModelRouter` selects `default` and the main run continues. A `UserError` is the exception: it means the request can never succeed as configured, so it propagates. Cancellation is not converted into a fallback either.
 
-If the router model raises at request time, returns invalid model behavior after its normal output retries, or returns an unknown key, `ModelRouter` selects `default` and the main run continues. Cancellation is not converted into a fallback.
-
-Configuration mistakes do not fall back. An empty menu, an unknown `default`, a threshold outside `0` to `1`, and a `router_model` Pydantic AI cannot resolve all raise `UserError` from the `ModelRouter` constructor, so a typo surfaces immediately instead of routing every request to `default` for the life of the agent.
+Configuration mistakes do not fall back. An empty menu, an unknown `default`, a `probability_threshold` outside `0` to `1`, and a `router_model` Pydantic AI cannot resolve all raise `UserError` from the `ModelRouter` constructor, so a typo surfaces immediately instead of routing every request to `default` for the life of the agent.
 
 ## Options
 
@@ -90,9 +88,9 @@ Configuration mistakes do not fall back. An empty menu, an unknown `default`, a 
 |---|---:|---|
 | `choices` | required | Mapping of keys to `ModelChoice(model, description)`. Keys and descriptions must be non-empty. |
 | `router_model` | required | Any model name or `Model` instance accepted by Pydantic AI. |
-| `default` | required | Configured choice used for router errors and low confidence. |
+| `default` | required | Configured choice used for router errors and low-probability picks. |
 | `mode` | `'once'` | Route `'once'` per run or `'per_step'`. |
-| `confidence_threshold` | `None` | Minimum reported confidence from `0` to `1`. Missing confidence accepts the pick. |
+| `probability_threshold` | `None` | Minimum probability, from `0` to `1`, the router must give its pick. A missing probability accepts the pick. |
 
 Both the router and choice models may be model names or configured `Model` instances. Model instances preserve their clients, credentials, base URLs, and instrumentation.
 
@@ -103,29 +101,29 @@ Each routing decision emits a `model_router.select` span on the parent run's tra
 | Attribute | Meaning |
 |---|---|
 | `model_router.choice` | Choice actually used after fallback. |
-| `model_router.confidence` | Reported confidence, when present. |
-| `model_router.fallback_reason` | `none`, `low_confidence`, or `error`. |
+| `model_router.probability` | The probability the router gave its pick, when reported. |
+| `model_router.fallback_reason` | `none`, `low_probability`, or `error`. |
 | `model_router.mode` | `once` or `per_step`. |
 | `model_router.run_step` | Logical request step being routed. |
-| `model_router.error.type` | Exception class when the default handled a router failure. |
+| `model_router.error.type` | Exception class when the router request failed, whether the default handled it or, for a `UserError`, it propagated. |
 
-The internal agent name `model_router` also lets Logfire group its requests, token use, cost, and latency separately from the main agent.
+The router run is instrumented with the parent run's instrumentation settings, from `Agent.instrument_all()`, `agent.instrument`, or an `Instrumentation` capability, so its `invoke_agent` and model request spans nest under `model_router.select` when the parent run is traced and are not emitted when it is not. The internal agent name `model_router` also lets Logfire group its requests, token use, cost, and latency separately from the main agent.
 
 ## Composition and execution constraints
 
-`ModelRouter` implements Pydantic AI's existing [`get_model()`](/ai/capabilities/custom/#selecting-the-model) hook. A model passed directly to `run(model=...)`, through a run spec, or through `agent.override(model=...)` takes precedence and skips capability routing. `ModelRouter` takes precedence over the model passed to the `Agent` constructor. When several capabilities contribute a model, Pydantic AI uses the last contribution.
+`ModelRouter` implements Pydantic AI's existing [`get_model()`](/ai/capabilities/custom/#selecting-the-model) hook. A model passed directly to `run(model=...)`, through a run spec, or through `agent.override(model=...)` takes precedence and skips capability routing. `ModelRouter` takes precedence over the model passed to the `Agent` constructor. When several capabilities contribute a model, Pydantic AI uses the last contribution. Two `ModelRouter`s on one agent share the default `id` `'model_router'`, so they are merged into one: their menus are combined and the later one's other settings win. Give each its own `id` to keep them apart, in which case the later one routes.
 
 Selection also runs before `before_model_request` and `wrap_model_request`, so a capability that gates or rewrites the prompt at either point does not cover the router request. An [`InputGuardrail`](guardrails.md) acts when the parent model request is made, by which time the router has already sent the original prompt to `router_model` and been billed for it, and it is still sent when the guard then blocks the parent call. Keep `router_model` inside the same trust boundary as the models in `choices`, and enforce any policy about content that must never leave that boundary before the run rather than inside it.
 
 The router request shares the parent run's `RunUsage` and usage limits, so its tokens, cost, and requests count toward the run limits and totals. It reserves one request for the pending parent model call.
 
-Dynamic model selection is not supported by Pydantic AI's durable execution capabilities. Pass an explicit registered model for a durable run. Resuming a suspended provider request also requires the exact model to be supplied explicitly.
+Under a durable execution capability such as `TemporalDurability` or `DBOSDurability`, the router request is a durable operation: it runs in the engine's activity or step, and replay restores the recorded choice instead of asking the router again and possibly choosing another model. A failed router request is recorded as the `default` fallback rather than retried under the engine's retry policy. Register the model of every `ModelChoice` in the durability capability's `models=`, like any model a durable run selects. The durability capability also needs the agent to have a `model` of its own. `ModelRouter` carries the stable default `id='model_router'`, so durable recovery works without configuration.
 
-`ModelRouter` is configured in Python and does not publish an AgentSpec entry. Its choice and router fields can contain live `Model` instances, and the `Literal` output type depends on the runtime choice keys.
+`ModelRouter` is configured in Python and does not publish an AgentSpec entry. Its choice and router fields can contain live `Model` instances, and the output type depends on the runtime choice keys.
 
 ## Why this is in Harness
 
-Pydantic AI core owns the selection mechanism: `ModelSelectionContext`, `ModelSelector`, the `get_model()` hook, and `SelectModel`. `ModelRouter` composes those primitives with an internal typed agent, a named menu, decision cadence, confidence fallback, error fallback, and telemetry. Those are routing policy and reusable agent behavior, so the composition belongs in Harness. Moving it into core would duplicate `SelectModel` with one opinionated way to implement its callable.
+Pydantic AI core owns the selection mechanism: `ModelSelectionContext`, `ModelSelector`, the `get_model()` hook, and `SelectModel`. `ModelRouter` composes those primitives with an internal typed agent, a named menu, decision cadence, probability fallback, error fallback, and telemetry. Those are routing policy and reusable agent behavior, so the composition belongs in Harness. Moving it into core would duplicate `SelectModel` with one opinionated way to implement its callable.
 
 ## Pydantic AI references
 

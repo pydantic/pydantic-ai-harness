@@ -5,17 +5,29 @@ from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
+from inline_snapshot import snapshot
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import Instrumentation
 from pydantic_ai.exceptions import UserError
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart, UserPromptPart
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
+)
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.instrumented import InstrumentationSettings
-from pydantic_ai.usage import UsageLimits
+from pydantic_ai.tools import DeferredToolResults
+from pydantic_ai.usage import RequestUsage, UsageLimits
 
 from pydantic_ai_harness.compaction import SummarizingCompaction
 from pydantic_ai_harness.guardrails import GuardrailResult, InputGuardrail
 from pydantic_ai_harness.model_router import ModelChoice, ModelRouter
-from tests.conftest import agent_run_names  # pyright: ignore[reportMissingTypeStubs]
+from tests._recording_durability import RecordingDurability  # pyright: ignore[reportMissingTypeStubs]
+from tests.conftest import IsDatetime, IsInstance, IsStr, agent_run_names  # pyright: ignore[reportMissingTypeStubs]
 
 if TYPE_CHECKING:
     from logfire.testing import CaptureLogfire
@@ -34,7 +46,7 @@ def _router_model(
             inspect(messages, info)
         output_tool = info.output_tools[0]
         return ModelResponse(
-            parts=[ToolCallPart(output_tool.name, {'response': choice})],
+            parts=[ToolCallPart(output_tool.name, {'choice': choice})],
             provider_details=dict(provider_details) if provider_details is not None else None,
         )
 
@@ -52,7 +64,7 @@ def _router(
     router_model: FunctionModel,
     *,
     mode: Literal['once', 'per_step'] = 'once',
-    confidence_threshold: float | None = None,
+    probability_threshold: float | None = None,
     fast_model: FunctionModel | None = None,
     capable_model: FunctionModel | None = None,
 ) -> ModelRouter[object]:
@@ -64,7 +76,7 @@ def _router(
         router_model=router_model,
         default='capable',
         mode=mode,
-        confidence_threshold=confidence_threshold,
+        probability_threshold=probability_threshold,
     )
 
 
@@ -73,22 +85,140 @@ class TestModelRouter:
     def anyio_backend(self) -> str:
         return 'asyncio'
 
-    async def test_routes_initial_prompt_with_literal_menu(self) -> None:
-        def inspect(messages: list[ModelMessage], info: AgentInfo) -> None:
-            schema = info.output_tools[0].parameters_json_schema
-            assert schema['properties']['response']['enum'] == ['fast', 'capable']
-            assert info.instructions is not None
-            assert 'Use for lookups.' in info.instructions
-            prompt = messages[-1].parts[-1]
-            assert isinstance(prompt, UserPromptPart)
-            assert 'Find the capital of France' in prompt.content
+    async def test_router_receives_the_run_history_ending_with_the_routed_request(self) -> None:
+        received: list[list[ModelMessage]] = []
 
-        agent = Agent(capabilities=[_router(_router_model('fast', inspect=inspect))])
+        def inspect(messages: list[ModelMessage], _info: AgentInfo) -> None:
+            received.append(messages)
+
+        def main(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            if len(messages) == 1:
+                return ModelResponse(parts=[ToolCallPart('lookup', {}, tool_call_id='call-1')])
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent = Agent(
+            capabilities=[
+                _router(_router_model('fast', inspect=inspect), mode='per_step', fast_model=FunctionModel(main))
+            ],
+            instructions='Parent instructions.',
+        )
+
+        @agent.tool_plain
+        def lookup() -> str:
+            return 'lookup result'
+
+        await agent.run('Find the capital of France')
+
+        assert received == snapshot(
+            [
+                [
+                    ModelRequest(
+                        parts=[UserPromptPart(content='Find the capital of France', timestamp=IsDatetime())],
+                        timestamp=IsDatetime(),
+                        instructions='Which model should take the next step of this conversation?',
+                        run_id=IsStr(),
+                        conversation_id=IsStr(),
+                    )
+                ],
+                [
+                    ModelRequest(
+                        parts=[UserPromptPart(content='Find the capital of France', timestamp=IsDatetime())],
+                        timestamp=IsDatetime(),
+                        instructions='Parent instructions.',
+                        run_id=IsStr(),
+                        conversation_id=IsStr(),
+                    ),
+                    ModelResponse(
+                        parts=[ToolCallPart(tool_name='lookup', args={}, tool_call_id='call-1')],
+                        usage=IsInstance(RequestUsage),
+                        model_name=IsStr(),
+                        timestamp=IsDatetime(),
+                        run_id=IsStr(),
+                        conversation_id=IsStr(),
+                    ),
+                    ModelRequest(
+                        parts=[
+                            ToolReturnPart(
+                                tool_name='lookup',
+                                content='lookup result',
+                                tool_call_id='call-1',
+                                timestamp=IsDatetime(),
+                            )
+                        ],
+                        timestamp=IsDatetime(),
+                        instructions='Which model should take the next step of this conversation?',
+                        run_id=IsStr(),
+                        conversation_id=IsStr(),
+                    ),
+                ],
+            ]
+        )
+
+    async def test_each_choice_description_is_in_the_output_schema(self) -> None:
+        seen: list[AgentInfo] = []
+
+        agent = Agent(capabilities=[_router(_router_model('fast', inspect=lambda _messages, info: seen.append(info)))])
 
         result = await agent.run('Find the capital of France')
 
         assert result.output == 'fast'
         assert result.usage.requests == 2
+        assert seen[0].output_tools[0].parameters_json_schema == snapshot(
+            {
+                'properties': {
+                    'choice': {
+                        'anyOf': [
+                            {'const': 'fast', 'description': 'Use for lookups.', 'type': 'string'},
+                            {
+                                'const': 'capable',
+                                'description': 'Use for difficult work.',
+                                'type': 'string',
+                            },
+                        ]
+                    }
+                },
+                'required': ['choice'],
+                'title': 'ModelRoute',
+                'type': 'object',
+            }
+        )
+
+    async def test_a_single_choice_still_routes(self) -> None:
+        router = ModelRouter[object](
+            choices={'only': ModelChoice(_answer_model('only'), 'Use for everything.')},
+            router_model=_router_model('only'),
+            default='only',
+        )
+
+        result = await Agent(capabilities=[router]).run('Choose')
+
+        assert result.output == 'only'
+
+    async def test_resuming_with_pending_tool_calls_routes_on_their_results(self) -> None:
+        received: list[list[ModelMessage]] = []
+
+        def inspect(messages: list[ModelMessage], _info: AgentInfo) -> None:
+            received.append(messages)
+
+        agent = Agent(capabilities=[_router(_router_model('fast', inspect=inspect))])
+
+        @agent.tool_plain(requires_approval=True)
+        def delete_file() -> str:
+            return 'deleted'
+
+        history: list[ModelMessage] = [
+            ModelRequest(parts=[UserPromptPart('Delete the file')]),
+            ModelResponse(parts=[ToolCallPart('delete_file', {}, tool_call_id='call-1')]),
+        ]
+        result = await agent.run(
+            message_history=history, deferred_tool_results=DeferredToolResults(approvals={'call-1': True})
+        )
+
+        assert result.output == 'fast'
+        assert len(received) == 1, 'the bootstrap selection, which sees the pending response, does not route'
+        last = received[0][-1]
+        assert isinstance(last, ModelRequest)
+        assert [type(part) for part in last.parts] == [ToolReturnPart]
 
     async def test_reserves_a_request_for_the_pending_parent_call(self) -> None:
         router = _router(_router_model('fast'))
@@ -108,7 +238,7 @@ class TestModelRouter:
                 nonlocal router_calls
                 router_calls += 1
                 choice = 'fast' if router_calls == 1 else 'capable'
-                return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {'response': choice})])
+                return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {'choice': choice})])
 
             def fast(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
                 nonlocal fast_calls
@@ -143,10 +273,10 @@ class TestModelRouter:
         assert await run('once') == ('fast finished', 1, 2, 0)
         assert await run('per_step') == ('capable finished', 2, 1, 1)
 
-    async def test_low_confidence_uses_default(self) -> None:
+    async def test_low_probability_uses_default(self) -> None:
         router = _router(
-            _router_model('fast', provider_details={'confidence': {'response': 0.49}}),
-            confidence_threshold=0.5,
+            _router_model('fast', provider_details={'probabilities': {'choice': {'fast': 0.49, 'capable': 0.51}}}),
+            probability_threshold=0.5,
         )
 
         result = await Agent(capabilities=[router]).run('Choose')
@@ -157,22 +287,23 @@ class TestModelRouter:
         ('provider_details', 'expected'),
         [
             pytest.param(None, 'fast', id='missing'),
-            pytest.param({'confidence': True}, 'fast', id='boolean'),
-            pytest.param({'confidence': 0.8}, 'fast', id='scalar'),
-            pytest.param({'confidence': {'other': 0.4}}, 'capable', id='mapping'),
-            pytest.param({'confidence': {'response': 0.8, 'other': 0.1}}, 'fast', id='response-key'),
-            pytest.param({'confidence': {'other': 'unknown'}}, 'fast', id='non-numeric'),
-            pytest.param({'confidence': 'unknown'}, 'fast', id='unsupported-scalar'),
-            pytest.param({'confidence': float('nan')}, 'capable', id='not-a-number'),
-            pytest.param({'confidence': {'response': float('inf')}}, 'capable', id='infinite'),
-            pytest.param({'confidence': -0.1}, 'capable', id='below-range'),
-            pytest.param({'confidence': {'other': 1.1}}, 'capable', id='above-range'),
+            pytest.param({'probabilities': 0.4}, 'fast', id='not-a-mapping'),
+            pytest.param({'probabilities': {'other': {'fast': 0.4}}}, 'fast', id='other-field'),
+            pytest.param({'probabilities': {'choice': {'capable': 0.4}}}, 'fast', id='pick-missing'),
+            pytest.param({'probabilities': {'choice': {'fast': 'low'}}}, 'fast', id='non-numeric'),
+            pytest.param({'probabilities': {'choice': {'fast': 0.8}}}, 'fast', id='above-threshold'),
+            pytest.param({'probabilities': {'choice': {'fast': 0.4}}}, 'capable', id='below-threshold'),
+            pytest.param(
+                {'confidence': {'choice': 0.9}, 'probabilities': {'choice': {'fast': 0.4}}},
+                'capable',
+                id='confidence-is-not-the-probability',
+            ),
         ],
     )
-    async def test_confidence_shapes(self, provider_details: Mapping[str, Any] | None, expected: str) -> None:
+    async def test_probability_shapes(self, provider_details: Mapping[str, Any] | None, expected: str) -> None:
         router = _router(
             _router_model('fast', provider_details=provider_details),
-            confidence_threshold=0.5,
+            probability_threshold=0.5,
         )
 
         result = await Agent(capabilities=[router]).run('Choose')
@@ -194,7 +325,7 @@ class TestModelRouter:
             nonlocal calls
             calls += 1
             await asyncio.sleep(0)
-            return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {'response': 'fast'})])
+            return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {'choice': 'fast'})])
 
         agent = Agent(capabilities=[_router(FunctionModel(route))])
 
@@ -202,12 +333,12 @@ class TestModelRouter:
 
         assert (first.output, second.output, calls) == ('fast', 'fast', 2)
 
-    async def test_span_records_pick_confidence_and_fallback(
+    async def test_span_records_pick_probability_and_fallback(
         self, capfire: CaptureLogfire, instrument_all_agents: None
     ) -> None:
         router = _router(
-            _router_model('fast', provider_details={'confidence': {'response': 0.4}}),
-            confidence_threshold=0.5,
+            _router_model('fast', provider_details={'probabilities': {'choice': {'fast': 0.4, 'capable': 0.6}}}),
+            probability_threshold=0.5,
         )
         agent = Agent(capabilities=[router])
 
@@ -217,8 +348,8 @@ class TestModelRouter:
         assert len(spans) == 1
         attributes = spans[0]['attributes']
         assert attributes['model_router.choice'] == 'capable'
-        assert attributes['model_router.confidence'] == 0.4
-        assert attributes['model_router.fallback_reason'] == 'low_confidence'
+        assert attributes['model_router.probability'] == 0.4
+        assert attributes['model_router.fallback_reason'] == 'low_probability'
         assert attributes['model_router.mode'] == 'once'
         assert attributes['model_router.run_step'] == 1
         assert agent_run_names(capfire).count('model_router') == 1
@@ -237,6 +368,86 @@ class TestModelRouter:
         assert span['attributes']['model_router.fallback_reason'] == 'error'
         assert span['attributes']['model_router.error.type'] == 'RuntimeError'
 
+    async def test_a_user_error_from_the_router_request_propagates(self, capfire: CaptureLogfire) -> None:
+        def reject(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+            raise UserError('Files are not supported by this model.')
+
+        agent = Agent(name='parent', capabilities=[_router(FunctionModel(reject)), Instrumentation()])
+
+        with pytest.raises(UserError, match='Files are not supported'):
+            await agent.run('Choose')
+
+        span = next(span for span in capfire.exporter.exported_spans_as_dict() if span['name'] == 'model_router.select')
+        assert span['attributes']['model_router.error.type'] == 'UserError'
+
+    async def test_routing_is_a_durable_operation(self) -> None:
+        capable = _answer_model('capable')
+        fast = _answer_model('fast')
+        router = ModelRouter[object](
+            choices={
+                'fast': ModelChoice(fast, 'Use for lookups.'),
+                'capable': ModelChoice(capable, 'Use for hard work.'),
+            },
+            router_model=_router_model('fast'),
+            default='capable',
+        )
+        assert router.id == 'model_router'
+        durability = RecordingDurability(models={'fast': fast})
+        agent = Agent(capable, name='parent', capabilities=[router, durability])
+
+        result = await agent.run('Choose')
+
+        assert result.output == 'fast'
+        assert result.usage.requests == 2, 'the router request crossed the boundary into the run usage'
+        bound = RecordingDurability.from_agent(agent)
+        assert bound is not None
+        assert [name for name, _ in bound.calls] == [
+            'parent__capability__model_router.route',
+            'parent__model.request.fast',
+        ]
+
+    async def test_a_failed_durable_operation_uses_the_default(self, capfire: CaptureLogfire) -> None:
+        capable = _answer_model('capable')
+        router = ModelRouter[object](
+            choices={
+                'fast': ModelChoice(_answer_model('fast'), 'Use for lookups.'),
+                'capable': ModelChoice(capable, 'Use for hard work.'),
+            },
+            router_model=_router_model('fast'),
+            default='capable',
+        )
+        durability = RecordingDurability(fail_operations=frozenset({'parent__capability__model_router.route'}))
+        agent = Agent(capable, name='parent', capabilities=[router, durability, Instrumentation()])
+
+        result = await agent.run('Choose')
+
+        assert result.output == 'capable'
+        span = next(span for span in capfire.exporter.exported_spans_as_dict() if span['name'] == 'model_router.select')
+        assert span['attributes']['model_router.fallback_reason'] == 'error'
+        assert span['attributes']['model_router.error.type'] == 'RuntimeError'
+
+    async def test_the_router_run_follows_the_parent_instrumentation(self, capfire: CaptureLogfire) -> None:
+        instrumented = Agent(name='parent', capabilities=[_router(_router_model('fast')), Instrumentation()])
+        await instrumented.run('Choose')
+        assert agent_run_names(capfire) == ['model_router', 'parent']
+
+        capfire.exporter.clear()
+        await Agent(name='parent', capabilities=[_router(_router_model('fast'))]).run('Choose')
+        assert capfire.exporter.exported_spans_as_dict() == []
+
+    async def test_the_router_run_does_not_show_the_first_run_banner(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        for name in ('PYTEST_VERSION', 'CI', 'PYDANTIC_AI_NO_BANNER'):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv('AI_AGENT', 'test')
+
+        await Agent(name='parent', capabilities=[_router(_router_model('fast'))]).run('Choose')
+
+        banner = capsys.readouterr().err
+        assert 'agent: parent' in banner
+        assert 'model_router' not in banner
+
     @pytest.mark.parametrize(
         ('kwargs', 'message'),
         [
@@ -253,8 +464,8 @@ class TestModelRouter:
             ),
             pytest.param({'default': 'missing'}, 'default must name a configured choice', id='unknown-default'),
             pytest.param({'mode': 'sometimes'}, 'mode must be', id='mode'),
-            pytest.param({'confidence_threshold': -0.1}, 'must be between 0 and 1', id='threshold-low'),
-            pytest.param({'confidence_threshold': 1.1}, 'must be between 0 and 1', id='threshold-high'),
+            pytest.param({'probability_threshold': -0.1}, 'must be between 0 and 1', id='threshold-low'),
+            pytest.param({'probability_threshold': 1.1}, 'must be between 0 and 1', id='threshold-high'),
         ],
     )
     async def test_validates_configuration(self, kwargs: dict[str, Any], message: str) -> None:
@@ -278,21 +489,21 @@ class TestModelRouter:
 
     async def test_the_router_agent_is_not_rebuilt_on_every_step(self, monkeypatch: pytest.MonkeyPatch) -> None:
         builds = 0
-        original = ModelRouter._instructions  # pyright: ignore[reportPrivateUsage]
+        original = ModelRouter._output_type  # pyright: ignore[reportPrivateUsage]
 
-        def counting(router: ModelRouter[Any]) -> str:
+        def counting(router: ModelRouter[Any]) -> type[Any]:
             nonlocal builds
             builds += 1
             return original(router)
 
-        monkeypatch.setattr(ModelRouter, '_instructions', counting)
+        monkeypatch.setattr(ModelRouter, '_output_type', counting)
 
         router_calls = 0
 
         def route(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
             nonlocal router_calls
             router_calls += 1
-            return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {'response': 'fast'})])
+            return ModelResponse(parts=[ToolCallPart(info.output_tools[0].name, {'choice': 'fast'})])
 
         def fast(messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
             if not any(isinstance(part, ToolReturnPart) for message in messages for part in message.parts):
@@ -327,14 +538,11 @@ class TestCompositionConstraints:
 
     async def test_per_step_routing_reads_the_history_one_step_behind_compaction(self) -> None:
         """Compaction bounds the routing input, but the compacting step routes on the old history."""
-        routing_inputs: list[str] = []
+        routing_inputs: list[list[ModelMessage]] = []
         steps = 6
 
         def inspect(messages: list[ModelMessage], _info: AgentInfo) -> None:
-            prompt = messages[-1].parts[-1]
-            assert isinstance(prompt, UserPromptPart)
-            assert isinstance(prompt.content, str)
-            routing_inputs.append(prompt.content)
+            routing_inputs.append(messages)
 
         step = 0
 
@@ -365,7 +573,7 @@ class TestCompositionConstraints:
         assert result.output == 'done'
         assert len(routing_inputs) == steps
 
-        summarized = ['SUMMARY' in routing_input for routing_input in routing_inputs]
+        summarized = ['SUMMARY' in repr(routing_input) for routing_input in routing_inputs]
         assert summarized == [False, False, False, True, True, True], (
             'the step that compacts routes on the history compaction is about to replace'
         )
