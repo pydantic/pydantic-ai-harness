@@ -132,26 +132,21 @@ def parse_agent_markdown(text: str) -> ParsedAgent:
     )
 
 
-def _convention_folder(root: Path, leaf: str) -> Path:
-    """`<root>/.agents/<leaf>` when `.agents/` exists, else the `.claude/` equivalent."""
-    if (root / '.agents').is_dir():
-        return root / '.agents' / leaf
-    return root / '.claude' / leaf
-
-
 def resolve_folders(agent_folders: str | Sequence[Path], cwd: Path, home: Path) -> list[Path]:
     """Resolve the configured disk source into a precedence-ordered list of folders.
 
-    - a `str`: the convention `<root>/.agents/<str>/` (or `.claude/<str>/`) for the
-      project root (`cwd`) then the home root, project first.
+    - a `str`: the convention folders `<root>/.agents/<str>/` then `<root>/.claude/<str>/`
+      for the project root (`cwd`) then the home root. Both are scanned for each root,
+      so a repo that uses `.agents/` for something else (such as skills) still loads
+      agents from `.claude/`; on a name collision `.agents/` wins.
     - a sequence of paths: those folders verbatim, in order.
 
     Folders resolving to the same absolute path are deduped (keeping the first), so
-    a project root equal to the home root does not scan and warn about every agent
-    twice.
+    a project root equal to the home root, or a `.claude/` symlinked to `.agents/`,
+    does not scan and warn about every agent twice.
     """
     if isinstance(agent_folders, str):
-        folders = [_convention_folder(cwd, agent_folders), _convention_folder(home, agent_folders)]
+        folders = [root / hidden / agent_folders for root in (cwd, home) for hidden in ('.agents', '.claude')]
     else:
         folders = list(agent_folders)
     seen: dict[Path, Path] = {}
