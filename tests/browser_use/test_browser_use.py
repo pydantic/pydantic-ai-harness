@@ -1277,7 +1277,8 @@ class TestBrowserUse:
 class TestAgentSpec:
     def test_spec_schema_includes_browser_use(self) -> None:
         schema = AgentSpec.model_json_schema_with_capabilities([BrowserUse])
-        assert 'BrowserUse' in json.dumps(schema)
+        params = schema['$defs']['spec_params_BrowserUse']
+        assert {'id', 'description', 'defer_loading'} <= params['properties'].keys()
 
     def test_from_spec_builds_capability(self) -> None:
         capability = BrowserUse[None].from_spec(
@@ -1291,6 +1292,9 @@ class TestAgentSpec:
             session_scope='agent',
             cdp_url='http://localhost:9222',
             guidance='Delegate.',
+            id='browser',
+            description='Use for interactive web tasks.',
+            defer_loading=True,
         )
         assert capability.allowed_domains == ['http*://example.com', 'http*://www.example.com']
         assert capability.block_ip_addresses is False
@@ -1302,6 +1306,9 @@ class TestAgentSpec:
         assert capability.session_scope == 'agent'
         assert capability.cdp_url == 'http://localhost:9222'
         assert capability.guidance == 'Delegate.'
+        assert capability.id == 'browser'
+        assert capability.description == 'Use for interactive web tasks.'
+        assert capability.defer_loading is True
         assert capability.llm is None
         assert capability.browser_profile is None
         assert capability.output_schema is None
