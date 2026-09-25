@@ -41,7 +41,7 @@ result = agent.run_sync('Read the toolsets docs, then explain how to build a Fun
 print(result.output)
 ```
 
-A configured local checkout is read through the run's [workspace](https://pydantic.dev/docs/ai/workspace/), so a run with a local path and no workspace fails at its start. To read the checkout from somewhere else, such as this machine while the agent works in a sandbox, pass a workspace backend: `PydanticAIDocs(local_docs_path=Path('docs'), workspace=LocalWorkspaceBackend('/opt/pydantic-ai'))`. It takes a backend, not the `LocalWorkspace` capability, and is read in-process only in this release. With no local path configured, every call goes to the remote source and no workspace is needed.
+A configured local checkout is read through the run's [workspace](https://pydantic.dev/docs/ai/workspace/), so a run with a local path and no workspace fails at its start. With no local path configured, every call goes to the remote source and no workspace is needed.
 
 The capability also adds a short static instruction telling the model that the `read_pyai_docs` tool exists and to read the relevant topic before authoring or modifying a Pydantic AI capability, hook, tool, or toolset, rather than relying on memory. The instruction is cache-stable, so it does not invalidate the prompt-cache prefix between turns.
 
@@ -62,7 +62,6 @@ The capability never runs git. Keep the local checkout current yourself; the rem
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `local_docs_path` | `None` | Pyai docs checkout inside the run workspace. Relative paths use the workspace working directory. Falls back to the `PYDANTIC_AI_HARNESS_DOCS_PATH` environment variable, then to the remote source. |
-| `workspace` | `None` | A workspace backend holding the local checkout, instead of the run's workspace. |
 | `cache` | `True` | Memoize each returned doc for one agent run, so repeated reads within that run do not repeat workspace or network I/O. |
 
 Caching is isolated per run so content read from one workspace is not reused in another. Set `cache=False` to re-read or re-fetch on every call within a run.

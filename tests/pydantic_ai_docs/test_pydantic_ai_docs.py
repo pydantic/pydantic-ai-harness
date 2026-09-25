@@ -247,24 +247,11 @@ class TestThroughAgent:
         with pytest.raises(UserError, match='`PydanticAIDocs` needs a workspace'):
             await agent.run('go')
 
-    async def test_own_workspace_holds_the_checkout(self, tmp_path: Path) -> None:
-        (tmp_path / 'capabilities.md').write_text('# Checkout capabilities', encoding='utf-8')
+    async def test_no_local_path_needs_no_workspace(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv('PYDANTIC_AI_HARNESS_DOCS_PATH', raising=False)
+        agent = Agent(TestModel(call_tools=[]), capabilities=[PydanticAIDocs()])
 
-        def call_then_finish(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-            if len(messages) == 1:
-                return ModelResponse(parts=[ToolCallPart('read_pyai_docs', {'topic': 'capabilities'})])
-            return ModelResponse(parts=[TextPart('done')])
-
-        docs = PydanticAIDocs(local_docs_path=Path('.'), workspace=LocalWorkspaceBackend(tmp_path))
-        result = await Agent(FunctionModel(call_then_finish), capabilities=[docs]).run('go')
-
-        returns = [
-            part.content
-            for message in result.all_messages()
-            for part in message.parts
-            if isinstance(part, ToolReturnPart)
-        ]
-        assert returns == ['# Checkout capabilities']
+        assert (await agent.run('go')).output
 
     async def test_cache_is_isolated_between_run_workspaces(self, tmp_path: Path) -> None:
         first_root = tmp_path / 'first'

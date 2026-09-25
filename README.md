@@ -110,7 +110,6 @@ Capabilities that only keep or read their own files use the run's workspace by d
 
 - [Tool Output Limits](pydantic_ai_harness/tool_output_limits/) spills oversized results to `.pydantic-ai-harness/tool-output/` (`WorkspaceStore(workspace=...)`, or `store=LocalFileStore()` for this machine's temporary directory).
 - [Skills](pydantic_ai_harness/skills/) reads skill directories at run start (`Skills(workspace=...)`).
-- [Pydantic AI Docs](pydantic_ai_harness/pydantic_ai_docs/) reads a local docs checkout (`PydanticAIDocs(workspace=...)`).
 
 [Shell](pydantic_ai_harness/shell/) keeps background job logs in `.pydantic-ai-harness/shell/`; the `.pydantic-ai-harness/` directory gets a `.gitignore` so none of it shows up in `git status`.
 
