@@ -512,7 +512,8 @@ show a "waiting for you" state) registers `@host.on(EventClass)` or
 `google_workspace` (`pydantic_clai2.google_workspace`) is a built-in that starts
 disabled. It gives the agent the tools of Google's hosted Workspace MCP servers
 through harness [`GoogleWorkspace`](../docs/google-workspace.md). It needs a
-Google OAuth access token whose scopes cover the products you select.
+Google OAuth access token whose scopes cover the products you select: sign in with
+Google once and CLAI renews the token itself, or keep a ready-made token in `/keys`.
 
 Enable it, then open its settings menu:
 
@@ -525,11 +526,13 @@ Enable it, then open its settings menu:
 moves, Enter edits a row, `r` puts a row back to its default, and Esc closes.
 Each change is saved to the plugin's declaration as soon as you make it and applies
 from the next turn, without reloading. Run `/google_workspace` again at any time
-to change a setting or pick a different key.
+to change a setting, sign in again, or pick a different key.
 
 | Row | Stored as | Default | Does |
 |---|---|---|---|
-| Access token key | the key's name, in the credential store | `GOOGLE_ACCESS_TOKEN` | which `/keys` entry holds the Google OAuth access token |
+| Sign in with Google | key names and granted scopes, in the credential store | not signed in | opens Google in your browser; `r` signs out |
+| OAuth client ID | `client_id` | not set | the Desktop app OAuth client that signing in uses |
+| Access token key | the key's name, in the credential store | `GOOGLE_ACCESS_TOKEN` | instead of signing in: which `/keys` entry holds a ready-made access token |
 | Products | `services` | `gmail, calendar, drive` | a searchable checklist of `gmail`, `drive`, `docs`, `sheets`, `slides`, `calendar`, `chat`, `people`; Enter toggles one, and at least one stays on |
 | Read-only tools | `read_only` | `true` | keep only the tools Google marks as read-only |
 | Server instructions | `include_instructions` | `true` | pass the Google servers' own instructions to the agent |
@@ -537,30 +540,59 @@ to change a setting or pick a different key.
 CLAI runs tools without asking first, so `read_only` defaults to `true`. Set it to
 `false` to also get the tools that send, change, and delete.
 
-**The token.** It lives in the [saved API keys](#saved-api-keys) store, never in
-plugin settings, which are plain SQLite and reject a `token` or `auth` entry.
-Enter on the key row lists your saved key names so you can pick one (type to
-filter; Esc leaves the choice unchanged). **Enter a different API key** asks for a
-new token without echoing it and saves it in `/keys` as `GOOGLE_ACCESS_TOKEN`,
-replacing any value already stored under that name. Only the chosen key's name is
-remembered, in the credential store. Several plugins and connections can share one
-named key, such as GitHub integrations all using `GITHUB_TOKEN`. While the plugin
-refers to a key, `/keys` refuses to rename it; pick another key here first. To
-replace the token itself, edit the key in `/keys`.
+**Sign in with Google.** Google has no automatic client registration, so signing
+in uses an OAuth client from your own Google Cloud project:
 
-The plugin loads without a token so that `/google_workspace` is available, and
-prints which key it is missing. Each turn looks the key up again, because Google
-access tokens expire after about an hour: replacing the value in `/keys` applies
-from the next turn. If the key is missing or was deleted, the turn fails with a
-message naming it instead of running without the tools. The `GOOGLE_ACCESS_TOKEN`
-environment variable is not read; key names are labels, not environment variables.
+1. Enable the APIs and MCP APIs for your products and add their scopes to the
+   consent screen, as in Google's
+   [MCP server setup](https://developers.google.com/workspace/guides/configure-mcp-servers).
+   Chat also needs the Chat app that page describes.
+2. Under Google Auth Platform > Clients, create a client of type **Desktop app**.
+   Desktop clients accept CLAI's `http://127.0.0.1:PORT/callback` redirect
+   without registering it.
+3. Put its client ID in the OAuth client ID row, then choose Sign in with Google.
+   CLAI asks for the client secret (pick a saved key or enter it; a new one is
+   saved in `/keys` as `GOOGLE_CLIENT_SECRET`) and opens the browser. If the
+   browser cannot reach this machine, for example over SSH, paste the URL it ends
+   up on.
 
-**Not configurable here.** The token decides the Google account and its OAuth
-scopes. `GoogleWorkspace` takes a ready-made access token and has no OAuth client
-ID, client secret, or scope settings, so there is nothing about the OAuth client to
-store: mint the token with your own OAuth client and save it in `/keys`. Enabling
-from the `/plugins` menu does not open this menu, because that menu already owns
-the screen; the load warning points you to `/google_workspace`.
+CLAI asks for the scopes Google lists for the selected products, with PKCE and a
+`state` check, and saves the refresh token in `/keys` as `GOOGLE_REFRESH_TOKEN`.
+Access tokens stay in memory and are renewed a minute before they expire. The
+credential store keeps only the client ID, the two key names, and the scopes
+Google granted. If you untick a permission on Google's consent screen, nothing is
+saved and the menu says so.
+
+A sign-in is tied to its client ID and scopes. Changing the client ID, or adding a
+product whose permissions it lacks, fails the next turn with a message asking you
+to sign in again. While a consent screen is in Testing, Google expires refresh
+tokens after 7 days, so publish it (an unverified app is fine for your own
+account) or expect to sign in weekly. If Google rejects the refresh token because
+it expired or was revoked, the turn fails and asks you to sign in again.
+
+**A ready-made token.** The Access token key row is the alternative, for tokens you
+mint elsewhere, such as with `gcloud`. Choosing it replaces a sign-in. Enter lists
+your saved key names so you can pick one (type to filter; Esc leaves the choice
+unchanged). **Enter a different API key** asks for a new token without echoing it
+and saves it in `/keys` as `GOOGLE_ACCESS_TOKEN`, replacing any value already
+stored under that name. Each turn looks the key up again, because Google access
+tokens expire after about an hour: replacing the value in `/keys` applies from the
+next turn.
+
+**Secrets stay in `/keys`.** Plugin settings are plain SQLite and reject a `token`
+or `auth` entry. The client secret, refresh token, and access token live in the
+[saved API keys](#saved-api-keys) store; only their names are remembered
+elsewhere. Several plugins and connections can share one named key, such as GitHub
+integrations all using `GITHUB_TOKEN`. While the plugin refers to a key, `/keys`
+refuses to rename it; sign out or pick another key here first. The
+`GOOGLE_ACCESS_TOKEN` environment variable is not read; key names are labels, not
+environment variables.
+
+The plugin loads without credentials so that `/google_workspace` is available, and
+prints what is missing. If a key is missing or was deleted, the turn fails with a
+message naming it instead of running without the tools. Enabling from the
+`/plugins` menu does not open this menu, because that menu already owns the screen;
+the load warning points you to `/google_workspace`.
 
 Declarations still work for scripted setups:
 
