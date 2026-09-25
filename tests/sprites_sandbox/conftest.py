@@ -18,6 +18,8 @@ collect_ignore = (
 
 if TYPE_CHECKING or _HAS_SPRITES:  # pragma: no branch - installed and slim jobs take opposite branches
     from sprites import AsyncSprite, AsyncSpritesClient
+    from sprites.async_filesystem import AsyncSpritePath
+    from sprites.types import FileStat
 
     from .fake_sprites import SpriteTransport
 
@@ -77,6 +79,15 @@ if _HAS_SPRITES:  # pragma: no branch - the fixture requires the SDK-backed fake
             await transport.destroy(client, name)
 
         monkeypatch.setattr(AsyncSpritesClient, 'destroy_sprite', destroy)
+
+        async def fs_stat(path: AsyncSpritePath) -> FileStat:
+            return await transport.fs_stat(path)
+
+        async def fs_write(path: AsyncSpritePath, data: bytes, mode: int = 0o644, mkdir_parents: bool = True) -> None:
+            await transport.fs_write(path, data, mode)
+
+        monkeypatch.setattr(AsyncSpritePath, 'stat', fs_stat)
+        monkeypatch.setattr(AsyncSpritePath, 'write_bytes', fs_write)
         yield transport
         for client in transport.clients:
             await client.aclose()

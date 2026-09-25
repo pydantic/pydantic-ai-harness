@@ -99,10 +99,10 @@ async def test_reattach_by_ref_reads_a_file_the_first_backend_wrote(client: Asyn
 
 
 async def test_command_and_file_round_trip(client: AsyncSpritesClient) -> None:
-    """Validates the fake-encoded assumption that binary data survives the command-backed filesystem.
+    """Validates the fake-encoded assumption that binary data survives the Sprite's file API and shell.
 
-    The backend has no file API of its own, so `Workspace` moves file contents through commands;
-    the fake runs those on the host, which cannot show what the Sprite's shell and tools do with them.
+    Writes go through the filesystem API and reads through commands; the fake runs both on the host,
+    which cannot show what the Sprite's API, shell, and tools do with them.
     """
     root = f'/tmp/{_unique("roundtrip")}'
     async with _owned(client) as backend:
@@ -116,6 +116,24 @@ async def test_command_and_file_round_trip(client: AsyncSpritesClient) -> None:
         assert (result.exit_code, result.stdout) == (0, 'from-file-api\n')
         assert await workspace.read_bytes(f'{root}/out.txt') == b'from-shell'
         assert await workspace.read_bytes(f'{root}/binary.bin') == b'\x00\xff\n'
+
+
+async def test_large_output_and_files_arrive_whole(client: AsyncSpritesClient) -> None:
+    """Validates the fake-encoded assumptions that a command's output is streamed only once the client
+    attaches, and that a large write fits no command.
+
+    The live Sprite starts a command before the client's stream attaches and replays only the last
+    16 or 64 KiB printed until then, and refuses an exec URL (which carries argv) above about 40 KB.
+    """
+    path = f'/tmp/{_unique("large")}.bin'
+    data = bytes(range(256)) * 4096
+    expected = ''.join(f'{i}\n' for i in range(1, 150_001))
+    async with _owned(client) as backend:
+        workspace = Workspace(backend)
+        await workspace.write_bytes(path, data)
+        assert await workspace.read_bytes(path) == data
+        for _ in range(3):
+            assert (await backend.run(['seq', '1', '150000'], timeout=60)).stdout == expected
 
 
 async def test_env_is_layered_on_the_sprite_environment(client: AsyncSpritesClient) -> None:

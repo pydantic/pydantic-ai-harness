@@ -17,6 +17,16 @@ docs, and (2026-09-15) a local WebSocket transport probe, with no live cloud cal
   directory goes in the `dir` query parameter as the SDK sends it; the API page lists `dir` only
   for the HTTP exec endpoint:
   https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/websocket.py
+* The exec API starts the command as soon as the request arrives, before the client's output
+  stream is attached, and replays only the last 16 or 64 KiB printed before then: the rest was lost
+  with exit status 0 (observed against real Sprites on 2026-09-26). So every command waits for the
+  client's stdin EOF, which the SDK sends once the socket is open, before it starts.
+* The exec API takes argv in the WebSocket URL, which the Sprite refuses (HTTP 414) above about
+  40 KB, so file writes go through the filesystem API (`PUT /fs/write`) instead. It writes through
+  a symlink, creates missing parents, owns the file to the Sprite's user, and sets the mode it is
+  given, replacing an existing file's; a 404 means either a missing path or a deleted Sprite
+  (observed 2026-09-26):
+  https://github.com/superfly/sprites-py/blob/v0.7.0/src/sprites/async_filesystem.py
 * The multiplexed control protocol (`sprites.control`, used only in the SDK's opt-in control mode)
   is not used: in 0.7.0 its `op.complete` handler overwrites the exit status from the EXIT frame
   with the message's own `exitCode`, which defaults to 0, so every command reported success
@@ -51,9 +61,12 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import TypeVar
 
 import anyio
+import httpx
 from pydantic_ai.workspaces import (
     CommandResult,
+    FileEntry,
     SupportsCommands,
+    SupportsFilesystem,
     WorkspaceBackend,
     WorkspaceCommand,
     WorkspaceError,
@@ -61,12 +74,23 @@ from pydantic_ai.workspaces import (
     WorkspaceTimeoutError,
     WorkspaceUnavailableError,
 )
+from pydantic_ai.workspaces.workspace import _ShellFilesystem  # pyright: ignore[reportPrivateUsage]
 
 from pydantic_ai_harness._workspace_provider import absolute_path, command_argv
 
 try:
     from sprites import AsyncSprite, AsyncSpritesClient
-    from sprites.exceptions import APIError, AuthenticationError, NetworkError, NotFoundError, SpriteError
+    from sprites.exceptions import (
+        APIError,
+        AuthenticationError,
+        FileNotFoundError_,
+        FilesystemError,
+        IsADirectoryError_,
+        NetworkError,
+        NotADirectoryError_,
+        NotFoundError,
+        SpriteError,
+    )
     from sprites.exceptions import TimeoutError as SpriteTimeoutError
     from sprites.websocket import WSCommand
 except ImportError as exc:  # pragma: no cover - exercised by the isolated missing-extra test
@@ -130,14 +154,11 @@ class _ExecCommand(WSCommand):
     """The SDK's exec WebSocket command, asking the Sprite to end the command soon after a disconnect."""
 
     def _build_websocket_url(self) -> str:
-        # The SDK always asks for stdin, and with it the live Sprite sent stderr on the stdout stream;
-        # commands here never read stdin, so it is turned off and the stream kept plain (no TTY).
-        # A non-TTY command keeps running for 10 seconds after its socket closes unless told otherwise,
-        # and `0` means no limit. One second makes closing the socket on a timeout or cancellation
-        # stop the command.
-        url = super()._build_websocket_url()
-        assert url.endswith('&stdin=true'), url
-        return f'{url.removesuffix("&stdin=true")}&stdin=false&tty=false&max_run_after_disconnect=1s'
+        # Stdin stays on: `_ending_with` waits for its EOF before starting the command. The stream is
+        # kept plain (no TTY). A non-TTY command keeps running for 10 seconds after its socket closes
+        # unless told otherwise, and `0` means no limit. One second makes closing the socket on a
+        # timeout or cancellation stop the command.
+        return f'{super()._build_websocket_url()}&tty=false&max_run_after_disconnect=1s'
 
 
 async def _close_command(command: WSCommand) -> None:
@@ -182,7 +203,7 @@ def _map_error(error: Exception, sprite_name: str | None) -> WorkspaceError | No
     return WorkspaceError(f'Sprites refused the request: {error}')
 
 
-class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
+class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
     """A Fly.io Sprite behind the Pydantic AI `WorkspaceBackend` protocol.
 
     Construction does no I/O. The typed `sprites.AsyncSprite` is available through `get_client()`.
@@ -190,7 +211,8 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
     and closes it in `aclose()`.
     The backend does not delete the Sprite; that is the application's job, through the native
     handle. Commands run under `/bin/sh -c` with `shell=True`, in the Sprite's own environment
-    plus `env`.
+    plus `env`. File writes go through the Sprite's filesystem API; the other file operations
+    run as shell commands.
     """
 
     def __init__(
@@ -363,9 +385,61 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
         stdout, stderr = _split_output(exec_command.get_stdout(), exec_command.get_stderr(), marker)
         return CommandResult(exit_code=code, stdout=stdout, stderr=stderr)
 
+    async def write_bytes(self, path: str, data: bytes) -> None:
+        # Not through a command: the exec API sends argv in the URL, which caps a command at about 40 KB.
+        sprite = await self.get_client()
+        target = sprite.filesystem() / path
+        try:
+            mode = 0o644
+            try:
+                current = await target.stat()
+            except FileNotFoundError_:
+                pass
+            else:
+                # The API sets the mode it is given, so an existing file keeps its own (an executable
+                # stays one). For a directory `stat` reports an entry inside it; the write refuses it.
+                if current.path == path and not current.is_dir:
+                    mode = int(current.mode, 8)
+            await target.write_bytes(data, mode=mode)
+        except IsADirectoryError_ as error:
+            raise IsADirectoryError(path) from error
+        except NotADirectoryError_ as error:
+            raise NotADirectoryError(path) from error
+        except FileNotFoundError_ as error:
+            # Missing parents are created, so a 404 here means the Sprite itself is gone: a command
+            # reports that as `WorkspaceUnavailableError`.
+            await self.run(['true'], timeout=_INTERNAL_EXEC_TIMEOUT)
+            raise WorkspaceError(f'Sprites could not write {path!r}: {error}') from error
+        except FilesystemError as error:
+            if isinstance(error.__cause__, httpx.RequestError):
+                raise  # A transport failure propagates, for durable engines to retry.
+            raise WorkspaceError(f'Sprites refused writing {path!r}: {error}') from error
+
+    # The other file operations are the ones Pydantic AI derives from `run` for a command-only backend.
+    async def read_bytes(self, path: str) -> bytes:
+        return await _ShellFilesystem(self).read_bytes(path)
+
+    async def stat(self, path: str) -> FileEntry:
+        return await _ShellFilesystem(self).stat(path)
+
+    async def list_dir(self, path: str) -> tuple[FileEntry, ...]:
+        return await _ShellFilesystem(self).list_dir(path)
+
+    async def make_dir(self, path: str) -> None:
+        await _ShellFilesystem(self).make_dir(path)
+
+    async def remove(self, path: str) -> None:
+        await _ShellFilesystem(self).remove(path)
+
+    async def exists(self, path: str) -> bool:
+        return await _ShellFilesystem(self).exists(path)
+
 
 def _ending_with(marker: str, args: list[str]) -> list[str]:
     """`args` run under a `sh` that reports their stdout, a `marker` line, then their stderr, all on stdout.
+
+    The `sh` first reads stdin to its EOF, which the client sends once its socket is open: output
+    printed before the client's stream attaches is lost, beyond a short replay.
 
     The live Sprite's stderr stream is not dependable: the same command's stderr arrived on the stderr
     stream in one run and on the stdout stream in the next, whole lines included (2026-09-25), while
@@ -374,7 +448,7 @@ def _ending_with(marker: str, args: list[str]) -> list[str]:
     status is the command's.
     """
     script = (
-        'err=$(mktemp) || exit 125; '
+        'cat >/dev/null; err=$(mktemp) || exit 125; '
         f'"$@" 2>"$err"; status=$?; printf "\\n%s\\n" {marker}; cat "$err"; rm -f "$err"; exit "$status"'
     )
     return ['sh', '-c', script, 'sh', *args]

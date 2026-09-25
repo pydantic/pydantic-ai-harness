@@ -6,6 +6,7 @@ import signal
 from collections.abc import AsyncIterator
 
 import anyio
+import httpx
 import pytest
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.exceptions import UserError
@@ -21,7 +22,15 @@ from pydantic_ai.workspaces import (
     WorkspaceUnavailableError,
 )
 from sprites import AsyncSprite
-from sprites.exceptions import APIError, AuthenticationError, NetworkError, NotFoundError, SpriteError
+from sprites.exceptions import (
+    APIError,
+    AuthenticationError,
+    FileNotFoundError_,
+    FilesystemError,
+    NetworkError,
+    NotFoundError,
+    SpriteError,
+)
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
 from websockets.http11 import Response
@@ -37,6 +46,11 @@ pytestmark = pytest.mark.anyio
 
 def context(conversation: str = 'chat') -> RunContext[None]:
     return RunContext(deps=None, model=TestModel(), usage=RunUsage(), conversation_id=conversation, run_id='run')
+
+
+def _caused_by(error: Exception, cause: Exception) -> Exception:
+    error.__cause__ = cause
+    return error
 
 
 def _handshake(status: int) -> InvalidStatus:
@@ -372,6 +386,8 @@ class TestSpritesSandbox:
             await owner.run(['true'])
         with pytest.raises(WorkspaceUnavailableError):
             await Workspace(owner).read_bytes('/tmp/anything')
+        with pytest.raises(WorkspaceUnavailableError):
+            await Workspace(owner).write_bytes('/tmp/anything', b'x')
 
     @pytest.mark.parametrize('failure', ['error', 'hang'])
     async def test_close_failure_after_exit_returns_the_result_and_aborts_the_socket(
@@ -416,7 +432,7 @@ class TestSpritesSandbox:
         assert socket.query['dir'] == [str(transport.root)]
         # Without it a non-TTY command outlives a closed socket by 10 seconds.
         assert socket.query['max_run_after_disconnect'] == ['1s']
-        assert (socket.query['stdin'], socket.query['tty']) == (['false'], ['false'])
+        assert (socket.query['stdin'], socket.query['tty']) == (['true'], ['false'])
         assert socket.sent == [b'\x04']
 
     async def test_argv_shell_environment_and_nonzero_exit(self, transport: SpriteTransport) -> None:
@@ -479,6 +495,54 @@ class TestSpritesSandbox:
         assert [entry.name for entry in await sandbox.list_dir('folder')] == ['a\nb']
         await sandbox.remove('folder')
         assert not await sandbox.exists('folder')
+
+    async def test_output_printed_before_the_stream_attaches_is_kept(self, transport: SpriteTransport) -> None:
+        """The Sprite starts a command before the client's stream attaches and drops what it printed until then."""
+        backend = SpritesSandboxBackend()
+        await backend.get_client()
+        transport.release_stdin_eof = asyncio.Event()
+        task = asyncio.create_task(backend.run(['seq', '1', '20000']))
+        await transport.exec_started.wait()
+        await anyio.sleep(0.2)  # Long enough for an ungated `seq` to finish before the stream attaches.
+        transport.release_stdin_eof.set()
+        assert (await task).stdout == ''.join(f'{i}\n' for i in range(1, 20001))
+
+    async def test_large_writes_go_through_the_filesystem_api(self, transport: SpriteTransport) -> None:
+        """A command carries its argv in the exec URL, which the Sprite refuses above about 40 KB."""
+        sandbox = Workspace(SpritesSandboxBackend())
+        with pytest.raises(WorkspaceError, match='status 414'):
+            await sandbox.run(['printf', 'x' * 50_000])
+        data = bytes(range(256)) * 4096
+        await sandbox.write_bytes('nested/big.bin', data)
+        assert await sandbox.read_bytes('nested/big.bin') == data
+        await sandbox.write_text('tool.sh', '#!/bin/sh\n')
+        await sandbox.run(['chmod', '755', 'tool.sh'])
+        await sandbox.write_text('tool.sh', '#!/bin/sh\necho hi\n')
+        assert (await sandbox.run(['./tool.sh'])).stdout == 'hi\n'
+        with pytest.raises(IsADirectoryError):
+            await sandbox.write_bytes('nested', b'x')
+        with pytest.raises(NotADirectoryError):
+            await sandbox.write_bytes('tool.sh/child', b'x')
+
+    @pytest.mark.parametrize(
+        ('failure', 'expected'),
+        [
+            (FileNotFoundError_('write', '/f'), WorkspaceError),
+            (FilesystemError('permission', 'write', '/f'), WorkspaceError),
+            # The SDK raises a transport failure as a `FilesystemError` from the `httpx` error.
+            (_caused_by(FilesystemError('connect failed', 'write', '/f'), httpx.ConnectError('down')), FilesystemError),
+        ],
+    )
+    async def test_filesystem_api_errors_are_mapped_or_propagate(
+        self, transport: SpriteTransport, monkeypatch: pytest.MonkeyPatch, failure: Exception, expected: type[Exception]
+    ) -> None:
+        async def fail(*args: object) -> None:
+            raise failure
+
+        monkeypatch.setattr(transport, 'fs_write', fail)
+        with pytest.raises(expected) as caught:
+            await Workspace(SpritesSandboxBackend()).write_bytes('/f', b'x')
+        assert type(caught.value) is expected
 
     async def test_deadline_closes_the_socket_and_preserves_partial_output(self, transport: SpriteTransport) -> None:
         backend = SpritesSandboxBackend()
