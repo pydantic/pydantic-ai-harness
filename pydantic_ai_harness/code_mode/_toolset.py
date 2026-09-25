@@ -109,8 +109,9 @@ def _check_monty_sandbox_url(url: str) -> None:
 def _is_os_handler(os_access: CodeModeOS) -> TypeIs[AbstractOS | OsHandler]:
     """Whether `os_access` takes Monty's keyword call, rather than the deprecated positional one.
 
-    A callable that accepts both shapes is taken as a handler. One whose signature cannot be read
-    is taken as a handler too, since that is the shape Monty calls.
+    Only a callable that takes `(name, args, kwargs)` positionally and cannot take Monty's keyword
+    call counts as positional. Anything else is passed to Monty unchanged, so a malformed handler
+    gets Monty's own error rather than a deprecation warning.
     """
     if isinstance(os_access, AbstractOS):
         return True
@@ -118,8 +119,15 @@ def _is_os_handler(os_access: CodeModeOS) -> TypeIs[AbstractOS | OsHandler]:
         signature = inspect.signature(os_access)
     except (TypeError, ValueError):  # pragma: no cover - builtins and some C callables have no signature
         return True
+    return not (
+        _binds(signature, 'os.getenv', (), {})
+        and not _binds(signature, name='os.getenv', args=(), kwargs={}, is_async=False)
+    )
+
+
+def _binds(signature: inspect.Signature, *args: object, **kwargs: object) -> bool:
     try:
-        signature.bind(name='os.getenv', args=(), kwargs={}, is_async=False)
+        signature.bind(*args, **kwargs)
     except TypeError:
         return False
     return True
@@ -1137,6 +1145,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                         session.feed_start,
                         code,
                         print_callback=capture.callback,
+                        # Already converted in `__post_init__`; this narrows the field's type.
                         os=as_os_handler(self.os_access),
                         mount=self.mount,
                         skip_type_check=not type_check,

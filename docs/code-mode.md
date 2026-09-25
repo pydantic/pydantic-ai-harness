@@ -172,8 +172,8 @@ Reserve `print()` for supplementary logging: printed text is surfaced separately
 Printed output is limited to 10 MiB. Exceeding the limit makes `run_code` return a model retry.
 
 Sandbox execution is bounded by `resource_limits`, which defaults to 30 seconds of execution time
-and a 256 MiB heap. `max_duration_secs` applies to each `run_code` snippet: no snippet runs longer
-than that of sandbox time, which is what stops a runaway loop. Time spent awaiting a nested tool is
+and a 256 MiB heap. `max_duration_secs` applies to each `run_code` snippet: each snippet gets at most that much
+sandbox time, which is what stops a runaway loop. Time spent awaiting a nested tool is
 excluded. A snippet that hits the limit is stopped and its session is reset, so any variables,
 imports, and definitions have to be recreated. The retry `run_code` returns says so and reports the
 nested calls the snippet already made.

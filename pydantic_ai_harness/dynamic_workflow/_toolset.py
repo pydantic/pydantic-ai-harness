@@ -145,10 +145,11 @@ done -- instead of delegating to one sub-agent at a time.
 The sandbox uses Monty, a subset of Python. Key restrictions:
 - **No third-party libraries**.
 - **Importable standard-library modules**: `sys`, `typing`, `asyncio`, `math`, `json`, `re`,
-  `unicodedata`, `datetime`, `os`, and `pathlib`. Import what you use at the top of the script.
-  Filesystem, environment, and clock operations are not configured for workflow scripts.
-- **No wall-clock or timing primitives** (`asyncio.sleep`, `datetime.datetime.now()`,
-  `datetime.date.today()`, the `time` module).
+  `unicodedata`, `datetime`, `time`, `random`, `os`, and `pathlib`. Import what you use at the top
+  of the script. Filesystem, environment, and clock operations are not configured for workflow
+  scripts.
+- **No clock or randomness**: `datetime.datetime.now()`, `datetime.date.today()`, `time.time()`,
+  and unseeded `random` fail. `time.sleep` and `asyncio.sleep` return at once, so do not poll.
 
 Each sub-agent below is an async function. Await it and pass `task` by keyword:
 `result = await reviewer(task="...")`, not `reviewer("...")`; all parameters are keyword-only. A

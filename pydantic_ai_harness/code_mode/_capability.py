@@ -114,7 +114,7 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     Pass an `AbstractOS` such as `OSAccess`, or a handler called with keyword arguments (see
     `pydantic_monty.OsHandler`). A plain function is called from a Monty thread, not the event
     loop's thread, with the run's contextvars set, so it must not touch asyncio objects; an `async`
-    handler is awaited on the run's event loop. The positional `(name, args, kwargs)` form is
+    handler is awaited on an event loop instead. The positional `(name, args, kwargs)` form is
     deprecated.
     """
 

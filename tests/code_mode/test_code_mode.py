@@ -3824,19 +3824,34 @@ class TestCodeModeOSAccess:
     @pytest.mark.parametrize(
         'code',
         [
-            pytest.param('import time\ntime.sleep(5)', id='time.sleep'),
-            pytest.param('import asyncio\nawait asyncio.sleep(5)', id='asyncio.sleep'),
+            pytest.param('import time\ntime.sleep(0.01)', id='time.sleep'),
+            pytest.param('import asyncio\nawait asyncio.sleep(0.01)', id='asyncio.sleep'),
         ],
     )
-    async def test_sleep_returns_at_once_even_with_os_access(self, code: str) -> None:
-        """`OSAccess` would sleep for real, holding the run with no duration limit to stop it."""
+    async def test_sleep_is_not_routed_to_os_access(self, code: str) -> None:
+        """Sleeps return in the sandbox instead of reaching `os_access`, where `OSAccess` would sleep for real
+        with no duration limit to stop it."""
+        seen: list[str] = []
+
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            seen.append(name)  # pragma: no cover
+
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': f'{code}\n"awake"'}, ctx, tools['run_code'])
+        assert result.return_value == 'awake'
+        assert seen == []
+
+    async def test_os_access_answers_unseeded_random(self) -> None:
         wrapper = CodeMode[object](os_access=OSAccess()).get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
         tools = await wrapper.get_tools(ctx)
-        with anyio.fail_after(2):
-            result = await wrapper.call_tool('run_code', {'code': f'{code}\n"awake"'}, ctx, tools['run_code'])
-        assert result.return_value == 'awake'
+        code = 'import random\nx = random.random()\n0 <= x < 1'
+        result = await wrapper.call_tool('run_code', {'code': code}, ctx, tools['run_code'])
+        assert result.return_value is True
 
     async def test_async_os_handler_is_awaited(self) -> None:
         async def os_handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
@@ -3865,12 +3880,30 @@ class TestCodeModeOSAccess:
             # Two runs: the per-run copies must not warn again.
             first = await agent.run('go')
             await agent.run('go')
-        assert len(caught) == 1
-        assert caught[0].filename == __file__
+        deprecations = [w for w in caught if issubclass(w.category, HarnessDeprecationWarning)]
+        assert len(deprecations) == 1
+        assert deprecations[0].filename == __file__
         assert 'positional os.getenv' in first.output
 
         with pytest.warns(HarnessDeprecationWarning, match='positional `os_access'):
             CodeModeToolset[object](wrapped=_build_function_toolset(add), os_access=os_cb)
+
+    async def test_keyword_os_callback_missing_is_async_is_not_taken_as_positional(self) -> None:
+        """A keyword-only handler that forgot `is_async` is a broken handler, not the deprecated positional
+        form: it gets Monty's error about the missing argument, without a deprecation warning."""
+
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            return 'unreachable'  # pragma: no cover
+
+        # Deliberately malformed: type checkers reject it too.
+        wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(  # pyright: ignore[reportArgumentType]
+            _build_function_toolset(add)
+        )
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with pytest.raises(ModelRetry, match='is_async'):
+            await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('X')"}, ctx, tools['run_code'])
 
     async def test_abstract_os_instance_dispatches_inside_run_code(self) -> None:
         """An `AbstractOS` instance is accepted as the `os` value and dispatches OS calls."""
