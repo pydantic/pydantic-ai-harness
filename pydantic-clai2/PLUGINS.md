@@ -319,35 +319,61 @@ to stock built-ins. See [telemetry](README.md#telemetry-and-references).
 The built-in `logfire_mcp` plugin (`pydantic_clai2.logfire_mcp`) gives the agent
 the tools of Logfire's hosted MCP server through harness
 [`LogfireMCP`](../docs/logfire-mcp.md). It starts disabled; turn it on with
-`/plugins enable logfire_mcp`. It picks the first credential that is available:
+`/plugins enable logfire_mcp`.
 
-1. `key`: the name of a key saved with `/keys`. Like a model connection that
-   references a saved key, the value is read at the start of each run, and a
-   deleted key fails the run.
+Secrets are managed in [`/keys`](#saved-api-keys), not in plugin settings, which
+are stored as plaintext in SQLite. The plugin uses the first credential that is
+available:
+
+1. The key chosen with `/logfire_mcp key`. It opens the same picker as
+   `/add_model`: choose any saved key, or enter a new one, which is saved in
+   `/keys` as `LOGFIRE_API_KEY` (CLAI asks before replacing an existing
+   `LOGFIRE_API_KEY`). Only the key's name is stored, in the credential store.
 2. `LOGFIRE_API_KEY` from the environment.
-3. OAuth: the first run opens your browser to sign in. Tokens are kept in the OS
+3. A key saved in `/keys` as `LOGFIRE_API_KEY`, so saving one there is enough.
+4. OAuth: the first run opens your browser to sign in. Tokens are kept in the OS
    keyring (or the private credential file) under the `mcp-logfire_mcp` account,
    so restarting CLAI does not mean signing in again. The handshake allows 330
    seconds for the sign-in.
 
-Enabling fails with a message naming what to set, instead of adding a Logfire
-connection that cannot sign in: a `key` that is not saved, no browser when OAuth
-is needed and no tokens are stored, or no credential with `oauth` off.
+A saved key's value is read at the start of each run, like a model connection's
+key. Replacing it in `/keys` applies from the next turn, and deleting it makes
+runs, and the next load, fail with its name. Like `vllm` and `openrouter`, a key
+chosen with `/logfire_mcp key` cannot be renamed while chosen. Several plugins
+and connections can share one named key.
+
+The label is `LOGFIRE_API_KEY`, the variable `LogfireMCP` reads, and not
+`LOGFIRE_TOKEN`. `LOGFIRE_TOKEN` is the write token the
+[`logfire` plugin](#logfire-default-agent-tracing) sends traces with, and it
+cannot query the MCP server. The `logfire` plugin keeps reading it from the
+environment or the Logfire SDK's credential file.
+
+| Command | Does |
+|---|---|
+| `/logfire_mcp key` | choose a saved key, or enter one to save as `LOGFIRE_API_KEY` |
+| `/logfire_mcp logout` | forget the chosen key and the OAuth sign-in; keys in `/keys` are kept |
+
+After either command, run `/plugins reload logfire_mcp` to connect with the new
+credential. Enabling fails with a message naming what to set, instead of adding a
+Logfire connection that cannot sign in: a chosen key that was deleted, no browser
+when OAuth is needed and no tokens are stored, or no credential with `oauth` off.
+The command is registered only while the plugin is loaded. If loading fails,
+save a key as `LOGFIRE_API_KEY` in `/keys` and run `/plugins enable logfire_mcp`
+again.
 
 ```text
-/plugins add logfire_mcp pydantic_clai2.logfire_mcp '{"key": "LOGFIRE_API_KEY", "region": "eu"}'
+/plugins add logfire_mcp pydantic_clai2.logfire_mcp '{"region": "eu"}'
 ```
 
-| Key | Default | Does |
+| Setting | Default | Does |
 |---|---|---|
-| `key` | none | name of a `/keys` entry to connect with |
-| `oauth` | `true` | sign in through the browser when there is no `key` and no `LOGFIRE_API_KEY` |
+| `oauth` | `true` | sign in through the browser when no key is chosen, set, or saved as `LOGFIRE_API_KEY` |
 | `region` | `"us"` | `"us"` or `"eu"`, the Logfire region your data lives in |
 | `read_only` | `true` | offer only the tools the server marks read-only; `false` also allows tools that change Logfire resources |
 
-Key values are not accepted in plugin settings. The credential's own scopes still
-decide which projects and actions are allowed. If you enabled `logfire_mcp` from
-the old harness catalog, that saved declaration still takes this plugin's place;
+Settings accept no keys or key names. The credential's own scopes still decide
+which projects and actions are allowed. If you enabled `logfire_mcp` from the old
+harness catalog, that saved declaration still takes this plugin's place;
 `/plugins remove logfire_mcp` switches to this one.
 
 ## Where plugins live
@@ -1045,8 +1071,8 @@ numbers, and underscores, starting with a letter or underscore. Saving an existi
 name asks before replacing it. Ctrl-C or Ctrl-D cancels without saving. Do not put
 the secret on the command line.
 
-When saved keys exist, vLLM's token prompt and OpenRouter's **Enter API key** flow
-show a searchable list of names. Choose one, enter a different key privately, or
+When saved keys exist, vLLM's token prompt, OpenRouter's **Enter API key** flow,
+and `/logfire_mcp key` show a searchable list of names. Choose one, enter a different key privately, or
 choose **No API key** for vLLM. Esc closes the picker without connecting. Browser
 login flows are unchanged. Select keys only for endpoints you trust.
 
@@ -1057,7 +1083,10 @@ Key values never appear in the picker or confirmation. Names are labels, not
 exported environment variables. Selecting a saved key stores a reference, not a copy. Discovery and each new
 turn resolve its current value. Replacing a key updates connections that reference
 it. Deleting it makes those connections fail until you restore the same name or
-reconfigure them. Keys referenced by saved connections cannot be renamed. A cross-process lock
+reconfigure them. Keys referenced by saved connections (vLLM, OpenRouter, and the
+key chosen with `/logfire_mcp key`) cannot be renamed. One named key can serve
+several connections and plugins, so built-in plugins look for conventional
+labels, such as `LOGFIRE_API_KEY`, that other tools can share. A cross-process lock
 serializes key changes and connection saves so concurrent CLAI sessions do not
 overwrite each other's key edits. The lock file contains no credentials.
 
