@@ -272,6 +272,10 @@ async def test_the_last_product_cannot_be_removed() -> None:
     assert result == 'Google Workspace needs at least one product.'
     assert plugin.settings(GoogleWorkspaceSettings).services == ['gmail']
     assert await configure(plugin) == 'No changes.'
+    source = google_workspace.SettingsSource(plugin)
+    [_, services, *_] = source.rows()
+    assert source.reset(services) == 'Reset Products.'
+    assert plugin.settings(GoogleWorkspaceSettings) == GoogleWorkspaceSettings()
 
 
 def test_an_invalid_saved_choice_fails_closed() -> None:

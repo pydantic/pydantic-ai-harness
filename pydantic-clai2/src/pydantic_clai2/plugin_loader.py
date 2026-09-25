@@ -303,8 +303,14 @@ class PluginLoader(Generic[DepsT]):
             self._drop(entry)
 
     def _save_settings(self, name: str, settings: dict[str, JsonValue]) -> None:
-        """Store a loaded plugin's edited settings on its current declaration, keeping everything else."""
-        self._store.save_plugin(self._entry(name).declaration.model_copy(update={'settings': settings}))
+        """Store a loaded plugin's edited settings on its current declaration, keeping everything else.
+
+        Updates the cached entry in place rather than calling `entries()`: a rebuild during `load`
+        would copy the host onto a new entry that a failed load's cleanup never sees.
+        """
+        entry = self._entries[name]
+        entry.declaration = entry.declaration.model_copy(update={'settings': settings})
+        self._store.save_plugin(entry.declaration)
 
     def _drop(self, entry: PluginEntry[DepsT]) -> None:
         if entry.host is not None:
