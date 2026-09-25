@@ -287,6 +287,7 @@ def test_menu_validates_and_resets_like_saving_would() -> None:
     'settings',
     [
         {'token': 'ghp_inline_secret'},
+        {'token': {'name': 'ghp_inline_secret'}},
         {'token': {'name': 'X', 'value': 'secret'}},
         {'toolsets': []},
         {'url': 'http://api.githubcopilot.com/mcp/'},

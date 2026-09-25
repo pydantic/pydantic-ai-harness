@@ -25,7 +25,8 @@ class KeyReference(BaseModel):
 
     model_config = ConfigDict(extra='forbid')
 
-    name: str = Field(min_length=1)
+    # The pattern `normalize_name` gives every `/keys` label; it also rejects most pasted tokens, such as `ghp_...`.
+    name: str = Field(pattern=r'^[A-Z_][A-Z0-9_]*$')
 
 
 def resolve_key(*, token: SecretStr | KeyReference) -> str:
