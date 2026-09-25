@@ -179,7 +179,7 @@ This release makes the workspace the single place that decides where an agent wo
 - **Pass the command environment.** A local workspace used to give commands the host's `PATH`, `HOME`, `LANG`, and `TMPDIR`; now they get the workspace's `env` plus `Shell(env=)`. Pass `env={'PATH': ..., 'HOME': ...}` to `LocalWorkspace` (see [The command environment](#the-command-environment)).
 - **`FileSystem(root_dir=)`** defaults to the working directory and resolves relative values from it. It must contain the working directory, symlinks that lead outside it are refused, and `root_dir='/'` turns the checks off.
 - **Harness files moved into the working directory.** Tool-output spills and Shell background-job files are under `.pydantic-ai-harness/` (git-ignored) instead of `$TMPDIR`. `ToolOutputLimits(store=LocalFileStore())` keeps spills on this machine.
-- **Skills** are read from the workspace at run start and loaded with a `load_skill` tool. [`Skills(workspace=LocalWorkspaceBackend('/app'))`](https://pydantic.dev/docs/ai/harness/skills/) reads them from somewhere else.
+- **Skills** are read from the workspace at run start and loaded as deferred capabilities. [`Skills(workspace=LocalWorkspaceBackend('/app'))`](https://pydantic.dev/docs/ai/harness/skills/) reads them from somewhere else.
 - **Capability Creation** runs only when the workspace is a writable `LocalWorkspace`.
 
 ## Benchmarking

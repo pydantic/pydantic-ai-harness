@@ -10,8 +10,8 @@ specialized instructions without putting every instruction in its initial
 prompt.
 
 Point `Skills` at one or more skill libraries. The model first sees each
-skill's name and description. When a skill is useful, the model calls the
-`load_skill` tool to receive that skill's instructions.
+skill's name and description. When a skill is useful, the model loads it with
+the `load_capability` tool to receive that skill's instructions.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/skills/)
 
@@ -74,17 +74,17 @@ At the start of every run, `Skills`:
 1. Reads each configured library from the run's workspace. Relative paths
    resolve from its working directory.
 2. Scans the immediate child directories and validates the selected `SKILL.md` files.
-3. Lists the selected skills by name and description in the instructions, and
-   registers a `load_skill(name)` tool.
+3. Offers each selected skill as a
+   [deferred capability](https://pydantic.dev/docs/ai/capabilities/on-demand/)
+   named after it: the model sees its name and description, and loads it with the
+   `load_capability` tool.
 
-`load_skill` returns a `# Skill: <name>` heading followed by the skill's Markdown
-body, read from the workspace when the model calls it. The catalog is the same on
-every run over the same files, so it stays in the cached prefix; a new or renamed
-skill appears in it on the next run.
+Loading a skill returns a `# Skill: <name>` heading followed by the skill's Markdown
+body. The catalog is the same on every run over the same files, so it stays in the
+cached prefix; a new or renamed skill appears in it on the next run.
 
-Under a durable engine such as Temporal, the catalog is read at run start through
-the durable workspace and `load_skill` runs as an activity, so no skill file is
-read in workflow code.
+Under a durable engine such as Temporal, the libraries are read through the durable
+workspace, so no skill file is read in workflow code.
 
 A run without a workspace fails at its start. To read skills from somewhere
 other than the run's workspace, such as skills shipped with your application
@@ -286,7 +286,7 @@ package. Malformed frontmatter, invalid or mismatched names, duplicate selected
 names, unknown selections, missing libraries, and non-directory library paths
 fail at run start. Combining `include` and `exclude` fails at construction.
 
-Two `Skills` on one agent combine into one catalog behind one `load_skill` tool.
+Two `Skills` on one agent combine into one catalog.
 
 ## Further reading
 

@@ -210,7 +210,7 @@ def _check_sub_agents(merged: Any) -> None:
 COMBINE_POLICY: dict[str, Policy] = {
     # -- One per agent: a default `id`, and `combine` says what two of them mean. --
     'Skills': Combines(
-        'one catalog behind one `load_skill` tool; every library either names stays reachable',
+        'one catalog; every library either names stays reachable',
         lambda: (Skills[Any]('first'), Skills[Any]('second')),
         _check_skills,
     ),
@@ -278,6 +278,7 @@ COMBINE_POLICY: dict[str, Policy] = {
     ),
     # -- Several of these is the normal case, so they stay anonymous. --
     'RepairToolArguments': Anonymous('repairing valid arguments again is a no-op'),
+    '_Skill': Anonymous('one per skill, with the skill name as its id; `Skills` rejects two with one name'),
     '_RequireWorkspace': Anonymous('the same run-start check; two check the same thing twice'),
     '_BoundToolOutputs': Anonymous('Coder-local truncation composes with standalone output policies'),
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
