@@ -3,9 +3,7 @@
 import asyncio
 import json
 import re
-import sqlite3
-from collections.abc import Generator
-from contextlib import closing, contextmanager
+from contextlib import AbstractContextManager
 from typing import Protocol
 
 from prompt_toolkit import PromptSession
@@ -15,7 +13,7 @@ from termflow.tui import MenuBuilder, MenuItem  # pyright: ignore[reportMissingT
 from termflow.tui.menu import Menu  # pyright: ignore[reportMissingTypeStubs]
 
 from ._rendering import markdown_style
-from .credential_store import credentials_path, load_codex_credentials, save_codex_credentials
+from .credential_store import credential_lock, credentials_path, load_codex_credentials, save_codex_credentials
 from .menu_worker import menu_key, run_worker
 
 
@@ -66,17 +64,11 @@ def normalize_name(*, name: str) -> str:
     return name
 
 
-@contextmanager
-def key_transaction() -> Generator[None]:
-    """Serialize bundle access across processes; the SQLite lock file holds no secrets."""
-    path = credentials_path(account='api-keys').with_suffix('.lock')
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        with closing(sqlite3.connect(path, timeout=20)) as connection, connection:
-            connection.execute('BEGIN IMMEDIATE')
-            yield
-    except sqlite3.Error:
-        raise UserError('Cannot lock API keys. Close other key editors and check the credential directory.') from None
+def key_transaction() -> AbstractContextManager[None]:
+    """Serialize bundle access across processes."""
+    return credential_lock(
+        account='api-keys', busy='Cannot lock API keys. Close other key editors and check the credential directory.'
+    )
 
 
 def load_keys() -> dict[str, SecretStr]:

@@ -1,20 +1,13 @@
 """The built-in `slack` plugin: a settings menu for `Slack`'s options, with the user token kept in `/keys`."""
 
-import io
 import threading
-from dataclasses import dataclass
-from typing import TypeGuard
 
 import anyio
 import pytest
 from anyio import to_thread
-from menu_script import Script, pick, typed
-from pydantic import JsonValue, SecretStr
-from pydantic_ai import Agent, RunContext
-from pydantic_ai.models.test import TestModel
-from pydantic_ai.usage import RunUsage
-from pydantic_ai_harness.slack import Slack
-from rich.console import Console
+from menu_script import pick, typed
+from pydantic import SecretStr
+from slack_shell import BUILTIN, ENABLED, ESC, script, shell
 from termflow.tui import MenuItem  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.textinput import TextInputResult  # pyright: ignore[reportMissingTypeStubs]
@@ -22,85 +15,20 @@ from termflow.tui.textinput import TextInputResult  # pyright: ignore[reportMiss
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2 import slack as slack_plugin
 from pydantic_clai2.api_keys import KeyReference, delete_key, load_keys, rename_key, save_key
-from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.credential_store import load_codex_credentials, save_codex_credentials
 from pydantic_clai2.field_menu import FieldMenu
-from pydantic_clai2.plugin_loader import PluginError, PluginLoader
+from pydantic_clai2.plugin_loader import PluginError
 from pydantic_clai2.plugin_menu import PluginMenu, open_plugins_menu
-from pydantic_clai2.plugins import SessionStart, TurnStart
 from pydantic_clai2.promoted_plugins import adopt_promoted
 from pydantic_clai2.settings_store import SettingsStore
 
 pytestmark = pytest.mark.anyio
 
-BUILTIN = next(plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'slack')
-ENABLED = BUILTIN.model_copy(update={'enabled': True})
-CONTEXT = RunContext[None](deps=None, model=TestModel(), usage=RunUsage())
-CLOSE = MenuResult(cancelled=True)
-ESC = TextInputResult(cancelled=True)
-
 
 @pytest.fixture(autouse=True)
 def no_env_token(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv('SLACK_USER_TOKEN', raising=False)
-
-
-def is_slack(capability: object) -> TypeGuard[Slack[None]]:
-    return isinstance(capability, Slack)
-
-
-@dataclass
-class Shell:
-    plugins: PluginLoader[None]
-    store: SettingsStore
-    output: io.StringIO
-
-    def slack(self) -> Slack[None]:
-        [capability] = self.plugins.capabilities()
-        assert is_slack(capability)
-        return capability
-
-    async def turn_token(self) -> str | None:
-        """The token the Slack connection would use for a turn started now."""
-        await self.plugins.fire(TurnStart(text='hi'))
-        auth = self.slack().auth
-        assert callable(auth)
-        return auth(CONTEXT)
-
-    def saved(self) -> dict[str, JsonValue]:
-        [declaration] = self.store.plugins()
-        return declaration.settings
-
-    def source(self) -> 'slack_plugin.SlackSource[None]':
-        [entry] = self.plugins.entries()
-        assert entry.host is not None
-        return slack_plugin.SlackSource(entry.host)
-
-
-async def shell(declaration: PluginSettings = ENABLED) -> Shell:
-    store = SettingsStore()
-    output = io.StringIO()
-    plugins: PluginLoader[None] = PluginLoader(
-        store=store,
-        console=Console(file=output, width=200),
-        commands=Commands(),
-        session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=store.load()),
-        builtin=(declaration,),
-    )
-    await plugins.load_all()
-    return Shell(plugins, store, output)
-
-
-def script(
-    monkeypatch: pytest.MonkeyPatch,
-    lists: list[MenuResult],
-    choices: list[MenuResult] | None = None,
-    texts: list[TextInputResult] | None = None,
-) -> Script:
-    scripted = Script(lists=[*lists, CLOSE], choices=choices or [], texts=texts or [])
-    monkeypatch.setattr(slack_plugin, 'RUNNERS', scripted.runners)
-    return scripted
 
 
 def key_choice(monkeypatch: pytest.MonkeyPatch, choice: str | KeyReference | None, *, think: float = 0) -> None:
@@ -142,7 +70,7 @@ async def test_enable_opens_the_menu_and_every_option_saves_immediately(monkeypa
     assert 'CLAI does not read SLACK_USER_TOKEN from the environment.' in app.output.getvalue()
     assert load_keys()['SLACK_USER_TOKEN'].get_secret_value() == 'xoxp-new'
     assert load_codex_credentials(account='slack') == '{"token":{"name":"SLACK_USER_TOKEN"}}'
-    assert app.saved() == {'read_only': False, 'include_instructions': False}
+    assert app.saved() == {'auth': 'key', 'client_id': None, 'read_only': False, 'include_instructions': False}
     assert not app.slack().read_only and not app.slack().include_instructions
     assert await app.turn_token() == 'xoxp-new'
     await app.plugins.close('exit')
@@ -252,9 +180,9 @@ async def test_reset_forgets_the_key_or_restores_a_default(monkeypatch: pytest.M
     slack_plugin.save_connection(KeyReference(name='SLACK_USER_TOKEN'))
     app = await shell(ENABLED.model_copy(update={'settings': {'read_only': False}}))
     source = app.source()
-    [token, read_only, _] = source.rows()
+    [_, token, read_only, _] = source.rows()
     assert source.reset(read_only) == 'Reset Tools.'
-    assert app.saved() == {'read_only': True, 'include_instructions': True}
+    assert app.saved() == {'auth': 'key', 'client_id': None, 'read_only': True, 'include_instructions': True}
     assert source.reset(token).startswith('Slack no longer uses a key from /keys')
     assert load_codex_credentials(account='slack') is None
     assert load_keys()['SLACK_USER_TOKEN'].get_secret_value() == 'xoxp-first'
@@ -265,22 +193,22 @@ async def test_rows_show_the_token_state_and_validate_options() -> None:
     app = await shell()
     source = app.source()
     menu = FieldMenu(source)
-    assert [row.key for row in source.rows()] == ['token', 'read_only', 'include_instructions']
-    assert source.rows()[0].note == 'choose a key'
-    assert source.current(source.rows()[0]) == '(not chosen)'
-    assert 'read-only' in menu.items()[1].label
-    assert source.problem(source.rows()[1], 'maybe') == 'Input should be a valid boolean'
-    assert source.problem(source.rows()[1], 'false') is None
+    assert [row.key for row in source.rows()] == ['auth', 'token', 'read_only', 'include_instructions']
+    assert source.rows()[1].note == 'choose a key'
+    assert source.current(source.rows()[1]) == '(not chosen)'
+    assert 'read-only' in menu.items()[2].label
+    assert source.problem(source.rows()[2], 'maybe') == 'Input should be a valid boolean'
+    assert source.problem(source.rows()[2], 'false') is None
 
     save_key(name='GONE', value='xoxp-gone')
     slack_plugin.save_connection(KeyReference(name='GONE'))
     delete_key(name='GONE')
-    assert source.rows()[0].note == 'missing from /keys'
-    assert source.current(source.rows()[0]) == 'GONE'
+    assert source.rows()[1].note == 'missing from /keys'
+    assert source.current(source.rows()[1]) == 'GONE'
 
     save_codex_credentials(account='slack', value='{"token": "xoxp-inline"}')
-    assert source.rows()[0].note == 'invalid; choose again'
-    assert source.current(source.rows()[0]) == '(invalid)'
+    assert source.rows()[1].note == 'invalid; choose again'
+    assert source.current(source.rows()[1]) == '(invalid)'
     assert await app.turn_token() is None
     assert 'The saved Slack connection is invalid.' in app.output.getvalue()
     await app.plugins.close('exit')

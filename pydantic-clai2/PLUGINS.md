@@ -524,7 +524,10 @@ highlighted row, `R` resets it, and Esc closes. Every change is saved as you mak
 
 | Row | Choices | Saved in |
 |---|---|---|
-| User token | a key from `/keys`, or a new user token (`xoxp-`) | `/keys`; only the key's name is kept for Slack, in the credential store |
+| Sign-in | user token from `/keys` (default) or browser sign-in through your Slack app | plugin settings, as `auth` (`key` or `browser`) |
+| User token (`key` only) | a key from `/keys`, or a new user token (`xoxp-`) | `/keys`; only the key's name is kept for Slack, in the credential store |
+| Slack app (`browser` only) | creates your CLAI Slack app, then takes its Client ID | plugin settings, as `client_id` (public, not a secret) |
+| Browser sign-in (`browser` only) | signs in again, or `R` signs out | the tokens, in the credential store (`slack-oauth`) |
 | Tools | read-only (default) or read and write | plugin settings, as `read_only` |
 | Server instructions | forwarded (default) or left out | plugin settings, as `include_instructions` |
 
@@ -540,13 +543,35 @@ user: to use another workspace, save its token under another name, such as
 turns the Slack tools off, and leaves the key in `/keys`. The row notes when no
 key is chosen or the chosen key is gone from `/keys`.
 
+**Browser sign-in.** Slack's MCP server has no dynamic client registration and
+serves only apps installed in your workspace, so browser sign-in goes through your
+own Slack app. CLAI creates it for you. Choose **Browser sign-in** in the Sign-in row,
+then press Enter on **Slack app**. CLAI opens Slack's create-app page filled in with
+CLAI's manifest. Pick your workspace, click **Create**, and paste the app's **Client
+ID** (Basic Information, App Credentials). CLAI then opens Slack's sign-in page and
+waits up to five minutes behind a screen that shows the URL, in case no browser
+opens (over SSH, for example); Esc cancels. You never copy a token or a client
+secret: the manifest enables PKCE, so Slack treats the app as a public client and
+neither signing in nor renewing needs a secret. The manifest also turns on the
+app's MCP access (`is_mcp_enabled`), which Slack requires, and token rotation.
+Access tokens last 12 hours; CLAI renews them before a turn when they are close
+to expiring, keeping the rotated refresh token in the credential store. If CLAI
+goes unused for 30 days, the refresh token expires and you sign in again.
+
+A read-only sign-in asks Slack for read scopes only, so the token itself cannot
+post. After switching Tools to read and write, press Enter on **Browser sign-in**
+to sign in again with the write scopes. The redirect is fixed at
+`http://localhost:53118/slack/callback`, because Slack matches the registered URL
+exactly. Workspaces that require admin approval for new apps need that approval
+first. `R` on Browser sign-in signs out; `R` on Slack app also forgets the app.
+
 Harness `Slack` has no server URL option: it always connects to
 `https://mcp.slack.com/mcp`, so the menu has no base URL row. Plugin settings never
 hold the token, and a pasted `token` setting is rejected. CLAI does not read the
 `SLACK_USER_TOKEN` environment variable either. If it is set and no key is
 chosen, CLAI says so and points at the menu.
 
-Before every turn CLAI reads the chosen key's current value from `/keys`, so
+With a user token, before every turn CLAI reads the chosen key's current value from `/keys`, so
 replacing it there takes effect on the next turn with no reload. When no key is
 chosen, the chosen key was deleted, or the saved choice is invalid, CLAI prints
 why and that turn has no Slack tools. While Slack uses a key, `/keys` will not
@@ -554,6 +579,8 @@ rename it.
 
 | Key | Default | Does |
 |---|---|---|
+| `auth` | `key` | `key` connects with the user token chosen from `/keys`; `browser` with the browser sign-in |
+| `client_id` | none | your CLAI Slack app's Client ID, for `browser` |
 | `read_only` | `true` | keep only the tools Slack marks read-only, so the agent can search and read but not post or edit |
 | `include_instructions` | `true` | forward the Slack server's own instructions to the agent |
 
@@ -973,6 +1000,39 @@ It saves a new value under `name` only after confirming a replacement, and
 returns a `KeyReference` to persist in place of the secret. Call it through
 `plugin_keys.on_loop` from the menu's worker thread. The built-in `slack` plugin
 is a complete example.
+
+### Sign in through the browser: `pkce.PKCESignIn`
+
+For a service whose OAuth needs a registered app but accepts PKCE instead of a
+client secret (a public client), describe the app once and let CLAI run the
+authorization-code flow, keep the tokens, and renew them:
+
+```python
+from pydantic_clai2.pkce import PKCESignIn, PublicClient
+
+client = PublicClient(
+    authorize_url='https://example.com/oauth/authorize',
+    token_url='https://example.com/oauth/token',
+    client_id=settings.client_id,  # public: plugin settings may hold it
+    redirect_uri='http://localhost:53119/example/callback',  # registered with the app, fixed port
+    scopes=('read',),
+)
+sign_in = PKCESignIn(client=client, account='example-oauth', service='Example', setup='/plugins configure example')
+```
+
+`await plugin_keys.browser_sign_in(sign_in, runners)` signs in from a settings
+menu behind a waiting screen that shows the URL, and returns `False` when the user
+presses Esc. Outside a menu, `await sign_in.sign_in()` opens the browser directly.
+Before each run, `await sign_in.token()` returns an access token, refreshing it
+first when it expires within five minutes and saving a rotated refresh token. It
+raises `UserError` naming `setup` when there is no usable sign-in, so a plugin can
+turn its tools off with that message. Refreshes are serialized across CLAI
+processes, because a service that rotates refresh tokens invalidates the old one.
+Token responses may report errors the standard way or, like Slack, with HTTP 200
+and an `error` field; both are handled. The tokens are stored under `account` in
+the credential store, tied to the Client ID, so changing the app means signing in
+again. Services with Dynamic Client Registration need none of this: add them as
+`/mcp` servers with OAuth.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 

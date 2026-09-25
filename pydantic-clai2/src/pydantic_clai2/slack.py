@@ -1,26 +1,32 @@
 """The built-in `slack` plugin: harness `Slack`, set up in the settings menu that `/plugins configure slack` opens.
 
-The user token lives in `/keys`; the credential store keeps only its name, so `/keys` refuses to rename it while
-Slack uses it. The plugin's settings hold only harness `Slack`'s non-secret options.
+It connects as the user in one of two ways. A browser sign-in through the user's own CLAI Slack app (`slack_app`)
+keeps rotating tokens in the credential store. A user token from `/keys` is referenced by name only, so `/keys`
+refuses to rename it while Slack uses it. The plugin's settings hold only non-secret options and the app's public
+Client ID.
 """
 
 import asyncio
 import os
+import webbrowser
 from dataclasses import replace
-from typing import Generic
+from typing import Generic, Literal
 
 from anyio import to_thread
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.tools import RunContext
 from pydantic_ai_harness.slack import Slack
+from termflow.tui import TextInputBuilder  # pyright: ignore[reportMissingTypeStubs]
 
-from . import theme
+from . import slack_app, theme
+from ._rendering import markdown_style
 from .api_keys import KeyReference, load_keys, resolve_key, save_key_connection
 from .credential_store import delete_credentials, load_codex_credentials
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
-from .menu_worker import run_worker
-from .plugin_keys import choose_key, on_loop
+from .menu_worker import menu_key, run_worker
+from .pkce import PKCESignIn
+from .plugin_keys import browser_sign_in, choose_key, on_loop
 from .plugins import DepsT, PluginHost, SessionStart, TurnStart
 
 TOKEN_NAME = 'SLACK_USER_TOKEN'
@@ -36,6 +42,14 @@ class SlackSettings(BaseModel):
     """The JSON a `slack` declaration may carry. Settings are stored in plaintext, so the token is not one of them."""
 
     model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    auth: Literal['key', 'browser'] = Field(
+        default='key', description='Connect with a user token from /keys, or sign in through your Slack app.'
+    )
+    client_id: str | None = Field(
+        default=None,
+        pattern=slack_app.CLIENT_ID_PATTERN,
+        description="Your CLAI Slack app's Client ID, for browser sign-in. It is public, not a secret.",
+    )
     read_only: bool = Field(
         default=True,
         description='Keep only the tools Slack marks read-only, so the agent cannot post or edit as you.',
@@ -61,8 +75,11 @@ def activate(host: PluginHost[DepsT]) -> None:
     async def refresh() -> None:
         nonlocal token
         try:
-            # `/keys` takes a cross-process lock that can wait up to 20 seconds; keep it off the event loop.
-            token = await to_thread.run_sync(connected_token)
+            if settings.auth == 'browser':
+                token = await signed_in_token(settings)
+            else:
+                # `/keys` takes a cross-process lock that can wait up to 20 seconds; keep it off the event loop.
+                token = await to_thread.run_sync(connected_token)
         except UserError as exc:
             token = None
             host.console.print(f'Slack tools are off. {exc}', style=theme.color(theme.WARNING), markup=False)
@@ -87,6 +104,13 @@ def activate(host: PluginHost[DepsT]) -> None:
             auth=current_token, read_only=settings.read_only, include_instructions=settings.include_instructions
         )
     )
+
+
+async def signed_in_token(settings: SlackSettings) -> str:
+    """The browser sign-in's access token, renewed when close to expiry."""
+    if settings.client_id is None:
+        raise UserError('Set up your Slack app: run /plugins configure slack.')
+    return await slack_app.session(settings.client_id, read_only=settings.read_only).token()
 
 
 def connected_token() -> str:
@@ -122,6 +146,34 @@ def user_token_only(value: str) -> None:
         raise ValueError("That is a bot token (xoxb-). Slack's MCP server accepts only user tokens (xoxp-).")
 
 
+_AUTH = FieldRow(
+    key='auth',
+    label='Sign-in',
+    description=(
+        'How Slack connects as you: a user token (xoxp-) from /keys, or a browser sign-in through your own CLAI '
+        'Slack app, which renews itself. Both act as you in the workspace they belong to.'
+    ),
+    default='key',
+    choices=('key', 'browser'),
+    choice_labels={'key': 'User token from /keys', 'browser': 'Browser sign-in (your Slack app)'},
+    allow_custom=False,
+)
+_APP = FieldRow(
+    key='client_id',
+    label='Slack app',
+    description=(
+        "Enter opens Slack's create-app page filled in for CLAI. Pick the workspace, click Create, then paste the "
+        "Client ID from the app's Basic Information page; the browser sign-in follows. The Client ID is not a "
+        'secret, and no client secret is needed. R forgets the app and signs out.'
+    ),
+    default='(not set up)',
+)
+_SIGNED_IN = FieldRow(
+    key='account',
+    label='Browser sign-in',
+    description='Enter signs in through the browser again, for example as another user. R signs out.',
+    default='signed out',
+)
 _TOKEN = FieldRow(
     key='token',
     label='User token',
@@ -155,12 +207,12 @@ _ROWS = (
 
 
 class SlackSource(Generic[DepsT]):
-    """The settings menu's rows: the token reference from the credential store, the rest from plugin settings."""
+    """The settings menu's rows: credentials from the credential store, the rest from plugin settings."""
 
     title = 'Slack'
 
     def __init__(self, host: PluginHost[DepsT]) -> None:
-        """Option edits go through `host.save_settings`; token choices go to the credential store."""
+        """Option edits go through `host.save_settings`; credentials go to the credential store."""
         self._host = host
 
     @property
@@ -168,19 +220,36 @@ class SlackSource(Generic[DepsT]):
         """The saved settings, including edits made earlier in this menu."""
         return self._host.settings(SlackSettings)
 
+    def session(self) -> PKCESignIn | None:
+        """The browser sign-in for the configured app, if one is set up."""
+        settings = self.settings
+        if settings.client_id is None:
+            return None
+        return slack_app.session(settings.client_id, read_only=settings.read_only)
+
     def rows(self) -> list[FieldRow]:
-        """Every option, with the token marked when it is unset, invalid, or gone from `/keys`."""
-        return [replace(_TOKEN, note=self._token_note()), *_ROWS]
+        """Sign-in first, then only the credential rows it uses, each marked when it needs attention."""
+        if self.settings.auth == 'browser':
+            credentials = [replace(_APP, note=self._app_note()), _SIGNED_IN]
+        else:
+            credentials = [replace(_TOKEN, note=self._token_note())]
+        return [_AUTH, *credentials, *_ROWS]
 
     def current(self, row: FieldRow) -> str:
         """The value as the user would type it."""
+        if row.key == 'client_id':
+            return self.settings.client_id or row.default
+        if row.key == 'account':
+            session = self.session()
+            return 'signed in' if session is not None and session.signed_in() else row.default
         if row.key == 'token':
             try:
                 connection = saved_connection()
             except UserError:
                 return '(invalid)'
             return connection.token.name if connection else row.default
-        return str(getattr(self.settings, row.key)).lower()
+        value: object = getattr(self.settings, row.key)
+        return str(value).lower() if isinstance(value, bool) else str(value)
 
     def problem(self, row: FieldRow, text: str) -> str | None:
         """Validate against the whole settings model, as saving would."""
@@ -193,13 +262,20 @@ class SlackSource(Generic[DepsT]):
     def apply(self, row: FieldRow, raw: str) -> str:
         """Save immediately; the loader loads the plugin again when the menu closes."""
         self._host.save_settings(self._updated(row, raw))
+        if row.key == 'read_only' and raw == 'false' and self.settings.auth == 'browser':
+            return f'Saved {row.label}. Sign in again (Browser sign-in row) so Slack grants the write scopes.'
         return f'Saved {row.label}.'
 
     def reset(self, row: FieldRow) -> str:
-        """Restore an option's default, or forget the chosen key, which turns Slack's tools off."""
+        """Restore an option's default, forget the chosen key, or sign out; the last two turn Slack's tools off."""
         if row.key == 'token':
             delete_credentials(account=_ACCOUNT)
             return 'Slack no longer uses a key from /keys; its tools are off until you choose one.'
+        if row.key in ('client_id', 'account'):
+            if session := self.session():
+                session.sign_out()
+            if row.key == 'account':
+                return 'Signed out of Slack; its tools are off until you sign in again.'
         data = self.settings.model_dump()
         del data[row.key]
         self._host.save_settings(SlackSettings.model_validate(data))
@@ -209,6 +285,12 @@ class SlackSource(Generic[DepsT]):
         data: dict[str, object] = self.settings.model_dump()
         data[row.key] = {'true': True, 'false': False}.get(raw, raw)
         return SlackSettings.model_validate(data)
+
+    def _app_note(self) -> str:
+        if self.settings.client_id is None:
+            return 'Enter to set up'
+        session = self.session()
+        return '' if session is not None and session.signed_in() else 'sign in: Enter on Browser sign-in'
 
     def _token_note(self) -> str:
         try:
@@ -238,6 +320,43 @@ async def configure_menu(source: SlackSource[DepsT]) -> str:
             return [str(exc)]
         return [f'Slack uses the saved key {reference.name}. Manage it in /keys.']
 
+    def sign_in() -> list[str]:
+        session = source.session()
+        if session is None:
+            return ['Set up the Slack app first (Slack app row).']
+        try:
+            if not on_loop(lambda: browser_sign_in(session, RUNNERS), loop):
+                return ['Slack sign-in cancelled.']
+        except UserError as exc:
+            return [str(exc)]
+        return ['Signed in to Slack. Tokens are kept in the OS credential store and renew themselves.']
+
+    def set_up_app() -> list[str]:
+        title = "Paste your CLAI Slack app's Client ID (Basic Information > App Credentials)"
+        if source.settings.client_id is None:  # With an app set up, Enter only changes the ID; R starts over.
+            url = slack_app.create_app_url()
+            try:
+                opened = webbrowser.open(url)
+            except webbrowser.Error:
+                opened = False
+            if not opened:
+                title = f'Open this URL, pick a workspace, and click Create:\n{url}\n\n{title}'
+        builder = (
+            TextInputBuilder(title)
+            .style(markdown_style())
+            .prompt('Client ID: ')
+            .placeholder('Looks like 1234567890.1234567890')
+            .footer_hint('Enter save - Esc cancel')
+            .key_source(menu_key)
+        )
+        answer = RUNNERS.run_text(builder.build())
+        if answer.cancelled or not isinstance(answer.value, str) or not answer.value.strip():
+            return []
+        if problem := source.problem(_APP, answer.value.strip()):
+            return [problem]
+        return [source.apply(_APP, answer.value.strip()), *sign_in()]
+
     menu = FieldMenu(source)
-    messages = await run_worker(lambda: run_flow(menu, RUNNERS, submenus={'token': pick_token}))
+    submenus = {'token': pick_token, 'client_id': set_up_app, 'account': sign_in}
+    messages = await run_worker(lambda: run_flow(menu, RUNNERS, submenus=submenus))
     return '\n'.join(messages) or 'Slack settings unchanged.'
