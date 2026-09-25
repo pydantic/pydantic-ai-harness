@@ -71,6 +71,7 @@ _STORE: TypeAdapter[dict[str, Tokens]] = TypeAdapter(dict[str, Tokens])
 _WRITES = threading.Lock()
 _UNSAVED: dict[str, Tokens] = {}
 _logouts = 0
+_MIN_INTERVAL = 1.0
 """Bumped by `forget()`, so a sign-in or refresh that started earlier knows not to save."""
 """Sign-ins the keyring or file refused, kept in memory so they last this session; guarded by `_WRITES`."""
 
@@ -320,7 +321,7 @@ async def _poll(
     verifier: str,
     sleep: Sleep,
 ) -> _Granted:
-    interval = device.interval
+    interval = max(device.interval, _MIN_INTERVAL)  # A zero or negative interval would poll without pause.
     deadline = time.monotonic() + device.expires_in
     while time.monotonic() < deadline:
         # A server-chosen interval cannot outlast the code.
@@ -370,6 +371,8 @@ async def _refresh(http: httpx.AsyncClient, *, resource: str, tokens: Tokens) ->
         granted = _Granted.model_validate_json(response.content)
     except (httpx.HTTPError, ValidationError):
         return None
+    if not granted.covers(READ_SCOPE):
+        return None  # Unusable for MCP; signing in again beats replacing a working token with it.
     refreshed = tokens.model_copy(
         update={
             'access_token': granted.access_token,
@@ -392,12 +395,14 @@ class DeviceAuth(httpx.Auth):
         read_only: bool,
         announce: Announce,
         http: Callable[[], httpx.AsyncClient] = http_client,
+        sleep: Sleep = anyio.sleep,
     ) -> None:
         """Tokens for `resource`, the MCP URL; `announce` shows the sign-in link and code."""
         self._resource = resource
         self._read_only = read_only
         self._announce = announce
         self._http = http
+        self._sleep = sleep
         self._lock = anyio.Lock()
 
     def sync_auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
@@ -429,7 +434,13 @@ class DeviceAuth(httpx.Auth):
     async def sign_in(self) -> Tokens:
         """Run the device flow now, announcing the link and code."""
         async with self._http() as http:
-            return await sign_in(resource=self._resource, read_only=self._read_only, announce=self._announce, http=http)
+            return await sign_in(
+                resource=self._resource,
+                read_only=self._read_only,
+                announce=self._announce,
+                http=http,
+                sleep=self._sleep,
+            )
 
 
 Status = Literal['signed in', 'expired', 'signed out']

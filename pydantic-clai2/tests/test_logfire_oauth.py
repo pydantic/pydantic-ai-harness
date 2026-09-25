@@ -141,6 +141,10 @@ def remember(tokens: Tokens) -> None:
     save_codex_credentials(value=json.dumps({RESOURCE: tokens.model_dump(mode='json')}), account=logfire_oauth.ACCOUNT)
 
 
+async def no_wait(seconds: float) -> None:
+    pass
+
+
 def emptied(service: str, account: str) -> None:
     keyring.set_password(service, account, '')  # conftest's fake keyring has no delete; empty reads as unset.
 
@@ -158,7 +162,7 @@ class TestSignIn:
             'Signed in to Logfire.',
         ]
         assert opened == [LINK]
-        assert sleeps == [0, 0, 5]
+        assert sleeps == [1, 1, 6]  # Logfire's 0 is raised to 1 second; slow_down adds 5.
         [registered] = logfire.registered
         assert registered == {
             'client_name': 'CLAI',
@@ -249,6 +253,13 @@ class TestSignIn:
         await run_sign_in(logfire)  # A sign-in started after the logout is kept.
         assert load(RESOURCE) is not None
 
+    async def test_a_negative_interval_still_pauses_between_polls(self) -> None:
+        logfire = Logfire()
+        logfire.device = (200, {**DEVICE, 'interval': -3})
+        sleeps: list[float] = []
+        await run_sign_in(logfire, sleeps=sleeps)
+        assert sleeps == [1]
+
     async def test_a_huge_interval_waits_no_longer_than_the_code_lasts(self) -> None:
         logfire = Logfire()
         logfire.device = (200, {**DEVICE, 'interval': 999_999_999})
@@ -272,7 +283,7 @@ class TestSignIn:
         sleeps: list[float] = []
         assert (await run_sign_in(logfire, sleeps=sleeps))[-1] == 'Signed in to Logfire.'
         assert dropped == [True]
-        assert sleeps == [0, 5]  # The server asked for no wait; a dropped poll still backs off.
+        assert sleeps == [1, 6]  # A dropped poll backs off like slow_down.
 
     @pytest.mark.parametrize(
         ('resource', 'metadata_path'),
@@ -285,7 +296,7 @@ class TestSignIn:
         logfire = Logfire()
         logfire.resource = (200, {'resource': resource, 'authorization_servers': [ORIGIN]})
         async with logfire.client() as http:
-            await sign_in(resource=resource, read_only=True, announce=lambda line: None, http=http, sleep=anyio.sleep)
+            await sign_in(resource=resource, read_only=True, announce=lambda line: None, http=http, sleep=no_wait)
         assert logfire.discovered == [metadata_path, '/.well-known/oauth-authorization-server']
         assert load(resource) is not None
 
@@ -399,6 +410,7 @@ class TestDeviceAuth:
             read_only=read_only,
             announce=(lines if lines is not None else []).append,
             http=logfire.client,
+            sleep=no_wait,
         )
         async with httpx.AsyncClient(transport=httpx.MockTransport(logfire.handle), auth=auth) as client:
             return (await client.post(RESOURCE)).status_code
@@ -432,7 +444,7 @@ class TestDeviceAuth:
         assert [form['refresh_token'] for form in logfire.forms] == ['refresh-1', 'refresh-1']
         assert {form['resource'] for form in logfire.forms} == {RESOURCE}
 
-    @pytest.mark.parametrize('refresh', [None, 'broken', 'unreachable', 'rejected'])
+    @pytest.mark.parametrize('refresh', [None, 'broken', 'unreachable', 'rejected', 'no-read-scope'])
     async def test_a_failed_refresh_signs_in_again(self, refresh: str | None, opened: list[str]) -> None:
         remember(stored(expires_in=-10, refresh=None if refresh is None else 'refresh-1'))
         logfire = Logfire()
@@ -440,6 +452,8 @@ class TestDeviceAuth:
             logfire.refreshes = [granted('access-2', token_type='MAC')]
         elif refresh == 'rejected':
             logfire.refreshes = [pending('invalid_grant')]
+        elif refresh == 'no-read-scope':
+            logfire.refreshes = [granted('access-2', scope='project:write')]
         elif refresh == 'unreachable':
             handle = logfire.handle
 
@@ -461,7 +475,9 @@ class TestDeviceAuth:
 
     async def test_concurrent_requests_sign_in_once(self, opened: list[str]) -> None:
         logfire = Logfire()
-        auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=lambda line: None, http=logfire.client)
+        auth = DeviceAuth(
+            resource=RESOURCE, read_only=True, announce=lambda line: None, http=logfire.client, sleep=no_wait
+        )
         async with httpx.AsyncClient(transport=httpx.MockTransport(logfire.handle), auth=auth) as client:
             async with anyio.create_task_group() as tasks:
                 for _ in range(3):
@@ -478,7 +494,7 @@ class TestDeviceAuth:
         monkeypatch.setattr(keyring, 'set_password', locked)
         logfire = Logfire()
         lines: list[str] = []
-        auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=lines.append, http=logfire.client)
+        auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=lines.append, http=logfire.client, sleep=no_wait)
         async with httpx.AsyncClient(transport=httpx.MockTransport(logfire.handle), auth=auth) as client:
             for _ in range(2):
                 assert (await client.post(RESOURCE)).status_code == 200
