@@ -136,11 +136,10 @@ def on_loop(
     for it to wind down.
     """
     running = asyncio.run_coroutine_threadsafe(operation(), loop)
-    while True:
-        try:
-            return running.result(timeout=0.05)
-        except concurrent.futures.TimeoutError:
-            if worker_stopping():
-                running.cancel()
-                concurrent.futures.wait([running])  # A started `/keys` write finishes before the menu is released.
-                return None
+    # Poll with `wait`, not `result(timeout=)`: its `TimeoutError` is the builtin, which the flow may raise too.
+    while not concurrent.futures.wait([running], timeout=0.05).done:
+        if worker_stopping():
+            running.cancel()
+            concurrent.futures.wait([running])  # A started `/keys` write finishes before the menu is released.
+            return None
+    return running.result()
