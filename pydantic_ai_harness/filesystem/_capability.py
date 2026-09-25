@@ -29,6 +29,7 @@ _DEFAULT_READ_ONLY: tuple[str, ...] = (
     '*.pem',
     '*.key',
     '**/secrets*',
+    '.pydantic-ai-harness/**',
 )
 
 
@@ -46,8 +47,8 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     symlinks, and `read_only_patterns` guard what may be written. This is a
     guardrail checked before each operation, not isolation: a symlink swapped in
     between the check and the use is not caught, and `Shell` commands are not
-    bounded at all. The workspace is the isolation boundary. Listings leave out a
-    symlink whose target is outside `root_dir`, and walks do not descend into one.
+    bounded at all. The workspace is the isolation boundary. Walks do not descend
+    into a directory whose real path is outside `root_dir`.
     """
 
     root_dir: str | Path | None = None
@@ -77,7 +78,8 @@ class FileSystem(AbstractCapability[AgentDepsT]):
     read_only_patterns: Sequence[str] = _DEFAULT_READ_ONLY
     """Paths matching these patterns are read-only (writes are rejected).
 
-    Defaults to `.git/`, `.env`, key files, and secrets.
+    Defaults to `.git/`, `.env`, key files, secrets, and `.pydantic-ai-harness/`, where
+    capabilities keep files such as spilled tool output and background job status.
     Set to an empty list to make every path writable.
     """
 
