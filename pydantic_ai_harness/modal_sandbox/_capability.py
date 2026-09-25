@@ -15,7 +15,12 @@ from typing_extensions import Never
 
 from pydantic_ai_harness._warn import warn_argument_renamed
 from pydantic_ai_harness._workspace_provider import check_integer, check_working_dir
-from pydantic_ai_harness.modal_sandbox._backend import DEFAULT_APP_NAME, DEFAULT_IMAGE, ModalSandboxBackend
+from pydantic_ai_harness.modal_sandbox._backend import (
+    DEFAULT_APP_NAME,
+    DEFAULT_IMAGE,
+    DEFAULT_SANDBOX_TIMEOUT,
+    ModalSandboxBackend,
+)
 
 if TYPE_CHECKING:
     import modal
@@ -103,15 +108,15 @@ def _legacy_argument_message(names: list[str]) -> str:
 
 @dataclass(kw_only=True, init=False)
 class ModalSandbox(AbstractCapability[AgentDepsT]):
-    """Supply a Modal sandbox as the run's workspace, through `ctx.workspace`.
+    """Supply a Modal sandbox as the run's workspace.
 
     A run with an explicit `WorkspaceRef` attaches to that sandbox. Without a reference, the
     first workspace operation creates a fresh Modal sandbox. Pydantic AI does not terminate the
     sandbox; terminating it is the application's job.
 
     The capability registers no tools. Pair it with `Coder`, or with `Shell` and `FileSystem`,
-    which run their tools against `ctx.workspace`, or write tools that use `ctx.workspace`
-    directly. Shell commands run under `sh -c` in the sandbox's shell environment. Constructor
+    which run their tools in the workspace, or write tools of your own that use it. Shell
+    commands run under `sh -c` in the sandbox's shell environment. Constructor
     arguments of the previous `ModalSandbox`, which bundled its own tools, raise a `UserError`
     that says how to express each one now.
     """
@@ -125,11 +130,11 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     create_app_if_missing: bool = True
     """Whether Modal may create the app."""
 
-    sandbox_timeout: int | None = None
-    """Lifetime of a newly created sandbox, in seconds (Modal's `timeout`); Modal's default when `None`."""
+    sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT
+    """Total lifetime of a newly created sandbox, in seconds (Modal's `timeout`). Defaults to Modal's maximum, 24 hours."""
 
     idle_timeout: int | None = None
-    """Seconds without activity after which Modal terminates a newly created sandbox; Modal's default when `None`."""
+    """Seconds without activity after which Modal terminates a newly created sandbox; `None` never does."""
 
     working_dir: str | None = None
     """Absolute directory commands start in and relative paths resolve against; the image's when `None`."""
@@ -140,7 +145,7 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
     warn_if_no_tools: bool = True
     """Warn once when a run has no `Shell` or `FileSystem` tool to reach the sandbox.
 
-    Set it to `False` for agents that use `ctx.workspace` only from their own code or hooks.
+    Set it to `False` for agents that reach the sandbox only from their own tools or hooks.
     This flag and its warning go away in the stable harness release.
     """
 
@@ -153,7 +158,7 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
         image: str | modal.Image = DEFAULT_IMAGE,
         app_name: str = DEFAULT_APP_NAME,
         create_app_if_missing: bool = True,
-        sandbox_timeout: int | None = None,
+        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
         idle_timeout: int | None = None,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -181,7 +186,7 @@ class ModalSandbox(AbstractCapability[AgentDepsT]):
             )
         # Checked here rather than when the backend first creates a sandbox, so a bad value fails
         # where it is written instead of at the first workspace operation of some later run.
-        check_integer('sandbox_timeout', sandbox_timeout, optional=True)
+        check_integer('sandbox_timeout', sandbox_timeout)
         check_integer('idle_timeout', idle_timeout, optional=True)
         check_working_dir(working_dir)
         self.id = id

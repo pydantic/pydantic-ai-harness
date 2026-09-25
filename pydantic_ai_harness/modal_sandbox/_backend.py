@@ -21,7 +21,7 @@ import posixpath
 import time
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING
 
 import anyio
 from pydantic_ai.exceptions import UserError
@@ -48,14 +48,9 @@ __all__ = ('ModalSandboxBackend',)
 
 DEFAULT_IMAGE = 'python:3.12-slim'
 DEFAULT_APP_NAME = 'pydantic-ai-harness'
-
-
-class _Lifetimes(TypedDict, total=False):
-    """The lifetime arguments of `modal.Sandbox.create` that a backend sets."""
-
-    timeout: int
-    idle_timeout: int
-
+# Modal's maximum sandbox lifetime (24 hours). The framework never terminates a sandbox, so a
+# conversation can continue in it for as long as Modal allows.
+DEFAULT_SANDBOX_TIMEOUT = 86_400
 
 _MISSING_MODAL = (
     'The \'modal\' package is required for ModalSandbox. Install it with `uv add "pydantic-ai-harness[modal]"`.'
@@ -87,23 +82,26 @@ def _is_shutting_down(e: BaseException) -> bool:
     return isinstance(e, modal.exception.ConflictError) and 'shutting down' in str(e).lower()
 
 
-def _translate(error: Exception, *, context: str, gone: str, path: str | None = None) -> Exception | None:
+def _translate(error: Exception, *, context: str, unavailable: str, path: str | None = None) -> Exception | None:
     """Map a Modal SDK exception onto the workspace protocol's typed failures.
 
     Returns `None` for an exception that must propagate unchanged: Modal's connection, rate-limit,
     and internal-service errors, and anything unrecognized, are transient infrastructure failures
-    that a durable engine retries. `gone` is the message for a sandbox that no longer exists;
-    `path` is set for a filesystem operation, whose path-level errors become the builtin ones.
+    that a durable engine retries. `unavailable` is the message for a sandbox that no longer
+    exists; `path` is set for a filesystem operation, whose path-level errors become the builtin
+    ones.
     """
     import modal
 
     exc = modal.exception
     if isinstance(error, (exc.AuthError, exc.PermissionDeniedError)):
         return WorkspaceUnavailableError(_AUTH_MESSAGE)
+    # `SandboxTimeoutError` is the sandbox reaching its lifetime (`sandbox_timeout`), not a
+    # command timing out; a command's own deadline is handled in `run()`.
     if isinstance(error, (exc.NotFoundError, exc.SandboxTerminatedError, exc.SandboxTimeoutError)) or (
         _is_shutting_down(error)
     ):
-        return WorkspaceUnavailableError(gone)
+        return WorkspaceUnavailableError(unavailable)
     if path is not None:
         path_errors: tuple[tuple[type[Exception], type[OSError], str], ...] = (
             (exc.SandboxFilesystemNotFoundError, FileNotFoundError, 'No such file or directory'),
@@ -118,7 +116,7 @@ def _translate(error: Exception, *, context: str, gone: str, path: str | None = 
     if isinstance(
         error,
         (
-            exc.InvalidError,  # includes a non-terminal `ConflictError`
+            exc.InvalidError,  # `ConflictError` subclasses it; the caller probes whether the sandbox is gone
             exc.AlreadyExistsError,
             exc.ExecutionError,
             exc.RequestSizeError,
@@ -156,7 +154,7 @@ def _unwrap_filesystem_error(error: Exception) -> Exception:
 _MAX_SYMLINK_HOPS = 40
 
 
-async def _file_entry(workspace: modal.Sandbox, entry: modal.types.FileInfo, path: str) -> FileEntry:
+async def _file_entry(sandbox: modal.Sandbox, entry: modal.types.FileInfo, path: str) -> FileEntry:
     """The protocol entry for `entry` at `path`, with `is_dir` and `size` following a symlink.
 
     Modal's `stat` and `list_files` describe a symlink itself, so a symlink entry is resolved by
@@ -164,7 +162,6 @@ async def _file_entry(workspace: modal.Sandbox, entry: modal.types.FileInfo, pat
     """
     import modal
 
-    is_symlink = entry.is_symlink()
     target: modal.types.FileInfo | None = entry
     link, hops = path, 0
     while target is not None and target.is_symlink():
@@ -175,7 +172,7 @@ async def _file_entry(workspace: modal.Sandbox, entry: modal.types.FileInfo, pat
         # A relative target is relative to the directory holding the link.
         link = posixpath.join(posixpath.dirname(link), target.symlink_target)
         try:
-            target = await workspace.filesystem.stat.aio(link)
+            target = await sandbox.filesystem.stat.aio(link)
         except (
             modal.exception.SandboxFilesystemNotFoundError,
             modal.exception.SandboxFilesystemNotADirectoryError,
@@ -185,17 +182,17 @@ async def _file_entry(workspace: modal.Sandbox, entry: modal.types.FileInfo, pat
     # A directory's reported size is an implementation detail of the underlying filesystem
     # rather than a content length, so report none for it, like the built-in backends.
     size = None if target is None or is_dir else target.size
-    return FileEntry(name=entry.name, path=path, is_dir=is_dir, size=size, is_symlink=is_symlink)
+    return FileEntry(name=entry.name, path=path, is_dir=is_dir, size=size)
 
 
 class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem):
-    """A Modal sandbox implementing Pydantic AI's ``WorkspaceBackend`` protocol.
+    """A Modal sandbox implementing Pydantic AI's `WorkspaceBackend` protocol.
 
     Construction performs no I/O. The first operation creates or attaches to a sandbox, and the
     typed `modal.Sandbox` is available through `get_client()`. The backend does not terminate the
     sandbox; terminating it is the application's job.
 
-    Modal applies whole-second command deadlines. Cancelling ``run()`` stops the local wait while
+    Modal applies whole-second command deadlines. Cancelling `run()` stops the local wait while
     the command may continue until its deadline or the sandbox lifetime ends.
 
     The protocol is structural, but subclassing it here makes a signature drift fail the type
@@ -203,16 +200,16 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
 
     Args:
         workspace: A live `modal.Sandbox` you already have. Whoever created it owns terminating it.
-        ref: Identity of an existing workspace to attach to on first use.
-        image: Registry tag, or a `modal.Image`, a newly created workspace runs.
-        app_name: Modal app a newly created workspace belongs to.
+        ref: Identity of an existing sandbox to attach to on first use.
+        image: Registry tag, or a `modal.Image`, a newly created sandbox runs.
+        app_name: Modal app a newly created sandbox belongs to.
         create_app_if_missing: Create the Modal app when it does not exist yet.
-        sandbox_timeout: How long Modal keeps a newly created workspace alive, in seconds;
-            Modal's default when `None`.
+        sandbox_timeout: Total lifetime of a newly created sandbox, in seconds (Modal's `timeout`).
+            Defaults to Modal's maximum, 24 hours.
         idle_timeout: Seconds without activity after which Modal terminates a newly created
-            workspace; Modal's default when `None`.
+            sandbox; `None` (the default) never terminates it for being idle.
         working_dir: Absolute directory commands start in and relative paths resolve against,
-            applied to every command, including in an attached workspace; the image's when `None`.
+            applied to every command, including in an attached sandbox; the image's when `None`.
         env: Environment variables every command gets; a command's own `env` is layered on top.
     """
 
@@ -224,7 +221,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         image: str | modal.Image = DEFAULT_IMAGE,
         app_name: str = DEFAULT_APP_NAME,
         create_app_if_missing: bool = True,
-        sandbox_timeout: int | None = None,
+        sandbox_timeout: int = DEFAULT_SANDBOX_TIMEOUT,
         idle_timeout: int | None = None,
         working_dir: str | None = None,
         env: Mapping[str, str] | None = None,
@@ -233,8 +230,8 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'modal'")
         if workspace is not None and ref is not None:
             raise ValueError('pass either `workspace` or `ref`, not both')
-        self._workspace: modal.Sandbox | None = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='modal', id=workspace.object_id)
+        self._sandbox: modal.Sandbox | None = workspace
         self._image = image
         self._app_name = app_name
         self._create_app_if_missing = create_app_if_missing
@@ -242,84 +239,84 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         self._idle_timeout = idle_timeout
         self._working_dir = absolute_path('working_dir', working_dir)
         self._env = dict(env) if env is not None else {}
-        self._probed_working_dir: str | None = None
-        # Set once this backend creates the workspace, so an expiry message can name its lifetime.
-        self._created = False
+        # `_working_dir` is what was configured (`None` for the image's); the protocol needs the
+        # canonical absolute path, which only `pwd -P` in the sandbox can give.
+        self._resolved_working_dir: str | None = None
         self._lock = anyio.Lock()
 
     async def get_client(self) -> modal.Sandbox:
         """Return the typed `modal.Sandbox`, creating or attaching to it on first use.
 
-        The only place `_workspace` is read, so nothing can reach an unacquired handle:
-        it stays optional and every other method comes through here. The lock serializes
-        concurrent first uses -- two callers each creating a sandbox would leave the loser
-        billed and unreferenced. Attaching by `ref` to a sandbox that no longer exists raises
-        `WorkspaceUnavailableError`; it does not create a replacement.
+        The lock serializes concurrent first uses -- two callers each creating a sandbox would
+        leave the loser billed and unreferenced. Attaching by `ref` to a sandbox that no longer
+        exists raises `WorkspaceUnavailableError`; it does not create a replacement.
 
         Raises:
             UserError: The `modal` package is not installed.
         """
         async with self._lock:
-            if (workspace := self._workspace) is not None:
-                return workspace
+            if (sandbox := self._sandbox) is not None:
+                return sandbox
             try:
                 importlib.import_module('modal')
             except ImportError as e:
                 raise UserError(_MISSING_MODAL) from e
             ref = self._ref
-            workspace = await self._attach(ref.id) if ref is not None else await self._create()
-            self._workspace = workspace
-            self._ref = WorkspaceRef(provider='modal', id=workspace.object_id)
-            return workspace
+            sandbox = await self._attach(ref.id) if ref is not None else await self._create()
+            self._sandbox = sandbox
+            self._ref = WorkspaceRef(provider='modal', id=sandbox.object_id)
+            return sandbox
 
     @property
     def ref(self) -> WorkspaceRef | None:
-        """Identity of the workspace, or `None` before one has been created."""
+        """Identity of the sandbox, or `None` before one has been created."""
         return self._ref
 
     @asynccontextmanager
-    async def _mapped_errors(self, context: str, path: str | None = None) -> AsyncGenerator[None]:
+    async def _mapped_errors(
+        self, sandbox: modal.Sandbox, context: str, path: str | None = None
+    ) -> AsyncGenerator[None]:
         """Raise the protocol's typed failure for a Modal exception, and let anything else through."""
         try:
             yield
         except Exception as wrapped:
             error = _unwrap_filesystem_error(wrapped) if path is not None else wrapped
-            mapped = await self._failure(error, context, path)
+            mapped = await _failure(sandbox, error, context, path)
             if mapped is None:
                 raise error
             raise mapped from error
 
     async def read_bytes(self, path: str) -> bytes:
-        workspace = await self.get_client()
-        async with self._mapped_errors(f'Could not read {path!r}', path):
-            return await workspace.filesystem.read_bytes.aio(path)
+        sandbox = await self.get_client()
+        async with self._mapped_errors(sandbox, f'Could not read {path!r}', path):
+            return await sandbox.filesystem.read_bytes.aio(path)
 
     async def write_bytes(self, path: str, data: bytes) -> None:
         # Modal takes the data first, creates missing parents, and replaces existing contents.
-        workspace = await self.get_client()
-        async with self._mapped_errors(f'Could not write {path!r}', path):
-            await workspace.filesystem.write_bytes.aio(data, path)
+        sandbox = await self.get_client()
+        async with self._mapped_errors(sandbox, f'Could not write {path!r}', path):
+            await sandbox.filesystem.write_bytes.aio(data, path)
 
     async def stat(self, path: str) -> FileEntry:
-        workspace = await self.get_client()
-        async with self._mapped_errors(f'Could not stat {path!r}', path):
-            return await _file_entry(workspace, await workspace.filesystem.stat.aio(path), path)
+        sandbox = await self.get_client()
+        async with self._mapped_errors(sandbox, f'Could not stat {path!r}', path):
+            return await _file_entry(sandbox, await sandbox.filesystem.stat.aio(path), path)
 
     async def list_dir(self, path: str) -> Sequence[FileEntry]:
-        workspace = await self.get_client()
-        async with self._mapped_errors(f'Could not list {path!r}', path):
-            entries = await workspace.filesystem.list_files.aio(path)
-            return [await _file_entry(workspace, entry, posixpath.join(path, entry.name)) for entry in entries]
+        sandbox = await self.get_client()
+        async with self._mapped_errors(sandbox, f'Could not list {path!r}', path):
+            entries = await sandbox.filesystem.list_files.aio(path)
+            return [await _file_entry(sandbox, entry, posixpath.join(path, entry.name)) for entry in entries]
 
     async def make_dir(self, path: str) -> None:
-        workspace = await self.get_client()
-        async with self._mapped_errors(f'Could not create directory {path!r}', path):
-            await workspace.filesystem.make_directory.aio(path)
+        sandbox = await self.get_client()
+        async with self._mapped_errors(sandbox, f'Could not create directory {path!r}', path):
+            await sandbox.filesystem.make_directory.aio(path)
 
     async def remove(self, path: str) -> None:
-        workspace = await self.get_client()
-        async with self._mapped_errors(f'Could not remove {path!r}', path):
-            await workspace.filesystem.remove.aio(path, recursive=True)
+        sandbox = await self.get_client()
+        async with self._mapped_errors(sandbox, f'Could not remove {path!r}', path):
+            await sandbox.filesystem.remove.aio(path, recursive=True)
 
     async def exists(self, path: str) -> bool:
         try:
@@ -334,7 +331,7 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         """Provision a fresh Modal sandbox."""
         import modal
 
-        workspace: modal.Sandbox | None = None
+        sandbox: modal.Sandbox | None = None
         try:
             # Shielded so that a caller cancelled mid-create still gets the sandbox Modal made:
             # `get_client` records it before the cancellation is delivered, so `ref` names it and
@@ -347,79 +344,82 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                     if isinstance(self._image, str)
                     else self._image
                 )
-                # Lifetimes are passed only when set, so Modal's own defaults apply otherwise.
-                lifetimes: _Lifetimes = {}
-                if self._sandbox_timeout is not None:
-                    lifetimes['timeout'] = self._sandbox_timeout
-                if self._idle_timeout is not None:
-                    lifetimes['idle_timeout'] = self._idle_timeout
                 variables: dict[str, str | None] | None = dict(self._env) if self._env else None
-                workspace = await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
-                    app=app, image=built, workdir=self._working_dir, env=variables, **lifetimes
+                sandbox = await modal.Sandbox.create.aio(  # pyright: ignore[reportUnknownMemberType]
+                    app=app,
+                    image=built,
+                    workdir=self._working_dir,
+                    env=variables,
+                    timeout=self._sandbox_timeout,
+                    idle_timeout=self._idle_timeout,
                 )
         except Exception as error:
-            # Nothing exists yet, so "not found" here is the app or image, not a sandbox.
-            mapped = _translate(
-                error, context='Could not start Modal sandbox', gone=f'Could not start Modal sandbox: {error}'
-            )
+            message = f'Could not start Modal sandbox: {error}'
+            mapped = _translate(error, context=message, unavailable=message)
             if mapped is None:
                 raise
-            raise mapped from error
-        if workspace is None:
+            # Modal refused the request itself: an unknown app or image, or an invalid argument
+            # such as a `sandbox_timeout` above its limit. Retrying cannot fix that, so it ends
+            # the run rather than going back to the model.
+            raise (
+                mapped if isinstance(mapped, WorkspaceUnavailableError) else WorkspaceUnavailableError(message)
+            ) from error
+        if sandbox is None:
             # A plain `TimeoutError`: an unresponsive control plane is transient, so a durable
             # engine retries it.
             raise TimeoutError(
                 f'Modal sandbox creation did not complete within {_CREATE_TIMEOUT}s; '
                 'the Modal control plane may be unreachable.'
             )
-        self._created = True
-        return workspace
+        return sandbox
 
-    async def _attach(self, id: str) -> modal.Sandbox:
+    async def _attach(self, sandbox_id: str) -> modal.Sandbox:
         """Attach to a Modal sandbox that already exists.
 
-        Modal hands back a handle for a workspace it still knows about even after that workspace
+        Modal hands back a handle for a sandbox it still knows about even after that sandbox
         has terminated, so this polls: a `WorkspaceRef` must not resolve to a dead environment.
         Nothing is recreated in its place -- a run that expected files there must be told they
-        are gone, not handed an empty workspace.
+        are gone, not handed an empty sandbox.
         """
         import modal
 
         try:
-            workspace = await modal.Sandbox.from_id.aio(id)
-            finished = await workspace.poll.aio()
+            sandbox = await modal.Sandbox.from_id.aio(sandbox_id)
+            finished = await sandbox.poll.aio()
         except Exception as error:
             mapped = _translate(
-                error, context=f'Could not connect to Modal sandbox {id!r}', gone=_attached_gone_message(id)
+                error,
+                context=f'Could not connect to Modal sandbox {sandbox_id!r}',
+                unavailable=_unavailable_message(sandbox_id),
             )
             if mapped is None:
                 raise
             raise mapped from error
         if finished is not None:
-            raise WorkspaceUnavailableError(_attached_gone_message(id))
-        return workspace
+            raise WorkspaceUnavailableError(_unavailable_message(sandbox_id))
+        return sandbox
 
     async def working_dir(self) -> str:
-        """The workspace's working directory (absolute POSIX path)."""
-        # Modal exposes no API for a running workspace's working directory -- it is the image's,
-        # or the configured `working_dir` every command is given -- so ask the environment itself,
+        """The sandbox's working directory (absolute POSIX path)."""
+        # Modal exposes no API for a running sandbox's working directory -- it is the image's,
+        # or the configured `working_dir` every command is given -- so ask the sandbox itself,
         # which also canonicalizes a configured path. It cannot change, so the probe is an
         # idempotent read: overlapping first calls may each run their own `pwd`, get the same
         # answer, and the cache converges. No lock needed.
-        if self._probed_working_dir is None:
+        if self._resolved_working_dir is None:
+            sandbox = await self.get_client()
             result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
             printed = result.stdout.removesuffix('\n')
-            # Only an absolute path is an answer. Caching whatever else the environment
-            # printed would hand every later `resolve()` a working directory that is not
-            # one, mis-resolving relative paths with no error.
+            # Only an absolute path is an answer. Caching whatever else the sandbox printed
+            # would hand every later `resolve()` a working directory that is not one,
+            # mis-resolving relative paths with no error.
             if result.exit_code != 0 or not posixpath.isabs(printed):
-                assert self._ref is not None
                 raise WorkspaceError(
-                    f'Could not determine the working directory of Modal sandbox {self._ref.id!r}: '
+                    f'Could not determine the working directory of Modal sandbox {sandbox.object_id!r}: '
                     f'`pwd` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
                 )
-            self._probed_working_dir = printed
-        return self._probed_working_dir
+            self._resolved_working_dir = printed
+        return self._resolved_working_dir
 
     async def run(
         self,
@@ -446,13 +446,16 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         merged = {**self._env, **(env or {})}
         variables: dict[str, str | None] | None = dict(merged) if merged else None
         # Acquiring the sandbox has its own bound; the timeout is the command's alone.
-        workspace = await self.get_client()
+        sandbox = await self.get_client()
+        # Modal takes whole seconds and reads 0 as no deadline, so round up. Messages quote the
+        # caller's `timeout`; the exception's `timeout` attribute is the deadline Modal enforced.
         deadline = None if timeout is None else max(1, math.ceil(timeout))
+        timed_out = f'Command timed out after {timeout} seconds.'
         server_started_at = time.monotonic()
         try:
             with anyio.fail_after(timeout):
-                async with self._mapped_errors('Command could not run in the workspace'):
-                    process = await workspace.exec.aio(
+                async with self._mapped_errors(sandbox, 'Command could not run in the workspace'):
+                    process = await sandbox.exec.aio(
                         *argv, timeout=deadline, workdir=workdir, env=variables, text=False
                     )
         except TimeoutError as error:
@@ -488,14 +491,13 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
                     return task.result()
 
                 raise WorkspaceTimeoutError(
-                    f'Command timed out after {deadline} seconds.',
-                    stdout=captured(tasks[0]),
-                    stderr=captured(tasks[1]),
-                    timeout=deadline,
+                    timed_out, stdout=captured(tasks[0]), stderr=captured(tasks[1]), timeout=deadline
                 ) from error
             if isinstance(error, Exception) and (
-                mapped := await self._failure(
-                    error, 'Could not read the command result (the command may still run until its deadline)'
+                mapped := await _failure(
+                    sandbox,
+                    error,
+                    'Could not read the command result (the command may still run until its deadline)',
                 )
             ):
                 raise mapped from error
@@ -505,72 +507,53 @@ class ModalSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesystem
         if deadline is not None and (
             exit_code == _CLIENT_DEADLINE_EXIT or (exit_code == _SIGKILL_EXIT and elapsed >= deadline)
         ):
-            raise WorkspaceTimeoutError(
-                f'Command timed out after {deadline} seconds.',
-                stdout=stdout,
-                stderr=stderr,
-                timeout=deadline,
-            )
+            raise WorkspaceTimeoutError(timed_out, stdout=stdout, stderr=stderr, timeout=deadline)
         return CommandResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
 
-    def _gone_message(self) -> str:
-        assert self._ref is not None
-        if not self._created:
-            return _attached_gone_message(self._ref.id)
-        lifetime = (
-            "Modal's default lifetime"
-            if self._sandbox_timeout is None
-            else f'its sandbox_timeout of {self._sandbox_timeout}s'
-        )
-        return (
-            f'The Modal sandbox {self._ref.id!r} is no longer running (it may have reached {lifetime}, '
-            'or been terminated). Start a new run, or raise sandbox_timeout for longer work.'
-        )
 
-    async def _failure(self, error: Exception, context: str, path: str | None = None) -> Exception | None:
-        """Translate an SDK failure on the acquired sandbox, or `None` to let it propagate.
-
-        Modal reports two failures ambiguously -- an exec on a dead sandbox raises
-        `ConflictError` (also used for transient aborts), and the filesystem layer wraps
-        everything, including a dead sandbox, in a generic `SandboxFilesystemError` -- so an
-        operation failure of either kind is classified by probing the sandbox before it is
-        reported as one.
-        """
-        import modal
-
-        mapped = _translate(error, context=context, gone=self._gone_message(), path=path)
-        if type(mapped) is WorkspaceError and isinstance(
-            error, (modal.exception.ConflictError, modal.exception.SandboxFilesystemError)
-        ):
-            return await self._probe(error) or mapped
-        return mapped
-
-    async def _probe(self, error: Exception) -> WorkspaceUnavailableError | None:
-        """The terminal failure behind an ambiguous `error`, or `None` if the sandbox still runs."""
-        # Probing only after an error keeps the extra round trip off successful operations.
-        import modal
-
-        try:
-            workspace = await self.get_client()
-            finished = await workspace.poll.aio()
-            if finished is None and isinstance(error, modal.exception.SandboxFilesystemError):
-                # A terminated sandbox that is still shutting down polls as running and fails
-                # filesystem calls with a generic error; only exec names the state.
-                with anyio.fail_after(_INTERNAL_EXEC_TIMEOUT):
-                    await workspace.exec.aio('true', timeout=_INTERNAL_EXEC_TIMEOUT)
-        except Exception as probe_error:
-            # A probe failing for any other reason, a transport error included, leaves the
-            # original error standing rather than replacing it.
-            mapped = _translate(probe_error, context='', gone=self._gone_message())
-            return mapped if isinstance(mapped, WorkspaceUnavailableError) else None
-        if finished is not None:
-            return WorkspaceUnavailableError(self._gone_message())
-        return None
-
-
-def _attached_gone_message(id: str) -> str:
+def _unavailable_message(sandbox_id: str) -> str:
     return (
-        f'The Modal sandbox {id!r} is no longer running '
-        '(it does not exist, was terminated, or expired at its configured lifetime). '
-        'Attach to a live workspace, or create a new one.'
+        f'The Modal sandbox {sandbox_id!r} is no longer running: it was terminated, or it reached its '
+        "`sandbox_timeout` or `idle_timeout`. Pass `workspace='new'` to start a fresh sandbox."
     )
+
+
+async def _failure(sandbox: modal.Sandbox, error: Exception, context: str, path: str | None = None) -> Exception | None:
+    """Translate an SDK failure on `sandbox`, or `None` to let it propagate.
+
+    Two Modal errors do not say whether the sandbox is gone: exec on a dead sandbox raises
+    `ConflictError`, which Modal also uses for transient aborts, and the filesystem layer reports a
+    dead sandbox as a generic `SandboxFilesystemError`. For those, the sandbox is probed before the
+    error is reported as an ordinary operation failure.
+    """
+    import modal
+
+    mapped = _translate(error, context=context, unavailable=_unavailable_message(sandbox.object_id), path=path)
+    if type(mapped) is WorkspaceError and isinstance(
+        error, (modal.exception.ConflictError, modal.exception.SandboxFilesystemError)
+    ):
+        return await _probe(sandbox, error) or mapped
+    return mapped
+
+
+async def _probe(sandbox: modal.Sandbox, error: Exception) -> WorkspaceUnavailableError | None:
+    """`WorkspaceUnavailableError` if `sandbox` has stopped running, else `None`."""
+    # Probing only after an error keeps the extra round trip off successful operations.
+    import modal
+
+    unavailable = _unavailable_message(sandbox.object_id)
+    try:
+        finished = await sandbox.poll.aio()
+        if finished is None and isinstance(error, modal.exception.SandboxFilesystemError):
+            # A terminated sandbox that is still shutting down polls as running and fails
+            # filesystem calls with a generic error; only exec names the state.
+            with anyio.fail_after(_INTERNAL_EXEC_TIMEOUT):
+                await sandbox.exec.aio('true', timeout=_INTERNAL_EXEC_TIMEOUT)
+    except Exception as probe_error:
+        # A probe failing for any other reason, a transport error included, leaves the
+        # original error standing rather than replacing it.
+        mapped = _translate(probe_error, context='', unavailable=unavailable)
+        return mapped if isinstance(mapped, WorkspaceUnavailableError) else None
+    if finished is not None:
+        return WorkspaceUnavailableError(unavailable)
+    return None

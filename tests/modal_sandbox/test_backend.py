@@ -113,6 +113,15 @@ class TestRun:
         assert isinstance(exc.value, TimeoutError)
         assert (exc.value.stdout, exc.value.stderr, exc.value.timeout) == ('partial', 'oops', 5)
 
+    async def test_a_timeout_message_quotes_the_callers_timeout(self, fake_modal: FakeModal) -> None:
+        # Modal enforces whole seconds, so 0.5 runs as a 1-second deadline; the message still
+        # names the timeout the caller asked for.
+        fake_modal.responder = lambda argv, timeout: ('', '', -1)
+        backend = await started()
+        with pytest.raises(WorkspaceTimeoutError, match=r'^Command timed out after 0\.5 seconds\.$') as exc:
+            await backend.run(['sleep', '99'], timeout=0.5)
+        assert exc.value.timeout == 1
+
     async def test_sentinel_without_a_deadline_is_a_real_exit(self, fake_modal: FakeModal) -> None:
         # -1 is only the timeout sentinel when we set a deadline; from another cause it is
         # the honest exit code.
@@ -176,15 +185,15 @@ class TestRun:
         backend = await started()
         fake_modal.exec_error = fake_modal.exception('ConflictError')('Sandbox already finished')
         fake_modal.sandboxes[0].poll_result = 0
-        with pytest.raises(WorkspaceUnavailableError, match="Modal's default lifetime"):
+        with pytest.raises(WorkspaceUnavailableError, match="'sb-owned' is no longer running"):
             await backend.run(['x'])
 
     async def test_shutting_down_conflict_is_terminal(self, fake_modal: FakeModal) -> None:
         # Right after `terminate()`, Modal still polls the sandbox as running but refuses exec
         # with this ConflictError; the sandbox will not come back, so it is not retryable.
-        backend = await started(sandbox_timeout=300)
+        backend = await started()
         fake_modal.exec_error = fake_modal.exception('ConflictError')('Modal Sandbox is shutting down.')
-        with pytest.raises(WorkspaceUnavailableError, match='sandbox_timeout of 300s'):
+        with pytest.raises(WorkspaceUnavailableError, match="'sb-owned' is no longer running"):
             await backend.run(['x'])
 
     async def test_transient_conflict_stays_recoverable(self, fake_modal: FakeModal) -> None:
@@ -218,8 +227,6 @@ class TestRun:
             await backend.run(['x'])
 
     async def test_attached_sandbox_names_itself_when_gone(self, fake_modal: FakeModal) -> None:
-        # A connected backend does not know the lifetime it was created with, so it points
-        # at the sandbox instead of quoting a `sandbox_timeout` it never set.
         backend = await started(ref=WorkspaceRef(provider='modal', id='sb-keep'))
         fake_modal.exec_error = fake_modal.exception('SandboxTerminatedError')('gone')
         with pytest.raises(WorkspaceUnavailableError, match="'sb-keep' is no longer running"):
@@ -335,26 +342,29 @@ class TestCreate:
         assert fake_modal.app_lookups[-1] == {'name': 'pydantic-ai-harness', 'create_if_missing': True}
         assert fake_modal.image_tags[-1] == 'python:3.12-slim'
         assert fake_modal.create_kwargs[-1]['env'] is None
-        # Lifetimes left unset are not passed, so Modal's own defaults apply.
-        assert 'timeout' not in fake_modal.create_kwargs[-1]
-        assert 'idle_timeout' not in fake_modal.create_kwargs[-1]
+        # Modal's maximum lifetime, and no idle termination: Modal's idle termination is permanent,
+        # so it would end a conversation that pauses for a while.
+        assert fake_modal.create_kwargs[-1]['timeout'] == 86_400
+        assert fake_modal.create_kwargs[-1]['idle_timeout'] is None
 
     @pytest.mark.parametrize(
-        ('name', 'expected', 'match'),
+        ('name', 'match'),
         [
-            ('InvalidError', WorkspaceError, 'Could not start Modal sandbox: failed'),
-            ('NotFoundError', WorkspaceUnavailableError, 'Could not start Modal sandbox: failed'),
-            ('AuthError', WorkspaceUnavailableError, 'Modal rejected the credentials'),
+            ('InvalidError', 'Could not start Modal sandbox: failed'),
+            ('NotFoundError', 'Could not start Modal sandbox: failed'),
+            ('AlreadyExistsError', 'Could not start Modal sandbox: failed'),
+            ('ExecutionError', 'Could not start Modal sandbox: failed'),
+            ('AuthError', 'Modal rejected the credentials'),
         ],
     )
-    async def test_create_failures_are_mapped(
-        self, fake_modal: FakeModal, name: str, expected: type[Exception], match: str
-    ) -> None:
-        # Nothing exists yet, so Modal's "not found" names the app or image, not a sandbox.
+    async def test_a_refused_create_is_unavailable(self, fake_modal: FakeModal, name: str, match: str) -> None:
+        # Modal refusing to create the sandbox (an unknown app or image, an invalid argument such
+        # as a `sandbox_timeout` above its limit) cannot be fixed by the model or a retry, so it
+        # ends the run instead of going back to the model as a `WorkspaceError`.
         fake_modal.create_error = fake_modal.exception(name)('failed')
-        with pytest.raises(expected, match=match) as exc:
+        with pytest.raises(WorkspaceUnavailableError, match=match) as exc:
             await started()
-        assert type(exc.value) is expected
+        assert type(exc.value) is WorkspaceUnavailableError
 
     async def test_create_transport_failure_propagates(self, fake_modal: FakeModal) -> None:
         fake_modal.create_error = fake_modal.exception('ResourceExhaustedError')('rate limited')
@@ -450,12 +460,12 @@ class TestFilesystem:
         (tmp_path / 'dangling').symlink_to('missing')
         (tmp_path / 'looping').symlink_to('looping')
         entries = await ModalSandboxBackend().list_dir(str(tmp_path))
-        assert {entry.name: (entry.is_dir, entry.size, entry.is_symlink) for entry in entries} == {
-            'chained': (False, 5, True),
-            'dangling': (False, None, True),
-            'data.txt': (False, 5, False),
-            'looping': (False, None, True),
-            'relative': (False, 5, True),
+        assert {entry.name: (entry.is_dir, entry.size) for entry in entries} == {
+            'chained': (False, 5),
+            'dangling': (False, None),
+            'data.txt': (False, 5),
+            'looping': (False, None),
+            'relative': (False, 5),
         }
 
     async def test_remove_is_recursive(self, fake_modal: FakeModal) -> None:
