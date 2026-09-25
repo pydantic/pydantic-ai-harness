@@ -5,10 +5,10 @@ name: Sandbox live nightly
 # its service changes behavior, or its API rejects a request it used to accept. This runs
 # every provider daily against `main` to catch that, and opens an issue when a run fails.
 #
-# A manual run tests any providers on any ref. To run the live tests for a fork's pull
-# request, read its diff first, then pass `refs/pull/<number>/head` and leave "Use workflow
-# from" on `main`: the workflow definition then comes from `main`, and only the tested code
-# comes from the fork.
+# A manual run tests any providers on the branch chosen in "Use workflow from". To run the
+# live tests for a fork's pull request, read its diff first, push its head to a branch in
+# this repository, and run this workflow from that branch. There is no ref input: checking
+# out another ref from a run on `main` would let untested code write to `main`'s cache.
 
 on:
   schedule:
@@ -19,16 +19,12 @@ on:
         description: 'JSON list of providers, for example ["modal"], or `all`.'
         type: string
         default: all
-      ref:
-        description: 'Ref to test, for example refs/pull/123/head. Empty tests the selected branch.'
-        type: string
-        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: sandbox-live-nightly-${{ inputs.ref || github.ref }}
+  group: sandbox-live-nightly-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -36,7 +32,6 @@ jobs:
     uses: ./.github/workflows/sandbox-live.yml
     with:
       providers: ${{ inputs.providers || 'all' }}
-      ref: ${{ inputs.ref || '' }}
     secrets:
       MODAL_TOKEN_ID: ${{ secrets.MODAL_TOKEN_ID }}
       MODAL_TOKEN_SECRET: ${{ secrets.MODAL_TOKEN_SECRET }}
