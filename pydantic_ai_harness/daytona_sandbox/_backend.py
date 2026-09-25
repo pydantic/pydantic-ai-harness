@@ -9,6 +9,9 @@ External assumptions last verified 2026-09-08 against Daytona Python SDK 0.198.0
 * process sessions provide asynchronous execution, separate stdout and stderr callbacks,
   exit status, and deletion as the per-command kill mechanism:
   https://www.daytona.io/docs/en/python-sdk/async/async-process/
+* the session log stream ends a stream that did not end in a newline with one (`printf abc` streams
+  `abc` plus a newline; observed live 2026-09-25, and the SDK passes frames through unchanged), so each command
+  prints an end marker last on both streams and the output is cut at it.
 * `sandbox.fs` provides metadata, byte upload/download, and directory operations:
   https://www.daytona.io/docs/en/python-sdk/async/async-file-system/
 * `auto_stop_interval` is a creation-time setting; left unset, Daytona stops an idle sandbox after
@@ -110,15 +113,29 @@ async def _delete_session(process: AsyncProcess, session_id: str) -> None:
     )
 
 
-def _command_line(command: WorkspaceCommand, *, shell: bool, cwd: str | None, env: Mapping[str, str]) -> str:
-    """Build the session command: the quoted argv, with the environment and directory applied."""
-    line = shlex.join(command_argv(command, shell))
+def _command_line(
+    command: WorkspaceCommand, *, shell: bool, cwd: str | None, env: Mapping[str, str], marker: str
+) -> str:
+    """Build the session command: the quoted argv, with the environment and directory applied.
+
+    The argv runs under a `sh` that prints `marker` last on stdout and stderr and exits with the
+    argv's status, so `_until_marker` can drop what Daytona appends after a stream's last byte.
+    """
+    script = f'"$@"; status=$?; printf %s {marker}; printf %s {marker} >&2; exit "$status"'
+    line = shlex.join(['sh', '-c', script, 'sh', *command_argv(command, shell)])
     if env:
         assignments = ' '.join(shlex.quote(f'{name}={value}') for name, value in env.items())
         line = f'env -- {assignments} {line}'
     if cwd is not None:
         line = f'cd -- {shlex.quote(cwd)} && {line}'
     return line
+
+
+def _until_marker(chunks: list[str], marker: str) -> str:
+    """The stream's output before `marker`; all of it when the command never printed the marker."""
+    output = ''.join(chunks)
+    head, found, _ = output.rpartition(marker)
+    return head if found else output
 
 
 @dataclass(kw_only=True)
@@ -131,6 +148,7 @@ class _DaytonaProcess:
     _command_id: str
     stdout: list[str]
     stderr: list[str]
+    marker: str
     _logs: asyncio.Task[None]
 
     async def wait(self) -> CommandResult:
@@ -143,7 +161,11 @@ class _DaytonaProcess:
             await _raise_failure(self._sandbox, error, 'Could not read the command result')
         if command.exit_code is None:
             raise WorkspaceError('Daytona closed the command output before reporting an exit status.')
-        return CommandResult(exit_code=command.exit_code, stdout=''.join(self.stdout), stderr=''.join(self.stderr))
+        return CommandResult(
+            exit_code=command.exit_code,
+            stdout=_until_marker(self.stdout, self.marker),
+            stderr=_until_marker(self.stderr, self.marker),
+        )
 
     async def kill(self) -> None:
         """Delete the Daytona process session, which kills its command."""
@@ -463,8 +485,8 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         assert scope.cancel_called
         raise WorkspaceTimeoutError(
             f'Command timed out after {timeout:g} seconds.',
-            stdout=''.join(process.stdout) if process is not None else '',
-            stderr=''.join(process.stderr) if process is not None else '',
+            stdout=_until_marker(process.stdout, process.marker) if process is not None else '',
+            stderr=_until_marker(process.stderr, process.marker) if process is not None else '',
             timeout=timeout,
         )
 
@@ -477,11 +499,13 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
         cwd: str | None,
         env: Mapping[str, str] | None,
     ) -> _DaytonaProcess:
+        marker = f'pydantic-ai-end-{uuid.uuid4().hex}'
         line = _command_line(
             command,
             shell=shell,
             cwd=absolute_path('cwd', cwd) if cwd is not None else self._working_dir,
             env={**self._env, **(env or {})},
+            marker=marker,
         )
         session_id = f'pydantic-ai-{uuid.uuid4().hex}'
         process = sandbox.process
@@ -513,6 +537,7 @@ class DaytonaSandboxBackend(WorkspaceBackend, SupportsCommands, SupportsFilesyst
                 _command_id=response.cmd_id,
                 stdout=stdout,
                 stderr=stderr,
+                marker=marker,
                 _logs=logs,
             )
         raise TimeoutError(f'Daytona command session setup did not complete within {_REQUEST_TIMEOUT}s.')

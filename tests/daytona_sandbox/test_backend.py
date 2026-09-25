@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +50,15 @@ def no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr('pydantic_ai_harness.daytona_sandbox._backend._RETRY_DELAY', 0)
 
 
+# Every command runs under a `sh` that prints a per-command end marker last on both streams.
+_WRAPPER = 'sh -c \'"$@"; status=$?; printf %s MARK; printf %s MARK >&2; exit "$status"\' sh'
+
+
+def _unmarked(command: str | None) -> str:
+    assert command is not None
+    return re.sub(r'pydantic-ai-end-[0-9a-f]{32}', 'MARK', command)
+
+
 async def started(**settings: Any) -> DaytonaSandboxBackend:
     """Build a backend and resolve it now.
 
@@ -89,7 +99,7 @@ class TestCommands:
         sandbox.process_exit_code = 3
         result = await backend.run(['printf', 'a b'], cwd='/work dir', env={'A': 'x y'}, timeout=5)
         assert result == type(result)(exit_code=3, stdout='output', stderr='error')
-        assert sandbox.process_command == ("cd -- '/work dir' && env -- 'A=x y' printf 'a b'")
+        assert _unmarked(sandbox.process_command) == f"cd -- '/work dir' && env -- 'A=x y' {_WRAPPER} printf 'a b'"
         assert sandbox.process_sessions == set()
 
     async def test_missing_exit_status_is_provider_error(self, fake_daytona: FakeDaytona) -> None:
@@ -102,7 +112,7 @@ class TestCommands:
     async def test_sandbox_env_is_layered_under_the_command_env(self, fake_daytona: FakeDaytona) -> None:
         backend = await started(env={'A': '1', 'B': '2'})
         await backend.run(['true'], env={'B': '3'})
-        assert fake_daytona.sandboxes[0].process_command == 'env -- A=1 B=3 true'
+        assert _unmarked(fake_daytona.sandboxes[0].process_command) == f'env -- A=1 B=3 {_WRAPPER} true'
 
     async def test_log_read_failure_propagates(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
@@ -441,7 +451,7 @@ class TestLazyOperations:
     async def test_default_cwd_is_applied_to_commands(self, fake_daytona: FakeDaytona) -> None:
         backend = DaytonaSandboxBackend(working_dir='/work dir')
         await backend.run(['true'])
-        assert fake_daytona.sandboxes[0].process_command == "cd -- '/work dir' && true"
+        assert _unmarked(fake_daytona.sandboxes[0].process_command) == f"cd -- '/work dir' && {_WRAPPER} true"
 
     async def test_working_dir_initializes_identity(self, fake_daytona: FakeDaytona) -> None:
         backend = DaytonaSandboxBackend(working_dir='/workspace')
@@ -539,7 +549,7 @@ async def test_working_directory_is_cached(fake_daytona: FakeDaytona) -> None:
 
 async def test_shell_command_is_passed_to_the_session(fake_daytona: FakeDaytona) -> None:
     await DaytonaSandboxBackend().run('printf hello | cat', shell=True)
-    assert fake_daytona.sandboxes[0].process_command == "/bin/sh -c 'printf hello | cat'"
+    assert _unmarked(fake_daytona.sandboxes[0].process_command) == f"{_WRAPPER} /bin/sh -c 'printf hello | cat'"
 
 
 async def test_attach_finds_target_among_several(fake_daytona: FakeDaytona) -> None:

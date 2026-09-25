@@ -259,14 +259,20 @@ class _HostProcess(FakeProcess):
     ) -> None:
         process, out, err = self.commands[command_id]
         offsets = [0, 0]
+        last = [b'\n', b'\n']
         while True:
             finished = process.poll() is not None
             for index, (stream, handler) in enumerate(((out, on_stdout), (err, on_stderr))):
                 chunk = os.pread(stream.fileno(), os.fstat(stream.fileno()).st_size - offsets[index], offsets[index])
                 offsets[index] += len(chunk)
                 if chunk:
+                    last[index] = chunk[-1:]
                     handler(chunk.decode(errors='replace'))
             if finished:
+                # Like the real log stream, end a stream that did not end in a newline with one.
+                for index, handler in enumerate((on_stdout, on_stderr)):
+                    if last[index] != b'\n':
+                        handler('\n')
                 return
             await anyio.sleep(0.01)
 
