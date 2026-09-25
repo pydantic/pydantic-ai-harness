@@ -177,7 +177,7 @@ async def test_no_api_key_clears_the_choice(tmp_path: Path, monkeypatch: pytest.
     key_choice(monkeypatch, '')
     script(monkeypatch, lists=[pick('key')])
     assert await shell.loader.configure('logfire_mcp') == (
-        'Logfire uses LOGFIRE_API_KEY from the environment, then browser sign-in.'
+        'Logfire uses LOGFIRE_API_KEY from the environment or /keys, then browser sign-in.'
     )
     assert shell.saved()['key'] is None
     assert shell.capability() == LogfireMCP[None](read_only=True)
@@ -223,6 +223,7 @@ def test_menu_validates_resets_and_notes_where_the_key_comes_from(monkeypatch: p
     rows = {row.key: row for row in source.rows()}
     assert (source.current(rows['key']), note()) == ('(none)', 'browser sign-in, if on')
     api_keys.save_key(name='LOGFIRE_API_KEY', value='saved')
+    assert note() == 'LOGFIRE_API_KEY from /keys'
     monkeypatch.setenv('LOGFIRE_API_KEY', 'env')
     assert note() == 'LOGFIRE_API_KEY from the environment'
     source.save(source.settings.model_copy(update={'key': KeyReference(name='GONE')}))
@@ -266,9 +267,12 @@ async def test_environment_key_wins_over_the_conventional_saved_key(
     assert shell.capability() == LogfireMCP[None](read_only=True)
 
 
-async def test_conventional_saved_key_resolves_each_run_when_there_is_no_sign_in(tmp_path: Path) -> None:
+async def test_conventional_saved_key_beats_browser_sign_in_and_resolves_each_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    browser(monkeypatch, found=True)
     api_keys.save_key(name='LOGFIRE_API_KEY', value='first')
-    shell = Shell(tmp_path, {'oauth': False})
+    shell = Shell(tmp_path)
     await shell.loader.enable('logfire_mcp')
     capability = shell.capability()
     assert capability == keyed('LOGFIRE_API_KEY')
@@ -395,7 +399,9 @@ async def test_plugins_menu_stays_open_when_there_is_nothing_to_configure(tmp_pa
     assert await open_plugins_menu(shell.loader, run=run) == ''
 
 
-async def test_cancelling_configure_cancels_an_open_key_picker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_cancelling_configure_waits_for_the_key_picker_to_clean_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     shell = Shell(tmp_path, {'oauth': False})
     await shell.loader.enable('logfire_mcp')
     opened = anyio.Event()
@@ -406,6 +412,9 @@ async def test_cancelling_configure_cancels_an_open_key_picker(tmp_path: Path, m
         try:
             await anyio.sleep_forever()
         finally:
+            # Slow cleanup, like a nested menu worker being joined: configure must wait for it.
+            with anyio.CancelScope(shield=True):
+                await anyio.sleep(0.2)
             finished.append(label)
         return None  # pragma: no cover -- unreachable; keeps the signature honest
 

@@ -128,6 +128,21 @@ def save_key(*, name: str, value: str) -> str:
     return f'Saved {name} in the OS keyring.'
 
 
+def add_key(*, name: str, value: str) -> bool:
+    """Save a key only if no key has that name, checked and saved under one lock; `False` means it exists."""
+    name = normalize_name(name=name)
+    value = value.strip()
+    if not value:
+        raise ValueError('An API key is required.')
+    with key_transaction():
+        keys = _load_keys()
+        if name in keys:
+            return False
+        keys[name] = SecretStr(value)
+        _save_keys(keys=keys)
+    return True
+
+
 def _save_keys(*, keys: dict[str, SecretStr]) -> None:
     save_codex_credentials(
         account='api-keys', value=json.dumps({label: key.get_secret_value() for label, key in keys.items()})

@@ -5,8 +5,8 @@ non-secret options, all edited in the menu that `/plugins configure logfire_mcp`
 """
 
 import asyncio
-import concurrent.futures
 import os
+import threading
 import webbrowser
 from dataclasses import replace
 from urllib.parse import urlsplit
@@ -19,7 +19,7 @@ from termflow.tui import MenuBuilder, MenuItem, TextInputBuilder  # pyright: ign
 
 from . import theme
 from ._rendering import markdown_style
-from .api_keys import KeyReference, SavedKey, load_keys, prompt_api_key, save_key
+from .api_keys import KeyReference, SavedKey, add_key, load_keys, prompt_api_key, save_key
 from .commands import Command
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
 from .mcp import HTTPServer, TokenStore, http_client, oauth
@@ -86,9 +86,10 @@ def activate(host: PluginHost[None]) -> None:
 
 
 def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], KeyReference | None]:
-    """The first of: chosen key, `LOGFIRE_API_KEY` env, browser sign-in, then `/keys` `LOGFIRE_API_KEY`.
+    """The first of: chosen key, `LOGFIRE_API_KEY` env, `/keys` `LOGFIRE_API_KEY`, then browser sign-in.
 
-    Returns the key the capability depends on, if any. Nothing here reads `/keys`, which takes a lock.
+    Returns the key the capability depends on, if any. `/keys` takes a cross-process lock, so it is read
+    only when browser sign-in would otherwise be used.
     """
 
     def build(
@@ -106,7 +107,8 @@ def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], KeyR
         return build(auth=SavedKey(name=settings.key.name, setup=SETUP)), settings.key
     if os.environ.get(KEY_NAME):
         return build(), None
-    if settings.oauth and (TokenStore(TOKEN_ACCOUNT).signed_in() or _has_browser()):
+    oauth = settings.oauth and (TokenStore(TOKEN_ACCOUNT).signed_in() or _has_browser())
+    if oauth and KEY_NAME not in load_keys():
         return build(client=_oauth_client(url=settings.url)), None
     # Read on every run, so saving LOGFIRE_API_KEY in /keys connects without a reload.
     return build(auth=SavedKey(name=KEY_NAME, setup=SETUP)), KeyReference(name=KEY_NAME)
@@ -140,8 +142,8 @@ _KEY = FieldRow(
     label='API key',
     description=(
         f'The saved key in /keys that Logfire connects with. Enter picks a saved key or saves a new one as {KEY_NAME}; '
-        f'plugin settings keep only its name. Unset uses {KEY_NAME} from the environment, then browser sign-in. '
-        'Any plugin naming the same key shares it.'
+        f'plugin settings keep only its name. Unset uses {KEY_NAME} from the environment or /keys, then browser '
+        'sign-in. Any plugin naming the same key shares it.'
     ),
     default='(none)',
 )
@@ -176,7 +178,7 @@ _ROWS = (
     FieldRow(
         key='oauth',
         label='Browser sign-in',
-        description='Sign in through the browser when no API key is chosen or set. Tokens stay in the OS keyring.',
+        description='Sign in through the browser when no API key is chosen, set, or saved. Tokens stay in the OS keyring.',
         default='true',
         choices=('true', 'false'),
         choice_labels={'true': 'when there is no key', 'false': 'off'},
@@ -249,7 +251,9 @@ class LogfireMCPSource:
 def _key_note(key: KeyReference | None) -> str:
     if key is not None:
         return 'missing from /keys' if key.name not in load_keys() else ''
-    return f'{KEY_NAME} from the environment' if os.environ.get(KEY_NAME) else 'browser sign-in, if on'
+    if os.environ.get(KEY_NAME):
+        return f'{KEY_NAME} from the environment'
+    return f'{KEY_NAME} from /keys' if KEY_NAME in load_keys() else 'browser sign-in, if on'
 
 
 async def _configure(source: LogfireMCPSource) -> str:
@@ -257,12 +261,21 @@ async def _configure(source: LogfireMCPSource) -> str:
 
     def pick_key() -> list[str]:
         # The key picker is async, so the menu's thread hands it back to the event loop. Its widgets
-        # watch their own stop signal, so cancelling this worker must cancel the picker explicitly.
-        picking = asyncio.run_coroutine_threadsafe(_choose_key(), loop)
-        while not (picking.done() or worker_stopping()):
-            concurrent.futures.wait([picking], timeout=0.05)
-        if not picking.done():
-            picking.cancel()
+        # watch their own stop signal, so cancelling this worker must cancel the picker explicitly, then
+        # wait until its own workers have released the terminal before this one does.
+        finished = threading.Event()
+
+        async def start() -> asyncio.Task[KeyReference | str | None]:
+            task = asyncio.create_task(_choose_key())
+            task.add_done_callback(lambda _: finished.set())
+            return task
+
+        picking = asyncio.run_coroutine_threadsafe(start(), loop).result()
+        while not (finished.is_set() or worker_stopping()):
+            finished.wait(timeout=0.05)
+        if not finished.is_set():
+            loop.call_soon_threadsafe(picking.cancel)
+            finished.wait()
             return []
         choice = picking.result()
         if choice is None:
@@ -270,7 +283,7 @@ async def _configure(source: LogfireMCPSource) -> str:
         key = choice if isinstance(choice, KeyReference) else None
         source.save(source.settings.model_copy(update={'key': key}))
         if key is None:
-            return [f'Logfire uses {KEY_NAME} from the environment, then browser sign-in.']
+            return [f'Logfire uses {KEY_NAME} from the environment or /keys, then browser sign-in.']
         return [f'Logfire uses the saved key {key.name}. Manage it in /keys.']
 
     menu = FieldMenu(source)
@@ -307,9 +320,11 @@ async def _choose_key() -> KeyReference | None | str:
     value = choice.strip()
     if not value:
         return None
-    if KEY_NAME in await asyncio.to_thread(load_keys) and not await run_worker(_confirm_replace):
-        return None
-    await asyncio.to_thread(save_key, name=KEY_NAME, value=value)
+    # Added only if absent, atomically, so a key another CLAI process just saved is never replaced unasked.
+    if not await asyncio.to_thread(add_key, name=KEY_NAME, value=value):
+        if not await run_worker(_confirm_replace):
+            return None
+        await asyncio.to_thread(save_key, name=KEY_NAME, value=value)
     return KeyReference(name=KEY_NAME)
 
 
