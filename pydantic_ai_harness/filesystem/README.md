@@ -279,7 +279,7 @@ need `**`.
 | `read_only_patterns` | Matching paths are read-only: reads succeed, writes are rejected. |
 
 `read_only_patterns` defaults to `.git/*`, `.env`/`.env.*`, `*.pem`, `*.key`,
-and `**/secrets*`, and `.pydantic-ai-harness/**`, where harness capabilities keep
+and `**/secrets*`, and `**/.pydantic-ai-harness/**`, where harness capabilities keep
 their own files (spilled tool output, background job status). Pass an empty list to make every path writable.
 `protected_patterns` is its deprecated name and still works, with a warning.
 

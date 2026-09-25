@@ -306,15 +306,19 @@ class TestPathSecurity:
         with pytest.raises(ModelRetry, match="'.env' is protected"):
             await toolset.write_file('envlink', 'HACKED=1\n', workspace=ws)
 
-    async def test_harness_metadata_is_read_only_by_default(self, fs_root: Path, ws: LocalWorkspaceBackend) -> None:
-        status = fs_root / '.pydantic-ai-harness' / 'shell' / 'job' / 'status.json'
+    @pytest.mark.parametrize('parent', ['', 'nested/'])
+    async def test_harness_metadata_is_read_only_by_default(
+        self, fs_root: Path, ws: LocalWorkspaceBackend, parent: str
+    ) -> None:
+        path = f'{parent}.pydantic-ai-harness/shell/job/status.json'
+        status = fs_root / path
         status.parent.mkdir(parents=True)
         status.write_text('{"pid": 1, "exit_code": null}')
         toolset = FileSystem[None]().get_toolset()
         assert isinstance(toolset, FileSystemToolset)
-        assert 'exit_code' in await toolset.read_file('.pydantic-ai-harness/shell/job/status.json', workspace=ws)
+        assert 'exit_code' in await toolset.read_file(path, workspace=ws)
         with pytest.raises(ModelRetry, match='is protected'):
-            await toolset.write_file('.pydantic-ai-harness/shell/job/status.json', '{}', workspace=ws)
+            await toolset.write_file(path, '{}', workspace=ws)
         assert 'null' in status.read_text()
 
     async def test_root_at_the_filesystem_root_follows_symlinks_anywhere(

@@ -29,7 +29,7 @@ _DEFAULT_READ_ONLY: tuple[str, ...] = (
     '*.pem',
     '*.key',
     '**/secrets*',
-    '.pydantic-ai-harness/**',
+    '**/.pydantic-ai-harness/**',
 )
 
 
