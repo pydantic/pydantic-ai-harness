@@ -71,7 +71,7 @@ except ImportError as error:  # pragma: no cover - exercised by the isolated mis
     raise ImportError('Install `pydantic-ai-harness[daytona]` to use DaytonaSandbox.') from error
 
 _AUTH_MESSAGE = (
-    'Daytona did not accept the credentials. Set DAYTONA_API_KEY, or pass a configured `AsyncDaytona` as `client=`.'
+    'Daytona rejected the credentials. Set DAYTONA_API_KEY, or pass a configured `AsyncDaytona` as `client=`.'
 )
 # Bound sandbox acquisition so a wedged control plane cannot hang creation or connection.
 _CREATE_TIMEOUT = 120
