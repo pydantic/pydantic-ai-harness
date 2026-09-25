@@ -66,3 +66,10 @@ HARNESS_PLUGINS: tuple[PluginSettings, ...] = tuple(
     PluginSettings(id=name, factory=f'pydantic_ai_harness.{factory}', enabled=False) for name, factory in _FACTORIES
 )
 """Disabled built-ins. The loader imports a capability only when the user enables it."""
+
+RETIRED_BUILTINS: dict[str, PluginSettings] = {
+    'google_workspace': PluginSettings(
+        id='google_workspace', factory='pydantic_ai_harness.google_workspace:GoogleWorkspace', enabled=False
+    ),
+}
+"""Former built-in declarations. A stored copy of one loads the built-in now declared under its id."""

@@ -20,6 +20,7 @@ from typing_extensions import TypeIs
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.api_keys import delete_key, save_key
 from pydantic_clai2.commands import Commands
+from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.google_workspace import MISSING_TOKEN, activate
 from pydantic_clai2.plugin_loader import PluginLoader
 from pydantic_clai2.plugin_menu import PluginMenu
@@ -111,20 +112,23 @@ def test_settings_reject_bad_values_and_credentials(settings: dict[str, JsonValu
         activate(host(settings))
 
 
+def loader(store: SettingsStore, builtin: Sequence[PluginSettings] = DEFAULT_PLUGINS) -> PluginLoader[None]:
+    return PluginLoader(
+        store=store,
+        console=Console(file=io.StringIO()),
+        commands=Commands(),
+        session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=store.load()),
+        builtin=builtin,
+    )
+
+
 def test_declared_as_a_disabled_builtin_that_enables_from_the_menu(tmp_path: Path) -> None:
     [declaration] = [plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'google_workspace']
     assert declaration.factory == 'pydantic_clai2.google_workspace'
     assert not declaration.enabled
     assert not any(plugin.factory.startswith('pydantic_ai_harness.google_workspace') for plugin in DEFAULT_PLUGINS)
 
-    store = SettingsStore(tmp_path / 'settings.db')
-    plugins = PluginLoader(
-        store=store,
-        console=Console(file=io.StringIO()),
-        commands=Commands(),
-        session_start=lambda: SessionStart(agent=Agent(TestModel()), settings=store.load()),
-        builtin=(declaration,),
-    )
+    plugins = loader(SettingsStore(tmp_path / 'settings.db'), builtin=(declaration,))
 
     def apply(action: Coroutine[object, object, object]) -> None:
         asyncio.run(action)
@@ -143,3 +147,31 @@ def test_declared_as_a_disabled_builtin_that_enables_from_the_menu(tmp_path: Pat
     [capability] = plugins.capabilities()
     assert isinstance(capability, GoogleWorkspace)
     asyncio.run(plugins.close('exit'))
+
+
+def test_the_former_catalog_entry_saved_by_the_menu_loads_the_builtin(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path / 'settings.db')
+    former = PluginSettings(id='google_workspace', factory='pydantic_ai_harness.google_workspace:GoogleWorkspace')
+    store.save_plugin(former)
+    [entry] = [entry for entry in loader(store).entries() if entry.name == 'google_workspace']
+    assert entry.declaration.factory == 'pydantic_clai2.google_workspace'
+    assert entry.declaration.enabled
+    assert entry.builtin
+
+    store.save_plugin(former.model_copy(update={'enabled': False}))
+    [entry] = [entry for entry in loader(store).entries() if entry.name == 'google_workspace']
+    assert entry.declaration.factory == 'pydantic_clai2.google_workspace'
+    assert not entry.declaration.enabled
+
+
+def test_a_former_declaration_with_its_own_settings_is_kept(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path / 'settings.db')
+    custom = PluginSettings(
+        id='google_workspace',
+        factory='pydantic_ai_harness.google_workspace:GoogleWorkspace',
+        settings={'services': ['gmail']},
+    )
+    store.save_plugin(custom)
+    [entry] = [entry for entry in loader(store).entries() if entry.name == 'google_workspace']
+    assert entry.declaration == custom
+    assert not entry.builtin

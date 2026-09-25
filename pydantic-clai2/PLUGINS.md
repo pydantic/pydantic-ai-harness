@@ -541,6 +541,12 @@ CLAI runs tools without asking first, so `read_only` defaults to `true`. Set it 
 
 The token does not go in these settings; they are stored in plain SQLite.
 
+Earlier versions listed `google_workspace` as a raw harness entry,
+`pydantic_ai_harness.google_workspace:GoogleWorkspace`. If you turned that entry on
+or off in the menu, CLAI now loads this plugin in its place and keeps your on or off
+choice. A declaration you added with its own settings under that factory is kept
+as written.
+
 ## Managing plugins
 
 `/plugins` on its own opens a full-screen menu, the same kind Code Puppy uses
