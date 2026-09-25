@@ -3,7 +3,8 @@
 The live tests start real, billed sandboxes, so CI runs a provider's live tier only when a
 change could break it:
 
-- the provider's own package or tests changed;
+- the provider's own package (its README included), docs page, or tests changed; the live
+  tier runs every example on the docs page;
 - the provider's SDK moved in `uv.lock`;
 - code every provider runs under changed (`SHARED`), or the `pydantic-ai-slim` pin moved,
   which is how a change to the workspace protocol reaches the harness. Either one runs every
@@ -14,9 +15,9 @@ live test. CI installs with `--locked`, so a `pyproject.toml` change that matter
 provider always shows up as a moved lock entry.
 
 A provider named in `PROVIDERS` follows one layout: package `pydantic_ai_harness/<name>_sandbox`,
-tests `tests/<name>_sandbox`, extra `<name>`, marker `<name>_live`, and the environment
-variables `PYDANTIC_AI_HARNESS_<NAME>_LIVE` and `<NAME>_REQUIRE_LIVE`. Adding a provider is
-one entry here. A provider whose package is not in the tree yet is never selected.
+docs page `docs/<name>-sandbox.md`, tests `tests/<name>_sandbox`, extra `<name>`, marker
+`<name>_live`, and the environment variables `PYDANTIC_AI_HARNESS_<NAME>_LIVE` and
+`<NAME>_REQUIRE_LIVE`. Adding a provider is one entry here. A provider whose package is not in the tree yet is never selected.
 
 Usage:
 
@@ -44,6 +45,7 @@ SHARED = (
     'pydantic_ai_harness/coder/',
     'tests/conftest.py',
     'tests/_tool_calls.py',
+    'tests/_docs_examples.py',
     '.github/workflows/sandbox-live.yml',
     'scripts/sandbox_live_changes.py',
 )
@@ -108,7 +110,7 @@ def providers_for(
 
     selected: list[str] = []
     for name, packages in PROVIDERS.items():
-        own = (f'pydantic_ai_harness/{name}_sandbox/', f'tests/{name}_sandbox/')
+        own = (f'pydantic_ai_harness/{name}_sandbox/', f'docs/{name}-sandbox.md', f'tests/{name}_sandbox/')
         if shared or any(_touches(path, own) for path in files) or moved & set(packages):
             selected.append(name)
     allowed = set(PROVIDERS if present is None else present)
