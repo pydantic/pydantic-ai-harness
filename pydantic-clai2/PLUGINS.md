@@ -385,8 +385,9 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
+`Coder`, `AskUser`, and `RepoContext` use the integrated entries above, and
+`Ordinal` uses the [`ordinal`](#ordinal-social-posts-in-ordinal) built-in, instead
+of appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
 Press Space to enable an entry. Its preview shows the import path and any load
@@ -506,6 +507,27 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+### `ordinal`: social posts in Ordinal
+
+`ordinal` (`pydantic_clai2.ordinal`) gives the model harness
+[`Ordinal`](../pydantic_ai_harness/ordinal/README.md), which drafts, schedules,
+and analyzes social posts through Ordinal's hosted MCP server. It starts disabled;
+`/plugins enable ordinal` turns it on. Ordinal MCP needs the Pro plan or higher.
+
+How it signs in:
+
+- **`ORDINAL_ACCESS_TOKEN` set**: that token, for every run.
+- **Otherwise**: the first run that uses Ordinal opens your browser to sign in.
+  CLAI keeps the tokens in the OS keyring (the private credential file when no
+  keyring exists), as `/mcp` does for OAuth servers, so later launches reuse them.
+  The browser sign-in only works on the machine you run CLAI on.
+- **No token, no saved sign-in, and no terminal** (headless runs from CI, say):
+  the plugin fails to load and names `ORDINAL_ACCESS_TOKEN`, rather than adding
+  tools that cannot connect.
+
+`/ordinal` shows which of these applies; `/ordinal logout` forgets the saved
+sign-in. Disabling the plugin does not sign you out.
 
 ## Managing plugins
 
