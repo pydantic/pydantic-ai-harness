@@ -77,6 +77,8 @@ _T = TypeVar('_T')
 _CLOSE_TIMEOUT = 6.0
 # Above the SDK's fixed 120-second creation request timeout, so the SDK's own error wins when it fires.
 _ACQUIRE_TIMEOUT = 150.0
+# Bounds the internal `pwd` probe behind `working_dir()`, which may first wake a sleeping Sprite.
+_INTERNAL_EXEC_TIMEOUT = 30
 _AUTH_MESSAGE = (
     'Sprites rejected the credentials. Set SPRITE_TOKEN, or pass a configured `AsyncSpritesClient` as `client=`.'
 )
@@ -306,11 +308,15 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
 
     async def working_dir(self) -> str:
         if self._resolved_working_dir is None:
-            result = await self.run(['pwd', '-P'], timeout=30)
-            directory = result.stdout.removesuffix('\n')
-            if result.exit_code != 0 or not posixpath.isabs(directory):
-                raise WorkspaceError('Could not determine the Sprite working directory.')
-            self._resolved_working_dir = directory
+            result = await self.run(['pwd', '-P'], timeout=_INTERNAL_EXEC_TIMEOUT)
+            printed = result.stdout.removesuffix('\n')
+            if result.exit_code != 0 or not posixpath.isabs(printed):
+                sprite = await self.get_client()
+                raise WorkspaceError(
+                    f'Could not determine the working directory of Sprite {sprite.name!r}: '
+                    f'`pwd -P` exited {result.exit_code} and printed {result.stdout!r}. Use absolute paths.'
+                )
+            self._resolved_working_dir = printed
         return self._resolved_working_dir
 
     async def run(
