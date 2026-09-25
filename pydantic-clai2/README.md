@@ -9,9 +9,8 @@ see [Questions from the model](#questions-from-the-model). The built-in
 into the agent's instructions; `/plugins disable repo_context` turns that off.
 Context management is the built-in `compaction` plugin,
 [described below](#compacting-the-conversation).
-The `/plugins` menu also lists every other harness capability, disabled by
-default. Press Space to enable one. Some need optional packages, credentials,
-or constructor settings first; see [optional harness capabilities](PLUGINS.md#optional-harness-capabilities).
+Other harness capabilities are not listed in `/plugins`; add one on purpose with
+`/plugins add`, see [other harness capabilities](PLUGINS.md#other-harness-capabilities).
 `/plugins enable logfire_mcp` lets the agent query your Logfire telemetry, using
 `LOGFIRE_API_KEY`, a key saved with `/keys`, or a browser sign-in; see
 [Logfire MCP](PLUGINS.md#logfire-mcp-query-your-telemetry).
@@ -693,7 +692,15 @@ the agent's configured tools determine how it can access it. Separately, bracket
 paste of existing image paths creates attachments as described in
 [Pasting images](#pasting-images).
 
-Up/down move through multiline drafts, then recall saved prompt history.
+Up/down move through multiline drafts, then recall queued messages and saved
+prompt history. Queued messages come first, newest first, because they are
+your most recent input; Up then continues into history, skipping the copies of
+queued messages that history already holds. Enter on a recalled queued message
+rewrites it in place, keeping its position in the queue, and the queue row
+shows `(editing)` meanwhile. Clearing the draft and pressing Enter removes the
+message from the queue. If the run takes the message before you press Enter,
+the edit is queued as a new follow-up. With nothing queued, Up/down only walk
+history.
 Enter submits a prompt when idle and queues a separate follow-up turn when busy.
 To steer instead, first queue the message with Enter, then press Alt+Enter
 (Option+Enter). This sends the oldest queued follow-up to the active run at its

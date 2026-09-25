@@ -346,7 +346,9 @@ is needed and no tokens are stored, or no credential with `oauth` off.
 | `read_only` | `true` | offer only the tools the server marks read-only; `false` also allows tools that change Logfire resources |
 
 Key values are not accepted in plugin settings. The credential's own scopes still
-decide which projects and actions are allowed.
+decide which projects and actions are allowed. If you enabled `logfire_mcp` from
+the old harness catalog, that saved declaration still takes this plugin's place;
+`/plugins remove logfire_mcp` switches to this one.
 
 ## Where plugins live
 
@@ -415,32 +417,30 @@ order plugin instructions, renderers, and status segments are consulted in.
 | `persistence` | `pydantic_clai2.sessions` | `{}` | Harness step checkpoints for interrupted session recovery |
 | `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
 
-### Optional harness capabilities
+### Other harness capabilities
 
-`/plugins` and `/plugins list` also include every other public harness capability,
-including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above, and
-`LogfireMCP` uses [`logfire_mcp`](#logfire-mcp-query-your-telemetry), instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
-are not separate capabilities.
+`/plugins` lists only the built-ins above, plus plugins you or the repository
+declared. It does not list every public harness capability for Space-enable:
+hosted-MCP integrations such as Slack or GitHub, sandboxes, and guardrails need
+credentials, extras, or settings that a checkbox cannot supply, so they belong in
+CLAI plugins written for them, such as
+[`logfire_mcp`](#logfire-mcp-query-your-telemetry).
 
-Press Space to enable an entry. Its preview shows the import path and any load
-error. Listing disabled entries does not import their modules or require their
-optional packages. Some capabilities need an extra installed in CLAI's Python
-environment, credentials, or constructor settings before they can load. Supply
-JSON constructor settings by replacing the declaration under the same id:
+To run any other capability, declare it on purpose under an id of your choice,
+with JSON constructor settings if it takes them:
 
 ```text
 /plugins add sliding_window_compaction pydantic_ai_harness.compaction:SlidingWindowCompaction '{"max_messages": 40}'
 ```
 
-For callbacks, stores, or other Python objects, use a plugin module that builds
-the capability and calls `host.add(...)`, registered under that id. The menu does
-not construct these objects or install dependencies. Avoid enabling overlapping
-tool providers together, such as `filesystem` or `shell` alongside `coder`.
-Removing an optional built-in restores its disabled declaration; enable and
-disable choices persist between launches. Project, drop-in, and saved declarations
-retain their usual precedence over built-ins.
+For callbacks, stores, or other Python objects, write a plugin module that builds
+the capability and calls `host.add(...)`. CLAI does not install the capability's
+optional dependencies. Avoid enabling overlapping tool providers together, such
+as `filesystem` or `shell` alongside `coder`.
+
+Earlier releases listed every harness capability here, disabled. If you enabled
+one of those, it was saved as your own declaration, so it keeps loading and now
+shows as a saved plugin; `/plugins remove NAME` forgets it.
 
 `/plugins disable coder` gives you a chat-only CLAI (a writing or research setup
 with `ExaSearch` instead, say); `/plugins enable coder` brings the tools back;
