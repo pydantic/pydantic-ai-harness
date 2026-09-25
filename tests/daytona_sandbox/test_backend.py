@@ -99,7 +99,7 @@ class TestCommands:
         sandbox.process_exit_code = 3
         result = await backend.run(['printf', 'a b'], cwd='/work dir', env={'A': 'x y'}, timeout=5)
         assert result == type(result)(exit_code=3, stdout='output', stderr='error')
-        assert _unmarked(sandbox.process_command) == f"cd -- '/work dir' && env -- 'A=x y' {_WRAPPER} printf 'a b'"
+        assert _unmarked(sandbox.process_command) == f"cd -- '/work dir' && {_WRAPPER} env -- 'A=x y' printf 'a b'"
         assert sandbox.process_sessions == set()
 
     async def test_missing_exit_status_is_provider_error(self, fake_daytona: FakeDaytona) -> None:
@@ -112,7 +112,16 @@ class TestCommands:
     async def test_sandbox_env_is_layered_under_the_command_env(self, fake_daytona: FakeDaytona) -> None:
         backend = await started(env={'A': '1', 'B': '2'})
         await backend.run(['true'], env={'B': '3'})
-        assert _unmarked(fake_daytona.sandboxes[0].process_command) == f'env -- A=1 B=3 {_WRAPPER} true'
+        assert _unmarked(fake_daytona.sandboxes[0].process_command) == f'{_WRAPPER} env -- A=1 B=3 true'
+
+    async def test_env_names_that_are_not_shell_identifiers_reach_the_command(
+        self, fake_daytona: FakeDaytona, tmp_path: Path
+    ) -> None:
+        # `env` runs inside the wrapper's `sh`; outside it, a dash `sh` would drop `A.B` before the command ran.
+        fake_daytona.host_root = tmp_path.resolve()
+        backend = await started(env={'A.B': 'sandbox'})
+        result = await backend.run(['env'], env={'C-D': 'command'})
+        assert {'A.B=sandbox', 'C-D=command'} <= set(result.stdout.splitlines())
 
     async def test_log_read_failure_propagates(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
@@ -220,14 +229,15 @@ class TestCommands:
             await backend.run(['true'], timeout=timeout)
 
 
-# `None` means the SDK error propagates unchanged, as a transient failure durable engines retry.
-_ERROR_MAPPING: list[tuple[Exception, type[Exception] | None]] = [
+# What creating a sandbox raises for each SDK error. `None` means the SDK error propagates unchanged,
+# as a transient failure durable engines retry; a refused creation ends the run.
+_CREATE_ERRORS: list[tuple[Exception, type[Exception] | None]] = [
     (DaytonaAuthenticationError('bad key', status_code=401), WorkspaceUnavailableError),
     (DaytonaAuthorizationError('forbidden', status_code=403), WorkspaceUnavailableError),
-    (DaytonaValidationError('bad request', status_code=400), WorkspaceError),
-    (DaytonaConflictError('name taken', status_code=409), WorkspaceError),
-    (DaytonaNotFoundError('no such snapshot', status_code=404), WorkspaceError),
-    (DaytonaError('unprocessable', status_code=422), WorkspaceError),
+    (DaytonaValidationError('bad request', status_code=400), WorkspaceUnavailableError),
+    (DaytonaConflictError('name taken', status_code=409), WorkspaceUnavailableError),
+    (DaytonaNotFoundError('no such snapshot', status_code=404), WorkspaceUnavailableError),
+    (DaytonaError('unprocessable', status_code=422), WorkspaceUnavailableError),
     (DaytonaRateLimitError('slow down', status_code=429), None),
     (DaytonaError('bad gateway', status_code=502), None),
     (DaytonaError('unknown'), None),
@@ -239,8 +249,8 @@ _ERROR_MAPPING: list[tuple[Exception, type[Exception] | None]] = [
 
 
 class TestErrorsAndFilesystem:
-    @pytest.mark.parametrize(('sdk_error', 'expected'), _ERROR_MAPPING, ids=lambda value: type(value).__name__)
-    async def test_sdk_error_mapping(
+    @pytest.mark.parametrize(('sdk_error', 'expected'), _CREATE_ERRORS, ids=lambda value: type(value).__name__)
+    async def test_creation_error_mapping(
         self, fake_daytona: FakeDaytona, sdk_error: Exception, expected: type[Exception] | None
     ) -> None:
         fake_daytona.create_error = sdk_error
@@ -252,10 +262,24 @@ class TestErrorsAndFilesystem:
             assert type(exc_info.value) is expected
             assert exc_info.value.__cause__ is sdk_error
 
+    async def test_refused_creation_names_the_provider_and_the_sdk_message(self, fake_daytona: FakeDaytona) -> None:
+        fake_daytona.create_error = DaytonaNotFoundError("Snapshot 'nope' not found", status_code=404)
+        with pytest.raises(
+            WorkspaceUnavailableError, match="^Could not start Daytona sandbox: Snapshot 'nope' not found$"
+        ):
+            await DaytonaSandboxBackend(snapshot='nope').run(['true'])
+
     async def test_missing_api_key_is_unavailable_with_the_auth_message(self, fake_daytona: FakeDaytona) -> None:
         fake_daytona.client_error = DaytonaAuthenticationError('Authentication credentials not found.')
         with pytest.raises(WorkspaceUnavailableError, match='Set DAYTONA_API_KEY'):
             await DaytonaSandboxBackend().run(['true'])
+
+    async def test_client_setup_failure_other_than_credentials_propagates(self, fake_daytona: FakeDaytona) -> None:
+        error = DaytonaConnectionError('offline')
+        fake_daytona.client_error = error
+        with pytest.raises(DaytonaConnectionError) as exc_info:
+            await DaytonaSandboxBackend().run(['true'])
+        assert exc_info.value is error
 
     async def test_concurrent_first_probes_converge(self, fake_daytona: FakeDaytona) -> None:
         # The probe is an idempotent read, so overlapping first calls are allowed to
