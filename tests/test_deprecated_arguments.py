@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.coder import Coder
@@ -16,7 +17,6 @@ from pydantic_ai_harness.repo_context import RepoContext, RepoContextToolset
 from pydantic_ai_harness.shell import Shell, ShellToolset
 
 from ._tool_calls import call_tool
-from ._workspace import local_workspace
 
 pytestmark = pytest.mark.anyio
 
@@ -108,7 +108,7 @@ async def test_working_directory_argument_warns_and_has_no_effect(
     with pytest.warns(HarnessDeprecationWarning, match=warning):
         capability = build('elsewhere', fake_cli)
 
-    assert expected in await call_tool([capability], tool, arguments, workspace=local_workspace(tmp_path))
+    assert expected in await call_tool([capability], tool, arguments, workspace=LocalWorkspaceBackend(tmp_path))
 
 
 @pytest.mark.parametrize(

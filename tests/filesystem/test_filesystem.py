@@ -48,7 +48,6 @@ from pydantic_ai_harness.filesystem._toolset import (
 )
 
 from .._tool_calls import call_tool, call_tools
-from .._workspace import local_workspace
 
 
 class ReadOnlyMount(LocalWorkspaceBackend):
@@ -134,7 +133,7 @@ class FilesystemOnlyWorkspace:
     """
 
     def __init__(self, working_dir: Path) -> None:
-        self._local = local_workspace(working_dir)
+        self._local = LocalWorkspaceBackend(working_dir)
 
     @property
     def ref(self) -> WorkspaceRef | None:
@@ -252,7 +251,7 @@ def fs_root(tmp_path: Path) -> Path:
 @pytest.fixture
 def ws(tmp_path: Path) -> LocalWorkspaceBackend:
     """The workspace for direct calls, whose working directory is the root the toolsets here use."""
-    return local_workspace(tmp_path)
+    return LocalWorkspaceBackend(tmp_path)
 
 
 @pytest.fixture
@@ -384,7 +383,7 @@ class TestRootDir:
             [FileSystem[None](root_dir='..')],
             'read_file',
             {'path': '../shared/notes.txt'},
-            workspace=local_workspace(tmp_path / 'project'),
+            workspace=LocalWorkspaceBackend(tmp_path / 'project'),
         )
         assert 'shared notes' in result
 
@@ -395,7 +394,9 @@ class TestRootDir:
 
     async def test_relative_root_at_the_working_directory_is_the_default(self, fs_root: Path) -> None:
         capabilities = [FileSystem[None](root_dir='src/..')]
-        read = await call_tool(capabilities, 'read_file', {'path': 'hello.txt'}, workspace=local_workspace(fs_root))
+        read = await call_tool(
+            capabilities, 'read_file', {'path': 'hello.txt'}, workspace=LocalWorkspaceBackend(fs_root)
+        )
         assert 'Hello' in read
 
     async def test_absolute_root_below_the_working_directory_fails_the_first_file_operation(
@@ -403,9 +404,9 @@ class TestRootDir:
     ) -> None:
         (tmp_path / 'src').mkdir()
         capabilities = [FileSystem[None](root_dir=tmp_path / 'src')]
-        assert await call_tools(capabilities, [], workspace=local_workspace(tmp_path)) == []
+        assert await call_tools(capabilities, [], workspace=LocalWorkspaceBackend(tmp_path)) == []
         with pytest.raises(UserError, match=r"The working directory '.*' is outside root_dir '.*/src'"):
-            await call_tool(capabilities, 'list_directory', {}, workspace=local_workspace(tmp_path))
+            await call_tool(capabilities, 'list_directory', {}, workspace=LocalWorkspaceBackend(tmp_path))
 
     async def test_the_boundary_is_resolved_once_per_run(self, tmp_path: Path) -> None:
         (tmp_path / 'a.txt').write_text('a\n')
@@ -1863,7 +1864,7 @@ class TestFileSystemCapability:
             model=TestModel(),
             usage=RunUsage(),
             run_id='test',
-            workspace=Workspace(local_workspace(tmp_path)),
+            workspace=Workspace(LocalWorkspaceBackend(tmp_path)),
         )
 
         tools = await filesystem.get_toolset().get_tools(context)
@@ -1895,7 +1896,9 @@ class TestFileSystemCapability:
             pytest.skip('Agent.run requires asyncio event loop')
         (tmp_path / 'notes.txt').write_text('needle\n')
         workspace: WorkspaceBackend = (
-            ReadOnlyWorkspace(Workspace(local_workspace(tmp_path))) if read_only else FilesystemOnlyWorkspace(tmp_path)
+            ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path)))
+            if read_only
+            else FilesystemOnlyWorkspace(tmp_path)
         )
         capability = FileSystem[None](root_dir=tmp_path, tools=FILE_SYSTEM_TOOL_NAMES)
         model = TestModel(call_tools=[])
@@ -1926,7 +1929,9 @@ class TestFileSystemCapability:
         toolset = capability.get_toolset()
         assert isinstance(toolset, FileSystemToolset)
         with pytest.raises(ToolFailed) as exc_info:
-            await toolset.write_file('new.txt', 'x', workspace=ReadOnlyWorkspace(Workspace(local_workspace(tmp_path))))
+            await toolset.write_file(
+                'new.txt', 'x', workspace=ReadOnlyWorkspace(Workspace(LocalWorkspaceBackend(tmp_path)))
+            )
         assert exc_info.value.message == READ_ONLY_FAILURE
         assert list(tmp_path.iterdir()) == []
 

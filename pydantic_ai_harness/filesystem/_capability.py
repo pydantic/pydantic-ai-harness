@@ -1,4 +1,4 @@
-"""Filesystem capability that provides sandboxed file system access."""
+"""Filesystem capability that provides bounded file system access to the run's workspace."""
 
 from __future__ import annotations
 

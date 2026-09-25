@@ -20,8 +20,8 @@ Letting an agent touch the filesystem directly is risky: path traversal
 (`../../etc/passwd`), clobbering `.git`, or leaking `.env` secrets. Hand-rolling the guards around every tool call is
 repetitive and easy to get subtly wrong.
 
-`FileSystem` centralizes those guards. It exposes one bounded, sandboxed
-toolset so you configure the boundary once and reuse it across agents.
+`FileSystem` centralizes those guards. It exposes one bounded toolset so you
+configure the boundary once and reuse it across agents.
 
 ## Usage
 
@@ -97,10 +97,8 @@ async def main() -> None:
 `DEFAULT_TOOL_NAMES`, is the eight tools that need only the workspace's
 filesystem. `list_files` and `grep` run the `rg` executable inside the
 workspace, which must be on its `PATH`, so they are opt-in by name. The
-`coder` extra installs `rg` for a local workspace; since a local workspace
-inherits no environment, give it one with `PATH`, as in
-`LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})`.
-A missing `rg` comes back to the model as a retry that says so.
+`coder` extra installs `rg` for a local workspace, whose commands get the
+host's `PATH`. A missing `rg` comes back to the model as a retry that says so.
 
 ```python
 from pydantic_ai_harness import FileSystem

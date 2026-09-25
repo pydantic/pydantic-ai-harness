@@ -14,8 +14,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.tool_output_limits import READ_TOOL_NAME, Band, Spill, ToolOutputLimits
 
-from .._workspace import HOST_ENV
-
 pytestmark = pytest.mark.anyio
 
 PAYLOAD = '\n'.join(f'line {i}' for i in range(500))
@@ -41,7 +39,7 @@ def _agent(work: Path, model: FunctionModel, *capabilities: AbstractCapability[N
         deps_type=type(None),
         capabilities=[
             ToolOutputLimits(bands=[Band(over=100, action=Spill())]),
-            LocalWorkspace(work, env=HOST_ENV),
+            LocalWorkspace(work),
             *capabilities,
         ],
     )

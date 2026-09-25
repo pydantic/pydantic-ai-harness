@@ -1,6 +1,6 @@
 # FileSystem
 
-Give an agent sandboxed, pattern-filtered access to a directory tree.
+Give an agent bounded, pattern-filtered access to a directory tree.
 
 [Source](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/filesystem/)
 
@@ -81,10 +81,8 @@ async def main() -> None:
 `DEFAULT_TOOL_NAMES`, is the eight tools that need only the workspace's
 filesystem. `list_files` and `grep` run the `rg` executable inside the
 workspace, which must be on its `PATH`, so they are opt-in by name. The
-`coder` extra installs `rg` for a local workspace; since a local workspace
-inherits no environment, give it one with `PATH`, as in
-`LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})`.
-A missing `rg` comes back to the model as a retry that says so.
+`coder` extra installs `rg` for a local workspace, whose commands get the
+host's `PATH`. A missing `rg` comes back to the model as a retry that says so.
 
 ```python
 from pydantic_ai_harness import FileSystem

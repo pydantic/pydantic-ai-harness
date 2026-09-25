@@ -149,8 +149,6 @@ Keep Shell's native `max_output_chars` above the `ToolOutputLimits` thresholds. 
 `tail` truncation for moderate command output and `Spill` for large output:
 
 ```python
-import os
-
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 
@@ -167,7 +165,7 @@ tail = Truncate(max_chars=4_000, strategy=TruncationStrategy.tail)
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
-        LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
+        LocalWorkspace('.'),
         Shell(allowed_commands=['git', 'rg', 'pytest'], max_output_chars=100_000),
         ToolOutputLimits(
             bands=[],

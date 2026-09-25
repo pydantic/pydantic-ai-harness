@@ -33,15 +33,13 @@ pip install "pydantic-ai-harness[anthropic]"
 <!-- Keep this blown-out example in sync across docs/coder.md, docs/index.md, README.md, pydantic_ai_harness/coder/README.md, and examples/coding_agent.py. -->
 
 ```python
-import os
-
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness.coder import Coder
 
 agent = Agent(
     'anthropic:claude-sonnet-5',
-    capabilities=[LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}), Coder()],
+    capabilities=[LocalWorkspace('.'), Coder()],
 )
 ```
 
@@ -51,7 +49,7 @@ print(result.output)
 #> Found it: `parse()` returned None on empty input instead of raising. Fixed in src/parser.py; tests pass now.
 ```
 
-`LocalWorkspace` gives the agent this directory to work in: nothing touches your machine unless you attach it. Commands inherit nothing from your environment, so the example passes `PATH` and `HOME` to let them find your tools. To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`; see [Workspaces](#workspaces).
+`LocalWorkspace` runs the agent's file tools and commands on your own machine, in this directory. It is not a sandbox: commands can reach anything your user account can. They get your `PATH` and `HOME`, so they find your tools; pass `env=` to add other variables. To run the same agent in isolation, a sandbox capability (Modal, E2B, Daytona, or Sprites) replaces `LocalWorkspace`; see [Workspaces](#workspaces).
 
 Coder provides six tools: `read_file`, `write_file`, `edit_file`, `list_files`, `grep`, and `shell`, plus repository context and context controls. Shell commands are unrestricted and can persist beyond individual runs. Default instructions guide autonomous investigation, editing, and verification; pass `instructions=` to add your own guidance.
 
@@ -76,8 +74,6 @@ pip install "pydantic-ai-slim[openai]"
 ```
 
 ```python
-import os
-
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace, WebSearch
 from pydantic_ai_harness import Coder, Memory
@@ -86,7 +82,7 @@ from pydantic_ai_harness.memory import FileStore
 agent = Agent(
     'openai:gpt-5.6-sol',
     capabilities=[
-        LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
+        LocalWorkspace('.'),
         Coder(),
         WebSearch(),  # look up docs and error messages on the web
         Memory(FileStore('.agent-memory')),  # remembers across sessions
@@ -113,7 +109,7 @@ Capabilities that only keep or read their own files use the run's workspace by d
 
 [Shell](pydantic_ai_harness/shell/) keeps background job logs in `.pydantic-ai-harness/shell/`; the `.pydantic-ai-harness/` directory gets a `.gitignore` so none of it shows up in `git status`.
 
-`FileSystem`'s `root_dir` is a guardrail for the file tools, checked before each operation. `Shell` commands are not bounded by it, and a local workspace is not a jail: use a sandbox for untrusted work.
+`FileSystem`'s `root_dir` is a guardrail for the file tools, checked before each operation. `Shell` commands are not bounded by it, and `LocalWorkspace` is not a sandbox: use a sandbox workspace for untrusted work.
 
 Upgrading from an earlier release? The [Coder page](pydantic_ai_harness/coder/#upgrading) lists what changed and how to update.
 

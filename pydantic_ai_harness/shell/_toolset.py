@@ -189,7 +189,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
     def _resolve_env(self) -> dict[str, str] | None:
         """The variables handed to the workspace for each command, on top of its own environment.
 
-        The workspace decides the base environment; nothing comes from the agent process.
+        The workspace decides the base environment.
         `None` adds nothing. An explicit `env` is added, minus names that match
         `denied_env_patterns` (glob, via `fnmatch`).
         """
