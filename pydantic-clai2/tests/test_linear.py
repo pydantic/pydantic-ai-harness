@@ -212,6 +212,26 @@ async def test_enter_a_new_key(
         assert prompt.labels[-1] == f'Replace {KEY_NAME} in /keys for every plugin using it? [y/N]: '
 
 
+async def test_key_changed_elsewhere_while_confirming_is_not_overwritten(
+    vault: Vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_key(name=KEY_NAME, value='lin_old')
+    monkeypatch.setattr(api_keys, 'menu_key', iter(['down', 'enter']).__next__)
+
+    class Racing(Prompt):
+        """Another CLAI saves the key while this one waits for the replace confirmation."""
+
+        async def prompt_async(self, label: str, /, *, is_password: bool = False) -> str:
+            if label.startswith('Replace'):
+                save_key(name=KEY_NAME, value='lin_other')
+            return await super().prompt_async(label, is_password=is_password)
+
+    with pytest.raises(UserError, match=f'{KEY_NAME} changed in /keys while you were entering a key'):
+        await choose_key(Racing('lin_new', 'y'))
+    assert load_keys()[KEY_NAME].get_secret_value() == 'lin_other'
+    assert load_codex_credentials(account=ACCOUNT) is None
+
+
 async def test_key_deleted_while_choosing(vault: Vault, monkeypatch: pytest.MonkeyPatch) -> None:
     async def gone(*, prompt: object, label: str) -> api_keys.KeyReference:
         return api_keys.KeyReference(name='GONE')

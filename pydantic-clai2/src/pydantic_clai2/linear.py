@@ -109,14 +109,15 @@ async def choose_key(prompt: SecretPrompt) -> str:
         value = choice.strip()
         if not value:
             raise ValueError('A Linear API key is required.')
-        if KEY_NAME in await to_thread.run_sync(load_keys):
+        previous = (await to_thread.run_sync(load_keys)).get(KEY_NAME)
+        if previous is not None:
             try:
                 answer = await prompt.prompt_async(f'Replace {KEY_NAME} in /keys for every plugin using it? [y/N]: ')
             except (EOFError, KeyboardInterrupt):
                 answer = ''
             if answer.strip().lower() != 'y':
                 return 'Linear key unchanged.'
-        saved = await to_thread.run_sync(lambda: save_key(name=KEY_NAME, value=value)) + ' '
+        saved = await to_thread.run_sync(lambda: save_key(name=KEY_NAME, value=value, replaces=previous)) + ' '
         key = KeyReference(name=KEY_NAME)
     value_json = _Connection(token=key).model_dump_json()
     await to_thread.run_sync(

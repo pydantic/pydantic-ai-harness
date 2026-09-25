@@ -6,6 +6,7 @@ import re
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing, contextmanager
+from types import EllipsisType
 from typing import Protocol
 
 from prompt_toolkit import PromptSession
@@ -98,14 +99,20 @@ def _load_keys() -> dict[str, SecretStr]:
         raise UserError('Stored API keys are invalid. Repair the api-keys credential bundle.') from None
 
 
-def save_key(*, name: str, value: str) -> str:
-    """Save one key without touching unrelated credentials or SQLite."""
+def save_key(*, name: str, value: str, replaces: SecretStr | None | EllipsisType = ...) -> str:
+    """Save one key without touching unrelated credentials or SQLite.
+
+    `replaces` is the value the caller saw, or `None` for no key. If another process changed the key since,
+    saving fails instead of overwriting a value the user never confirmed replacing.
+    """
     name = normalize_name(name=name)
     value = value.strip()
     if not value:
         raise ValueError('An API key is required.')
     with key_transaction():
         keys = _load_keys()
+        if replaces is not ... and keys.get(name) != replaces:
+            raise UserError(f'{name} changed in /keys while you were entering a key. Nothing was saved; try again.')
         keys[name] = SecretStr(value)
         _save_keys(keys=keys)
     path = credentials_path(account='api-keys')
