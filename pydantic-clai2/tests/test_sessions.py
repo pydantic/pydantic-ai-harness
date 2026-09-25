@@ -11,6 +11,7 @@ from pydantic_ai import Agent, AgentStreamEvent, FunctionToolCallEvent, RunConte
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ToolCallPart, ToolReturnPart, UserPromptPart
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.workspaces import LocalWorkspaceBackend, WorkspaceBackend, WorkspaceRef
 from pydantic_ai_harness.step_persistence import ContinuableSnapshot, StepPersistence
 from pydantic_ai_harness.step_persistence.conversations import (
     ConversationConflict,
@@ -321,3 +322,28 @@ async def test_resume_from_another_directory_runs_in_this_session_directory(tmp_
     await second.prompt('second')
     await second.prompt('third')
     assert working_dirs == [str(original.resolve()), str(elsewhere.resolve()), str(elsewhere.resolve())]
+
+
+async def test_a_plugin_that_supplies_the_workspace_replaces_the_session_directory(tmp_path: Path) -> None:
+    working_dirs: list[str] = []
+    sandbox = tmp_path / 'sandbox'
+    sandbox.mkdir()
+
+    class SandboxPlugin(AbstractCapability[None]):
+        def get_workspace(self, ctx: RunContext[None], *, ref: WorkspaceRef | None) -> WorkspaceBackend:
+            return LocalWorkspaceBackend(sandbox)
+
+        async def before_run(self, ctx: RunContext[None]) -> None:
+            working_dirs.append(await ctx.workspace.working_dir())
+
+    def no_capability(ctx: RunContext[None]) -> None:
+        return None
+
+    session = Session(
+        Agent(TestModel(custom_output_text='answer'), deps_type=type(None)),
+        deps=None,
+        workspace=tmp_path,
+        plugins=[no_capability, SandboxPlugin()],
+    )
+    await session.prompt('go')
+    assert working_dirs == [str(sandbox.resolve())]
