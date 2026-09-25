@@ -25,14 +25,18 @@ class KeyReference(BaseModel):
     name: str = Field(min_length=1)
 
 
-def resolve_key(*, token: SecretStr | KeyReference) -> str:
+KEY_CONSUMERS = {'vllm': '/add_model', 'openrouter': '/add_model', 'slack': '/slack'}
+"""Credential-store accounts that may reference a named key, and the command that reconfigures each."""
+
+
+def resolve_key(*, token: SecretStr | KeyReference, configure: str = '/add_model') -> str:
     """Resolve at use time and fail closed when a referenced key was deleted."""
     if isinstance(token, SecretStr):
         return token.get_secret_value()
     keys = load_keys()
     if token.name not in keys:
         raise UserError(
-            f'Saved API key {token.name} is missing. Restore it in /keys or reconfigure through /add_model.'
+            f'Saved API key {token.name} is missing. Restore it in /keys or reconfigure through {configure}.'
         )
     return keys[token.name].get_secret_value()
 
@@ -90,14 +94,16 @@ def _load_keys() -> dict[str, SecretStr]:
         raise UserError('Stored API keys are invalid. Repair the api-keys credential bundle.') from None
 
 
-def save_key(*, name: str, value: str) -> str:
-    """Save one key without touching unrelated credentials or SQLite."""
+def save_key(*, name: str, value: str, replace: bool = True) -> str:
+    """Save one key without touching unrelated credentials or SQLite; `replace=False` refuses an existing name."""
     name = normalize_name(name=name)
     value = value.strip()
     if not value:
         raise ValueError('An API key is required.')
     with key_transaction():
         keys = _load_keys()
+        if not replace and name in keys:
+            raise ValueError(f'{name} already exists in /keys. Choose it from the list, or replace its value in /keys.')
         keys[name] = SecretStr(value)
         _save_keys(keys=keys)
     path = credentials_path(account='api-keys')
@@ -119,13 +125,13 @@ class _Credential(BaseModel):
 def key_users(*, name: str) -> list[str]:
     """Find saved provider references without exposing their inline credentials."""
     users: list[str] = []
-    for account in ('vllm', 'openrouter'):
+    for account, configure in KEY_CONSUMERS.items():
         raw = load_codex_credentials(account=account)
         if raw is not None:
             try:
                 credential = _Credential.model_validate_json(raw)
             except ValidationError:
-                raise UserError(f'Reconfigure the invalid {account} connection through /add_model first.') from None
+                raise UserError(f'Reconfigure the invalid {account} connection through {configure} first.') from None
             if isinstance(credential.token, KeyReference) and credential.token.name == name:
                 users.append(account)
     return users

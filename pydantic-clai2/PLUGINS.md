@@ -517,13 +517,20 @@ earlier raw `pydantic_ai_harness.slack:Slack` catalog row, CLAI switches that sa
 row to this plugin at startup and keeps your choice. A declaration with your own
 settings is left as it is.
 
-CLAI reads a Slack user token (`xoxp-`; Slack rejects bot tokens) from the
-`SLACK_USER_TOKEN` environment variable, or, when that is unset, from a key saved
-under the same name in [`/keys`](#saved-api-keys). The token is read when the
-plugin loads, so `/plugins enable slack` without one fails with a message naming
-both places and registers nothing. After replacing the key, run
-`/plugins reload slack`. The token never goes in the plugin's settings, which
-are stored in plaintext.
+The Slack user token (`xoxp-`; Slack rejects bot tokens) lives in
+[`/keys`](#saved-api-keys), not in the plugin's settings, which are stored in
+plaintext SQLite. After enabling the plugin, run `/slack`. It shows the names of
+your saved keys: pick one, or enter a new token privately, which saves it in
+`/keys` as `SLACK_USER_TOKEN` (harness `Slack`'s documented name, used only as a
+label). `/slack` never overwrites an existing `SLACK_USER_TOKEN`. CLAI saves only
+the key's name for Slack, in the same credential store as the vLLM and OpenRouter
+connections, and does not read the `SLACK_USER_TOKEN` environment variable.
+
+Before every turn CLAI reads the key's current value from `/keys`, so replacing
+it there takes effect on the next turn with no reload. When no key is chosen,
+the chosen key was deleted, or the saved connection is invalid, CLAI prints why
+and that turn has no Slack tools. Other plugins that choose the same name share
+the token, and while any connection references a key, `/keys` will not rename it.
 
 | Key | Default | Does |
 |---|---|---|
@@ -1038,8 +1045,8 @@ numbers, and underscores, starting with a letter or underscore. Saving an existi
 name asks before replacing it. Ctrl-C or Ctrl-D cancels without saving. Do not put
 the secret on the command line.
 
-When saved keys exist, vLLM's token prompt and OpenRouter's **Enter API key** flow
-show a searchable list of names. Choose one, enter a different key privately, or
+When saved keys exist, vLLM's token prompt, OpenRouter's **Enter API key** flow,
+and `/slack` show a searchable list of names. Choose one, enter a different key privately, or
 choose **No API key** for vLLM. Esc closes the picker without connecting. Browser
 login flows are unchanged. Select keys only for endpoints you trust.
 
@@ -1053,6 +1060,12 @@ it. Deleting it makes those connections fail until you restore the same name or
 reconfigure them. Keys referenced by saved connections cannot be renamed. A cross-process lock
 serializes key changes and connection saves so concurrent CLAI sessions do not
 overwrite each other's key edits. The lock file contains no credentials.
+
+Manage plugin secrets here too: a plugin that needs a token stores a reference to
+a named key, never the token itself, because plugin settings are plaintext
+SQLite. Several connections can share one key: name it the way its provider's
+tools do, such as `SLACK_USER_TOKEN` or `GITHUB_TOKEN`, and choose that name in
+each connection. Replacing it then updates all of them.
 
 Existing connections with inline credentials, manually entered connection keys,
 and browser logins remain unchanged. To switch an existing connection to a
