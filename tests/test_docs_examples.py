@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pydantic_ai.workspaces import WorkspaceRef
 
-from ._docs_examples import python_blocks, run_block
+from ._docs_examples import documented_cleanup, python_blocks, run_block
 
 _PAGE = """
 ```python
@@ -30,7 +30,11 @@ Agent('openai:gpt-6', capabilities=[LocalWorkspace({root!r}), FileSystem()]).run
 ```
 
 ```python
-async def cleanup(ref: object) -> None: ...
+from pathlib import Path
+
+
+async def cleanup(ref) -> None:
+    Path(ref.id, 'cleaned').touch()
 ```
 """
 
@@ -38,22 +42,18 @@ async def cleanup(ref: object) -> None: ...
 def test_blocks_run_their_agents_through_the_tools_and_hand_every_workspace_to_cleanup(tmp_path: Path) -> None:
     page = tmp_path / 'page.md'
     page.write_text(_PAGE.format(root=str(tmp_path)))
-    coder, split, definition = python_blocks(str(page))
-    cleaned: list[WorkspaceRef] = []
-
-    async def cleanup(ref: WorkspaceRef) -> None:
-        cleaned.append(ref)
+    blocks = python_blocks(str(page))
+    coder, split, _ = blocks
+    cleanup = documented_cleanup(blocks, 'cleanup')
 
     _, runs = run_block(coder, cleanup=cleanup)
     assert [run.used_sandbox for run in runs] == [True, True]
     assert set(runs[0].outputs) == {'shell', 'write_file', 'read_file'}
-    assert cleaned == [WorkspaceRef(provider='local', id=str(tmp_path))]
+    assert runs[0].ref == WorkspaceRef(provider='local', id=str(tmp_path))
+    assert (tmp_path / 'cleaned').exists()
 
     _, runs = run_block(split, cleanup=cleanup)
     assert [(run.used_sandbox, set(run.outputs)) for run in runs] == [
         (True, {'run_command'}),
         (True, {'write_file', 'read_file'}),
     ]
-
-    namespace, runs = run_block(definition)
-    assert runs == [] and callable(namespace['cleanup'])
