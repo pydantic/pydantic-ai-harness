@@ -212,6 +212,16 @@ async def test_enter_a_new_key(
         assert prompt.labels[-1] == f'Replace {KEY_NAME} in /keys for every plugin using it? [y/N]: '
 
 
+async def test_key_deleted_while_choosing(vault: Vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def gone(*, prompt: object, label: str) -> api_keys.KeyReference:
+        return api_keys.KeyReference(name='GONE')
+
+    monkeypatch.setattr(linear, 'prompt_api_key', gone)
+    with pytest.raises(UserError, match='Select a saved key again through /linear key'):
+        await choose_key(Prompt())
+    assert load_codex_credentials(account=ACCOUNT) is None
+
+
 async def test_cancel_empty_and_invalid_choice(vault: Vault) -> None:
     assert await choose_key(Prompt(EOFError())) == 'Linear key unchanged.'
     with pytest.raises(ValueError, match='A Linear API key is required'):

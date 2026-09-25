@@ -40,11 +40,16 @@ def resolve_key(*, token: SecretStr | KeyReference, reconfigure: str = '/add_mod
     return keys[token.name].get_secret_value()
 
 
-def save_key_connection(*, account: str, token: SecretStr | KeyReference, value: str) -> None:
-    """Validate references and save atomically with respect to key renames and deletions."""
+def save_key_connection(
+    *, account: str, token: SecretStr | KeyReference, value: str, reconfigure: str = '/add_model'
+) -> None:
+    """Validate references and save atomically with respect to key renames and deletions.
+
+    `reconfigure` names the command that picks another key for this consumer.
+    """
     with key_transaction():
         if isinstance(token, KeyReference) and token.name not in _load_keys():
-            raise UserError('The selected API key no longer exists. Select a saved key again through /add_model.')
+            raise UserError(f'The selected API key no longer exists. Select a saved key again through {reconfigure}.')
         save_codex_credentials(account=account, value=value)
 
 

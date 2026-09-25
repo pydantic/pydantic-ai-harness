@@ -119,7 +119,9 @@ async def choose_key(prompt: SecretPrompt) -> str:
         saved = await to_thread.run_sync(lambda: save_key(name=KEY_NAME, value=value)) + ' '
         key = KeyReference(name=KEY_NAME)
     value_json = _Connection(token=key).model_dump_json()
-    await to_thread.run_sync(lambda: save_key_connection(account=ACCOUNT, token=key, value=value_json))
+    await to_thread.run_sync(
+        lambda: save_key_connection(account=ACCOUNT, token=key, value=value_json, reconfigure=_RECONFIGURE)
+    )
     return f'{saved}Linear uses {key.name} from /keys from the next run.'
 
 
