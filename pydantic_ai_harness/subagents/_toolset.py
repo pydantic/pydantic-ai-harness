@@ -201,6 +201,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
     def __init__(
         self,
         *,
+        id: str | None = None,
         agents: Mapping[str, SubAgent[AgentDepsT]],
         forward_usage: bool,
         inherit_tools: bool,
@@ -212,7 +213,7 @@ class SubAgentToolset(FunctionToolset[AgentDepsT]):
         call_counts: dict[str, dict[str, int]],
         models: Mapping[str, ModelOption] | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         self._agents: dict[str, SubAgent[AgentDepsT]] = dict(agents)
         self._forward_usage = forward_usage
         self._inherit_tools = inherit_tools

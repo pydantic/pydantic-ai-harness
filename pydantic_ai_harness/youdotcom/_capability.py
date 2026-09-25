@@ -51,6 +51,9 @@ class YouSearch(AbstractCapability[AgentDepsT]):
 
     _: KW_ONLY
 
+    id: str | None = 'you_search'
+    """Stable capability and toolset ID."""
+
     num_results: int = 10
     """Number of results `web_search` returns per query (1 to 20)."""
 
@@ -126,6 +129,7 @@ class YouSearch(AbstractCapability[AgentDepsT]):
     def get_toolset(self) -> YouSearchToolset[AgentDepsT]:
         """Build the toolset providing `web_search` and `get_page`."""
         return YouSearchToolset[AgentDepsT](
+            id=self.id,
             client=self.client,
             num_results=self.num_results,
             extraction_mode=self.extraction_mode,

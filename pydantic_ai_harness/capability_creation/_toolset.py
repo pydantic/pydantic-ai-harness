@@ -12,8 +12,8 @@ from pydantic_ai_harness.capability_creation._store import CapabilityStore
 class CapabilityCreationToolset(FunctionToolset[AgentDepsT]):
     """Exposes `author_capability`, `list_authored_capabilities`, and `disable_authored_capability`."""
 
-    def __init__(self, store: CapabilityStore) -> None:
-        super().__init__()
+    def __init__(self, store: CapabilityStore, *, id: str | None = None) -> None:
+        super().__init__(id=id)
         self._store = store
         self.add_function(
             self.author_capability,
