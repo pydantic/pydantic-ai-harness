@@ -21,7 +21,11 @@ if TYPE_CHECKING:
 
 
 class _SuppliedBackend(SpritesSandboxBackend):
-    """The backend `SpritesSandbox` built for one run; the capability closes its client when the run ends."""
+    """The backend `SpritesSandbox` built for one run; the capability closes its client when that run ends."""
+
+    def __init__(self, *, run_id: str | None, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.run_id = run_id
 
 
 @dataclass(kw_only=True)
@@ -62,10 +66,10 @@ class SpritesSandbox(AbstractCapability[AgentDepsT]):
 
     def get_workspace(self, ctx: RunContext[AgentDepsT], *, ref: WorkspaceRef | None) -> WorkspaceBackend | None:
         """Build the backend for this run. No I/O here: it attaches or creates on first use."""
-        del ctx
         if ref is not None and ref.provider != 'sprites':
             return None
         return _SuppliedBackend(
+            run_id=ctx.run_id,
             client=self.client,
             ref=ref,
             runtime=self.runtime,
@@ -77,6 +81,8 @@ class SpritesSandbox(AbstractCapability[AgentDepsT]):
         try:
             return await handler()
         finally:
+            # Only the backend this run built: one passed in as `workspace=`, such as a parent run's
+            # handed to a subagent, belongs to the run that built it and may still be in use.
             backend = innermost_backend(ctx.workspace)
-            if isinstance(backend, _SuppliedBackend):
+            if isinstance(backend, _SuppliedBackend) and backend.run_id == ctx.run_id:
                 await backend.aclose()

@@ -167,6 +167,26 @@ class TestSpritesSandbox:
         assert transport.close_calls == 0
         assert len(transport.clients) == 2
 
+    async def test_a_subagent_run_leaves_the_parent_runs_backend_open(self, transport: SpriteTransport) -> None:
+        child = Agent(TestModel(), capabilities=[SpritesSandbox()])
+
+        @child.tool
+        async def child_echo(ctx: RunContext[object]) -> str:
+            return (await ctx.workspace.run(['echo', 'child'])).stdout
+
+        parent = Agent(TestModel(), capabilities=[SpritesSandbox()])
+
+        @parent.tool
+        async def delegate(ctx: RunContext[object]) -> int:
+            await ctx.workspace.run(['true'])
+            await child.run('go', workspace=ctx.workspace)
+            return transport.close_calls
+
+        result = await parent.run('go')
+
+        assert '"delegate":0' in result.output
+        assert transport.close_calls == 1
+
     async def test_coder_tools_run_in_the_sprite(self, transport: SpriteTransport) -> None:
         async def model(messages: list[ModelMessage], info: AgentInfo) -> AsyncIterator[str | dict[int, DeltaToolCall]]:
             returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
