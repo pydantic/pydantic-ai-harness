@@ -7,13 +7,13 @@ from collections.abc import AsyncIterable, Awaitable, Callable, Sequence
 from dataclasses import replace
 from fnmatch import fnmatchcase
 from pathlib import Path
-from typing import Generic, Literal, TypeVar
+from typing import Generic, Literal, TypeVar, cast
 from uuid import uuid4
 
 from anyio import get_cancelled_exc_class, move_on_after
 from pydantic_ai import AgentRunResult, AgentStreamEvent, RunContext, capture_run_messages
 from pydantic_ai.agent import AbstractAgent
-from pydantic_ai.capabilities import AgentCapability, LocalWorkspace
+from pydantic_ai.capabilities import AbstractCapability, AgentCapability, LocalWorkspace, WrapperCapability
 from pydantic_ai.messages import BinaryContent, ModelMessage, ModelRequest, ModelResponse, UserContent, UserPromptPart
 from pydantic_ai.models import Model
 from pydantic_ai.settings import ModelSettings
@@ -33,6 +33,25 @@ OutputT = TypeVar('OutputT')
 
 def _supports_local_workspace() -> bool:
     return sys.platform != 'win32'
+
+
+def _supplies_workspace(plugins: Sequence[AgentCapability[DepsT]]) -> bool:
+    """Whether a plugin, such as a sandbox, supplies the run's workspace; a run has only one.
+
+    The same test core applies when it rejects a second workspace capability: a leaf that overrides
+    `get_workspace` and is loaded up front. A wrapper forwards to what it wraps, a leaf of its own.
+    """
+    leaves: list[AbstractCapability[DepsT]] = []
+    for plugin in plugins:
+        # A capability function's capability exists only once the run starts.
+        if isinstance(plugin, AbstractCapability):
+            cast('AbstractCapability[DepsT]', plugin).apply(leaves.append)
+    return any(
+        not leaf.defer_loading
+        and not isinstance(leaf, WrapperCapability)
+        and type(leaf).get_workspace is not AbstractCapability.get_workspace
+        for leaf in leaves
+    )
 
 
 def _command_env() -> dict[str, str]:
@@ -216,8 +235,7 @@ class Session(Generic[DepsT, OutputT]):
                     model = await self.resolved_model()
                     capabilities = list(self.plugins)
                     workspace: Literal['new'] | None = None
-                    if _supports_local_workspace():
-                        # Last, so a sandbox plugin earlier in the list supplies the workspace instead.
+                    if _supports_local_workspace() and not _supplies_workspace(self.plugins):
                         capabilities.append(LocalWorkspace[DepsT](self.workspace, env=_command_env()))
                         if _stale_local_workspace(previous, self.workspace):
                             # A conversation resumed from another directory: work in this session's.
