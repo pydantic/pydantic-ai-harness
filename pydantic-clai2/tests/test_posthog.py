@@ -279,6 +279,23 @@ async def test_cancelled_or_blank_key_changes_nothing(
     assert api_keys.load_keys() == {} and posthog.saved_key() is None
 
 
+async def test_a_key_saved_elsewhere_while_typing_is_not_overwritten(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+
+    async def racing_prompt(*, prompt: object, label: str, optional: bool = False) -> str:
+        api_keys.save_key(name=KEY, value='saved-by-another-process')
+        return 'phx_mine'
+
+    monkeypatch.setattr(posthog, 'prompt_api_key', racing_prompt)
+    script(monkeypatch, lists=[pick('key')], choices=[pick(False)])
+    assert await shell.loader.configure('posthog') == 'PostHog key unchanged.'
+    assert api_keys.load_keys()[KEY].get_secret_value() == 'saved-by-another-process'
+
+
 async def test_replacing_a_shared_key_needs_confirmation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     api_keys.save_key(name=KEY, value='shared')
     shell = Shell(tmp_path)
@@ -324,7 +341,8 @@ def test_menu_validates_resets_and_flags_a_missing_key() -> None:
     assert source.problem(rows['url'], 'http://posthog.example.com/mcp') == (
         'Value error, Use an https:// URL (http:// only for localhost) with no query string.'
     )
-    assert source.problem(rows['url'], f'{US_URL}?features=sql') is not None
+    for url in (f'{US_URL}?features=sql', f'{US_URL}?', f'{US_URL}#'):
+        assert source.problem(rows['url'], url) is not None, 'the feature filter owns the query string'
     for url in ('https://user:phx_secret@mcp.posthog.com/mcp', 'https://phx_secret@mcp.posthog.com/mcp'):
         assert source.problem(rows['url'], url) == 'Value error, Leave credentials out of the URL; keep keys in /keys.'
     assert source.problem(rows['project_id'], '12 34') == (
@@ -408,6 +426,8 @@ async def test_status_command_in_key_mode(tmp_path: Path) -> None:
     api_keys.save_key(name=KEY, value='saved')
     save_codex_credentials(account='posthog', value=f'{{"token": {{"name": "{KEY}"}}}}')
     assert await commands.execute_async('/posthog') == f'PostHog (read-only, {US_URL}) connects with {KEY} from /keys.'
+    api_keys.delete_key(name=KEY)
+    assert f'PostHog uses {KEY}, which is missing from /keys.' in await commands.execute_async('/posthog')
     with pytest.raises(ValueError, match='Usage: /posthog'):
         await commands.execute_async('/posthog key')
 

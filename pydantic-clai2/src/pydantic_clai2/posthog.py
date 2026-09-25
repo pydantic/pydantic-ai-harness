@@ -29,7 +29,15 @@ from termflow.tui.menu import Menu  # pyright: ignore[reportMissingTypeStubs]
 
 from . import theme
 from ._rendering import markdown_style
-from .api_keys import KeyReference, load_keys, prompt_api_key, resolve_key, save_key, save_key_connection
+from .api_keys import (
+    KeyExistsError,
+    KeyReference,
+    load_keys,
+    prompt_api_key,
+    resolve_key,
+    save_key,
+    save_key_connection,
+)
 from .commands import Command
 from .credential_store import load_codex_credentials
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
@@ -103,7 +111,8 @@ class PostHogSettings(BaseModel):
     def _endpoint(cls, url: str) -> str:
         parts = urlsplit(url)
         local = parts.scheme == 'http' and parts.hostname in _LOOPBACK
-        if not (parts.scheme == 'https' or local) or not parts.hostname or parts.query or parts.fragment:
+        # `?` and `#` are rejected even when empty: the feature filter is appended as the query string.
+        if not (parts.scheme == 'https' or local) or not parts.hostname or '?' in url or '#' in url:
             raise ValueError('Use an https:// URL (http:// only for localhost) with no query string.')
         if parts.username is not None or parts.password is not None:
             # Settings are plaintext, so a password in the URL would be stored in the clear.
@@ -195,9 +204,10 @@ def activate(host: PluginHost[None]) -> None:
             complete=lambda args: ['logout'] if len(args) <= 1 else [],
         )
     )
-    if settings.auth == 'key' and _missing_key() is not None:
+    usable = _usable_key() if settings.auth == 'key' else None
+    if isinstance(usable, str):
         # Loading anyway keeps the settings menu available; each run fails closed until a key is chosen.
-        host.console.print(_missing_key(), style=theme.color(theme.WARNING), markup=False)
+        host.console.print(usable, style=theme.color(theme.WARNING), markup=False)
 
 
 def client(settings: PostHogSettings) -> Client[StreamableHttpTransport]:
@@ -224,7 +234,8 @@ def client(settings: PostHogSettings) -> Client[StreamableHttpTransport]:
     return Client(transport, init_timeout=OAUTH_TIMEOUT if browser else None)
 
 
-def _missing_key() -> str | None:
+def _usable_key() -> KeyReference | str:
+    """The chosen key if `/keys` still has it, otherwise what is wrong and how to fix it."""
     try:
         reference = saved_key()
     except UserError as exc:
@@ -234,17 +245,17 @@ def _missing_key() -> str | None:
         return f'PostHog has no key yet, so each run fails until one is chosen. {SETUP}'
     if reference.name not in load_keys():
         return f'PostHog uses {reference.name}, which is missing from /keys. {SETUP}'
-    return None
+    return reference
 
 
 def _status(settings: PostHogSettings, tokens: TokenStore) -> str:
     access = 'read-only' if settings.read_only else 'read-write'
     if settings.auth == 'browser':
         return f'PostHog ({access}, {settings.url}) is {_SIGN_IN_STATES[tokens.signed_in()]}.'
-    reference = saved_key()
-    if reference is None:
-        return f'PostHog has no key yet. {SETUP}'
-    return f'PostHog ({access}, {settings.url}) connects with {reference.name} from /keys.'
+    usable = _usable_key()
+    if isinstance(usable, str):
+        return usable
+    return f'PostHog ({access}, {settings.url}) connects with {usable.name} from /keys.'
 
 
 _KEY = FieldRow(
@@ -350,8 +361,8 @@ class PostHogSource:
 
     def rows(self) -> list[FieldRow]:
         """Every option, with the key marked when it needs attention."""
-        missing = _missing_key()
-        key = replace(_KEY, note='needs a key' if missing and self.settings.auth == 'key' else '')
+        missing = self.settings.auth == 'key' and isinstance(_usable_key(), str)
+        key = replace(_KEY, note='needs a key' if missing else '')
         return [key, *_ROWS[1:]]
 
     def current(self, row: FieldRow) -> str:
@@ -499,9 +510,13 @@ async def choose_key() -> str:
     if isinstance(token, str):
         if not token.strip():
             return 'PostHog key unchanged.'
-        if KEY_NAME in await asyncio.to_thread(load_keys) and not await run_worker(_confirm_replace):
-            return 'PostHog key unchanged.'
-        await asyncio.to_thread(save_key, name=KEY_NAME, value=token)
+        try:
+            # Checked and written under one /keys lock, so a key saved meanwhile elsewhere is not overwritten.
+            await asyncio.to_thread(save_key, name=KEY_NAME, value=token, replace=False)
+        except KeyExistsError:
+            if not await run_worker(_confirm_replace):
+                return 'PostHog key unchanged.'
+            await asyncio.to_thread(save_key, name=KEY_NAME, value=token)
         token = KeyReference(name=KEY_NAME)
     saved = _Saved(token=token).model_dump_json()
     await asyncio.to_thread(save_key_connection, account=ACCOUNT, token=token, value=saved)

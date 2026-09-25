@@ -90,14 +90,20 @@ def _load_keys() -> dict[str, SecretStr]:
         raise UserError('Stored API keys are invalid. Repair the api-keys credential bundle.') from None
 
 
-def save_key(*, name: str, value: str) -> str:
-    """Save one key without touching unrelated credentials or SQLite."""
+class KeyExistsError(ValueError):
+    """`save_key(replace=False)` found a key of that name, perhaps saved by another process meanwhile."""
+
+
+def save_key(*, name: str, value: str, replace: bool = True) -> str:
+    """Save one key without touching unrelated credentials or SQLite; `replace=False` never overwrites."""
     name = normalize_name(name=name)
     value = value.strip()
     if not value:
         raise ValueError('An API key is required.')
     with key_transaction():
         keys = _load_keys()
+        if not replace and name in keys:
+            raise KeyExistsError(f'{name} is already in /keys.')
         keys[name] = SecretStr(value)
         _save_keys(keys=keys)
     path = credentials_path(account='api-keys')
