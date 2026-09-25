@@ -130,6 +130,9 @@ class Shell(AbstractCapability[AgentDepsT]):
     `persist_cwd` does not apply to `shell`; each command starts in the working directory.
     """
 
+    _toolset: ShellToolset[AgentDepsT] | None = field(default=None, init=False, repr=False, compare=False)
+    """The one toolset `get_toolset` returns, so durable execution sees the leaf it registered."""
+
     def __post_init__(self) -> None:
         """Resolve the built-in denylist according to the selected policy."""
         if self.cwd is not None:
@@ -142,7 +145,12 @@ class Shell(AbstractCapability[AgentDepsT]):
         require_workspace(ctx.workspace, 'Shell')
 
     def get_toolset(self) -> ShellToolset[AgentDepsT]:
-        """Build and return the shell toolset."""
+        """The shell toolset, built once; its `for_run` gives each run a fresh copy."""
+        if self._toolset is None:
+            self._toolset = self._make_toolset()
+        return self._toolset
+
+    def _make_toolset(self) -> ShellToolset[AgentDepsT]:
         return ShellToolset[AgentDepsT](
             allowed_commands=self.allowed_commands,
             denied_commands=self.denied_commands,
@@ -155,4 +163,5 @@ class Shell(AbstractCapability[AgentDepsT]):
             env=self.env,
             denied_env_patterns=self.denied_env_patterns,
             tools=self.tools,
+            id=self.id or 'shell',
         )

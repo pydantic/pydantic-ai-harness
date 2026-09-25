@@ -8,6 +8,7 @@ import posixpath
 import re
 import shlex
 import uuid
+import weakref
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -17,7 +18,7 @@ from pydantic_ai import RunContext
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
-from pydantic_ai.workspaces import WorkspaceTimeoutError
+from pydantic_ai.workspaces import Workspace, WorkspaceTimeoutError
 
 from pydantic_ai_harness._output import truncate_tail
 from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
@@ -74,8 +75,9 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         denied_env_patterns: Sequence[str] = (),
         tools: Sequence[str] = RUN_SCOPED_TOOL_NAMES,
         cwd: Path | None = None,
+        id: str | None = None,
     ) -> None:
-        super().__init__()
+        super().__init__(id=id)
         if cwd is not None:
             warn_argument_ignored('ShellToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
         # The absolute workspace path `persist_cwd` last recorded; `None` means the working directory.
@@ -96,7 +98,8 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         self._env = dict(env) if env is not None else None
         self._denied_env_patterns = list(denied_env_patterns)
         self._tools = tuple(tools)
-        self._jobs_dir: str | None = None
+        # Each workspace's job directory, looked up on its first command; weak, so no finished run's workspace is kept.
+        self._jobs_dirs: weakref.WeakKeyDictionary[Workspace, str] = weakref.WeakKeyDictionary()
 
         if self._allowed_commands and self._denied_commands:
             raise ValueError('Specify allowed_commands or denied_commands, not both.')
@@ -124,13 +127,16 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
                 self.add_function(registrations[name], name=name, metadata=metadata)
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
-        """Return a fresh instance per run so the tracked cwd is isolated.
+        """Return a fresh instance per run when `persist_cwd` tracks a cwd, so each run has its own.
 
         `get_toolset` builds one shared instance at agent construction (see
-        `AbstractToolset.for_run`, which defaults to returning `self`). This
-        toolset holds mutable per-run state (`_cwd`), so without an override two
-        concurrent runs would corrupt each other's cwd.
+        `AbstractToolset.for_run`, which defaults to returning `self`). The tracked
+        `_cwd` is per-run state, so without a copy two concurrent runs would corrupt
+        each other's cwd. Without `persist_cwd` there is no per-run state and every run
+        shares this instance, which durable execution requires of the toolset it registered.
         """
+        if not self._persist_cwd:
+            return self
         return ShellToolset(
             allowed_commands=self._allowed_commands,
             denied_commands=self._denied_commands,
@@ -143,6 +149,7 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
             env=self._env,
             denied_env_patterns=self._denied_env_patterns,
             tools=self._tools,
+            id=self.id,
         )
 
     async def get_tools(self, ctx: RunContext[AgentDepsT]) -> dict[str, ToolsetTool[AgentDepsT]]:
@@ -193,10 +200,10 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         return self._cwd if self._cwd is not None else await ctx.workspace.working_dir()
 
     async def _jobs_base(self, ctx: RunContext[AgentDepsT]) -> str:
-        """The workspace directory holding this run's job and capture files, looked up once per run."""
-        if self._jobs_dir is None:
-            self._jobs_dir = await metadata_dir(ctx.workspace, 'shell')
-        return self._jobs_dir
+        """The workspace directory holding job and capture files, looked up once per workspace."""
+        if (jobs_dir := self._jobs_dirs.get(ctx.workspace)) is None:
+            jobs_dir = self._jobs_dirs[ctx.workspace] = await metadata_dir(ctx.workspace, 'shell')
+        return jobs_dir
 
     async def _job(self, ctx: RunContext[AgentDepsT], command_id: str) -> Job | None:
         """The background command `command_id` names in the workspace, started by this run or an earlier one."""
