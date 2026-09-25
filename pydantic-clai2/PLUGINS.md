@@ -536,7 +536,8 @@ settings can reach. Some PostHog tools use an LLM on PostHog's side and need AI
 data processing enabled for your organization.
 
 Secrets are managed in `/keys`, never in plugin settings (plugin settings are
-plaintext SQLite, and a declaration that tries to hold a key is rejected). A new
+plaintext SQLite, and a declaration that tries to hold a key is rejected: `/plugins add` keeps
+no settings that fail validation, and the error does not echo them). A new
 key typed in the menu is saved in `/keys` as `POSTHOG_PERSONAL_API_KEY`, the name
 harness `PostHog` documents. It is a label only: CLAI does not read or export the
 environment variable. If a key of that name exists, the menu asks before

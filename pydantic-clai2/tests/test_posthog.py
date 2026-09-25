@@ -445,6 +445,21 @@ async def test_settings_cannot_hold_a_secret_or_invalid_options(tmp_path: Path, 
     assert shell.loader.capabilities() == []
 
 
+async def test_add_with_rejected_settings_keeps_no_trace_of_them(tmp_path: Path) -> None:
+    shell = Shell(tmp_path, terminal=False)
+    with pytest.raises(PluginError) as raised:
+        await shell.loader.command(['add', 'analytics', 'pydantic_clai2.posthog', '{"api_key": "phx_pasted"}'])
+    assert 'phx_pasted' not in str(raised.value), 'errors never echo a rejected value'
+    assert [plugin.id for plugin in shell.store.plugins()] == []
+    await shell.loader.command(['enable', 'posthog'])
+    before = shell.saved()
+    with pytest.raises(PluginError):
+        await shell.loader.command(['add', 'posthog', 'pydantic_clai2.posthog', '{"token": "phx_pasted"}'])
+    assert shell.saved() == before, 'replacing with rejected settings restores the previous declaration'
+    assert b'phx_pasted' not in shell.path.read_bytes()
+    assert len(shell.loader.capabilities()) == 1, 'and the previous plugin is loaded again'
+
+
 async def test_add_replacing_the_builtin_opens_the_menu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     shell = Shell(tmp_path)
     script(monkeypatch, lists=[pick('read_only')], choices=[pick('true')])

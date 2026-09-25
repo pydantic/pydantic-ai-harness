@@ -83,7 +83,8 @@ _SIGN_IN_STATES: dict[bool | None, str] = {
 class PostHogSettings(BaseModel):
     """The JSON a `posthog` declaration may carry. Nothing here is secret."""
 
-    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)
+    # A rejected field may be a pasted key, so errors never echo the input.
+    model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)
     auth: Literal['key', 'browser'] = Field(
         default='key', description='Connect with a named key from /keys, or sign in through the browser.'
     )
