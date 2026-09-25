@@ -26,16 +26,13 @@ class _RunBackend(DaytonaSandboxBackend):
 
 @dataclass(kw_only=True)
 class DaytonaSandbox(AbstractCapability[AgentDepsT]):
-    """Supply an isolated [Daytona](https://www.daytona.io) workspace through `ctx.workspace`.
+    """Run the agent's commands and file operations in an isolated [Daytona](https://www.daytona.io) sandbox.
 
-    A run with no reference creates a fresh workspace. Pass a `WorkspaceRef` supplied by the
-    application to attach to an environment managed elsewhere. Shell commands run under `/bin/sh -c`
-    in the sandbox's shell environment.
+    A run with no workspace ref creates a fresh sandbox; pass a `WorkspaceRef` to attach to an
+    existing one. Shell commands run under `/bin/sh -c`.
 
-    This capability supplies execution only. Compose it with tools or
-    capabilities that consume
-    [`RunContext.workspace`][pydantic_ai.tools.RunContext.workspace], such as `Coder`, `Shell`,
-    or `FileSystem`.
+    This capability supplies the sandbox only. Compose it with capabilities that use the run's
+    workspace, such as `Coder`, `Shell`, or `FileSystem`.
 
     Without `client=`, each run opens its own `AsyncDaytona` API client on first use and closes it
     when the run ends; the sandbox keeps running, and `result.workspace` opens a new client if it

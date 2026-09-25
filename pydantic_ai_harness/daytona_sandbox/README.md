@@ -24,23 +24,28 @@ Then set `DAYTONA_API_KEY` to an API key from your Daytona dashboard.
 
 ## Quick start
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[DaytonaSandbox(), Coder()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder()])
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
-print(result.output)
 ```
 
 `Coder`'s shell and file tools now run in the sandbox, not on your machine. The sandbox is created the first time a tool uses it, and it keeps running, and billing, after the run ends; see [Clean up](#clean-up).
 
-Daytona's default snapshot already has Python, `git`, and the `rg` that `Coder` needs. If you pass your own `snapshot=`, install them in it.
+Daytona's default snapshot includes Python, `git`, and `rg`; in a snapshot of your own (`snapshot=`), installing `rg` (ripgrep) makes file search faster. A snapshot Daytona doesn't know fails on first use with a clear error.
 
 ## Continue in the same sandbox
 
-```python
+```python {names="defined"}
+from pydantic_ai import Agent
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
+
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder()])
+result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
 followup = agent.run_sync(
     'Which capability would you add next, and where would it live?',
     message_history=result.all_messages(),
@@ -51,15 +56,15 @@ The follow-up run finds the sandbox in the message history and works in it, so t
 
 ## Choose the tools
 
-For a narrower agent, use [`Shell`](../shell/) and [`FileSystem`](../filesystem/) instead of `Coder`, or write your own tool: inside a tool, `ctx.workspace` is the sandbox.
+For a narrower agent, use [`Shell`](../shell/) and [`FileSystem`](../filesystem/) instead of `Coder`, or write your own tool:
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent, RunContext
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
 
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[DaytonaSandbox(), Shell(), FileSystem()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Shell(), FileSystem()])
 
 
 @agent.tool
@@ -69,33 +74,26 @@ async def run_python(ctx: RunContext, code: str) -> str:
     return result.stdout + result.stderr
 ```
 
-See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for everything `ctx.workspace` can do.
+See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more.
 
 ## Reattach later
 
-To come back to the sandbox without the message history, save its id and pass it back as `workspace=`:
+To come back to the sandbox without the message history, keep the run's workspace ref (in your database, say) and pass it back as `workspace=`:
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
-from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[DaytonaSandbox(), Coder()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(), Coder()])
 
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
-ref = result.workspace.ref
-assert ref is not None  # None only if no tool used the sandbox
-sandbox_id = ref.id  # save this, e.g. in your database
+ref = result.workspace.ref  # None if no tool used the sandbox
 
-later = agent.run_sync(
-    'Which capability would you add next, and where would it live?',
-    workspace=WorkspaceRef(provider='daytona', id=sandbox_id),
-)
-print(later.output)
+later = agent.run_sync('Which capability would you add next, and where would it live?', workspace=ref)
 ```
 
-The id holds no credentials, so the process that reattaches needs `DAYTONA_API_KEY` too. Pass `workspace='new'` to start a fresh sandbox even when the message history names one.
+The ref holds no credentials, so the process that reattaches needs `DAYTONA_API_KEY` too. Pass `workspace='new'` to start a fresh sandbox even when the message history names one.
 
 `snapshot`, `auto_stop_interval`, and `network_block_all` only shape a new sandbox; `working_dir` and `env` apply to every command, including after you reattach.
 
@@ -103,23 +101,23 @@ Already have a `daytona.AsyncSandbox`? Pass `workspace=DaytonaSandboxBackend(wor
 
 ## Clean up
 
-The sandbox keeps running, and billing, after the run ends. Pydantic AI never stops or deletes it. Delete it with the id you saved:
+The sandbox keeps running, and billing, after the run ends. Pydantic AI never stops or deletes it. Delete it with the ref you kept:
 
-```python
+```python {names="defined"}
 from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness.daytona_sandbox import DaytonaSandboxBackend
 
 
-async def delete_sandbox(sandbox_id: str) -> None:
-    backend = DaytonaSandboxBackend(ref=WorkspaceRef(provider='daytona', id=sandbox_id))
+async def delete_sandbox(ref: WorkspaceRef) -> None:
+    backend = DaytonaSandboxBackend(ref=ref)
     sandbox = await backend.get_client()
     await sandbox.delete()
     await backend.aclose()
 ```
 
-`get_client()` returns the `daytona.AsyncSandbox`, and `aclose()` closes the Daytona client the backend opened. If a run fails before it returns, you never get the id: find the sandbox in the Daytona dashboard and delete it there.
+`get_client()` returns the `daytona.AsyncSandbox`, and `aclose()` closes the Daytona client the backend opened. If a run fails before it returns, you never get the ref: find the sandbox in the Daytona dashboard and delete it there.
 
-A sandbox you don't delete stops after 15 idle minutes (change it with `auto_stop_interval=`) and is archived after 7 days stopped, but never deleted. A stopped sandbox keeps its disk. See [Daytona's SDK docs](https://www.daytona.io/docs/en/python-sdk/async/async-daytona/).
+By default, Daytona stops a sandbox after 15 idle minutes (a later run starts it again); set `auto_stop_interval=` to a smaller number of minutes to stop it sooner. A stopped sandbox keeps its disk, is archived after 7 days, and is never deleted. See [Daytona's SDK docs](https://www.daytona.io/docs/en/python-sdk/async/async-daytona/).
 
 ## Configuration
 
@@ -136,7 +134,7 @@ A sandbox you don't delete stops after 15 idle minutes (change it with `auto_sto
 
 Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/temporal/) or another durable engine, create one client when the worker starts and pass it as `client=`. Otherwise every activity opens its own client and never closes it.
 
-```python
+```python {names="defined"}
 from daytona import AsyncDaytona
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
@@ -145,7 +143,7 @@ from pydantic_ai_harness.daytona_sandbox import DaytonaSandbox
 
 async def run_worker() -> None:
     async with AsyncDaytona() as client:
-        agent = Agent('anthropic:claude-sonnet-5', capabilities=[DaytonaSandbox(client=client), Coder()])
+        agent = Agent('anthropic:claude-opus-5-5', capabilities=[DaytonaSandbox(client=client), Coder()])
         ...  # wrap `agent` for Temporal and start the worker
 ```
 
