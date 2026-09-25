@@ -18,7 +18,6 @@ from pydantic_ai.capabilities import AbstractCapability, AgentCapability
 from rich.console import Console
 
 from . import theme
-from .capability_catalog import RETIRED_BUILTINS
 from .commands import Commands, plugins_command
 from .config import PluginSettings
 from .plugins import (
@@ -39,6 +38,13 @@ from .spinners import Spinner
 from .status import Status, StatusSegment
 
 _FOLDER_PACKAGE = 'pydantic_clai2_plugins'
+
+_RETIRED_BUILTINS: dict[str, PluginSettings] = {
+    'google_workspace': PluginSettings(
+        id='google_workspace', factory='pydantic_ai_harness.google_workspace:GoogleWorkspace', enabled=False
+    ),
+}
+"""Former built-in declarations. A stored copy of one loads the built-in now declared under its id."""
 
 
 class PluginError(Exception):
@@ -163,7 +169,7 @@ class PluginLoader(Generic[DepsT]):
         loading the old factory. Declarations with their own settings are left as the user wrote them.
         """
         current = self._builtin.get(saved.id)
-        if current is None or not _same_plugin(saved, RETIRED_BUILTINS.get(saved.id)):
+        if current is None or not _same_plugin(saved, _RETIRED_BUILTINS.get(saved.id)):
             return saved
         return current.model_copy(update={'enabled': saved.enabled})
 
