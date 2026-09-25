@@ -18,7 +18,6 @@ from rich.console import Console
 
 from pydantic_clai2 import DEFAULT_PLUGINS
 from pydantic_clai2.api_keys import save_key
-from pydantic_clai2.capability_catalog import HARNESS_PLUGINS
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.linear import TOKEN_ACCOUNT
 from pydantic_clai2.mcp import TokenStore, http_client
@@ -74,11 +73,11 @@ async def declare(loader: PluginLoader[None], settings: dict[str, JsonValue]) ->
     await loader.command(['add', 'linear', 'pydantic_clai2.linear', json.dumps(settings)])
 
 
-def test_declared_as_a_disabled_built_in_not_a_catalog_entry() -> None:
+def test_declared_as_a_disabled_built_in_not_the_raw_capability() -> None:
     [declaration] = [plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'linear']
     assert declaration.factory == 'pydantic_clai2.linear'
     assert not declaration.enabled
-    assert all('linear' not in plugin.factory for plugin in HARNESS_PLUGINS)
+    assert all(not plugin.factory.startswith('pydantic_ai_harness.linear') for plugin in DEFAULT_PLUGINS)
 
 
 async def test_environment_token_and_read_only_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
