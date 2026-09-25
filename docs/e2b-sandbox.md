@@ -41,7 +41,7 @@ result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summa
 print(result.output)
 ```
 
-The model's shell and file tools run in a fresh E2B sandbox built from that template. Nothing runs on the machine that hosts the agent. Construction makes no E2B requests; the first workspace operation creates the sandbox, and a run that never uses its workspace creates nothing.
+The model's shell and file tools run in a fresh E2B sandbox built from that template. Nothing runs on the machine that hosts the agent. The sandbox is created the first time the run uses it; a run that never uses it creates nothing.
 
 Continue the conversation in the same sandbox by passing the history. The run recovers the sandbox's reference from it and attaches on first use:
 
@@ -139,7 +139,7 @@ Rejected credentials and a sandbox that is gone raise `WorkspaceUnavailableError
 
 A sandbox keeps running, and billing, after the agent run ends: Pydantic AI does not kill it. `sandbox_timeout` sets the lifetime of a newly created sandbox, after which E2B stops it; when it is unset, [E2B's default lifetime](https://docs.e2b.dev/sandbox) applies. That lifetime is the backstop for sandboxes you lose track of. Attaching by reference applies E2B's default lifetime from the time of attaching, which can extend a shorter remaining lifetime. Cancelling a run while E2B creates its sandbox waits for creation to finish, so `ref` still names the sandbox. To stop a sandbox sooner, kill it through `get_client()`, as above.
 
-`E2BSandbox.get_workspace` performs no I/O, so a backend can be rebuilt from a `WorkspaceRef` wherever the run continues, including under a durable execution engine. The reference carries no credentials, so each worker needs its own `E2B_API_KEY`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
+A run can reattach from a `WorkspaceRef` wherever it continues, including under a durable execution engine. The reference carries no credentials, so each worker needs its own `E2B_API_KEY`. See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for how a run selects and restores its workspace.
 
 The capability emits no additional telemetry spans. Core agent and tool spans cover calls made through tools; provider-specific diagnostics remain available through E2B.
 
