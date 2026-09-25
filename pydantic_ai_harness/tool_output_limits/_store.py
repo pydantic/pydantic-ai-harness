@@ -10,7 +10,9 @@ primitive (pydantic-ai #4352 / `ExecutionEnvironment`) once it lands.
 
 from __future__ import annotations
 
+import os
 import re
+import stat
 import tempfile
 import threading
 import time
@@ -57,25 +59,39 @@ def _safe_segment(segment: str) -> str:
     return cleaned
 
 
+def _default_root() -> Path:
+    """Per-user root under the system temp dir, so users on one host never share it."""
+    getuid = getattr(os, 'getuid', None)
+    name = 'pyai_harness_overflow' if getuid is None else f'pyai_harness_overflow-{getuid()}'
+    return Path(tempfile.gettempdir()) / name
+
+
 @dataclass
 class LocalFileStore:
     """Dependency-free `OverflowStore` that writes each payload to a local file.
 
     The handle equals the key: a relative `run_id/tool_call_id.retry` path under
-    `base_dir`. The root is stable and shareable on purpose -- a later agent or run can
+    `base_dir`. The root is stable on purpose -- a later agent or run by the same user can
     read a spill a previous run produced, so the store is not isolated per instance.
 
-    Security comes from two mechanisms, not isolation: the root is created with `0700`
-    perms (owner-only), and `read` resolves the target (following symlinks) and rejects
+    Security comes from three mechanisms: the default root is per user
+    (`pyai_harness_overflow-<uid>` under the system temp dir); before each write, on POSIX,
+    the root must be owned by the current user and is tightened to `0700` if group or
+    other bits are set, and a root owned by anyone else raises `PermissionError` instead
+    of being written to; and `read` resolves the target (following symlinks) and rejects
     anything that escapes the root via symlink, `..`, or an absolute path. Handle segments
-    are also sanitized by `_safe_segment`.
+    are also sanitized by `_safe_segment`. On Windows there is no uid, so the default root
+    is `pyai_harness_overflow` and the ownership check is skipped.
 
     Files are kept after the run by default (a later `read_tool_result` may need them).
     Set `cleanup_after` to opt into age-based pruning; see that field.
     """
 
     base_dir: Path | None = None
-    """Root directory for spilled files. Defaults to a stable temp subdirectory."""
+    """Root directory for spilled files. Defaults to a per-user temp subdirectory.
+
+    An explicit `base_dir` gets the same ownership check as the default root.
+    """
 
     cleanup_after: timedelta | None = None
     """Opt-in TTL for spilled files. `None` (default) keeps files forever.
@@ -90,9 +106,7 @@ class LocalFileStore:
     _root: Path = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._root = (
-            self.base_dir if self.base_dir is not None else Path(tempfile.gettempdir()) / 'pyai_harness_overflow'
-        )
+        self._root = self.base_dir if self.base_dir is not None else _default_root()
 
     def _path(self, key: str) -> Path:
         segments = [_safe_segment(part) for part in key.split('/') if part]
@@ -101,12 +115,23 @@ class LocalFileStore:
         return self._root.joinpath(*segments)
 
     def _ensure_root(self) -> None:
-        """Create the root directory owned by the current user with `0700` perms."""
+        """Create the root and make sure only the current user can reach it.
+
+        A root that already exists may have been created by someone else (the default
+        lives in the shared temp dir), so ownership is checked rather than assumed.
+        """
         self._root.mkdir(parents=True, exist_ok=True)
-        try:
+        getuid = getattr(os, 'getuid', None)
+        if getuid is None:
+            return
+        st = self._root.stat()
+        if st.st_uid != getuid():
+            raise PermissionError(
+                f'Overflow store root {str(self._root)!r} is not owned by the current user; '
+                'refusing to write spilled tool output there.'
+            )
+        if stat.S_IMODE(st.st_mode) & 0o077:
             self._root.chmod(0o700)
-        except OSError:  # pragma: no cover - best effort on a root we do not own
-            pass
 
     async def write(self, key: str, data: bytes) -> str:
         self._ensure_root()

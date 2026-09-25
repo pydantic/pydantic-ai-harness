@@ -94,7 +94,9 @@ returns untouched.
 Every action takes an optional `then`, applied when the action cannot run: a `Spill` whose
 store errors, a `Truncate` / `Summarize` on a binary payload, a `Summarize` whose model call
 raises. `then` chains, so `Summarize(then=Spill(then=Truncate()))` degrades summarize ->
-spill -> truncate.
+spill -> truncate. Each failed spill or summarize is logged at `WARNING` on the
+`pydantic_ai_harness.tool_output_limits` logger, with the exception type and traceback, before
+the fallback runs.
 
 ### Per-tool overrides and filtering
 
@@ -277,13 +279,21 @@ class OverflowStore(Protocol):
     async def read(self, handle: str) -> bytes: ...
 ```
 
-### Security model (shared root, not isolation)
+### Security model (per-user root, not per-instance isolation)
 
-The store root is stable and shareable on purpose -- spilled files must be readable by a later
-agent or run -- so security does not come from per-instance isolation. It comes from two
-mechanisms: the root is created with `0700` (owner-only) permissions, and `read` resolves the
-target (following symlinks) and rejects anything that escapes the root via symlink, `..`, or
-an absolute path. Handle segments are also sanitized so a crafted handle cannot traverse out.
+The store root is stable on purpose -- spilled files must be readable by a later agent or run
+-- so security does not come from per-instance isolation. It comes from three mechanisms:
+
+- **Per-user default root**: without `base_dir`, the root is `pyai_harness_overflow-<uid>` under
+  the system temp dir, so users on the same host do not share a directory.
+- **Ownership check**: before each write, on POSIX, the root (default or an explicit
+  `base_dir`) must be owned by the current user. Group and other permission bits are removed
+  (`0700`). A root owned by another user raises `PermissionError` and nothing is written; the
+  failure is logged and the band's `then` fallback runs. Windows has no uid, so there the
+  default root is `pyai_harness_overflow` and the check is skipped.
+- **Contained reads**: `read` resolves the target (following symlinks) and rejects anything
+  that escapes the root via symlink, `..`, or an absolute path. Handle segments are also
+  sanitized so a crafted handle cannot traverse out.
 
 ### Cleanup: keep-forever by default, opt-in TTL pruning
 
@@ -311,10 +321,12 @@ Prefer external cleanup (cron, a sweeper) over the in-process TTL? Point it at t
 and delete by mtime:
 
 ```python
+import os
+import tempfile
 import time
 from pathlib import Path
 
-root = Path('/tmp/pyai_harness_overflow')  # or your configured base_dir
+root = Path(tempfile.gettempdir()) / f'pyai_harness_overflow-{os.getuid()}'  # or your base_dir
 cutoff = time.time() - 6 * 3600
 for path in root.rglob('*'):
     if path.is_file() and path.stat().st_mtime < cutoff:
