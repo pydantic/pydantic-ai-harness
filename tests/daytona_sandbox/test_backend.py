@@ -123,6 +123,23 @@ class TestCommands:
         result = await backend.run(['env'], env={'C-D': 'command'})
         assert {'A.B=sandbox', 'C-D=command'} <= set(result.stdout.splitlines())
 
+    async def test_output_comes_from_the_stored_logs_not_the_stream(self, fake_daytona: FakeDaytona) -> None:
+        # SDK 0.198.0's stream demultiplexer injects prefix bytes and misroutes output above ~4 KB.
+        backend = await started()
+        sandbox = fake_daytona.sandboxes[0]
+        sandbox.process_stdout = ['1\n\x01\x01\x012\n']
+        sandbox.process_stderr = ['\x02\x02\x02']
+        sandbox.process_stored_stdout = '1\n2\n'
+        sandbox.process_stored_stderr = ''
+        result = await backend.run(['seq', '1', '2'])
+        assert (result.stdout, result.stderr) == ('1\n2\n', '')
+
+    async def test_stored_log_read_failure_propagates(self, fake_daytona: FakeDaytona) -> None:
+        backend = await started()
+        fake_daytona.sandboxes[0].process_stored_logs_error = RuntimeError('stored logs failed')
+        with pytest.raises(RuntimeError, match='stored logs failed'):
+            await backend.run(['true'])
+
     async def test_log_read_failure_propagates(self, fake_daytona: FakeDaytona) -> None:
         backend = await started()
         fake_daytona.sandboxes[0].process_logs_error = RuntimeError('logs failed')

@@ -12,6 +12,10 @@ External assumptions last verified 2026-09-08 against Daytona Python SDK 0.198.0
 * the session log stream ends a stream that did not end in a newline with one (`printf abc` streams
   `abc` plus a newline; observed live 2026-09-25, and the SDK passes frames through unchanged), so each command
   prints an end marker last on both streams and the output is cut at it.
+* the log stream's demultiplexer (`daytona/_utils/stream.py` `_std_demux_loop`) misreads a stream prefix
+  that ends a websocket frame, injecting the prefix bytes into the output and misrouting it
+  (observed live 2026-09-26 above ~4 KB); the non-follow `get_session_command_logs` is exact, so a
+  finished command's output comes from it.
 * `sandbox.fs` provides metadata, byte upload/download, and directory operations:
   https://www.daytona.io/docs/en/python-sdk/async/async-file-system/
 * `auto_stop_interval` is a creation-time setting; left unset, Daytona stops an idle sandbox after
@@ -163,10 +167,19 @@ class _DaytonaProcess:
             await _raise_failure(self._sandbox, error, 'Could not read the command result')
         if command.exit_code is None:
             raise WorkspaceError('Daytona closed the command output before reporting an exit status.')
+        # The streamed copy is only for partial output on a timeout: SDK 0.198.0's stream
+        # demultiplexer misreads a stream prefix split across websocket frames, corrupting output
+        # over a few KB. The finished command's stored logs are exact.
+        try:
+            logs = await self._process.get_session_command_logs(
+                self._session_id, self._command_id, request_timeout=_REQUEST_TIMEOUT
+            )
+        except Exception as error:
+            await _raise_failure(self._sandbox, error, 'Could not read the command output')
         return CommandResult(
             exit_code=command.exit_code,
-            stdout=_until_marker(self.stdout, self.marker),
-            stderr=_until_marker(self.stderr, self.marker),
+            stdout=_until_marker([logs.stdout or ''], self.marker),
+            stderr=_until_marker([logs.stderr or ''], self.marker),
         )
 
     async def kill(self) -> None:

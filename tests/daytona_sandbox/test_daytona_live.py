@@ -90,6 +90,18 @@ async def test_creates_a_fresh_sandbox_and_runs_a_command(client: daytona.AsyncD
         assert (result.stdout.strip(), result.stderr.strip(), result.exit_code) == ('out', 'err', 3)
 
 
+async def test_large_output_is_exact(client: daytona.AsyncDaytona) -> None:
+    """Validates the fake-encoded assumption that a finished command's stored logs are its exact output.
+
+    The SDK's log stream corrupts output above a few KB (it misreads a stream prefix split across
+    websocket frames), so the result must not be built from it.
+    """
+    async with _owned(client) as backend:
+        result = await backend.run(['seq', '1', '50000'], timeout=120)
+
+        assert result.stdout == ''.join(f'{i}\n' for i in range(1, 50001))
+
+
 async def test_reattach_by_ref_reads_a_file_the_first_backend_wrote(client: daytona.AsyncDaytona) -> None:
     """Validates the fake-encoded assumption that `client.get` plus `start` reaches the same sandbox."""
     path = f'/tmp/{_unique("reattach")}.txt'

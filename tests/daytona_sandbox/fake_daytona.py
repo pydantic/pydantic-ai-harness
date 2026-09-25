@@ -100,6 +100,22 @@ class FakeProcess:
         if self.owner.process_hangs:
             await asyncio.Event().wait()
 
+    async def get_session_command_logs(
+        self,
+        session_id: str,
+        command_id: str,
+        request_timeout: float | None = None,
+    ) -> SimpleNamespace:
+        """The finished command's stored logs; the streamed chunks unless a test sets them apart."""
+        if self.owner.process_stored_logs_error is not None:
+            raise self.owner.process_stored_logs_error
+        stdout = self.owner.process_stored_stdout
+        stderr = self.owner.process_stored_stderr
+        return SimpleNamespace(
+            stdout=''.join(self.owner.process_stdout) if stdout is None else stdout,
+            stderr=''.join(self.owner.process_stderr) if stderr is None else stderr,
+        )
+
     async def get_session_command(
         self,
         session_id: str,
@@ -276,6 +292,18 @@ class _HostProcess(FakeProcess):
                 return
             await anyio.sleep(0.01)
 
+    async def get_session_command_logs(
+        self,
+        session_id: str,
+        command_id: str,
+        request_timeout: float | None = None,
+    ) -> SimpleNamespace:
+        _, out, err = self.commands[command_id]
+        stdout, stderr = (
+            os.pread(f.fileno(), os.fstat(f.fileno()).st_size, 0).decode(errors='replace') for f in (out, err)
+        )
+        return SimpleNamespace(stdout=stdout, stderr=stderr)
+
     async def get_session_command(
         self,
         session_id: str,
@@ -373,6 +401,10 @@ class FakeSandbox:
         self.process_status_error: Exception | None = None
         self.process_status_gate: asyncio.Event | None = None
         self.process_logs_error: Exception | None = None
+        # What the non-follow `get_session_command_logs` returns, when not the streamed chunks joined.
+        self.process_stored_stdout: str | None = None
+        self.process_stored_stderr: str | None = None
+        self.process_stored_logs_error: Exception | None = None
         self.process_create_gate: asyncio.Event | None = None
         self.process_logs_started = asyncio.Event()
         self.process = FakeProcess(self)
