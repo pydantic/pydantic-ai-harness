@@ -528,8 +528,10 @@ How it signs in:
   the plugin fails to load and names `ORDINAL_ACCESS_TOKEN`, rather than adding
   tools that cannot connect.
 
-`/ordinal` shows which of these applies; `/ordinal logout` forgets the saved
-sign-in. Disabling the plugin does not sign you out.
+`/ordinal` shows which of these applies. `/ordinal logout` forgets the saved
+sign-in and drops the one in use, so the next run opens the browser again; with
+`ORDINAL_ACCESS_TOKEN` set, runs keep using the token. Disabling the plugin does
+not sign you out.
 
 ## Managing plugins
 

@@ -6,9 +6,11 @@ this plugin gives `Ordinal` its own transport whose OAuth tokens live in CLAI's 
 
 import os
 import sys
+from typing import Generic
 
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic_ai.exceptions import UserError
+from pydantic_ai.tools import RunContext
 from pydantic_ai_harness.ordinal import Ordinal
 
 from . import theme
@@ -24,17 +26,44 @@ TOKENS = 'plugin_ordinal'
 USAGE = 'Usage: /ordinal [logout]'
 
 
+class BrowserSignIn(Generic[DepsT]):
+    """Hands each run the `Ordinal` for the current browser sign-in.
+
+    Once connected, FastMCP's `OAuth` keeps the access token in memory, so clearing the keyring alone would leave
+    this session signed in. `logout` therefore replaces the whole `Ordinal`, transport and sign-in handler included.
+    """
+
+    def __init__(self, tokens: TokenStore) -> None:
+        """Connect through `tokens`' keyring entry."""
+        self.tokens = tokens
+        self.ordinal = self._connect()
+
+    def __call__(self, ctx: RunContext[DepsT]) -> Ordinal[DepsT]:
+        """The capability for this run."""
+        return self.ordinal
+
+    def logout(self) -> None:
+        """Forget the saved tokens and the in-memory ones, so the next run opens the browser."""
+        self.tokens.forget()
+        self.ordinal = self._connect()
+
+    def _connect(self) -> Ordinal[DepsT]:
+        auth = sign_in(self.tokens.name)
+        return Ordinal[DepsT](client=StreamableHttpTransport(url=URL, auth=auth, httpx_client_factory=http_client))
+
+
 def activate(host: PluginHost[DepsT]) -> None:
     """Add `Ordinal`, or refuse to load when no token, saved sign-in, or terminal for a browser sign-in exists."""
     tokens = TokenStore(TOKENS)
+    browser: BrowserSignIn[DepsT] | None = None
     if os.environ.get(TOKEN_ENV):
         host.add(Ordinal[DepsT]())
     else:
         signed_in = tokens.signed_in()
         if not signed_in and not sys.stdin.isatty():
             raise UserError(f'Set `{TOKEN_ENV}`, or start clai2 in a terminal once to sign in to Ordinal.')
-        transport = StreamableHttpTransport(url=URL, auth=sign_in(TOKENS), httpx_client_factory=http_client)
-        host.add(Ordinal[DepsT](client=transport))
+        browser = BrowserSignIn[DepsT](tokens)
+        host.add(browser)
         if not signed_in:
             host.console.print(
                 'Ordinal: not signed in; your browser opens to sign in on first use.', style=theme.color(theme.MUTED)
@@ -45,7 +74,10 @@ def activate(host: PluginHost[DepsT]) -> None:
             case []:
                 return status(tokens)
             case ['logout']:
-                tokens.forget()
+                if browser is None:
+                    tokens.forget()
+                    return f'Forgot any saved Ordinal sign-in; runs still use `{TOKEN_ENV}`.'
+                browser.logout()
                 return 'Signed out of Ordinal; the next run that uses it opens the browser to sign in.'
             case _:
                 return USAGE

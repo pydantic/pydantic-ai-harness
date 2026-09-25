@@ -16,6 +16,8 @@ from pydantic_ai import Agent
 from pydantic_ai.exceptions import UserError
 from pydantic_ai.mcp import MCPToolset, MCPToolsetClient
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.tools import RunContext
+from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.ordinal import Ordinal
 from rich.console import Console
 
@@ -24,7 +26,7 @@ from pydantic_clai2._app import RETIRED_PLUGINS, create_shell
 from pydantic_clai2.commands import Commands
 from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.mcp import TokenStore
-from pydantic_clai2.ordinal import TOKEN_ENV, TOKENS, URL, USAGE, activate
+from pydantic_clai2.ordinal import TOKEN_ENV, TOKENS, URL, USAGE, BrowserSignIn, activate
 from pydantic_clai2.plugin_loader import PluginError, PluginLoader
 from pydantic_clai2.plugins import PluginHost, SessionStart
 from pydantic_clai2.project_settings import ProjectSettings
@@ -70,8 +72,10 @@ def host() -> tuple[PluginHost[None], io.StringIO]:
 
 
 def ordinal_client(plugin: PluginHost[None]) -> MCPToolsetClient | None:
-    """The one capability is an `Ordinal`; return the connection it was given, if any."""
+    """The `Ordinal` this plugin gives the next run; return the connection it was given, if any."""
     [capability] = plugin.capabilities
+    if isinstance(capability, BrowserSignIn):
+        return capability(RunContext[None](deps=None, model=TestModel(), usage=RunUsage())).client
     assert isinstance(capability, Ordinal)
     return capability.client
 
@@ -107,6 +111,7 @@ def test_environment_token_is_used_as_is(vault: Vault, monkeypatch: pytest.Monke
     assert ordinal_client(plugin) is None
     assert output.getvalue() == ''
     assert run(plugin) == f'Ordinal uses `{TOKEN_ENV}`.'
+    assert run(plugin, 'logout') == f'Forgot any saved Ordinal sign-in; runs still use `{TOKEN_ENV}`.'
 
 
 def test_terminal_without_a_token_signs_in_through_the_browser(vault: Vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,8 +136,15 @@ async def test_saved_sign_in_loads_without_a_terminal(vault: Vault, monkeypatch:
     assert output.getvalue() == ''
     assert run(plugin) == 'Ordinal: signed in through the browser.'
 
+    signed_in_transport = ordinal_client(plugin)
     assert 'Signed out of Ordinal' in str(run(plugin, 'logout'))
     assert vault == {}
+    signed_out_transport = ordinal_client(plugin)
+    assert isinstance(signed_in_transport, StreamableHttpTransport)
+    assert isinstance(signed_out_transport, StreamableHttpTransport)
+    # FastMCP keeps tokens inside the `OAuth` once connected; the next run must not reuse it.
+    assert signed_out_transport is not signed_in_transport
+    assert signed_out_transport.auth is not signed_in_transport.auth
     assert run(plugin) == 'Ordinal: not signed in; the browser opens on first use.'
 
 
