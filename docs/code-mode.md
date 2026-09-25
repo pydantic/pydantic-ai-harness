@@ -616,7 +616,7 @@ Your callback's return value decides the call's fate, and the two outcomes are e
 
 Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python subset. Key restrictions:
 
-- No third-party imports. Allowed stdlib modules: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `unicodedata`, `datetime`, `os`, `pathlib` (each must be imported before use).
+- No third-party imports. Allowed stdlib modules: `sys`, `typing`, `asyncio`, `math`, `json`, `re`, `unicodedata`, `datetime`, `os`, `pathlib`, `collections`, `itertools`, `functools`, `dataclasses`, `base64` (each must be imported before use).
 - `asyncio.gather(...)` accepts positional awaitables but no keyword arguments. Other task creation and wait APIs are unavailable.
 - No wall-clock or timing primitives by default: `asyncio.sleep`, `datetime.datetime.now()`, `datetime.date.today()`, and the `time` module. `datetime.datetime.now()` / `datetime.date.today()` become available when an `os_access` handler implements them (the built-in `OSAccess` does); `asyncio.sleep` and `time` never do.
 - No `import *`.

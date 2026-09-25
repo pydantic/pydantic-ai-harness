@@ -345,6 +345,76 @@ class TestCodeMode:
         assert 'With `print()` output and a plain, non-`None` final expression' in description
         assert 'With `print()` output and a multimodal final expression' in description
 
+    async def test_run_code_description_lists_all_importable_modules(self) -> None:
+        """The emitted description names every stdlib module that imports in the sandbox.
+
+        The list is a closed contract the model obeys (issue #1053), so each
+        omission is a false prohibition. The companion test
+        `test_every_module_in_run_code_description_imports_via_monty` guards the
+        reverse direction.
+        """
+        captured_descriptions: list[str] = []
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            run_code_def = next(tool_def for tool_def in info.function_tools if tool_def.name == 'run_code')
+            captured_descriptions.append(run_code_def.description or '')
+            return ModelResponse(parts=[TextPart('done')])
+
+        agent: Agent[object, str] = Agent(FunctionModel(model_fn), capabilities=[CodeMode[object]()])
+        await agent.run('hello')
+
+        description = captured_descriptions[0]
+        marker = '**Importable standard library modules**: '
+        assert marker in description
+        start = description.index(marker) + len(marker)
+        end = description.index('. These must be imported', start)
+        listed = [module.strip('`') for module in description[start:end].split(', ')]
+        assert listed == [
+            'sys',
+            'typing',
+            'asyncio',
+            'math',
+            'json',
+            're',
+            'unicodedata',
+            'datetime',
+            'os',
+            'pathlib',
+            'collections',
+            'itertools',
+            'functools',
+            'dataclasses',
+            'base64',
+        ]
+
+    async def test_every_module_in_run_code_description_imports_via_monty(self) -> None:
+        """Every module the emitted description lists must import in a real Monty session.
+
+        Guards the phantom-import direction of issue #1053 raised in the #295
+        review: if the description ever names a module Monty rejects, or drops one
+        it accepts, this test fails in CI in either direction.
+        """
+        wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        description = tools['run_code'].tool_def.description
+        assert description is not None
+
+        marker = '**Importable standard library modules**: '
+        assert marker in description
+        start = description.index(marker) + len(marker)
+        end = description.index('. These must be imported', start)
+        modules = [module.strip('`') for module in description[start:end].split(', ')]
+        assert len(modules) >= 15  # the ten long-standing entries plus the five #1053 additions
+
+        for module in modules:
+            # A failed import raises ModelRetry (a RetryPromptPart through Agent.run);
+            # a bare import has no output and a `None` final expression, so success
+            # is the documented empty return.
+            result = await wrapper.call_tool('run_code', {'code': f'import {module}'}, ctx, tools['run_code'])
+            assert result.return_value == {}, f'importing {module!r} failed: {result}'
+
     async def test_run_code_function_examples_are_expressions(self) -> None:
         """Async, sync, and mixed function examples do not end on assignments."""
         cases: list[tuple[FunctionToolset[object], tuple[str, ...], bool]] = [

@@ -13,6 +13,12 @@ import re
 from pathlib import Path
 
 import pytest
+from pydantic_ai import RunContext
+from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
+from pydantic_ai.usage import RunUsage
+
+from pydantic_ai_harness.code_mode import CodeMode
 
 _ROOT = Path(__file__).parent.parent
 _PACKAGE = _ROOT / 'pydantic_ai_harness'
@@ -392,3 +398,40 @@ def test_coder_entry_page_describes_current_tools(surface: str) -> None:
     assert 'allowlisted shell' not in introduction
     assert 'explorer sub-agent' not in introduction
     assert 'no default instructions' not in introduction
+
+
+def _code_mode_stdlib_modules(text: str, start_marker: str, end_marker: str) -> list[str]:
+    """Extract the backticked stdlib module names between the two markers."""
+    start = text.index(start_marker) + len(start_marker)
+    end = text.index(end_marker, start)
+    return re.findall(r'`([a-z_][a-z_0-9]*)`', text[start:end])
+
+
+async def test_code_mode_run_code_module_list_parity() -> None:
+    """The stdlib module list is identical across the emitted description and both docs surfaces (issue #1053)."""
+    wrapper = CodeMode[object]().get_wrapper_toolset(FunctionToolset[object]())
+    assert wrapper is not None
+    run_context = RunContext[object](
+        deps=None,
+        model=TestModel(),
+        usage=RunUsage(),
+        prompt=None,
+        messages=[],
+        run_step=0,
+        pending_messages=[],
+    )
+    tools = await wrapper.get_tools(run_context)
+    description = tools['run_code'].tool_def.description
+    assert description is not None
+    emitted = _code_mode_stdlib_modules(
+        description, '**Importable standard library modules**: ', '. These must be imported'
+    )
+
+    docs = (_ROOT / 'docs/code-mode.md').read_text(encoding='utf-8')
+    readme = (_ROOT / 'pydantic_ai_harness/code_mode/README.md').read_text(encoding='utf-8')
+    assert _code_mode_stdlib_modules(docs, 'Allowed stdlib modules: ', ' (each must be imported before use)') == (
+        emitted
+    ), 'docs/code-mode.md module list differs from the emitted run_code description'
+    assert _code_mode_stdlib_modules(readme, 'allowed stdlib: ', ')') == emitted, (
+        'pydantic_ai_harness/code_mode/README.md module list differs from the emitted run_code description'
+    )
