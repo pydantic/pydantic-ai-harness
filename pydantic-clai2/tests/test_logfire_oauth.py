@@ -1,6 +1,7 @@
 """Logfire browser sign-in (device flow) against a fake Logfire; no request leaves the process."""
 
 import json
+import re
 import time
 import webbrowser
 from urllib.parse import parse_qs
@@ -23,6 +24,21 @@ OFFERED = ['project:read', 'project:write', 'organization:create_project']
 Reply = tuple[int, JsonValue]
 
 
+METADATA: dict[str, JsonValue] = {
+    'device_authorization_endpoint': f'{ORIGIN}/api/oauth/device/code',
+    'token_endpoint': f'{ORIGIN}/api/oauth/token',
+    'registration_endpoint': f'{ORIGIN}/api/oauth/register',
+}
+DEVICE: dict[str, JsonValue] = {
+    'device_code': 'device',
+    'user_code': 'ABCD-EFGH',
+    'verification_uri': f'{ORIGIN}/auth/oauth-device',
+    'verification_uri_complete': LINK,
+    'expires_in': 600,
+    'interval': 0,
+}
+
+
 class Logfire:
     """Just enough of Logfire's OAuth server and MCP endpoint, recording what CLAI sends."""
 
@@ -32,23 +48,9 @@ class Logfire:
             200,
             {'resource': RESOURCE, 'authorization_servers': [ORIGIN], 'scopes_supported': offered},
         )
-        self.metadata: JsonValue = {
-            'device_authorization_endpoint': f'{ORIGIN}/api/oauth/device/code',
-            'token_endpoint': f'{ORIGIN}/api/oauth/token',
-            'registration_endpoint': f'{ORIGIN}/api/oauth/register',
-        }
+        self.metadata: JsonValue = METADATA
         self.registration: Reply = (201, {'client_id': 'client-1'})
-        self.device: Reply = (
-            200,
-            {
-                'device_code': 'device',
-                'user_code': 'ABCD-EFGH',
-                'verification_uri': f'{ORIGIN}/auth/oauth-device',
-                'verification_uri_complete': LINK,
-                'expires_in': 600,
-                'interval': 0,
-            },
-        )
+        self.device: Reply = (200, DEVICE)
         self.polls: list[Reply] = [granted('access-1', refresh='refresh-1')]
         self.refreshes: list[Reply] = []
         self.valid = {'access-1'}
@@ -80,6 +82,10 @@ class Logfire:
 
     def client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=httpx.MockTransport(self.handle))
+
+
+def refuse(request: httpx.Request) -> httpx.Response:
+    raise httpx.ConnectError('refused', request=request)
 
 
 def granted(access: str, *, refresh: str | None = None, **extra: JsonValue) -> Reply:
@@ -204,7 +210,7 @@ class TestSignIn:
 
         monkeypatch.setattr(webbrowser, 'open', no_browser)
         logfire = Logfire()
-        logfire.device = (200, {**json.loads(json.dumps(logfire.device[1])), 'verification_uri_complete': None})
+        logfire.device = (200, {**DEVICE, 'verification_uri_complete': None})
         lines = await run_sign_in(logfire)
         assert lines[0] == f'Sign in to Logfire (new users can sign up there): open {ORIGIN}/auth/oauth-device'
         assert 'No browser opened; open the link above yourself.' in lines
@@ -219,6 +225,14 @@ class TestSignIn:
         await run_sign_in(logfire, read_only=False)
         tokens = load(RESOURCE)
         assert tokens is not None and tokens.writable
+
+    async def test_a_huge_interval_waits_no_longer_than_the_code_lasts(self) -> None:
+        logfire = Logfire()
+        logfire.device = (200, {**DEVICE, 'interval': 999_999_999})
+        sleeps: list[float] = []
+        await run_sign_in(logfire, sleeps=sleeps)
+        [waited] = sleeps
+        assert 590 < waited <= 600
 
     async def test_a_dropped_poll_keeps_waiting_for_approval(self) -> None:
         logfire = Logfire()
@@ -257,56 +271,66 @@ class TestSignIn:
         assert logfire.forms[0]['scope'] == 'project:read'  # Nothing offered beyond what MCP requires.
 
     @pytest.mark.parametrize(
-        ('change', 'message'),
+        ('broken', 'value', 'message'),
         [
-            ('denied', 'Logfire sign-in was denied. Run /logfire_mcp login to retry.'),
-            ('failed', 'Logfire sign-in failed: invalid grant. Run /logfire_mcp login to retry.'),
-            ('expired', 'The Logfire sign-in code expired before it was approved.'),
-            ('no-registration', 'This Logfire server does not let CLAI register for browser sign-in.'),
-            ('registration', 'Logfire refused to register CLAI: nope'),
-            ('device', 'Logfire refused browser sign-in: HTTP 503'),
-            ('nested', 'Logfire refused browser sign-in: PKCE is required'),
-            ('odd-error', 'Logfire refused browser sign-in: HTTP 400'),
-            ('unreachable', 'Logfire sign-in failed: ConnectError. Run /logfire_mcp login to retry.'),
-            ('malformed', 'Logfire sign-in failed: ValidationError.'),
-            ('not-bearer', 'Logfire sign-in failed: ValidationError.'),
-            ('other-resource', f'{RESOURCE} described itself as https://logfire-us.pydantic.dev/mcp; not signing in.'),
+            ('polls', [pending('access_denied')], 'Logfire sign-in was denied. Run /logfire_mcp login to retry.'),
+            ('polls', [pending('invalid_grant')], 'Logfire sign-in failed: invalid grant. Run /logfire_mcp login'),
+            ('polls', [(200, {'access_token': ''})], 'Logfire sign-in failed: ValidationError.'),
+            ('polls', [granted('access-1', token_type='DPoP')], 'Logfire sign-in failed: ValidationError.'),
+            ('device', (200, {**DEVICE, 'expires_in': 0}), 'The Logfire sign-in code expired before it was approved.'),
+            ('device', (503, 'unavailable'), 'Logfire refused browser sign-in: HTTP 503'),
+            (
+                'device',
+                (400, {'detail': {'error': 'invalid_client', 'error_description': 'PKCE is required'}}),
+                'Logfire refused browser sign-in: PKCE is required',
+            ),
+            ('device', (400, ['not', 'an', 'object']), 'Logfire refused browser sign-in: HTTP 400'),
+            (
+                'metadata',
+                {**METADATA, 'registration_endpoint': None},
+                'This Logfire server does not let CLAI register for browser sign-in.',
+            ),
+            ('metadata', {**METADATA, 'token_endpoint': 'http://logfire.test/token'}, 'failed: ValidationError.'),
+            (
+                'registration',
+                (400, {'error': 'invalid_client_metadata', 'error_description': 'nope'}),
+                'Logfire refused to register CLAI: nope',
+            ),
+            (
+                'resource',
+                (200, {'resource': RESOURCE, 'authorization_servers': ['http://logfire.test']}),
+                'Logfire sign-in failed: ValidationError.',
+            ),
+            (
+                'resource',
+                (200, {'resource': 'https://logfire-us.pydantic.dev/mcp', 'authorization_servers': [ORIGIN]}),
+                f'{RESOURCE} described itself as https://logfire-us.pydantic.dev/mcp; not signing in.',
+            ),
+            ('handle', refuse, 'Logfire sign-in failed: ConnectError. Run /logfire_mcp login to retry.'),
+        ],
+        ids=[
+            'denied',
+            'failed',
+            'malformed',
+            'not-bearer',
+            'expired',
+            'device-down',
+            'nested-error',
+            'odd-error',
+            'no-registration',
+            'plain-http',
+            'registration',
+            'plain-http-issuer',
+            'other-resource',
+            'unreachable',
         ],
     )
-    async def test_failures_explain_how_to_retry_and_save_nothing(self, change: str, message: str) -> None:
+    async def test_failures_explain_how_to_retry_and_save_nothing(
+        self, broken: str, value: object, message: str
+    ) -> None:
         logfire = Logfire()
-        if change == 'denied':
-            logfire.polls = [pending('access_denied')]
-        elif change == 'failed':
-            logfire.polls = [pending('invalid_grant')]
-        elif change == 'expired':
-            logfire.device = (200, {**json.loads(json.dumps(logfire.device[1])), 'expires_in': 0})
-        elif change == 'no-registration':
-            logfire.metadata = {**json.loads(json.dumps(logfire.metadata)), 'registration_endpoint': None}
-        elif change == 'registration':
-            logfire.registration = (400, {'error': 'invalid_client_metadata', 'error_description': 'nope'})
-        elif change == 'device':
-            logfire.device = (503, 'unavailable')
-        elif change == 'nested':
-            logfire.device = (400, {'detail': {'error': 'invalid_client', 'error_description': 'PKCE is required'}})
-        elif change == 'odd-error':
-            logfire.device = (400, ['not', 'an', 'object'])
-        elif change == 'malformed':
-            logfire.polls = [(200, {'access_token': ''})]
-        elif change == 'not-bearer':
-            logfire.polls = [granted('access-1', token_type='DPoP')]
-        elif change == 'other-resource':
-            logfire.resource = (
-                200,
-                {'resource': 'https://logfire-us.pydantic.dev/mcp', 'authorization_servers': [ORIGIN]},
-            )
-        if change == 'unreachable':
-
-            def refuse(request: httpx.Request) -> httpx.Response:
-                raise httpx.ConnectError('refused', request=request)
-
-            logfire.handle = refuse
-        with pytest.raises(SignInError, match=message.replace('(', r'\(').replace(')', r'\)')):
+        setattr(logfire, broken, value)
+        with pytest.raises(SignInError, match=re.escape(message)):
             await run_sign_in(logfire)
         assert load(RESOURCE) is None
 

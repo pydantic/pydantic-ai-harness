@@ -296,8 +296,8 @@ async def _configure(source: LogfireMCPSource) -> str:
             return [f'Logfire uses {KEY_NAME} from the environment or /keys, then browser sign-in.']
         return [f'Logfire uses the saved key {key.name}. Manage it in /keys.']
 
-    menu = FieldMenu(source)
-    messages = await run_worker(lambda: run_flow(menu, RUNNERS, submenus={'key': pick_key}))
+    # Built in the worker: its rows read `/keys` (a cross-process lock) and the keyring.
+    messages = await run_worker(lambda: run_flow(FieldMenu(source), RUNNERS, submenus={'key': pick_key}))
     return '\n'.join(messages) or 'Logfire MCP settings unchanged.'
 
 

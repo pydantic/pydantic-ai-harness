@@ -16,14 +16,14 @@ import threading
 import time
 import webbrowser
 from collections.abc import AsyncGenerator, Awaitable, Callable, Generator
-from typing import Literal
+from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 import anyio
 import httpx
 from anyio import to_thread
 from keyring.errors import KeyringError
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 from pydantic_ai.exceptions import UserError
 
 from .credential_store import delete_credentials, load_codex_credentials, save_codex_credentials
@@ -100,16 +100,26 @@ def forget() -> bool:
         return True
 
 
+def _https(url: str) -> str:
+    # Device codes and refresh tokens are sent to these URLs.
+    if urlsplit(url).scheme != 'https':
+        raise ValueError(f'Logfire OAuth URLs must use https, not {url}')
+    return url
+
+
+_Https = Annotated[str, AfterValidator(_https)]
+
+
 class _Resource(BaseModel):
     resource: str
-    authorization_servers: list[str] = Field(min_length=1)
+    authorization_servers: list[_Https] = Field(min_length=1)
     scopes_supported: list[str] = []
 
 
 class _Server(BaseModel):
-    device_authorization_endpoint: str
-    token_endpoint: str
-    registration_endpoint: str | None = None
+    device_authorization_endpoint: _Https
+    token_endpoint: _Https
+    registration_endpoint: _Https | None = None
 
 
 class _Registered(BaseModel):
@@ -276,7 +286,8 @@ async def _poll(
     interval = device.interval
     deadline = time.monotonic() + device.expires_in
     while time.monotonic() < deadline:
-        await sleep(interval)
+        # A server-chosen interval cannot outlast the code.
+        await sleep(max(min(interval, deadline - time.monotonic()), 0))
         # Logfire requires PKCE on the device flow too, so the verifier goes with the device code.
         try:
             response = await http.post(
