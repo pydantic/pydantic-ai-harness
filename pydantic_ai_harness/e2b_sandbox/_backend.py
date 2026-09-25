@@ -124,7 +124,8 @@ async def _file_entry(sandbox: e2b.AsyncSandbox, entry: e2b.EntryInfo) -> FileEn
 def _unavailable_message(sandbox_id: str) -> str:
     return (
         f'The E2B sandbox {sandbox_id!r} is no longer running: it was killed, or it was paused when its '
-        '`sandbox_timeout` ran out. Attaching to it again resumes a paused sandbox.'
+        '`sandbox_timeout` ran out (a later run that attaches to it resumes it). '
+        "Pass `workspace='new'` to start a fresh sandbox."
     )
 
 
