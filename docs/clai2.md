@@ -32,8 +32,9 @@ to `config.db`: `$XDG_CONFIG_HOME/pydantic-clai2/input-history`, or
 `~/.config/pydantic-clai2/input-history` by default. On POSIX the file is restricted
 to its owner (mode 0600). Avoid entering secrets in the prompt: input history is
 not encrypted. Delete this file while CLAI is closed to clear saved input.
-`/new` clears model conversation history, not input recall. Model responses and
-tool results are not saved to this file.
+`/new` clears model conversation history, not input recall. `/clear`, or bare
+`clear`, is an alias of `/new`. Model responses and tool results are not saved
+to this file.
 
 ## CI coverage
 
@@ -203,6 +204,13 @@ anything not listed), everything else a typed input that validates as you go.
 An empty value resets. `R` resets the highlighted setting. Esc closes. Every
 edit saves and applies immediately, the same as `/set KEY VALUE`.
 
+While a turn is running, `/set`, `/model`, `/add_model`, `/model_settings`,
+`/theme`, and `/spinner` typed without arguments open their menu right away
+instead of queueing. The turn keeps running: its output is held while the menu is open
+and printed in order when the menu closes. A question from the agent waits for
+the menu to close. Model and run settings saved in the menu apply once the
+running turn ends. With arguments, these commands queue like any other.
+
 ## Models and their settings
 
 `/model` opens a searchable provider list, then a model picker for that provider.
@@ -239,7 +247,7 @@ Settings are validated before writes. `/set` updates the active settings snapsho
 legacy `/config` writes apply on restart; plugin changes apply on the next prompt.
 `--request-limit` controls the full prompt's model-request budget.
 
-Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/help`, `/new`, `/exit`, `/config`, `/plugins`, and `/reload`.
+Interactive commands: `/login`, `/set`, `/theme`, `/model`, `/help`, `/new`, `/clear`, `/exit`, `/config`, `/plugins`, and `/reload`.
 Tab completion suggests commands, settings, boolean values, plugin identifiers,
 and paths after `@`. Path completion inserts a path; it does not attach file contents.
 Unknown slash commands are not sent to the model. Up/down recall prompt history
@@ -324,7 +332,9 @@ and cancellation. Unsupported terminals may ignore these changes. Redirected
 output receives no palette-changing sequences. Your terminal configuration file
 is not modified.
 
-The early splash retains its brand colours. Syntax highlighting keeps Monokai;
+The early splash and the `CLAI 2.0` banner keep Pydantic's brand colours under
+every palette, except on 16-colour terminals, where the palette owns the ANSI
+slots. Syntax highlighting keeps Monokai;
 bundled palettes use Termflow's default diff colours. Theme selection adds no
 model requests or telemetry.
 

@@ -40,6 +40,7 @@ class Interrupts:
     async def run(self, operation: Awaitable[None]) -> bool:
         """Return false for user cancellation; propagate external task cancellation."""
         main_thread = threading.current_thread() is threading.main_thread()
+        loop = asyncio.get_running_loop()
 
         async def invoke() -> None:
             await operation
@@ -57,6 +58,9 @@ class Interrupts:
 
         def on_signal(signum: int, frame: FrameType | None) -> None:
             cancel(True)
+            # Wake an idle selector, as `asyncio.Runner` does for SIGINT; a silent shell
+            # command otherwise leaves the cancellation unprocessed until the child exits.
+            loop.call_soon_threadsafe(lambda: None)
 
         previous = signal.getsignal(signal.SIGINT)
         self._cancel = cancel
@@ -64,12 +68,16 @@ class Interrupts:
             if main_thread:
                 signal.signal(signal.SIGINT, on_signal)
             try:
-                await task
+                # `asyncio.wait` never forwards our own cancellation to `task`, so a
+                # `CancelledError` here is always external and must propagate.
+                await asyncio.wait({task})
             except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if not interrupted or current is not None and current.cancelling():
-                    raise
+                task.cancel()
+                await asyncio.wait({task})
+                raise
+            if interrupted and task.cancelled():
                 return False
+            await task  # Re-raise the operation's failure, or a cancellation that was not ours.
             return True
         finally:
             self._cancel = None
