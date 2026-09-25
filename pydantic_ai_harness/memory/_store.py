@@ -502,8 +502,10 @@ class FileStore:
     @staticmethod
     async def _confine(workspace: Workspace, root: str, target: str, path: str) -> str:
         """Return `target` with symlinks resolved, refusing one that leaves the store directory."""
-        real_root = await workspace.realpath(root)
-        real_target = await workspace.realpath(target)
+        return FileStore._confined(await workspace.realpath(root), await workspace.realpath(target), path)
+
+    @staticmethod
+    def _confined(real_root: str, real_target: str, path: str) -> str:
         if not real_target.startswith(real_root.rstrip('/') + '/'):
             raise ValueError(f'memory path {path!r} resolves outside the store directory')
         return real_target
@@ -704,12 +706,13 @@ class FileStore:
             return MemorySearchResult(matches=[], scanned=0, truncated=False)
         paths = await self.list_paths(prefix, limit=max_files + 1)
         workspace = self._workspace()
-        root = await self._root(workspace)
+        # Resolved once here rather than per file.
+        root = await workspace.realpath(await self._root(workspace))
         files: list[tuple[str, str]] = []
         content_truncated = False
         for path in paths[:max_files]:
             try:
-                target = await self._confine(workspace, root, self._target(root, path), path)
+                target = self._confined(root, await workspace.realpath(self._target(root, path)), path)
             except ValueError:
                 # A listed file that links outside the store directory is not read.
                 continue
