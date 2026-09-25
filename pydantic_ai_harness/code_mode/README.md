@@ -612,8 +612,8 @@ CodeMode(os_access=OSAccess(environ={'API_BASE': 'https://api.example.com'}))
 allowed_env = {'API_KEY': 'sk-...'}
 
 
-def my_os(fn, args, kwargs):
-    if fn == 'os.getenv':
+def my_os(*, name, args, kwargs, **_):
+    if name == 'os.getenv':
         # Answer the call: allow-listed keys resolve, every other key reads back
         # as None -- absent, exactly like a real unset variable.
         return allowed_env.get(args[0])
@@ -623,6 +623,9 @@ def my_os(fn, args, kwargs):
 
 CodeMode(os_access=my_os)
 ```
+
+The callback takes keyword arguments and may be `async`. The older positional form, `my_os(name, args, kwargs)`,
+still works but is deprecated and will be removed in the next breaking release.
 
 Your callback's return value decides the call's fate, and the two outcomes are easy to confuse:
 
@@ -650,10 +653,10 @@ do **not** reach the host. Pass `mode='read-write'` when later calls need to rea
 Code runs inside [Monty](https://github.com/pydantic/monty), a sandboxed Python subset. Key restrictions:
 
 - No third-party imports (allowed stdlib: `sys`, `typing`, `asyncio`, `math`, `json`, `re`,
-  `unicodedata`, `datetime`, `os`, `pathlib`)
+  `unicodedata`, `datetime`, `time`, `random`, `os`, `pathlib`)
 - `asyncio.gather(...)` accepts positional awaitables but no keyword arguments; other task creation
   and wait APIs are unavailable
-- No clock, sleep, or randomness by default (`datetime.datetime.now()`, `datetime.date.today()`, `time.time()`, `asyncio.sleep`, `time.sleep`, unseeded `random`) -- they become available when an `os_access` handler implements them (the built-in `OSAccess` does)
+- No clock or randomness by default (`datetime.datetime.now()`, `datetime.date.today()`, `time.time()`, unseeded `random`) -- they become available when an `os_access` handler implements them (the built-in `OSAccess` does); `time.sleep` and `asyncio.sleep` return immediately
 - No `import *`
 - Filesystem I/O needs an `os_access` handler or a `mount`; `os.getenv`/`os.environ` need an `os_access` handler
 - Tools requiring approval or with deferred (`CallDeferred`) execution are sandboxed like any other tool; without a `HandleDeferredToolCalls` (or equivalent) capability on the agent to resolve them inline, calling one from `run_code` raises an error that surfaces to the model as a retry

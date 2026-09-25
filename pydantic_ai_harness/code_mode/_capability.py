@@ -26,6 +26,7 @@ from pydantic_ai_harness.code_mode._toolset import (
     CodeModeOS,
     CodeModeResourceLimits,
     CodeModeToolset,
+    as_os_handler,
     in_durable_execution,
 )
 
@@ -110,8 +111,11 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     os_access: CodeModeOS | None = None
     """Give sandboxed code environment variables, the clock, and file I/O through a handler you provide; unset, they are unavailable.
 
-    The handler is called synchronously from a Monty thread, not the event loop's thread, with the
-    run's contextvars set. Do not touch asyncio objects from it.
+    Pass an `AbstractOS` such as `OSAccess`, or a handler called with keyword arguments (see
+    `pydantic_monty.OsHandler`). A plain function is called from a Monty thread, not the event
+    loop's thread, with the run's contextvars set, so it must not touch asyncio objects; an `async`
+    handler is awaited on the run's event loop. The positional `(name, args, kwargs)` form is
+    deprecated.
     """
 
     mount: CodeModeMount | None = None
@@ -193,6 +197,8 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     _announced_tools: set[str] = field(default_factory=set[str], init=False, repr=False)
 
     def __post_init__(self) -> None:
+        # Converted once here, so the per-run copies and the toolsets built from this do not warn again.
+        self.os_access = as_os_handler(self.os_access)
         if isinstance(self.speculate, str) and self.speculate != 'declared':
             raise UserError(
                 f"`speculate` accepts a list of tool names or the string 'declared', not {self.speculate!r}. "

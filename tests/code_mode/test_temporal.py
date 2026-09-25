@@ -180,7 +180,7 @@ code_mode_agent = Agent(
 _request_id: contextvars.ContextVar[str] = contextvars.ContextVar('request_id', default='unset')
 
 
-def _request_id_os(fn: str, args: tuple[object, ...], kwargs: dict[str, object]) -> object:
+def _request_id_os(*, name: str, args: tuple[object, ...], kwargs: dict[str, object], **_: object) -> object:
     return _request_id.get()
 
 

@@ -34,7 +34,7 @@ from pydantic_ai.tool_manager import ParallelExecutionMode, ToolManager
 from pydantic_ai.tools import AgentDepsT, ToolDenied, ToolSelector, matches_tool_selector
 from pydantic_ai.toolsets.abstract import SchemaValidatorProt, ToolsetTool
 from pydantic_core import PydanticSerializationError, to_json, to_jsonable_python
-from typing_extensions import NotRequired, Self, TypedDict
+from typing_extensions import NotRequired, Self, TypedDict, TypeIs
 
 try:
     from pydantic_ai.toolsets._tool_search import _SEARCH_TOOLS_NAME  # pyright: ignore[reportPrivateUsage]
@@ -64,15 +64,16 @@ from pydantic_ai_harness._monty_exec import (
     in_temporal_workflow,
     is_sandbox_panic,
 )
+from pydantic_ai_harness._warn import HarnessDeprecationWarning
 
 if TYPE_CHECKING:
     from pydantic_ai_harness.code_mode._speculation import SpeculationCoordinator
 
-# A raw OS callback. Return `pydantic_monty.NOT_HANDLED` to defer the call to the
-# sandbox's default, which leaves it unavailable.
+# Deprecated: a positional `(name, args, kwargs)` OS callback. Pass Monty's keyword-only `OsHandler`
+# instead; this form is still accepted and will be removed in the next breaking release.
 CodeModeOSCallback = Callable[[OsFunction, tuple[object, ...], dict[str, object]], object]
-# Accepted by `CodeMode.os_access`: a ready-made OS implementation or a raw callback.
-CodeModeOS = AbstractOS | CodeModeOSCallback
+# Accepted by `CodeMode.os_access`: a ready-made OS implementation or a handler that decides each call.
+CodeModeOS = AbstractOS | OsHandler | CodeModeOSCallback
 # Accepted by `CodeMode.mount`: one or more host-directory mounts.
 CodeModeMount = MountDir | list[MountDir]
 
@@ -105,13 +106,44 @@ def _check_monty_sandbox_url(url: str) -> None:
         raise UserError(f'`monty_sandbox_url` must be a `ws://` or `wss://` URL, not scheme {scheme!r}.')
 
 
-def _os_handler(os_access: CodeModeOS) -> OsHandler:
-    """Adapt `CodeMode.os_access` to Monty's keyword-only `os=` handler."""
+def _is_os_handler(os_access: CodeModeOS) -> TypeIs[AbstractOS | OsHandler]:
+    """Whether `os_access` takes Monty's keyword call, rather than the deprecated positional one.
+
+    A callable that accepts both shapes is taken as a handler. One whose signature cannot be read
+    is taken as a handler too, since that is the shape Monty calls.
+    """
     if isinstance(os_access, AbstractOS):
+        return True
+    try:
+        signature = inspect.signature(os_access)
+    except (TypeError, ValueError):  # pragma: no cover - builtins and some C callables have no signature
+        return True
+    try:
+        signature.bind(name='os.getenv', args=(), kwargs={}, is_async=False)
+    except TypeError:
+        return False
+    return True
+
+
+def as_os_handler(os_access: CodeModeOS | None) -> AbstractOS | OsHandler | None:
+    """Return `os_access` in the keyword-only shape Monty calls, warning once for the positional form.
+
+    Called from the `__post_init__` of the dataclasses that take `os_access`, which store the result:
+    their per-run copies re-run `__post_init__` and then see a handler that needs no warning.
+    """
+    if os_access is None or _is_os_handler(os_access):
         return os_access
+    warnings.warn(
+        'A positional `os_access(name, args, kwargs)` callback is deprecated. Accept keyword arguments '
+        'instead, as `pydantic_monty.OsHandler` does: `def handler(*, name, args, kwargs, **_): ...`. '
+        'The positional form will be removed in the next breaking release.',
+        category=HarnessDeprecationWarning,
+        stacklevel=4,  # this function, `__post_init__`, the dataclass `__init__`, then the caller
+    )
+    callback: Callable[..., object] = os_access
 
     def handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> object:
-        return os_access(name, args, kwargs)
+        return callback(name, args, kwargs)
 
     return handler
 
@@ -373,21 +405,21 @@ The sandbox uses Monty, a subset of Python. Key restrictions:
 # a `mount` only exposes filesystem paths, while environment and clock calls
 # require an `os` handler.
 _NO_OS_RESTRICTION = (
-    '- **No filesystem, environment, or timing primitives**: `pathlib.Path` I/O, '
-    '`os.getenv`/`os.environ`, `datetime.datetime.now()`, `datetime.date.today()`, `asyncio.sleep`, '
-    'and the `time` module are unavailable here (no filesystem mount or OS handler is configured). '
-    '`os` and `pathlib` import successfully, but their I/O operations are not supported in this '
-    'configuration.'
+    '- **No filesystem, environment, or clock**: `pathlib.Path` I/O, `os.getenv`/`os.environ`, '
+    '`datetime.datetime.now()`, `datetime.date.today()`, and `time.time()` are unavailable here '
+    '(no filesystem mount or OS handler is configured). `os` and `pathlib` import successfully, but '
+    'their I/O operations are not supported in this configuration. `asyncio.sleep` returns at once.'
 )
 _MOUNT_ONLY_NOTE = (
     '- **Mounted filesystem access**: `pathlib.Path` operations under the configured mount '
     'point(s) are routed to the host. `os.getenv`/`os.environ`, `datetime.datetime.now()`, '
-    '`datetime.date.today()`, `asyncio.sleep`, and the `time` module remain unavailable.'
+    '`datetime.date.today()`, and `time.time()` remain unavailable. `asyncio.sleep` returns at once.'
 )
 _OS_ENABLED_NOTE = (
     '- **Configured OS access**: `pathlib.Path` operations, `os.getenv`/`os.environ`, '
-    '`datetime.datetime.now()`, `datetime.date.today()`, and `asyncio.sleep` are routed to the OS '
-    'handler configured for this agent (availability depends on that configuration).'
+    '`datetime.datetime.now()`, `datetime.date.today()`, and `time.time()` are routed to the OS '
+    'handler configured for this agent (availability depends on that configuration). '
+    '`asyncio.sleep` returns at once.'
 )
 _MOUNT_LIFETIME_NOTE = (
     "- **Mount write lifetime**: writes through a `mode='overlay'` mount last only for the current "
@@ -768,6 +800,10 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
     # logs every step. Reset on `for_run` because each run gets a fresh instance.
     _warned_deferred: set[str] = field(default_factory=set[str], init=False, repr=False)
 
+    def __post_init__(self) -> None:
+        # Converted once here, so the copies `for_run` and `for_run_step` make do not warn again.
+        self.os_access = as_os_handler(self.os_access)
+
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
         """Return a fresh toolset instance with isolated REPL state for this agent run."""
         wrapped = await self.wrapped.for_run(ctx)
@@ -1101,7 +1137,7 @@ class CodeModeToolset(WrapperToolset[AgentDepsT]):
                         session.feed_start,
                         code,
                         print_callback=capture.callback,
-                        os=None if self.os_access is None else _os_handler(self.os_access),
+                        os=as_os_handler(self.os_access),
                         mount=self.mount,
                         skip_type_check=not type_check,
                     )
@@ -1341,7 +1377,7 @@ def _model_safe_result(value: object) -> object:
     """Render the parts of a snippet's result that have no JSON form as their `repr`.
 
     Monty hands some sandbox values back as host objects: `type(x)` and `ValueError` arrive
-    as `type` objects, `len` as a builtin function, a bare exception instance as itself.
+    as `type` objects, `len` as a `MontyStdTypeProxy`, a bare exception instance as itself.
     None of them serialize, so the tool return would abort the run in whichever layer
     renders it first (`ToolOutputLimits`, or pydantic-ai building the model request). The
     `repr` is what the snippet's author would have seen in a Python REPL. Non-finite floats

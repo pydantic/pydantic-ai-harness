@@ -124,9 +124,10 @@ async def _release_monty(stack: AsyncExitStack) -> None:
 # limit fires first and the model sees a time-limit error rather than a dropped connection.
 _REMOTE_TURN_SLACK_SECS = 10.0
 
-# Route the clock, sleeps, and unseeded randomness to the `os=` handler, as before Monty 1.0. Without
-# one they are unavailable, which keeps sandbox code deterministic when a Temporal workflow replays it.
-_OS_POLICY: OSPolicy = {'datetime': 'call_host', 'sleep': 'call_host', 'random_start': 'call_host'}
+# Route the clock and unseeded randomness to the `os=` handler, as before Monty 1.0: without one they are
+# unavailable, which keeps sandbox code deterministic when a Temporal workflow replays it. Sleeps return
+# at once: a handler's sleep would block the run, and sleep time does not count toward duration limits.
+_OS_POLICY: OSPolicy = {'datetime': 'call_host', 'sleep': 'zero', 'random_start': 'call_host'}
 
 
 @dataclass

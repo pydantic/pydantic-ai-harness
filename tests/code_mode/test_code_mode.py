@@ -66,7 +66,7 @@ from pydantic_core import SchemaValidator, core_schema
 from pydantic_monty import NOT_HANDLED, AsyncMonty, MountDir, OSAccess, OsFunction
 from typing_extensions import Never, TypedDict
 
-from pydantic_ai_harness import CodeMode, ToolOutputLimits
+from pydantic_ai_harness import CodeMode, HarnessDeprecationWarning, ToolOutputLimits
 from pydantic_ai_harness.code_mode import CodeModeResourceLimits, CodeModeToolset
 from pydantic_ai_harness.code_mode._capability import (
     _extract_discovered_names,  # pyright: ignore[reportPrivateUsage]
@@ -3685,7 +3685,7 @@ class TestDynamicCatalog:
         assert result.output == 'got 7'
 
 
-def _unused_os_callback(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+def _unused_os_callback(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
     """An `os` callback for tests that only assert description/forwarding, never run code."""
     return NOT_HANDLED  # pragma: no cover - never invoked by these tests
 
@@ -3700,7 +3700,7 @@ class TestCodeModeOSAccess:
         assert isinstance(wrapper, CodeModeToolset)
         description = (await wrapper.get_tools(build_run_context(None)))['run_code'].tool_def.description
         assert description is not None
-        assert 'No filesystem, environment, or timing primitives' in description
+        assert 'No filesystem, environment, or clock' in description
         assert 'their I/O operations are not supported in this configuration' in description
 
     async def test_description_with_os_callback_notes_host_access(self) -> None:
@@ -3740,8 +3740,8 @@ class TestCodeModeOSAccess:
         """The `os` captured at `feed_start` answers OS-call snapshots via `resume_auto()`,
         so OS calls still dispatch after a tool-call suspend/resume round-trip."""
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            if fn == 'os.getenv':
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            if name == 'os.getenv':
                 return 'envval'
             return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
 
@@ -3759,8 +3759,8 @@ class TestCodeModeOSAccess:
         """`os` is supplied on every `feed_start`, so OS access still works on a later
         `run_code` call that reuses the persisted (non-fresh) REPL."""
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            if fn == 'os.getenv':
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            if name == 'os.getenv':
                 return 'persisted'
             return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
 
@@ -3778,7 +3778,7 @@ class TestCodeModeOSAccess:
         """Monty calls OS handlers from its own thread; they still see the run's contextvars."""
         run_value: contextvars.ContextVar[str] = contextvars.ContextVar('run_value', default='unset')
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
             return run_value.get()
 
         wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
@@ -3794,12 +3794,11 @@ class TestCodeModeOSAccess:
         [
             pytest.param('import datetime\ndatetime.datetime.now()', id='datetime'),
             pytest.param('import time\ntime.time()', id='time'),
-            pytest.param('import asyncio\nawait asyncio.sleep(0)', id='sleep'),
             pytest.param('import random\nrandom.random()', id='random'),
         ],
     )
-    async def test_clock_sleep_and_entropy_need_os_access(self, code: str) -> None:
-        """Without `os_access` sandbox code has no clock, sleep, or entropy, so a replay sees the same run."""
+    async def test_clock_and_entropy_need_os_access(self, code: str) -> None:
+        """Without `os_access` sandbox code has no clock or entropy, so a replay sees the same run."""
         wrapper = CodeMode[object]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)
         ctx = await build_ctx(None, wrapper)
@@ -3810,8 +3809,8 @@ class TestCodeModeOSAccess:
     async def test_os_callback_answers_the_clock(self) -> None:
         seen: list[str] = []
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            seen.append(fn)
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            seen.append(name)
             return 1_000_000.0
 
         wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
@@ -3821,6 +3820,57 @@ class TestCodeModeOSAccess:
         result = await wrapper.call_tool('run_code', {'code': 'import time\ntime.time()'}, ctx, tools['run_code'])
         assert result.return_value == 1_000_000.0
         assert seen == ['time.time']
+
+    @pytest.mark.parametrize(
+        'code',
+        [
+            pytest.param('import time\ntime.sleep(5)', id='time.sleep'),
+            pytest.param('import asyncio\nawait asyncio.sleep(5)', id='asyncio.sleep'),
+        ],
+    )
+    async def test_sleep_returns_at_once_even_with_os_access(self, code: str) -> None:
+        """`OSAccess` would sleep for real, holding the run with no duration limit to stop it."""
+        wrapper = CodeMode[object](os_access=OSAccess()).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        with anyio.fail_after(2):
+            result = await wrapper.call_tool('run_code', {'code': f'{code}\n"awake"'}, ctx, tools['run_code'])
+        assert result.return_value == 'awake'
+
+    async def test_async_os_handler_is_awaited(self) -> None:
+        async def os_handler(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            await asyncio.sleep(0)
+            return f'{name}{args}'
+
+        wrapper = CodeMode[object](os_access=os_handler).get_wrapper_toolset(_build_function_toolset(add))
+        assert isinstance(wrapper, CodeModeToolset)
+        ctx = await build_ctx(None, wrapper)
+        tools = await wrapper.get_tools(ctx)
+        result = await wrapper.call_tool('run_code', {'code': "import os\nos.getenv('A')"}, ctx, tools['run_code'])
+        assert result.return_value == "os.getenv('A', None)"
+
+    async def test_positional_os_callback_is_deprecated_but_still_works(self) -> None:
+        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            return f'positional {fn}'
+
+        def model_fn(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+            returns = [p for m in messages for p in m.parts if isinstance(p, ToolReturnPart)]
+            if returns:
+                return ModelResponse(parts=[TextPart(str(returns[-1].content))])
+            return ModelResponse(parts=[ToolCallPart('run_code', {'code': "import os\nos.getenv('A')"})])
+
+        with pytest.warns(HarnessDeprecationWarning, match='positional `os_access') as caught:
+            agent = Agent(FunctionModel(model_fn), capabilities=[CodeMode(os_access=os_cb, dynamic_catalog=True)])
+            # Two runs: the per-run copies must not warn again.
+            first = await agent.run('go')
+            await agent.run('go')
+        assert len(caught) == 1
+        assert caught[0].filename == __file__
+        assert 'positional os.getenv' in first.output
+
+        with pytest.warns(HarnessDeprecationWarning, match='positional `os_access'):
+            CodeModeToolset[object](wrapped=_build_function_toolset(add), os_access=os_cb)
 
     async def test_abstract_os_instance_dispatches_inside_run_code(self) -> None:
         """An `AbstractOS` instance is accepted as the `os` value and dispatches OS calls."""
@@ -3837,7 +3887,7 @@ class TestCodeModeOSAccess:
         """A raising `os` callback surfaces as a `ModelRetry`, like any other sandbox runtime
         error -- it must not crash the agent loop."""
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
             raise ValueError('boom from os')
 
         wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
@@ -3856,8 +3906,8 @@ class TestCodeModeOSAccess:
         """
         allowed = {'API_KEY': 'sk-xxx'}
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
-            if fn == 'os.getenv':
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
+            if name == 'os.getenv':
                 return allowed.get(args[0])
             return NOT_HANDLED  # pragma: no cover - sandbox only calls os.getenv here
 
@@ -3877,7 +3927,7 @@ class TestCodeModeOSAccess:
         answering `None`, and using it for a key the model expects will burn retries.
         """
 
-        def os_cb(fn: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        def os_cb(*, name: OsFunction, args: tuple[Any, ...], kwargs: dict[str, Any], **_: Any) -> Any:
             return NOT_HANDLED
 
         wrapper = CodeMode[object](os_access=os_cb).get_wrapper_toolset(_build_function_toolset(add))
