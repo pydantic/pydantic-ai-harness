@@ -173,7 +173,10 @@ def _map_error(error: Exception, sprite_name: str | None) -> WorkspaceError | No
         # An unknown runtime or a bad request fails the same way on every retry.
         return WorkspaceUnavailableError(f'Could not start Sprites sandbox: {error}')
     if isinstance(error, NotFoundError) or status == 404:
-        return WorkspaceUnavailableError(f'Sprite {sprite_name!r} no longer exists.')
+        return WorkspaceUnavailableError(
+            f'The Sprite {sprite_name!r} no longer exists: it was deleted. '
+            "Pass `workspace='new'` to start a fresh sandbox."
+        )
     return WorkspaceError(f'Sprites refused the request: {error}')
 
 
@@ -202,7 +205,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
             raise ValueError(f"unsupported workspace provider {ref.provider!r}; expected 'sprites'")
         if workspace is not None and ref is not None:
             raise ValueError('pass either `workspace` or `ref`, not both')
-        self._workspace = workspace
+        self._sandbox = workspace
         self._ref = ref if workspace is None else WorkspaceRef(provider='sprites', id=workspace.name)
         self._new_sprite_name = f'pydantic-ai-{uuid.uuid4().hex}'
         self._runtime = runtime
@@ -231,7 +234,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
         no longer exists raises `WorkspaceUnavailableError`; it does not create a replacement.
         """
         async with self._lock:
-            if (workspace := self._workspace) is not None:
+            if (workspace := self._sandbox) is not None:
                 return workspace
 
             client = self._client
@@ -252,7 +255,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                     else:
                         workspace = await client.create_sprite(self._new_sprite_name, runtime=self._runtime)
                     # Recorded as soon as the SDK returns, so a cancelled caller still leaves it named.
-                    self._workspace = workspace
+                    self._sandbox = workspace
                     self._ref = WorkspaceRef(provider='sprites', id=workspace.name)
                     return workspace
                 # Only our own bound lands here; an SDK `TimeoutError` propagates as raised. A stalled
@@ -296,7 +299,7 @@ class SpritesSandboxBackend(WorkspaceBackend, SupportsCommands):
                     logger.warning('Could not close Sprites SDK client: %r', error)
                 else:
                     self._client = None
-                    self._workspace = None
+                    self._sandbox = None
 
         # Finished even when the caller (a run being cancelled) is cancelled meanwhile.
         await _run_to_completion(close)
