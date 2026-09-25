@@ -1326,9 +1326,10 @@ plugin list. Use `/plugins list` to print it. Plugins are trusted code running a
 
 [PLUGINS.md](PLUGINS.md) has the full list of hooks, events, and rules.
 
-`/plugins enable notion` gives the agent Notion's hosted MCP tools, connecting
-with `NOTION_ACCESS_TOKEN` or, without it, a browser sign-in whose tokens stay
-in the OS keyring. See [PLUGINS.md](PLUGINS.md#notion-workspace-tools).
+`/plugins enable notion` gives the agent Notion's hosted MCP tools. `/notion key`
+picks its token from `/keys` (a new one is saved there as `NOTION_API_KEY`);
+without one, it signs in through the browser. Plugin settings never hold the
+token. See [PLUGINS.md](PLUGINS.md#notion-workspace-tools).
 
 ## Questions from the model
 

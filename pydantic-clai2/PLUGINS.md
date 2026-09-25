@@ -321,26 +321,39 @@ enable notion` adds harness `Notion`, the tools of Notion's hosted MCP server,
 acting with the permissions of the Notion account it connects as. That includes
 tools that change pages.
 
-When `NOTION_ACCESS_TOKEN` holds a Notion OAuth access token, the plugin uses it.
-Otherwise the first run that connects opens your browser to sign in; the tokens
-go to the OS keyring, or CLAI's private credential file when there is no keyring,
-so later launches reuse and refresh them. `/notion logout` forgets them; it
-cannot revoke `NOTION_ACCESS_TOKEN`, so `/plugins disable notion` stops using that. Notion
-integration tokens do not work with the hosted server. Tokens are not accepted in
-plugin settings.
+Plugin settings are saved as plaintext in SQLite, so they never hold the token.
+Secrets live in the named keystore you manage with `/keys`:
+
+- `/notion key` lists your saved keys by name. Pick one, or enter a Notion OAuth
+  access token privately; a new token is saved in `/keys` as `NOTION_API_KEY`,
+  asking first if that name already exists. Notion keeps only the key's name.
+- Each run looks the key up again, so replacing `NOTION_API_KEY` in `/keys`
+  reaches every plugin that uses it, and several plugins can share one named key
+  (GitHub and Copilot both using `GITHUB_TOKEN`, for instance). Deleting the key
+  makes Notion runs fail until you restore it or choose another; a key in use
+  cannot be renamed.
+- With no key chosen, the first run that connects opens your browser to sign in.
+  Those OAuth tokens go to the OS keyring, or CLAI's private credential file when
+  there is no keyring, so later launches reuse and refresh them.
+- `/notion logout` forgets the browser sign-in and the chosen key name. The key
+  itself stays in `/keys`.
+
+Notion integration tokens do not work with the hosted server. The plugin does not
+read `NOTION_ACCESS_TOKEN`; save the token in `/keys` instead.
 
 | Key | Default | Does |
 |---|---|---|
-| `auth` | unset | `"token"` requires `NOTION_ACCESS_TOKEN` and fails to load without it; `"oauth"` always signs in through the browser; unset uses the token when it is set |
+| `auth` | unset | `"key"` uses the chosen key and never opens a browser; `"oauth"` always signs in through the browser; unset uses the chosen key when there is one |
 | `read_only` | `false` | keep only the tools the server marks as read-only |
 
 ```text
-/plugins add notion pydantic_clai2.notion '{"read_only": true}'
+/plugins add notion pydantic_clai2.notion '{"auth": "key", "read_only": true}'
 ```
 
 The browser sign-in needs a browser on the machine CLAI runs on. For headless
-runs or remote machines, set `NOTION_ACCESS_TOKEN` and `"auth": "token"` so a
-missing token stops the plugin from loading instead of waiting for a sign-in.
+runs or remote machines, choose a key with `/notion key` in an interactive
+session and set `"auth": "key"`: without a key, runs then fail with a message
+instead of waiting for a sign-in.
 
 ## Where plugins live
 
@@ -1038,8 +1051,8 @@ numbers, and underscores, starting with a letter or underscore. Saving an existi
 name asks before replacing it. Ctrl-C or Ctrl-D cancels without saving. Do not put
 the secret on the command line.
 
-When saved keys exist, vLLM's token prompt and OpenRouter's **Enter API key** flow
-show a searchable list of names. Choose one, enter a different key privately, or
+When saved keys exist, vLLM's token prompt, OpenRouter's **Enter API key** flow,
+and `/notion key` show a searchable list of names. Choose one, enter a different key privately, or
 choose **No API key** for vLLM. Esc closes the picker without connecting. Browser
 login flows are unchanged. Select keys only for endpoints you trust.
 

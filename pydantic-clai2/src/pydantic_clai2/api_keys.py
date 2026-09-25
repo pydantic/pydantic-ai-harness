@@ -119,7 +119,7 @@ class _Credential(BaseModel):
 def key_users(*, name: str) -> list[str]:
     """Find saved provider references without exposing their inline credentials."""
     users: list[str] = []
-    for account in ('vllm', 'openrouter'):
+    for account in ('vllm', 'openrouter', 'notion'):
         raw = load_codex_credentials(account=account)
         if raw is not None:
             try:
