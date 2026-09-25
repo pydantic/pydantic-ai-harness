@@ -286,6 +286,10 @@ Pass `custom_capability_types` so the spec loader knows how to instantiate
 `Shell`, and attach a workspace to the run (`workspace=` on the run method, or a
 workspace capability in Python).
 
+## Durable execution
+
+`Coder`, `Shell` and `FileSystem` work under DBOS durable execution, but not yet under Temporal or Prefect.
+
 ## Further reading
 
 - [Pydantic AI capabilities](https://ai.pydantic.dev/capabilities/)
