@@ -37,9 +37,10 @@ def test_command_argv(command: str | tuple[str, ...], shell: bool, argv: list[st
     [
         ('echo hi', False, 'a string command requires shell=True; pass an argv sequence otherwise'),
         (['echo', 'hi'], True, 'an argv sequence cannot be combined with shell=True; pass a single command string'),
+        ([], False, 'an argv sequence needs at least the program to run'),
     ],
 )
-def test_command_argv_rejects_a_mismatched_shell_flag(command: str | list[str], shell: bool, message: str) -> None:
+def test_command_argv_rejects_an_unrunnable_command(command: str | list[str], shell: bool, message: str) -> None:
     with pytest.raises(TypeError) as error:
         command_argv(command, shell)
     assert str(error.value) == message

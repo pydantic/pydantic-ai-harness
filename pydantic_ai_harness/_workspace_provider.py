@@ -20,7 +20,9 @@ def absolute_path(name: str, value: str | None) -> str | None:
 def command_argv(command: WorkspaceCommand, shell: bool) -> list[str]:
     """The argv that runs `command`, with the same `shell` rules as core's local backend.
 
-    A shell string runs under `/bin/sh -c`; an argv sequence runs as given.
+    A shell string runs under `/bin/sh -c`; an argv sequence runs as given. An empty argv is
+    refused: a provider that quotes it with `shlex.join` would get `''`, which a shell runs as a
+    successful no-op.
     """
     if isinstance(command, str):
         if not shell:
@@ -28,6 +30,8 @@ def command_argv(command: WorkspaceCommand, shell: bool) -> list[str]:
         return ['/bin/sh', '-c', command]
     if shell:
         raise TypeError('an argv sequence cannot be combined with shell=True; pass a single command string')
+    if not command:
+        raise TypeError('an argv sequence needs at least the program to run')
     return list(command)
 
 
