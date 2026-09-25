@@ -7,10 +7,10 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.auth import OAuth
 from fastmcp.client.transports import StreamableHttpTransport
-from pydantic_ai import Agent
-from pydantic_ai.capabilities import AgentCapability
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.mcp import MCPToolset
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.usage import RunUsage
 from pydantic_ai_harness.notion import Notion
 from rich.console import Console
 
@@ -42,10 +42,19 @@ def names(commands: Commands) -> set[str]:
     return {command.name for command in commands}
 
 
-def notion(capabilities: list[AgentCapability[None]]) -> Notion[None]:
-    found: list[Notion[None]] = [capability for capability in capabilities if isinstance(capability, Notion)]
-    [capability] = found
-    return capability
+async def run(commands: Commands, text: str) -> str:
+    result = commands.execute(text)
+    assert not isinstance(result, str), '`/notion` reaches the keyring off the event loop'
+    return await result
+
+
+def built(plugins: PluginLoader[None]) -> Notion[None]:
+    """The run's `Notion`, calling the per-run factory the browser sign-in registers."""
+    [capability] = plugins.capabilities()
+    context = RunContext[None](deps=None, model=TestModel(), usage=RunUsage())
+    result = capability(context) if callable(capability) else capability
+    assert isinstance(result, Notion)
+    return result
 
 
 def test_declared_as_a_disabled_builtin_not_a_raw_catalog_entry() -> None:
@@ -60,7 +69,7 @@ async def test_token_from_the_environment(tmp_path: Path, monkeypatch: pytest.Mo
     commands = Commands()
     plugins = loader(tmp_path, commands)
     await plugins.enable('notion')
-    capability = notion(plugins.capabilities())
+    capability = built(plugins)
     assert capability.auth == 'ntn-token' and capability.client is None and not capability.read_only
     assert isinstance(capability.get_toolset(), MCPToolset)
     assert 'notion' in names(commands)
@@ -71,13 +80,14 @@ async def test_token_from_the_environment(tmp_path: Path, monkeypatch: pytest.Mo
 async def test_browser_sign_in_without_a_token(tmp_path: Path) -> None:
     plugins = loader(tmp_path)
     await plugins.command(['add', 'notion', 'pydantic_clai2.notion', '{"read_only": true}'])
-    capability = notion(plugins.capabilities())
+    capability = built(plugins)
     assert capability.auth is None and capability.read_only
     client = capability.client
     assert isinstance(client, Client)
     transport = client.transport
     assert isinstance(transport, StreamableHttpTransport)
     assert transport.url == NOTION_MCP_URL and isinstance(transport.auth, OAuth)
+    assert built(plugins).client is not client, 'each run reloads the sign-in, so logout applies to the next run'
     await plugins.close('exit')
 
 
@@ -85,7 +95,7 @@ async def test_oauth_setting_ignores_the_environment(tmp_path: Path, monkeypatch
     monkeypatch.setenv('NOTION_ACCESS_TOKEN', 'ntn-token')
     plugins = loader(tmp_path)
     await plugins.command(['add', 'notion', 'pydantic_clai2.notion', '{"auth": "oauth"}'])
-    capability = notion(plugins.capabilities())
+    capability = built(plugins)
     assert capability.auth is None and isinstance(capability.client, Client)
     await plugins.close('exit')
 
@@ -116,9 +126,21 @@ async def test_logout_forgets_the_browser_sign_in(tmp_path: Path, vault: dict[tu
     [command] = [command for command in commands if command.name == 'notion']
     assert list(command.complete([''])) == ['logout'] and list(command.complete(['logout', ''])) == []
     with pytest.raises(ValueError, match='Usage: /notion logout'):
-        commands.execute('/notion')
-    assert commands.execute('/notion logout') == (
-        'Signed out of Notion. The next browser sign-in asks for your account again.'
-    )
+        await run(commands, '/notion')
+    assert await run(commands, '/notion logout') == 'Signed out of Notion. The next run opens the browser to sign in.'
+    assert vault == {}
+    await plugins.close('exit')
+
+
+async def test_logout_with_a_token_says_the_token_still_applies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, vault: dict[tuple[str, str], str]
+) -> None:
+    monkeypatch.setenv('NOTION_ACCESS_TOKEN', 'ntn-token')
+    commands = Commands()
+    plugins = loader(tmp_path, commands)
+    await plugins.enable('notion')
+    await TOKENS.put('token', {'access_token': 'a'}, collection='mcp-oauth-token')
+    message = await run(commands, '/notion logout')
+    assert 'cannot revoke' in message and '/plugins disable notion' in message
     assert vault == {}
     await plugins.close('exit')

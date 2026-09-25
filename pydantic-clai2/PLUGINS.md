@@ -324,7 +324,8 @@ tools that change pages.
 When `NOTION_ACCESS_TOKEN` holds a Notion OAuth access token, the plugin uses it.
 Otherwise the first run that connects opens your browser to sign in; the tokens
 go to the OS keyring, or CLAI's private credential file when there is no keyring,
-so later launches reuse and refresh them. `/notion logout` forgets them. Notion
+so later launches reuse and refresh them. `/notion logout` forgets them; it
+cannot revoke `NOTION_ACCESS_TOKEN`, so `/plugins disable notion` stops using that. Notion
 integration tokens do not work with the hosted server. Tokens are not accepted in
 plugin settings.
 

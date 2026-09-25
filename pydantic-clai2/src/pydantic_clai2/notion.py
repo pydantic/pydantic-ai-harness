@@ -2,11 +2,14 @@
 
 import os
 from collections.abc import Iterable
+from functools import partial
 from typing import Literal
 
+from anyio import to_thread
 from fastmcp import Client
 from fastmcp.client.transports import StreamableHttpTransport
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic_ai import RunContext
 from pydantic_ai.exceptions import UserError
 from pydantic_ai_harness.notion import Notion
 
@@ -40,30 +43,42 @@ def activate(host: PluginHost[DepsT]) -> None:
         raise UserError(
             f'Set {TOKEN_ENV} to a Notion OAuth access token, or drop `"auth": "token"` to sign in through the browser.'
         )
-    if token and settings.auth != 'oauth':
-        host.add(Notion[DepsT](auth=token, read_only=settings.read_only))
+    read_only = settings.read_only
+    uses_token = bool(token) and settings.auth != 'oauth'
+    if uses_token:
+        host.add(Notion[DepsT](auth=token, read_only=read_only))
     else:
-        # Harness `auth='oauth'` keeps tokens in memory behind a 5-second handshake; CLAI keeps them in the
-        # keyring and allows the browser round trip, the same as an OAuth server added through `/mcp`.
-        transport = StreamableHttpTransport(
-            NOTION_MCP_URL, auth=browser_sign_in(TOKENS), httpx_client_factory=http_client
-        )
-        host.add(Notion[DepsT](client=Client(transport, init_timeout=OAUTH_TIMEOUT), read_only=settings.read_only))
+
+        def sign_in(_: RunContext[DepsT]) -> Notion[DepsT]:
+            # Harness `auth='oauth'` keeps tokens in memory behind a 5-second handshake; this keeps them in the
+            # keyring and allows the browser round trip, like an OAuth server added through `/mcp`. A client per
+            # run reloads them from the keyring, so `/notion logout` applies from the next run.
+            transport = StreamableHttpTransport(
+                NOTION_MCP_URL, auth=browser_sign_in(TOKENS), httpx_client_factory=http_client
+            )
+            return Notion[DepsT](client=Client(transport, init_timeout=OAUTH_TIMEOUT), read_only=read_only)
+
+        host.add(sign_in)
     host.commands.register(
         Command(
             name='notion',
             description='Sign out of Notion (/notion logout).',
-            handler=_command,
+            handler=partial(_command, uses_token=uses_token),
             complete=_complete,
         )
     )
 
 
-def _command(args: list[str]) -> str:
+async def _command(args: list[str], *, uses_token: bool) -> str:
     if args != ['logout']:
         raise ValueError('Usage: /notion logout')
-    TOKENS.forget()
-    return 'Signed out of Notion. The next browser sign-in asks for your account again.'
+    await to_thread.run_sync(TOKENS.forget)
+    if uses_token:
+        return (
+            f'Cleared the saved browser sign-in, but this session connects with {TOKEN_ENV}, which /notion logout '
+            'cannot revoke. /plugins disable notion stops using it.'
+        )
+    return 'Signed out of Notion. The next run opens the browser to sign in.'
 
 
 def _complete(args: list[str]) -> Iterable[str]:
