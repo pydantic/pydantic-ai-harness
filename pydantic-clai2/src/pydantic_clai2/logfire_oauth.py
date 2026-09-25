@@ -70,6 +70,8 @@ class Tokens(BaseModel):
 _STORE: TypeAdapter[dict[str, Tokens]] = TypeAdapter(dict[str, Tokens])
 _WRITES = threading.Lock()
 _UNSAVED: dict[str, Tokens] = {}
+_logouts = 0
+"""Bumped by `forget()`, so a sign-in or refresh that started earlier knows not to save."""
 """Sign-ins the keyring or file refused, kept in memory so they last this session; guarded by `_WRITES`."""
 
 
@@ -86,9 +88,11 @@ def load(resource: str) -> Tokens | None:
     return _UNSAVED.get(resource) or _load_all().get(resource)
 
 
-def _save(resource: str, tokens: Tokens) -> str | None:
-    """Store `tokens`; the reason when the keyring or file refused them."""
+def _save(resource: str, tokens: Tokens, logouts: int) -> str | None:
+    """Store `tokens` unless a logout came after `logouts`; the reason when the keyring or file refused them."""
     with _WRITES:
+        if logouts != _logouts:
+            raise SignInError('Signed out of Logfire while signing in, so this sign-in was discarded.')
         try:
             store = _load_all()
             store[resource] = tokens
@@ -101,14 +105,18 @@ def _save(resource: str, tokens: Tokens) -> str | None:
 
 
 def forget() -> bool:
-    """Sign out everywhere; `False` when there was nothing to forget."""
+    """Sign out everywhere, including sign-ins in progress; `False` when there was nothing to forget."""
+    global _logouts
     with _WRITES:
+        _logouts += 1
+        try:
+            stored = bool(load_codex_credentials(account=ACCOUNT))
+        except (UserError, UnicodeDecodeError, KeyringError, OSError):
+            stored = True  # Unreadable now is not gone: delete it so it cannot come back.
         unsaved = bool(_UNSAVED)
         _UNSAVED.clear()
-        if not _load_all():
-            return unsaved
         delete_credentials(account=ACCOUNT)
-        return True
+        return stored or unsaved
 
 
 def _https(url: str) -> str:
@@ -247,6 +255,7 @@ async def sign_in(
     *, resource: str, read_only: bool, announce: Announce, http: httpx.AsyncClient, sleep: Sleep = anyio.sleep
 ) -> Tokens:
     """Run the device flow now and save the result; raises `SignInError` when it is denied or expires."""
+    logouts = _logouts
     try:
         server, offered = await _discover(http, resource)
         writable = not read_only
@@ -291,7 +300,7 @@ async def sign_in(
         expires_at=time.time() + granted.expires_in,
         writable=writable,
     )
-    problem = await to_thread.run_sync(_save, resource, tokens)
+    problem = await to_thread.run_sync(_save, resource, tokens, logouts)
     # The approval is spent either way, so an unsaved sign-in still serves this session.
     announce(
         'Signed in to Logfire.'
@@ -345,6 +354,7 @@ async def _poll(
 async def _refresh(http: httpx.AsyncClient, *, resource: str, tokens: Tokens) -> Tokens | None:
     if tokens.refresh_token is None:
         return None
+    logouts = _logouts
     try:
         response = await http.post(
             tokens.token_endpoint,
@@ -367,7 +377,8 @@ async def _refresh(http: httpx.AsyncClient, *, resource: str, tokens: Tokens) ->
             'expires_at': time.time() + granted.expires_in,
         }
     )
-    await to_thread.run_sync(_save, resource, refreshed)  # Unsaved, it lasts this session; later ones sign in.
+    # Unsaved, it lasts this session; a logout since the refresh began discards it instead.
+    await to_thread.run_sync(_save, resource, refreshed, logouts)
     return refreshed
 
 

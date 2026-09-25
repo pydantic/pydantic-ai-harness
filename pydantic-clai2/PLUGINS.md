@@ -399,7 +399,8 @@ any device.
   credential file) under the `logfire-oauth` account, so restarting CLAI does
   not mean signing in again. An expired or rejected token is refreshed; if that
   fails, the next run signs in again. `/logfire_mcp logout` forgets every
-  Logfire sign-in and keeps keys in `/keys`.
+  Logfire sign-in, including one still waiting for approval, and keeps keys in
+  `/keys`.
   If the keyring or file refuses to save a sign-in, CLAI says so and keeps it in
   memory for the rest of the session (logout forgets it too); the next session
   asks you to sign in again.

@@ -138,7 +138,11 @@ def stored(*, expires_in: float = 3600, refresh: str | None = 'refresh-1', writa
 
 
 def remember(tokens: Tokens) -> None:
-    logfire_oauth._save(RESOURCE, tokens)  # pyright: ignore[reportPrivateUsage]
+    save_codex_credentials(value=json.dumps({RESOURCE: tokens.model_dump(mode='json')}), account=logfire_oauth.ACCOUNT)
+
+
+def emptied(service: str, account: str) -> None:
+    keyring.set_password(service, account, '')  # conftest's fake keyring has no delete; empty reads as unset.
 
 
 class TestSignIn:
@@ -230,6 +234,20 @@ class TestSignIn:
         assert tokens is not None and tokens.serves(read_only=False)  # Asking again would loop on the same grant.
         logfire.polls = [granted('access-1', scope=' '.join(OFFERED))]
         assert not any('fewer scopes' in line for line in await run_sign_in(logfire, read_only=False))
+
+    async def test_logging_out_while_waiting_for_approval_discards_the_sign_in(self) -> None:
+        logfire = Logfire()
+
+        async def log_out(seconds: float) -> None:
+            forget()
+
+        async with logfire.client() as http:
+            with pytest.raises(SignInError, match='Signed out of Logfire while signing in'):
+                await sign_in(resource=RESOURCE, read_only=True, announce=lambda line: None, http=http, sleep=log_out)
+        assert load(RESOURCE) is None
+        logfire.polls = [granted('access-1')]
+        await run_sign_in(logfire)  # A sign-in started after the logout is kept.
+        assert load(RESOURCE) is not None
 
     async def test_a_huge_interval_waits_no_longer_than_the_code_lasts(self) -> None:
         logfire = Logfire()
@@ -478,6 +496,24 @@ class TestDeviceAuth:
         assert forget()
         assert not forget()
 
+    async def test_logging_out_during_a_refresh_discards_it(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(keyring, 'delete_password', emptied)
+        remember(stored(expires_in=-10))
+        logfire = Logfire()
+        logfire.valid = {'access-2'}
+        logfire.refreshes = [granted('access-2')]
+        handle = logfire.handle
+
+        def log_out_first(request: httpx.Request) -> httpx.Response:
+            if b'grant_type=refresh_token' in request.content:
+                assert forget()
+            return handle(request)
+
+        logfire.handle = log_out_first
+        with pytest.raises(SignInError, match='Signed out of Logfire while signing in'):
+            await self.mcp(logfire)
+        assert load(RESOURCE) is None
+
     def test_sync_clients_are_refused(self) -> None:
         auth = DeviceAuth(resource=RESOURCE, read_only=True, announce=print)
         with httpx.Client(transport=httpx.MockTransport(Logfire().handle), auth=auth) as client:
@@ -486,10 +522,7 @@ class TestDeviceAuth:
 
 
 def test_status_forget_and_unreadable_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    def delete_password(service: str, account: str) -> None:
-        keyring.set_password(service, account, '')  # conftest's fake keyring has no delete; empty reads as unset.
-
-    monkeypatch.setattr(keyring, 'delete_password', delete_password)
+    monkeypatch.setattr(keyring, 'delete_password', emptied)
     assert status(resource=RESOURCE, read_only=True) == 'signed out'
     remember(stored(writable=False))
     assert status(resource=RESOURCE, read_only=True) == 'signed in'
@@ -502,3 +535,19 @@ def test_status_forget_and_unreadable_storage(monkeypatch: pytest.MonkeyPatch) -
     assert forget() is False
     save_codex_credentials(value='not json', account=logfire_oauth.ACCOUNT)
     assert load(RESOURCE) is None
+    assert forget() is True  # Unparsable tokens are deleted too, so they cannot come back.
+    assert forget() is False
+
+    def unreadable(service: str, account: str) -> str:
+        raise KeyringError('locked')
+
+    monkeypatch.setattr(keyring, 'get_password', unreadable)
+    deleted: list[str] = []
+
+    def delete_credentials(*, account: str) -> None:
+        deleted.append(account)
+
+    monkeypatch.setattr(logfire_oauth, 'delete_credentials', delete_credentials)
+    assert load(RESOURCE) is None
+    assert forget() is True  # Unreadable is not gone, so it is deleted.
+    assert deleted == [logfire_oauth.ACCOUNT]
