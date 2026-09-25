@@ -62,15 +62,15 @@ def offer_worktree_cleanup(created: Path | None = None) -> None:
     except (OSError, subprocess.CalledProcessError):
         return
     if disposable is not None:
+        branch, checked = disposable
         if _remove(root, common):
             try:
-                # `-D` because `_disposable_branch` proved every commit is reachable from another ref,
-                # while `-d` would also demand a merge into the main checkout's current branch.
-                _git('-C', str(common), 'branch', '-D', '--', disposable)
+                # Compare-and-delete: a commit landing after the check moves the tip, so the branch is kept.
+                _git('-C', str(common), 'update-ref', '-d', f'refs/heads/{branch}', checked)
             except (OSError, subprocess.CalledProcessError) as exc:
-                print(f'Removed worktree {root}. Branch {disposable} kept: {_detail(exc)}', file=sys.stderr)
+                print(f'Removed worktree {root}. Branch {branch} kept: {_detail(exc)}', file=sys.stderr)
             else:
-                print(f'Removed unchanged worktree {root} and branch {disposable}.')
+                print(f'Removed unchanged worktree {root} and branch {branch}.')
         return
     try:
         answer = input(f'Remove worktree {root}? The branch will be kept. [y/N] ')
@@ -83,16 +83,17 @@ def offer_worktree_cleanup(created: Path | None = None) -> None:
         print(f'Removed worktree {root}. Branch kept.')
 
 
-def _disposable_branch(root: Path, created: Path | None) -> str | None:
-    """Return the branch of the worktree this run created if deleting it loses nothing, else `None`."""
+def _disposable_branch(root: Path, created: Path | None) -> tuple[str, str] | None:
+    """Return the branch and checked commit of this run's worktree if deleting it loses nothing, else `None`."""
     if created is None or created.resolve() != root:
         return None
     branch = f'clai/{created.name}'
     if _git('branch', '--show-current') != branch or _git('status', '--porcelain', '--untracked-files=all'):
         return None
     # Commits reachable from HEAD but from no other branch, tag, or remote would be lost with the branch.
-    unique = _git('rev-list', '-n1', 'HEAD', '--not', f'--exclude={branch}', '--branches', '--tags', '--remotes')
-    return None if unique else branch
+    head = _git('rev-parse', 'HEAD')
+    unique = _git('rev-list', '-n1', head, '--not', f'--exclude={branch}', '--branches', '--tags', '--remotes')
+    return None if unique else (branch, head)
 
 
 def _remove(root: Path, common: Path) -> bool:

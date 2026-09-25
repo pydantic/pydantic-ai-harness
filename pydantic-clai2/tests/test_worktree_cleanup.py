@@ -227,3 +227,24 @@ def test_branch_deletion_failure_reports_kept_branch(
     assert not created.exists()
     assert 'clai/task' in branches(created)
     assert f'Removed worktree {created}. Branch clai/task kept:' in capsys.readouterr().err
+
+
+def test_commit_after_check_keeps_branch(
+    created: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = created.parents[1]
+    run = subprocess.run
+
+    def commit_before_removal(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if 'remove' in command:
+            late = git(repo, 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'Late work')
+            git(repo, 'update-ref', 'refs/heads/clai/task', late)
+        return run(command, check=True, capture_output=True, text=True)
+
+    monkeypatch.setattr(subprocess, 'run', commit_before_removal)
+    monkeypatch.setattr('builtins.input', no_prompt)
+    offer_worktree_cleanup(created=created)
+    monkeypatch.undo()
+    assert 'clai/task' in branches(created)
+    assert git(repo, 'log', '-1', '--format=%s', 'clai/task') == 'Late work'
+    assert f'Removed worktree {created}. Branch clai/task kept:' in capsys.readouterr().err
