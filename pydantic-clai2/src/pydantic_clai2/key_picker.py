@@ -1,13 +1,16 @@
 """Choose a plugin's secret from `/keys` inside its settings menu; only a `KeyReference` comes back.
 
 A plugin's settings menu runs on a menu worker thread, but `prompt_api_key` is a coroutine that opens its
-own widgets through `run_worker`. `pick_key` hands it back to the event loop and waits, watching the menu's
-stop signal so cancelling the menu cancels the picker too.
+own widgets through `run_worker`. `pick_key` hands the questions back to the event loop and waits, watching
+the menu's stop signal so cancelling the menu cancels them too; the one write happens afterwards, on the
+menu's own thread.
 """
 
 import asyncio
 import concurrent.futures
+from dataclasses import dataclass, field
 
+from pydantic import SecretStr
 from termflow.tui import MenuBuilder, MenuItem, TextInputBuilder  # pyright: ignore[reportMissingTypeStubs]
 
 from ._rendering import markdown_style
@@ -41,8 +44,16 @@ class MaskedPrompt:
         return result.value
 
 
-async def choose_key(*, name: str, label: str, runners: Runners) -> KeyReference | None:
-    """Pick a saved key, or save a masked new value under `name`; `None` means nothing changed."""
+@dataclass(frozen=True)
+class NewKey:
+    """A value to save under the key's name, replacing `replacing` (`None` when the name was free)."""
+
+    value: str = field(repr=False)
+    replacing: SecretStr | None = field(repr=False)
+
+
+async def ask_key(*, name: str, label: str, runners: Runners) -> KeyReference | NewKey | None:
+    """Ask for a saved key or a new masked value, writing nothing; `None` means nothing changed."""
     choice = await prompt_api_key(prompt=MaskedPrompt(runners), label=label)
     if choice is None or isinstance(choice, KeyReference):
         return choice
@@ -52,21 +63,32 @@ async def choose_key(*, name: str, label: str, runners: Runners) -> KeyReference
     replacing = (await asyncio.to_thread(load_keys)).get(name)
     if replacing is not None and not await run_worker(lambda: _confirm_replace(name, runners)):
         return None
-    # `expected` makes the save refuse if another session wrote `name` since the user decided.
-    await asyncio.to_thread(save_key, name=name, value=value, expected=replacing)
-    return KeyReference(name=name)
+    return NewKey(value, replacing)
 
 
 def pick_key(loop: asyncio.AbstractEventLoop, *, name: str, label: str, runners: Runners) -> KeyReference | None:
-    """Run `choose_key` on `loop` from a menu worker thread; a stopping worker cancels it and returns `None`."""
-    picking = asyncio.run_coroutine_threadsafe(choose_key(name=name, label=label, runners=runners), loop)
-    while True:
+    """Ask on `loop` from a menu worker thread, then save any new value here.
+
+    Stopping the worker cancels only the questions. The save runs on this thread after the user has decided,
+    so a cancelled menu never leaves a key written without the `KeyReference` the caller records for it.
+    """
+    asking = asyncio.run_coroutine_threadsafe(ask_key(name=name, label=label, runners=runners), loop)
+    while not worker_stopping():
         try:
-            return picking.result(timeout=0.05)
+            decision = asking.result(timeout=0.05)
         except concurrent.futures.TimeoutError:
-            if worker_stopping():  # pragma: no cover -- timing-dependent; the picker's own keys see the stop.
-                picking.cancel()
-                return None
+            continue
+        return _save(name, decision)
+    asking.cancel()
+    return None
+
+
+def _save(name: str, decision: KeyReference | NewKey | None) -> KeyReference | None:
+    if not isinstance(decision, NewKey):
+        return decision
+    # `expected` makes the save refuse if another session wrote `name` since the user decided.
+    save_key(name=name, value=decision.value, expected=decision.replacing)
+    return KeyReference(name=name)
 
 
 def _confirm_replace(name: str, runners: Runners) -> bool:
