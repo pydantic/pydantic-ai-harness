@@ -18,7 +18,7 @@ from pydantic_ai_harness.grain import Grain
 
 from . import theme
 from .commands import Command
-from .mcp import OAUTH_TIMEOUT, SignIn, TokenStore, http_client
+from .mcp import OAUTH_TIMEOUT, SignIn, http_client
 from .plugins import PluginHost
 
 GRAIN_MCP_URL = 'https://api.grain.com/_/mcp'
@@ -64,15 +64,21 @@ class GrainSignIn(SignIn):
             ) from exc
         await super().redirect_handler(authorization_url)
 
+    async def forget(self) -> None:
+        """Sign out now: drop the saved sign-in and the tokens this session holds in memory."""
+        await to_thread.run_sync(self.tokens.forget)
+        self.context.clear_tokens()
+
 
 def activate(host: PluginHost[None]) -> None:
     """Add `Grain`, authenticated by `GRAIN_ACCESS_TOKEN` or by a keyring-backed browser sign-in."""
     settings = host.settings(GrainSettings)
-    uses_token = bool(os.environ.get(_ENV))
-    if uses_token:
+    sign_in: GrainSignIn | None = None
+    if os.environ.get(_ENV):
         host.add(Grain(read_only=settings.read_only))
     else:
-        transport = StreamableHttpTransport(GRAIN_MCP_URL, auth=GrainSignIn(host), httpx_client_factory=http_client)
+        sign_in = GrainSignIn(host)
+        transport = StreamableHttpTransport(GRAIN_MCP_URL, auth=sign_in, httpx_client_factory=http_client)
         # The default 5 second handshake timeout would end a browser sign-in before the user finishes it.
         client = Client(transport, init_timeout=OAUTH_TIMEOUT)
         host.add(Grain(client=client, read_only=settings.read_only))
@@ -80,23 +86,24 @@ def activate(host: PluginHost[None]) -> None:
         Command(
             name='grain',
             description='Show how CLAI signs in to Grain, or sign out (/grain logout).',
-            handler=partial(grain_command, uses_token=uses_token),
+            handler=partial(grain_command, sign_in=sign_in),
             complete=lambda args: ('logout',) if len(args) <= 1 else (),
         )
     )
 
 
-async def grain_command(args: list[str], *, uses_token: bool) -> str:
-    """Report how this session authenticates, or forget the saved sign-in."""
-    if args == ['logout']:
-        await to_thread.run_sync(TokenStore(TOKEN_ACCOUNT).forget)
-        # The loaded client keeps its tokens in memory until the plugin is loaded again.
-        return 'Signed out of Grain. After /plugins reload grain or a restart, the next prompt signs in again.'
-    if args:
+async def grain_command(args: list[str], *, sign_in: GrainSignIn | None) -> str:
+    """Report how this session authenticates, or sign out; `sign_in` is `None` when the token comes from the environment."""
+    if args not in ([], ['logout']):
         raise ValueError('Usage: /grain [logout]')
-    if uses_token:
+    if sign_in is None:
+        if args:
+            return f'Grain uses {_ENV}, which /grain logout cannot revoke. Unset it, then /plugins reload grain.'
         return f'Grain uses {_ENV}.'
-    signed_in = await to_thread.run_sync(TokenStore(TOKEN_ACCOUNT).signed_in)
+    if args:
+        await sign_in.forget()
+        return 'Signed out of Grain. The next prompt that uses Grain opens the browser to sign in.'
+    signed_in = await to_thread.run_sync(sign_in.tokens.signed_in)
     return {
         True: 'Signed in to Grain; the tokens are in the OS keyring. /grain logout signs out.',
         False: 'Not signed in to Grain; the next prompt opens the browser to sign in.',

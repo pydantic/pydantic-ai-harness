@@ -30,7 +30,6 @@ from ._branding import print_banner
 from ._completion_adapter import COMPLETION_STYLE, PromptCompleter
 from ._rendering import StreamRenderer
 from ._session import Session
-from .capability_catalog import HARNESS_PLUGINS
 from .command_context import CommandContext, CommandProvider
 from .commands import (
     Command,
@@ -98,13 +97,29 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='notifications', factory='pydantic_clai2.notifications'),
     PluginSettings(id='mcp', factory='pydantic_clai2.mcp'),
     PluginSettings(id='grain', factory='pydantic_clai2.grain', enabled=False),
-    *HARNESS_PLUGINS,
 )
-"""Built-in declarations, including opt-in harness capabilities. `remove` restores their defaults.
+"""Built-in declarations, each integrated with the shell. `remove` restores their defaults.
+
+Other harness capabilities are not listed here: a user adds one on purpose with `/plugins add` or a plugin module.
 
 `coder` leaves out its own `RepoContext` because `repo_context` binds one, so instruction files load once.
 `grain` wraps harness's `Grain` with CLAI's keyring-backed sign-in; it is off until the user enables it.
 """
+
+_SUPERSEDED: dict[str, str] = {'grain': 'pydantic_ai_harness.grain:Grain'}
+"""Built-in ids whose plugin replaced the raw harness factory the retired `/plugins` catalog saved under that id."""
+
+
+def _adopt_superseded(store: SettingsStore, builtin: Sequence[PluginSettings]) -> None:
+    """Move a settings-free catalog declaration onto the built-in that replaced it, keeping its enabled state.
+
+    Saved declarations outrank built-ins, so a catalog `grain` would otherwise keep shadowing the `grain` plugin.
+    A declaration with settings was written on purpose with `/plugins add`, so it stays.
+    """
+    shipped = {plugin.id: plugin for plugin in builtin}
+    for saved in store.plugins():
+        if saved.id in shipped and _SUPERSEDED.get(saved.id) == saved.factory and not saved.settings:
+            store.save_plugin(shipped[saved.id].model_copy(update={'enabled': saved.enabled}))
 
 
 def create_agent(model: str | None = None) -> Agent[None, str]:
@@ -401,6 +416,7 @@ def create_shell(
     )
     screen = Screen()
     status = Status()
+    _adopt_superseded(store, builtin_plugins)
     loader: PluginLoader[DepsT] = PluginLoader(
         store=store,
         console=console,

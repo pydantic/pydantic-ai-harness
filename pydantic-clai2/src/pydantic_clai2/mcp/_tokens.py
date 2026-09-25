@@ -161,7 +161,8 @@ class SignIn(OAuth):
 
     def __init__(self, name: str, *, callback_host: str = '127.0.0.1') -> None:
         """Tokens go to the `mcp-NAME` credential; see `TokenStore`."""
-        super().__init__(client_name='CLAI', callback_host=callback_host, token_storage=TokenStore(name))
+        self.tokens = TokenStore(name)
+        super().__init__(client_name='CLAI', callback_host=callback_host, token_storage=self.tokens)
 
 
 def oauth(name: str, server: RemoteServer) -> OAuth | None:

@@ -19,14 +19,18 @@ from pydantic_ai_harness.grain import Grain
 from rich.console import Console
 
 from pydantic_clai2 import DEFAULT_PLUGINS
-from pydantic_clai2.capability_catalog import HARNESS_PLUGINS
+from pydantic_clai2._app import create_shell
 from pydantic_clai2.commands import Commands
+from pydantic_clai2.config import PluginSettings
 from pydantic_clai2.grain import GRAIN_MCP_URL, TOKEN_ACCOUNT, GrainSignIn, activate
 from pydantic_clai2.headless import no_screen
-from pydantic_clai2.mcp import TokenStore
 from pydantic_clai2.plugin_loader import PluginLoader
 from pydantic_clai2.plugins import FullScreen, PluginHost, SessionStart, bare_screen
+from pydantic_clai2.project_settings import ProjectSettings
 from pydantic_clai2.settings_store import SettingsStore
+
+RETIRED = 'pydantic_ai_harness.grain:Grain'
+"""The raw factory the retired `/plugins` catalog saved under `grain`."""
 
 pytestmark = pytest.mark.anyio
 
@@ -77,11 +81,44 @@ def sign_in(capability: Grain[None]) -> GrainSignIn:
     return transport.auth
 
 
-def test_declared_as_a_disabled_builtin_instead_of_the_raw_catalog_entry() -> None:
+def test_declared_as_a_disabled_builtin() -> None:
     [declaration] = [plugin for plugin in DEFAULT_PLUGINS if plugin.id == 'grain']
     assert declaration.factory == 'pydantic_clai2.grain'
     assert not declaration.enabled
-    assert not [plugin for plugin in HARNESS_PLUGINS if 'grain' in plugin.factory]
+
+
+@pytest.mark.parametrize('enabled', [True, False])
+def test_a_saved_catalog_declaration_moves_to_the_builtin(tmp_path: Path, enabled: bool) -> None:
+    store = SettingsStore(tmp_path / 'settings.db')
+    store.save_plugin(PluginSettings(id='grain', factory=RETIRED, enabled=enabled))
+    store.save_plugin(PluginSettings(id='other', factory=RETIRED))
+    shell_for(store)
+    saved = {plugin.id: plugin for plugin in store.plugins()}
+    assert saved['grain'] == PluginSettings(id='grain', factory='pydantic_clai2.grain', enabled=enabled)
+    assert saved['other'].factory == RETIRED, 'only the id the built-in replaced moves'
+
+
+def test_a_saved_declaration_with_settings_stays(tmp_path: Path) -> None:
+    store = SettingsStore(tmp_path / 'settings.db')
+    chosen = PluginSettings(id='grain', factory=RETIRED, settings={'read_only': True})
+    store.save_plugin(chosen)
+    shell_for(store)
+    assert store.plugins() == [chosen]
+
+
+def shell_for(store: SettingsStore) -> None:
+    create_shell(
+        Agent(TestModel()),
+        deps=None,
+        plugins=(),
+        usage_limits=None,
+        console=Console(file=io.StringIO()),
+        settings=None,
+        store=store,
+        builtin_plugins=DEFAULT_PLUGINS,
+        project=ProjectSettings(),
+        headless=True,
+    )
 
 
 async def test_enabling_the_builtin_adds_grain_and_the_command(tmp_path: Path) -> None:
@@ -110,6 +147,7 @@ async def test_token_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> No
     capability = grain(plugin)
     assert capability.client is None and capability.auth is None and not capability.read_only
     assert await plugin.commands.execute_async('/grain') == 'Grain uses GRAIN_ACCESS_TOKEN.'
+    assert 'cannot revoke' in await plugin.commands.execute_async('/grain logout')
 
 
 async def test_without_a_token_it_signs_in_through_the_browser_and_keeps_tokens_in_the_keyring() -> None:
@@ -117,15 +155,19 @@ async def test_without_a_token_it_signs_in_through_the_browser_and_keeps_tokens_
     activate(plugin)
     capability = grain(plugin)
     assert capability.auth is None and capability.read_only
-    assert isinstance(sign_in(capability), OAuth)
+    oauth = sign_in(capability)
+    assert oauth.tokens.name == TOKEN_ACCOUNT
     assert 'Not signed in' in await plugin.commands.execute_async('/grain')
 
-    storage = TokenStorageAdapter(TokenStore(TOKEN_ACCOUNT), server_url=GRAIN_MCP_URL)
-    await storage.set_tokens(OAuthToken(access_token='access', token_type='Bearer', refresh_token='refresh'))
+    storage = TokenStorageAdapter(oauth.tokens, server_url=GRAIN_MCP_URL)
+    token = OAuthToken(access_token='access', token_type='Bearer', refresh_token='refresh')
+    await storage.set_tokens(token)
+    oauth.context.current_tokens = token
     assert 'Signed in to Grain' in await plugin.commands.execute_async('/grain')
 
     assert 'Signed out of Grain' in await plugin.commands.execute_async('/grain logout')
     assert await storage.get_tokens() is None
+    assert oauth.context.current_tokens is None, 'the loaded client cannot keep using the old token'
     with pytest.raises(ValueError, match='Usage: /grain'):
         await plugin.commands.execute_async('/grain login')
 

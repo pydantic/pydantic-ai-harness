@@ -380,33 +380,31 @@ order plugin instructions, renderers, and status segments are consulted in.
 | `repo_context` | `pydantic_clai2.repo_context` | `{}` | reads `CLAUDE.md` or `AGENTS.md` from the launch directory into the instructions |
 | `persistence` | `pydantic_clai2.sessions` | `{}` | Harness step checkpoints for interrupted session recovery |
 | `compaction` | `pydantic_clai2.compaction` | `{}` | automatic summarisation with a truncation fallback, `/compact`, and the context warning |
+| `grain` | `pydantic_clai2.grain` | `{}` | off until enabled: search and read Grain meetings; see [below](#grain-meetings-with-a-saved-sign-in) |
 
-### Optional harness capabilities
+### Other harness capabilities
 
-`/plugins` and `/plugins list` also include every other public harness capability,
-including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above, and
-`Grain` uses the [`grain`](#grain-meetings-with-a-saved-sign-in) plugin, instead
-of appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
-are not separate capabilities.
+`/plugins` lists only the built-ins above, plus plugins you or the repository
+declared. It does not list every public harness capability for Space-enable:
+hosted-MCP integrations such as Slack or GitHub, sandboxes, and guardrails need
+credentials, extras, or settings that a checkbox cannot supply, so they belong in
+CLAI plugins written for them, like [`grain`](#grain-meetings-with-a-saved-sign-in).
 
-Press Space to enable an entry. Its preview shows the import path and any load
-error. Listing disabled entries does not import their modules or require their
-optional packages. Some capabilities need an extra installed in CLAI's Python
-environment, credentials, or constructor settings before they can load. Supply
-JSON constructor settings by replacing the declaration under the same id:
+To run any other capability, declare it on purpose under an id of your choice,
+with JSON constructor settings if it takes them:
 
 ```text
 /plugins add sliding_window_compaction pydantic_ai_harness.compaction:SlidingWindowCompaction '{"max_messages": 40}'
 ```
 
-For callbacks, stores, or other Python objects, use a plugin module that builds
-the capability and calls `host.add(...)`, registered under that id. The menu does
-not construct these objects or install dependencies. Avoid enabling overlapping
-tool providers together, such as `filesystem` or `shell` alongside `coder`.
-Removing an optional built-in restores its disabled declaration; enable and
-disable choices persist between launches. Project, drop-in, and saved declarations
-retain their usual precedence over built-ins.
+For callbacks, stores, or other Python objects, write a plugin module that builds
+the capability and calls `host.add(...)`. CLAI does not install the capability's
+optional dependencies. Avoid enabling overlapping tool providers together, such
+as `filesystem` or `shell` alongside `coder`.
+
+Earlier releases listed every harness capability here, disabled. If you enabled
+one of those, it was saved as your own declaration, so it keeps loading and now
+shows as a saved plugin; `/plugins remove NAME` forgets it.
 
 `/plugins disable coder` gives you a chat-only CLAI (a writing or research setup
 with `ExaSearch` instead, say); `/plugins enable coder` brings the tools back;
@@ -524,8 +522,14 @@ them instead of signing in again. A headless run (`clai2 -p`) cannot sign in:
 with no saved sign-in or token, its Grain connection fails and says so.
 
 `/grain` says which of the two this session uses. `/grain logout` forgets the
-saved sign-in; the loaded plugin keeps its tokens in memory until
-`/plugins reload grain` or a restart.
+saved sign-in and the tokens the session holds, so the next prompt that uses
+Grain signs in again. It cannot revoke `GRAIN_ACCESS_TOKEN`: unset it, then
+`/plugins reload grain`.
+
+If you enabled `grain` from the old `/plugins` catalog, which saved
+`pydantic_ai_harness.grain:Grain` under that id, CLAI moves that declaration onto
+this plugin at startup and keeps it enabled or disabled. A declaration you gave
+settings with `/plugins add` stays as you wrote it.
 
 | Key | Default | Does |
 |---|---|---|
