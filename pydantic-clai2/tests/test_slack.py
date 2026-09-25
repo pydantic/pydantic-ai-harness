@@ -8,7 +8,7 @@ from typing import TypeGuard
 import anyio
 import pytest
 from menu_script import Script, pick, typed
-from pydantic import JsonValue
+from pydantic import JsonValue, SecretStr
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
@@ -196,6 +196,28 @@ async def test_a_shared_name_is_replaced_only_when_confirmed(
     script(monkeypatch, lists=[pick('token')], choices=[pick(replace)])
     app = await shell()
     await app.plugins.command(['configure', 'slack'])
+    assert load_keys()['SLACK_USER_TOKEN'].get_secret_value() == expected
+    assert (load_codex_credentials(account='slack') is not None) is replace
+    await app.plugins.close('exit')
+
+
+@pytest.mark.parametrize(('replace', 'expected'), [(False, 'xoxp-other-session'), (True, 'xoxp-mine')])
+async def test_a_key_saved_meanwhile_by_another_session_still_needs_confirmation(
+    monkeypatch: pytest.MonkeyPatch, replace: bool, expected: str
+) -> None:
+    async def prompt_api_key(*, prompt: object, label: str, optional: bool = False) -> str:
+        save_key(name='SLACK_USER_TOKEN', value='xoxp-other-session')  # After the name was found free.
+        return 'xoxp-mine'
+
+    def keys_before_the_other_session() -> dict[str, SecretStr]:
+        return {}
+
+    monkeypatch.setattr('pydantic_clai2.plugin_keys.load_keys', keys_before_the_other_session)
+    monkeypatch.setattr('pydantic_clai2.plugin_keys.prompt_api_key', prompt_api_key)
+    shown = script(monkeypatch, lists=[pick('token')], choices=[pick(replace)])
+    app = await shell()
+    await app.plugins.command(['configure', 'slack'])
+    assert shown.opened == ['list', 'choice', 'list']
     assert load_keys()['SLACK_USER_TOKEN'].get_secret_value() == expected
     assert (load_codex_credentials(account='slack') is not None) is replace
     await app.plugins.close('exit')

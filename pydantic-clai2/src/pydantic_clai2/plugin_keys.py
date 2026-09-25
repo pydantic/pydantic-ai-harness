@@ -3,12 +3,13 @@
 import asyncio
 import concurrent.futures
 from collections.abc import Callable, Coroutine
+from functools import partial
 from typing import TypeVar
 
 from termflow.tui import MenuBuilder, MenuItem, TextInputBuilder  # pyright: ignore[reportMissingTypeStubs]
 
 from ._rendering import markdown_style
-from .api_keys import KeyReference, load_keys, prompt_api_key, save_key
+from .api_keys import KeyExistsError, KeyReference, load_keys, prompt_api_key, save_key
 from .field_menu import Runners
 from .menu_worker import menu_key, run_worker, worker_stopping
 
@@ -62,10 +63,16 @@ async def choose_key(
     if not value:
         return None
     check(value)
-    if name in keys and not await run_worker(lambda: confirm_replace(name, runners)):
-        return None
-    await asyncio.to_thread(save_key, name=name, value=value)
-    return KeyReference(name=name)
+    replace = name in keys
+    while True:
+        if replace and not await run_worker(lambda: confirm_replace(name, runners)):
+            return None
+        try:
+            await asyncio.to_thread(partial(save_key, name=name, value=value, replace=replace))
+        except KeyExistsError:  # Another session saved `name` since `keys` was read: ask before replacing it.
+            replace = True
+        else:
+            return KeyReference(name=name)
 
 
 def confirm_replace(name: str, runners: Runners) -> bool:
