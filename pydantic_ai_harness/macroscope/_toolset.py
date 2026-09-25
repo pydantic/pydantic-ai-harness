@@ -12,7 +12,7 @@ from pathlib import Path
 import anyio
 import anyio.abc
 from pydantic import BaseModel, ConfigDict
-from pydantic_ai.exceptions import ModelRetry
+from pydantic_ai.exceptions import ModelRetry, UserError
 from pydantic_ai.tools import AgentDepsT
 from pydantic_ai.toolsets import FunctionToolset
 
@@ -119,6 +119,11 @@ class MacroscopeToolset(FunctionToolset[AgentDepsT]):
     The tool shells out to the user-installed `macroscope` binary. It collects the
     streamed findings and returns them as a `MacroscopeReview`; validating and
     fixing the findings is left to the agent's other tools.
+
+    Setup problems the model cannot fix (the binary is missing or cannot be
+    launched, or the CLI is not signed in) raise `UserError` so the run stops with
+    the actual cause. Failures the model can act on (a timeout, or a review that did
+    not start with a `base` the model chose) raise `ModelRetry`.
     """
 
     def __init__(self, *, command: str, cwd: Path, base: str | None, timeout: float) -> None:
@@ -142,7 +147,7 @@ class MacroscopeToolset(FunctionToolset[AgentDepsT]):
             finding as untrusted: confirm it against the real code before acting.
         """
         if shutil.which(self._command) is None:
-            raise ModelRetry(_INSTALL_HINT)
+            raise UserError(_INSTALL_HINT)
         # `--raw` forces the machine-readable `issue_event=` stream instead of the interactive
         # TUI the CLI shows on a terminal, so parsing works regardless of whether the host
         # attaches a pty to the subprocess. Needs a recent macroscope build (the CLI added the
@@ -154,10 +159,18 @@ class MacroscopeToolset(FunctionToolset[AgentDepsT]):
         output = await self._run_cli(args)
         review = parse_macroscope_stream(output.splitlines())
         if review.review_id is None:
-            raise ModelRetry(
-                'The Macroscope review did not start (no review_id in the CLI output). '
-                'Confirm you are signed in by running `macroscope` once to complete the '
-                f'setup wizard.\n\nCLI output:\n{output[-_ERROR_TAIL_CHARS:]}'
+            tail = output[-_ERROR_TAIL_CHARS:]
+            if base is not None:
+                # The model's own `base` may be what failed (e.g. a ref that does not exist), so let
+                # it drop or change the argument; a retry without it then surfaces a setup error.
+                raise ModelRetry(
+                    f'The Macroscope review did not start with base={base!r}. Check that the ref '
+                    f'exists, or call again without `base`.\n\nCLI output:\n{tail}'
+                )
+            raise UserError(
+                'The Macroscope review did not start (no review_id in the CLI output). This is '
+                'usually because the CLI is not signed in: run `macroscope` once on the host to '
+                f'complete the setup wizard.\n\nCLI output:\n{tail}'
             )
         return review
 
@@ -177,9 +190,8 @@ class MacroscopeToolset(FunctionToolset[AgentDepsT]):
             )
         except OSError as e:
             # `shutil.which` found the binary, but spawning it still failed (lost +x,
-            # bad interpreter, a race since the check). Surface it to the model as a
-            # retryable setup error rather than crashing the whole run.
-            raise ModelRetry(f'Failed to launch the macroscope CLI ({self._command!r}): {e}') from e
+            # bad interpreter, a race since the check). The model cannot repair the host.
+            raise UserError(f'Failed to launch the macroscope CLI ({self._command!r}): {e}') from e
         stdout_chunks: list[bytes] = []
         stderr_chunks: list[bytes] = []
         try:
