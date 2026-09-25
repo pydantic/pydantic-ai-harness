@@ -243,8 +243,9 @@ previous login.
 
 Saved login takes precedence over `GITHUB_COPILOT_API_KEY`,
 `GITHUB_COPILOT_API_TOKEN`, and `COPILOT_GITHUB_TOKEN`, checked in that order when
-no login is saved. CLAI does not read `GH_TOKEN`, `GITHUB_TOKEN`, or another
-application's token files. This is shell-owned authentication, not a plugin API.
+no login is saved. Copilot login does not read `GH_TOKEN`, `GITHUB_TOKEN`, or another
+application's token files; `GITHUB_TOKEN` belongs to the separate
+[`github` plugin](#github-tools-from-githubs-hosted-mcp-server). This is shell-owned authentication, not a plugin API.
 Core owns inference and its telemetry; CLAI adds no login-specific spans.
 Bare `/login` continues to sign in to Codex.
 
@@ -385,8 +386,8 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
+`Coder`, `AskUser`, `RepoContext`, and `GitHub` use their integrated entries
+instead of appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
 Press Space to enable an entry. Its preview shows the import path and any load
@@ -506,6 +507,33 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+### `github`: tools from GitHub's hosted MCP server
+
+The `github` built-in (`pydantic_clai2.github`) gives the model harness
+[`GitHub`](../pydantic_ai_harness/github/README.md): the tools of GitHub's hosted
+MCP server, acting as the account behind a token. It starts disabled; turn it on
+with `/plugins enable github`.
+
+The token comes from the `GITHUB_TOKEN` environment variable, or else from an API
+key named `GITHUB_TOKEN` saved with `/set api_key` or `/keys`. The environment
+wins, as `GH_TOKEN` does over `gh auth login`, so one launch can use another
+account. With neither, the plugin fails to load and names both options; enable
+it again once a token is set. The token is read when the plugin loads, so after
+changing it run `/plugins reload github`. It is never stored in plugin settings.
+The plugin does not use GitHub OAuth or your `/login github-copilot` login.
+
+It offers only GitHub's read tools by default (`read_only`), so the agent cannot
+change repositories, issues, or pull requests unless you allow it:
+
+```text
+/plugins add github pydantic_clai2.github '{"read_only": false}'
+```
+
+The token's own permissions still limit what either mode can reach. For other
+`GitHub` options, such as `toolsets` or a GitHub Enterprise Cloud `url`, write a
+plugin module that constructs `GitHub` and register it under the `github` id.
+The plugin emits no telemetry of its own; tool calls appear in core's spans.
 
 ## Managing plugins
 
