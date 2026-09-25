@@ -24,9 +24,11 @@ if TYPE_CHECKING:
         WarnNearLimits,
     )
     from .conversation_search import ConversationSearch
+    from .day_ai import DayAI
     from .dynamic_workflow import DynamicWorkflow
     from .exa import ExaAgent, ExaSearch
     from .filesystem import READ_ONLY_TOOL_NAMES, FileSystem
+    from .grain import Grain
     from .guardrails import (
         GuardrailError,
         GuardrailResult,
@@ -74,12 +76,14 @@ __all__ = [
     'Coder',
     'ConversationSearch',
     'DEFAULT_RESEARCHER_INSTRUCTIONS',
+    'DayAI',
     'DeduplicateFileReads',
     'DynamicWorkflow',
     'ExaAgent',
     'ExaSearch',
     'FallbackCompaction',
     'FileSystem',
+    'Grain',
     'GuardrailError',
     'GuardrailResult',
     'HarnessDeprecationWarning',
@@ -135,12 +139,14 @@ _CAPABILITY_EXPORTS = {
     'CodeMode': 'code_mode',
     'Coder': 'coder',
     'ConversationSearch': 'conversation_search',
+    'DayAI': 'day_ai',
     'DeduplicateFileReads': 'compaction',
     'DynamicWorkflow': 'dynamic_workflow',
     'ExaAgent': 'exa',
     'ExaSearch': 'exa',
     'FallbackCompaction': 'compaction',
     'FileSystem': 'filesystem',
+    'Grain': 'grain',
     'LocalStack': 'localstack',
     'Macroscope': 'macroscope',
     'ManagedPrompt': 'logfire',

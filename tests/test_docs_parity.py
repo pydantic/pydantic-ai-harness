@@ -164,6 +164,8 @@ _CAPABILITY_PAGE_META = {
     'linear.md': ('linear', 'Linear'),
     'notion.md': ('notion', 'Notion'),
     'ordinal.md': ('ordinal', 'Ordinal'),
+    'grain.md': ('grain', 'Grain'),
+    'day-ai.md': ('day_ai', 'Day AI'),
     'posthog.md': ('posthog', 'PostHog'),
     'stackone.md': ('stackone', 'StackOne'),
     'slack.md': ('slack', 'Slack'),
