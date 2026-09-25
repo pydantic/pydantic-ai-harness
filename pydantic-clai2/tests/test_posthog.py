@@ -375,6 +375,24 @@ async def test_edits_saved_before_the_menu_fails_still_apply(tmp_path: Path, mon
     assert transport(shell.capability()).headers == {}, 'the saved edit is loaded even though the menu failed'
 
 
+async def test_a_corrupt_key_reference_still_loads_so_the_menu_can_fix_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_codex_credentials(account='posthog', value='{"token": "inline-secret"}')
+    shell = Shell(tmp_path)
+    script(monkeypatch, lists=[])
+    await shell.loader.enable('posthog')
+    assert 'The saved PostHog key reference is invalid.' in shell.output.getvalue()
+    source = PostHogSource(PluginHost[None](name='posthog', console=Console(), settings={}))
+    [key, *_] = source.rows()
+    assert key.note == 'needs a key' and source.current(key) == '(invalid)'
+    key_choice(monkeypatch, KeyReference(name=KEY))
+    api_keys.save_key(name=KEY, value='phx_fixed')
+    script(monkeypatch, lists=[pick('key')])
+    assert await shell.loader.configure('posthog') == f'PostHog connects with {KEY} from /keys.'
+    assert bearer() == 'Bearer phx_fixed'
+
+
 async def test_headless_configure_explains_instead_of_drawing(tmp_path: Path) -> None:
     shell = Shell(tmp_path, terminal=False)
     assert await shell.loader.command(['enable', 'posthog']) == (

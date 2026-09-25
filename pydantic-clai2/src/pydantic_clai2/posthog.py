@@ -225,7 +225,11 @@ def client(settings: PostHogSettings) -> Client[StreamableHttpTransport]:
 
 
 def _missing_key() -> str | None:
-    reference = saved_key()
+    try:
+        reference = saved_key()
+    except UserError as exc:
+        # Reported, not raised, so the plugin loads and its menu can replace the reference.
+        return str(exc)
     if reference is None:
         return f'PostHog has no key yet, so each run fails until one is chosen. {SETUP}'
     if reference.name not in load_keys():
@@ -353,7 +357,10 @@ class PostHogSource:
     def current(self, row: FieldRow) -> str:
         """The value as the user would type it."""
         if row.key == 'key':
-            reference = saved_key()
+            try:
+                reference = saved_key()
+            except UserError:
+                return '(invalid)'
             return '(none)' if reference is None else reference.name
         if row.key == 'features':
             return ','.join(self.settings.features) if self.settings.features else 'every group'
