@@ -75,7 +75,12 @@ def test_saved_key_resolves_each_run(monkeypatch: pytest.MonkeyPatch) -> None:
         added({'key': 'not a name'})
 
 
-def test_oauth_uses_a_keyring_client_with_a_sign_in_timeout() -> None:
+def a_browser() -> webbrowser.BaseBrowser:
+    return webbrowser.GenericBrowser('true')
+
+
+def test_oauth_uses_a_keyring_client_with_a_sign_in_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(webbrowser, 'get', a_browser)
     capability = added({'region': 'eu'})
     assert capability.auth is None
     assert isinstance(capability.client, Client)
