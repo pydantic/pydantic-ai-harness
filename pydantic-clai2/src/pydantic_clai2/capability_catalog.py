@@ -2,7 +2,7 @@
 
 from .config import PluginSettings
 
-# Coder, AskUser and RepoContext already have shell-integrated built-in entries.
+# Coder, AskUser, RepoContext and DayAI already have shell-integrated built-in entries.
 _FACTORIES = (
     ('advisor', 'advisor:Advisor'),
     ('aws_lambda', 'aws_lambda:AWSLambdaDurability'),
@@ -20,7 +20,6 @@ _FACTORIES = (
     ('tiered_compaction', 'compaction:TieredCompaction'),
     ('warn_near_limits', 'compaction:WarnNearLimits'),
     ('conversation_search', 'conversation_search:ConversationSearch'),
-    ('day_ai', 'day_ai:DayAI'),
     ('dynamic_workflow', 'dynamic_workflow:DynamicWorkflow'),
     ('exa_agent', 'exa:ExaAgent'),
     ('exa_search', 'exa:ExaSearch'),

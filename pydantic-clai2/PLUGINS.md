@@ -385,8 +385,8 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
+`Coder`, `AskUser`, and `RepoContext` use the integrated entries above, and
+`DayAI` uses [`day_ai`](#day_ai-day-ai-crm-tools), instead of appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
 Press Space to enable an entry. Its preview shows the import path and any load
@@ -466,6 +466,32 @@ The picker uses `host.full_screen()` only to flush streaming output and suspend
 the editor's input reader. It does not switch to the alternate screen. The draft
 is restored on exit, and your picks are printed to the transcript afterwards.
 `/plugins disable ask_user` takes the tool away.
+
+### `day_ai`: Day AI CRM tools
+
+`day_ai` (`pydantic_clai2.day_ai`) starts disabled. `/plugins enable day_ai`
+gives the model harness
+[`DayAI`](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/day_ai/),
+the tools of Day AI's hosted MCP server: search and update CRM records, read
+meeting context, and draft emails. It needs a paid Day AI Agent tier.
+
+With `DAY_AI_ACCESS_TOKEN` set, it connects with that token. Otherwise enabling
+it opens the browser to sign in, the way `/mcp` signs in to an OAuth server, and
+keeps the tokens in the OS keyring (credential `mcp-day_ai`), so later sessions
+reuse and refresh them. A failed sign-in fails the load, so nothing is added. A
+headless run with neither a token nor a stored sign-in fails to load the plugin
+rather than opening a browser.
+
+The only setting is `oauth` (default `true`). Set it to `false` to require the
+variable:
+
+```text
+/plugins add day_ai pydantic_clai2.day_ai '{"oauth": false}'
+```
+
+The server does not mark tools read-only, so, as with harness `DayAI`, there is
+no `read_only` option: the model gets every tool your tier and role allow,
+including ones that change CRM records.
 
 The inline `ask_user_question` picker also offers `Other (type answer)`.
 Choose it to type your own answer instead of the suggested options, including for
