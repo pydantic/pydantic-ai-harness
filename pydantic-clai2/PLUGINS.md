@@ -493,6 +493,10 @@ The server does not mark tools read-only, so, as with harness `DayAI`, there is
 no `read_only` option: the model gets every tool your tier and role allow,
 including ones that change CRM records.
 
+If you enabled `day_ai` from the harness catalog before this plugin existed, your
+saved `pydantic_ai_harness.day_ai:DayAI` declaration still takes precedence and
+only reads `DAY_AI_ACCESS_TOKEN`. `/plugins remove day_ai` switches to this plugin.
+
 The inline `ask_user_question` picker also offers `Other (type answer)`.
 Choose it to type your own answer instead of the suggested options, including for
 multi-select questions. Enter submits nonblank text. Esc returns to the choices
