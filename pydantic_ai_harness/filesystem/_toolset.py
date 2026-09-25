@@ -25,6 +25,7 @@ from pydantic_ai.workspaces import (
     WorkspaceReadOnlyError,
 )
 
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored, warn_argument_renamed
 from pydantic_ai_harness._workspace import raise_tool_failure, supports_commands, workspace_path
 from pydantic_ai_harness.filesystem._changes import Change
 from pydantic_ai_harness.filesystem._events import (
@@ -425,7 +426,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         root_dir: Path | None = None,
         allowed_patterns: Sequence[str],
         denied_patterns: Sequence[str],
-        read_only_patterns: Sequence[str],
+        read_only_patterns: Sequence[str] | None = None,
         max_read_lines: int,
         max_read_chars: int | None = None,
         max_list_results: int,
@@ -434,8 +435,17 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         id: str | None = None,
         content_hashes: bool = True,
         tools: Sequence[str] = DEFAULT_TOOL_NAMES,
+        protected_patterns: Sequence[str] | None = None,
+        cwd: Path | None = None,
     ) -> None:
         super().__init__(id=id)
+        if cwd is not None:
+            warn_argument_ignored('FileSystemToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
+        if protected_patterns is not None:
+            if read_only_patterns is not None:
+                raise TypeError('Pass `read_only_patterns` only: `protected_patterns` is its deprecated name.')
+            warn_argument_renamed('FileSystemToolset', 'protected_patterns', 'read_only_patterns')
+            read_only_patterns = protected_patterns
         # A workspace path, absolute or relative to the workspace's working directory, resolved
         # against the workspace a call acts on; `None` bounds calls by the working directory itself.
         self._root_spelling = root_spelling(root_dir)
@@ -443,7 +453,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         self._resolved: _Scope | None = None
         self._allowed_patterns = list(allowed_patterns)
         self._denied_patterns = list(denied_patterns)
-        self._read_only_patterns = list(read_only_patterns)
+        self._read_only_patterns = list(read_only_patterns or ())
         self._max_read_lines = max_read_lines
         self._max_read_chars = max_read_chars
         self._max_list_results = max_list_results

@@ -9,6 +9,7 @@ import posixpath
 import shlex
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -19,6 +20,7 @@ from pydantic_ai.toolsets import AbstractToolset, FunctionToolset, ToolsetTool
 from pydantic_ai.workspaces import WorkspaceTimeoutError
 
 from pydantic_ai_harness._output import truncate_tail
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
 from pydantic_ai_harness._workspace import metadata_dir
 from pydantic_ai_harness.shell._jobs import CONTROL_TIMEOUT, Job
 from pydantic_ai_harness.shell._limits import file_limit_status, limited_script, validate_file_limit
@@ -84,8 +86,11 @@ class ShellToolset(FunctionToolset[AgentDepsT]):
         env: Mapping[str, str] | None = None,
         denied_env_patterns: Sequence[str] = (),
         tools: Sequence[str] = RUN_SCOPED_TOOL_NAMES,
+        cwd: Path | None = None,
     ) -> None:
         super().__init__()
+        if cwd is not None:
+            warn_argument_ignored('ShellToolset', 'cwd', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
         # The absolute workspace path `persist_cwd` last recorded; `None` means the working directory.
         self._cwd: str | None = None
         self._allowed_commands = list(allowed_commands)

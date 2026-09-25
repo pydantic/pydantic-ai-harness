@@ -8,14 +8,17 @@ from pathlib import Path
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import FunctionToolset
 
+from pydantic_ai_harness._warn import WORKING_DIR_IS_THE_WORKSPACES, warn_argument_ignored
 from pydantic_ai_harness.repo_context._inventory import AgentContextInventory, scan_assets
 
 
 class RepoContextToolset(FunctionToolset[AgentDepsT]):
     """Exposes a single tool that reports where the repo's CE assets live."""
 
-    def __init__(self, asset_roots: Sequence[str], tool_name: str) -> None:
+    def __init__(self, asset_roots: Sequence[str], tool_name: str, *, workspace_dir: Path | None = None) -> None:
         super().__init__()
+        if workspace_dir is not None:
+            warn_argument_ignored('RepoContextToolset', 'workspace_dir', WORKING_DIR_IS_THE_WORKSPACES, stacklevel=3)
         self._asset_roots = asset_roots
         self.add_function(self.inventory_agent_context, name=tool_name)
 

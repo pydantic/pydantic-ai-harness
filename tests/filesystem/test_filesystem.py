@@ -1958,6 +1958,12 @@ class TestFileSystemCapability:
         with pytest.raises(TypeError, match='`protected_patterns` is its deprecated name'):
             FileSystem(read_only_patterns=['*.lock'], protected_patterns=['*.lock'])
 
+    def test_toolset_protected_patterns_is_a_deprecated_alias(self) -> None:
+        with pytest.warns(HarnessDeprecationWarning, match=r'`FileSystemToolset\(protected_patterns=\.\.\.\)`'):
+            _toolset_with_patterns(None, ['*.lock'])
+        with pytest.raises(TypeError, match='`protected_patterns` is its deprecated name'):
+            _toolset_with_patterns([], ['*.lock'])
+
     def test_non_positive_max_read_lines_rejected(self) -> None:
         with pytest.raises(ValueError, match='max_read_lines must be a positive integer'):
             FileSystem(max_read_lines=0)
@@ -2249,3 +2255,16 @@ class TestWalkBounds:
                 workspace=ws,
             )
         assert [event.truncated for event in seen] == [True]
+
+
+def _toolset_with_patterns(read_only: list[str] | None, protected: list[str]) -> FileSystemToolset[None]:
+    return FileSystemToolset[None](
+        allowed_patterns=[],
+        denied_patterns=[],
+        read_only_patterns=read_only,
+        protected_patterns=protected,
+        max_read_lines=1,
+        max_list_results=1,
+        max_search_results=1,
+        max_find_results=1,
+    )
