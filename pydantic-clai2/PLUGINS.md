@@ -243,9 +243,9 @@ previous login.
 
 Saved login takes precedence over `GITHUB_COPILOT_API_KEY`,
 `GITHUB_COPILOT_API_TOKEN`, and `COPILOT_GITHUB_TOKEN`, checked in that order when
-no login is saved. Copilot login does not read `GH_TOKEN`, `GITHUB_TOKEN`, or another
-application's token files; `GITHUB_TOKEN` belongs to the separate
-[`github` plugin](#github-tools-from-githubs-hosted-mcp-server). This is shell-owned authentication, not a plugin API.
+no login is saved. Copilot login does not read `GH_TOKEN`, `GITHUB_TOKEN`, the
+`GITHUB_TOKEN` key in `/keys`, or another application's token files; that key
+belongs to the separate [`github` plugin](#github-tools-from-githubs-hosted-mcp-server). This is shell-owned authentication, not a plugin API.
 Core owns inference and its telemetry; CLAI adds no login-specific spans.
 Bare `/login` continues to sign in to Codex.
 
@@ -513,13 +513,23 @@ The `github` built-in (`pydantic_clai2.github`) gives the model harness
 MCP server, acting as the account behind a token. It starts disabled; turn it on
 with `/plugins enable github`.
 
-The token comes from the `GITHUB_TOKEN` environment variable, or else from an API
-key named `GITHUB_TOKEN` saved with `/set api_key` or `/keys`. The environment
-wins, as `GH_TOKEN` does over `gh auth login`, so one launch can use another
-account. With neither, the plugin fails to load and names both options; enable
-it again once a token is set. The token is read when the plugin loads, so after
-changing it run `/plugins reload github`. It is never stored in plugin settings.
-The plugin does not use GitHub OAuth or your `/login github-copilot` login.
+The token lives in the named API key store, never in plugin settings: those are
+plaintext SQLite. Run `/github connect` to pick a saved key from `/keys`, or to type
+a new token into a masked prompt, which saves it in `/keys` as `GITHUB_TOKEN`.
+Replacing a key that already exists asks first, because other plugins and
+connections may share it. The plugin's settings then hold only the key's name,
+such as `{"token": {"name": "GITHUB_TOKEN"}}`, and a declaration that tries to hold
+a token is rejected. `GITHUB_TOKEN` is a label in `/keys`, not an environment
+variable: the plugin does not read the environment.
+
+The key is looked up on every run, so replacing it in `/keys` applies from the
+next turn. If the named key is missing when the plugin loads, it still loads, prints
+a warning, and keeps `/github connect` available; each run fails with an error
+naming the key until you save one, so the agent never runs without the account you
+chose. `/github` on its own shows which key is in use and whether it exists.
+Deleting or renaming that key in `/keys` has the same effect; `/keys` does not
+block renaming a key a plugin uses. The plugin does not use GitHub OAuth or your
+`/login github-copilot` login.
 
 It offers only GitHub's read tools by default (`read_only`), so the agent cannot
 change repositories, issues, or pull requests unless you allow it:
@@ -916,6 +926,41 @@ Bad or missing values fail at startup with a message naming your plugin.
 CLAI ignores unknown names in its own saved settings and preserves their values for
 other versions or branches. This does not relax validation of plugin declarations
 or `host.settings(Model)`.
+
+### Keep secrets in `/keys`: `KeyReference`, `SavedKey`, `host.save_settings`
+
+Plugin settings are stored in plaintext SQLite, so a token, API key, or client
+secret must never be one of them. Keep the secret in the named API key store that
+`/keys` manages, and put only its name in your settings. Use the conventional
+uppercase variable name as the label, such as `GITHUB_TOKEN` or `SLACK_BOT_TOKEN`,
+so plugins that need the same credential share one key; replacing it in `/keys`
+reaches all of them. The label does not export or read an environment variable.
+
+```python
+from pydantic import BaseModel, ConfigDict, Field
+
+from pydantic_clai2.api_keys import KeyReference, SavedKey
+
+
+class MySettings(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    token: KeyReference = Field(default_factory=lambda: KeyReference(name='MY_SERVICE_TOKEN'))
+
+
+def activate(host):
+    settings = host.settings(MySettings)
+    host.add(MyService(auth=SavedKey(name=settings.token.name, setup='Add MY_SERVICE_TOKEN in /keys.')))
+```
+
+`SavedKey` is a capability `auth` function. It looks the key up on every run and
+raises with `setup` when the key is missing, so a deleted key fails closed rather
+than falling back to something else. To let the user choose a key from a command,
+call `prompt_api_key(prompt=..., label=...)`: it returns a `KeyReference` to a
+saved key, a masked new value for you to `save_key(name=..., value=...)`, or `None`
+when cancelled. Then call `host.save_settings(settings)` with the new reference; it
+saves your plugin's declaration as `plugins add` would; `host.settings(Model)`
+returns the new values from then on, and the next load starts with them. The built-in `github` plugin's `/github connect` works this
+way.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 

@@ -18,7 +18,17 @@ from pydantic_clai2.plugin_menu import PluginMenu
 from pydantic_clai2.plugins import SessionStart
 from pydantic_clai2.settings_store import SettingsStore
 
-CURATED = {'coder', 'ask_user', 'repo_context', 'compaction', 'persistence', 'logfire', 'notifications', 'mcp', 'github'}
+CURATED = {
+    'coder',
+    'ask_user',
+    'repo_context',
+    'compaction',
+    'persistence',
+    'logfire',
+    'notifications',
+    'mcp',
+    'github',
+}
 OPT_IN = {'github'}
 
 
