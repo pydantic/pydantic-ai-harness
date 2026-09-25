@@ -11,7 +11,7 @@ from pydantic_ai.toolsets import FunctionToolset
 
 _REMOTE_BASE = 'https://raw.githubusercontent.com/pydantic/pydantic-ai/main/docs'
 """Raw-markdown base for the live fallback. Tracks `pydantic/pydantic-ai:main`,
-and each topic maps to `{base}/{topic}.md` -- byte-identical to a local checkout."""
+and each topic maps to `{base}/{page}` -- byte-identical to a local checkout."""
 
 _FETCH_TIMEOUT = 30.0
 """Per-request timeout (seconds) for the remote markdown fetch."""
@@ -20,8 +20,9 @@ _FETCH_TIMEOUT = 30.0
 class PydanticAIDocsTopic(str, Enum):
     """A Pydantic AI documentation page that `read_pyai_docs` can return.
 
-    Each value is the on-disk / remote file stem, so `{value}.md` resolves both a
-    local checkout file and a raw-markdown URL.
+    The value is the topic name the model passes. `_PAGES` maps it to the page's
+    path relative to the pydantic-ai `docs/` directory, used for both a local
+    checkout file and a raw-markdown URL.
     """
 
     capabilities = 'capabilities'
@@ -32,11 +33,23 @@ class PydanticAIDocsTopic(str, Enum):
     agent = 'agent'
 
 
+_PAGES: dict[PydanticAIDocsTopic, str] = {
+    PydanticAIDocsTopic.capabilities: 'capabilities/overview.md',
+    PydanticAIDocsTopic.hooks: 'hooks.md',
+    PydanticAIDocsTopic.tools: 'tools.md',
+    PydanticAIDocsTopic.tools_advanced: 'tools-advanced.md',
+    PydanticAIDocsTopic.toolsets: 'toolsets.md',
+    PydanticAIDocsTopic.agent: 'agent.md',
+}
+"""Each topic's page relative to pydantic-ai's `docs/`. The capabilities page moved to
+`capabilities/overview.md` in pydantic/pydantic-ai#6621."""
+
+
 class PydanticAIDocsToolset(FunctionToolset[AgentDepsT]):
     """Exposes one `read_pyai_docs` tool that locates and returns a pyai doc.
 
     Resolution per call: a configured local checkout first (when the topic's
-    `{stem}.md` exists there), otherwise a raw-markdown fetch from `main`. The
+    page exists there), otherwise a raw-markdown fetch from `main`. The
     full doc is returned verbatim. Results are memoized in the shared `cache`
     dict (when caching is enabled) so a topic is read or fetched at most once.
     """
@@ -80,14 +93,14 @@ class PydanticAIDocsToolset(FunctionToolset[AgentDepsT]):
         """Return the local checkout's markdown for `topic`, or `None` to fall back to remote."""
         if self._local_docs_path is None:
             return None
-        path = self._local_docs_path.expanduser() / f'{topic.value}.md'
+        path = self._local_docs_path.expanduser() / _PAGES[topic]
         if not path.is_file():
             return None
         return path.read_text(encoding='utf-8')
 
     async def _fetch_remote(self, topic: PydanticAIDocsTopic) -> str:
         """Fetch `topic`'s markdown from the live source, or raise a descriptive error."""
-        url = f'{_REMOTE_BASE}/{topic.value}.md'
+        url = f'{_REMOTE_BASE}/{_PAGES[topic]}'
         try:
             async with httpx.AsyncClient(timeout=_FETCH_TIMEOUT) as client:
                 response = await client.get(url)

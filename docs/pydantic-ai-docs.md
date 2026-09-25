@@ -46,8 +46,8 @@ The capability also adds a short static instruction telling the model that the `
 
 Each call resolves in this order:
 
-1. **Local checkout** -- when `local_docs_path` (or the `PYDANTIC_AI_HARNESS_DOCS_PATH` env var) is set and `{path}/{topic}.md` exists, that file is read and returned.
-2. **Remote fetch** -- otherwise the page is fetched from `https://raw.githubusercontent.com/pydantic/pydantic-ai/main/docs/{topic}.md`.
+1. **Local checkout** -- when `local_docs_path` (or the `PYDANTIC_AI_HARNESS_DOCS_PATH` env var) is set and the topic's page exists under it (`{path}/{topic}.md`, or `{path}/capabilities/overview.md` for `capabilities`), that file is read and returned.
+2. **Remote fetch** -- otherwise the page is fetched from the same path under `https://raw.githubusercontent.com/pydantic/pydantic-ai/main/docs/`.
 3. **Neither resolves** -- a descriptive error naming the local path tried and the URL.
 
 The capability never runs git. Keep the local checkout current yourself; the remote path always reads `main`, so it is the fresh fallback.
