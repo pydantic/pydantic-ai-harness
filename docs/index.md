@@ -1,6 +1,6 @@
 ---
 title: Pydantic AI Harness
-description: "Pydantic AI Harness is the official capability library for Pydantic AI: a coding agent, file and shell tools, memory, subagents, and context management."
+description: "Your agent's favorite harness, built on Pydantic AI: 50+ capabilities, from memory, guardrails and sub-agents to planning, up to a complete coding agent."
 ---
 
 # Pydantic AI Harness
