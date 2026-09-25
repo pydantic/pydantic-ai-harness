@@ -127,7 +127,11 @@ jobs:
         env:
           BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
-        run: echo "providers=$(python3 scripts/sandbox_live_changes.py changed "$BASE_SHA" "$HEAD_SHA")" >> "$GITHUB_OUTPUT"
+        # An assignment, not `echo "$(...)"`, so a failing script fails the step instead of
+        # writing an empty list that skips the live tests.
+        run: |
+          providers="$(python3 scripts/sandbox_live_changes.py changed "$BASE_SHA" "$HEAD_SHA")"
+          echo "providers=${providers}" >> "$GITHUB_OUTPUT"
 
   clai-test:
     name: CLAI test (${{ matrix.python }})
