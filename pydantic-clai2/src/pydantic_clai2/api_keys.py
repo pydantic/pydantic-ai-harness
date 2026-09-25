@@ -112,14 +112,20 @@ def _load_keys() -> dict[str, SecretStr]:
         raise UserError('Stored API keys are invalid. Repair the api-keys credential bundle.') from None
 
 
-def save_key(*, name: str, value: str) -> str:
-    """Save one key without touching unrelated credentials or SQLite."""
+def save_key(*, name: str, value: str, replace: bool = True) -> str:
+    """Save one key without touching unrelated credentials or SQLite.
+
+    With `replace=False`, the existence check happens under the same lock as the write, so a key another
+    process saved after the caller looked is not overwritten without the user confirming it.
+    """
     name = normalize_name(name=name)
     value = value.strip()
     if not value:
         raise ValueError('An API key is required.')
     with key_transaction():
         keys = _load_keys()
+        if not replace and name in keys:
+            raise ValueError(f'{name} was saved in /keys by another session meanwhile. Choose it again to replace it.')
         keys[name] = SecretStr(value)
         _save_keys(keys=keys)
     path = credentials_path(account='api-keys')

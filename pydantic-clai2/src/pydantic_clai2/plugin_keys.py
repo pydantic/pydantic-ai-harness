@@ -48,9 +48,11 @@ async def choose_key(*, name: str, label: str, placeholder: str, runners: Runner
     value = choice.strip()
     if not value:
         return None
-    if name in await asyncio.to_thread(load_keys) and not await run_worker(lambda: _confirm_replace(name, runners)):
+    exists = name in await asyncio.to_thread(load_keys)
+    if exists and not await run_worker(lambda: _confirm_replace(name, runners)):
         return None
-    await asyncio.to_thread(save_key, name=name, value=value)
+    # Confirmed replacements replace whatever is there; otherwise refuse a key that appeared since the check.
+    await asyncio.to_thread(save_key, name=name, value=value, replace=exists)
     return KeyReference(name=name)
 
 

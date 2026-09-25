@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from menu_script import Script, pick, typed
+from pydantic import SecretStr
 from termflow.tui.menu import MenuResult  # pyright: ignore[reportMissingTypeStubs]
 from termflow.tui.textinput import TextInputResult  # pyright: ignore[reportMissingTypeStubs]
 
@@ -38,6 +39,21 @@ async def test_a_masked_new_value_is_saved_under_the_plugins_name() -> None:
 async def test_escape_or_an_empty_value_saves_nothing(result: TextInputResult) -> None:
     assert await choose(Script(lists=[], choices=[], texts=[result])) is None
     assert api_keys.load_keys() == {}
+
+
+async def test_a_key_saved_by_another_session_meanwhile_is_not_overwritten(monkeypatch: pytest.MonkeyPatch) -> None:
+    answer(monkeypatch, 'mine')
+    real_load_keys = api_keys.load_keys
+
+    def load_keys_then_another_session_saves() -> dict[str, SecretStr]:
+        keys = real_load_keys()
+        api_keys.save_key(name='DEMO_TOKEN', value='theirs')
+        return keys
+
+    monkeypatch.setattr('pydantic_clai2.plugin_keys.load_keys', load_keys_then_another_session_saves)
+    with pytest.raises(ValueError, match='DEMO_TOKEN was saved in /keys by another session meanwhile'):
+        await choose(Script(lists=[], choices=[], texts=[]))
+    assert api_keys.load_keys()['DEMO_TOKEN'].get_secret_value() == 'theirs'
 
 
 async def test_a_saved_key_is_returned_by_name(monkeypatch: pytest.MonkeyPatch) -> None:
