@@ -17,6 +17,7 @@ class PromptBuffer:
     search: str | None = None
     search_original: str = ''
     _pastes: list[tuple[int, int]] = field(default_factory=list[tuple[int, int]], init=False, repr=False)
+    _entries: list[str] = field(default_factory=list[str], init=False, repr=False)
 
     def replace(self, text: str) -> None:
         """Set a draft and put its cursor at the end."""
@@ -45,15 +46,28 @@ class PromptBuffer:
             self._pastes.append((start, self.cursor))
             self._pastes.sort()
 
-    def recall(self, *, backwards: bool) -> None:
-        """Walk chronological history, preserving the draft beyond its newest entry."""
+    @property
+    def recall_offset(self) -> int | None:
+        """Steps back from the draft during a recall walk: 0 is the draft, -1 the newest entry."""
+        return None if self.history_index is None else self.history_index - len(self._entries)
+
+    def recall(self, *, backwards: bool, queued: tuple[str, ...] = ()) -> None:
+        """Walk chronological history, preserving the draft beyond its newest entry.
+
+        `queued` prompts are newer than any history, so a walk that starts here visits them
+        between the draft and history. `accept` already recorded them in history, so those
+        duplicates are skipped rather than visited twice.
+        """
         if self.history_index is None:
             self.saved_draft = self.text
-            self.history_index = len(self.history)
-        self.history_index = min(len(self.history), max(0, self.history_index + (-1 if backwards else 1)))
-        self.replace(self.saved_draft if self.history_index == len(self.history) else self.history[self.history_index])
+            self._entries = [entry for entry in self.history if entry not in queued] + list(queued)
+            self.history_index = len(self._entries)
+        self.history_index = min(len(self._entries), max(0, self.history_index + (-1 if backwards else 1)))
+        self.replace(
+            self.saved_draft if self.history_index == len(self._entries) else self._entries[self.history_index]
+        )
 
-    def vertical(self, *, backwards: bool) -> None:
+    def vertical(self, *, backwards: bool, queued: tuple[str, ...] = ()) -> None:
         """Move within multiline text before falling back to history recall."""
         lines = self.text.split('\n')
         before = self.text[: self.cursor]
@@ -62,7 +76,7 @@ class PromptBuffer:
         if len(lines) > 1 and 0 <= target < len(lines):
             self.cursor = sum(len(line) + 1 for line in lines[:target]) + min(column, len(lines[target]))
         else:
-            self.recall(backwards=backwards)
+            self.recall(backwards=backwards, queued=queued)
 
     def search_key(self, key: str) -> None:
         """Search backwards without submitting the selected history entry."""
