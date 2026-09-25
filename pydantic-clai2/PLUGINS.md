@@ -468,36 +468,6 @@ the editor's input reader. It does not switch to the alternate screen. The draft
 is restored on exit, and your picks are printed to the transcript afterwards.
 `/plugins disable ask_user` takes the tool away.
 
-### `day_ai`: Day AI CRM tools
-
-`day_ai` (`pydantic_clai2.day_ai`) starts disabled. `/plugins enable day_ai`
-gives the model harness
-[`DayAI`](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/day_ai/),
-the tools of Day AI's hosted MCP server: search and update CRM records, read
-meeting context, and draft emails. It needs a paid Day AI Agent tier.
-
-With `DAY_AI_ACCESS_TOKEN` set, it connects with that token. Otherwise enabling
-it opens the browser to sign in, the way `/mcp` signs in to an OAuth server, and
-keeps the tokens in the OS keyring (credential `mcp-day_ai`), so later sessions
-reuse and refresh them. A failed sign-in fails the load, so nothing is added. A
-headless run with neither a token nor a stored sign-in fails to load the plugin
-rather than opening a browser.
-
-The only setting is `oauth` (default `true`). Set it to `false` to require the
-variable:
-
-```text
-/plugins add day_ai pydantic_clai2.day_ai '{"oauth": false}'
-```
-
-The server does not mark tools read-only, so, as with harness `DayAI`, there is
-no `read_only` option: the model gets every tool your tier and role allow,
-including ones that change CRM records.
-
-If you enabled `day_ai` from the earlier harness catalog, your
-saved `pydantic_ai_harness.day_ai:DayAI` declaration still takes precedence and
-only reads `DAY_AI_ACCESS_TOKEN`. `/plugins remove day_ai` switches to this plugin.
-
 The inline `ask_user_question` picker also offers `Other (type answer)`.
 Choose it to type your own answer instead of the suggested options, including for
 multi-select questions. Enter submits nonblank text. Esc returns to the choices
@@ -537,6 +507,45 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+### `day_ai`: Day AI CRM tools
+
+`day_ai` (`pydantic_clai2.day_ai`) starts disabled. `/plugins enable day_ai`
+gives the model harness
+[`DayAI`](https://github.com/pydantic/pydantic-ai-harness/tree/main/pydantic_ai_harness/day_ai/),
+the tools of Day AI's hosted MCP server: search and update CRM records, read
+meeting context, and draft emails. It needs a paid Day AI Agent tier.
+
+It connects in one of two ways, and neither puts a secret in plugin settings,
+which are stored in plaintext:
+
+- **A token in `/keys`.** Save it under `DAY_AI_ACCESS_TOKEN`, the name harness
+  `DayAI` documents, and the plugin uses it. The name is a `/keys` label only;
+  CLAI does not read the environment variable. The token is looked up on every
+  run, so replacing it in `/keys` reaches the next run, and deleting it makes
+  runs fail with a message until you save it again. Plugins that name the same
+  key share it, the way `github` and Copilot can share `GITHUB_TOKEN`.
+- **Browser sign-in.** With no key, enabling the plugin opens the browser to sign
+  in, the way `/mcp` signs in to an OAuth server, and keeps the tokens in the OS
+  keyring (credential `mcp-day_ai`), so later sessions reuse and refresh them. A
+  failed sign-in fails the load, so nothing is added. A headless run with no
+  token and no stored sign-in fails to load rather than opening a browser.
+
+`/day_ai` shows which one is in use. `/day_ai connect` lets you pick a saved key
+from `/keys`, type a new one (masked, saved as `DAY_AI_ACCESS_TOKEN` after
+asking before replacing an existing value), or leave it empty for browser
+sign-in. It saves only the key's name as the plugin's `token` setting, for
+example `{"token": {"name": "WORK_DAY_AI"}}`; `/plugins reload day_ai` applies
+it. A `token` that names a missing key does not fall back to the browser.
+
+The server does not mark tools read-only, so, as with harness `DayAI`, there is
+no `read_only` option: the model gets every tool your tier and role allow,
+including ones that change CRM records.
+
+If you enabled `day_ai` from the earlier harness catalog, your saved
+`pydantic_ai_harness.day_ai:DayAI` declaration still takes precedence and reads
+`DAY_AI_ACCESS_TOKEN` from the environment. `/plugins remove day_ai` switches to
+this plugin.
 
 ## Managing plugins
 
