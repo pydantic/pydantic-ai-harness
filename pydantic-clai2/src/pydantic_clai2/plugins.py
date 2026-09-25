@@ -296,7 +296,7 @@ class PluginHost(Generic[DepsT]):
         Never save a secret: keep it in `/keys` and save a `KeyReference` naming it. A host built
         outside the loader keeps the change for this load only.
         """
-        self._settings = settings.model_dump(mode='json')
+        self._settings = settings.model_dump(mode='json', by_alias=True)
         self._persist(self._settings)
 
     def add(self, capability: AgentCapability[DepsT], /) -> None:
