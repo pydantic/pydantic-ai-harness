@@ -385,8 +385,9 @@ order plugin instructions, renderers, and status segments are consulted in.
 
 `/plugins` and `/plugins list` also include every other public harness capability,
 including each compaction strategy and guardrail. These entries start disabled.
-`Coder`, `AskUser`, and `RepoContext` use the integrated entries above instead of
-appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
+`Coder`, `AskUser`, and `RepoContext` use the integrated entries above, and
+`Grain` uses the [`grain`](#grain-meetings-with-a-saved-sign-in) plugin, instead
+of appearing twice. Deprecated aliases, toolsets, stores, and the ACP server adapter
 are not separate capabilities.
 
 Press Space to enable an entry. Its preview shows the import path and any load
@@ -506,6 +507,33 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 `AskUserAnsweredEvent`, so a plugin that only wants to watch (log the question,
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
+
+### `grain`: meetings, with a saved sign-in
+
+`grain` (`pydantic_clai2.grain`) gives the agent harness's
+[`Grain`](../pydantic_ai_harness/grain/README.md) capability: search and read
+the Grain meetings, transcripts, and notes you can see. It starts disabled;
+`/plugins enable grain` turns it on.
+
+When `GRAIN_ACCESS_TOKEN` is set, the plugin uses that token. Otherwise the
+first prompt that connects opens your browser to sign in to Grain and prints the
+sign-in URL, in case the browser does not open (over SSH, for example). The
+tokens go to the OS keyring (or CLAI's private credential file when there is
+no keyring), the way `/mcp` OAuth servers keep theirs, so later sessions refresh
+them instead of signing in again. A headless run (`clai2 -p`) cannot sign in:
+with no saved sign-in or token, its Grain connection fails and says so.
+
+`/grain` says which of the two this session uses. `/grain logout` forgets the
+saved sign-in; the loaded plugin keeps its tokens in memory until
+`/plugins reload grain` or a restart.
+
+| Key | Default | Does |
+|---|---|---|
+| `read_only` | `true` | offer only the tools Grain marks read-only; `false` also lets the agent create clips and tag meetings |
+
+```text
+/plugins add grain pydantic_clai2.grain '{"read_only": false}'
+```
 
 ## Managing plugins
 

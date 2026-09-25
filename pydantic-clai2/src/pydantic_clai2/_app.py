@@ -97,11 +97,13 @@ DEFAULT_PLUGINS: tuple[PluginSettings, ...] = (
     PluginSettings(id='logfire', factory='pydantic_clai2.logfire'),
     PluginSettings(id='notifications', factory='pydantic_clai2.notifications'),
     PluginSettings(id='mcp', factory='pydantic_clai2.mcp'),
+    PluginSettings(id='grain', factory='pydantic_clai2.grain', enabled=False),
     *HARNESS_PLUGINS,
 )
 """Built-in declarations, including opt-in harness capabilities. `remove` restores their defaults.
 
 `coder` leaves out its own `RepoContext` because `repo_context` binds one, so instruction files load once.
+`grain` wraps harness's `Grain` with CLAI's keyring-backed sign-in; it is off until the user enables it.
 """
 
 
