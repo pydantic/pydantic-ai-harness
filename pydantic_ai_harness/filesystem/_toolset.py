@@ -137,7 +137,7 @@ class _EventLocation(TypedDict):
     root_dir: str
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Scope:
     """The workspace a call acts on, with its containment boundary and working directory."""
 
@@ -151,6 +151,8 @@ class _Scope:
 
     A boundary at `/` contains everything, so only access patterns need the real path there.
     """
+    lacks_ripgrep: bool = False
+    """Set once `rg` is found missing, so later searches go straight to the built-in walk."""
 
 
 def _contains(root: str, path: str) -> bool:
@@ -1295,6 +1297,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             raise NotADirectoryError(f'Path {path!r} is not a directory.')
         arguments = ['--files', '--sort', 'path', *(['--glob', glob] if glob is not None else [])]
         try:
+            if scope.lacks_ripgrep:
+                raise RipgrepMissing
             results, capped = await run_ripgrep(
                 scope.workspace,
                 arguments,
@@ -1304,6 +1308,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 accept=lambda record: self._ripgrep_entry(scope, resolved, record),
             )
         except RipgrepMissing:
+            scope.lacks_ripgrep = True
             # Like ripgrep's, a glob without a `/` matches a file name at any depth.
             pattern = '**' if glob is None else glob if '/' in glob else f'**/{glob}'
             return await self._find_files(scope, ctx, pattern, path=path, files_only=True)
@@ -1424,6 +1429,8 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
             arguments.append('--fixed-strings')
         arguments.extend(['--regexp', pattern, '--', target])
         try:
+            if scope.lacks_ripgrep:
+                raise RipgrepMissing
             results, capped = await run_ripgrep(
                 scope.workspace,
                 arguments,
@@ -1432,6 +1439,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
                 accept=lambda record: self._match_line(scope, cwd, record),
             )
         except RipgrepMissing:
+            scope.lacks_ripgrep = True
             if file_type is not None:
                 raise ValueError('`file_type` needs ripgrep, which the workspace lacks; use `glob` instead.')
             regex = re.escape(pattern) if literal else pattern

@@ -2,7 +2,7 @@
 
 import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import pytest
@@ -10,7 +10,7 @@ from pydantic_ai import Agent, RunContext
 from pydantic_ai.capabilities import AbstractCapability, on_event
 from pydantic_ai.exceptions import ModelRetry
 from pydantic_ai.models.test import TestModel
-from pydantic_ai.workspaces import LocalWorkspaceBackend
+from pydantic_ai.workspaces import CommandResult, LocalWorkspaceBackend, Workspace, WorkspaceCommand
 
 from pydantic_ai_harness.filesystem import RIPGREP_TOOL_NAMES, FilesSearchedEvent, FileSystem, FileSystemToolset
 
@@ -273,6 +273,23 @@ class TestGrep:
         assert 'link.txt' not in await toolset(workspace).grep('import os', workspace=LocalWorkspaceBackend(workspace))
 
 
+class _CountingProbes(LocalWorkspaceBackend):
+    probes = 0
+
+    async def run(
+        self,
+        command: WorkspaceCommand,
+        *,
+        shell: bool = False,
+        cwd: str | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> CommandResult:
+        if isinstance(command, str) and 'command -v rg' in command:
+            self.probes += 1
+        return await super().run(command, shell=shell, cwd=cwd, env=env, timeout=timeout)
+
+
 class TestWithoutRipgrep:
     """A workspace without `rg` (E2B's default template, say) gets the same tools, served by walking the tree."""
 
@@ -295,3 +312,10 @@ class TestWithoutRipgrep:
         assert await ts.grep('os.name', literal=True, workspace=without_rg) == 'src/app.py:5:    return os.name'
         with pytest.raises(ModelRetry, match='`file_type` needs ripgrep'):
             await ts.grep('os', file_type='py', workspace=without_rg)
+
+    async def test_missing_rg_is_probed_once_per_workspace(self, workspace: Path) -> None:
+        backend = _CountingProbes(workspace, env={'PATH': str(workspace)})
+        ts, ws = toolset(workspace), Workspace(backend)
+        await ts.grep('os', workspace=ws)
+        await ts.list_files(workspace=ws)
+        assert backend.probes == 1
