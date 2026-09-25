@@ -387,7 +387,8 @@ order plugin instructions, renderers, and status segments are consulted in.
 declared. It does not list every public harness capability for Space-enable:
 hosted-MCP integrations such as Slack or GitHub, sandboxes, and guardrails need
 credentials, extras, or settings that a checkbox cannot supply, so they belong in
-CLAI plugins written for them.
+CLAI plugins written for them, such as the
+[`ordinal`](#ordinal-social-posts-in-ordinal) built-in.
 
 To run any other capability, declare it on purpose under an id of your choice,
 with JSON constructor settings if it takes them:
@@ -403,7 +404,9 @@ as `filesystem` or `shell` alongside `coder`.
 
 Earlier releases listed every harness capability here, disabled. If you enabled
 one of those, it was saved as your own declaration, so it keeps loading and now
-shows as a saved plugin; `/plugins remove NAME` forgets it.
+shows as a saved plugin; `/plugins remove NAME` forgets it. The exception is a
+saved copy of an entry that now has its own built-in under the same id, such as
+`ordinal`: it becomes that built-in, keeping whether it was enabled.
 
 `/plugins disable coder` gives you a chat-only CLAI (a writing or research setup
 with `ExaSearch` instead, say); `/plugins enable coder` brings the tools back;
@@ -505,6 +508,54 @@ The request and its response are also emitted as `AskUserRequestedEvent` and
 show a "waiting for you" state) registers `@host.on(EventClass)` or
 `@host.render(EventClass)` without being the answerer.
 
+### `ordinal`: social posts in Ordinal
+
+`ordinal` (`pydantic_clai2.ordinal`) gives the model harness
+[`Ordinal`](../pydantic_ai_harness/ordinal/README.md), which drafts, schedules,
+and analyzes social posts through Ordinal's hosted MCP server. It starts disabled;
+`/plugins enable ordinal` turns it on. Ordinal MCP needs the Pro plan or higher.
+If you had enabled or disabled the former `pydantic_ai_harness.ordinal:Ordinal`
+catalog entry, that choice carries over to this plugin.
+
+Set it up in its settings menu. `/plugins enable ordinal` and `/plugins add`
+open the menu, and so do `/plugins configure ordinal` and `C` in `/plugins`
+later, so you can change anything without reinstalling. It is the same field
+editor `/set` uses: type to filter, Enter edits a row, `R` resets it, Esc closes.
+Each change is saved as soon as you make it, and the plugin loads again when the
+menu closes.
+
+| Row | Default | Does |
+|---|---|---|
+| Sign-in | Automatic | which credential runs use: Automatic (a `/keys` entry, else `ORDINAL_ACCESS_TOKEN`, else the browser), or only a saved key, only the environment variable, or only the browser |
+| `/keys` entry | none | opens the `/keys` picker: choose a saved key, or type a new token masked; `R` stops using the key |
+| Server instructions | Included | pass Ordinal's own server instructions to the model |
+
+Harness `Ordinal` has one endpoint and reaches every workspace the token's user
+belongs to, so there is no base URL or workspace to set.
+
+The token never goes in plugin settings, which are plaintext SQLite; the settings
+hold only the two options above, and a declaration with any other field, such as
+a pasted token, fails to load. A token typed in the menu is saved in `/keys` as
+`ORDINAL_ACCESS_TOKEN`, after asking if that would replace an existing key, since
+other plugins and connections may share it. CLAI keeps only the chosen key's name
+and looks it up on every run. Replacing the key in `/keys` applies to the next
+run, and deleting it makes runs fail instead of connecting without it. `/keys`
+will not rename a key while Ordinal uses it. Several plugins and providers can
+name the same key, as GitHub and Copilot can both use `GITHUB_TOKEN`.
+
+A browser sign-in opens your browser on the first run that uses Ordinal. CLAI
+keeps the OAuth tokens in the OS keyring (the private credential file when no
+keyring exists), as `/mcp` does for OAuth servers, so later launches reuse them.
+It only works on the machine you run CLAI on. With no credential for the chosen
+sign-in and no terminal (a headless run from CI, say), the plugin fails to load
+with a message naming `/plugins configure ordinal`, rather than adding tools that
+cannot connect.
+
+`/ordinal` shows which credential the next run uses. `/ordinal logout` forgets the
+saved browser sign-in and drops the one in use, so the next browser run signs in
+again; it does not touch a `/keys` entry or the environment variable. Disabling
+the plugin does not sign you out.
+
 ## Managing plugins
 
 `/plugins` on its own opens a full-screen menu, the same kind Code Puppy uses
@@ -519,8 +570,11 @@ for `/agent` and `/mcp`:
                                                      | adds    2 commands, 1 hook, 0 tools
                                                      | error   none
 
- Up/Down move - Space enable/disable - R reload - D remove - Enter/Q close
+ Up/Down move - Space enable/disable - C configure - R reload - D remove - Enter/Q close
 ```
+
+`C` closes the list and opens the highlighted plugin's settings menu, if it has
+one; enabling such a plugin with Space shows a reminder to press it.
 
 The left side lists every plugin with `[x]` for on and `[ ]` for off. The right
 side shows details for the highlighted one: where it came from, whether it
@@ -540,6 +594,7 @@ CLAI does the same thing:
 | `/plugins remove NAME` | forget an installed declaration; persistently disable a drop-in (delete its file yourself to remove it); reset a built-in or project-declared plugin to its declaration |
 | `/plugins enable NAME` / `disable NAME` | load or unload, remembered across restarts |
 | `/plugins reload NAME` | re-import the file and load it again (for editing a plugin while CLAI runs) |
+| `/plugins configure NAME` | open a loaded plugin's settings menu, if it registered one with `host.configure`; `enable` and `add` open it too |
 | `/reload` | reload CLAI's own Python modules for development and rebuild the shell without restarting the process |
 
 `/reload` takes no arguments. It uses `importlib.reload`, preserves the conversation,
@@ -888,6 +943,24 @@ Bad or missing values fail at startup with a message naming your plugin.
 CLAI ignores unknown names in its own saved settings and preserves their values for
 other versions or branches. This does not relax validation of plugin declarations
 or `host.settings(Model)`.
+
+### Offer a settings menu: `@host.configure`, `host.save_settings(model)`
+
+Register an async function with `@host.configure` and it opens from
+`/plugins configure NAME`, from `C` in `/plugins`, and right after
+`/plugins enable NAME` or `/plugins add`. Build it from the field editor in
+`pydantic_clai2.field_menu`, as `ordinal` does, and save each change as the user
+makes it with `host.save_settings(model)`; `host.settings(Model)` then returns the
+new values. Return a line to print. When the saved settings changed, the loader
+loads the plugin again after the menu closes, so `activate` builds from them.
+
+Plugin settings are plaintext SQLite. Never save a token, API key, or client
+secret in them: keep it in `/keys` with `prompt_api_key` and `save_key`, save only
+its name as a `KeyReference`, and call `resolve_key` when connecting, so a key
+replaced in `/keys` applies and a deleted one fails closed. Name a new key with
+the conventional environment-style label (`GITHUB_TOKEN`, `ORDINAL_ACCESS_TOKEN`)
+so plugins that need the same credential share it. The label is only a name; it
+does not export or read an environment variable.
 
 ### Reach the conversation and the status row: `host.conversation`, `host.status`
 
