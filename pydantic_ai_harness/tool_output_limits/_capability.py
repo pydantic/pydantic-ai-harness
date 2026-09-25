@@ -28,7 +28,7 @@ from pydantic_ai.workspaces import WorkspaceError, WorkspaceReadOnlyError
 
 from pydantic_ai_harness._usage import reserved_usage_limits
 from pydantic_ai_harness._workspace import METADATA_DIR, raise_tool_failure
-from pydantic_ai_harness.filesystem._reader import find_file_reader
+from pydantic_ai_harness.filesystem._reader import READ_CHARS, find_file_reader
 from pydantic_ai_harness.tool_output_limits._bands import (
     Action,
     Band,
@@ -739,7 +739,7 @@ def _head_tail_preview(text: str, preview_chars: int) -> str:
 _MAX_READ_LINES = 1_000
 """Hard cap on lines returned by one `read_tool_result` call."""
 
-_MAX_READ_CHARS = 50_000
+_MAX_READ_CHARS = READ_CHARS
 """Hard cap on characters returned by one `read_tool_result` call."""
 
 
