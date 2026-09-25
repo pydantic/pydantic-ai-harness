@@ -13,8 +13,8 @@ calls that are harmless to re-run or discard. Everything else waits for eager or
 execution.
 
 The sandbox gets Monty's `OSAccess` (isolated environment, host clock, in-memory scratch files)
-and, when the run's `FileSystem` allows it (`mount_mode`) and the run's workspace is this machine,
-a mount of the workspace's working directory at its real path (`workspace_mount`). A sandbox
+and, when the run's `FileSystem` allows it (`_mount_mode`) and the run's workspace is this machine,
+a mount of the workspace's working directory at its real path (`_workspace_mount`). A sandbox
 plugin's workspace is not mounted: the host directory is not the filesystem its tools act on.
 There is no network in the sandbox; anything remote goes through a wrapped tool such as `shell`.
 """
@@ -140,10 +140,10 @@ determines how fast it runs:
 """
 
 
-MountMode = Literal['read-write', 'read-only']
+_MountMode = Literal['read-write', 'read-only']
 """How much of the working directory the run's `FileSystem` lets the sandbox mount."""
 
-WORKSPACE_GUIDANCE: Mapping[str | None, str] = {
+_WORKSPACE_GUIDANCE: Mapping[str | None, str] = {
     'read-write': """\
 - The workspace is mounted read-write at its real absolute path: use
   `pathlib.Path` to read, write, glob, and stat project files directly.""",
@@ -159,16 +159,16 @@ WORKSPACE_GUIDANCE: Mapping[str | None, str] = {
   only reaches in-memory scratch files. Use the file functions to read and
   write project files.""",
 }
-"""The `GUIDANCE` line for each `MountMode`, `None` when the file system allows no mount, and
+"""The `GUIDANCE` line for each `_MountMode`, `None` when the file system allows no mount, and
 `'remote'` when it would but the workspace is a sandbox rather than this machine."""
 
 
-def guidance(mount: MountMode | Literal['remote'] | None) -> str:
+def guidance(mount: _MountMode | Literal['remote'] | None) -> str:
     """Code Puppy's guidance, describing the workspace the sandbox actually has."""
-    return GUIDANCE.format(workspace=WORKSPACE_GUIDANCE[mount])
+    return GUIDANCE.format(workspace=_WORKSPACE_GUIDANCE[mount])
 
 
-def is_local(workspace: Workspace) -> bool:
+def _is_local(workspace: Workspace) -> bool:
     """Whether the run's workspace is a directory on this machine, which a host mount can reach."""
     ref = workspace.ref
     return ref is not None and ref.provider == 'local'
@@ -178,7 +178,7 @@ def _is_capability(capability: AgentCapability[AgentDepsT]) -> TypeGuard[Abstrac
     return isinstance(capability, AbstractCapability)
 
 
-def mount_mode(granted: Sequence[AgentCapability[AgentDepsT]]) -> MountMode | None:
+def _mount_mode(granted: Sequence[AgentCapability[AgentDepsT]]) -> _MountMode | None:
     """Mount only what the run's `FileSystem` already lets its tools reach, or nothing.
 
     `pathlib` calls on a mount never pass through `FileSystem`'s checks, so an unconditional
@@ -206,13 +206,13 @@ def mount_mode(granted: Sequence[AgentCapability[AgentDepsT]]) -> MountMode | No
     return 'read-write' if writable else 'read-only'
 
 
-async def workspace_mount(workspace: Workspace, mode: MountMode | None) -> MountDir | None:
+async def _workspace_mount(workspace: Workspace, mode: _MountMode | None) -> MountDir | None:
     """The run's working directory at its real path, when `mode` allows a mount and the workspace is local.
 
     A sandbox plugin's workspace lives elsewhere, so a host mount would hand `pathlib` a different
     filesystem than the one the file tools act on.
     """
-    if mode is None or not is_local(workspace):
+    if mode is None or not _is_local(workspace):
         return None
     directory = await workspace.working_dir()
     return MountDir(virtual_path=directory, host_path=directory, mode=mode)
@@ -220,14 +220,14 @@ async def workspace_mount(workspace: Workspace, mode: MountMode | None) -> Mount
 
 @dataclass
 class _MountWorkspace(WrapperToolset[AgentDepsT]):
-    """Give `CodeMode`'s toolset this run's `workspace_mount`, once the run's workspace is known."""
+    """Give `CodeMode`'s toolset this run's `_workspace_mount`, once the run's workspace is known."""
 
-    mode: MountMode | None = None
+    mode: _MountMode | None = None
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> AbstractToolset[AgentDepsT]:
         code_mode = self.wrapped
         assert isinstance(code_mode, CodeModeToolset)
-        mount = await workspace_mount(ctx.workspace, self.mode)
+        mount = await _workspace_mount(ctx.workspace, self.mode)
         return await replace(code_mode, mount=mount).for_run(ctx)
 
 
@@ -239,7 +239,7 @@ class WorkspaceCodeMode(CodeMode[AgentDepsT]):
     toolset's `for_run`, which runs after the selection.
     """
 
-    mount_mode: MountMode | None = None
+    mount_mode: _MountMode | None = None
 
     def get_wrapper_toolset(self, toolset: AbstractToolset[AgentDepsT]) -> AbstractToolset[AgentDepsT] | None:
         """`CodeMode`'s toolset, mounted per run by `_MountWorkspace`."""
@@ -276,14 +276,14 @@ class SpeculativeExecution(AbstractCapability[AgentDepsT]):
     """Fold code tools in, teach the snippet shape, stream tool arguments, and count outcomes."""
 
     counters: SpeculationCounters
-    mount: MountMode | None = None
-    """The sandbox's `mount_mode`, so the guidance describes it."""
+    mount: _MountMode | None = None
+    """The sandbox's `_mount_mode`, so the guidance describes it."""
 
     def get_instructions(self) -> Callable[[RunContext[AgentDepsT]], str]:
         """Code Puppy's guidance, with CLAI's tool and argument names and the run's actual mount."""
 
         def describe(ctx: RunContext[AgentDepsT]) -> str:
-            local = self.mount is None or is_local(ctx.workspace)
+            local = self.mount is None or _is_local(ctx.workspace)
             return guidance(self.mount if local else 'remote')
 
         return describe
@@ -400,7 +400,7 @@ def speculative_capabilities(
 
     `granted` is every other capability the run binds; the sandbox mount follows its `FileSystem`.
     """
-    mode = mount_mode(granted)
+    mode = _mount_mode(granted)
     return [
         WorkspaceCodeMode(
             tools=_sandboxed,
