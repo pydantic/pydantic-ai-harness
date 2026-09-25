@@ -485,8 +485,7 @@ reach runtime validation; they are still rejected before a sub-agent runs.
 Attach `TemporalDurability` to the orchestrating agent alongside `DynamicWorkflow`, and to each
 sub-agent whose model requests should run as activities, then register every agent with its own
 `AgentPlugin`. The script runs in workflow code, like [Code Mode's `run_code`](../code_mode/README.md#temporal-durability),
-and is re-executed during replay against the recorded sub-agent results. `max_duration_secs` is
-ignored there, because a time limit could make replay take a different path from the original run.
+and is re-executed during replay against the recorded sub-agent results.
 
 ## What is coming
 

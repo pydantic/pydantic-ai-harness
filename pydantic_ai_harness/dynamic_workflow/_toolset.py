@@ -13,7 +13,6 @@ import json
 import keyword
 import warnings
 from collections.abc import Mapping, Sequence
-from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Annotated, Any, Generic, Literal, cast
@@ -33,7 +32,6 @@ from typing_extensions import Self, TypedDict
 
 try:
     from pydantic_monty import (
-        AsyncMonty,
         MontyCrashedError,
         MontyRuntimeError,
         MontySyntaxError,
@@ -48,12 +46,10 @@ except ImportError as _import_error:  # pragma: no cover
 
 from pydantic_ai_harness._monty_exec import (
     MontyExecutor,
+    MontyRunState,
     PrintCapture,
-    enter_monty,
     in_temporal_workflow,
     is_sandbox_panic,
-    open_monty_portal,
-    release_monty,
 )
 
 # Set while a workflow script is executing, so a sub-agent that itself tries to run a workflow can
@@ -76,8 +72,7 @@ class WorkflowResourceLimits(TypedDict, total=False):
     nor a concurrent `asyncio.gather` batch, because during that wait the script is suspended on
     the host, not running sandbox code. There is no default cap. Set one to bound a pure-CPU
     `while True` loop, which would otherwise burn a core and block the event loop -- the one
-    runaway the sub-agent budgets do not catch. Ignored inside a Temporal workflow, where an
-    elapsed timer could make replay diverge from the recorded run."""
+    runaway the sub-agent budgets do not catch."""
 
     max_memory: int
     """Maximum sandbox memory, in bytes."""
@@ -101,31 +96,22 @@ _MAX_RESULT_PREVIEW_CHARS = 300
 _TRUNCATED_MARKER = ' ... [truncated]'
 
 
-def _resolve_resource_limits(
-    limits: WorkflowResourceLimits | Literal['unlimited'] | None, *, in_temporal_workflow: bool = False
-) -> ResourceLimits:
+def _resolve_resource_limits(limits: WorkflowResourceLimits | Literal['unlimited'] | None) -> ResourceLimits:
     """Resolve the public `resource_limits` value to the limits handed to the sandbox.
 
     A partial mapping merges *onto* the backstop rather than replacing it. Full semantics:
     `DynamicWorkflow.resource_limits`.
     """
-    resolved: ResourceLimits
     if limits is None:
-        resolved = _default_resource_limits()
-    elif limits == 'unlimited':
-        resolved = {}
-    else:
-        unknown = set(limits) - _RESOURCE_LIMIT_KEYS
-        if unknown:
-            raise UserError(
-                f'Unknown `resource_limits` key(s): {sorted(unknown)}. Valid keys are {sorted(_RESOURCE_LIMIT_KEYS)}.'
-            )
-        resolved = {**_default_resource_limits(), **limits}
-    if in_temporal_workflow:
-        # `run_workflow` executes in workflow code and Temporal replays it. An elapsed timer may
-        # make the original run and replay take different branches, which Temporal cannot record.
-        resolved.pop('max_duration_secs', None)
-    return resolved
+        return _default_resource_limits()
+    if limits == 'unlimited':
+        return {}
+    unknown = set(limits) - _RESOURCE_LIMIT_KEYS
+    if unknown:
+        raise UserError(
+            f'Unknown `resource_limits` key(s): {sorted(unknown)}. Valid keys are {sorted(_RESOURCE_LIMIT_KEYS)}.'
+        )
+    return {**_default_resource_limits(), **limits}
 
 
 class _WorkflowArguments(TypedDict):
@@ -743,21 +729,20 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             return output
 
         in_temporal = in_temporal_workflow(ctx)
-        limits = _resolve_resource_limits(self.resource_limits, in_temporal_workflow=in_temporal)
+        limits = _resolve_resource_limits(self.resource_limits)
         capture = PrintCapture()
         type_check_stubs = self._build_type_check_stubs()
         in_workflow_token = _in_workflow.set(True)
-        monty = AsyncExitStack()
+        monty = MontyRunState()
         try:
-            portal = open_monty_portal(monty, in_temporal_workflow=in_temporal)
-            pool = await enter_monty(monty, AsyncMonty(), portal)
-            checkout = pool.checkout(limits=limits, type_check=True, type_check_stubs=type_check_stubs)
-            session = await enter_monty(monty, checkout, portal)
+            session = await monty.get_session(
+                type_check=True, type_check_stubs=type_check_stubs, limits=limits, in_temporal_workflow=in_temporal
+            )
             # `_by_name` is not mutated while a script executes (reveals land in `get_tools`,
             # which does not interleave with `call_tool`), so it is a stable name registry for
             # the whole script. Sub-agents always run concurrently (the executor's defaults);
             # durable ordering (global_sequential) lands with durability.
-            completed = await MontyExecutor(dispatch=dispatch, valid_names=self._by_name, portal=portal).run(
+            completed = await MontyExecutor(dispatch=dispatch, valid_names=self._by_name, portal=monty.portal).run(
                 partial(session.feed_start, code, print_callback=capture.callback)
             )
         except MontyTypingError as e:
@@ -806,7 +791,7 @@ class DynamicWorkflowToolset(AbstractToolset[AgentDepsT]):
             ) from e
         finally:
             _in_workflow.reset(in_workflow_token)
-            await release_monty(monty)
+            await monty.close()
 
         # Monty lets workflow code catch host exceptions. Exhausting the budget remains
         # terminal even if the script catches that error and otherwise finishes normally.

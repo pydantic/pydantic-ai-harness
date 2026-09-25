@@ -1462,7 +1462,7 @@ class TestCodeMode:
                 raise RuntimeError('wrapped enter failed')
 
         monty = MagicMock()
-        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.AsyncMonty', monty)
+        monkeypatch.setattr('pydantic_ai_harness._monty_exec.AsyncMonty', monty)
         wrapper = CodeMode[object]().get_wrapper_toolset(FailingToolset())
         assert isinstance(wrapper, CodeModeToolset)
 
@@ -1503,7 +1503,7 @@ class TestCodeMode:
                 events.append('wrapped exit')
                 return None
 
-        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.AsyncMonty', TrackingMonty)
+        monkeypatch.setattr('pydantic_ai_harness._monty_exec.AsyncMonty', TrackingMonty)
         wrapper = CodeMode[object]().get_wrapper_toolset(TrackingToolset())
         assert isinstance(wrapper, CodeModeToolset)
 
@@ -1534,7 +1534,7 @@ class TestCodeMode:
             return True
 
         monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.in_temporal_workflow', in_temporal_workflow)
-        monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.AsyncMonty', failing_monty)
+        monkeypatch.setattr('pydantic_ai_harness._monty_exec.AsyncMonty', failing_monty)
 
         threads_before = set(threading.enumerate())
         threads_after_retry: list[str] = []
@@ -2907,7 +2907,7 @@ class TestCodeMode:
         `MontyCrashedError` cannot be constructed or subclassed from Python.
         """
         monkeypatch.setattr(
-            'pydantic_ai_harness.code_mode._toolset.AsyncMonty', functools.partial(AsyncMonty, request_timeout=0.5)
+            'pydantic_ai_harness._monty_exec.AsyncMonty', functools.partial(AsyncMonty, request_timeout=0.5)
         )
         wrapper = CodeMode[None]().get_wrapper_toolset(_build_function_toolset(add))
         assert isinstance(wrapper, CodeModeToolset)

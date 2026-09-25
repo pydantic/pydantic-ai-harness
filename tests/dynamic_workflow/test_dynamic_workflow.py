@@ -979,7 +979,7 @@ async def test_worker_crash_becomes_model_retry(monkeypatch: pytest.MonkeyPatch)
     # or subclassed from Python, so injection is not an option.
 
     monkeypatch.setattr(
-        'pydantic_ai_harness.dynamic_workflow._toolset.AsyncMonty', functools.partial(AsyncMonty, request_timeout=0.5)
+        'pydantic_ai_harness._monty_exec.AsyncMonty', functools.partial(AsyncMonty, request_timeout=0.5)
     )
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent()])
     with pytest.raises(ModelRetry, match='crashed the sandbox worker') as exc_info:
@@ -992,7 +992,7 @@ async def test_worker_crash_after_budget_exhaustion_returns_terminal_result(
 ) -> None:
 
     monkeypatch.setattr(
-        'pydantic_ai_harness.dynamic_workflow._toolset.AsyncMonty', functools.partial(AsyncMonty, request_timeout=0.5)
+        'pydantic_ai_harness._monty_exec.AsyncMonty', functools.partial(AsyncMonty, request_timeout=0.5)
     )
     ts = DynamicWorkflowToolset[object](agents=[_wf_agent('counted-result', 'counted')], max_agent_calls=1)
     code = (

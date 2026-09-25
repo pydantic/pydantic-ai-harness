@@ -10,11 +10,8 @@ Two capabilities build on this:
 
 The snapshot API (rather than `feed_run`) is used deliberately: it exposes each suspension
 to this host-controlled loop, which owns sequential barriers, dispatch cancellation, and
-trace context. The loop drives Monty's async bindings only: `AsyncMonty` for local worker
-subprocesses and `AsyncMontyWebsocket` for remote workers, which hand it the same snapshot
-types. Under Temporal, this loop runs workflow-side and replays; each Monty call then goes
-through a blocking portal (see `call_monty`), while nested durable-wrapped tools cross their
-configured activity boundaries.
+trace context. Workers come from Monty's async bindings (`MontyRunState`); inside a Temporal
+workflow each call into them goes through a blocking portal (see `call_monty`).
 """
 
 from __future__ import annotations
@@ -35,6 +32,9 @@ try:
     from pydantic_monty import (
         AsyncFunctionSnapshot,
         AsyncFutureSnapshot,
+        AsyncMonty,
+        AsyncMontySession,
+        AsyncMontyWebsocket,
         AsyncNameLookupSnapshot,
         AsyncSnapshot,
         CollectString,
@@ -43,6 +43,7 @@ try:
         ExternalReturnValue,
         ExternalSettledResult,
         MontyComplete,
+        ResourceLimits,
     )
 except ImportError as _import_error:  # pragma: no cover
     raise ImportError(
@@ -79,19 +80,12 @@ def in_temporal_workflow(ctx: RunContext[object]) -> bool:
 # ----------------------------------------
 # Monty's bindings are async and complete each awaited call from Monty's own I/O thread by waking
 # the event loop the `await` started on (`loop.call_soon_threadsafe`). A Temporal workflow's event
-# loop cannot be woken that way, so the call would never complete. Inside a workflow, the four
+# loop cannot be woken that way, so the call would never complete. Inside a workflow, the
 # helpers below therefore route every Monty call through an `anyio` blocking portal: a helper
 # thread running a normal asyncio loop. The workflow thread blocks until the sandbox suspends or
 # completes, exactly as it did with Monty's former sync bindings, and control is back in the
 # workflow between calls, where nested tools run as activities. Outside a workflow the portal is
 # `None` and every helper is a plain `await`.
-
-
-def open_monty_portal(stack: AsyncExitStack, *, in_temporal_workflow: bool) -> BlockingPortal | None:
-    """Open the portal Monty calls need inside a Temporal workflow; `stack` closes it."""
-    if not in_temporal_workflow:
-        return None
-    return stack.enter_context(start_blocking_portal())
 
 
 async def call_monty(
@@ -103,7 +97,7 @@ async def call_monty(
     return portal.call(fn, *args)
 
 
-async def enter_monty(
+async def _enter_monty(
     stack: AsyncExitStack, resource: AbstractAsyncContextManager[_T], portal: BlockingPortal | None
 ) -> _T:
     """Enter a Monty pool or session on `stack`, through `portal` when there is one."""
@@ -112,7 +106,7 @@ async def enter_monty(
     return stack.enter_context(portal.wrap_async_context_manager(resource))
 
 
-async def release_monty(stack: AsyncExitStack) -> None:
+async def _release_monty(stack: AsyncExitStack) -> None:
     """Exit the Monty resources on `stack`, even while the run is being cancelled.
 
     Cancellation is delivered again at every suspension point while an enclosing cancel scope
@@ -123,6 +117,78 @@ async def release_monty(stack: AsyncExitStack) -> None:
     """
     with anyio.CancelScope(shield=True):
         await stack.aclose()
+
+
+# Extra time the WebSocket transport allows on top of `max_duration_secs`, so the sandbox's own
+# limit fires first and the model sees a time-limit error rather than a dropped connection.
+_REMOTE_TURN_SLACK_SECS = 10.0
+
+
+@dataclass
+class MontyRunState:
+    """A Monty worker pool and its checked-out REPL session, opened lazily and closed together.
+
+    Workers are local subprocesses from `AsyncMonty`, or remote ones dialed through
+    `AsyncMontyWebsocket` when `monty_sandbox_url` is set. Inside a Temporal workflow every Monty
+    call goes through `portal`, opened with the pool and closed after it.
+    """
+
+    monty_sandbox_url: str | None = None
+    pool: AsyncMonty | AsyncMontyWebsocket | None = None
+    session: AsyncMontySession | None = None
+    portal: BlockingPortal | None = None
+    has_executed_feed: bool = False
+    _pool_stack: AsyncExitStack = field(default_factory=AsyncExitStack, repr=False)
+    _session_stack: AsyncExitStack = field(default_factory=AsyncExitStack, repr=False)
+
+    async def get_session(
+        self,
+        *,
+        type_check: bool,
+        type_check_stubs: str | None,
+        limits: ResourceLimits,
+        in_temporal_workflow: bool = False,
+    ) -> AsyncMontySession:
+        """Return the live REPL session, spawning or dialing the pool on first use."""
+        if self.pool is None:
+            try:
+                if in_temporal_workflow:
+                    self.portal = self._pool_stack.enter_context(start_blocking_portal())
+                if self.monty_sandbox_url is None:
+                    pool = AsyncMonty()
+                else:
+                    max_duration_secs = limits.get('max_duration_secs')
+                    timeout = None if max_duration_secs is None else max_duration_secs + _REMOTE_TURN_SLACK_SECS
+                    pool = AsyncMontyWebsocket(self.monty_sandbox_url, request_timeout=timeout)
+                self.pool = await _enter_monty(self._pool_stack, pool, self.portal)
+            except BaseException:
+                await self._release_pool()  # a failed spawn or dial must not leave the portal thread behind
+                raise
+        if self.session is None:
+            checkout = self.pool.checkout(limits=limits, type_check=type_check, type_check_stubs=type_check_stubs)
+            self.session = await _enter_monty(self._session_stack, checkout, self.portal)
+        return self.session
+
+    async def reset(self) -> None:
+        """Return the current worker and make the next call start a fresh REPL."""
+        # Detach before awaiting the exit, so a session checked out meanwhile is not dropped.
+        stack, self._session_stack = self._session_stack, AsyncExitStack()
+        self.session = None
+        self.has_executed_feed = False
+        await _release_monty(stack)
+
+    async def close(self) -> None:
+        """Return the checked-out worker, then close the owning pool (and portal) even if that fails."""
+        try:
+            await self.reset()
+        finally:
+            await self._release_pool()
+
+    async def _release_pool(self) -> None:
+        stack, self._pool_stack = self._pool_stack, AsyncExitStack()
+        self.pool = None
+        self.portal = None
+        await _release_monty(stack)
 
 
 @dataclass
@@ -183,7 +249,7 @@ class MontyExecutor:
     valid_names: Container[str]
     sequential_names: set[str] = field(default_factory=set[str])
     global_sequential: bool = False
-    # Set inside a Temporal workflow; see `open_monty_portal`.
+    # Set inside a Temporal workflow; see `call_monty`.
     portal: BlockingPortal | None = None
 
     # Parallel calls deferred but not yet resolved, keyed by Monty call id.

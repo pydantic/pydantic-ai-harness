@@ -153,10 +153,8 @@ class CodeMode(AbstractCapability[AgentDepsT]):
     monty_sandbox_url: str | None = None
     """Run sandboxed code on remote Monty workers reached over this `ws://` or `wss://` URL.
 
-    The URL points to a relay or any server that bridges each WebSocket connection to a Monty
-    worker. Only execution moves: tool dispatch, mounts, `os_access`, and print capture stay
-    host-side over the connection. Plaintext `ws://` is accepted for loopback IP literals only.
-    Works inside a Temporal workflow like local workers do.
+    Only execution moves: tool dispatch, mounts, `os_access`, and print capture stay host-side
+    over the connection.
     """
 
     dynamic_catalog: bool = False

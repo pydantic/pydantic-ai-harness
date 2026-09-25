@@ -470,9 +470,8 @@ agent = Agent(
 ```
 
 The URL points to a server that connects each WebSocket to one Monty worker, such as
-[Full Monty](https://pydantic.dev/docs/monty/commercial-support/server/). Use `wss://`: plaintext
-`ws://` is only accepted for a loopback IP address such as `ws://127.0.0.1:8000`, for example a
-local TLS-terminating proxy.
+[Full Monty](https://pydantic.dev/docs/monty/commercial-support/server/). Use `wss://` unless the
+server is on a private network: the connection carries your tool results and file contents.
 
 Only code execution moves to the worker. Your tools, `mount` directories, `os_access`, and `print`
 output are still handled by the agent's process, and REPL state persists across `run_code` calls

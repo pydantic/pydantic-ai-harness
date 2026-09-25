@@ -74,23 +74,9 @@ async def test_code_mode_runs_over_websocket(websocket_relay_url: str, tmp_path:
     ]
 
 
-@pytest.mark.parametrize(
-    'url',
-    ['ws://sandbox.example.com:8799/monty', 'ws://192.0.2.1:8799', 'ws://localhost:8799', 'ws:///monty'],
-)
-async def test_plaintext_remote_sandbox_url_rejected(url: str) -> None:
-    """`ws://` to anything but a loopback IP literal fails when the run starts, before any dial.
-
-    `localhost` is a name, and names are only as loopback as the resolver says they are.
-    """
-    agent = Agent(_snippets_model(), capabilities=[CodeMode(monty_sandbox_url=url)])
-    with pytest.raises(UserError, match='wss://'):
-        await agent.run('never dials')
-
-
-@pytest.mark.parametrize('url', ['ws://127.0.0.1:8799', 'ws://[::1]:8799', 'wss://sandbox.example.com/monty'])
-async def test_loopback_or_tls_sandbox_url_accepted(url: str) -> None:
-    """Loopback-literal `ws://` and any `wss://` URL pass validation; workers dial lazily, not at enter."""
+@pytest.mark.parametrize('url', ['ws://monty-server:8000', 'wss://sandbox.example.com/monty'])
+async def test_websocket_sandbox_url_accepted(url: str) -> None:
+    """Any `ws://` or `wss://` URL passes validation; workers dial lazily, not at enter."""
     agent = Agent(_snippets_model(), capabilities=[CodeMode(monty_sandbox_url=url)])
     result = await agent.run('no run_code call, so nothing dials')
     assert result.output == 'done'
@@ -117,7 +103,7 @@ async def test_remote_turn_deadline_follows_max_duration(
         seen.append(request_timeout)
         raise RuntimeError('not dialing')
 
-    monkeypatch.setattr('pydantic_ai_harness.code_mode._toolset.AsyncMontyWebsocket', recording_pool)
+    monkeypatch.setattr('pydantic_ai_harness._monty_exec.AsyncMontyWebsocket', recording_pool)
     agent = Agent(
         _snippets_model('1'),
         capabilities=[CodeMode(monty_sandbox_url='wss://sandbox.example.com/monty', resource_limits=resource_limits)],
