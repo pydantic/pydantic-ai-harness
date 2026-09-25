@@ -93,9 +93,17 @@ class PluginMenu(Generic[DepsT]):
         menu.replace_items(self.items())
 
     def configure(self, menu: Redrawable, item: MenuItem) -> MenuResult | None:
-        """C: close and open the highlighted plugin's settings menu."""
+        """C: close and open the highlighted plugin's settings menu; stay open when there is none."""
         entry = self._find(item)
         if entry is None:
+            return None
+        if entry.host is None or entry.host.configurer is None:
+            self.notice = (
+                f'Enable {entry.name} before configuring it.'
+                if entry.host is None
+                else f'{entry.name} has no settings menu.'
+            )
+            menu.replace_items(self.items())
             return None
         return MenuResult(item=MenuItem(item.label, value=Configure(entry.name)))
 
@@ -148,10 +156,7 @@ async def open_plugins_menu(
     chosen = result.item.value if isinstance(result, MenuResult) and result.item is not None else None
     if not isinstance(chosen, Configure):
         return ''
-    try:
-        return await loader.configure(chosen.name)
-    except (PluginError, ValueError) as exc:
-        return str(exc)
+    return await loader.configure(chosen.name)
 
 
 def _run_menu(menu: PluginMenu[DepsT]) -> MenuResult:  # pragma: no cover -- needs a real terminal.

@@ -332,7 +332,7 @@ changing anything; `R` resets the highlighted row to its default.
 | Destination | `url` | Logfire US | Logfire US, Logfire EU, or type the `https://` MCP URL of a self-hosted Logfire |
 | Tools | `read_only` | read-only | offer only the tools the server marks read-only; "read and write" also allows tools that change Logfire resources |
 | Server instructions | `include_instructions` | forwarded | whether the server's instructions, query guidance, and current UTC time reach the agent |
-| Browser sign-in | `oauth` | when there is no key | sign in through the browser when no key is chosen, set, or saved |
+| Browser sign-in | `oauth` | when there is no key | sign in through the browser when no key is chosen or set |
 
 ### Keys live in `/keys`
 
@@ -351,21 +351,23 @@ The plugin uses the first credential that is available:
 
 1. The key chosen in the menu.
 2. `LOGFIRE_API_KEY` from the environment.
-3. A key saved in `/keys` as `LOGFIRE_API_KEY`, so saving one there is enough.
-4. Browser sign-in (OAuth): the first run opens your browser. Tokens are kept in
-   the OS keyring (or the private credential file) under the `mcp-logfire_mcp`
-   account, so restarting CLAI does not mean signing in again. The handshake
-   allows 330 seconds for the sign-in. `/logfire_mcp logout` forgets them.
+3. Browser sign-in (OAuth), when it is on and there is a browser or a stored
+   sign-in: the first run opens your browser. Tokens are kept in the OS keyring
+   (or the private credential file) under the `mcp-logfire_mcp` account, so
+   restarting CLAI does not mean signing in again. The handshake allows 330
+   seconds for the sign-in. `/logfire_mcp logout` forgets them.
+4. Otherwise, the key saved in `/keys` as `LOGFIRE_API_KEY`, read on every run,
+   so saving it there connects without reloading the plugin.
 
 A saved key's value is read at the start of each run, like a model connection's.
-Replacing it in `/keys` applies from the next turn. Deleting or renaming it makes
-runs fail with its name until you pick a key again.
+Replacing it in `/keys` applies from the next turn. `/keys` does not stop you
+deleting or renaming a key that plugin settings name; the plugin's runs then fail
+with the old name and `/plugins configure logfire_mcp` as the fix, until you pick
+a key again.
 
-When nothing could connect (a chosen key missing from `/keys`, browser sign-in
-off, or needed with no browser and no stored sign-in), the plugin still loads, so
-the menu stays reachable, prints what is wrong, and each run fails with that
-message instead of reaching Logfire. Saving `LOGFIRE_API_KEY` in `/keys` fixes
-the last two without a reload.
+When the key the plugin depends on is missing from `/keys`, the plugin still
+loads, so the menu stays reachable. It prints a warning when the session starts,
+and each run fails with that message instead of reaching Logfire.
 
 The label is `LOGFIRE_API_KEY`, the variable `LogfireMCP` reads, and not
 `LOGFIRE_TOKEN`. `LOGFIRE_TOKEN` is the write token the

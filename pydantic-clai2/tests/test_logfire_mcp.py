@@ -4,6 +4,7 @@ import io
 import webbrowser
 from pathlib import Path
 
+import anyio
 import pytest
 from fastmcp import Client
 from menu_script import Script, pick, typed
@@ -96,6 +97,12 @@ def browser(monkeypatch: pytest.MonkeyPatch, *, found: bool) -> None:
     monkeypatch.setattr(webbrowser, 'get', get)
 
 
+@pytest.fixture(autouse=True)
+def headless(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No browser unless a test finds one, so results do not depend on the machine running them."""
+    browser(monkeypatch, found=False)
+
+
 def keyed(name: str) -> LogfireMCP[None]:
     return LogfireMCP[None](auth=SavedKey(name=name, setup=SETUP), read_only=True)
 
@@ -150,7 +157,7 @@ async def test_reopening_repicks_a_saved_key_and_region_without_reinstalling(
     shell = Shell(tmp_path, {'key': {'name': 'LOGFIRE_API_KEY'}})
     script(monkeypatch, lists=[])
     await shell.loader.command(['enable', 'logfire_mcp'])
-    assert 'LOGFIRE_API_KEY is not in /keys. Run /plugins configure logfire_mcp' in shell.output.getvalue()
+    assert 'Logfire MCP has no credential: LOGFIRE_API_KEY is not in /keys. Run /plugins' in shell.output.getvalue()
     key_choice(monkeypatch, KeyReference(name='SHARED'))
     script(monkeypatch, lists=[pick('key'), pick('url')], choices=[pick(LOGFIRE_EU_MCP_URL)])
     assert await shell.loader.command(['configure', 'logfire_mcp']) == (
@@ -170,7 +177,7 @@ async def test_no_api_key_clears_the_choice(tmp_path: Path, monkeypatch: pytest.
     key_choice(monkeypatch, '')
     script(monkeypatch, lists=[pick('key')])
     assert await shell.loader.configure('logfire_mcp') == (
-        'Logfire uses LOGFIRE_API_KEY from the environment or /keys, then browser sign-in.'
+        'Logfire uses LOGFIRE_API_KEY from the environment, then browser sign-in.'
     )
     assert shell.saved()['key'] is None
     assert shell.capability() == LogfireMCP[None](read_only=True)
@@ -216,7 +223,6 @@ def test_menu_validates_resets_and_notes_where_the_key_comes_from(monkeypatch: p
     rows = {row.key: row for row in source.rows()}
     assert (source.current(rows['key']), note()) == ('(none)', 'browser sign-in, if on')
     api_keys.save_key(name='LOGFIRE_API_KEY', value='saved')
-    assert note() == 'LOGFIRE_API_KEY from /keys'
     monkeypatch.setenv('LOGFIRE_API_KEY', 'env')
     assert note() == 'LOGFIRE_API_KEY from the environment'
     source.save(source.settings.model_copy(update={'key': KeyReference(name='GONE')}))
@@ -260,9 +266,9 @@ async def test_environment_key_wins_over_the_conventional_saved_key(
     assert shell.capability() == LogfireMCP[None](read_only=True)
 
 
-async def test_conventional_saved_key_resolves_each_run(tmp_path: Path) -> None:
+async def test_conventional_saved_key_resolves_each_run_when_there_is_no_sign_in(tmp_path: Path) -> None:
     api_keys.save_key(name='LOGFIRE_API_KEY', value='first')
-    shell = Shell(tmp_path)
+    shell = Shell(tmp_path, {'oauth': False})
     await shell.loader.enable('logfire_mcp')
     capability = shell.capability()
     assert capability == keyed('LOGFIRE_API_KEY')
@@ -286,17 +292,14 @@ async def test_oauth_uses_a_keyring_client_with_a_sign_in_timeout(
     assert str(client.transport.url) == LOGFIRE_EU_MCP_URL  # pyright: ignore[reportAttributeAccessIssue,reportUnknownMemberType,reportUnknownArgumentType]
 
 
-@pytest.mark.parametrize(
-    ('settings', 'problem'),
-    [({}, 'browser sign-in needs a browser'), ({'oauth': False}, 'there is no API key and browser sign-in is off')],
-)
+@pytest.mark.parametrize('settings', [{}, {'oauth': False}], ids=['no-browser', 'oauth-off'])
 async def test_no_credential_still_loads_the_menu_and_fails_runs_closed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: dict[str, JsonValue], problem: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, settings: dict[str, JsonValue]
 ) -> None:
     browser(monkeypatch, found=False)
     shell = Shell(tmp_path, settings)
     await shell.loader.enable('logfire_mcp')
-    assert f'Logfire MCP: {problem}. {SETUP}' in shell.output.getvalue()
+    assert f'Logfire MCP has no credential: LOGFIRE_API_KEY is not in /keys. {SETUP}' in shell.output.getvalue()
     capability = shell.capability()
     auth = capability.auth
     assert auth == SavedKey(name='LOGFIRE_API_KEY', setup=SETUP)
@@ -373,14 +376,47 @@ async def test_plugins_menu_configure_key_opens_the_settings_menu(
     assert shell.capability().read_only is False
 
 
-async def test_plugins_menu_reports_a_configure_error(tmp_path: Path) -> None:
+async def test_plugins_menu_stays_open_when_there_is_nothing_to_configure(tmp_path: Path) -> None:
     shell = Shell(tmp_path)
+    shell.store.save_plugin(
+        BUILTIN.model_copy(update={'id': 'plain', 'factory': 'pydantic_clai2.repo_context', 'enabled': True})
+    )
+    await shell.loader.load_all()
 
     def run(menu: PluginMenu[None]) -> MenuResult | None:
         assert menu.configure(Redraw(), MenuItem('none', value=None)) is None
-        return menu.configure(Redraw(), menu.items()[0])
+        logfire_row, plain_row = sorted(menu.items(), key=lambda item: str(item.value))
+        assert menu.configure(Redraw(), logfire_row) is None
+        assert menu.notice == 'Enable logfire_mcp before configuring it.'
+        assert menu.configure(Redraw(), plain_row) is None
+        assert menu.notice == 'plain has no settings menu.'
+        return None
 
-    assert 'enable it before configuring' in await open_plugins_menu(shell.loader, run=run)
+    assert await open_plugins_menu(shell.loader, run=run) == ''
+
+
+async def test_cancelling_configure_cancels_an_open_key_picker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    shell = Shell(tmp_path, {'oauth': False})
+    await shell.loader.enable('logfire_mcp')
+    opened = anyio.Event()
+    finished: list[str] = []
+
+    async def prompt_api_key(*, prompt: object, label: str, optional: bool = False) -> str | KeyReference | None:
+        opened.set()
+        try:
+            await anyio.sleep_forever()
+        finally:
+            finished.append(label)
+        return None  # pragma: no cover -- unreachable; keeps the signature honest
+
+    monkeypatch.setattr('pydantic_clai2.logfire_mcp.prompt_api_key', prompt_api_key)
+    script(monkeypatch, lists=[pick('key')])
+    with anyio.fail_after(10):
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(shell.loader.configure, 'logfire_mcp')
+            await opened.wait()
+            tasks.cancel_scope.cancel()
+    assert finished == ['Logfire API key (saved in /keys as LOGFIRE_API_KEY)']
 
 
 class Redraw:

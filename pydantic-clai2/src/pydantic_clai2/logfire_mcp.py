@@ -5,6 +5,7 @@ non-secret options, all edited in the menu that `/plugins configure logfire_mcp`
 """
 
 import asyncio
+import concurrent.futures
 import os
 import webbrowser
 from dataclasses import replace
@@ -22,8 +23,8 @@ from .api_keys import KeyReference, SavedKey, load_keys, prompt_api_key, save_ke
 from .commands import Command
 from .field_menu import TERMINAL, FieldMenu, FieldRow, Runners, first_error, run_flow
 from .mcp import HTTPServer, TokenStore, http_client, oauth
-from .menu_worker import menu_key, run_worker
-from .plugins import PluginHost
+from .menu_worker import menu_key, run_worker, worker_stopping
+from .plugins import PluginHost, SessionStart
 
 KEY_NAME = 'LOGFIRE_API_KEY'
 """The conventional `/keys` label, matching the variable `LogfireMCP` reads, so other tools can share one key."""
@@ -54,14 +55,25 @@ class LogfireMCPSettings(BaseModel):
 
 
 def activate(host: PluginHost[None]) -> None:
-    """Add `LogfireMCP` and the settings menu; a missing credential warns and fails each run closed."""
+    """Add `LogfireMCP` and the settings menu; with no usable credential, warn and fail each run closed."""
     settings = host.settings(LogfireMCPSettings)
-    capability, problem = _capability(settings=settings)
+    capability, needed = _capability(settings=settings)
     host.add(capability)
 
     @host.configure
     async def configure() -> str:  # pyright: ignore[reportUnusedFunction]
         return await _configure(LogfireMCPSource(host))
+
+    @host.on('session_start')
+    async def warn(event: SessionStart) -> None:  # pyright: ignore[reportUnusedFunction]
+        # Loading anyway keeps the settings menu available. A worker thread, because the `/keys` lock
+        # can wait for another CLAI process.
+        if needed is not None and needed.name not in await asyncio.to_thread(load_keys):
+            host.console.print(
+                f'Logfire MCP has no credential: {needed.name} is not in /keys. {SETUP}',
+                style=theme.color(theme.WARNING),
+                markup=False,
+            )
 
     host.commands.register(
         Command(
@@ -71,13 +83,13 @@ def activate(host: PluginHost[None]) -> None:
             complete=lambda _: ('logout',),
         )
     )
-    if problem:
-        # Loading anyway keeps the settings menu available; each run fails closed until a key is saved.
-        host.console.print(f'Logfire MCP: {problem}', style=theme.color(theme.WARNING), markup=False)
 
 
-def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], str | None]:
-    """The first available of: chosen key, `LOGFIRE_API_KEY` env, `/keys` `LOGFIRE_API_KEY`, then OAuth."""
+def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], KeyReference | None]:
+    """The first of: chosen key, `LOGFIRE_API_KEY` env, browser sign-in, then `/keys` `LOGFIRE_API_KEY`.
+
+    Returns the key the capability depends on, if any. Nothing here reads `/keys`, which takes a lock.
+    """
 
     def build(
         *, auth: SavedKey | None = None, client: Client[StreamableHttpTransport] | None = None
@@ -91,21 +103,13 @@ def _capability(*, settings: LogfireMCPSettings) -> tuple[LogfireMCP[None], str 
         )
 
     if settings.key is not None:
-        missing = settings.key.name not in load_keys()
-        return build(auth=SavedKey(name=settings.key.name, setup=SETUP)), (
-            f'{settings.key.name} is not in /keys. {SETUP}' if missing else None
-        )
+        return build(auth=SavedKey(name=settings.key.name, setup=SETUP)), settings.key
     if os.environ.get(KEY_NAME):
         return build(), None
-    # With no other credential, the conventional key is still read on every run, so saving it needs no reload.
-    fallback = build(auth=SavedKey(name=KEY_NAME, setup=SETUP))
-    if KEY_NAME in load_keys():
-        return fallback, None
-    if not settings.oauth:
-        return fallback, f'there is no API key and browser sign-in is off. {SETUP}'
-    if not TokenStore(TOKEN_ACCOUNT).signed_in() and not _has_browser():
-        return fallback, f'browser sign-in needs a browser. {SETUP}'
-    return build(client=_oauth_client(url=settings.url)), None
+    if settings.oauth and (TokenStore(TOKEN_ACCOUNT).signed_in() or _has_browser()):
+        return build(client=_oauth_client(url=settings.url)), None
+    # Read on every run, so saving LOGFIRE_API_KEY in /keys connects without a reload.
+    return build(auth=SavedKey(name=KEY_NAME, setup=SETUP)), KeyReference(name=KEY_NAME)
 
 
 def _has_browser() -> bool:
@@ -136,8 +140,8 @@ _KEY = FieldRow(
     label='API key',
     description=(
         f'The saved key in /keys that Logfire connects with. Enter picks a saved key or saves a new one as {KEY_NAME}; '
-        f'plugin settings keep only its name. Unset uses {KEY_NAME} from the environment or /keys, then browser '
-        'sign-in. Any plugin naming the same key shares it.'
+        f'plugin settings keep only its name. Unset uses {KEY_NAME} from the environment, then browser sign-in. '
+        'Any plugin naming the same key shares it.'
     ),
     default='(none)',
 )
@@ -172,7 +176,7 @@ _ROWS = (
     FieldRow(
         key='oauth',
         label='Browser sign-in',
-        description='Sign in through the browser when no API key is chosen or saved. Tokens stay in the OS keyring.',
+        description='Sign in through the browser when no API key is chosen or set. Tokens stay in the OS keyring.',
         default='true',
         choices=('true', 'false'),
         choice_labels={'true': 'when there is no key', 'false': 'off'},
@@ -245,23 +249,28 @@ class LogfireMCPSource:
 def _key_note(key: KeyReference | None) -> str:
     if key is not None:
         return 'missing from /keys' if key.name not in load_keys() else ''
-    if os.environ.get(KEY_NAME):
-        return f'{KEY_NAME} from the environment'
-    return f'{KEY_NAME} from /keys' if KEY_NAME in load_keys() else 'browser sign-in, if on'
+    return f'{KEY_NAME} from the environment' if os.environ.get(KEY_NAME) else 'browser sign-in, if on'
 
 
 async def _configure(source: LogfireMCPSource) -> str:
     loop = asyncio.get_running_loop()
 
     def pick_key() -> list[str]:
-        # The key picker is async, so the menu's thread hands it back to the event loop.
-        choice = asyncio.run_coroutine_threadsafe(_choose_key(), loop).result()
+        # The key picker is async, so the menu's thread hands it back to the event loop. Its widgets
+        # watch their own stop signal, so cancelling this worker must cancel the picker explicitly.
+        picking = asyncio.run_coroutine_threadsafe(_choose_key(), loop)
+        while not (picking.done() or worker_stopping()):
+            concurrent.futures.wait([picking], timeout=0.05)
+        if not picking.done():
+            picking.cancel()
+            return []
+        choice = picking.result()
         if choice is None:
             return []
         key = choice if isinstance(choice, KeyReference) else None
         source.save(source.settings.model_copy(update={'key': key}))
         if key is None:
-            return [f'Logfire uses {KEY_NAME} from the environment or /keys, then browser sign-in.']
+            return [f'Logfire uses {KEY_NAME} from the environment, then browser sign-in.']
         return [f'Logfire uses the saved key {key.name}. Manage it in /keys.']
 
     menu = FieldMenu(source)

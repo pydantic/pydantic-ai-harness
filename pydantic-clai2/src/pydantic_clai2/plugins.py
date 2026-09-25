@@ -5,7 +5,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Generic, Literal, Protocol, TypeVar, get_args, overload
 
-from pydantic import BaseModel, JsonValue
+from pydantic import BaseModel, JsonValue, TypeAdapter, ValidationError
 from pydantic_ai import AgentRunResult, AgentStreamEvent
 from pydantic_ai.agent import AbstractAgent
 from pydantic_ai.capabilities import AgentCapability, Hooks
@@ -212,6 +212,10 @@ HOST_HOOKS: dict[str, type[HostEvent]] = {
 CORE_HOOK_NAMES: frozenset[str] = frozenset(get_args(CoreHookName))
 
 
+_SETTINGS_JSON = TypeAdapter(dict[str, JsonValue])
+"""Plugin settings are saved as one JSON object."""
+
+
 class PluginHost(Generic[DepsT]):
     """The one object a plugin talks to. Discarding the host unloads the plugin."""
 
@@ -295,9 +299,18 @@ class PluginHost(Generic[DepsT]):
         """Remember new settings for this plugin, as `plugins add` would; they are stored in plaintext.
 
         Never save a secret: keep it in `/keys` and save a `KeyReference` naming it. A host built
-        outside the loader keeps the change for this load only.
+        outside the loader keeps the change for this load only. Settings whose JSON would not load
+        back as the same model (a computed field, a serialization-only alias, a non-object root) raise
+        `ValueError` and are not saved.
         """
-        self._settings = settings.model_dump(mode='json', by_alias=True)
+        unsaved = ValueError(f'{type(settings).__name__} would not load back from its saved JSON; not saved.')
+        try:
+            dumped = _SETTINGS_JSON.validate_python(settings.model_dump(mode='json', by_alias=True))
+            if type(settings).model_validate(dumped) != settings:
+                raise unsaved
+        except ValidationError:
+            raise unsaved from None
+        self._settings = dumped
         self._persist(self._settings)
 
     @property
