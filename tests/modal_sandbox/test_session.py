@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+import logging
 import sys
 import time
 
@@ -63,29 +64,46 @@ class TestOwnedLifecycle:
     async def test_exit_without_enter_is_safe(self) -> None:
         await ModalSandboxSession().__aexit__(None, None, None)
 
-    async def test_detach_failure_does_not_raise(self, fake_modal: FakeModal) -> None:
+    async def test_detach_failure_does_not_raise(self, fake_modal: FakeModal, caplog: pytest.LogCaptureFixture) -> None:
         # Detach is best-effort like terminate: a raise from `__aexit__` would replace the
-        # exception unwinding through the body.
-        async with ModalSandboxSession():
-            fake_modal.sandboxes[0].detach_error = RuntimeError('detach boom')
+        # exception unwinding through the body. The operator still sees the failure in the logs.
+        with caplog.at_level(logging.WARNING, logger='pydantic_ai_harness.modal_sandbox'):
+            async with ModalSandboxSession():
+                fake_modal.sandboxes[0].detach_error = RuntimeError('detach boom')
         assert fake_modal.sandboxes[0].terminated is True
+        [record] = caplog.records
+        assert record.levelno == logging.WARNING
+        assert record.getMessage() == "Failed to detach from Modal sandbox 'sb-owned'"
+        assert record.exc_info is not None and str(record.exc_info[1]) == 'detach boom'
 
-    async def test_terminate_failure_does_not_raise_and_still_detaches(self, fake_modal: FakeModal) -> None:
+    async def test_terminate_failure_does_not_raise_and_still_detaches(
+        self, fake_modal: FakeModal, caplog: pytest.LogCaptureFixture
+    ) -> None:
         # Termination is best-effort: a teardown failure must not replace the exception
         # unwinding through the `async with` body (raising from `__aexit__` would mask it),
         # and the server-side sandbox_timeout reaps the sandbox regardless. The client is
-        # still detached so the attachment is not leaked.
-        async with ModalSandboxSession():
-            fake_modal.sandboxes[0].terminate_error = RuntimeError('terminate boom')
+        # still detached so the attachment is not leaked. The sandbox may still be billed until
+        # then, so the failure is logged for the operator.
+        with caplog.at_level(logging.WARNING, logger='pydantic_ai_harness.modal_sandbox'):
+            async with ModalSandboxSession():
+                fake_modal.sandboxes[0].terminate_error = RuntimeError('terminate boom')
         assert fake_modal.sandboxes[0].detached is True
+        [record] = caplog.records
+        assert record.levelno == logging.WARNING
+        assert record.getMessage() == "Failed to terminate Modal sandbox 'sb-owned'"
+        assert record.exc_info is not None and str(record.exc_info[1]) == 'terminate boom'
 
-    async def test_terminating_an_already_gone_sandbox_is_not_an_error(self, fake_modal: FakeModal) -> None:
+    async def test_terminating_an_already_gone_sandbox_is_not_an_error(
+        self, fake_modal: FakeModal, caplog: pytest.LogCaptureFixture
+    ) -> None:
         # An owned run that outlived its sandbox_timeout self-terminates; the teardown terminate
         # then hits "already gone". That is success, not a failure to raise -- a raise here would
-        # mask the terminal error the tool already surfaced.
-        async with ModalSandboxSession():
-            fake_modal.sandboxes[0].terminate_error = fake_modal.sandbox_terminated_type('already terminated')
+        # mask the terminal error the tool already surfaced -- nor one to warn about.
+        with caplog.at_level(logging.WARNING, logger='pydantic_ai_harness.modal_sandbox'):
+            async with ModalSandboxSession():
+                fake_modal.sandboxes[0].terminate_error = fake_modal.sandbox_terminated_type('already terminated')
         assert fake_modal.sandboxes[0].detached is True
+        assert caplog.records == []
 
     async def test_error_exit_still_terminates(self, fake_modal: FakeModal) -> None:
         # The owned sandbox is torn down when the body raises, not only on clean exit.
@@ -96,7 +114,7 @@ class TestOwnedLifecycle:
         assert fake_modal.sandboxes[0].detached is True
 
     async def test_teardown_bounded_when_terminate_hangs(
-        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         # If Modal's control plane stalls, terminate must not hang the caller forever: the
         # shielded teardown gives each RPC a deadline, and detach still runs after it fires.
@@ -104,21 +122,27 @@ class TestOwnedLifecycle:
         # no-private-imports rule; there is no public seam for it and the hang test is
         # worth the coupling.)
         monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._session._TEARDOWN_TIMEOUT', 0.05)
-        with anyio.fail_after(5):
+        with anyio.fail_after(5), caplog.at_level(logging.WARNING, logger='pydantic_ai_harness.modal_sandbox'):
             async with ModalSandboxSession():
                 fake_modal.sandboxes[0].terminate = _HangingCall()
         assert fake_modal.sandboxes[0].detached is True
+        assert [r.getMessage() for r in caplog.records] == [
+            "Timed out after 0.05s terminating Modal sandbox 'sb-owned'"
+        ]
 
     async def test_teardown_bounded_when_detach_hangs(
-        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch
+        self, fake_modal: FakeModal, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         # Teardown runs shielded, so a hanging detach would be uncancellable; its own
         # deadline is the only bound between a wedged control plane and a hung process.
         monkeypatch.setattr('pydantic_ai_harness.modal_sandbox._session._TEARDOWN_TIMEOUT', 0.05)
-        with anyio.fail_after(5):
+        with anyio.fail_after(5), caplog.at_level(logging.WARNING, logger='pydantic_ai_harness.modal_sandbox'):
             async with ModalSandboxSession():
                 fake_modal.sandboxes[0].detach = _HangingCall()
         assert fake_modal.sandboxes[0].terminated is True
+        assert [r.getMessage() for r in caplog.records] == [
+            "Timed out after 0.05s detaching from Modal sandbox 'sb-owned'"
+        ]
 
     async def test_entering_an_open_session_raises(self, fake_modal: FakeModal) -> None:
         # A second enter would overwrite the handle and orphan the first owned sandbox
