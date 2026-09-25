@@ -25,26 +25,36 @@ This saves your Modal credentials; in CI, set `MODAL_TOKEN_ID` and `MODAL_TOKEN_
 
 ## Quick start
 
-```python
+```python {names="defined"}
 import modal
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-# Coder uses git and ripgrep, which the default image doesn't have.
-image = modal.Image.debian_slim(python_version='3.12').apt_install('git', 'ripgrep')
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[ModalSandbox(image=image), Coder()])
+# The default image has no git, which the clone needs.
+image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(image=image), Coder()])
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
-print(result.output)
 ```
 
 `Coder`'s shell and file tools now run in the sandbox, not on your machine. The sandbox is created the first time a tool uses it, and it keeps running, and billing, after the run ends; see [Clean up](#clean-up).
 
-Modal stops a sandbox 5 minutes after it's created by default, even if it's still in use. For longer work, pass `ModalSandbox(sandbox_timeout=3600)`.
+A new sandbox lives for up to 24 hours, Modal's maximum; pass `ModalSandbox(sandbox_timeout=3600)` to end it sooner. If Modal can't start the sandbox, for example because the image doesn't exist, the first tool call raises an error that says why.
+
+Search tools use ripgrep when the image has it (add `'ripgrep'` to `apt_install`) and fall back to a built-in search otherwise.
 
 ## Continue in the same sandbox
 
-```python
+```python {names="defined"}
+import modal
+from pydantic_ai import Agent
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.modal_sandbox import ModalSandbox
+
+image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(image=image), Coder()])
+result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
+
 followup = agent.run_sync(
     'Which capability would you add next, and where would it live?',
     message_history=result.all_messages(),
@@ -55,15 +65,15 @@ The follow-up run finds the sandbox in the message history and works in it, so t
 
 ## Choose the tools
 
-For a narrower agent, use [`Shell`](shell.md) and [`FileSystem`](filesystem.md) instead of `Coder`, or write your own tool: inside a tool, `ctx.workspace` is the sandbox.
+For a narrower agent, use [`Shell`](shell.md) and [`FileSystem`](filesystem.md) instead of `Coder`, or write your own tool that runs in the sandbox:
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent, RunContext
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 from pydantic_ai_harness.shell import Shell
 
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[ModalSandbox(), Shell(), FileSystem()])
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(), Shell(), FileSystem()])
 
 
 @agent.tool
@@ -73,39 +83,32 @@ async def run_python(ctx: RunContext, code: str) -> str:
     return result.stdout + result.stderr
 ```
 
-See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for everything `ctx.workspace` can do.
+See [Workspaces](https://pydantic.dev/docs/ai/core-concepts/workspace/) for more.
 
-Modal can't stop a command once it starts: cancelling a run stops waiting, but the command runs on until its timeout, or until the sandbox ends if it has none. `Shell` sets a 30-second timeout for you; in your own tools, pass `timeout=` to `ctx.workspace.run()`.
+Modal can't stop a command once it starts: cancelling a run stops waiting, but the command runs on until its timeout, or until the sandbox ends if it has none. `Shell` sets a 30-second timeout for you; in your own tools, pass a `timeout`, as above.
 
 If only your own tools use the sandbox, pass `ModalSandbox(warn_if_no_tools=False)` to silence the missing-tools warning.
 
 ## Reattach later
 
-To come back to the sandbox without the message history, save its id and pass it back as `workspace=`:
+To come back to the sandbox without the message history, store its ref and pass it back as `workspace=`:
 
-```python
+```python {names="defined"}
 import modal
 from pydantic_ai import Agent
-from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.modal_sandbox import ModalSandbox
 
-image = modal.Image.debian_slim(python_version='3.12').apt_install('git', 'ripgrep')
-agent = Agent('anthropic:claude-sonnet-5', capabilities=[ModalSandbox(image=image), Coder()])
+image = modal.Image.debian_slim(python_version='3.12').apt_install('git')
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[ModalSandbox(image=image), Coder()])
 
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
-ref = result.workspace.ref
-assert ref is not None  # None only if no tool used the sandbox
-sandbox_id = ref.id  # save this, e.g. in your database
+ref = result.workspace.ref  # store it, e.g. in your database
 
-later = agent.run_sync(
-    'Which capability would you add next, and where would it live?',
-    workspace=WorkspaceRef(provider='modal', id=sandbox_id),
-)
-print(later.output)
+later = agent.run_sync('Which capability would you add next, and where would it live?', workspace=ref)
 ```
 
-The id holds no credentials, so the process that reattaches needs your Modal credentials too. Pass `workspace='new'` to start a fresh sandbox even when the message history names one.
+The ref holds no credentials, so the process that reattaches needs your Modal credentials too. Pass `workspace='new'` to start a fresh sandbox even when the message history names one.
 
 `image`, `app_name`, `create_app_if_missing`, `sandbox_timeout`, and `idle_timeout` only shape a new sandbox; `working_dir` and `env` apply to every command, including after you reattach.
 
@@ -113,20 +116,19 @@ Already have a `modal.Sandbox`? Pass `workspace=ModalSandboxBackend(workspace=sa
 
 ## Clean up
 
-The sandbox keeps running, and billing, after the run ends. Pydantic AI never terminates it. Terminate it with the id you saved:
+The sandbox keeps running, and billing, after the run ends. Pydantic AI never terminates it. Terminate it with the ref you stored:
 
-```python
+```python {names="defined"}
 from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness.modal_sandbox import ModalSandboxBackend
 
 
-async def terminate_sandbox(sandbox_id: str) -> None:
-    backend = ModalSandboxBackend(ref=WorkspaceRef(provider='modal', id=sandbox_id))
-    sandbox = await backend.get_client()
+async def terminate_sandbox(ref: WorkspaceRef) -> None:
+    sandbox = await ModalSandboxBackend(ref=ref).get_client()
     await sandbox.terminate.aio()
 ```
 
-`get_client()` returns the `modal.Sandbox`. A sandbox you don't terminate ends when its `sandbox_timeout` runs out, or after `idle_timeout` seconds without activity. See [Modal's timeouts](https://modal.com/docs/guide/sandbox#timeouts).
+`get_client()` returns the `modal.Sandbox`. A sandbox you don't terminate ends when its `sandbox_timeout` runs out, or after `idle_timeout` seconds without activity if you set one. See [Modal's timeouts](https://modal.com/docs/guide/sandbox#timeouts).
 
 ## Configuration
 
@@ -135,8 +137,8 @@ async def terminate_sandbox(sandbox_id: str) -> None:
 | `image` | Image for a new sandbox: a registry tag or a `modal.Image`. Default: `'python:3.12-slim'`. |
 | `app_name` | Modal app a new sandbox belongs to. Default: `'pydantic-ai-harness'`. |
 | `create_app_if_missing` | Create that app if it doesn't exist. Default: `True`. |
-| `sandbox_timeout` | Seconds a new sandbox lives before Modal stops it. Default: Modal's, 5 minutes. |
-| `idle_timeout` | Seconds without activity before Modal stops a new sandbox. Default: none. |
+| `sandbox_timeout` | Seconds a new sandbox lives before Modal stops it. Default: `86_400` (24 hours, Modal's maximum). |
+| `idle_timeout` | Seconds without activity before Modal stops a new sandbox. Default: `None`, no idle limit. |
 | `working_dir` | Absolute directory commands start in and relative paths resolve against. Default: the image's. |
 | `env` | Environment variables every command gets. Nothing from your machine's environment reaches the sandbox. |
 | `warn_if_no_tools` | Warn when the agent has no `Shell` or `FileSystem` tool. Default: `True`. |
@@ -147,7 +149,8 @@ The previous `ModalSandbox` registered its own `run_command`, `read_file`, `writ
 
 ### What changed in the lifecycle
 
-- A run no longer terminates the sandbox. It runs until you terminate it or a timeout ends it (see [Clean up](#clean-up)).
+- A run no longer terminates the sandbox. It runs until you terminate it or its `sandbox_timeout` ends it (see [Clean up](#clean-up)).
+- `sandbox_timeout` defaults to 24 hours instead of 5 minutes, so a later run can continue in the same sandbox.
 - A run that continues a `message_history` reattaches to the previous run's sandbox. Pass `workspace='new'` for a fresh one.
 - Reattaching to an expired or terminated sandbox raises `WorkspaceUnavailableError`. No empty replacement is created.
 
@@ -156,7 +159,7 @@ The previous `ModalSandbox` registered its own `run_command`, `read_file`, `writ
 | Previous API | Now |
 | --- | --- |
 | `image`, `app_name`, `create_app_if_missing`, `env` | Unchanged. `image` also takes a `modal.Image`. |
-| `sandbox_timeout` | Unchanged. When unset, Modal's default (5 minutes) applies. |
+| `sandbox_timeout` | Unchanged name. The default is now `86_400` (24 hours) instead of `300`. |
 | `workdir` | Renamed `working_dir`. `workdir=` still works, with a deprecation warning. |
 | `sandbox_id` | Removed. Use `agent.run(..., workspace=WorkspaceRef(provider='modal', id=sandbox_id))`. |
 | `session`, `ModalSandboxSession` | Removed. Use `agent.run(..., workspace=ModalSandboxBackend(workspace=<modal.Sandbox>))`. |
