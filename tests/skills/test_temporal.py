@@ -1,4 +1,4 @@
-"""`Skills` under `TemporalDurability`: the catalog is read through the durable workspace, `load_skill` in an activity.
+"""`Skills` under `TemporalDurability`: the catalog is read through the durable workspace in `for_run`.
 
 These tests start a local Temporal dev server via `WorkflowEnvironment.start_local()`.
 """
@@ -25,7 +25,7 @@ except ImportError:  # pragma: lax no cover
 
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
-from pydantic_ai.messages import ModelMessage, ModelResponse, TextPart, ToolCallPart, ToolReturnPart
+from pydantic_ai.messages import LoadCapabilityReturnPart, ModelMessage, ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from pydantic_ai_harness.skills import Skills
@@ -47,11 +47,11 @@ WORK = Path(__file__).parent / 'temporal_workspace'
 
 
 def _load_reviewer(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-    """Load the `reviewer` skill, then answer with what `load_skill` returned."""
-    returns = [part for message in messages for part in message.parts if isinstance(part, ToolReturnPart)]
-    if returns:
-        return ModelResponse(parts=[TextPart(str(returns[0].content))])
-    return ModelResponse(parts=[ToolCallPart('load_skill', {'name': 'reviewer'})])
+    """Load the `reviewer` skill, then answer with the instructions `load_capability` returned."""
+    loaded = [part for message in messages for part in message.parts if isinstance(part, LoadCapabilityReturnPart)]
+    if loaded:
+        return ModelResponse(parts=[TextPart(loaded[0].content.get('instructions', ''))])
+    return ModelResponse(parts=[ToolCallPart('load_capability', {'id': 'reviewer'})])
 
 
 skills_agent = Agent(
@@ -88,7 +88,7 @@ async def client() -> AsyncIterator[Client]:
         yield await Client.connect(f'localhost:{TEMPORAL_PORT}', plugins=[PydanticAIPlugin()])
 
 
-async def test_load_skill_reads_the_skill_in_an_activity(client: Client) -> None:
+async def test_skills_are_read_through_the_durable_workspace(client: Client) -> None:
     async with Worker(
         client,
         task_queue=TASK_QUEUE,

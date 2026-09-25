@@ -251,8 +251,7 @@ def acp_terminal(session: AcpSession) -> Toolset[None] | None:
     ```python
     def session_config(session: AcpSession) -> AcpSessionConfig[None]:
         shell = acp_terminal(session) or Shell()
-        # A local workspace inherits no environment; give its commands the PATH to find programs.
-        workspace = LocalWorkspaceBackend(session.cwd, env={'PATH': os.environ['PATH']})
+        workspace = LocalWorkspaceBackend(session.cwd)
         return AcpSessionConfig(deps=None, capabilities=[shell], workspace=workspace)
     ```
 

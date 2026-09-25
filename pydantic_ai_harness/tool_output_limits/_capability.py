@@ -631,14 +631,11 @@ def _spill_location(store: OverflowStore | WorkspaceStore) -> str | None:
     """Where spills go in the run's workspace, relative to its working directory.
 
     `None` for anywhere a file tool of the run can't be relied on to reach: another kind of store,
-    a store with its own workspace, or an absolute directory.
+    or a store with its own workspace.
     """
     if not isinstance(store, WorkspaceStore) or store.workspace is not None:
         return None
-    if store.directory is None:
-        return posixpath.join(METADATA_DIR, 'tool-output')
-    directory = posixpath.normpath(store.directory)
-    return None if posixpath.isabs(directory) else directory
+    return posixpath.join(METADATA_DIR, 'tool-output')
 
 
 def _named_read_tool(messages: Sequence[ModelMessage]) -> bool:

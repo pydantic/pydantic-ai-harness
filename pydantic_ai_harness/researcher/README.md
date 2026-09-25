@@ -19,9 +19,10 @@ pip install "pydantic-ai-harness[researcher]"
 
 ```python
 from pydantic_ai import Agent
+from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Researcher
 
-agent = Agent('openai:gpt-5.6-sol', capabilities=[Researcher()])
+agent = Agent('openai:gpt-5.6-sol', capabilities=[LocalWorkspace('.'), Researcher()])
 
 result = agent.run_sync('What changed in the last three major releases of Django?')
 print(result.output)
@@ -41,9 +42,11 @@ It is literally these capabilities combined, in this order:
 - Core [`WebSearch(local=True)`](https://pydantic.dev/docs/ai/capabilities/web-search/): the provider's native web search when the model supports it, with a local DuckDuckGo fallback when it doesn't
 - Core [`WebFetch(local=True)`](https://pydantic.dev/docs/ai/capabilities/web-fetch/): read the pages behind the results, native where supported with a local fallback, so claims can be checked against their sources
 - [`SubAgents`](https://pydantic.dev/docs/ai/harness/subagents/): delegation, with a focused web `researcher` sub-agent by default
-- [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/): bounds how much context any single tool result can consume, spilling oversized results to this machine's temporary directory so no workspace is needed
+- [`ToolOutputLimits`](https://pydantic.dev/docs/ai/harness/tool-output-limits/): bounds how much context any single tool result can consume, spilling oversized results to files in the run's workspace
 
 Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries.
+
+Oversized tool results are stored in the run's [workspace](https://pydantic.dev/docs/ai/workspace/), under `.pydantic-ai-harness/tool-output/` (git-ignored), so a run without one fails at its start. `LocalWorkspace('.')` keeps them in the current directory and a sandbox capability keeps them in the sandbox. To store them elsewhere, build the [blown-out equivalent](#blown-out-equivalent) with [`ToolOutputLimits(store=...)`](https://pydantic.dev/docs/ai/harness/tool-output-limits/).
 
 ## Blown-out equivalent
 
@@ -51,9 +54,8 @@ Pass `subagents=[]` to disable delegation, or supply your own `SubAgent` entries
 
 ```python
 from pydantic_ai import Agent
-from pydantic_ai.capabilities import WebFetch, WebSearch
+from pydantic_ai.capabilities import LocalWorkspace, WebFetch, WebSearch
 from pydantic_ai_harness import SubAgent, SubAgents, ToolOutputLimits
-from pydantic_ai_harness.tool_output_limits import LocalFileStore
 
 instructions = """\
 Search broadly before drawing conclusions.
@@ -67,7 +69,7 @@ sub_researcher = SubAgent(
     Agent(
         name='researcher',
         description='Research a focused sub-question on the web and report back with findings and source links',
-        capabilities=[WebSearch(local=True), WebFetch(local=True), ToolOutputLimits(store=LocalFileStore())],
+        capabilities=[WebSearch(local=True), WebFetch(local=True), ToolOutputLimits()],
     )
 )
 
@@ -75,10 +77,11 @@ agent = Agent(
     'openai:gpt-5.6-sol',
     instructions=instructions,
     capabilities=[
+        LocalWorkspace('.'),  # where oversized tool results are spilled
         WebSearch(local=True),  # native provider search, DuckDuckGo fallback on models without it
         WebFetch(local=True),  # read the pages behind the results, native or local
         SubAgents(agents=[sub_researcher], agent_folders=None),
-        ToolOutputLimits(store=LocalFileStore()),  # research needs no workspace; spills stay on this machine
+        ToolOutputLimits(),  # spills oversized results to the workspace
     ],
 )
 ```

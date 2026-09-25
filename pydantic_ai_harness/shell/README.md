@@ -19,8 +19,6 @@ configurable allow/deny lists and automatic cleanup of background processes
 when the agent run ends.
 
 ```python
-import os
-
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import LocalWorkspace
 from pydantic_ai_harness import Shell
@@ -28,7 +26,7 @@ from pydantic_ai_harness import Shell
 agent = Agent(
     'anthropic:claude-sonnet-5',
     capabilities=[
-        LocalWorkspace('./workspace', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']}),
+        LocalWorkspace('./workspace'),
         Shell(allowed_commands=['ls', 'cat', 'rg']),
     ],
 )
@@ -141,13 +139,9 @@ tool-call result carries the failure and limit context.
 ## Environment control
 
 A command gets the workspace's environment plus `Shell(env=...)`, minus names
-matching `denied_env_patterns`; nothing comes from the agent process.
-`LocalWorkspace` starts from an empty environment unless you give it `env=`,
-so pass the variables commands need, usually `PATH` and `HOME`:
-`LocalWorkspace('.', env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})`.
-Without `PATH`, tools installed outside the system default path (Homebrew,
-`~/.local/bin`) are not found. A sandbox provider's workspace has whatever its
-provider configures. Two fields shape what `Shell` adds:
+matching `denied_env_patterns`. `LocalWorkspace` passes on the host's `PATH` and
+`HOME` and nothing else from the agent process; give it `env=` for anything more.
+A sandbox provider's workspace has whatever its provider configures. Two fields shape what `Shell` adds:
 
 | Field | Effect |
 |---|---|

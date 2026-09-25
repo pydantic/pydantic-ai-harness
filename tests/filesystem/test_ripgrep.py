@@ -15,7 +15,6 @@ from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness.filesystem import RIPGREP_TOOL_NAMES, FilesSearchedEvent, FileSystem, FileSystemToolset
 
 from .._tool_calls import call_tool
-from .._workspace import local_workspace
 
 pytestmark = pytest.mark.anyio
 
@@ -55,7 +54,7 @@ async def call(
     """Call a tool of a `FileSystem` bounded by `workspace`, run in `working_dir` (by default `workspace`)."""
     capability = FileSystem[None](root_dir=workspace, tools=RIPGREP_TOOL_NAMES, **settings)  # pyright: ignore[reportArgumentType]
     return await call_tool(
-        [capability, *capabilities], name, arguments, workspace=local_workspace(working_dir or workspace)
+        [capability, *capabilities], name, arguments, workspace=LocalWorkspaceBackend(working_dir or workspace)
     )
 
 
@@ -81,14 +80,14 @@ class TestRegistration:
     async def test_opt_in(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=[])
         await Agent(model, capabilities=[FileSystem(root_dir=tmp_path)]).run(
-            'Inspect tools', workspace=local_workspace(tmp_path)
+            'Inspect tools', workspace=LocalWorkspaceBackend(tmp_path)
         )
         assert model.last_model_request_parameters is not None
         assert not {'list_files', 'grep'} & {t.name for t in model.last_model_request_parameters.function_tools}
 
         model = TestModel(call_tools=[])
         await Agent(model, capabilities=[FileSystem(root_dir=tmp_path, tools=['read_file', 'grep'])]).run(
-            'Inspect', workspace=local_workspace(tmp_path)
+            'Inspect', workspace=LocalWorkspaceBackend(tmp_path)
         )
         assert model.last_model_request_parameters is not None
         assert [t.name for t in model.last_model_request_parameters.function_tools] == ['read_file', 'grep']
@@ -100,42 +99,49 @@ class TestRegistration:
 
 class TestListFiles:
     async def test_respects_ignore_rules_and_hidden_files(self, workspace: Path) -> None:
-        assert (await toolset(workspace).list_files(workspace=local_workspace(workspace))).splitlines() == [
+        assert (await toolset(workspace).list_files(workspace=LocalWorkspaceBackend(workspace))).splitlines() == [
             'notes.txt',
             'src/app.py',
         ]
 
     async def test_glob(self, workspace: Path) -> None:
-        assert await toolset(workspace).list_files(glob='*.py', workspace=local_workspace(workspace)) == 'src/app.py'
         assert (
-            await toolset(workspace).list_files('src', glob='*.txt', workspace=local_workspace(workspace))
+            await toolset(workspace).list_files(glob='*.py', workspace=LocalWorkspaceBackend(workspace)) == 'src/app.py'
+        )
+        assert (
+            await toolset(workspace).list_files('src', glob='*.txt', workspace=LocalWorkspaceBackend(workspace))
             == 'No files found.'
         )
 
     async def test_glob_overrides_ignore_files_but_not_hidden(self, workspace: Path) -> None:
-        assert await toolset(workspace).list_files(glob='*.log', workspace=local_workspace(workspace)) == 'ignored.log'
-        assert (await toolset(workspace).list_files(glob='**', workspace=local_workspace(workspace))).splitlines() == [
+        assert (
+            await toolset(workspace).list_files(glob='*.log', workspace=LocalWorkspaceBackend(workspace))
+            == 'ignored.log'
+        )
+        assert (
+            await toolset(workspace).list_files(glob='**', workspace=LocalWorkspaceBackend(workspace))
+        ).splitlines() == [
             'ignored.log',
             'notes.txt',
             'src/app.py',
         ]
         assert '.hidden' not in await toolset(workspace).grep(
-            'import os', glob='**', workspace=local_workspace(workspace)
+            'import os', glob='**', workspace=LocalWorkspaceBackend(workspace)
         )
 
     async def test_denied_patterns_filter_entries(self, workspace: Path) -> None:
         assert (
-            await toolset(workspace, denied_patterns=['src/*']).list_files(workspace=local_workspace(workspace))
+            await toolset(workspace, denied_patterns=['src/*']).list_files(workspace=LocalWorkspaceBackend(workspace))
             == 'notes.txt'
         )
 
     async def test_cap(self, workspace: Path) -> None:
-        listed = await toolset(workspace, max_find_results=1).list_files(workspace=local_workspace(workspace))
+        listed = await toolset(workspace, max_find_results=1).list_files(workspace=LocalWorkspaceBackend(workspace))
         assert listed.splitlines() == ['notes.txt', '[... truncated at 1 files]']
 
     async def test_cap_counts_permitted_entries_only(self, workspace: Path) -> None:
         listed = await toolset(workspace, max_find_results=1, denied_patterns=['notes.txt']).list_files(
-            workspace=local_workspace(workspace)
+            workspace=LocalWorkspaceBackend(workspace)
         )
         assert listed == 'src/app.py'
 
@@ -172,17 +178,18 @@ class TestListFiles:
 class TestGrep:
     async def test_matches_with_line_numbers(self, workspace: Path) -> None:
         assert (
-            await toolset(workspace).grep('import os', workspace=local_workspace(workspace)) == 'src/app.py:1:import os'
+            await toolset(workspace).grep('import os', workspace=LocalWorkspaceBackend(workspace))
+            == 'src/app.py:1:import os'
         )
 
     async def test_options(self, workspace: Path) -> None:
         built = toolset(workspace)
         assert (
-            await built.grep('import', ignore_case=True, glob='*.txt', workspace=local_workspace(workspace))
+            await built.grep('import', ignore_case=True, glob='*.txt', workspace=LocalWorkspaceBackend(workspace))
             == 'notes.txt:1:Import notes'
         )
         assert (
-            await built.grep('os', file_type='py', context=1, workspace=local_workspace(workspace))
+            await built.grep('os', file_type='py', context=1, workspace=LocalWorkspaceBackend(workspace))
         ).splitlines() == [
             'src/app.py:1:import os',
             'src/app.py-2-',
@@ -190,36 +197,36 @@ class TestGrep:
             'src/app.py:5:    return os.name',
         ]
         assert (
-            await built.grep('return os.name', literal=True, path='src', workspace=local_workspace(workspace))
+            await built.grep('return os.name', literal=True, path='src', workspace=LocalWorkspaceBackend(workspace))
             == 'src/app.py:5:    return os.name'
         )
-        assert await built.grep('nothing', workspace=local_workspace(workspace)) == 'No matches found.'
+        assert await built.grep('nothing', workspace=LocalWorkspaceBackend(workspace)) == 'No matches found.'
 
     async def test_long_lines_are_cut_by_ripgrep(self, workspace: Path) -> None:
         (workspace / 'minified.js').write_text('x' * 5000 + 'needle' + 'y' * 5000 + '\n')
-        result = await toolset(workspace).grep('needle', workspace=local_workspace(workspace))
+        result = await toolset(workspace).grep('needle', workspace=LocalWorkspaceBackend(workspace))
         assert result.startswith('minified.js:1:xxxx') and result.endswith('[... omitted end of long line]')
         assert len(result) < 5000
 
     async def test_file_target(self, workspace: Path) -> None:
         assert (
-            await toolset(workspace).grep('os', path='notes.txt', workspace=local_workspace(workspace))
+            await toolset(workspace).grep('os', path='notes.txt', workspace=LocalWorkspaceBackend(workspace))
             == 'notes.txt:2:os is a module'
         )
 
     async def test_authorization_filters_records(self, workspace: Path) -> None:
         assert (
-            await toolset(workspace, denied_patterns=['src/*']).grep('os', workspace=local_workspace(workspace))
+            await toolset(workspace, denied_patterns=['src/*']).grep('os', workspace=LocalWorkspaceBackend(workspace))
             == 'notes.txt:2:os is a module'
         )
 
     async def test_cap_counts_context_lines(self, workspace: Path) -> None:
         capped = await toolset(workspace, max_search_results=1).grep(
-            'os', context=2, workspace=local_workspace(workspace)
+            'os', context=2, workspace=LocalWorkspaceBackend(workspace)
         )
         assert capped.splitlines() == ['notes.txt-1-Import notes', '[... truncated at 1 lines]']
         assert (
-            await toolset(workspace, max_search_results=2).grep('os', workspace=local_workspace(workspace))
+            await toolset(workspace, max_search_results=2).grep('os', workspace=LocalWorkspaceBackend(workspace))
         ).splitlines() == [
             'notes.txt:2:os is a module',
             'src/app.py:1:import os',
@@ -255,9 +262,8 @@ class TestGrep:
         assert message in await call(workspace, 'grep', arguments)
 
     async def test_missing_ripgrep(self, workspace: Path) -> None:
-        # A local workspace inherits no environment, so the model is pointed at `env=`.
         without_rg = LocalWorkspaceBackend(workspace, env={'PATH': str(workspace)})
-        with pytest.raises(ModelRetry, match=r"not found on the workspace's PATH.*env=\{'PATH'"):
+        with pytest.raises(ModelRetry, match=r"not found on the workspace's PATH.*`search_files`"):
             await toolset(workspace).grep('os', workspace=without_rg)
 
     @pytest.mark.skipif(os.name == 'nt', reason='POSIX symlinks')
@@ -267,6 +273,6 @@ class TestGrep:
         outside = tmp_path_factory.mktemp('outside') / 'secret.txt'
         outside.write_text('import os\n')
         (workspace / 'link.txt').symlink_to(outside)
-        listed = await toolset(workspace).list_files(workspace=local_workspace(workspace))
+        listed = await toolset(workspace).list_files(workspace=LocalWorkspaceBackend(workspace))
         assert 'link.txt' not in listed
-        assert 'link.txt' not in await toolset(workspace).grep('import os', workspace=local_workspace(workspace))
+        assert 'link.txt' not in await toolset(workspace).grep('import os', workspace=LocalWorkspaceBackend(workspace))

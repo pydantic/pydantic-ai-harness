@@ -210,7 +210,7 @@ def _check_sub_agents(merged: Any) -> None:
 COMBINE_POLICY: dict[str, Policy] = {
     # -- One per agent: a default `id`, and `combine` says what two of them mean. --
     'Skills': Combines(
-        'one catalog behind one `load_skill` tool; every library either names stays reachable',
+        'one catalog; every library either names stays reachable',
         lambda: (Skills[Any]('first'), Skills[Any]('second')),
         _check_skills,
     ),
@@ -278,7 +278,8 @@ COMBINE_POLICY: dict[str, Policy] = {
     ),
     # -- Several of these is the normal case, so they stay anonymous. --
     'RepairToolArguments': Anonymous('repairing valid arguments again is a no-op'),
-    '_RequireWorkspace': Anonymous('the same run-start check; two check the same thing twice'),
+    '_Skill': Anonymous('one per skill, with the skill name as its id; `Skills` rejects two with one name'),
+    'RequireWorkspace': Anonymous('the same run-start check; two check the same thing twice'),
     '_BoundToolOutputs': Anonymous('Coder-local truncation composes with standalone output policies'),
     'Coder': Anonymous('a packaged harness; composing two is composing their members'),
     'ModalSandbox': Anonymous('two coexist; the first supplies the run workspace, as core picks the first supplier'),
@@ -618,39 +619,6 @@ def test_sub_agents_compose_the_roster_and_nothing_else(
 
     with pytest.raises(UserError, match=f'disagree on {field_name!r}'):
         SubAgents.combine([first, second])
-
-
-def test_merging_reuses_the_delegates_already_loaded_from_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A merge must not re-read `agent_folders`, because the host folders may have changed since.
-
-    Both inputs resolved their host disk delegates when they were constructed. Re-running
-    `__post_init__` to rebuild the roster would load them again from wherever the home folder
-    points now -- so a merge could hand the run a different set of delegates than either
-    capability was built with, and re-invoke `tool_resolver` besides.
-    """
-    home = tmp_path / 'home'
-    folder = home / '.agents' / 'agents'  # `<home>/.agents/<agent_folders>/`
-    folder.mkdir(parents=True)
-    (folder / 'helper.md').write_text('---\nname: helper\ndescription: helps\n---\n\nBe helpful.\n', encoding='utf-8')
-    homes = [home, tmp_path]
-
-    def fake_home(cls: type[Path]) -> Path:
-        return homes[0]
-
-    monkeypatch.setattr(Path, 'home', classmethod(fake_home))
-
-    first = SubAgents[Any](agents=[SubAgent(_child('alpha'), description='alpha')])
-    second = SubAgents[Any](agents=[SubAgent(_child('beta'), description='beta')])
-    assert 'helper' in first._by_name, 'the disk delegate is picked up at construction'  # pyright: ignore[reportPrivateUsage]
-
-    # The folder is gone by the time the two are combined.
-    homes.pop(0)
-
-    merged = SubAgents.combine([first, second])
-    assert isinstance(merged, SubAgents)
-    assert set(merged._by_name) == {'alpha', 'beta', 'helper'}, (  # pyright: ignore[reportPrivateUsage]
-        'the disk delegate survives the merge because it is reused, not reloaded'
-    )
 
 
 def _child(name: str) -> Agent[Any, str]:

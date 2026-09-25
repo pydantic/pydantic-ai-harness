@@ -7,16 +7,16 @@ from pathlib import Path
 
 import pytest
 from pydantic_ai.capabilities import AbstractCapability
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness import HarnessDeprecationWarning
 from pydantic_ai_harness.coder import Coder
-from pydantic_ai_harness.filesystem import FileSystem
-from pydantic_ai_harness.macroscope import Macroscope
-from pydantic_ai_harness.repo_context import RepoContext
-from pydantic_ai_harness.shell import Shell
+from pydantic_ai_harness.filesystem import FileSystem, FileSystemToolset
+from pydantic_ai_harness.macroscope import Macroscope, MacroscopeToolset
+from pydantic_ai_harness.repo_context import RepoContext, RepoContextToolset
+from pydantic_ai_harness.shell import Shell, ShellToolset
 
 from ._tool_calls import call_tool
-from ._workspace import local_workspace
 
 pytestmark = pytest.mark.anyio
 
@@ -108,4 +108,48 @@ async def test_working_directory_argument_warns_and_has_no_effect(
     with pytest.warns(HarnessDeprecationWarning, match=warning):
         capability = build('elsewhere', fake_cli)
 
-    assert expected in await call_tool([capability], tool, arguments, workspace=local_workspace(tmp_path))
+    assert expected in await call_tool([capability], tool, arguments, workspace=LocalWorkspaceBackend(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ('build', 'warning'),
+    [
+        (
+            lambda: FileSystemToolset[None](
+                cwd=Path('elsewhere'),
+                allowed_patterns=[],
+                denied_patterns=[],
+                max_read_lines=10,
+                max_list_results=10,
+                max_search_results=10,
+                max_find_results=10,
+            ),
+            r'`FileSystemToolset\(cwd=\.\.\.\)` is deprecated and ignored',
+        ),
+        (
+            lambda: ShellToolset[None](
+                cwd=Path('elsewhere'),
+                allowed_commands=[],
+                denied_commands=[],
+                denied_operators=[],
+                default_timeout=1,
+                max_output_chars=10,
+                persist_cwd=False,
+                allow_interactive=False,
+            ),
+            r'`ShellToolset\(cwd=\.\.\.\)` is deprecated and ignored',
+        ),
+        (
+            lambda: MacroscopeToolset[None](cwd=Path('elsewhere'), command='macroscope', base=None, timeout=1),
+            r'`MacroscopeToolset\(cwd=\.\.\.\)` is deprecated and ignored',
+        ),
+        (
+            lambda: RepoContextToolset[None](['.claude'], 'inventory', workspace_dir=Path('elsewhere')),
+            r'`RepoContextToolset\(workspace_dir=\.\.\.\)` is deprecated and ignored',
+        ),
+    ],
+    ids=['FileSystemToolset', 'ShellToolset', 'MacroscopeToolset', 'RepoContextToolset'],
+)
+def test_toolset_working_directory_argument_warns(build: Callable[[], object], warning: str) -> None:
+    with pytest.warns(HarnessDeprecationWarning, match=warning):
+        build()

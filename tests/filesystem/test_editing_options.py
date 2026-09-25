@@ -6,11 +6,11 @@ from pathlib import Path
 import pytest
 from pydantic_ai import Agent
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.filesystem import FILE_SYSTEM_TOOL_NAMES, FileSystem, FileSystemToolset, Replacement
 
 from .._tool_calls import call_tool
-from .._workspace import local_workspace
 
 pytestmark = pytest.mark.anyio
 
@@ -32,14 +32,14 @@ async def call(
 ) -> str:
     """Call a tool of a `FileSystem` bounded by `root`, in a workspace at `working_dir` (by default `root`)."""
     capability = FileSystem[None](root_dir=root, **settings)  # pyright: ignore[reportArgumentType]
-    return await call_tool([capability], name, arguments, workspace=local_workspace(working_dir or root))
+    return await call_tool([capability], name, arguments, workspace=LocalWorkspaceBackend(working_dir or root))
 
 
 class TestContentHashes:
     async def test_schema_omits_expected_hash(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=[])
         await Agent(model, capabilities=[FileSystem(root_dir=tmp_path, content_hashes=False)]).run(
-            'Inspect', workspace=local_workspace(tmp_path)
+            'Inspect', workspace=LocalWorkspaceBackend(tmp_path)
         )
         assert model.last_model_request_parameters is not None
         schemas = {t.name: t.parameters_json_schema for t in model.last_model_request_parameters.function_tools}
@@ -49,7 +49,7 @@ class TestContentHashes:
 
         model = TestModel(call_tools=[])
         await Agent(model, capabilities=[FileSystem(root_dir=tmp_path)]).run(
-            'Inspect', workspace=local_workspace(tmp_path)
+            'Inspect', workspace=LocalWorkspaceBackend(tmp_path)
         )
         assert model.last_model_request_parameters is not None
         schemas = {t.name: t.parameters_json_schema for t in model.last_model_request_parameters.function_tools}
@@ -125,7 +125,7 @@ class TestReplacements:
     async def test_direct_method_keeps_single_pair(self, tmp_path: Path) -> None:
         (tmp_path / 'f.txt').write_text('one')
         assert (
-            await toolset(tmp_path).edit_file('f.txt', 'one', 'two', workspace=local_workspace(tmp_path))
+            await toolset(tmp_path).edit_file('f.txt', 'one', 'two', workspace=LocalWorkspaceBackend(tmp_path))
         ).startswith('Edited f.txt.')
         assert (tmp_path / 'f.txt').read_text() == 'two'
         assert Replacement(old_text='a', new_text='b').new_text == 'b'
@@ -195,7 +195,7 @@ class TestRootAboveTheWorkingDirectory:
         target = directory / 'AGENTS.md'
         target.write_text('Project instructions')
         capability = FileSystem[None](root_dir=tmp_path, tools=FILE_SYSTEM_TOOL_NAMES)
-        workspace = local_workspace(project)
+        workspace = LocalWorkspaceBackend(project)
 
         discovered = await call_tool([capability], name, {'path': search_path, **arguments}, workspace=workspace)
         path = discovered.partition(':')[0].partition('  (')[0]
@@ -237,9 +237,9 @@ class TestRootAboveTheWorkingDirectory:
             tools=FILE_SYSTEM_TOOL_NAMES,
             allowed_patterns=['project/*.txt'],
             denied_patterns=['project/denied.txt'],
-            protected_patterns=['project/allowed.txt'],
+            read_only_patterns=['project/allowed.txt'],
         )
-        workspace = local_workspace(project)
+        workspace = LocalWorkspaceBackend(project)
 
         result = await call_tool([capability], name, arguments, workspace=workspace)
         path = result.partition(':')[0].partition('  (')[0]
@@ -256,7 +256,7 @@ class TestRootAboveTheWorkingDirectory:
         await Agent(
             model,
             capabilities=[FileSystem(root_dir=tmp_path, tools=FILE_SYSTEM_TOOL_NAMES, content_hashes=content_hashes)],
-        ).run('Inspect tools', workspace=local_workspace(tmp_path))
+        ).run('Inspect tools', workspace=LocalWorkspaceBackend(tmp_path))
         assert model.last_model_request_parameters is not None
         for tool in model.last_model_request_parameters.function_tools:
             description = tool.parameters_json_schema['properties']['path']['description']
@@ -267,7 +267,7 @@ class TestRootAboveTheWorkingDirectory:
         project.mkdir()
         (tmp_path / 'shared.txt').write_text('outside the project')
         built = toolset(tmp_path)
-        workspace = local_workspace(project)
+        workspace = LocalWorkspaceBackend(project)
         await built.write_file('local.txt', 'inside', workspace=workspace)
         assert (project / 'local.txt').read_text() == 'inside'
         assert 'outside the project' in await built.read_file('../shared.txt', workspace=workspace)
@@ -283,7 +283,7 @@ class TestRootAboveTheWorkingDirectory:
         (tmp_path / 'target.txt').write_text('shared')
         (project / 'link.txt').symlink_to(tmp_path / 'target.txt')
         (tmp_path / 'link.txt').write_text('a regular file at the root with the same name')
-        info = await toolset(tmp_path).file_info('link.txt', workspace=local_workspace(project))
+        info = await toolset(tmp_path).file_info('link.txt', workspace=LocalWorkspaceBackend(project))
         assert 'symlink' in info and 'target.txt' in info
 
     async def test_traversal_is_still_bounded_by_root(self, tmp_path: Path) -> None:

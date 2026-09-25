@@ -7,13 +7,13 @@ import pytest
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import AbstractCapability, LocalWorkspace
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.tool_output_limits import ToolOutputLimits
 
 from .._recording_durability import RecordingDurability
 from .._tool_calls import call_tool
-from .._workspace import HOST_ENV, local_workspace
 
 pytestmark = pytest.mark.anyio
 
@@ -27,7 +27,9 @@ async def call(
     unrestricted_filesystem: bool = False,
 ) -> str:
     coder = Coder[None](unrestricted_filesystem=unrestricted_filesystem)
-    return await call_tool([coder, *capabilities], name, arguments, workspace=local_workspace(working_dir=tmp_path))
+    return await call_tool(
+        [coder, *capabilities], name, arguments, workspace=LocalWorkspaceBackend(working_dir=tmp_path)
+    )
 
 
 class TestCoder:
@@ -35,7 +37,7 @@ class TestCoder:
     async def test_durable_binding(self, tmp_path: Path, extra_limits: bool) -> None:
         durability = RecordingDurability()
         capabilities: list[AbstractCapability[object]] = [
-            LocalWorkspace(tmp_path, env=HOST_ENV),
+            LocalWorkspace(tmp_path),
             Coder(),
             durability,
         ]
@@ -57,7 +59,7 @@ class TestCoder:
         target = tmp_path / 'src' / 'AGENTS.md'
         target.write_text('Project instructions')
         coder = Coder[None](unrestricted_filesystem=unrestricted_filesystem, repo_context=False)
-        workspace = local_workspace(working_dir=tmp_path)
+        workspace = LocalWorkspaceBackend(working_dir=tmp_path)
         path = await call_tool([coder], 'list_files', {'glob': '**/AGENTS.md'}, workspace=workspace)
         assert Path(path) == Path('src/AGENTS.md')
         assert 'Project instructions' in await call_tool([coder], 'read_file', {'path': path}, workspace=workspace)
@@ -68,7 +70,9 @@ class TestCoder:
 
     async def test_schema(self, tmp_path: Path) -> None:
         model = TestModel(call_tools=[])
-        await Agent(model, capabilities=[Coder()]).run('Inspect tools', workspace=local_workspace(working_dir=tmp_path))
+        await Agent(model, capabilities=[Coder()]).run(
+            'Inspect tools', workspace=LocalWorkspaceBackend(working_dir=tmp_path)
+        )
         assert model.last_model_request_parameters is not None
         tools = {tool.name: tool for tool in model.last_model_request_parameters.function_tools}
         assert list(tools) == ['read_file', 'write_file', 'edit_file', 'list_files', 'grep', 'shell']
@@ -80,7 +84,7 @@ class TestCoder:
     async def test_instructions(self, tmp_path: Path, extra_instructions: str | None) -> None:
         model = TestModel(call_tools=[])
         await Agent(model, capabilities=[Coder(instructions=extra_instructions, repo_context=False)]).run(
-            'Inspect instructions', workspace=local_workspace(tmp_path)
+            'Inspect instructions', workspace=LocalWorkspaceBackend(tmp_path)
         )
         assert model.last_model_request_parameters is not None
         parts = model.last_model_request_parameters.instruction_parts or []
@@ -96,7 +100,7 @@ class TestCoder:
         (tmp_path / 'AGENTS.md').write_text('Always answer in haiku.\n')
         model = TestModel(call_tools=[])
         await Agent(model, capabilities=[Coder(repo_context=repo_context)]).run(
-            'Inspect instructions', workspace=local_workspace(working_dir=tmp_path)
+            'Inspect instructions', workspace=LocalWorkspaceBackend(working_dir=tmp_path)
         )
         assert model.last_model_request_parameters is not None
         instructions = model.last_model_request_parameters.instruction_parts or []

@@ -11,9 +11,8 @@ from pydantic_ai._utils import replace_no_init  # pyright: ignore[reportPrivateU
 from pydantic_ai.capabilities import AbstractCapability
 from pydantic_ai.tools import AgentDepsT, RunContext
 from pydantic_ai.toolsets import AgentToolset
-from pydantic_ai.workspaces import Workspace, WorkspaceBackend
 
-from pydantic_ai_harness._workspace import require_workspace, secondary_workspace
+from pydantic_ai_harness._workspace import require_workspace
 from pydantic_ai_harness.pydantic_ai_docs._toolset import PydanticAIDocsToolset, PydanticAIDocsTopic
 
 if TYPE_CHECKING:
@@ -42,8 +41,8 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     The local checkout path comes from `local_docs_path`, or the
     `PYDANTIC_AI_HARNESS_DOCS_PATH` env var when that is unset; with neither set
     every call goes straight to the remote source. The checkout is read through
-    the run's workspace, or `workspace` when set, and a run with a local path but
-    neither workspace fails at its start. The capability never runs git -- keep
+    the run's workspace, and a run with a local path but no workspace fails at its
+    start. The capability never runs git -- keep
     the local checkout current yourself; the remote path always reads `main`.
 
     ```python
@@ -65,14 +64,6 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
     working directory. When `None`, falls back to the
     `PYDANTIC_AI_HARNESS_DOCS_PATH` env var, then to the remote source."""
 
-    workspace: WorkspaceBackend | None = None
-    """A workspace backend holding the local checkout, instead of the run's workspace.
-
-    For instance `LocalWorkspaceBackend('/opt/pydantic-ai')` for a checkout on this machine while
-    the agent works in a sandbox. It is read in-process only in this release: a durable engine
-    does not route it through its workflow machinery.
-    """
-
     cache: bool = True
     """If `True`, each returned doc is memoized for one agent run."""
 
@@ -80,11 +71,6 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
         default_factory=dict[PydanticAIDocsTopic, str], init=False, repr=False, compare=False
     )
     """In-memory doc cache shared with toolsets created during one run."""
-
-    _workspace: Workspace | None = field(default=None, init=False, repr=False, compare=False)
-
-    def __post_init__(self) -> None:
-        self._workspace = secondary_workspace(self.workspace, 'PydanticAIDocs')
 
     async def for_run(self, ctx: RunContext[AgentDepsT]) -> PydanticAIDocs[AgentDepsT]:
         """Return a fresh per-run cache so workspace-local content cannot cross runs."""
@@ -94,7 +80,7 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
 
     async def before_run(self, ctx: RunContext[AgentDepsT]) -> None:
         """Fail the run at its start when a local checkout is configured but no workspace holds it."""
-        if self._workspace is None and self._resolved_local_path() is not None:
+        if self._resolved_local_path() is not None:
             require_workspace(ctx.workspace, 'PydanticAIDocs')
 
     def _resolved_local_path(self) -> Path | None:
@@ -116,7 +102,6 @@ class PydanticAIDocs(AbstractCapability[AgentDepsT]):
         """Toolset providing `read_pyai_docs` over the resolved local path and shared cache."""
         return PydanticAIDocsToolset[AgentDepsT](
             local_docs_path=self._resolved_local_path(),
-            workspace=self._workspace,
             cache=self._cache if self.cache else None,
         )
 

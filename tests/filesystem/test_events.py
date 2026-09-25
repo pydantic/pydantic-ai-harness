@@ -20,6 +20,7 @@ from pydantic_ai.messages import (
     ToolReturnPart,
 )
 from pydantic_ai.models.function import AgentInfo, DeltaToolCall, DeltaToolCalls, FunctionModel
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.filesystem import (
     MAX_DIFF_SOURCE_CHARS,
@@ -36,8 +37,6 @@ from pydantic_ai_harness.filesystem import (
     FileWrittenEvent,
     SearchKind,
 )
-
-from .._workspace import local_workspace
 
 pytestmark = pytest.mark.anyio
 
@@ -91,7 +90,7 @@ async def _run_and_collect(
         id='file_system',
     )
     agent = Agent(_tool_model(tool_name, json_args), deps_type=type(None), capabilities=[capability, *listeners])
-    await agent.run('go', event_stream_handler=handler, workspace=local_workspace(root))
+    await agent.run('go', event_stream_handler=handler, workspace=LocalWorkspaceBackend(root))
     return events
 
 
@@ -942,9 +941,9 @@ class TestFileChangeRequests:
         toolset = FileSystem[None](root_dir=tmp_path).get_toolset()
         assert isinstance(toolset, FileSystemToolset)
 
-        await toolset.write_file('direct.txt', 'hi\n', workspace=local_workspace(tmp_path))
-        await toolset.edit_file('direct.txt', 'hi', 'bye', workspace=local_workspace(tmp_path))
-        await toolset.create_directory('made', workspace=local_workspace(tmp_path))
+        await toolset.write_file('direct.txt', 'hi\n', workspace=LocalWorkspaceBackend(tmp_path))
+        await toolset.edit_file('direct.txt', 'hi', 'bye', workspace=LocalWorkspaceBackend(tmp_path))
+        await toolset.create_directory('made', workspace=LocalWorkspaceBackend(tmp_path))
 
         assert (tmp_path / 'direct.txt').read_text() == 'bye\n'
         assert (tmp_path / 'made').is_dir()

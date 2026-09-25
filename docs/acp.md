@@ -93,8 +93,6 @@ The provider environment must be available to the launched subprocess. GUI edito
 A coding agent should read and write files in the workspace the editor opened, not wherever the subprocess started. ACP gives each session a working directory (`cwd`); a `session_config` factory turns that into per-session tools:
 
 ```python
-import os
-
 from pydantic_ai import Agent
 from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness.filesystem import FileSystem
@@ -106,7 +104,7 @@ agent = Agent('anthropic:claude-sonnet-5')
 
 def session_config(session: AcpSession) -> AcpSessionConfig[None]:
     # Run file and shell tools in the directory the client opened.
-    workspace = LocalWorkspaceBackend(session.cwd, env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})
+    workspace = LocalWorkspaceBackend(session.cwd)
     return AcpSessionConfig(deps=None, capabilities=[FileSystem[None](), Shell[None]()], workspace=workspace)
 
 
@@ -116,15 +114,13 @@ if __name__ == '__main__':
 
 The factory runs once per session with the client's `AcpSession` setup (its `cwd`, `mcp_servers`, and capabilities) and returns an `AcpSessionConfig` whose `deps`, `capabilities`, `toolsets`, and optional `workspace` apply to every run in that session. This is correct across multiple concurrent sessions in one process, where a single static `FileSystem` could not be.
 
-Commands in a local workspace inherit nothing from the agent process, so the example passes `PATH` and `HOME` explicitly; see [workspaces](https://pydantic.dev/docs/ai/workspace/). Use `capabilities` for session behavior so hooks, instructions, ordering constraints, and capability event ownership are preserved. Keep `toolsets` for bare toolsets such as MCP servers. Session capabilities and toolsets are added to the agent's own configuration.
+Use `capabilities` for session behavior so hooks, instructions, ordering constraints, and capability event ownership are preserved. Keep `toolsets` for bare toolsets such as MCP servers. Session capabilities and toolsets are added to the agent's own configuration.
 
 ## Editor-native filesystem and shell (optional)
 
 The local [`FileSystem`](filesystem.md) and [`Shell`](shell.md) above operate on the session's workspace -- with `LocalWorkspaceBackend`, the agent machine's own disk and subprocesses. An editor's source of truth is different: unsaved buffers, its own idea of the workspace layout, and -- for a remote or containerized editor -- the machine the code actually lives on. When the client advertises support, `acp_filesystem` and `acp_terminal` give the agent `read_file`/`write_file`/`run_command` tools that route through the client, so it acts where the user is:
 
 ```python
-import os
-
 from pydantic_ai.workspaces import LocalWorkspaceBackend
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
@@ -135,7 +131,7 @@ def session_config(session: AcpSession) -> AcpSessionConfig[None]:
     # Use the editor's filesystem/terminal when offered; otherwise fall back to local.
     fs = acp_filesystem(session) or FileSystem[None]()
     shell = acp_terminal(session) or Shell[None]()
-    workspace = LocalWorkspaceBackend(session.cwd, env={'PATH': os.environ['PATH'], 'HOME': os.environ['HOME']})
+    workspace = LocalWorkspaceBackend(session.cwd)
     return AcpSessionConfig(deps=None, capabilities=[fs, shell], workspace=workspace)
 ```
 

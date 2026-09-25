@@ -13,6 +13,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 from opentelemetry.trace import Tracer
 from pydantic_ai import Agent, AgentSpec, DeferredToolRequests, ModelRetry, RunContext
 from pydantic_ai.capabilities import ToolSearch
+from pydantic_ai.exceptions import UserError
 from pydantic_ai.messages import (
     ModelMessage,
     ModelMessagesTypeAdapter,
@@ -30,6 +31,7 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.models.instrumented import InstrumentationSettings
 from pydantic_ai.models.test import TestModel
 from pydantic_ai.usage import RunUsage
+from pydantic_ai.workspaces import LocalWorkspaceBackend
 
 from pydantic_ai_harness.memory import (
     FileStore,
@@ -811,10 +813,16 @@ class TestInjection:
             captured.append(_latest_memory_context(messages))
             return ModelResponse(parts=[TextPart('done')])
 
-        await Agent(
+        agent = Agent(
             FunctionModel(model),
-            capabilities=[Memory(store=FileStore(root), guidance='', max_tokens=20, max_memory_size=25)],
-        ).run('go')
+            capabilities=[Memory(store=FileStore('memory'), guidance='', max_tokens=20, max_memory_size=25)],
+        )
+        # The store keeps its files in the run's workspace, so a run without one fails at its start.
+        with pytest.raises(
+            UserError, match=r"`Memory\(store=FileStore\(\.\.\.\)\)` keeps memory files in the run's workspace"
+        ):
+            await agent.run('go')
+        await agent.run('go', workspace=LocalWorkspaceBackend(tmp_path))
         assert len(captured[0]) <= 80
         assert 'm' * 26 not in captured[0]
         assert 'search_memory' in captured[0]
@@ -1323,7 +1331,7 @@ class TestConfigurationAndSpecs:
 
     def test_from_spec_backends_and_cross_backend_validation(self, tmp_path: Path) -> None:
         assert isinstance(Memory.from_spec().store, InMemoryStore)
-        assert isinstance(Memory.from_spec(backend='file', directory=str(tmp_path)).store, FileStore)
+        assert isinstance(Memory.from_spec(backend='file', directory='memory').store, FileStore)
         assert isinstance(
             Memory.from_spec(backend='sqlite', database=str(tmp_path / 'memory.db')).store, SqliteMemoryStore
         )
