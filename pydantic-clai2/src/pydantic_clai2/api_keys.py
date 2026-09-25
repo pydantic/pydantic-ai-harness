@@ -25,14 +25,17 @@ class KeyReference(BaseModel):
     name: str = Field(min_length=1)
 
 
-def resolve_key(*, token: SecretStr | KeyReference) -> str:
-    """Resolve at use time and fail closed when a referenced key was deleted."""
+def resolve_key(*, token: SecretStr | KeyReference, reconfigure: str = '/add_model') -> str:
+    """Resolve at use time and fail closed when a referenced key was deleted.
+
+    `reconfigure` names the command that picks another key for this consumer.
+    """
     if isinstance(token, SecretStr):
         return token.get_secret_value()
     keys = load_keys()
     if token.name not in keys:
         raise UserError(
-            f'Saved API key {token.name} is missing. Restore it in /keys or reconfigure through /add_model.'
+            f'Saved API key {token.name} is missing. Restore it in /keys or reconfigure through {reconfigure}.'
         )
     return keys[token.name].get_secret_value()
 
@@ -119,7 +122,7 @@ class _Credential(BaseModel):
 def key_users(*, name: str) -> list[str]:
     """Find saved provider references without exposing their inline credentials."""
     users: list[str] = []
-    for account in ('vllm', 'openrouter'):
+    for account in ('vllm', 'openrouter', 'linear'):
         raw = load_codex_credentials(account=account)
         if raw is not None:
             try:

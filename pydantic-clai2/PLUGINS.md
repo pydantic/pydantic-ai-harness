@@ -323,17 +323,18 @@ on with `/plugins enable linear`. It connects to Linear's read-only endpoint
 unless you set `"read_only": false`, because tools that create or change issues
 act on a workspace your team shares.
 
-It takes the first credential it finds:
+The API key lives in [`/keys`](#saved-api-keys), not in plugin settings, which
+are stored in plaintext. Run `/linear key` to choose a saved key or enter a new
+one in a masked prompt; a new key is saved in `/keys` as `LINEAR_API_KEY`, asking
+first if that name already exists. Until you choose, the plugin uses the key named
+`LINEAR_API_KEY`. The plugin stores only the key's name and looks the key up at the
+start of every run, so replacing the value in `/keys` takes effect on the next run.
+If the key is missing, loading the plugin prints a warning and each run fails with
+an error naming `/linear key`, rather than running without Linear. Harness's
+`LINEAR_ACCESS_TOKEN` environment variable is not read.
 
-| Settings | Credential |
-|---|---|
-| `{"oauth": true}` | browser sign-in on the first run; tokens go to the keyring the way `/mcp` OAuth tokens do. `/linear logout` signs out |
-| `{"api_key": "NAME"}` | the key saved as `NAME` with `/set api_key` |
-| neither | `LINEAR_ACCESS_TOKEN` (a Linear API key or OAuth access token) |
-
-With no credential, enabling the plugin fails with a message naming these
-options and no Linear tools are added. Tokens are not accepted in plugin
-settings. For example:
+To sign in through the browser instead, declare `{"oauth": true}`. Tokens go to
+the keyring the way `/mcp` OAuth tokens do, and `/linear logout` signs out:
 
 ```text
 /plugins add linear pydantic_clai2.linear '{"oauth": true, "read_only": false}'
@@ -1033,6 +1034,15 @@ and uppercased automatically, so `my_vllm_key` becomes `MY_VLLM_KEY`. Use letter
 numbers, and underscores, starting with a letter or underscore. Saving an existing
 name asks before replacing it. Ctrl-C or Ctrl-D cancels without saving. Do not put
 the secret on the command line.
+
+Consumers store a key's name, not its value, and look it up each time they
+connect, so replacing a value in `/keys` updates every consumer and a deleted key
+makes them fail with an error. Renaming a key that vLLM, OpenRouter, or the
+`linear` plugin uses is refused until they are pointed at another key. Several
+consumers can share one entry: name keys with the conventional variable name for
+the service, such as `LINEAR_API_KEY` or `GITHUB_TOKEN`, and every plugin for that
+service can pick the same entry. The names are labels only; CLAI does not export
+them as environment variables.
 
 When saved keys exist, vLLM's token prompt and OpenRouter's **Enter API key** flow
 show a searchable list of names. Choose one, enter a different key privately, or
