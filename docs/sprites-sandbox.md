@@ -21,7 +21,7 @@ Then set `SPRITE_TOKEN` to your Sprites API token.
 
 ## Quick start
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
@@ -36,7 +36,14 @@ A new Sprite comes with git, Python, and Node.js ([preinstalled tools](https://d
 
 ## Continue in the same sandbox
 
-```python
+```python {names="defined"}
+from pydantic_ai import Agent
+from pydantic_ai_harness.coder import Coder
+from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
+
+agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(), Coder()])
+result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
+
 followup = agent.run_sync(
     'Which capability would you add next, and where would it live?',
     message_history=result.all_messages(),
@@ -49,7 +56,7 @@ The follow-up run finds the Sprite in the message history and works in it, so th
 
 For a narrower agent, use [`Shell`](shell.md) and [`FileSystem`](filesystem.md) instead of `Coder`, or write your own tool that runs in the Sprite:
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent, RunContext
 from pydantic_ai_harness.filesystem import FileSystem
 from pydantic_ai_harness.shell import Shell
@@ -73,7 +80,7 @@ When a command times out, processes it started in the background (such as `serve
 
 To come back to the Sprite without the message history, pass its ref back as `workspace=`:
 
-```python
+```python {names="defined"}
 from pydantic_ai import Agent
 from pydantic_ai_harness.coder import Coder
 from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
@@ -81,7 +88,7 @@ from pydantic_ai_harness.sprites_sandbox import SpritesSandbox
 agent = Agent('anthropic:claude-opus-5-5', capabilities=[SpritesSandbox(), Coder()])
 
 result = agent.run_sync('Clone https://github.com/pydantic/pydantic-ai and summarize how capabilities work.')
-ref = result.workspace.ref  # store it, e.g. in your database; None if no tool used the Sprite
+ref = result.workspace.ref  # store this, e.g. in your database
 
 later = agent.run_sync('Which capability would you add next, and where would it live?', workspace=ref)
 ```
@@ -96,7 +103,7 @@ Already have a `sprites.AsyncSprite`? Pass `workspace=SpritesSandboxBackend(work
 
 The Sprite keeps its files and installed packages after the run ends. Pydantic AI never deletes it. It sleeps when idle and wakes on the next command: you pay for compute while it is active and for storage until you delete it. Delete it with the ref you stored:
 
-```python
+```python {names="defined"}
 from pydantic_ai.workspaces import WorkspaceRef
 from pydantic_ai_harness.sprites_sandbox import SpritesSandboxBackend
 
@@ -123,7 +130,7 @@ async def delete_sprite(ref: WorkspaceRef) -> None:
 
 Under [Temporal](https://pydantic.dev/docs/ai/capabilities/durable_execution/temporal/) or another durable engine, create one client when the worker starts and pass it as `client=`. Otherwise every activity opens its own client and never closes it.
 
-```python
+```python {names="defined"}
 import os
 
 from pydantic_ai import Agent
