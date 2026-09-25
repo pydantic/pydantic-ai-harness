@@ -37,7 +37,7 @@ from pydantic_ai_harness.filesystem._events import (
     FileWrittenEvent,
     SearchKind,
 )
-from pydantic_ai_harness.filesystem._ripgrep import Record, run_ripgrep
+from pydantic_ai_harness.filesystem._ripgrep import Record, RipgrepMissing, run_ripgrep
 
 _P = ParamSpec('_P')
 
@@ -1214,7 +1214,13 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
 
     @_recoverable
     async def _find_files(
-        self, scope: _Scope, ctx: RunContext[AgentDepsT] | None, pattern: str, *, path: str = '.'
+        self,
+        scope: _Scope,
+        ctx: RunContext[AgentDepsT] | None,
+        pattern: str,
+        *,
+        path: str = '.',
+        files_only: bool = False,
     ) -> str:
         if posixpath.isabs(pattern):
             raise ValueError(f'Pattern {pattern!r} must be relative to the search path, not absolute.')
@@ -1233,7 +1239,7 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         found = [
             child
             for child in walked
-            if (child.is_dir or not directories_only)
+            if (not child.is_dir if files_only else child.is_dir or not directories_only)
             and _glob_match(parts, posixpath.relpath(child.path, resolved).split('/'))
         ]
 
@@ -1288,14 +1294,19 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if entry is None or not entry.is_dir:
             raise NotADirectoryError(f'Path {path!r} is not a directory.')
         arguments = ['--files', '--sort', 'path', *(['--glob', glob] if glob is not None else [])]
-        results, capped = await run_ripgrep(
-            scope.workspace,
-            arguments,
-            cwd=resolved,
-            limit=self._max_find_results,
-            listing=True,
-            accept=lambda record: self._ripgrep_entry(scope, resolved, record),
-        )
+        try:
+            results, capped = await run_ripgrep(
+                scope.workspace,
+                arguments,
+                cwd=resolved,
+                limit=self._max_find_results,
+                listing=True,
+                accept=lambda record: self._ripgrep_entry(scope, resolved, record),
+            )
+        except RipgrepMissing:
+            # Like ripgrep's, a glob without a `/` matches a file name at any depth.
+            pattern = '**' if glob is None else glob if '/' in glob else f'**/{glob}'
+            return await self._find_files(scope, ctx, pattern, path=path, files_only=True)
         if ctx is not None:
             await ctx.emit(
                 self._searched(scope, resolved, glob or '', search='find', match_count=len(results), truncated=capped)
@@ -1412,13 +1423,21 @@ class FileSystemToolset(FunctionToolset[AgentDepsT]):
         if literal:
             arguments.append('--fixed-strings')
         arguments.extend(['--regexp', pattern, '--', target])
-        results, capped = await run_ripgrep(
-            scope.workspace,
-            arguments,
-            cwd=cwd,
-            limit=self._max_search_results,
-            accept=lambda record: self._match_line(scope, cwd, record),
-        )
+        try:
+            results, capped = await run_ripgrep(
+                scope.workspace,
+                arguments,
+                cwd=cwd,
+                limit=self._max_search_results,
+                accept=lambda record: self._match_line(scope, cwd, record),
+            )
+        except RipgrepMissing:
+            if file_type is not None:
+                raise ValueError('`file_type` needs ripgrep, which the workspace lacks; use `glob` instead.')
+            regex = re.escape(pattern) if literal else pattern
+            return await self._search_files(
+                scope, ctx, f'(?i){regex}' if ignore_case else regex, path=path, include_glob=glob
+            )
         if ctx is not None:
             await ctx.emit(
                 self._searched(scope, resolved, pattern, search='grep', match_count=len(results), truncated=capped)

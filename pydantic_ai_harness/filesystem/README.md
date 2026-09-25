@@ -62,8 +62,9 @@ so they are left out when it can't run commands; `search_files` and
 `tools` names the tools to register, from `FILE_SYSTEM_TOOL_NAMES`. The default,
 `DEFAULT_TOOL_NAMES`, is the eight tools that need only the workspace's
 filesystem. `list_files` and `grep` run the `rg` executable inside the
-workspace, which must be on its `PATH`, so they are opt-in by name. The
-`coder` extra installs `rg` for a local workspace.
+workspace when it is on its `PATH`, so they are opt-in by name. The
+`coder` extra installs `rg` for a local workspace. Without `rg`, both walk the
+files instead, without ignore files or `grep`'s `context` and `file_type`.
 
 ```python
 from pydantic_ai_harness import FileSystem
@@ -78,8 +79,8 @@ hidden even then, as with the other walkers. Output is sorted by path, so a capp
 result is a deterministic prefix rather than a random subset. `grep` reports
 matches as `path:line:text` and context lines as `path-line-text`, paths relative
 to the working directory; a pattern uses ripgrep's regex syntax unless `literal` is set. A
-missing `rg` or a pattern ripgrep rejects comes back to the model as a retry, so
-it can correct the call or use `search_files`/`find_files` instead. Every path
+pattern ripgrep rejects comes back to the model as a retry, so it can correct
+the call. Every path
 ripgrep prints goes through the same containment and pattern checks as the other
 walkers before it is shown. Ripgrep output over 8 MiB is cut, and the search
 is reported as truncated. `read_only=True` keeps only the tools in
